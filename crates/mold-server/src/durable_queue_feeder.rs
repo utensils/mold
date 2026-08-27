@@ -2,8 +2,9 @@
 //! scheduler queue.
 //!
 //! SQLite owns every not-yet-hydrated child. This task is the sole producer
-//! for rows admitted through `/api/generation-batches`; legacy singleton rows
-//! are deliberately excluded by the batch-child ownership join.
+//! for generation, because `/api/generate`, `/api/generate/stream`, and
+//! `/api/generation-batches` are one admission path with three delivery
+//! shapes. Rows without a batch-child row are excluded by the ownership join.
 
 use std::sync::Arc;
 
@@ -280,6 +281,7 @@ async fn hold_claimed(
     ingress: Option<&crate::queue_media_ingress::QueueMediaIngress>,
     job_id: &str,
     reason: String,
+    code: Option<String>,
     retryable: bool,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> HoldClaimOutcome {
@@ -296,7 +298,7 @@ async fn hold_claimed(
         Ok(crate::queue_journal::RetainOutcome::Released)
         | Ok(crate::queue_journal::RetainOutcome::Stale) => {
             if let Some(ingress) = ingress {
-                ingress.fail_claimed(job_id, message);
+                ingress.fail_claimed_with_code(job_id, message, code);
             }
             HoldClaimOutcome::Held
         }
@@ -365,6 +367,20 @@ fn claim_next(
                         claim,
                         claimed_as_attached: true,
                     }));
+                }
+                // An exact claim that fails means one of two things, and they
+                // need opposite answers. The row may be GONE — cancelled and
+                // deleted — in which case the hint and its observer are both
+                // dead and `discard_hint` resolves the caller. Or the row may
+                // simply be UNCLAIMABLE RIGHT NOW, most often because this
+                // same feeder just claimed it through the ordinary FIFO path,
+                // whose `take_claimed` will hand the observer over exactly
+                // once. Discarding the hint in that second case detaches a
+                // live observer and turns a print into a `202` the caller has
+                // to reconcile — which is what two concurrent `/api/generate`
+                // requests used to do to each other.
+                None if journal.owns_cancellable_row(&job_id).unwrap_or(false) => {
+                    ingress.defer_claimed_hint(&job_id);
                 }
                 None => ingress.discard_hint(&job_id),
             }
@@ -775,9 +791,16 @@ async fn feed_available(
                 Ok(Ok(output)) => completed_output = output,
                 Ok(Err(error)) if error.is_invalid_authority() => {
                     let reason = format!("durable publication authority is invalid: {error}");
-                    let held =
-                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
-                            .await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        false,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
                     if held == HoldClaimOutcome::Retained {
                         report.stop = FeederStop::RecoverableFailure;
@@ -806,9 +829,16 @@ async fn feed_available(
         if completed_output.is_none() {
             if let Some(error) = db_invalid_authority {
                 let reason = format!("durable publication metadata is invalid: {error}");
-                let held =
-                    hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
-                        .await;
+                let held = hold_claimed(
+                    ticket,
+                    ingress.as_deref(),
+                    &row.id,
+                    reason,
+                    None,
+                    false,
+                    shutdown,
+                )
+                .await;
                 drop(reservation);
                 if held == HoldClaimOutcome::Retained {
                     report.stop = FeederStop::RecoverableFailure;
@@ -850,6 +880,7 @@ async fn feed_available(
                             ingress.as_deref(),
                             &row.id,
                             "the gallery directory could not be reconciled".into(),
+                            None,
                             false,
                             shutdown,
                         )
@@ -879,6 +910,7 @@ async fn feed_available(
                             ingress.as_deref(),
                             &row.id,
                             "the gallery directory this job targets cannot be created".into(),
+                            None,
                             false,
                             shutdown,
                         )
@@ -899,6 +931,7 @@ async fn feed_available(
                         ingress.as_deref(),
                         &row.id,
                         "server gallery output is disabled".into(),
+                        None,
                         false,
                         shutdown,
                     )
@@ -922,6 +955,7 @@ async fn feed_available(
                     ingress.as_deref(),
                     &row.id,
                     "the recorded request could not be deserialized".into(),
+                    None,
                     false,
                     shutdown,
                 )
@@ -970,9 +1004,16 @@ async fn feed_available(
                 Ok(deferred) => Some(deferred),
                 Err(error) if projection_failure_holds(&error) => {
                     let reason = format!("durable media projection is invalid: {error}");
-                    let held =
-                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
-                            .await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        false,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
                     if held == HoldClaimOutcome::Retained {
                         report.stop = FeederStop::RecoverableFailure;
@@ -1014,9 +1055,16 @@ async fn feed_available(
                     message: reason,
                 })) => {
                     let logged_reason = reason.clone();
-                    let held =
-                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
-                            .await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        false,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
                     if held == HoldClaimOutcome::Retained {
                         report.stop = FeederStop::RecoverableFailure;
@@ -1032,9 +1080,16 @@ async fn feed_available(
                     message: reason,
                 })) => {
                     let logged_reason = reason.clone();
-                    let held =
-                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, true, shutdown)
-                            .await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        true,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
                     if held == HoldClaimOutcome::Retained {
                         report.stop = FeederStop::RecoverableFailure;
@@ -1089,6 +1144,7 @@ async fn feed_available(
                                 ingress.as_deref(),
                                 &row.id,
                                 reason,
+                                None,
                                 false,
                                 shutdown,
                             )
@@ -1155,6 +1211,7 @@ async fn feed_available(
                     ingress.as_deref(),
                     &row.id,
                     reason,
+                    Some(error.code.clone()),
                     retryable,
                     shutdown,
                 )
@@ -1335,7 +1392,6 @@ async fn feed_available(
             progress_tx,
             result_tx,
             output_dir: Some(row.output_dir),
-            batch_child: None,
             journal: Some(ticket),
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant,
@@ -1820,6 +1876,7 @@ mod tests {
                 Some(&ingress),
                 &ids[0],
                 "dependency unavailable".into(),
+                None,
                 true,
                 &shutdown,
             )
@@ -1856,6 +1913,7 @@ mod tests {
                 Some(&ingress),
                 &ids[1],
                 "dependency unavailable".into(),
+                None,
                 true,
                 &shutdown,
             )
@@ -2695,7 +2753,7 @@ mod tests {
         let output = state.config.try_read().unwrap().effective_output_dir();
         let direct_ticket = state
             .queue_journal
-            .record(JournalAdmission {
+            .record_for_test(JournalAdmission {
                 id: "legacy-direct",
                 request: &request,
                 output_dir: Some(&output),
@@ -2781,7 +2839,7 @@ mod tests {
         let output = state.config.try_read().unwrap().effective_output_dir();
         let interrupted_ticket = state
             .queue_journal
-            .record(JournalAdmission {
+            .record_for_test(JournalAdmission {
                 id: "interrupted-direct",
                 request: &request,
                 output_dir: Some(&output),
@@ -2803,7 +2861,7 @@ mod tests {
         // again and erase this live submitter's ownership token.
         let live_ticket = state
             .queue_journal
-            .record(JournalAdmission {
+            .record_for_test(JournalAdmission {
                 id: "post-barrier-direct",
                 request: &request,
                 output_dir: Some(&output),

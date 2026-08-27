@@ -1,7 +1,4 @@
 pub mod auth;
-pub mod batch_attempt;
-pub mod batch_parent;
-pub mod batch_runtime;
 pub mod batch_transaction;
 pub mod catalog_api;
 pub mod catalog_credentials;
@@ -765,40 +762,27 @@ pub async fn run_server(
     // late feeder recovery pass. Propagating the error fails startup closed.
     durable_queue_feeder::recover_runtime(&state).await?;
 
-    let mut recovered_live_batches = None;
-    // Batch recovery is a serving precondition, including when SQLite is
-    // disabled. No router, gallery observer, or generation job producer is started
-    // until every durable attempt is either rolled back or rolled forward.
+    // Gallery publication recovery is a serving precondition, including when
+    // SQLite is disabled. No router, gallery observer, or generation job
+    // producer is started until every staged transaction is either rolled back
+    // or rolled forward and the committed archive index is installed.
     {
         let config = state.config.read().await;
         if !state.is_output_disabled(&config) {
             let output_dir = config.effective_output_dir();
             drop(config);
             std::fs::create_dir_all(&output_dir)?;
-            let report = batch_attempt::recover_batches(
+            let report = batch_transaction::recover_transactions(
                 &output_dir,
                 &state.gallery_publication_gate,
                 state.metadata_db.clone(),
             )
             .await?;
-            if report.outcomes.iter().any(|outcome| {
-                matches!(
-                    outcome,
-                    batch_attempt::RecoveredParentOutcome::Resumable { .. }
-                )
-            }) {
-                recovered_live_batches = Some((output_dir.clone(), report.outcomes.clone()));
-            }
             tracing::info!(
-                joint_parents = report.parents_discovered,
-                joint_running = report.running_attempts_retained,
-                joint_rolled_forward = report.parents_rolled_forward,
-                receipts_removed = report.receipts_removed,
-                leases_requeued = report.leases_requeued,
-                rolled_back = report.legacy_transactions.rolled_back,
-                rolled_forward = report.legacy_transactions.rolled_forward,
-                healed_committed_rows = report.legacy_transactions.healed_committed_rows,
-                "batch transaction startup recovery complete"
+                rolled_back = report.rolled_back,
+                rolled_forward = report.rolled_forward,
+                healed_committed_rows = report.healed_committed_rows,
+                "gallery transaction startup recovery complete"
             );
         }
     }
@@ -944,21 +928,6 @@ pub async fn run_server(
             }
         }
     };
-
-    // Recovered live parents are resumed only after their authoritative
-    // dispatch owner is running, but still before the router begins serving.
-    // Exact execution-equivalence drift fails closed into a durable cancelled
-    // parent and private-attempt rollback.
-    if let Some((output_dir, outcomes)) = recovered_live_batches {
-        let report =
-            batch_runtime::resume_recovered_batches(&state, &output_dir, &outcomes).await?;
-        tracing::info!(
-            resumed = report.resumed,
-            committed = report.committed,
-            rolled_back = report.rolled_back,
-            "live batch restart recovery settled"
-        );
-    }
 
     // A SIGKILL runs no destructor, so every hard stop used to leak a
     // directory of reference media under MOLD_HOME. Swept in the same startup

@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 #[cfg(any(feature = "preview", test))]
 use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 #[cfg(test)]
 use mold_core::ServerCapabilities;
 use mold_core::{
@@ -16,11 +15,12 @@ use rand::Rng;
 #[cfg(feature = "preview")]
 use std::io::IsTerminal;
 use std::io::Write;
+#[cfg(any(feature = "preview", test))]
 use std::time::Duration;
 
 #[cfg(test)]
 use crate::commands::durable_generation::admit_for_test;
-use crate::commands::durable_generation::try_canonical_generation;
+use crate::commands::durable_generation::canonical_generation;
 use crate::commands::h3::ReferenceUpload;
 use crate::control::{stream_server_pull, CliContext};
 use crate::errors::RemoteInferenceError;
@@ -499,11 +499,9 @@ async fn run_canonical_remote_batch(
     output: &Option<String>,
     piped: bool,
     preview: bool,
-) -> Result<bool> {
+) -> Result<()> {
     let total = u32::try_from(requests.len()).context("batch is too large")?;
-    let Some(report) = try_canonical_generation(client, requests).await? else {
-        return Ok(false);
-    };
+    let report = canonical_generation(client, requests).await?;
     let admitted_client_ids = report.admitted_client_ids;
     let mut failures = report.failures;
 
@@ -623,7 +621,7 @@ async fn run_canonical_remote_batch(
         }
         anyhow::bail!(failures.join("; "));
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Re-derive request defaults after an auto-pull refreshed the model
@@ -1603,34 +1601,24 @@ pub async fn run(
         };
         let mut collected = BatchOutputs::new(batch, base_seed);
 
-        let legacy_requests = {
-            let requests = if batch > 1 {
-                remote_batch_requests(&req, batch, base_seed, batch_prompts.as_deref())
-            } else {
-                vec![req.clone()]
-            };
-            // Batch N only. A singleton keeps the attached path, which is the
-            // one that carries live step progress, the denoise preview, and
-            // `GenerateServerAction::PullModelAndRetry` for a model the remote
-            // host does not have yet. Routing singletons canonically bought
-            // nothing durable — `/api/generate` admits through
-            // `direct_durable_admission` either way — and silently cost all
-            // three. Removing this gate needs the canonical path to carry
-            // progress and the missing-model resume first.
-            if batch > 1
-                && run_canonical_remote_batch(ctx.client(), &requests, &output, piped, preview)
-                    .await
-                    .map_err(|error| tag_remote(ctx.client(), error))?
-            {
-                if let Some(lease) = reference_session.as_mut() {
-                    lease.mark_consumed();
-                }
-                return Ok(());
+        // Batch N is one `POST /api/generation-batches` operation. A singleton
+        // keeps `/api/generate/stream`, which is the same durable admission
+        // with an attached observer, and is the one that carries live step
+        // progress, the denoise preview, and
+        // `GenerateServerAction::PullModelAndRetry` for a model the remote
+        // host does not have yet.
+        if batch > 1 {
+            let requests = remote_batch_requests(&req, batch, base_seed, batch_prompts.as_deref());
+            run_canonical_remote_batch(ctx.client(), &requests, &output, piped, preview)
+                .await
+                .map_err(|error| tag_remote(ctx.client(), error))?;
+            if let Some(lease) = reference_session.as_mut() {
+                lease.mark_consumed();
             }
-            requests
-        };
+            return Ok(());
+        }
 
-        for (i, iter_req) in legacy_requests.into_iter().enumerate() {
+        for (i, iter_req) in std::iter::once(req.clone()).enumerate() {
             let i = i as u32;
             debug_assert_eq!(iter_req.batch_size, 1);
 
@@ -1649,10 +1637,6 @@ pub async fn run(
                 &iter_req,
                 &config,
                 model,
-                piped,
-                effective_width,
-                effective_height,
-                effective_steps,
                 gpus.clone(),
                 t5_variant.clone(),
                 qwen3_variant.clone(),
@@ -2226,10 +2210,6 @@ async fn generate_remote(
     req: &GenerateRequest,
     config: &Config,
     model: &str,
-    piped: bool,
-    effective_width: u32,
-    effective_height: u32,
-    effective_steps: u32,
     gpus: Option<String>,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
@@ -2242,18 +2222,14 @@ async fn generate_remote(
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
 ) -> Result<GenerateResponse> {
-    // One reporting point for every remote path — SSE, the blocking
-    // fallback, and the pull-and-retry — so a new branch inside cannot
-    // silently skip the advisory.
+    // One reporting point for every remote path — the stream and the
+    // pull-and-retry — so a new branch inside cannot silently skip the
+    // advisory.
     let response = generate_remote_inner(
         client,
         req,
         config,
         model,
-        piped,
-        effective_width,
-        effective_height,
-        effective_steps,
         gpus,
         t5_variant,
         qwen3_variant,
@@ -2277,10 +2253,6 @@ async fn generate_remote_inner(
     req: &GenerateRequest,
     config: &Config,
     model: &str,
-    piped: bool,
-    effective_width: u32,
-    effective_height: u32,
-    effective_steps: u32,
     gpus: Option<String>,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
@@ -2299,44 +2271,9 @@ async fn generate_remote_inner(
     let one_use_references = has_remote_reference_handles(req);
 
     match client.generate_stream(req, tx).await {
-        Ok(Some(response)) => {
+        Ok(response) => {
             let _ = render.await;
             Ok(response)
-        }
-        Ok(None) if one_use_references => {
-            let _ = render.await;
-            Err(tag_remote(
-                client,
-                anyhow::anyhow!(
-                    "server lacks secure streaming generation required for one-use MiniMax H3 references; create a fresh upload attempt after updating the server"
-                ),
-            ))
-        }
-        Ok(None) => {
-            // Server doesn't support SSE — fall back to blocking API with spinner
-            let _ = render.await;
-            generate_remote_blocking(
-                client,
-                req,
-                config,
-                model,
-                piped,
-                effective_width,
-                effective_height,
-                effective_steps,
-                gpus,
-                t5_variant,
-                qwen3_variant,
-                qwen2_variant,
-                qwen2_text_encoder_mode,
-                eager,
-                offload,
-                cli_width,
-                cli_height,
-                cli_steps,
-                cli_guidance,
-            )
-            .await
         }
         Err(e) => {
             let _ = render.await;
@@ -2361,125 +2298,9 @@ async fn generate_remote_inner(
 
                     let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
                     let render2 = tokio::spawn(render_progress(rx2));
-                    match client.generate_stream(req, tx2).await {
-                        Ok(Some(response)) => {
-                            let _ = render2.await;
-                            Ok(response)
-                        }
-                        // Either the server has no SSE endpoint (Ok(None)) or
-                        // the SSE stream failed (Err) — some proxies/servers
-                        // close the stream before the final `complete` event
-                        // even though the blocking `/api/generate` path still
-                        // works. Fall back to the blocking endpoint before
-                        // giving up.
-                        _ => {
-                            let _ = render2.await;
-                            client
-                                .generate(req.clone())
-                                .await
-                                .map_err(|e| tag_remote(client, e))
-                        }
-                    }
-                }
-                GenerateServerAction::FallbackLocal => {
-                    if has_remote_reference_handles(req) {
-                        return Err(tag_remote(
-                            client,
-                            anyhow::anyhow!(
-                                "server connection failed after H3 references were bound; secure upload handles cannot fall back to local inference"
-                            ),
-                        ));
-                    }
-                    print_using_local_inference();
-                    let mut local_request = req.clone();
-                    materialize_local_builtin_control(&mut local_request, config).await?;
-                    materialize_local_builtin_camera_controls(&mut local_request, config).await?;
-                    generate_local(
-                        &local_request,
-                        config,
-                        gpus,
-                        t5_variant,
-                        qwen3_variant,
-                        qwen2_variant,
-                        qwen2_text_encoder_mode,
-                        eager,
-                        offload,
-                        cli_width,
-                        cli_height,
-                        cli_steps,
-                        cli_guidance,
-                    )
-                    .await
-                }
-                GenerateServerAction::SurfaceError => Err(tag_remote(client, e)),
-            }
-        }
-    }
-}
-
-/// Blocking remote generation with a simple spinner (fallback for servers without SSE).
-#[allow(clippy::too_many_arguments)]
-async fn generate_remote_blocking(
-    client: &MoldClient,
-    req: &GenerateRequest,
-    config: &Config,
-    model: &str,
-    piped: bool,
-    effective_width: u32,
-    effective_height: u32,
-    effective_steps: u32,
-    gpus: Option<String>,
-    t5_variant: Option<String>,
-    qwen3_variant: Option<String>,
-    qwen2_variant: Option<String>,
-    qwen2_text_encoder_mode: Option<String>,
-    eager: bool,
-    offload: bool,
-    cli_width: Option<u32>,
-    cli_height: Option<u32>,
-    cli_steps: Option<u32>,
-    cli_guidance: Option<f64>,
-) -> Result<GenerateResponse> {
-    if has_remote_reference_handles(req) {
-        anyhow::bail!(
-            "one-use MiniMax H3 reference handles require streaming generation and cannot use the blocking fallback"
-        );
-    }
-    let pb = ProgressBar::new_spinner();
-    if piped {
-        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-    }
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template(&format!("{{spinner:.{}}} {{msg}}", theme::SPINNER_STYLE))
-            .unwrap(),
-    );
-    pb.set_message(format!(
-        "Generating on server ({}x{}, {} steps)...",
-        effective_width, effective_height, effective_steps
-    ));
-    pb.enable_steady_tick(Duration::from_millis(100));
-
-    match client.generate(req.clone()).await {
-        Ok(response) => {
-            pb.finish_and_clear();
-            Ok(response)
-        }
-        Err(e) => {
-            pb.finish_and_clear();
-            match classify_generate_error(&e) {
-                GenerateServerAction::PullModelAndRetry => {
-                    require_remote_auto_pull_acquisition(req, config)
-                        .map_err(|error| tag_remote(client, error))?;
-                    print_server_pull_missing_model(model);
-                    stream_server_pull(client, model, &[])
-                        .await
-                        .map_err(|e| tag_remote(client, e))?;
-                    status!("{} Generating...", theme::icon_info());
-                    client
-                        .generate(req.clone())
-                        .await
-                        .map_err(|e| tag_remote(client, e))
+                    let response = client.generate_stream(req, tx2).await;
+                    let _ = render2.await;
+                    response.map_err(|e| tag_remote(client, e))
                 }
                 GenerateServerAction::FallbackLocal => {
                     if has_remote_reference_handles(req) {
@@ -4291,10 +4112,6 @@ mod tests {
             request,
             &Config::default(),
             &request.model,
-            false,
-            request.width,
-            request.height,
-            request.steps,
             None,
             None,
             None,
@@ -4620,7 +4437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_use_reference_handles_never_use_blocking_fallback() {
+    async fn one_use_reference_handles_never_reach_a_second_endpoint() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -4647,7 +4464,13 @@ mod tests {
         let error = generate_remote_for_test(&MoldClient::new(&server.uri()), &request)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("secure streaming generation"));
+        // There is no blocking endpoint left to fall back to: a host that does
+        // not serve the streaming route is an error naming it, and the one-use
+        // upload handles are never replayed anywhere.
+        assert!(
+            format!("{error:#}").contains("/api/generate/stream"),
+            "{error:#}"
+        );
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].url.path(), "/api/generate/stream");
@@ -6274,9 +6097,6 @@ mod audio_batch_passthrough_tests {
         use wiremock::{Mock, ResponseTemplate};
 
         let mut capabilities = ServerCapabilities::default();
-        capabilities.queue.heterogeneous_batch = true;
-        capabilities.queue.durable_batch_outcomes = true;
-        capabilities.queue.admission_protocol_version = Some(2);
         capabilities.queue.heterogeneous_batch_max_outputs = Some(limit);
         Mock::given(method("GET"))
             .and(path("/api/capabilities"))
@@ -6606,12 +6426,12 @@ mod audio_batch_passthrough_tests {
         assert!(error.to_string().contains("after 5 attempts"));
     }
 
+    /// A media-carrying request needs the encrypted store advertised; a
+    /// media-free one does not. Both answers are typed.
     #[test]
-    fn canonical_batch_support_requires_the_complete_v2_contract() {
+    fn media_admission_follows_the_advertised_durable_media_contract() {
+        use mold_core::CanonicalRefusal::UnsupportedRequestTrait;
         let mut capabilities = ServerCapabilities::default();
-        capabilities.queue.heterogeneous_batch = true;
-        capabilities.queue.durable_batch_outcomes = true;
-        capabilities.queue.admission_protocol_version = Some(2);
         capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
         let request: GenerateRequest = serde_json::from_str(
             r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
@@ -6619,25 +6439,26 @@ mod audio_batch_passthrough_tests {
         .unwrap();
         assert_eq!(
             capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
-            Some(64)
+            Ok(64)
         );
 
         let mut media = request.clone();
         media.source_image = Some(vec![1, 2, 3]);
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[media.clone()]),
-            None
+            Err(UnsupportedRequestTrait {
+                index: 1,
+                trait_name: "restart-safe request media"
+            })
         );
         capabilities.durable_media = Some(mold_core::DurableMediaCapabilities::v2(false));
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[media]),
-            Some(64)
+            Ok(64)
         );
-
-        capabilities.queue.admission_protocol_version = Some(1);
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[request]),
-            None
+            Ok(64)
         );
     }
 }

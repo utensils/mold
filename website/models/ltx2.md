@@ -672,8 +672,9 @@ conditioning, skipping a VAE encode/decode round-trip so the continuation
 stays visually coherent.
 
 `mold run` routes automatically: when `--frames` is `≤ 97` you stay on the
-single-clip path; above 97 the request is rewritten into a chain and dispatched
-to the new `/api/generate/chain/stream` endpoint. Chaining is supported for
+single-clip path; above 97 the request is rewritten into a chain and submitted
+as a durable chain job (`POST /api/chain-jobs`), whose stage progress the CLI
+follows over `GET /api/chain-jobs/{id}/events`. Chaining is supported for
 the LTX-2 generation pipelines — `one-stage`, `distilled`, `two-stage`, and
 `two-stage-hq` (the specialized keyframe, audio-to-video, IC-LoRA, retake,
 lip-dub, and audio-only modes render single clips only) — for LTX-Video

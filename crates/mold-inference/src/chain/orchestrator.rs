@@ -765,6 +765,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         }
     }
 
@@ -1371,6 +1372,7 @@ mod tests {
             clip_frames: Some(97),
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         };
         let mut req = req.normalise().unwrap();
         for s in req.stages.iter_mut().skip(1) {

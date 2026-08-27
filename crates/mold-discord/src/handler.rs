@@ -13,11 +13,6 @@ const EDIT_THROTTLE: std::time::Duration = std::time::Duration::from_secs(3);
 /// payload exceeds this we fall back to the always-generated gif_preview.
 const MAX_ATTACHMENT_BYTES: usize = 24 * 1024 * 1024;
 
-fn requires_secure_generation_stream(req: &GenerateRequest) -> bool {
-    mold_core::minimax_h3::task_for_model(&req.model).is_some()
-        || req.references.as_ref().is_some_and(|refs| !refs.is_empty())
-}
-
 /// Convert our format::EmbedData into a serenity CreateEmbed.
 pub fn embed_data_to_create_embed(data: &EmbedData) -> CreateEmbed {
     let mut embed = CreateEmbed::new().title(&data.title).color(data.color);
@@ -84,21 +79,14 @@ pub async fn run_generation(ctx: Context<'_>, req: GenerateRequest) -> Result<()
     // Generation complete — get the result
     let result = gen_handle.await??;
 
-    match result {
-        Some(resp) => {
-            send_result_edit(&reply_handle, ctx, &resp, &prompt, identity_note.as_deref()).await?;
-        }
-        None => {
-            if requires_secure_generation_stream(&req) {
-                anyhow::bail!(
-                    "server lacks secure streaming generation required for one-use MiniMax H3 references; update the server"
-                );
-            }
-            // Server doesn't support SSE — fall back to non-streaming
-            let resp = client.generate(req).await?;
-            send_result_edit(&reply_handle, ctx, &resp, &prompt, identity_note.as_deref()).await?;
-        }
-    }
+    send_result_edit(
+        &reply_handle,
+        ctx,
+        &result,
+        &prompt,
+        identity_note.as_deref(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -250,29 +238,6 @@ mod tests {
             seed_used: 7,
             gpu: None,
         }
-    }
-
-    #[test]
-    fn h3_generation_never_reuses_one_use_authority_on_the_blocking_fallback() {
-        let req = crate::commands::generate::build_generate_request(
-            crate::commands::generate::BuildParams {
-                prompt: "animate",
-                model: mold_core::minimax_h3::REF2VA_COMFY,
-                family: Some(mold_core::minimax_h3::FAMILY),
-                ..Default::default()
-            },
-        );
-        assert!(requires_secure_generation_stream(&req));
-
-        let ordinary = crate::commands::generate::build_generate_request(
-            crate::commands::generate::BuildParams {
-                prompt: "cat",
-                model: "flux-schnell:q8",
-                family: Some("flux"),
-                ..Default::default()
-            },
-        );
-        assert!(!requires_secure_generation_stream(&ordinary));
     }
 
     #[test]

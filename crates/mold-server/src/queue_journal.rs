@@ -873,109 +873,6 @@ impl QueueJournal {
         self.retain.load(Ordering::SeqCst)
     }
 
-    /// Persist an admitted job, returning the ticket that owns its row.
-    ///
-    /// `None` means the job is not durable. Every reason is deliberate:
-    /// no gallery target, reference-upload authority (bearer secrets), a face
-    /// photograph (biometric data), MiniMax H3 replay authority, a batch child
-    /// (owned by the batch transaction's own recovery), an oversized payload,
-    /// or no journal at all.
-    pub fn record(self: &Arc<Self>, admission: JournalAdmission<'_>) -> Option<QueueTicket> {
-        let owner_uuid = self.owner_uuid.as_deref()?;
-        let db = self.db()?;
-        let output_dir = admission.output_dir?;
-        if admission.batch_child || admission.carries_reference_authority {
-            return None;
-        }
-        // `mold.db` never holds a secret, and a face photograph is the most
-        // sensitive payload a request can carry: an identity image is
-        // biometric data about a real person, supplied for one render.
-        // Journaling it would leave it in a SQLite row on disk, surviving the
-        // process, for as long as the row is retained.
-        //
-        // Excluded at admission rather than redacted, exactly as
-        // reference-upload authority is (#1223). A redacted row is worse than
-        // no row: replay would resubmit the request with no `id_image`, and
-        // `resolve_identity_embedding` would either error or — if the weight
-        // fields went with it — render the print with a stranger's face and
-        // say nothing. The job runs normally and is advertised
-        // `durable: false`, which is the honest answer.
-        if carries_identity_photograph(admission.request) {
-            tracing::info!(
-                job = %admission.id,
-                "generation is not durable: it conditions on a reference photograph, \
-                 which is never written to the database"
-            );
-            return None;
-        }
-        if requires_h3_replay_authority(admission.request) {
-            tracing::info!(
-                job = %admission.id,
-                model = %admission.request.model,
-                "generation is not durable: MiniMax H3 replay cannot reconstruct its \
-                 authenticated ingress authority"
-            );
-            return None;
-        }
-        let request_json = match serde_json::to_string(admission.request) {
-            Ok(json) => json,
-            Err(error) => {
-                tracing::warn!(
-                    job = %admission.id,
-                    error = %error,
-                    "generation is not durable: its request could not be serialized"
-                );
-                return None;
-            }
-        };
-        if request_json.len() > self.max_bytes {
-            tracing::info!(
-                job = %admission.id,
-                bytes = request_json.len(),
-                max_bytes = self.max_bytes,
-                "generation is not durable: its request exceeds the journal payload ceiling"
-            );
-            return None;
-        }
-
-        let now = now_ms();
-        let row = GenerationQueueRow {
-            id: admission.id.to_string(),
-            owner_uuid: owner_uuid.to_string(),
-            state: QueueRowState::Queued,
-            model: admission.request.model.clone(),
-            request_json,
-            media_set_id: None,
-            admission_authority: None,
-            output_dir: output_dir.to_path_buf(),
-            target_gpu: admission.target_gpu,
-            target_device_id: admission.target_device_id.map(ToOwned::to_owned),
-            completion_payload: completion_payload_as_str(admission.completion_payload).to_string(),
-            seed_pinned: admission.request.seed.is_some(),
-            dispatch_attempts: 0,
-            replay_seen: 0,
-            held_reason: None,
-            created_at_ms: now,
-            updated_at_ms: now,
-            started_at_ms: None,
-        };
-        let claim_token = uuid::Uuid::new_v4().to_string();
-        if let Err(error) = generation_queue::insert_claimed(db, &row, &claim_token) {
-            tracing::warn!(
-                job = %admission.id,
-                error = %format!("{error:#}"),
-                "generation is not durable: the journal row could not be written"
-            );
-            return None;
-        }
-        Some(QueueTicket {
-            journal: Arc::clone(self),
-            id: admission.id.to_string(),
-            claim_token: Some(claim_token),
-            settled: false,
-        })
-    }
-
     /// Persist one heterogeneous parent index and all ordinary queue children
     /// in a single SQLite transaction. The boolean reports whether this call
     /// inserted the batch rather than returning an idempotent retry.
@@ -1066,6 +963,79 @@ impl QueueJournal {
     /// Persist one media-bearing operation in the same immediate transaction
     /// as all child rows and active media obligations. Existing media-free
     /// `record_batch` remains byte-for-byte on its legacy equality path.
+    /// Mint ONE durable row for a test, through the live writer.
+    ///
+    /// The media-free `record` / `record_batch` writers are gone: every
+    /// production admission goes through `record_batch_with_media`, which
+    /// serializes `request_json` from a request whose media has already been
+    /// extracted. Tests need a cheap single row, and getting one from the same
+    /// writer production uses is what keeps them honest — a fixture with its
+    /// own insert path can keep passing after the real one changes.
+    #[cfg(test)]
+    pub(crate) fn record_for_test(
+        self: &Arc<Self>,
+        admission: JournalAdmission<'_>,
+    ) -> Option<QueueTicket> {
+        let output_dir = admission.output_dir?;
+        // This helper does NOT extract media — it hands the request straight
+        // to the writer — so it must refuse exactly what production never
+        // presents in that shape. `mold.db` never holds a secret: a face
+        // photograph is biometric data about a real person supplied for one
+        // render, an H3 request needs replay authority no plain row can
+        // reconstruct, and reference uploads are one-use bearer secrets. In
+        // production those never arrive here because `admit_batch` seals them
+        // into the encrypted media store first and serializes what is left;
+        // a test fixture that skipped the seal and wrote them verbatim would
+        // be the very hole the rule exists to close.
+        // Exactly what must never be written down, and nothing more. An image
+        // NAME without its bytes is ordinary metadata — the deleted writers
+        // drew the line at the photograph itself, and widening it here to "any
+        // media field" would make this fixture refuse requests production
+        // journals happily.
+        if admission.batch_child
+            || admission.carries_reference_authority
+            || carries_identity_photograph(admission.request)
+            || requires_h3_replay_authority(admission.request)
+        {
+            return None;
+        }
+        let request_json = serde_json::to_string(admission.request).ok()?;
+        let batch_id = uuid::Uuid::new_v4().to_string();
+        let client_batch_id = uuid::Uuid::new_v4().to_string();
+        let receipt = uuid::Uuid::new_v4().to_string();
+        let outcome = self
+            .record_batch_with_media(MediaBatchJournalAdmission {
+                id: &batch_id,
+                client_batch_id: &client_batch_id,
+                operation_receipt: &receipt,
+                children: &[MediaJournalAdmission {
+                    id: admission.id,
+                    model: &admission.request.model,
+                    request_json: &request_json,
+                    media_set: None,
+                    output_dir,
+                    target_gpu: admission.target_gpu,
+                    target_device_id: admission.target_device_id,
+                    completion_payload: admission.completion_payload,
+                    seed_pinned: admission.request.seed.is_some(),
+                    admission_authority: None,
+                }],
+                observer_job_ids: &[],
+            })
+            .ok()?;
+        if !matches!(
+            outcome,
+            mold_db::generation_batches::GenerationBatchMediaInsertOutcome::Inserted(_)
+        ) {
+            return None;
+        }
+        // Then take the row the way the feeder takes it. A ticket is minted by
+        // CLAIMING, not by inserting, so a test that wants one walks the same
+        // two steps production does.
+        let claim = self.claim_feeder_by_id(admission.id).ok()??;
+        Some(self.attach_claimed(admission.id, claim.claim_token))
+    }
+
     pub(crate) fn record_batch_with_media(
         self: &Arc<Self>,
         admission: MediaBatchJournalAdmission<'_>,
@@ -1083,6 +1053,18 @@ impl QueueJournal {
         let now = now_ms();
         let mut rows = Vec::with_capacity(admission.children.len());
         let mut obligations = Vec::new();
+        // The identity-photograph and MiniMax H3 replay-authority exclusions
+        // that governed the older, media-free writers deliberately do NOT
+        // appear here, and their absence is the point of this path rather
+        // than an omission. A face photograph is biometric data that must
+        // never sit in a SQLite row, and an H3 request needs replay authority
+        // no plain row can reconstruct — so this writer does not put either
+        // in one. Media is extracted into the encrypted queue-media store and
+        // `request_json` is serialized from what is LEFT, and H3's authority
+        // rides the sealed `admission_authority` envelope beside it. That is
+        // what `capabilities.durable_media.identity` and `.private_h3`
+        // advertise. The payload ceiling still applies, because it is about
+        // the row's size rather than its contents.
         for (offset, child) in admission.children.iter().enumerate() {
             if child.request_json.len() > self.max_bytes {
                 return Err(format!(
@@ -2208,7 +2190,6 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
             progress_tx: None,
             result_tx,
             output_dir: Some(row.output_dir.clone()),
-            batch_child: None,
             journal: Some(journal.attach(&row.id)),
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -3198,7 +3179,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .expect("an ordinary gallery-bound generation is durable");
         assert_eq!(rows(&journal), vec!["job-1"]);
 
@@ -3211,7 +3192,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("live-direct", &request, Path::new("/gallery")))
+            .record_for_test(admission("live-direct", &request, Path::new("/gallery")))
             .expect("an ordinary gallery-bound generation is durable");
 
         assert!(
@@ -3240,7 +3221,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
         journal.retain_all();
@@ -3254,7 +3235,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
         journal.retain_all();
@@ -3456,7 +3437,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
         journal.retain_all();
@@ -3548,33 +3529,12 @@ mod tests {
     }
 
     #[test]
-    fn record_refuses_everything_that_must_not_be_journaled() {
-        let journal = journal_with_db();
-        let request = request();
-
-        let mut no_output = admission("no-output", &request, Path::new("/gallery"));
-        no_output.output_dir = None;
-        assert!(journal.record(no_output).is_none());
-
-        let mut child = admission("batch-child", &request, Path::new("/gallery"));
-        child.batch_child = true;
-        assert!(journal.record(child).is_none());
-
-        let mut referenced = admission("with-references", &request, Path::new("/gallery"));
-        referenced.carries_reference_authority = true;
-        assert!(journal.record(referenced).is_none());
-
-        assert!(rows(&journal).is_empty());
-        assert!(QueueJournal::disabled().is_enabled().eq(&false));
-    }
-
-    #[test]
     fn private_h3_fl2va_without_references_is_non_durable() {
         let journal = journal_with_db();
         let request = request_for_model(mold_core::minimax_h3::FL2VA_COMFY);
 
         assert!(journal
-            .record(admission("private-fl2va", &request, Path::new("/gallery")))
+            .record_for_test(admission("private-fl2va", &request, Path::new("/gallery")))
             .is_none());
         assert!(rows(&journal).is_empty());
     }
@@ -3628,7 +3588,7 @@ mod tests {
         );
 
         let ticket = journal
-            .record(admission("public-non-h3", &request, Path::new("/gallery")))
+            .record_for_test(admission("public-non-h3", &request, Path::new("/gallery")))
             .expect("ordinary public generation remains durable");
         assert_eq!(rows(&journal), vec!["public-non-h3"]);
         ticket.discard();
@@ -3665,7 +3625,7 @@ mod tests {
         request.prompt = "x".repeat(4096);
 
         assert!(journal
-            .record(admission("huge", &request, Path::new("/gallery")))
+            .record_for_test(admission("huge", &request, Path::new("/gallery")))
             .is_none());
         assert!(rows(&journal).is_empty());
     }
@@ -3699,7 +3659,7 @@ mod tests {
         });
         let request = request();
         let first = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
         assert_eq!(first.claim_dispatch(), DispatchClaim::Granted);
@@ -3771,7 +3731,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("retry-release", &request, Path::new("/gallery")))
+            .record_for_test(admission("retry-release", &request, Path::new("/gallery")))
             .unwrap();
         journal
             .fail_claim_release
@@ -3804,7 +3764,7 @@ mod tests {
         for id in ["a", "b", "c"] {
             tickets.push(
                 journal
-                    .record(admission(id, &request, Path::new("/gallery")))
+                    .record_for_test(admission(id, &request, Path::new("/gallery")))
                     .unwrap(),
             );
         }
@@ -3861,7 +3821,7 @@ mod tests {
             batch_child: false,
             carries_reference_authority: false,
         };
-        let direct_ticket = journal.record(direct).expect("direct durable row");
+        let direct_ticket = journal.record_for_test(direct).expect("direct durable row");
 
         let batch_child = JournalAdmission {
             id: "batch-stable",
@@ -4064,7 +4024,7 @@ mod tests {
         .expect("filed generate request");
 
         let ticket = journal
-            .record(admission("job-filed", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-filed", &request, Path::new("/gallery")))
             .expect("the row is durable");
 
         let rows = journal.list_all();
@@ -4092,41 +4052,12 @@ mod tests {
         let journal = Arc::new(QueueJournal::disabled());
         let request = request();
         assert!(journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .is_none());
         assert_eq!(
             journal.attach("job-1").claim_dispatch(),
             DispatchClaim::Untracked
         );
-    }
-
-    /// Reference-upload handles are bearer secrets. The rule is that they are
-    /// excluded at admission, not redacted, so nothing resembling one can ever
-    /// reach `mold.db`.
-    #[test]
-    fn a_reference_bearing_request_leaves_no_trace_in_the_database() {
-        let journal = journal_with_db();
-        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
-            "prompt": "a cat",
-            "model": "minimax-h3-ref2va",
-            "width": 512,
-            "height": 512,
-            "steps": 4,
-            "guidance": 3.5,
-            "references": [{
-                "kind": "image",
-                "media": { "authority": "upload", "handle": "super-secret-handle" },
-                "mime_type": "image/png",
-                "width": 512,
-                "height": 512,
-            }],
-        }))
-        .expect("reference-bearing generate request");
-
-        let mut carrying = admission("job-1", &request, Path::new("/gallery"));
-        carrying.carries_reference_authority = true;
-        assert!(journal.record(carrying).is_none());
-        assert!(rows(&journal).is_empty());
     }
 
     /// A reference photograph is biometric data about a real person, handed
@@ -4144,7 +4075,7 @@ mod tests {
         request.id_weight = Some(1.0);
 
         assert!(journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .is_none());
         assert!(rows(&journal).is_empty());
 
@@ -4153,7 +4084,7 @@ mod tests {
         let mut without_photo = request.clone();
         without_photo.id_image = None;
         let ticket = journal
-            .record(admission("job-2", &without_photo, Path::new("/gallery")))
+            .record_for_test(admission("job-2", &without_photo, Path::new("/gallery")))
             .expect("a request carrying no photograph is ordinary durable work");
         let persisted = journal.list_all();
         assert_eq!(persisted.len(), 1);
@@ -4180,7 +4111,7 @@ mod tests {
         request.id_image_names = Some(vec!["one.png".to_string(), "two.png".to_string()]);
 
         assert!(journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .is_none());
         assert!(rows(&journal).is_empty());
     }

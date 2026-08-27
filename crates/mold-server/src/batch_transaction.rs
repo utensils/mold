@@ -6,7 +6,6 @@
 //! semantics, commits all metadata rows in one SQLite transaction, and
 //! durably advances the manifest to `committed`.
 
-use crate::batch_parent::{BatchChildLease, BatchChildReceipt};
 use anyhow::{bail, ensure, Context};
 use mold_db::GenerationRecord;
 use serde::{Deserialize, Serialize};
@@ -17,8 +16,33 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The child slot one staged artifact belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchChildLease {
+    pub parent_id: String,
+    pub child_index: usize,
+    pub attempt_generation: u64,
+    pub lease_generation: u64,
+}
+
+/// Durable proof that a particular lease produced one immutable staged file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchChildReceipt {
+    pub version: u32,
+    pub parent_id: String,
+    pub attempt_generation: u64,
+    pub child_index: usize,
+    pub lease_generation: u64,
+    pub checksum_sha256: String,
+    pub size_bytes: u64,
+    pub record_identity_sha256: String,
+}
+
+impl BatchChildReceipt {
+    pub const VERSION: u32 = 1;
+}
+
 pub const TRANSACTION_DIR: &str = ".mold-batch-transactions";
-pub(crate) const PARENT_AUTHORITY_DIR: &str = "parent-authority";
 const MANIFEST_FILE: &str = "manifest.json";
 const JOURNAL_FILE: &str = "journal.jsonl";
 const COMMITTED_DIR: &str = "committed";
@@ -26,7 +50,6 @@ const DELETED_ARCHIVE_CHILDREN_DIR: &str = "deleted-archive-children";
 const DELETED_ARCHIVE_CHILD_VERSION: u32 = 1;
 const LEGACY_ATTEMPT_LOCKS_DIR: &str = ".attempt-locks";
 const ATTEMPT_LOCK_PREFIX: &str = ".mold-batch-attempt-";
-const PARENT_LOCK_PREFIX: &str = ".mold-batch-parent-";
 const ATTEMPT_LOCK_SUFFIX: &str = ".lock";
 const MANIFEST_VERSION_V1: u32 = 1;
 const MANIFEST_VERSION: u32 = 2;
@@ -820,10 +843,6 @@ pub struct BatchTransaction {
     // through publication, archive/rollback cleanup, and Drop. Recovery may
     // inspect or mutate an attempt only after claiming the same authority.
     _attempt_authority: AttemptAuthority,
-    // Joint parent-owned attempts retain the stable parent authority after
-    // the generation-scoped authority. Field order is load-bearing: Rust
-    // drops `_attempt_authority` before `_parent_authority`.
-    _parent_authority: Option<ParentAuthority>,
     manifest: BatchAttemptManifest,
     next_journal_sequence: u64,
     journaled_final_children: BTreeSet<usize>,
@@ -862,42 +881,6 @@ pub(crate) enum AttemptAuthority {
     // Production construction has no unclaimed variant.
     #[cfg(test)]
     Unclaimed,
-}
-
-#[derive(Debug)]
-pub(crate) struct ParentAuthority {
-    file: Option<File>,
-    path: PathBuf,
-    canonical_output_dir: PathBuf,
-    parent_id: String,
-}
-
-impl ParentAuthority {
-    pub(crate) fn validate_identity(
-        &self,
-        output_dir: &Path,
-        parent_id: &str,
-    ) -> anyhow::Result<()> {
-        ensure!(
-            self.parent_id == parent_id
-                && self.canonical_output_dir == fs::canonicalize(output_dir)?
-                && self.path == parent_authority_lock_path(output_dir, parent_id)?,
-            "batch parent authority identity drift"
-        );
-        Ok(())
-    }
-}
-
-impl Drop for ParentAuthority {
-    fn drop(&mut self) {
-        if let Some(file) = self.file.as_ref() {
-            let _ = fs2::FileExt::unlock(file);
-        }
-        drop(self.file.take());
-        // The stable parent pathname is deliberately never unlinked. Every
-        // claimant opens this same inode under gallery bookkeeping, so a
-        // replaceable lockfile can never split parent authority.
-    }
 }
 
 impl Drop for AttemptAuthority {
@@ -1079,12 +1062,6 @@ pub struct BatchAttemptAuthorityContended {
     pub attempt_generation: u64,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("batch parent {parent_id} is still owned by another live process")]
-pub struct BatchParentAuthorityContended {
-    pub parent_id: String,
-}
-
 impl BatchTransaction {
     /// Create a generation-scoped transaction and reserve collision-safe final
     /// names. The returned manifest is already durable.
@@ -1121,7 +1098,6 @@ impl BatchTransaction {
             records,
             || {},
             after_reservation_directory_created,
-            false,
         )
     }
 
@@ -1142,56 +1118,9 @@ impl BatchTransaction {
             records,
             after_attempt_directory_created,
             || {},
-            false,
         )
     }
 
-    pub(crate) fn begin_parent_owned(
-        output_dir: &Path,
-        parent_id: &str,
-        attempt_generation: u64,
-        normalized_request: serde_json::Value,
-        records: Vec<GenerationRecord>,
-    ) -> anyhow::Result<Self> {
-        Self::begin_with_hooks(
-            output_dir,
-            parent_id,
-            attempt_generation,
-            normalized_request,
-            records,
-            || {},
-            || {},
-            true,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_under_parent_authority(
-        output_dir: &Path,
-        parent_id: &str,
-        attempt_generation: u64,
-        normalized_request: serde_json::Value,
-        records: Vec<GenerationRecord>,
-        parent_authority: &ParentAuthority,
-    ) -> anyhow::Result<Self> {
-        parent_authority.validate_identity(output_dir, parent_id)?;
-        // The stable parent authority is already retained by the caller.
-        // `begin` acquires bookkeeping and then the generation authority, so
-        // retry preserves parent -> attempt lifetime ordering without trying
-        // to recursively lock the parent.
-        Self::begin(
-            output_dir,
-            parent_id,
-            attempt_generation,
-            normalized_request,
-            records,
-        )
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "test hooks and the parent-claim mode are explicit durability boundaries"
-    )]
     fn begin_with_hooks(
         output_dir: &Path,
         parent_id: &str,
@@ -1200,7 +1129,6 @@ impl BatchTransaction {
         mut records: Vec<GenerationRecord>,
         after_attempt_directory_created: impl FnOnce(),
         after_reservation_directory_created: impl FnOnce(),
-        claim_parent_authority: bool,
     ) -> anyhow::Result<Self> {
         validate_component(parent_id, "parent id")?;
         ensure!(!records.is_empty(), "batch transaction must have children");
@@ -1215,22 +1143,10 @@ impl BatchTransaction {
         // In particular, an ordinary reservation drop cannot rmdir the empty
         // reservations directory between this begin and its first durable
         // create-new reservation.
-        // This slot is declared before bookkeeping so panic unwinding releases
-        // the later bookkeeping guard before dropping an owned attempt.
-        let mut parent_authority_for_unwind: Option<ParentAuthority> = None;
         let mut attempt_authority_for_unwind: Option<AttemptAuthority>;
         let _bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
         let canonical_output_dir = _bookkeeping_lock.canonical_root().to_path_buf();
         sweep_reclaimable_attempt_authorities(&_bookkeeping_lock)?;
-        if claim_parent_authority {
-            parent_authority_for_unwind = Some(
-                try_claim_parent_authority(parent_id, &_bookkeeping_lock)?.ok_or_else(|| {
-                    BatchParentAuthorityContended {
-                        parent_id: parent_id.to_owned(),
-                    }
-                })?,
-            );
-        }
         let attempt_dir = attempt_dir(output_dir, parent_id, attempt_generation);
         let attempts_root = attempt_dir
             .parent()
@@ -1377,7 +1293,6 @@ impl BatchTransaction {
             output_dir: canonical_output_dir,
             attempt_dir,
             _attempt_authority: attempt_authority,
-            _parent_authority: parent_authority_for_unwind.take(),
             manifest,
             next_journal_sequence: 0,
             journaled_final_children: BTreeSet::new(),
@@ -1406,95 +1321,6 @@ impl BatchTransaction {
 
     pub fn manifest(&self) -> &BatchAttemptManifest {
         &self.manifest
-    }
-
-    pub(crate) fn take_parent_authority(&mut self) -> anyhow::Result<ParentAuthority> {
-        self._parent_authority
-            .take()
-            .context("joint batch transaction has no parent authority")
-    }
-
-    pub(crate) fn protocol_version(&self) -> u32 {
-        self.manifest.version
-    }
-
-    pub(crate) fn recover_exact_claimed(
-        output_dir: &Path,
-        parent_id: &str,
-        attempt_generation: u64,
-        authority: AttemptAuthority,
-    ) -> anyhow::Result<Self> {
-        let attempt_dir = attempt_dir(output_dir, parent_id, attempt_generation);
-        Self::load_claimed(output_dir, &attempt_dir.join(MANIFEST_FILE), authority)
-    }
-
-    /// Load a retained commit proof only after re-validating both its immutable
-    /// manifest identity and every published child on disk.
-    pub(crate) fn load_validated_committed_archive(
-        output_dir: &Path,
-        parent_id: &str,
-        attempt_generation: u64,
-    ) -> anyhow::Result<BatchAttemptManifest> {
-        validate_component(parent_id, "batch parent id")?;
-        let path = committed_manifests_dir(output_dir, parent_id)
-            .join(format!("{attempt_generation}.json"));
-        let manifest: BatchAttemptManifest = serde_json::from_slice(&fs::read(&path)?)
-            .with_context(|| format!("reading archived batch commit {}", path.display()))?;
-        validate_loaded_manifest(
-            output_dir,
-            &attempt_dir(output_dir, parent_id, attempt_generation),
-            &manifest,
-        )?;
-        ensure!(
-            manifest.parent_id == parent_id
-                && manifest.attempt_generation == attempt_generation
-                && manifest.state == BatchManifestState::Committed,
-            "archived batch commit identity/state is invalid"
-        );
-        for child in &manifest.children {
-            let expected_checksum = child
-                .checksum_sha256
-                .as_deref()
-                .context("committed archive child has no checksum")?;
-            let expected_size = child
-                .size_bytes
-                .context("committed archive child has no size")?;
-            let final_path = output_dir.join(&child.final_name);
-            let metadata = fs::metadata(&final_path).with_context(|| {
-                format!(
-                    "committed archive child is missing: {}",
-                    final_path.display()
-                )
-            })?;
-            ensure!(
-                metadata.is_file() && metadata.len() == expected_size,
-                "committed archive child size changed: {}",
-                final_path.display()
-            );
-            ensure!(
-                checksum_file(&final_path)? == expected_checksum,
-                "committed archive child checksum changed: {}",
-                final_path.display()
-            );
-        }
-        Ok(manifest)
-    }
-
-    pub(crate) fn archived_child_identity(child: &BatchManifestChild) -> anyhow::Result<String> {
-        immutable_record_identity(child)
-    }
-
-    pub(crate) fn central_child_record_identity(
-        entry: &CommittedArchiveEntry,
-    ) -> anyhow::Result<String> {
-        immutable_record_identity(&BatchManifestChild {
-            child_index: entry.identity.child_index,
-            staging_name: format!("{:08}.stage", entry.identity.child_index),
-            final_name: entry.identity.final_name.clone(),
-            checksum_sha256: Some(entry.identity.checksum_sha256.clone()),
-            size_bytes: Some(entry.identity.size_bytes),
-            record: entry.record.clone(),
-        })
     }
 
     pub fn staging_path(&self, child_index: usize) -> anyhow::Result<PathBuf> {
@@ -1530,168 +1356,6 @@ impl BatchTransaction {
                 BatchAuxiliaryKind::PreviewGif => "preview.gif",
             },
         )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn staged_video_thumbnail_path(
-        &self,
-        child_index: usize,
-    ) -> anyhow::Result<PathBuf> {
-        self.auxiliary_path(child_index, BatchAuxiliaryKind::ThumbnailPng)
-    }
-
-    /// Persist optional video auxiliaries under private attempt authority.
-    /// They become public cache entries only after the central gallery
-    /// manifest is committed.
-    pub(crate) fn stage_video_auxiliaries_for_lease(
-        &mut self,
-        lease: &BatchChildLease,
-        thumbnail: &[u8],
-        gif_preview: &[u8],
-    ) -> anyhow::Result<()> {
-        self.ensure_usable()?;
-        ensure!(
-            self.manifest.state == BatchManifestState::Staging
-                && lease.parent_id == self.manifest.parent_id
-                && lease.attempt_generation == self.manifest.attempt_generation,
-            "video auxiliaries do not belong to this staging attempt"
-        );
-        for (kind, bytes) in [
-            (BatchAuxiliaryKind::ThumbnailPng, thumbnail),
-            (BatchAuxiliaryKind::PreviewGif, gif_preview),
-        ] {
-            if bytes.is_empty() {
-                continue;
-            }
-            let key = (lease.child_index, kind);
-            let path = self.auxiliary_path(lease.child_index, kind)?;
-            if let Some(existing) = self.auxiliary_receipts.get(&key) {
-                ensure!(
-                    existing.lease_generation == lease.lease_generation
-                        && existing.size_bytes == bytes.len() as u64
-                        && existing.checksum_sha256 == checksum_bytes(bytes)
-                        && checksum_file(&path)? == existing.checksum_sha256,
-                    "video auxiliary retry changed a durable staged receipt"
-                );
-                continue;
-            }
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            let receipt = BatchAuxiliaryReceipt {
-                child_index: lease.child_index,
-                lease_generation: lease.lease_generation,
-                kind,
-                checksum_sha256: checksum_bytes(bytes),
-                size_bytes: bytes.len() as u64,
-            };
-            self.append_journal(BatchJournalEvent::ChildAuxiliaryStaged {
-                receipt: receipt.clone(),
-            })?;
-            self.auxiliary_receipts.insert(key, receipt);
-        }
-        sync_dir(&self.attempt_dir.join("staging"))
-    }
-
-    fn clear_auxiliaries(&mut self, child_index: usize) -> anyhow::Result<usize> {
-        let receipts = self
-            .auxiliary_receipts
-            .range(
-                (child_index, BatchAuxiliaryKind::ThumbnailPng)
-                    ..=(child_index, BatchAuxiliaryKind::PreviewGif),
-            )
-            .map(|(key, receipt)| (*key, receipt.clone()))
-            .collect::<Vec<_>>();
-        let mut removed = 0;
-        for ((_, kind), _) in &receipts {
-            match fs::remove_file(self.auxiliary_path(child_index, *kind)?) {
-                Ok(()) => removed += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        // Also remove deterministic paths which were durably written but
-        // crashed before their receipt append.
-        for kind in [
-            BatchAuxiliaryKind::ThumbnailPng,
-            BatchAuxiliaryKind::PreviewGif,
-        ] {
-            if receipts.iter().any(|((_, seen), _)| *seen == kind) {
-                continue;
-            }
-            match fs::remove_file(self.auxiliary_path(child_index, kind)?) {
-                Ok(()) => removed += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        if removed > 0 {
-            sync_dir(&self.attempt_dir.join("staging"))?;
-        }
-        if !receipts.is_empty() {
-            let lease_generation = receipts[0].1.lease_generation;
-            ensure!(
-                receipts
-                    .iter()
-                    .all(|(_, receipt)| receipt.lease_generation == lease_generation),
-                "video auxiliary receipts span multiple child leases"
-            );
-            self.append_journal(BatchJournalEvent::ChildAuxiliariesCleared {
-                child_index,
-                lease_generation,
-            })?;
-            self.auxiliary_receipts
-                .retain(|(index, _), _| *index != child_index);
-            self.cleared_auxiliary_leases
-                .insert((child_index, lease_generation));
-        }
-        Ok(removed)
-    }
-
-    /// Replace result-dependent metadata after inference but before the exact
-    /// child lease gains a durable staging receipt.
-    pub(crate) fn update_child_record_for_lease(
-        &mut self,
-        lease: &BatchChildLease,
-        mut record: GenerationRecord,
-    ) -> anyhow::Result<()> {
-        self.ensure_usable()?;
-        ensure!(
-            self.manifest.state == BatchManifestState::Staging,
-            "child records can only change while staging"
-        );
-        ensure!(
-            lease.parent_id == self.manifest.parent_id
-                && lease.attempt_generation == self.manifest.attempt_generation,
-            "child lease does not belong to this transaction attempt"
-        );
-        let final_name = {
-            let child = self
-                .manifest
-                .children
-                .get(lease.child_index)
-                .context("batch child index out of range")?;
-            ensure!(
-                child.checksum_sha256.is_none()
-                    && !self.staged_receipts.contains_key(&lease.child_index),
-                "staged child record is immutable"
-            );
-            child.final_name.clone()
-        };
-        record.filename = final_name;
-        record.output_dir = self.output_dir.to_string_lossy().into_owned();
-        self.append_journal(BatchJournalEvent::ChildRecordUpdated {
-            child_index: lease.child_index,
-            lease_generation: lease.lease_generation,
-            record: Box::new(record.clone()),
-        })?;
-        self.manifest.children[lease.child_index].record = record;
-        self.record_lease_generations
-            .insert(lease.child_index, lease.lease_generation);
-        Ok(())
     }
 
     /// Write one private child artifact, fsync it, and journal its checksum.
@@ -1761,100 +1425,6 @@ impl BatchTransaction {
         self.staged_receipts
             .insert(lease.child_index, receipt.clone());
         Ok(receipt)
-    }
-
-    pub(crate) fn staged_receipts(&self) -> &BTreeMap<usize, BatchChildReceipt> {
-        &self.staged_receipts
-    }
-
-    /// Remove an unaccepted receipt from only this generation's private
-    /// staging directory, fsync the removal, then append its tombstone.
-    pub(crate) fn unstage_receipt(&mut self, child_index: usize) -> anyhow::Result<()> {
-        self.ensure_usable()?;
-        let receipt = self
-            .staged_receipts
-            .get(&child_index)
-            .cloned()
-            .context("batch child has no staged receipt")?;
-        let aux_removed = self.clear_auxiliaries(child_index)?;
-        let path = self.staging_path(child_index)?;
-        match fs::remove_file(&path) {
-            Ok(()) => sync_dir(path.parent().expect("staging path has parent"))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        self.append_journal(BatchJournalEvent::ChildUnstaged {
-            child_index,
-            lease_generation: receipt.lease_generation,
-            record_identity_sha256: receipt.record_identity_sha256,
-        })?;
-        let child = &mut self.manifest.children[child_index];
-        child.checksum_sha256 = None;
-        child.size_bytes = None;
-        child.record.file_size_bytes = None;
-        child.record.file_mtime_ms = None;
-        self.staged_receipts.remove(&child_index);
-        if aux_removed > 0 {
-            sync_dir(path.parent().expect("staging path has parent"))?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn remove_unreceipted_staging(&mut self) -> anyhow::Result<usize> {
-        self.ensure_usable()?;
-        let mut removed = 0;
-        for child_index in 0..self.manifest.children.len() {
-            if self.staged_receipts.contains_key(&child_index) {
-                continue;
-            }
-            removed += self.clear_auxiliaries(child_index)?;
-            let path = self.staging_path(child_index)?;
-            match fs::remove_file(&path) {
-                Ok(()) => removed += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        if removed > 0 {
-            sync_dir(&self.attempt_dir.join("staging"))?;
-        }
-        Ok(removed)
-    }
-
-    pub(crate) fn rollback_private_attempt(&mut self) -> anyhow::Result<()> {
-        self.ensure_usable()?;
-        ensure!(
-            matches!(
-                self.manifest.state,
-                BatchManifestState::Staging
-                    | BatchManifestState::Prepared
-                    | BatchManifestState::Failed
-            ),
-            "cannot roll back transaction in {:?}",
-            self.manifest.state
-        );
-        ensure!(
-            !self.any_final_exists(),
-            "private rollback found a final-path artifact"
-        );
-        if self.manifest.state != BatchManifestState::Failed {
-            self.manifest.state = BatchManifestState::Failed;
-            self.persist_manifest()?;
-        }
-        self.release_reservations();
-        self.cleanup_private_staging();
-        remove_failed_attempt(self);
-        Ok(())
-    }
-
-    pub(crate) fn retire_committed_attempt(&mut self) -> anyhow::Result<()> {
-        self.ensure_usable()?;
-        ensure!(
-            self.manifest.state == BatchManifestState::Committed,
-            "only a committed transaction can be retired"
-        );
-        self.verify_all_committed()?;
-        self.archive_committed_attempt(true)
     }
 
     /// Seal a child that was streamed directly into its transaction-owned
@@ -2590,7 +2160,6 @@ impl BatchTransaction {
             output_dir: output_dir.to_path_buf(),
             attempt_dir,
             _attempt_authority: attempt_authority,
-            _parent_authority: None,
             manifest,
             next_journal_sequence,
             journaled_final_children: replay.published_children,
@@ -3551,12 +3120,6 @@ fn collect_claimed_attempts(
         if !parent.path().is_dir() || parent.file_name() == "reservations" {
             continue;
         }
-        // Version-2 parent attempts are recovered only by the joint
-        // parent/transaction authority. Generic v1 recovery must never roll
-        // back a receipted child before that reducer is reconciled.
-        if parent.path().join(PARENT_AUTHORITY_DIR).is_dir() {
-            continue;
-        }
         let attempts = parent.path().join("attempts");
         if !attempts.is_dir() {
             continue;
@@ -3938,111 +3501,6 @@ fn try_claim_attempt_authority(
     bookkeeping: &GalleryBookkeepingGuard,
 ) -> anyhow::Result<Option<AttemptAuthority>> {
     try_claim_attempt_authority_with_post_lock_hook(attempt_dir, bookkeeping, |_| {})
-}
-
-fn try_claim_parent_authority(
-    parent_id: &str,
-    bookkeeping: &GalleryBookkeepingGuard,
-) -> anyhow::Result<Option<ParentAuthority>> {
-    validate_component(parent_id, "batch parent id")?;
-    let lock_path = parent_authority_lock_path(&bookkeeping.canonical_output_dir, parent_id)?;
-    let Some(authority) = try_claim_authority_file(
-        &lock_path,
-        &bookkeeping
-            .canonical_output_dir
-            .join(TRANSACTION_DIR)
-            .join(parent_id),
-        bookkeeping,
-    )?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(ParentAuthority {
-        file: authority.file,
-        path: authority.path,
-        canonical_output_dir: bookkeeping.canonical_output_dir.clone(),
-        parent_id: parent_id.to_owned(),
-    }))
-}
-
-pub(crate) fn claim_parent_authority(
-    output_dir: &Path,
-    parent_id: &str,
-) -> anyhow::Result<ParentAuthority> {
-    fs::create_dir_all(output_dir)?;
-    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
-    try_claim_parent_authority(parent_id, &bookkeeping)?.ok_or_else(|| {
-        BatchParentAuthorityContended {
-            parent_id: parent_id.to_owned(),
-        }
-        .into()
-    })
-}
-
-pub(crate) fn claim_parent_and_attempt_authorities(
-    output_dir: &Path,
-    parent_id: &str,
-    generations: &[u64],
-) -> anyhow::Result<(ParentAuthority, BTreeMap<u64, AttemptAuthority>)> {
-    fs::create_dir_all(output_dir)?;
-    let requested_generation_count = generations.len();
-    let generations = generations.iter().copied().collect::<BTreeSet<_>>();
-    ensure!(
-        generations.len() == requested_generation_count,
-        "duplicate batch attempt generation requested for parent {parent_id}"
-    );
-
-    // This collection must be declared before bookkeeping. AttemptAuthority
-    // Drop reacquires gallery bookkeeping to reclaim its current sidecar, so
-    // panic unwinding must release the later bookkeeping guard first.
-    let mut attempts = BTreeMap::new();
-    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
-    let parent = match (|| -> anyhow::Result<ParentAuthority> {
-        let parent = try_claim_parent_authority(parent_id, &bookkeeping)?.ok_or_else(|| {
-            BatchParentAuthorityContended {
-                parent_id: parent_id.to_owned(),
-            }
-        })?;
-        for generation in generations.iter().copied() {
-            let directory = attempt_dir(output_dir, parent_id, generation);
-            let authority =
-                try_claim_attempt_authority(&directory, &bookkeeping)?.ok_or_else(|| {
-                    BatchAttemptAuthorityContended {
-                        parent_id: parent_id.to_owned(),
-                        attempt_generation: generation,
-                    }
-                })?;
-            attempts.insert(generation, authority);
-        }
-        Ok(parent)
-    })() {
-        Ok(parent) => parent,
-        Err(error) => {
-            // Normal error unwinding is explicit as well: dropping a partially
-            // collected AttemptAuthority while bookkeeping is held would
-            // self-deadlock in AttemptAuthority::drop.
-            drop(bookkeeping);
-            drop(attempts);
-            return Err(error);
-        }
-    };
-    drop(bookkeeping);
-    parent.validate_identity(output_dir, parent_id)?;
-    Ok((parent, attempts))
-}
-
-fn parent_authority_lock_path(output_dir: &Path, parent_id: &str) -> anyhow::Result<PathBuf> {
-    validate_component(parent_id, "batch parent id")?;
-    let canonical_output = fs::canonicalize(output_dir)
-        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
-    let mut identity = Sha256::new();
-    identity.update(b"mold.batch-parent-authority.v1\0");
-    identity.update((parent_id.len() as u64).to_le_bytes());
-    identity.update(parent_id.as_bytes());
-    Ok(canonical_output.join(format!(
-        "{PARENT_LOCK_PREFIX}{:x}{ATTEMPT_LOCK_SUFFIX}",
-        identity.finalize()
-    )))
 }
 
 fn try_claim_attempt_authority_with_post_lock_hook(
@@ -6694,6 +6152,27 @@ mod tests {
     use std::io::BufRead as _;
     use std::sync::{Arc as StdArc, Barrier};
 
+    fn predecessor_attempt_authority_path(attempt_dir: &Path) -> PathBuf {
+        let generation = attempt_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let parent_root = attempt_dir.parent().unwrap().parent().unwrap();
+        let parent_id = parent_root.file_name().unwrap().to_str().unwrap();
+        let transaction_root = fs::canonicalize(parent_root.parent().unwrap()).unwrap();
+        let locks = transaction_root.join(LEGACY_ATTEMPT_LOCKS_DIR);
+        fs::create_dir_all(&locks).unwrap();
+
+        let mut identity = Sha256::new();
+        identity.update(b"mold.batch-attempt-authority.v1\0");
+        identity.update((parent_id.len() as u64).to_le_bytes());
+        identity.update(parent_id.as_bytes());
+        identity.update(generation.to_le_bytes());
+        locks.join(format!("{:x}.lock", identity.finalize()))
+    }
+
     fn record(name: &str, seed: u64) -> GenerationRecord {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": format!("prompt {seed}"),
@@ -6920,118 +6399,6 @@ mod tests {
                 return Ok(());
             }
         }
-    }
-
-    #[test]
-    #[ignore = "subprocess helper for partial multi-attempt authority contention"]
-    fn partial_attempt_claim_contention_process_helper() {
-        let output_dir = PathBuf::from(
-            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
-                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
-        );
-        let parent_id = "partial-claim-parent";
-        fs::create_dir_all(attempt_dir(&output_dir, parent_id, 0)).unwrap();
-        fs::create_dir_all(attempt_dir(&output_dir, parent_id, 1)).unwrap();
-        let bookkeeping = acquire_gallery_bookkeeping_lock(&output_dir).unwrap();
-        let held =
-            try_claim_attempt_authority(&attempt_dir(&output_dir, parent_id, 1), &bookkeeping)
-                .unwrap()
-                .expect("fixture must own the later attempt");
-        drop(bookkeeping);
-        write_process_test_marker("LATER_ATTEMPT_HELD");
-
-        let error =
-            claim_parent_and_attempt_authorities(&output_dir, parent_id, &[0, 1]).unwrap_err();
-        assert!(
-            error
-                .downcast_ref::<BatchAttemptAuthorityContended>()
-                .is_some(),
-            "later-generation contention must remain typed: {error:#}"
-        );
-        write_process_test_marker("TYPED_CONTENTION");
-        drop(held);
-    }
-
-    #[test]
-    fn partial_attempt_claim_contention_releases_bookkeeping_before_unwind() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                "batch_transaction::tests::partial_attempt_claim_contention_process_helper",
-                "--nocapture",
-            ])
-            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
-        read_process_test_marker(&mut output, "LATER_ATTEMPT_HELD").unwrap();
-
-        let (result_tx, result_rx) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            let result = read_process_test_marker(&mut output, "TYPED_CONTENTION");
-            result_tx.send(result).unwrap();
-            output
-        });
-        match result_rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(result) => result.unwrap(),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = reader.join();
-                panic!(
-                    "partially acquired attempts deadlocked while unwinding under gallery \
-                     bookkeeping: {error}"
-                );
-            }
-        }
-        let mut output = reader.join().unwrap();
-        let _ = std::io::copy(&mut output, &mut std::io::sink());
-        assert!(child.wait().unwrap().success());
-    }
-
-    #[test]
-    fn duplicate_attempt_claim_is_rejected_before_acquiring_authority() {
-        let dir = tempfile::tempdir().unwrap();
-        let parent_id = "duplicate-generation-parent";
-        fs::create_dir_all(attempt_dir(dir.path(), parent_id, 0)).unwrap();
-
-        let error = match claim_parent_and_attempt_authorities(dir.path(), parent_id, &[0, 0]) {
-            Ok(_) => panic!("duplicate attempt generations must be rejected"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("duplicate batch attempt generation"),
-            "duplicate rejection must remain actionable: {error:#}"
-        );
-
-        let authority = claim_parent_and_attempt_authorities(dir.path(), parent_id, &[0])
-            .expect("duplicate validation must not leak parent or attempt authority");
-        drop(authority);
-    }
-
-    fn predecessor_attempt_authority_path(attempt_dir: &Path) -> PathBuf {
-        let generation = attempt_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap()
-            .parse::<u64>()
-            .unwrap();
-        let parent_root = attempt_dir.parent().unwrap().parent().unwrap();
-        let parent_id = parent_root.file_name().unwrap().to_str().unwrap();
-        let transaction_root = fs::canonicalize(parent_root.parent().unwrap()).unwrap();
-        let locks = transaction_root.join(LEGACY_ATTEMPT_LOCKS_DIR);
-        fs::create_dir_all(&locks).unwrap();
-
-        let mut identity = Sha256::new();
-        identity.update(b"mold.batch-attempt-authority.v1\0");
-        identity.update((parent_id.len() as u64).to_le_bytes());
-        identity.update(parent_id.as_bytes());
-        identity.update(generation.to_le_bytes());
-        locks.join(format!("{:x}.lock", identity.finalize()))
     }
 
     #[test]
@@ -10948,230 +10315,6 @@ mod tests {
     }
 
     #[test]
-    fn child_record_updates_append_constant_size_deltas_and_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        let records = (0..64)
-            .map(|index| record(&format!("{index}.png"), index))
-            .collect();
-        let mut transaction =
-            BatchTransaction::begin(dir.path(), "parent", 0, serde_json::json!({}), records)
-                .unwrap();
-        let journal = transaction.attempt_dir.join(JOURNAL_FILE);
-        let before = std::fs::metadata(&journal).unwrap().len();
-
-        for child_index in 0..64 {
-            let lease = BatchChildLease {
-                parent_id: "parent".to_string(),
-                child_index,
-                attempt_generation: 0,
-                lease_generation: 1,
-            };
-            let mut updated = record(&format!("{child_index}.png"), child_index as u64);
-            updated.generation_time_ms = Some(10_000 + child_index as i64);
-            transaction
-                .update_child_record_for_lease(&lease, updated)
-                .unwrap();
-        }
-
-        let growth = std::fs::metadata(&journal).unwrap().len() - before;
-        assert!(
-            growth < 512_000,
-            "child record updates rewrote the N-child manifest: {growth} bytes"
-        );
-        let manifest_path = transaction.attempt_dir.join(MANIFEST_FILE);
-        drop(transaction);
-        let loaded = BatchTransaction::load(dir.path(), &manifest_path).unwrap();
-        assert_eq!(
-            loaded.manifest.children[63].record.generation_time_ms,
-            Some(10_063)
-        );
-    }
-
-    fn auxiliary_fixture(
-        directory: &Path,
-    ) -> (BatchTransaction, BatchChildLease, PathBuf, PathBuf) {
-        let parent_id = format!("aux-{}", uuid::Uuid::new_v4());
-        let filename = format!("{parent_id}.mp4");
-        let transaction = BatchTransaction::begin(
-            directory,
-            &parent_id,
-            0,
-            serde_json::json!({}),
-            vec![record(&filename, 0)],
-        )
-        .unwrap();
-        let lease = BatchChildLease {
-            parent_id,
-            child_index: 0,
-            attempt_generation: 0,
-            lease_generation: 1,
-        };
-        let thumbnail = transaction
-            .auxiliary_cache_path(0, BatchAuxiliaryKind::ThumbnailPng)
-            .unwrap();
-        let preview = transaction
-            .auxiliary_cache_path(0, BatchAuxiliaryKind::PreviewGif)
-            .unwrap();
-        (transaction, lease, thumbnail, preview)
-    }
-
-    #[test]
-    fn video_auxiliaries_are_private_and_removed_on_rollback() {
-        let directory = tempfile::tempdir().unwrap();
-        let (mut transaction, lease, thumbnail, preview) = auxiliary_fixture(directory.path());
-        transaction
-            .stage_video_auxiliaries_for_lease(&lease, b"png-private", b"gif-private")
-            .unwrap();
-        assert!(!thumbnail.exists());
-        assert!(!preview.exists());
-        assert_eq!(transaction.auxiliary_receipts.len(), 2);
-
-        transaction.rollback_private_attempt().unwrap();
-        assert!(!thumbnail.exists());
-        assert!(!preview.exists());
-    }
-
-    #[test]
-    fn corrupt_receipted_video_auxiliary_fails_closed_before_prepare() {
-        let directory = tempfile::tempdir().unwrap();
-        let (mut transaction, lease, _, _) = auxiliary_fixture(directory.path());
-        transaction
-            .stage_video_auxiliaries_for_lease(&lease, b"png-original", b"gif-original")
-            .unwrap();
-        transaction.stage_bytes_for_lease(&lease, b"video").unwrap();
-        let thumbnail = transaction
-            .auxiliary_path(0, BatchAuxiliaryKind::ThumbnailPng)
-            .unwrap();
-        fs::write(&thumbnail, b"corrupt").unwrap();
-
-        let error = transaction.mark_prepared().unwrap_err();
-        assert!(
-            format!("{error:#}").contains("auxiliary changed"),
-            "unexpected corruption error: {error:#}"
-        );
-    }
-
-    #[test]
-    fn recovery_removes_receipted_auxiliaries_without_a_primary_receipt() {
-        let directory = tempfile::tempdir().unwrap();
-        let (mut transaction, lease, _, _) = auxiliary_fixture(directory.path());
-        transaction
-            .stage_video_auxiliaries_for_lease(&lease, b"png-orphan", b"gif-orphan")
-            .unwrap();
-        let thumbnail = transaction
-            .auxiliary_path(0, BatchAuxiliaryKind::ThumbnailPng)
-            .unwrap();
-        let preview = transaction
-            .auxiliary_path(0, BatchAuxiliaryKind::PreviewGif)
-            .unwrap();
-        let manifest_path = transaction.attempt_dir.join(MANIFEST_FILE);
-        drop(transaction);
-
-        let mut recovered = BatchTransaction::load(directory.path(), &manifest_path).unwrap();
-        assert_eq!(recovered.auxiliary_receipts.len(), 2);
-        assert_eq!(recovered.remove_unreceipted_staging().unwrap(), 2);
-        assert!(recovered.auxiliary_receipts.is_empty());
-        assert!(!thumbnail.exists());
-        assert!(!preview.exists());
-
-        drop(recovered);
-        let replayed = BatchTransaction::load(directory.path(), &manifest_path).unwrap();
-        assert!(replayed.auxiliary_receipts.is_empty());
-    }
-
-    #[tokio::test]
-    async fn committed_video_auxiliaries_project_exactly_after_gallery_authority() {
-        let directory = tempfile::tempdir().unwrap();
-        let (mut transaction, lease, thumbnail, preview) = auxiliary_fixture(directory.path());
-        let _ = fs::remove_file(&thumbnail);
-        let _ = fs::remove_file(&preview);
-        transaction
-            .stage_video_auxiliaries_for_lease(&lease, b"png-committed", b"gif-committed")
-            .unwrap();
-        transaction.stage_bytes_for_lease(&lease, b"video").unwrap();
-        transaction.mark_prepared().unwrap();
-        assert!(!thumbnail.exists());
-        assert!(!preview.exists());
-
-        transaction
-            .commit(&GalleryPublicationGate::default(), Arc::new(None))
-            .await
-            .unwrap();
-        assert_eq!(fs::read(&thumbnail).unwrap(), b"png-committed");
-        assert_eq!(fs::read(&preview).unwrap(), b"gif-committed");
-        fs::remove_file(thumbnail).unwrap();
-        fs::remove_file(preview).unwrap();
-    }
-
-    #[test]
-    fn hundred_thousand_child_staged_deltas_have_constant_record_size() {
-        let mut bytes = Vec::new();
-        for child_index in 0..100_000 {
-            let record = BatchJournalRecord {
-                sequence: child_index as u64 + 1,
-                attempt_generation: 7,
-                event: BatchJournalEvent::ChildStaged {
-                    receipt: BatchChildReceipt {
-                        version: 1,
-                        parent_id: "parent".into(),
-                        attempt_generation: 7,
-                        child_index,
-                        lease_generation: 3,
-                        checksum_sha256: "a".repeat(64),
-                        size_bytes: 123,
-                        record_identity_sha256: "b".repeat(64),
-                    },
-                },
-            };
-            bytes.extend(serde_json::to_vec(&record).unwrap());
-            bytes.push(b'\n');
-        }
-        assert!(
-            bytes.len() < 40_000_000,
-            "ChildStaged deltas are not constant-size: {} bytes",
-            bytes.len()
-        );
-    }
-
-    #[test]
-    fn uncertain_delta_append_boundaries_poison_until_recovery() {
-        for failpoint in [
-            DeltaAppendFailpoint::Open,
-            DeltaAppendFailpoint::Write,
-            DeltaAppendFailpoint::Flush,
-            DeltaAppendFailpoint::FileSync,
-            DeltaAppendFailpoint::DirectorySync,
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let mut transaction = BatchTransaction::begin(
-                dir.path(),
-                "parent",
-                0,
-                serde_json::json!({}),
-                vec![record("one.png", 0)],
-            )
-            .unwrap();
-            transaction.delta_append_failpoint = Some(failpoint);
-            assert!(transaction.stage_bytes(0, b"one").is_err());
-            assert!(transaction.poisoned);
-            let sequence = transaction.next_journal_sequence;
-            let error = transaction
-                .append_journal(BatchJournalEvent::MetadataCommitted)
-                .unwrap_err();
-            assert!(format!("{error:#}").contains("poisoned"));
-            assert_eq!(transaction.next_journal_sequence, sequence);
-
-            transaction.relinquish_attempt_authority_for_recovery();
-            let recovered =
-                BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE));
-            assert!(
-                recovered.is_ok(),
-                "recovery could not decide the durable prefix after {failpoint:?}: {recovered:?}"
-            );
-        }
-    }
-
-    #[test]
     fn sealed_stream_uses_v2_child_receipt_delta() {
         let dir = tempfile::tempdir().unwrap();
         let mut transaction = BatchTransaction::begin(
@@ -11198,41 +10341,6 @@ mod tests {
         let loaded = BatchTransaction::load(dir.path(), &manifest_path).unwrap();
         assert_eq!(loaded.manifest.state, BatchManifestState::Prepared);
         assert_eq!(loaded.staged_receipts.len(), 1);
-    }
-
-    #[test]
-    fn legacy_v2_snapshot_does_not_bypass_lease_bound_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
-            dir.path(),
-            "gallery-import",
-            0,
-            serde_json::json!({"kind": "gallery_import"}),
-            vec![record("import.mp4", 0)],
-        )
-        .unwrap();
-        let lease = BatchChildLease {
-            parent_id: "gallery-import".into(),
-            child_index: 0,
-            attempt_generation: 0,
-            lease_generation: 7,
-        };
-        let mut updated = record("import.mp4", 0);
-        updated.generation_time_ms = Some(42);
-        transaction
-            .update_child_record_for_lease(&lease, updated)
-            .unwrap();
-        fs::write(transaction.staging_path(0).unwrap(), b"leased video").unwrap();
-        transaction.manifest.children[0].checksum_sha256 = Some(checksum_bytes(b"leased video"));
-        transaction.manifest.children[0].size_bytes = Some(12);
-        transaction.manifest.children[0].record.file_size_bytes = Some(12);
-        transaction.persist_manifest().unwrap();
-
-        let error =
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .unwrap_err();
-
-        assert!(format!("{error:#}").contains("illegal batch manifest transition"));
     }
 
     #[tokio::test]
@@ -11287,56 +10395,6 @@ mod tests {
         assert_eq!(report.rolled_forward, 1);
         assert_eq!(fs::read(final_path).unwrap(), bytes);
         assert!(!attempt_dir(dir.path(), "gallery-import-legacy", 0).exists());
-    }
-
-    #[test]
-    fn v1_manifest_snapshot_journal_fixture_remains_readable() {
-        let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
-            dir.path(),
-            "parent",
-            0,
-            serde_json::json!({"legacy": true}),
-            vec![record("one.png", 0)],
-        )
-        .unwrap();
-        let mut initial = transaction.manifest.clone();
-        initial.version = 1;
-        atomic_write_json(&transaction.attempt_dir.join(MANIFEST_FILE), &initial).unwrap();
-        let initial_record = BatchJournalRecord {
-            sequence: 0,
-            attempt_generation: 0,
-            event: BatchJournalEvent::ManifestSnapshot {
-                manifest: initial.clone(),
-            },
-        };
-        fs::write(
-            transaction.attempt_dir.join(JOURNAL_FILE),
-            format!("{}\n", serde_json::to_string(&initial_record).unwrap()),
-        )
-        .unwrap();
-        let staged_path = transaction.staging_path(0).unwrap();
-        fs::write(&staged_path, b"legacy").unwrap();
-        let mut staged = initial;
-        staged.children[0].checksum_sha256 = Some(checksum_bytes(b"legacy"));
-        staged.children[0].size_bytes = Some(6);
-        staged.children[0].record.file_size_bytes = Some(6);
-        let staged_record = BatchJournalRecord {
-            sequence: 1,
-            attempt_generation: 0,
-            event: BatchJournalEvent::ManifestSnapshot {
-                manifest: staged.clone(),
-            },
-        };
-        append_raw_batch_record(&transaction.attempt_dir, &staged_record);
-        atomic_write_json(&transaction.attempt_dir.join(MANIFEST_FILE), &staged).unwrap();
-
-        let loaded =
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .unwrap();
-
-        assert_eq!(loaded.protocol_version(), 1);
-        assert_eq!(loaded.manifest.children[0].size_bytes, Some(6));
     }
 
     /// `fs::rename` replaces an existing destination on Unix, so a live

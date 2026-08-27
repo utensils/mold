@@ -23,19 +23,7 @@ use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
 use crate::model_manager;
-use crate::state::{AppState, GenerationJob, SseCompletionPayload, SseMessage, SubmitError};
-
-fn submit_error_to_api(e: SubmitError) -> ApiError {
-    match e {
-        SubmitError::Full { pending, capacity } => {
-            ApiError::queue_full(format!("generation queue is full ({pending}/{capacity})"))
-        }
-        SubmitError::Cancelled => {
-            ApiError::inference("generation cancelled before queue admission")
-        }
-        SubmitError::Shutdown => ApiError::internal("generation queue shut down"),
-    }
-}
+use crate::state::{AppState, SseCompletionPayload, SseMessage};
 
 // ── ApiError — structured JSON error response ────────────────────────────────
 
@@ -275,6 +263,7 @@ use crate::queue::clean_error_message;
         generate_stream,
         admit_generation_batch,
         get_generation_batch,
+        generation_batch_events,
         get_generation_batch_by_client,
         reconcile_generation_batches,
         generate_placement_preview,
@@ -343,8 +332,6 @@ use crate::queue::clean_error_message;
         capabilities_ltx2_camera_controls,
         list_licenses_endpoint,
         stream_events,
-        crate::routes_chain::generate_chain,
-        crate::routes_chain::generate_chain_stream,
         crate::routes_chain::validate_chain,
         crate::routes_chain_jobs::create_chain_job,
         crate::routes_chain_jobs::preview_chain_job_placement,
@@ -541,6 +528,10 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/generation-batches/:id", get(get_generation_batch))
         .route(
+            "/api/generation-batches/:id/events",
+            get(generation_batch_events),
+        )
+        .route(
             "/api/generate/reference-upload-sessions",
             post(crate::reference_uploads::create_reference_upload_session)
                 .delete(crate::reference_uploads::cancel_reference_upload_session)
@@ -556,14 +547,6 @@ pub fn create_router(state: AppState) -> Router {
                 )
                 .unwrap_or(usize::MAX),
             )),
-        )
-        .route(
-            "/api/generate/chain",
-            post(crate::routes_chain::generate_chain),
-        )
-        .route(
-            "/api/generate/chain/stream",
-            post(crate::routes_chain::generate_chain_stream),
         )
         .route(
             "/api/generate/chain/validate",
@@ -958,7 +941,7 @@ fn merge_request_warnings(
     admitted
 }
 
-async fn require_server_model_activation(
+pub(crate) async fn require_server_model_activation(
     state: &AppState,
     model_name: &str,
 ) -> Result<Option<String>, ApiError> {
@@ -1110,27 +1093,10 @@ pub(crate) async fn require_server_generation_request_activation(
 }
 
 pub(crate) struct PreparedGenerationRoute {
-    pub(crate) output_dir: Option<std::path::PathBuf>,
     pub(crate) warnings: RequestWarnings,
-    pub(crate) preferred_gpu: Option<usize>,
     pub(crate) resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GenerationPreparationDelivery {
-    AttachedResponse,
-    /// Work that was already acknowledged and persisted by canonical
-    /// admission. Slow preparation is replayable, but it must not invent an
-    /// untracked first-party download or rely on the original HTTP caller.
-    DeferredDurable,
-}
-
-impl GenerationPreparationDelivery {
-    fn is_durable(self) -> bool {
-        matches!(self, Self::DeferredDurable)
-    }
 }
 
 /// Name the first request-owned media authority that cannot be replayed from
@@ -1145,49 +1111,18 @@ fn durable_generation_unsupported(message: impl Into<String>) -> ApiError {
     )
 }
 
-async fn prepare_generation(
-    state: &AppState,
-    request: &mut mold_core::GenerateRequest,
-    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
-) -> Result<PreparedGenerationRoute, ApiError> {
-    prepare_generation_for_delivery(
-        state,
-        request,
-        authenticated,
-        GenerationPreparationDelivery::AttachedResponse,
-    )
-    .await
-}
-
-pub(crate) async fn prepare_generation_for_delivery(
-    state: &AppState,
-    request: &mut mold_core::GenerateRequest,
-    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
-    delivery: GenerationPreparationDelivery,
-) -> Result<PreparedGenerationRoute, ApiError> {
-    prepare_generation_for_delivery_inner(state, request, authenticated, delivery, None).await
-}
-
 pub(crate) async fn prepare_generation_after_durable_ack(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
     authority: crate::durable_admission_authority::RuntimeAuthority,
 ) -> Result<PreparedGenerationRoute, ApiError> {
-    prepare_generation_for_delivery_inner(
-        state,
-        request,
-        None,
-        GenerationPreparationDelivery::DeferredDurable,
-        Some(authority),
-    )
-    .await
+    prepare_generation_inner(state, request, None, Some(authority)).await
 }
 
-async fn prepare_generation_for_delivery_inner(
+async fn prepare_generation_inner(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
-    delivery: GenerationPreparationDelivery,
     restored_authority: Option<crate::durable_admission_authority::RuntimeAuthority>,
 ) -> Result<PreparedGenerationRoute, ApiError> {
     #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
@@ -1214,17 +1149,6 @@ async fn prepare_generation_for_delivery_inner(
     // for every non-H3 configured alias and catalog ID.
     mold_core::minimax_h3::canonicalize_request_model(request);
 
-    // `hdr_exr_dir` names an output directory on the machine doing inference.
-    // An HTTP client must never choose that server-local path: unlike media
-    // inputs there is no useful remote artifact to return and no safe root to
-    // resolve it beneath. Forced-local CLI generation bypasses this boundary
-    // and continues to own EXR export and metadata recording.
-    if request.hdr_exr_dir.is_some() {
-        return Err(ApiError::validation(
-            "hdr_exr_dir is local-only and cannot be set through the server API; \
-             re-run the CLI with --local so the EXR sidecar is written on your machine",
-        ));
-    }
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
         request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
@@ -1467,7 +1391,7 @@ async fn prepare_generation_for_delivery_inner(
         // Installed adapters are materialized cheaply and identically; absent
         // adapters are refused honestly instead of acknowledging a row whose
         // request cannot reproduce the legacy execution payload.
-        if delivery.is_durable() && !control_artifact_is_complete(adapter, &path) {
+        if !control_artifact_is_complete(adapter, &path) {
             return Err(durable_generation_unsupported(format!(
                 "IC-LoRA control '{}' must be downloaded before durable batch admission",
                 adapter.id
@@ -1475,28 +1399,36 @@ async fn prepare_generation_for_delivery_inner(
         }
         materialize_builtin_ltx2_control(state, request, adapter, path).await?;
     }
-    if delivery.is_durable() {
-        if let Some((preset, _)) = planned_camera_controls
-            .iter()
-            .find(|(preset, path)| !camera_control_artifact_is_complete(preset, path))
-        {
-            return Err(durable_generation_unsupported(format!(
-                "camera control '{}' must be downloaded before durable batch admission",
-                preset.id
+    if let Some((preset, _)) = planned_camera_controls
+        .iter()
+        .find(|(preset, path)| !camera_control_artifact_is_complete(preset, path))
+    {
+        return Err(durable_generation_unsupported(format!(
+            "camera control '{}' must be downloaded before durable batch admission",
+            preset.id
+        )));
+    }
+    materialize_builtin_ltx2_camera_controls(state, &planned_camera_controls).await?;
+    // Durable admission accepts a request naming a server-local adapter and
+    // preparation may run minutes — or a restart — later, so the path is
+    // re-asked HERE rather than trusted from admission. A LoRA that has since
+    // been moved or deleted holds its row by name, which is the same shape a
+    // missing model takes: the print is parked with an actionable reason, not
+    // rendered without the adapter it asked for and not silently dropped.
+    {
+        let config = state.config.read().await;
+        if let Some(missing) = missing_lora_path(&config, request) {
+            return Err(ApiError::not_found(format!(
+                "LoRA adapter is no longer readable at {missing}; \
+                 restore the file and retry this job"
             )));
         }
     }
-    materialize_builtin_ltx2_camera_controls(state, &planned_camera_controls).await?;
 
-    let (output_dir, dim_warning) = {
+    let dim_warning = {
         let config = state.config.read().await;
-        let output_dir = if state.is_output_disabled(&config) {
-            None
-        } else {
-            Some(config.effective_output_dir())
-        };
         let family = config.resolved_model_config(&request.model).family;
-        let dim_warning = family.as_deref().and_then(|f| {
+        family.as_deref().and_then(|f| {
             // Per model: a composing LTX-2 checkpoint advertises the
             // composed rungs, so judging it against the single-pass list
             // would flag the very shapes it exists to render.
@@ -1506,8 +1438,7 @@ async fn prepare_generation_for_delivery_inner(
                 mold_core::validation::Ltx2SpatialComposition::SinglePass
             };
             mold_core::dimension_warning_composed(request.width, request.height, f, composition)
-        });
-        (output_dir, dim_warning)
+        })
     };
 
     warnings.dimension = dim_warning;
@@ -1531,9 +1462,7 @@ async fn prepare_generation_for_delivery_inner(
         None
     };
     Ok(PreparedGenerationRoute {
-        output_dir,
         warnings,
-        preferred_gpu,
         resolved_references,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
@@ -2360,24 +2289,59 @@ fn require_expand_model_activation(settings: &mold_core::ExpandSettings) -> Resu
 
 // ── /api/generate ─────────────────────────────────────────────────────────────
 
-const OPERATION_ID_HEADER: &str = "x-mold-operation-id";
-
 pub(crate) fn canonical_client_batch_id(value: &str) -> Result<String, ApiError> {
     uuid::Uuid::parse_str(value.trim())
         .map(|id| id.to_string())
         .map_err(|_| ApiError::validation("client_batch_id must be a UUID"))
 }
 
-fn requested_operation_id(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
-    let Some(value) = headers.get(OPERATION_ID_HEADER) else {
-        return Ok(None);
-    };
-    let value = value
-        .to_str()
-        .map_err(|_| ApiError::validation("X-Mold-Operation-Id must be an ASCII UUID"))?;
-    let operation_id = uuid::Uuid::parse_str(value.trim())
-        .map_err(|_| ApiError::validation("X-Mold-Operation-Id must be a UUID"))?;
-    Ok(Some(operation_id.to_string()))
+/// `hdr_exr_dir` names an output directory on the machine doing inference.
+///
+/// An HTTP client must never choose that server-local path: unlike media
+/// inputs there is no useful remote artifact to return and no safe root to
+/// resolve it beneath. Forced-local CLI generation bypasses this boundary and
+/// continues to own EXR export and metadata recording.
+///
+/// Asked at ADMISSION, before the row is durable, because it is a property of
+/// the request that no amount of retrying changes — deferring it to
+/// preparation would turn an actionable `422` into an accepted job that holds.
+/// The first LoRA this request would load whose file is not readable.
+///
+/// Camera-control aliases resolve through the config and are checked by their
+/// own materialization, so only plain paths are asked here. A zero-scale entry
+/// is skipped for the same reason `effective_loras` drops it: it is never
+/// merged, so its file is never opened.
+fn missing_lora_path(
+    config: &mold_core::Config,
+    request: &mold_core::GenerateRequest,
+) -> Option<String> {
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+    let loras = request
+        .loras
+        .as_ref()
+        .filter(|stack| !stack.is_empty())
+        .cloned()
+        .or_else(|| request.lora.clone().map(|lora| vec![lora]))?;
+    let _ = config;
+    loras
+        .into_iter()
+        .filter(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
+        .find(|lora| {
+            !lora.path.starts_with("camera-control:") && !std::path::Path::new(&lora.path).is_file()
+        })
+        .map(|lora| lora.path)
+}
+
+pub(crate) fn reject_client_supplied_hdr_output(
+    request: &mold_core::GenerateRequest,
+) -> Result<(), ApiError> {
+    if request.hdr_exr_dir.is_some() {
+        return Err(ApiError::validation(
+            "hdr_exr_dir is local-only and cannot be set through the server API; \
+             re-run the CLI with --local so the EXR sidecar is written on your machine",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_direct_generation_request(
@@ -2393,67 +2357,54 @@ fn validate_direct_generation_request(
     Ok(())
 }
 
+/// Admit one singleton through the single durable path, or refuse.
+///
+/// There is no second pipeline. A host that cannot admit durably does not
+/// generate, so every gate here is a refusal rather than a fallback: silently
+/// running a non-durable render on a host whose queue cannot replay it is
+/// exactly the ambiguity this route exists to remove.
 pub(crate) async fn direct_durable_admission(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
-    explicitly_requested: bool,
-) -> Result<Option<Arc<crate::queue_media_admission::DurableMediaAdmission>>, ApiError> {
+) -> Result<Arc<crate::queue_media_admission::DurableMediaAdmission>, ApiError> {
     // Resolve the small, config-only control contracts before availability or
     // encrypted-media gates. This preserves precise 422 diagnostics without
     // doing model, placement, download, or device work before durable ack.
     let _ = plan_builtin_ltx2_control(state, request).await?;
     let _ = plan_builtin_ltx2_camera_controls(state, request).await?;
-    if let Err(error) = crate::queue_media_admission::durable_media_preflight(request) {
-        return if explicitly_requested {
-            Err(error)
-        } else {
-            Ok(None)
-        };
+    crate::queue_media_admission::durable_media_preflight(request)?;
+    // Asked before readiness: a host on its way down is a more specific — and
+    // more actionable — answer than "this host cannot admit durably", and it
+    // carries the `Retry-After` that tells the caller to come back. The batch
+    // route asks the same question at the top of `admit_batch`.
+    if state.queue_journal.is_retaining() {
+        return Err(ApiError::server_restarting(
+            "server is restarting; this generation was not accepted",
+        ));
     }
     ensure_generation_available(state)?;
     let config = state.config.read().await;
-    // One resolved value, read once. This used to be a ladder of free-standing
-    // gates that between them omitted conjunct 3 entirely, so a legacy or
-    // observe host ran durable semantics on a request whose client had
-    // negotiated the attached path from `heterogeneous_batch: false`.
+    // One resolved value, read once, by every consumer.
     let readiness = DurableAdmissionReadiness::resolve(state, &config);
     drop(config);
-    // THE RULE. A readiness gate refuses only when the caller explicitly asked
-    // for durable admission; otherwise it returns `Ok(None)` and the request
-    // takes the attached path, which is what capability discovery already told
-    // that client to do. Every gate here is also a conjunct of an advertised
-    // capability, except the platform-hydration check in
-    // `durable_media_preflight` above — that one is a host property with no
-    // advertised conjunct, and it obeys the same rule because the attached
-    // path carries its media inline and needs nothing this path provides.
-    if let Some(unready) = readiness.unready_for_direct() {
-        return if explicitly_requested {
-            Err(unready.api_error())
-        } else {
-            Ok(None)
-        };
+    if let Some(unready) = readiness.unready() {
+        return Err(unready.api_error());
     }
     // The encrypted store is a separate axis from the four conjuncts: the
     // admission service can be installed while the store is still degraded.
-    // This gate previously ignored `explicitly_requested` while the gate
-    // immediately below it consulted it, so a degraded store hard-503'd every
-    // img2img, identity, edit, mask, control, audio, source-video, extend,
-    // keyframe and H3 request on both direct routes — behind a 503 that both
-    // client classifiers read as transient, on a host serving /health 200.
+    // It gates MEDIA, not generation, so a media-free request is unaffected.
     if !readiness.media_ready()
         && crate::queue_media_admission::request_requires_encrypted_durable_media(request)
     {
-        return if explicitly_requested {
-            Err(ApiError::with_code(
-                "encrypted durable request media is unavailable",
-                "DURABLE_MEDIA_UNAVAILABLE",
-                StatusCode::SERVICE_UNAVAILABLE,
-            ))
-        } else {
-            Ok(None)
-        };
+        return Err(ApiError::with_code(
+            "encrypted durable request media is unavailable",
+            "DURABLE_MEDIA_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
     }
-    Ok(readiness.admission())
+    readiness
+        .admission()
+        .ok_or_else(|| DurableAdmissionUnready::AdmissionServiceMissing.api_error())
 }
 
 fn durable_reconciliation_response(
@@ -2634,6 +2585,127 @@ async fn get_generation_batch(
     Ok(Json(generation_batch_status(&state.instance_id, detail)))
 }
 
+/// Live authoritative state for one durable batch.
+///
+/// A batch's children are independent durable rows, so the thing a client
+/// needs streamed is the AUTHORITATIVE state each one commits — which is
+/// exactly what `ServerEvent::JobStateCommitted` announces, after the SQLite
+/// transaction. Each announcement re-reads the batch and emits the whole
+/// status, so a client that connects late, reconnects, or misses a frame is
+/// correct from the first event it sees rather than having to replay a delta
+/// log.
+///
+/// Deliberately NOT per-step progress or denoise previews: those ride the
+/// single-consumer observer a job's own admission registered, and one job has
+/// exactly one. `/api/generate/stream` is that consumer for a singleton, and
+/// `GET /api/queue/{id}/preview` is the snapshot every other surface reads.
+#[utoipa::path(
+    get,
+    path = "/api/generation-batches/{id}/events",
+    tag = "generation",
+    params(("id" = String, Path, description = "Generation batch id")),
+    responses(
+        (status = 200, description = "SSE stream of authoritative batch status"),
+        (status = 404, description = "Batch not found"),
+    )
+)]
+async fn generation_batch_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let status = read_generation_batch_status(&state, &id).await?;
+    let mut events = state.events.subscribe();
+    let children = status
+        .children
+        .iter()
+        .map(|child| child.job_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let stream = async_stream::stream! {
+        let mut settled = generation_batch_is_settled(&status);
+        yield Ok::<_, Infallible>(generation_batch_event(&status));
+        while !settled {
+            let event = match events.recv().await {
+                Ok(event) => Some(event),
+                // A lagged subscriber missed announcements, but every frame is
+                // a whole status, so one fresh read restores it.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
+            if let Some(event) = event {
+                let concerns_batch = match &event {
+                    mold_core::ServerEvent::JobStateCommitted { id } => children.contains(id),
+                    // One transaction settled several rows at once; ask rather
+                    // than guess whether any of them was ours.
+                    mold_core::ServerEvent::GenerationStatesCommitted => true,
+                    _ => false,
+                };
+                if !concerns_batch {
+                    continue;
+                }
+            }
+            let Ok(status) = read_generation_batch_status(&state, &id).await else {
+                return;
+            };
+            settled = generation_batch_is_settled(&status);
+            yield Ok(generation_batch_event(&status));
+        }
+    };
+    Ok(Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response())
+}
+
+fn generation_batch_event(status: &mold_core::GenerationBatchStatus) -> axum::response::sse::Event {
+    match serde_json::to_string(status) {
+        Ok(data) => axum::response::sse::Event::default()
+            .event("generation_batch")
+            .data(data),
+        Err(error) => axum::response::sse::Event::default().event("error").data(
+            serde_json::json!({ "message": format!("failed to serialize batch status: {error}") })
+                .to_string(),
+        ),
+    }
+}
+
+/// Every child has reached a state this server will not leave on its own. A
+/// `held` child counts: it is waiting for an explicit
+/// `POST /api/queue/{id}/retry`, not for this host.
+fn generation_batch_is_settled(status: &mold_core::GenerationBatchStatus) -> bool {
+    use mold_core::GenerationBatchChildState as ChildState;
+    status.children.iter().all(|child| {
+        matches!(
+            child.state,
+            ChildState::Complete | ChildState::Failed | ChildState::Cancelled | ChildState::Held
+        )
+    })
+}
+
+async fn read_generation_batch_status(
+    state: &AppState,
+    id: &str,
+) -> Result<mold_core::GenerationBatchStatus, ApiError> {
+    let journal = state.queue_journal.clone();
+    let batch_id = id.to_string();
+    let detail = spawn_queue_read(move || {
+        journal
+            .durable_generation_batch(&batch_id)
+            .map_err(anyhow::Error::msg)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::with_code(
+            "generation batch not found",
+            "GENERATION_BATCH_NOT_FOUND",
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    Ok(generation_batch_status(&state.instance_id, detail))
+}
+
 #[utoipa::path(
     get,
     path = "/api/generation-batches/by-client/{client_batch_id}",
@@ -2755,245 +2827,98 @@ fn canonical_generation_batch_status_ids(
 async fn generate(
     State(state): State<AppState>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
-    headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     validate_direct_generation_request(&req)?;
-    let operation_id = requested_operation_id(&headers)?;
-    let canonical_admission =
-        direct_durable_admission(&state, &mut req, operation_id.is_some()).await?;
-    if let Some(admission) = canonical_admission {
-        let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let outcome = admission
-            .admit_batch(
-                &state,
-                authenticated.as_ref().map(|Extension(auth)| auth),
-                mold_core::GenerationBatchAdmissionRequest {
-                    client_batch_id: operation_id,
-                    requests: vec![req],
-                },
-                Some(crate::queue_media_ingress::ObserverMode::Raw),
-                SseCompletionPayload::Full,
-            )
-            .await?;
-        let status = outcome.status;
-        let warnings = outcome.warnings.unwrap_or_default();
-        if outcome.observers.len() != status.children.len()
-            || outcome.observers.iter().any(Option::is_none)
-        {
-            return Err(ApiError::internal(
-                "durable admission returned without its direct observer",
-            ));
-        }
-        let observer = outcome
-            .observers
-            .into_iter()
-            .next()
-            .flatten()
-            .expect("checked above");
-        let attached = match observer.attached().await {
-            Ok(attached) => attached,
-            Err(_) => {
-                return Ok(durable_reconciliation_response(
-                    status,
-                    "observer detached before feeder handoff",
-                ));
-            }
-        };
-        let crate::queue_media_ingress::AttachedObserver::Raw {
-            outcome,
-            warnings: deferred_warnings,
-        } = attached
-        else {
-            return Err(ApiError::internal(
-                "durable raw observer received an SSE delivery",
-            ));
-        };
-        let result = match outcome.await {
-            Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => *result,
-            Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
-                return Err(ApiError::cancelled(format!(
-                    "generation job {} was cancelled while queued",
-                    status.children[0].job_id
-                )));
-            }
-            Err(_) => {
-                return Ok(durable_reconciliation_response(
-                    status,
-                    "worker observer dropped before terminal result",
-                ));
-            }
-        };
-        if result.is_err() {
-            let batch_id = status.id.clone();
-            let journal = state.queue_journal.clone();
-            let refreshed = match spawn_queue_read(move || {
-                journal
-                    .durable_generation_batch(&batch_id)
-                    .map_err(anyhow::Error::msg)
-            })
-            .await
-            {
-                Ok(Some(detail)) => generation_batch_status(&state.instance_id, detail),
-                Ok(None) => status,
-                Err(error) => {
-                    tracing::warn!(
-                        batch = %status.id,
-                        error = ?error,
-                        "durable generation status refresh failed after acceptance; returning original reconciliation identity"
-                    );
-                    status
-                }
-            };
-            return Ok(durable_reconciliation_response(
-                refreshed,
-                "accepted durable generation ended without a media response",
-            ));
-        }
-        return generation_result_response(
-            result,
-            merge_request_warnings(warnings, deferred_warnings),
-        );
-    }
-    // Capture before prepare_generation: prompt expansion mutates req.prompt,
-    // and history should hold what the user typed.
-    let typed = (
-        req.prompt.clone(),
-        req.negative_prompt.clone(),
-        req.model.clone(),
-    );
-    let prepared = prepare_generation(
-        &state,
-        &mut req,
-        authenticated.as_ref().map(|Extension(auth)| auth),
-    )
-    .await?;
-    let PreparedGenerationRoute {
-        output_dir,
-        warnings,
-        preferred_gpu,
-        resolved_references,
-        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-        h3_private_ingress_grant,
-    } = prepared;
-    record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
-
-    tracing::info!(
-        model = %req.model,
-        prompt = %req.prompt,
-        width = req.width,
-        height = req.height,
-        steps = req.steps,
-        guidance = req.guidance,
-        seed = ?req.seed,
-        format = %req.resolved_output_format(),
-        lora = ?req.lora.as_ref().map(|l| &l.path),
-        lora_scale = ?req.lora.as_ref().map(|l| l.scale),
-        loras = ?req.loras.as_ref().map(|v| v.iter().map(|l| &l.path).collect::<Vec<_>>()),
-        "generate request"
-    );
-
-    // Non-streaming path still gets a registry entry so an HTTP client
-    // hanging on the response is visible via GET /api/queue alongside
-    // SSE clients. Cleanup happens unconditionally on every terminal
-    // path (drop guard in `gpu_worker::process_job`).
-    let job_id = uuid::Uuid::new_v4().to_string();
-    // Metadata-shaped request params ride the queue listing so any client
-    // can inspect the job and reuse its settings. `seed_pinned` records
-    // whether the request pinned a seed — metadata's required seed field
-    // can't distinguish an explicit 0 from "let the server pick".
-    let queue_metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
-        &req,
-        req.seed.unwrap_or(0),
-        req.scheduler,
-        mold_core::build_info::version_string(),
-    ));
-    // Persist first, then publish the bounded registry row under the scheduler
-    // fence while the durable transition gate excludes PATCH/cancellation.
-    // SQLite never runs beneath the scheduler fence.
-    let durable_transition = state.queue_journal.lock_durable_transition().await;
-    // Record the durable row BEFORE submit, so a crash between here and the
-    // worker still leaves something to replay.
-    let target_device_id =
-        crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
-    let journal = (!crate::queue_media_admission::request_has_durable_media(&req))
-        .then(|| {
-            state
-                .queue_journal
-                .record(crate::queue_journal::JournalAdmission {
-                    id: &job_id,
-                    request: &req,
-                    output_dir: output_dir.as_deref(),
-                    target_gpu: preferred_gpu,
-                    target_device_id: target_device_id.as_deref(),
-                    completion_payload: SseCompletionPayload::Full,
-                    batch_child: false,
-                    carries_reference_authority: resolved_references.is_some()
-                        || req.references.is_some(),
-                })
-        })
-        .flatten();
-    let cancel = {
-        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-        state.job_registry.register_job(
-            &job_id,
-            &req.model,
-            preferred_gpu,
-            Some(req.seed.is_some()),
-            Some(queue_metadata),
+    let admission = direct_durable_admission(&state, &mut req).await?;
+    let outcome = admission
+        .admit_batch(
+            &state,
+            authenticated.as_ref().map(|Extension(auth)| auth),
+            mold_core::GenerationBatchAdmissionRequest {
+                client_batch_id: uuid::Uuid::new_v4().to_string(),
+                requests: vec![req],
+            },
+            Some(crate::queue_media_ingress::ObserverMode::Raw),
+            SseCompletionPayload::Full,
         )
+        .await?;
+    let status = outcome.status;
+    let warnings = outcome.warnings.unwrap_or_default();
+    if outcome.observers.len() != status.children.len()
+        || outcome.observers.iter().any(Option::is_none)
+    {
+        return Err(ApiError::internal(
+            "durable admission returned without its direct observer",
+        ));
+    }
+    let observer = outcome
+        .observers
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("checked above");
+    let attached = match observer.attached().await {
+        Ok(attached) => attached,
+        Err(_) => {
+            return Ok(durable_reconciliation_response(
+                status,
+                "observer detached before feeder handoff",
+            ));
+        }
     };
-    drop(durable_transition);
-    // The result channel's receiver is owned by a detached supervisor, not by
-    // this handler: an admitted job runs to completion even if the client hangs
-    // up, and only an explicit `DELETE /api/queue/:id` closes it early.
-    let crate::job_supervisor::SupervisedJob {
-        result_tx,
-        outcome_rx,
-    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
-    let job = GenerationJob {
-        id: job_id.clone(),
-        durable_queue_rank: None,
-        request: req,
-        deferred_media: None,
-        resolved_references,
-        completion_payload: SseCompletionPayload::Full,
-        progress_tx: None,
-        result_tx,
-        output_dir,
-        batch_child: None,
-        journal,
-        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-        h3_private_ingress_grant,
+    let crate::queue_media_ingress::AttachedObserver::Raw {
+        outcome,
+        warnings: deferred_warnings,
+    } = attached
+    else {
+        return Err(ApiError::internal(
+            "durable raw observer received an SSE delivery",
+        ));
     };
-
-    let _position = state
-        .queue
-        .submit(job, state.queue_capacity)
-        .await
-        .inspect_err(|_| state.job_registry.remove(&job_id))
-        .map_err(submit_error_to_api)?;
-
-    // Wait for the queue worker to process the job — or for
-    // `DELETE /api/queue/:id` to cancel it while it's still queued. Returning
-    // here no longer discards the job: the supervisor keeps holding the result
-    // channel, so the render finishes and the output is still saved.
-    let result = match outcome_rx.await {
+    let result = match outcome.await {
         Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => *result,
         Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
             return Err(ApiError::cancelled(format!(
-                "generation job {job_id} was cancelled while queued"
+                "generation job {} was cancelled while queued",
+                status.children[0].job_id
             )));
         }
         Err(_) => {
-            return Err(ApiError::internal(
-                "generation queue worker dropped the job",
+            return Ok(durable_reconciliation_response(
+                status,
+                "worker observer dropped before terminal result",
             ));
         }
     };
-
-    generation_result_response(result, warnings)
+    if result.is_err() {
+        let batch_id = status.id.clone();
+        let journal = state.queue_journal.clone();
+        let refreshed = match spawn_queue_read(move || {
+            journal
+                .durable_generation_batch(&batch_id)
+                .map_err(anyhow::Error::msg)
+        })
+        .await
+        {
+            Ok(Some(detail)) => generation_batch_status(&state.instance_id, detail),
+            Ok(None) => status,
+            Err(error) => {
+                tracing::warn!(
+                    batch = %status.id,
+                    error = ?error,
+                    "durable generation status refresh failed after acceptance; returning original reconciliation identity"
+                );
+                status
+            }
+        };
+        return Ok(durable_reconciliation_response(
+            refreshed,
+            "accepted durable generation ended without a media response",
+        ));
+    }
+    generation_result_response(result, merge_request_warnings(warnings, deferred_warnings))
 }
 
 fn generation_result_response(
@@ -3966,263 +3891,88 @@ async fn generate_stream(
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     let completion_payload = requested_sse_completion_payload(&headers)?;
     validate_direct_generation_request(&req)?;
-    let operation_id = requested_operation_id(&headers)?;
-    let canonical_admission =
-        direct_durable_admission(&state, &mut req, operation_id.is_some()).await?;
-    if let Some(admission) = canonical_admission {
-        let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let outcome = admission
-            .admit_batch(
-                &state,
-                authenticated.as_ref().map(|Extension(auth)| auth),
-                mold_core::GenerationBatchAdmissionRequest {
-                    client_batch_id: operation_id,
-                    requests: vec![req],
-                },
-                Some(crate::queue_media_ingress::ObserverMode::Sse(
-                    completion_payload,
-                )),
+    let admission = direct_durable_admission(&state, &mut req).await?;
+    let outcome = admission
+        .admit_batch(
+            &state,
+            authenticated.as_ref().map(|Extension(auth)| auth),
+            mold_core::GenerationBatchAdmissionRequest {
+                client_batch_id: uuid::Uuid::new_v4().to_string(),
+                requests: vec![req],
+            },
+            Some(crate::queue_media_ingress::ObserverMode::Sse(
                 completion_payload,
-            )
-            .await?;
-        let status = outcome.status;
-        if outcome.observers.len() != status.children.len()
-            || outcome.observers.iter().any(Option::is_none)
-        {
-            return Err(ApiError::internal(
-                "durable admission returned without its direct observer",
-            ));
-        }
-        let warnings = outcome.warnings.unwrap_or_default();
-        let observer = outcome
-            .observers
-            .into_iter()
-            .next()
-            .flatten()
-            .expect("checked above");
-        let job_id = status.children[0].job_id.clone();
-        let batch_id = status.id.clone();
-        let client_batch_id = status.client_batch_id.clone();
-        let stream = async_stream::stream! {
-            for warning in warnings.all() {
-                yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
-                    SseProgressEvent::Info { message: warning.to_string() }
-                )));
-            }
-            yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
-                SseProgressEvent::Queued { position: 0, id: job_id }
-            )));
-            let Ok(attached) = observer.attached().await else {
-                yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
-                    mold_core::SseErrorEvent::retained_with_code(
-                        format!(
-                            "durable generation remains queued; reconcile batch {batch_id} or client operation {client_batch_id}"
-                        ),
-                        mold_core::SSE_ERROR_CODE_DURABLE_OBSERVER_DETACHED,
-                    ),
-                )));
-                return;
-            };
-            let crate::queue_media_ingress::AttachedObserver::Sse { mut messages } = attached else {
-                return;
-            };
-            let mut terminal = false;
-            while let Some(message) = messages.recv().await {
-                terminal = matches!(message, SseMessage::Complete(_) | SseMessage::Error(_));
-                yield Ok::<_, Infallible>(sse_message_to_event(message));
-                if terminal {
-                    break;
-                }
-            }
-            if !terminal {
-                yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
-                    mold_core::SseErrorEvent::retained_with_code(
-                        format!(
-                            "durable generation remains queued; reconcile batch {batch_id} or client operation {client_batch_id}"
-                        ),
-                        mold_core::SSE_ERROR_CODE_DURABLE_OBSERVER_DETACHED,
-                    ),
-                )));
-            }
-        };
-        return Ok(Sse::new(stream)
-            .keep_alive(
-                KeepAlive::new()
-                    .interval(std::time::Duration::from_secs(15))
-                    .text("ping"),
-            )
-            .into_response());
-    }
-    // Capture before prepare_generation: prompt expansion mutates req.prompt,
-    // and history should hold what the user typed.
-    let typed = (
-        req.prompt.clone(),
-        req.negative_prompt.clone(),
-        req.model.clone(),
-    );
-    let prepared = prepare_generation(
-        &state,
-        &mut req,
-        authenticated.as_ref().map(|Extension(auth)| auth),
-    )
-    .await?;
-    let PreparedGenerationRoute {
-        output_dir,
-        warnings,
-        preferred_gpu,
-        resolved_references,
-        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-        h3_private_ingress_grant,
-    } = prepared;
-    if completion_payload == SseCompletionPayload::MetadataOnly && output_dir.is_none() {
-        return Err(ApiError::validation(
-            "metadata-only SSE completions require server gallery output to be enabled",
+            )),
+            completion_payload,
+        )
+        .await?;
+    let status = outcome.status;
+    if outcome.observers.len() != status.children.len()
+        || outcome.observers.iter().any(Option::is_none)
+    {
+        return Err(ApiError::internal(
+            "durable admission returned without its direct observer",
         ));
     }
-    record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
-
-    tracing::info!(
-        model = %req.model,
-        prompt = %req.prompt,
-        "generate/stream request"
-    );
-
-    // Create SSE channel
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
-
-    // Send dimension warning before queuing so the client sees it early
-    for warning in warnings.all() {
-        let _ = tx.send(SseMessage::Progress(SseProgressEvent::Info {
-            message: warning.to_string(),
-        }));
-    }
-
-    // Assign a server-side ID and register before submit so the entry is
-    // visible to /api/queue from the moment we accept the request.
-    let job_id = uuid::Uuid::new_v4().to_string();
-    // Metadata-shaped request params ride the queue listing so any client
-    // can inspect the job and reuse its settings. `seed_pinned` records
-    // whether the request pinned a seed — metadata's required seed field
-    // can't distinguish an explicit 0 from "let the server pick".
-    let queue_metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
-        &req,
-        req.seed.unwrap_or(0),
-        req.scheduler,
-        mold_core::build_info::version_string(),
-    ));
-    let durable_transition = state.queue_journal.lock_durable_transition().await;
-    let target_device_id =
-        crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
-    let journal = (!crate::queue_media_admission::request_has_durable_media(&req))
-        .then(|| {
-            state
-                .queue_journal
-                .record(crate::queue_journal::JournalAdmission {
-                    id: &job_id,
-                    request: &req,
-                    output_dir: output_dir.as_deref(),
-                    target_gpu: preferred_gpu,
-                    target_device_id: target_device_id.as_deref(),
-                    completion_payload,
-                    batch_child: false,
-                    carries_reference_authority: resolved_references.is_some()
-                        || req.references.is_some(),
-                })
-        })
-        .flatten();
-    let cancel = {
-        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-        state.job_registry.register_job(
-            &job_id,
-            &req.model,
-            preferred_gpu,
-            Some(req.seed.is_some()),
-            Some(queue_metadata),
-        )
-    };
-    drop(durable_transition);
-    // Detached ownership of the result channel — see the non-streaming path.
-    let crate::job_supervisor::SupervisedJob {
-        result_tx,
-        outcome_rx,
-    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
-    let job = GenerationJob {
-        id: job_id.clone(),
-        durable_queue_rank: None,
-        request: req,
-        deferred_media: None,
-        resolved_references,
-        completion_payload,
-        progress_tx: Some(tx.clone()),
-        result_tx,
-        output_dir,
-        batch_child: None,
-        journal,
-        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-        h3_private_ingress_grant,
-    };
-
-    // The seed position is the registry index, not the queue's pending count.
-    // The pending count excludes the running job, so a submit behind one
-    // running generation used to report 0 here and 1 in every later
-    // announcement, making the place in line appear to move backwards.
-    //
-    // Read it BEFORE `submit`: once the job is in the channel a worker can run
-    // it to completion and unregister the entry before this task resumes, and
-    // the fallback would seed 0 for a job that genuinely had a queue ahead of
-    // it. Pre-submit the job cannot be dispatched, so the read is race-free;
-    // the fallback only fires if a concurrent cancel already removed the
-    // entry — a job whose position no longer matters.
-    let position = state
-        .job_registry
-        .entry(&job_id)
-        .map_or(0, |entry| entry.position);
-
-    state
-        .queue
-        .submit(job, state.queue_capacity)
-        .await
-        .inspect_err(|_| state.job_registry.remove(&job_id))
-        .map_err(submit_error_to_api)?;
-
-    // First event the client sees — carries the position AND the server
-    // ID so the SPA can later reconcile this job against /api/queue.
-    let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued {
-        position,
-        id: job_id,
-    }));
-
-    // Hold `tx` alive in a background task until the job settles, so the SSE
-    // stream never closes prematurely even if the queue worker hasn't received
-    // the job yet. A `DELETE /api/queue/:id` cancel arrives as
-    // `SupervisedOutcome::Cancelled`: emit a terminal error event, then drop
-    // `tx`. The supervisor drops the job's result receiver on that same path,
-    // which is what makes the worker/dispatcher skip a cancelled job.
-    tokio::spawn(async move {
-        if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) = outcome_rx.await {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(
-                "cancelled".to_string(),
+    let warnings = outcome.warnings.unwrap_or_default();
+    let observer = outcome
+        .observers
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("checked above");
+    let job_id = status.children[0].job_id.clone();
+    let batch_id = status.id.clone();
+    let client_batch_id = status.client_batch_id.clone();
+    // The first frame carries the position AND the server id, so a client can
+    // say "#N in line" before anything renders and reconcile against
+    // `/api/queue` afterwards. Read on the REGISTRY scale — the count of live
+    // jobs this admission now sits behind — because the durable row has not
+    // been claimed by the feeder yet, so there is no dispatch position to
+    // read. Seeding 0 unconditionally told every caller it was next up.
+    let queued_position = state.job_registry.len();
+    let stream = async_stream::stream! {
+        for warning in warnings.all() {
+            yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
+                SseProgressEvent::Info { message: warning.to_string() }
             )));
         }
-        drop(tx); // closes the SSE stream
-    });
-
-    // Build SSE stream from the channel receiver. Error events are terminal
-    // on this endpoint (the worker always follows them by resolving the
-    // job), so end the stream right after one — a cancelled job's queued
-    // `GenerationJob` still holds a sender clone, and without the explicit
-    // break the stream would stay open until the worker drained it.
-    let stream = async_stream::stream! {
-        let mut rx = rx;
-        while let Some(msg) = rx.recv().await {
-            let is_error = matches!(msg, SseMessage::Error(_));
-            yield Ok::<_, Infallible>(sse_message_to_event(msg));
-            if is_error {
+        yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
+            SseProgressEvent::Queued { position: queued_position, id: job_id }
+        )));
+        let Ok(attached) = observer.attached().await else {
+            yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
+                mold_core::SseErrorEvent::retained_with_code(
+                    format!(
+                        "durable generation remains queued; reconcile batch {batch_id} or client operation {client_batch_id}"
+                    ),
+                    mold_core::SSE_ERROR_CODE_DURABLE_OBSERVER_DETACHED,
+                ),
+            )));
+            return;
+        };
+        let crate::queue_media_ingress::AttachedObserver::Sse { mut messages } = attached else {
+            return;
+        };
+        let mut terminal = false;
+        while let Some(message) = messages.recv().await {
+            terminal = matches!(message, SseMessage::Complete(_) | SseMessage::Error(_));
+            yield Ok::<_, Infallible>(sse_message_to_event(message));
+            if terminal {
                 break;
             }
         }
+        if !terminal {
+            yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
+                mold_core::SseErrorEvent::retained_with_code(
+                    format!(
+                        "durable generation remains queued; reconcile batch {batch_id} or client operation {client_batch_id}"
+                    ),
+                    mold_core::SSE_ERROR_CODE_DURABLE_OBSERVER_DETACHED,
+                ),
+            )));
+        }
     };
-
     Ok(Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
@@ -5808,41 +5558,32 @@ pub(crate) enum DurableAdmissionUnready {
 }
 
 impl DurableAdmissionUnready {
-    /// The refusal code for this conjunct.
+    /// One refusal code for every route and every conjunct.
     ///
-    /// This mapping is a CONTRACT, not a formatting choice:
-    /// `routes_test::output_disabled_batch_admission_is_a_typed_unavailable_response`
-    /// asserts the code, and it is the only thing distinguishing the two gates
-    /// in `admit_generation_batch`. Collapsing both onto one code compiles,
-    /// passes on both sides of a rebase, and silently deletes that coverage.
-    pub(crate) fn code(self) -> &'static str {
-        match self {
-            Self::GalleryOutputDisabled => "DURABLE_ADMISSION_UNAVAILABLE",
-            Self::QueueJournalDisabled
-            | Self::SchedulerNotAuthoritative
-            | Self::AdmissionServiceMissing => "HETEROGENEOUS_BATCH_UNAVAILABLE",
-        }
-    }
+    /// A client cannot act differently on "the journal is off" than on "the
+    /// scheduler is not authoritative": both mean this host does not generate
+    /// until an operator changes its configuration. The per-conjunct MESSAGE
+    /// is what names the repair.
+    pub(crate) const CODE: &'static str = "DURABLE_ADMISSION_UNAVAILABLE";
 
     pub(crate) fn message(self) -> &'static str {
         match self {
             Self::GalleryOutputDisabled => "durable admission requires server gallery output",
-            Self::QueueJournalDisabled | Self::SchedulerNotAuthoritative => {
-                "batch admission requires Scheduler V2 and the durable queue"
-            }
+            Self::QueueJournalDisabled => "durable admission requires the durable queue journal",
+            Self::SchedulerNotAuthoritative => "durable admission requires Scheduler V2",
             Self::AdmissionServiceMissing => "durable admission is unavailable on this host",
         }
     }
 
     pub(crate) fn api_error(self) -> ApiError {
-        ApiError::with_code(self.message(), self.code(), StatusCode::SERVICE_UNAVAILABLE)
+        ApiError::with_code(self.message(), Self::CODE, StatusCode::SERVICE_UNAVAILABLE)
     }
 }
 
 /// The complete durable-admission answer for one request-time snapshot.
 ///
 /// Before this existed, four sites took four DIFFERENT subsets of the same
-/// four conjuncts — `capabilities.queue.heterogeneous_batch` took 1∧2∧3,
+/// four conjuncts — the advertised batch limit took 1∧2∧3,
 /// `durable_media_is_applicable` took 2∧3, `direct_durable_admission` took
 /// 2∧4, and only `admit_generation_batch` took all four (and only by
 /// sequencing across a `config.read().await`). The gaps between those subsets
@@ -5877,13 +5618,11 @@ impl DurableAdmissionReadiness {
         }
     }
 
-    /// The first unmet conjunct of the BATCH protocol, or `None` when
-    /// `/api/generation-batches` would accept.
+    /// The first unmet conjunct, or `None` when this host generates.
     ///
-    /// Order is load-bearing and preserves the pre-existing refusal precedence:
-    /// `admit_generation_batch` checked scheduler/journal/admission first and
-    /// gallery output last, so a host that is both non-authoritative AND
-    /// output-disabled must still answer `HETEROGENEOUS_BATCH_UNAVAILABLE`.
+    /// ONE order, read by `/api/generate`, `/api/generate/stream`,
+    /// `/api/generation-batches`, and the capability that advertises them, so
+    /// a host can never refuse one route for a reason it accepts on another.
     pub(crate) fn unready(&self) -> Option<DurableAdmissionUnready> {
         if !self.authoritative {
             return Some(DurableAdmissionUnready::SchedulerNotAuthoritative);
@@ -5900,38 +5639,6 @@ impl DurableAdmissionReadiness {
         None
     }
 
-    /// The first unmet conjunct of DIRECT durable admission.
-    ///
-    /// Deliberately does NOT require an authoritative scheduler, and the
-    /// difference from [`Self::unready`] is a real contract rather than an
-    /// oversight: the durable feeder is spawned on `start_generation_runner`
-    /// alone and runs in legacy and observe dispatch too, so a direct
-    /// generation on such a host is genuinely durable and survives a restart.
-    /// The client cannot tell either way — a headerless request receives the
-    /// same attached media bytes — so requiring V2 here would remove real
-    /// durability from every legacy and observe host in exchange for nothing.
-    /// The batch PROTOCOL is what needs V2, because that is what
-    /// `capabilities.queue.heterogeneous_batch` advertises.
-    pub(crate) fn unready_for_direct(&self) -> Option<DurableAdmissionUnready> {
-        // Gallery output FIRST, which is the direct path's own precedence and
-        // deliberately the opposite of the batch route's. A direct request on a
-        // host that is both output-disabled and missing its admission service
-        // has always answered `DURABLE_ADMISSION_UNAVAILABLE`; the batch route
-        // has always answered `HETEROGENEOUS_BATCH_UNAVAILABLE` for the same
-        // pair, because it checks scheduler/journal/admission first. Two
-        // routes, two documented precedences — not an inconsistency to unify.
-        if !self.output_enabled {
-            return Some(DurableAdmissionUnready::GalleryOutputDisabled);
-        }
-        if !self.journal_enabled {
-            return Some(DurableAdmissionUnready::QueueJournalDisabled);
-        }
-        if self.admission.is_none() {
-            return Some(DurableAdmissionUnready::AdmissionServiceMissing);
-        }
-        None
-    }
-
     /// Would this server ever offer restart-safe request media — gallery
     /// output on and an authoritative scheduler. False is a configuration,
     /// never a degradation, which is why `/health` must not report it.
@@ -5939,10 +5646,9 @@ impl DurableAdmissionReadiness {
         self.output_enabled && self.authoritative
     }
 
-    /// `capabilities.queue.heterogeneous_batch` and friends. True exactly when
-    /// `admit_generation_batch` would accept, so the capability can never
-    /// advertise a protocol the same server refuses.
-    pub(crate) fn heterogeneous_batch(&self) -> bool {
+    /// True exactly when generation would be admitted, so a capability can
+    /// never advertise a protocol the same server refuses.
+    pub(crate) fn generation_admitted(&self) -> bool {
         self.unready().is_none()
     }
 
@@ -5950,7 +5656,7 @@ impl DurableAdmissionReadiness {
     /// value, so applicability cannot be forgotten at the call site — which is
     /// exactly how it was forgotten before.
     pub(crate) fn advertised_media(&self) -> Option<mold_core::DurableMediaCapabilities> {
-        self.heterogeneous_batch()
+        self.generation_admitted()
             .then(|| self.media.clone())
             .flatten()
     }
@@ -7088,11 +6794,10 @@ async fn server_capabilities(
     // makes it a systematic over-promise rather than an edge case, and clients
     // read this to decide whether to keep polling a job whose stream died.
     let durable_queue = state.queue_journal.is_enabled() && !state.is_output_disabled(&config);
-    // One resolved value, total over all four conjuncts. Advertising the batch
-    // protocol without conjunct 4 is what let a host with a corrupt admission
-    // key promise `admission_protocol_version: 2` and then 503 every POST.
+    // One resolved value, total over all four conjuncts. Advertising a batch
+    // limit without conjunct 4 is what let a host with a corrupt admission key
+    // promise admission and then 503 every POST.
     let readiness = DurableAdmissionReadiness::resolve(&state, &config);
-    let heterogeneous_batch = readiness.heterogeneous_batch();
     // Trash and organization both live in the metadata DB; trash additionally
     // needs somewhere to move bytes to. With the DB disabled, DELETE stays a
     // hard delete and the organization routes answer 501.
@@ -7136,11 +6841,9 @@ async fn server_capabilities(
             stable_device_pins: true,
             cooperative_cancellation: true,
             durable_queue,
-            heterogeneous_batch,
-            heterogeneous_batch_max_outputs: heterogeneous_batch
+            heterogeneous_batch_max_outputs: readiness
+                .generation_admitted()
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
-            durable_batch_outcomes: heterogeneous_batch,
-            admission_protocol_version: heterogeneous_batch.then_some(2),
         },
         durable_media: readiness.advertised_media(),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
@@ -10346,7 +10049,7 @@ mod tests {
         wan.extend_video_path = None;
         wan.extend_video = Some(b"\0\0\0\x20ftypisom".to_vec());
         assert_eq!(wan.extend_overlap_frames, None);
-        let _ = prepare_generation(&state, &mut wan, None).await;
+        let _ = prepare_generation_inner(&state, &mut wan, None, None).await;
         assert_eq!(
             wan.extend_overlap_frames,
             Some(mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES),
@@ -10357,7 +10060,7 @@ mod tests {
         ltx2.extend_video_path = None;
         ltx2.extend_video = Some(b"\0\0\0\x20ftypisom".to_vec());
         assert_eq!(ltx2.extend_overlap_frames, None);
-        let _ = prepare_generation(&state, &mut ltx2, None).await;
+        let _ = prepare_generation_inner(&state, &mut ltx2, None, None).await;
         assert_eq!(
             ltx2.extend_overlap_frames,
             Some(mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
@@ -10370,12 +10073,12 @@ mod tests {
         explicit.extend_video_path = None;
         explicit.extend_video = Some(b"\0\0\0\x20ftypisom".to_vec());
         explicit.extend_overlap_frames = Some(5);
-        let _ = prepare_generation(&state, &mut explicit, None).await;
+        let _ = prepare_generation_inner(&state, &mut explicit, None, None).await;
         assert_eq!(explicit.extend_overlap_frames, Some(5));
 
         let mut plain = wan_continuation("wan22-t2v-a14b:q8");
         plain.extend_video_path = None;
-        let _ = prepare_generation(&state, &mut plain, None).await;
+        let _ = prepare_generation_inner(&state, &mut plain, None, None).await;
         assert_eq!(plain.extend_overlap_frames, None);
     }
 

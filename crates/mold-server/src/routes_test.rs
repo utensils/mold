@@ -373,11 +373,56 @@ mod tests {
     }
 
     /// Create an app with a running queue worker (needed for generate endpoints).
-    fn app_with(engine: MockEngine) -> axum::Router {
-        let (state, rx) = AppState::with_engine_and_queue(engine);
-        let worker_state = state.clone();
-        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
-        create_router(state)
+    /// A DURABLE-ready host, which is the only kind that generates.
+    ///
+    /// The gallery lands in the returned `TempDir`, which the caller must keep
+    /// alive for the life of the state — dropping it removes the output
+    /// directory and the queue-owner claim underneath a running feeder.
+    ///
+    /// Every generation fixture in this module goes through here, because
+    /// there is no non-durable path left to submit on: `/api/generate`,
+    /// `/api/generate/stream`, and `/api/generation-batches` all admit through
+    /// `admit_batch`, and a host missing any of the four readiness conjuncts
+    /// answers `503 DURABLE_ADMISSION_UNAVAILABLE` before it reads the request.
+    fn durable_test_state(
+        engine: MockEngine,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state_with_engine(db, root.path(), engine);
+        install_authoritative_v2(&mut state);
+        (state, rx, root)
+    }
+
+    /// Run the two tasks a durable admission needs to reach a worker: the
+    /// feeder that hydrates the SQLite row into the runtime queue, and the
+    /// queue worker itself. The direct routes block on the feeder claiming the
+    /// row, so a generation test without a feeder hangs rather than fails.
+    fn spawn_durable_runtime(
+        state: &AppState,
+        rx: tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) {
+        spawn_durable_feeder(state);
+        tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+    }
+
+    /// The feeder alone, for a test that owns its own worker — or that wants
+    /// the job to sit in the runtime queue rather than run.
+    fn spawn_durable_feeder(state: &AppState) {
+        tokio::spawn(crate::durable_queue_feeder::spawn(
+            state.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        ));
+    }
+
+    fn app_with(engine: MockEngine) -> (axum::Router, tempfile::TempDir) {
+        let (state, rx, root) = durable_test_state(engine);
+        spawn_durable_runtime(&state, rx);
+        (create_router(state), root)
     }
 
     #[tokio::test]
@@ -627,6 +672,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         }
     }
 
@@ -927,8 +973,11 @@ mod tests {
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(scheduled_tx, mode);
     }
 
-    fn app_with_worker_pool(engine: MockEngine, ordinals: &[usize]) -> axum::Router {
-        let mut state = AppState::with_engine(engine);
+    fn app_with_worker_pool(
+        engine: MockEngine,
+        ordinals: &[usize],
+    ) -> (axum::Router, tempfile::TempDir) {
+        let (mut state, _rx, root) = durable_test_state(engine);
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
             workers: ordinals
                 .iter()
@@ -938,7 +987,7 @@ mod tests {
                 .into(),
         });
         install_worker_registry(&mut state);
-        create_router(state)
+        (create_router(state), root)
     }
 
     fn generate_body(prompt: &str, width: u32, height: u32) -> String {
@@ -1135,7 +1184,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_200() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -1148,7 +1197,7 @@ mod tests {
     /// `MOLD_DB_DISABLE` host as degraded would make the field useless.
     #[tokio::test]
     async fn health_reports_ok_when_no_durable_queue_owner_exists() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -1171,7 +1220,8 @@ mod tests {
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
     ) {
         let db = std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (mut state, rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         state.output_disabled_override = false;
         state
             .config
@@ -1592,7 +1642,9 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_built_in_control_pairing_is_rejected_before_media_or_queue_work() {
-        let app = app_empty();
+        // A validation refusal needs a host that generates: on one that does
+        // not, every generation request is 503 before its shape is read.
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let response = app
             .oneshot(
                 Request::post("/api/generate")
@@ -1626,7 +1678,9 @@ mod tests {
 
     #[tokio::test]
     async fn guidance_overrides_are_rejected_for_non_ltx2_models() {
-        let app = app_empty();
+        // A validation refusal needs a host that generates: on one that does
+        // not, every generation request is 503 before its shape is read.
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let response = app
             .oneshot(
                 Request::post("/api/generate")
@@ -1656,7 +1710,9 @@ mod tests {
 
     #[tokio::test]
     async fn guidance_overrides_out_of_range_are_rejected_before_queue_work() {
-        let app = app_empty();
+        // A validation refusal needs a host that generates: on one that does
+        // not, every generation request is 503 before its shape is read.
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let response = app
             .oneshot(
                 Request::post("/api/generate")
@@ -1689,7 +1745,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_returns_json() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
             .await
@@ -1878,8 +1934,6 @@ mod tests {
         }))
         .unwrap();
         for (path, body) in [
-            ("/api/generate/chain", chain_body.clone()),
-            ("/api/generate/chain/stream", chain_body.clone()),
             ("/api/chain-jobs", chain_body),
             ("/api/upscale", upscale_body.clone()),
             ("/api/upscale/stream", upscale_body),
@@ -3171,8 +3225,7 @@ mod tests {
         .unwrap();
 
         for (path, body) in [
-            ("/api/generate/chain", chain_body.clone()),
-            ("/api/generate/chain/stream", chain_body.clone()),
+            ("/api/chain-jobs", chain_body.clone()),
             ("/api/upscale", upscale_body.clone()),
             ("/api/upscale/stream", upscale_body.clone()),
         ] {
@@ -4848,9 +4901,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert!(body.get("durable_media").is_none());
-        assert_eq!(body["queue"]["admission_protocol_version"], 2);
-        assert_eq!(body["queue"]["heterogeneous_batch"], true);
-        assert_eq!(body["queue"]["durable_batch_outcomes"], true);
+        assert_eq!(body["queue"]["heterogeneous_batch_max_outputs"], 64);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4999,7 +5050,7 @@ mod tests {
 
     #[tokio::test]
     async fn raw_batch_never_enters_legacy_single_result_worker() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = serde_json::json!({
             "prompt": "two cats",
             "model": "mock-model",
@@ -5027,19 +5078,10 @@ mod tests {
     /// admission and the worker still leaves something to replay.
     #[tokio::test]
     async fn an_admitted_gallery_bound_generation_is_journaled_before_it_is_queued() {
-        let output_dir = tempfile::tempdir().unwrap();
-        let (mut state, mut rx) = AppState::with_engine_and_queue(MockEngine::ready());
-        state.output_disabled_override = false;
-        state.config.write().await.output_dir =
-            Some(output_dir.path().to_string_lossy().into_owned());
-        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let home = tempfile::tempdir().unwrap();
-        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
-            state.metadata_db.clone(),
-            Some(home.path()),
-            "test-instance",
-        ));
+        let (state, mut rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         let journal = state.queue_journal.clone();
+        let output_dir = state.config.read().await.effective_output_dir();
         let app = app_with_state(state.clone());
 
         let gen_app = app.clone();
@@ -5065,46 +5107,7 @@ mod tests {
         let rows = journal.list_all();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, job.id);
-        assert_eq!(rows[0].output_dir, output_dir.path());
-
-        gen_task.abort();
-        let _ = gen_task.await;
-    }
-
-    /// No gallery target means the only delivery is the HTTP response, which
-    /// by definition does not survive the restart. Replaying such a job would
-    /// burn a full render whose result is discarded.
-    #[tokio::test]
-    async fn a_generation_with_no_gallery_target_is_not_journaled() {
-        let (mut state, mut rx) = AppState::with_engine_and_queue(MockEngine::ready());
-        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let home = tempfile::tempdir().unwrap();
-        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
-            state.metadata_db.clone(),
-            Some(home.path()),
-            "test-instance",
-        ));
-        let journal = state.queue_journal.clone();
-        let app = app_with_state(state.clone());
-
-        let gen_app = app.clone();
-        let gen_task = tokio::spawn(async move {
-            gen_app
-                .oneshot(
-                    Request::post("/api/generate")
-                        .header("content-type", "application/json")
-                        .body(Body::from(generate_body("a cat", 512, 512)))
-                        .unwrap(),
-                )
-                .await
-        });
-
-        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("the job must be queued")
-            .expect("the queue channel must stay open");
-        assert!(job.journal.is_none());
-        assert!(journal.list_all().is_empty());
+        assert_eq!(rows[0].output_dir, output_dir);
 
         gen_task.abort();
         let _ = gen_task.await;
@@ -5178,6 +5181,13 @@ mod tests {
             Some(root),
             instance_id,
         ));
+        // Production installs this in `lib.rs` before recovery; without it the
+        // journal commits authoritative state silently and nothing that reads
+        // `/api/events` — including the batch event stream — ever wakes.
+        state
+            .queue_journal
+            .install_event_broadcaster(state.events.clone())
+            .unwrap();
         if let Some(owner) = state.queue_journal.owner_uuid() {
             let lifecycle = Arc::new(crate::queue_media_lifecycle::QueueMediaLifecycle::new(
                 db,
@@ -6007,8 +6017,14 @@ mod tests {
         assert!(journal.list_all().is_empty());
     }
 
+    /// A host with no gallery does not generate.
+    ///
+    /// It used to render singletons on the attached path and simply not save
+    /// them. There is no attached path any more — a queued print's only
+    /// delivery is the gallery file, so a host that writes none cannot admit
+    /// one — and every generation route says so with the same typed refusal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn output_disabled_hosts_keep_singleton_raw_and_sse_response_contracts() {
+    async fn output_disabled_hosts_refuse_every_generation_route() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, rx) = durable_state(db, root.path());
@@ -6018,36 +6034,33 @@ mod tests {
         let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
         let app = app_with_state(state);
 
-        let raw = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                "/api/generate",
-                serde_json::from_str(&generate_body("raw without gallery", 64, 64)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(raw.status(), StatusCode::OK);
-        assert_eq!(raw.headers()["content-type"], "image/png");
-
-        let sse = app
-            .oneshot(json_request(
-                "POST",
-                "/api/generate/stream",
-                serde_json::from_str(&generate_body("SSE without gallery", 64, 64)).unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(sse.status(), StatusCode::OK);
-        let body = tokio::time::timeout(
-            Duration::from_secs(5),
-            axum::body::to_bytes(sse.into_body(), 1024 * 1024),
-        )
-        .await
-        .expect("attached SSE generation must finish")
-        .unwrap();
-        let body = String::from_utf8_lossy(&body);
-        assert!(body.contains("event: complete"), "{body}");
+        for path in [
+            "/api/generate",
+            "/api/generate/stream",
+            "/api/generation-batches",
+        ] {
+            let single: serde_json::Value =
+                serde_json::from_str(&generate_body("no gallery here", 64, 64)).unwrap();
+            let body = if path == "/api/generation-batches" {
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [single],
+                })
+            } else {
+                single
+            };
+            let refused = app
+                .clone()
+                .oneshot(json_request("POST", path, body))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(
+                json_body(refused).await["code"],
+                "DURABLE_ADMISSION_UNAVAILABLE",
+                "{path}"
+            );
+        }
         assert!(journal.list_all().is_empty());
         worker.abort();
     }
@@ -6134,13 +6147,9 @@ mod tests {
         let mut request: GenerateRequest =
             serde_json::from_str(&generate_body("media-free admission", 64, 64)).unwrap();
 
-        assert!(
-            crate::routes::direct_durable_admission(&state, &mut request, true)
-                .await
-                .unwrap()
-                .is_some(),
-            "encrypted-media readiness must not disable media-free direct admission"
-        );
+        crate::routes::direct_durable_admission(&state, &mut request)
+            .await
+            .expect("encrypted-media readiness must not disable media-free direct admission");
 
         let journal = state.queue_journal.clone();
         let response = app_with_state(state)
@@ -6427,8 +6436,7 @@ mod tests {
                 .unwrap();
             assert_eq!(capabilities.status(), StatusCode::OK);
             let capabilities = json_body(capabilities).await;
-            assert_eq!(capabilities["queue"]["heterogeneous_batch"], false);
-            assert!(capabilities["queue"]["admission_protocol_version"].is_null());
+            assert!(capabilities["queue"]["heterogeneous_batch_max_outputs"].is_null());
             let rejected = app
                 .oneshot(json_request("POST", "/api/generation-batches", body))
                 .await
@@ -6501,8 +6509,7 @@ mod tests {
             .await
             .unwrap();
         let capabilities = json_body(capabilities).await;
-        assert_eq!(capabilities["queue"]["heterogeneous_batch"], false);
-        assert!(capabilities["queue"]["admission_protocol_version"].is_null());
+        assert!(capabilities["queue"]["heterogeneous_batch_max_outputs"].is_null());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6532,29 +6539,210 @@ mod tests {
         );
     }
 
+    /// `hdr_exr_dir` is refused for a reason that predates durability and has
+    /// nothing to do with it: it names an output directory on the machine
+    /// doing inference, and an HTTP client may not choose one. The refusal
+    /// keeps its own actionable wording and happens BEFORE acceptance, so a
+    /// caller gets a `422` it can act on rather than a job that holds.
     #[tokio::test(flavor = "current_thread")]
-    async fn unsupported_direct_traits_fallback_only_without_an_operation_id() {
+    async fn a_client_supplied_hdr_directory_is_refused_before_acceptance() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
         install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let mut body: serde_json::Value =
+            serde_json::from_str(&generate_body("hdr from a client", 64, 64)).unwrap();
+        body["hdr_exr_dir"] = serde_json::json!("/trusted/output");
+
+        let refused = app_with_state(state)
+            .oneshot(json_request("POST", "/api/generate", body))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let refused = json_body(refused).await;
+        assert_eq!(refused["code"], "VALIDATION_ERROR");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--local"),
+            "{refused}"
+        );
+        assert!(journal.list_all().is_empty());
+    }
+
+    /// Conditioning media never reaches `mold.db`, and the mechanism is
+    /// extraction rather than refusal.
+    ///
+    /// The media-free journal writers refused to persist media at all. They
+    /// are gone; the live path extracts every media field into the encrypted
+    /// queue-media store and serializes `request_json` from what is LEFT,
+    /// which is what `capabilities.durable_media` advertises. This asserts the
+    /// guarantee against the bytes on disk rather than against a refusal.
+    ///
+    /// Uses `source_image` because this binary is built without `pulid`, so an
+    /// identity request is refused before admission here. The face-photograph
+    /// half of the rule — biometric data about a real person, supplied for one
+    /// render — is pinned by
+    /// `queue_journal::tests::an_identity_request_never_writes_the_photograph_to_the_database`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn conditioning_media_is_sealed_and_never_written_into_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+
+        // A base64 payload distinctive enough to find in the raw database.
+        const PIXELS: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let mut body: serde_json::Value =
+            serde_json::from_str(&generate_body("a repaint", 64, 64)).unwrap();
+        body["source_image"] = serde_json::json!(PIXELS);
+
+        let accepted = app_with_state(state)
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [body],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+        // The row exists — the print IS durable — and the photograph is not in
+        // it.
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1, "a media-carrying print is admitted durably");
+        assert!(
+            rows[0].media_set_id.is_some(),
+            "its media belongs to the encrypted store"
+        );
+        let mut sqlite = std::fs::read(&db_path).unwrap();
+        if let Ok(wal) = std::fs::read(format!("{}-wal", db_path.display())) {
+            sqlite.extend(wal);
+        }
+        assert!(
+            !sqlite
+                .windows(PIXELS.len())
+                .any(|window| window == PIXELS.as_bytes()),
+            "conditioning media must never be written into mold.db"
+        );
+    }
+
+    /// Ordered references still refuse, and the reason is their one-use upload
+    /// authority rather than a protocol version. Nothing reaches SQLite: the
+    /// point of the refusal is that those handles are never written down.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ordered_references_refuse_without_persisting_their_handles() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
         let mut request: GenerateRequest =
-            serde_json::from_str(&generate_body("attached fallback", 64, 64)).unwrap();
+            serde_json::from_str(&generate_body("ordered references", 64, 64)).unwrap();
         request.references = Some(Vec::new());
 
-        assert!(
-            crate::routes::direct_durable_admission(&state, &mut request, false)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        let error = match crate::routes::direct_durable_admission(&state, &mut request, true).await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("an explicit durable operation must not downgrade"),
+        let Err(error) = crate::routes::direct_durable_admission(&state, &mut request).await else {
+            panic!("one-use reference authority cannot be persisted");
         };
         assert_eq!(error.code, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED");
-        assert!(state.queue_journal.list_all().is_empty());
+        assert!(error.error.contains("one-use"), "{}", error.error);
+        assert!(journal.list_all().is_empty());
+    }
+
+    /// A LoRA beside conditioning media is an ordinary durable request.
+    ///
+    /// It used to be refused by name: durable media protocol v1 could not
+    /// carry the LoRA's server-local path, so `DURABLE_MEDIA_LORA_UNSUPPORTED`
+    /// took out every img2img, inpaint, control and video-source render that
+    /// used one. `lora.path` is a request field like `model` — it is persisted
+    /// with the rest of the request and re-validated at dispatch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn media_with_a_lora_is_admitted_durably() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) =
+            durable_state_with_engine(db, root.path(), MockEngine::ready_for_model("flux-dev:q4"));
+        install_authoritative_v2(&mut state);
+        let adapter = root.path().join("adapter.safetensors");
+        std::fs::write(&adapter, b"lora").unwrap();
+
+        let mut request: GenerateRequest = serde_json::from_str(&generate_body_for_model(
+            "img2img with a lora",
+            "flux-dev:q4",
+            64,
+            64,
+        ))
+        .unwrap();
+        request.source_image = Some(minimal_png());
+        request.lora = Some(mold_core::LoraWeight {
+            path: adapter.display().to_string(),
+            scale: 0.8,
+            expert: None,
+        });
+
+        assert!(
+            crate::routes::direct_durable_admission(&state, &mut request)
+                .await
+                .is_ok(),
+            "a LoRA beside conditioning media is an ordinary durable request"
+        );
+    }
+
+    /// The persisted request keeps the LoRA, and dispatch re-validates the
+    /// path it names. A LoRA that vanished between admission and replay is a
+    /// HELD row that says so — never a silent drop, and never a render with
+    /// the adapter missing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_vanished_lora_holds_its_row_by_name() {
+        // A LoRA needs a model whose family merges one, and admission infers
+        // the family from the model name, so the fixture engine answers to a
+        // real FLUX identity rather than `mock-model`.
+        const MODEL: &str = "flux-dev:q4";
+        let (state, rx, gallery_root) = durable_test_state(MockEngine::ready_for_model(MODEL));
+        spawn_durable_runtime(&state, rx);
+        let adapter = gallery_root.path().join("adapter.safetensors");
+        std::fs::write(&adapter, b"lora").unwrap();
+        let app = app_with_state(state.clone());
+
+        let mut body: serde_json::Value = serde_json::from_str(&generate_body_for_model(
+            "a print with a lora",
+            MODEL,
+            64,
+            64,
+        ))
+        .unwrap();
+        body["lora"] = serde_json::json!({
+            "path": adapter.display().to_string(),
+            "scale": 0.8,
+        });
+        // The adapter disappears after the request is composed but before the
+        // feeder prepares it — the replay-after-restart shape, compressed.
+        std::fs::remove_file(&adapter).unwrap();
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(20),
+            app.oneshot(json_request("POST", "/api/generate", body)),
+        )
+        .await
+        .expect("a vanished adapter must settle the request")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let settled = json_body(response).await;
+        let child = &settled["children"][0];
+        assert_eq!(child["state"], "held", "{settled}");
+        assert_eq!(child["retryable"], true, "{settled}");
+        let reason = child["error"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("adapter.safetensors"),
+            "the hold must name the LoRA that vanished: {settled}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7033,11 +7221,47 @@ mod tests {
             assert!(journal.cancel_id(&row.id).unwrap());
         }
 
-        let mut refused = media;
-        refused["lora"] = serde_json::json!({
-            "path": "must-not-be-resolved.safetensors",
-            "scale": 1.0
+        // A LoRA beside the media is an ordinary img2img-with-adapter print:
+        // it seals with the media and commits like any other sibling.
+        let mut with_adapter = media.clone();
+        // Ordinary validation still applies: an adapter needs a LoRA-capable
+        // family, and the mock engine's model is not one.
+        with_adapter["model"] = serde_json::json!("flux-dev");
+        with_adapter["lora"] = serde_json::json!({
+            "path": "adapter.safetensors",
+            "scale": 0.8
         });
+        let accepted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [
+                        serde_json::from_str::<serde_json::Value>(
+                            &generate_body("plain beside adapter", 64, 64)
+                        ).unwrap(),
+                        with_adapter
+                    ],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].media_set_id.is_none());
+        assert!(rows[1].media_set_id.is_some());
+        for row in rows {
+            assert!(journal.cancel_id(&row.id).unwrap());
+        }
+
+        // One-over-N atomicity is asked with a trait that still refuses:
+        // ordered references. A LoRA beside media used to serve here and no
+        // longer refuses at all — it is an ordinary durable request.
+        let mut refused = media;
+        refused["references"] = serde_json::json!([]);
         let rejected = app
             .oneshot(json_request(
                 "POST",
@@ -7057,7 +7281,7 @@ mod tests {
         assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             json_body(rejected).await["code"],
-            "DURABLE_MEDIA_LORA_UNSUPPORTED"
+            "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"
         );
         assert!(journal.list_all().is_empty());
         let owner = journal.owner_uuid().unwrap();
@@ -7077,32 +7301,6 @@ mod tests {
             serde_json::json!(base64::engine::general_purpose::STANDARD.encode(minimal_png()));
         request["source_image_name"] = serde_json::json!("direct-source.png");
         request.to_string()
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn durable_direct_header_is_validated_before_any_admission() {
-        let root = tempfile::tempdir().unwrap();
-        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, _rx) = durable_state(db, root.path());
-        install_authoritative_v2(&mut state);
-        let journal = state.queue_journal.clone();
-        let app = app_with_state(state);
-
-        for path in ["/api/generate", "/api/generate/stream"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::post(path)
-                        .header("content-type", "application/json")
-                        .header("x-mold-operation-id", "not-a-uuid")
-                        .body(Body::from(durable_direct_media_body("invalid header")))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        }
-        assert!(journal.list_all().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7135,16 +7333,19 @@ mod tests {
         hdr["hdr_exr_dir"] = serde_json::json!(hdr_sentinel);
 
         for path in ["/api/generate", "/api/generate/stream"] {
+            // `hdr_exr_dir` keeps its own older refusal — an HTTP client may
+            // not name an output directory on the inference machine — so the
+            // code differs from the reference one while the guarantee this
+            // test exists for, that neither reaches SQLite, is unchanged.
             for (request, expected_code) in [
                 (&references, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"),
-                (&hdr, "DURABLE_MEDIA_HDR_UNSUPPORTED"),
+                (&hdr, "VALIDATION_ERROR"),
             ] {
                 let response = app
                     .clone()
                     .oneshot(
                         Request::post(path)
                             .header("content-type", "application/json")
-                            .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
                             .body(Body::from(request.to_string()))
                             .unwrap(),
                     )
@@ -7166,17 +7367,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn headerless_direct_media_is_durable_without_a_client_operation_id() {
+    async fn direct_media_commits_before_it_waits_for_a_worker() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (state, mut rx) = durable_state(db, root.path());
+        let (mut state, mut rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
         let journal = state.queue_journal.clone();
         let app = app_with_state(state);
         let request = tokio::spawn(async move {
             app.oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
-                    .body(Body::from(durable_direct_media_body("legacy attached")))
+                    .body(Body::from(durable_direct_media_body(
+                        "media without a header",
+                    )))
                     .unwrap(),
             )
             .await
@@ -7203,7 +7407,6 @@ mod tests {
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, rx) = durable_state(db, root.path());
         install_authoritative_v2(&mut state);
-        let operation_id = uuid::Uuid::new_v4().to_string();
         let feeder_shutdown = tokio_util::sync::CancellationToken::new();
         let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
         let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
@@ -7212,7 +7415,6 @@ mod tests {
             app_with_state(state.clone()).oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
-                    .header("x-mold-operation-id", operation_id)
                     .body(Body::from(durable_direct_media_body("durable raw")))
                     .unwrap(),
             ),
@@ -7241,7 +7443,6 @@ mod tests {
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, rx) = durable_state_with_engine(db, root.path(), MockEngine::failing());
         install_authoritative_v2(&mut state);
-        let operation_id = uuid::Uuid::new_v4().to_string();
         let feeder_shutdown = tokio_util::sync::CancellationToken::new();
         let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
         let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
@@ -7251,7 +7452,6 @@ mod tests {
             app_with_state(state).oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
-                    .header("x-mold-operation-id", &operation_id)
                     .body(Body::from(durable_direct_media_body("durable raw failure")))
                     .unwrap(),
             ),
@@ -7262,7 +7462,10 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let body = json_body(response).await;
-        assert_eq!(body["client_batch_id"], operation_id);
+        // The direct facade mints its own idempotency key: there is no
+        // client-supplied operation header any more, and the reconciliation
+        // body is how the caller learns the one it was given.
+        assert!(uuid::Uuid::parse_str(body["client_batch_id"].as_str().unwrap()).is_ok());
         assert_eq!(body["durable"], true);
         assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
         assert!(body["children"][0]["job_id"]
@@ -7791,8 +7994,7 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(capabilities["queue"]["heterogeneous_batch"], true);
-        assert_eq!(capabilities["queue"]["durable_batch_outcomes"], true);
+        assert_eq!(capabilities["queue"]["heterogeneous_batch_max_outputs"], 64);
 
         let client_batch_id = uuid::Uuid::new_v4().to_string();
         let requests = ["complete", "failed"]
@@ -8157,6 +8359,7 @@ mod tests {
 
         let submitted_id = {
             let (mut state, _rx) = durable_state(db.clone(), output_dir.path());
+            install_authoritative_v2(&mut state);
             state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
                 workers: vec![gpu_worker_stub_with_stable_id(2, STABLE_ID)].into(),
             });
@@ -8334,7 +8537,8 @@ mod tests {
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
 
         let submitted = {
-            let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+            let (mut state, mut rx) = durable_state(db.clone(), output_dir.path());
+            install_authoritative_v2(&mut state);
             let feeder_shutdown = tokio_util::sync::CancellationToken::new();
             let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
             let app = app_with_state(state.clone());
@@ -8425,7 +8629,8 @@ mod tests {
     async fn a_cpu_rendered_generation_stamps_its_job_id_and_clears_its_row() {
         let output_dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (state, rx) = durable_state(db.clone(), output_dir.path());
+        let (mut state, rx) = durable_state(db.clone(), output_dir.path());
+        install_authoritative_v2(&mut state);
         let journal = state.queue_journal.clone();
 
         // The real CPU-only dispatch pair — `StartupMode::CpuFallback` spawns
@@ -9108,7 +9313,8 @@ mod tests {
     /// `false` and the job still reaches a worker.
     #[tokio::test]
     async fn a_disconnected_blocking_generate_still_reaches_the_worker() {
-        let (state, mut rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (state, mut rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         let app = app_with_state(state.clone());
 
         let gen_app = app.clone();
@@ -9143,7 +9349,10 @@ mod tests {
     async fn delete_queue_resolves_blocking_generate_with_cancelled_error() {
         // No queue worker is spawned — the submitted job sits queued in the
         // channel exactly like a job stuck behind a long-running generation.
-        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        // The feeder still runs: it is what moves the durable row into that
+        // channel in the first place.
+        let (state, _rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         let app = app_with_state(state.clone());
 
         let gen_app = app.clone();
@@ -9182,7 +9391,10 @@ mod tests {
     #[tokio::test]
     async fn delete_queue_emits_sse_error_and_closes_the_stream() {
         // No queue worker — the streaming job stays queued until cancelled.
-        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        // The feeder still runs: without it the durable row never reaches the
+        // runtime queue and the attached observer never resolves at all.
+        let (state, _rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         let app = app_with_state(state.clone());
 
         let resp = app
@@ -9451,14 +9663,25 @@ mod tests {
     /// Engine+queue state (no worker) with an in-memory metadata DB — the
     /// setup for asserting that accepting a generation records history. The
     /// queue receiver is returned so the caller keeps the channel open.
-    fn generating_app_with_history_db() -> (
+    fn generating_app_with_history_db() -> (axum::Router, AppState, tempfile::TempDir) {
+        let (state, rx, root) = durable_test_state(MockEngine::ready());
+        spawn_durable_runtime(&state, rx);
+        (app_with_state(state.clone()), state, root)
+    }
+
+    /// As [`generating_app_with_history_db`], but with no queue worker, so an
+    /// admitted job reaches the runtime queue and stays there. Tests that
+    /// inspect a job WHILE it is queued need the feeder (which is what puts it
+    /// there) and must not have the worker (which would finish it first).
+    fn queueing_app_with_history_db() -> (
         axum::Router,
         AppState,
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+        tempfile::TempDir,
     ) {
-        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
-        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        (app_with_state(state.clone()), state, rx)
+        let (state, rx, root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
+        (app_with_state(state.clone()), state, rx, root)
     }
 
     async fn history_prompts(app: &axum::Router) -> Vec<String> {
@@ -9478,7 +9701,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_stream_records_prompt_history_on_accept() {
-        let (app, _state, _rx) = generating_app_with_history_db();
+        let (app, _state, _gallery_root) = generating_app_with_history_db();
 
         let resp = app
             .clone()
@@ -9515,7 +9738,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_stream_dedupes_consecutive_identical_prompts() {
-        let (app, _state, _rx) = generating_app_with_history_db();
+        let (app, _state, _gallery_root) = generating_app_with_history_db();
 
         for _ in 0..3 {
             let resp = app
@@ -9553,7 +9776,7 @@ mod tests {
     async fn blocking_generate_records_prompt_history_on_accept() {
         // No queue worker: submit, verify the history row exists while the
         // job is still queued, then cancel to resolve the blocked request.
-        let (app, state, _rx) = generating_app_with_history_db();
+        let (app, state, _rx, _gallery_root) = queueing_app_with_history_db();
 
         let gen_app = app.clone();
         let gen_task = tokio::spawn(async move {
@@ -10217,7 +10440,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn status_does_not_block_during_generation() {
         let blocker = Arc::new(GenerateBlocker::default());
-        let app = app_with(MockEngine::blocking_generate(blocker.clone()));
+        let (app, _gallery_root) = app_with(MockEngine::blocking_generate(blocker.clone()));
 
         let generate_task = tokio::spawn({
             let app = app.clone();
@@ -10273,7 +10496,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_returns_json_array() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
@@ -10283,7 +10506,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_uses_manifest_defaults_for_unpulled() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
@@ -10326,7 +10549,7 @@ mod tests {
         // with the `h3` feature runs anything at all, Ref2VA runs on no
         // released build, and the official BF16 references and pruned NVFP4
         // transformers have no engine arm anywhere.
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
@@ -10447,7 +10670,7 @@ mod tests {
     /// below is.
     #[tokio::test]
     async fn every_unrunnable_h3_row_is_refused_at_generation_with_its_own_reason() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .clone()
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
@@ -10478,7 +10701,11 @@ mod tests {
                 "batch_size": 1,
                 "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
                 "fps": mold_core::minimax_h3::FIXED_FPS,
-                "output_format": "mp4"
+                "output_format": "mp4",
+                // Durable admission validates request fields before it asks
+                // the runtime-availability question, so the probe must be a
+                // request the family would otherwise accept.
+                "strength": 1.0
             })
             .to_string();
             let submit = || {
@@ -10559,7 +10786,7 @@ mod tests {
         use mold_core::minimax_h3::{
             FL2VA_COMFY_NVFP4, FL2VA_OFFICIAL, REF2VA_COMFY_NVFP4, REF2VA_OFFICIAL,
         };
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         for name in [
             FL2VA_OFFICIAL,
             REF2VA_OFFICIAL,
@@ -10611,7 +10838,7 @@ mod tests {
     /// Sequence picker even though the server chains them.
     #[tokio::test]
     async fn list_models_advertise_per_model_sequence_support() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
@@ -10929,7 +11156,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_models_does_not_block_during_generation() {
         let blocker = Arc::new(GenerateBlocker::default());
-        let app = app_with(MockEngine::blocking_generate(blocker.clone()));
+        let (app, _gallery_root) = app_with(MockEngine::blocking_generate(blocker.clone()));
 
         let generate_task = tokio::spawn({
             let app = app.clone();
@@ -10972,7 +11199,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_empty_prompt_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("", 768, 768);
         let resp = app
             .oneshot(
@@ -10991,7 +11218,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_stream_qwen_edit_without_image_returns_actionable_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = serde_json::json!({
             "prompt": "make the coat blue",
             "model": "qwen-image-edit:q4",
@@ -11016,13 +11243,13 @@ mod tests {
         assert_eq!(body["code"], "VALIDATION_ERROR");
         assert_eq!(
             body["error"],
-            "Qwen Image Edit needs at least one image. Add a Target image and try again."
+            "requests[1]: Qwen Image Edit needs at least one image. Add a Target image and try again."
         );
     }
 
     #[tokio::test]
     async fn generate_zero_width_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("a cat", 0, 768);
         let resp = app
             .oneshot(
@@ -11040,7 +11267,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_non_multiple_of_16_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("a cat", 769, 768);
         let resp = app
             .oneshot(
@@ -11058,7 +11285,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_oversized_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         // 1408x1408 = ~1.98MP > 1.8MP limit
         let body = generate_body("a cat", 1408, 1408);
         let resp = app
@@ -11077,7 +11304,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_zero_steps_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = r#"{"prompt":"a cat","model":"mock-model","width":768,"height":768,"steps":0,"batch_size":1,"output_format":"png"}"#;
         let resp = app
             .oneshot(
@@ -11095,7 +11322,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_rejects_client_supplied_hdr_exr_directory() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = serde_json::json!({
             "prompt": "an HDR sunset",
             "model": "mock-model",
@@ -11214,7 +11441,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generate_valid_request_returns_image_bytes() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("a glowing robot", 768, 768);
         let resp = app
             .oneshot(
@@ -11242,8 +11469,8 @@ mod tests {
     // ── /api/generate — engine error ─────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn generate_engine_error_returns_500() {
-        let app = app_with(MockEngine::failing());
+    async fn generate_engine_error_settles_as_a_held_child() {
+        let (app, _gallery_root) = app_with(MockEngine::failing());
         let body = generate_body("a cat", 768, 768);
         let resp = app
             .oneshot(
@@ -11254,18 +11481,28 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // An ACCEPTED durable job that then fails is reconciliation, not a
+        // 500: the row is authoritative, the client is an observer, and the
+        // failure is reported through the batch status it can re-read.
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "INFERENCE_ERROR");
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("mock engine error"));
+        let child = &body["children"][0];
+        // A render that fails leaves the durable row HELD and retryable — the
+        // print is not lost, it is parked with its reason — and that reason is
+        // the engine's own, carried to the client in the reconciliation body.
+        assert_eq!(child["state"], "held");
+        assert!(
+            child["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("mock engine error"),
+            "{body}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn generate_empty_images_returns_500() {
-        let app = app_with(MockEngine::empty_images());
+    async fn generate_empty_images_settles_as_a_held_child() {
+        let (app, _gallery_root) = app_with(MockEngine::empty_images());
         let body = generate_body("a cat", 768, 768);
         let resp = app
             .oneshot(
@@ -11276,60 +11513,86 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "INFERENCE_ERROR");
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("returned no images"));
+        let child = &body["children"][0];
+        assert_eq!(child["state"], "held");
+        assert!(
+            child["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("returned no images"),
+            "{body}"
+        );
     }
 
     // ── /api/generate — unknown model ────────────────────────────────────────
 
-    #[tokio::test]
-    async fn generate_unknown_model_returns_400() {
-        let app = app_empty();
+    /// The raw route accepts durably before it resolves a checkpoint, so an
+    /// unknown model settles as a held child reported through the
+    /// reconciliation body rather than as the `400` the attached path answered
+    /// with. The streaming facade keeps a coded frame — see
+    /// `stream_unknown_model_reports_its_code_on_the_error_frame`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn generate_unknown_model_settles_as_a_held_child() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = r#"{"prompt":"a cat","model":"nonexistent-model-xyz","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
-        let resp = app
-            .oneshot(
+        let resp = tokio::time::timeout(
+            Duration::from_secs(10),
+            app.oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            ),
+        )
+        .await
+        .expect("an unresolvable model must settle the request")
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "UNKNOWN_MODEL");
+        let child = &body["children"][0];
+        assert_eq!(child["state"], "held");
+        assert_eq!(child["retryable"], true);
+        assert!(
+            child["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nonexistent-model-xyz"),
+            "{body}"
+        );
     }
 
     // ── /api/generate — known but not downloaded model returns 404 ───────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
-    async fn generate_known_model_not_downloaded_returns_404() {
+    async fn generate_known_model_not_downloaded_settles_as_a_held_child() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("generate-not-downloaded");
         std::fs::create_dir_all(&models_dir).unwrap();
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
 
-        let app = app_empty();
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         // flux-schnell:q8 is a known manifest model but not configured/downloaded
         let body = r#"{"prompt":"a cat","model":"flux-schnell:q8","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
-        let resp = app
-            .oneshot(
+        let resp = tokio::time::timeout(
+            Duration::from_secs(10),
+            app.oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            ),
+        )
+        .await
+        .expect("an undownloaded model must settle the request")
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "MODEL_NOT_FOUND");
+        let child = &body["children"][0];
+        assert_eq!(child["state"], "held");
+        assert_eq!(child["retryable"], true);
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
@@ -11362,7 +11625,7 @@ mod tests {
 
     #[tokio::test]
     async fn openapi_json_returns_valid_spec() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(
                 Request::get("/api/openapi.json")
@@ -11713,7 +11976,8 @@ mod tests {
 
     #[tokio::test]
     async fn config_only_h3_generation_is_rejected_before_queueing() {
-        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (state, mut queue_rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         state.config.write().await.models.insert(
             "private-video-model".to_string(),
             mold_core::ModelConfig {
@@ -11754,7 +12018,8 @@ mod tests {
 
     #[tokio::test]
     async fn configured_h3_artifact_path_is_rejected_before_queueing() {
-        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (state, mut queue_rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         state.config.write().await.models.insert(
             "renamed-private-model".to_string(),
             mold_core::ModelConfig {
@@ -12031,7 +12296,7 @@ mod tests {
 
     #[tokio::test]
     async fn docs_returns_html() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/docs").body(Body::empty()).unwrap())
             .await
@@ -12053,7 +12318,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_valid_request_returns_sse() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("a robot", 768, 768);
         let resp = app
             .oneshot(
@@ -12106,7 +12371,8 @@ mod tests {
     /// backwards.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_first_queued_event_is_on_the_registry_scale() {
-        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (state, rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         // One generation already occupies the machine, so the two scales
         // disagree: pending count 0, registry index 1.
         state
@@ -12147,7 +12413,7 @@ mod tests {
     /// stays silent rather than announcing a position to a user who is first.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_idle_host_still_seeds_position_zero() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let response = app
             .oneshot(
                 Request::post("/api/generate/stream")
@@ -12169,7 +12435,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_invalid_payload_header_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(
                 Request::post("/api/generate/stream")
@@ -12193,7 +12459,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_metadata_only_returns_saved_filename_without_base64_media() {
         let output_dir = tempfile::tempdir().unwrap();
-        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (mut state, rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         state.output_disabled_override = false;
         state.config.write().await.output_dir =
             Some(output_dir.path().to_string_lossy().into_owned());
@@ -12252,7 +12519,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_empty_prompt_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("", 768, 768);
         let resp = app
             .oneshot(
@@ -12268,9 +12535,13 @@ mod tests {
         assert_eq!(body["code"], "VALIDATION_ERROR");
     }
 
-    #[tokio::test]
-    async fn stream_unknown_model_returns_400() {
-        let app = app_empty();
+    /// Durable admission accepts before it resolves a checkpoint, so an
+    /// unknown model is a CODED terminal frame rather than the `400` the
+    /// attached path answered with. The code is what keeps every client's
+    /// missing-model classifier — and therefore auto-pull — working.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_unknown_model_reports_its_code_on_the_error_frame() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = r#"{"prompt":"a cat","model":"nonexistent-model-xyz","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
         let resp = app
             .oneshot(
@@ -12281,20 +12552,31 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body = json_body(resp).await;
-        assert_eq!(body["code"], "UNKNOWN_MODEL");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+        )
+        .await
+        .expect("an unresolvable model must close the stream")
+        .unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(text.contains("event: error"), "{text}");
+        assert!(
+            text.contains(mold_core::SSE_ERROR_CODE_UNKNOWN_MODEL),
+            "{text}"
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
-    async fn stream_known_model_not_downloaded_returns_404() {
+    async fn stream_known_model_not_downloaded_reports_its_code_on_the_error_frame() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("stream-not-downloaded");
         std::fs::create_dir_all(&models_dir).unwrap();
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
 
-        let app = app_empty();
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = r#"{"prompt":"a cat","model":"flux-schnell:q8","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
         let resp = app
             .oneshot(
@@ -12305,9 +12587,20 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        let body = json_body(resp).await;
-        assert_eq!(body["code"], "MODEL_NOT_FOUND");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+        )
+        .await
+        .expect("an undownloaded model must close the stream")
+        .unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(text.contains("event: error"), "{text}");
+        assert!(
+            text.contains(mold_core::SSE_ERROR_CODE_MODEL_NOT_FOUND),
+            "{text}"
+        );
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
@@ -12315,7 +12608,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_engine_error_returns_sse_error() {
-        let app = app_with(MockEngine::failing());
+        let (app, _gallery_root) = app_with(MockEngine::failing());
         let body = generate_body("a cat", 768, 768);
         let resp = app
             .oneshot(
@@ -12345,7 +12638,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_empty_images_returns_sse_error() {
-        let app = app_with(MockEngine::empty_images());
+        let (app, _gallery_root) = app_with(MockEngine::empty_images());
         let body = generate_body("a cat", 768, 768);
         let resp = app
             .oneshot(
@@ -12370,7 +12663,7 @@ mod tests {
     async fn reused_engine_clears_progress_callbacks_between_stream_and_generate() {
         let progress_set_count = Arc::new(AtomicUsize::new(0));
         let progress_clear_count = Arc::new(AtomicUsize::new(0));
-        let app = app_with(MockEngine::tracked_progress(
+        let (app, _gallery_root) = app_with(MockEngine::tracked_progress(
             progress_set_count.clone(),
             progress_clear_count.clone(),
         ));
@@ -12412,7 +12705,7 @@ mod tests {
 
     #[tokio::test]
     async fn unload_loaded_model_returns_200() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(
                 Request::delete("/api/models/unload")
@@ -12569,59 +12862,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_requests_only_load_existing_engine_once() {
         let load_count = Arc::new(AtomicUsize::new(0));
-        let (tx, rx) = tokio::sync::mpsc::channel(16);
-        let queue = crate::state::QueueHandle::new(tx);
-        let engine = MockEngine::unloaded(load_count.clone(), Duration::from_millis(50));
-        let mut cache = crate::model_cache::ModelCache::new(3);
-        cache.insert(Box::new(engine), 0);
-        let state = AppState {
-            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
-            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
-            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
-            discovery: Arc::new(crate::state::DiscoveryState::default()),
-            gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new().into(),
-            }),
-            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
-            device_registry: crate::device_registry::DeviceRegistry::empty(),
-            queue_capacity: 200,
-            model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
-            active_generation: Arc::new(std::sync::RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
-            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
-            output_disabled_override: true,
-            reload_config_from_disk: false,
-            start_time: std::time::Instant::now(),
-            model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
-            pull_lock: Arc::new(tokio::sync::Mutex::new(())),
-            queue,
-            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
-            job_registry: crate::job_registry::JobRegistry::new(),
-            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
-            queue_pause: crate::queue::QueuePause::new(),
-            shared_pool: Arc::new(std::sync::Mutex::new(
-                mold_inference::shared_pool::SharedPool::new(),
-            )),
-            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
-            metadata_db: Arc::new(None),
-            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
-            chain_jobs: None,
-            downloads: crate::downloads::DownloadQueue::new(),
-            resources: crate::resources::ResourceBroadcaster::new(),
-            events: crate::events::EventBroadcaster::new(),
-            catalog_live_cache: mold_catalog::live::LiveCache::new(
-                std::time::Duration::from_secs(300),
-                64,
-            ),
-            catalog_live_civitai_base: std::sync::Arc::new(
-                crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
-            ),
-            catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            models_disk_cache: Arc::new(crate::state::ModelsDiskCache::default()),
-        };
+        let (state, rx, _gallery_root) = durable_test_state(MockEngine::unloaded(
+            load_count.clone(),
+            Duration::from_millis(50),
+        ));
+        spawn_durable_feeder(&state);
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state);
@@ -12644,59 +12889,8 @@ mod tests {
     /// conversion) are delivered through the SSE stream to the client.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_delivers_load_progress_events() {
-        let (tx, rx) = tokio::sync::mpsc::channel(16);
-        let queue = crate::state::QueueHandle::new(tx);
-        let engine = MockEngine::unloaded_with_progress();
-        let mut cache = crate::model_cache::ModelCache::new(3);
-        cache.insert(Box::new(engine), 0);
-        let state = AppState {
-            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
-            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
-            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
-            discovery: Arc::new(crate::state::DiscoveryState::default()),
-            gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new().into(),
-            }),
-            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
-            device_registry: crate::device_registry::DeviceRegistry::empty(),
-            queue_capacity: 200,
-            model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
-            active_generation: Arc::new(std::sync::RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
-            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
-            output_disabled_override: true,
-            reload_config_from_disk: false,
-            start_time: std::time::Instant::now(),
-            model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
-            pull_lock: Arc::new(tokio::sync::Mutex::new(())),
-            queue,
-            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
-            job_registry: crate::job_registry::JobRegistry::new(),
-            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
-            queue_pause: crate::queue::QueuePause::new(),
-            shared_pool: Arc::new(std::sync::Mutex::new(
-                mold_inference::shared_pool::SharedPool::new(),
-            )),
-            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
-            metadata_db: Arc::new(None),
-            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
-            chain_jobs: None,
-            downloads: crate::downloads::DownloadQueue::new(),
-            resources: crate::resources::ResourceBroadcaster::new(),
-            events: crate::events::EventBroadcaster::new(),
-            catalog_live_cache: mold_catalog::live::LiveCache::new(
-                std::time::Duration::from_secs(300),
-                64,
-            ),
-            catalog_live_civitai_base: std::sync::Arc::new(
-                crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
-            ),
-            catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            models_disk_cache: Arc::new(crate::state::ModelsDiskCache::default()),
-        };
+        let (state, rx, _gallery_root) = durable_test_state(MockEngine::unloaded_with_progress());
+        spawn_durable_feeder(&state);
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state);
@@ -12741,8 +12935,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_stream_requests_both_complete() {
         let blocker = Arc::new(GenerateBlocker::default());
-        let (state, rx) =
-            AppState::with_engine_and_queue(MockEngine::blocking_generate(blocker.clone()));
+        let (state, rx, _gallery_root) =
+            durable_test_state(MockEngine::blocking_generate(blocker.clone()));
+        spawn_durable_feeder(&state);
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state);
@@ -12816,7 +13011,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_stream_receives_position_event() {
         let model = "sd15:fp16";
-        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready_for_model(model));
+        let (state, rx, _gallery_root) = durable_test_state(MockEngine::ready_for_model(model));
+        spawn_durable_feeder(&state);
         let queue = state.queue.clone();
         let worker_state = state.clone();
         let app = app_with_state(state);
@@ -12890,10 +13086,15 @@ mod tests {
             text2.contains(r#""type":"queued""#),
             "second request should receive a queued event, got: {text2}"
         );
-        // The second request should report position > 0 (queued behind the first)
+        // The position is a snapshot on the REGISTRY scale, taken when the
+        // frame is emitted. Durable admission acknowledges before the feeder
+        // claims the row, so a request admitted while its predecessor is still
+        // being fed legitimately reports 0 — the exact value is a race and
+        // `/api/queue` is the authority. What must hold is that the frame
+        // carries the server id the client reconciles against.
         assert!(
-            text2.contains(r#""position":1"#),
-            "second request should be at position 1, got: {text2}"
+            text2.contains(r#""position":"#) && text2.contains(r#""id":"#),
+            "the queued frame must carry a position and the server id, got: {text2}"
         );
 
         tokio::time::timeout(Duration::from_secs(10), body1)
@@ -12903,11 +13104,130 @@ mod tests {
             .unwrap();
     }
 
+    /// The batch event stream is the authoritative-state channel for Batch N.
+    ///
+    /// It opens with a whole status so a late or reconnecting client is
+    /// correct immediately, emits a whole status again on every committed
+    /// child transition, and closes once nothing is left for this host to do.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn generation_batch_events_stream_authoritative_status_until_settled() {
+        let (state, rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_runtime(&state, rx);
+        let app = app_with_state(state);
+
+        let single: serde_json::Value =
+            serde_json::from_str(&generate_body("batch events", 64, 64)).unwrap();
+        let accepted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [single.clone(), single],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let batch_id = json_body(accepted).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let events = app
+            .oneshot(
+                Request::get(format!("/api/generation-batches/{batch_id}/events"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(events.status(), StatusCode::OK);
+        let body = tokio::time::timeout(
+            Duration::from_secs(30),
+            axum::body::to_bytes(events.into_body(), 4 * 1024 * 1024),
+        )
+        .await
+        .expect("the stream must close once every child settles")
+        .unwrap();
+        let text = String::from_utf8_lossy(&body).into_owned();
+        assert!(text.contains("event: generation_batch"), "{text}");
+        assert!(text.contains(&batch_id), "{text}");
+        // The last frame is the settled one, and every frame is a whole
+        // status rather than a delta.
+        let last = text
+            .rsplit("data: ")
+            .next()
+            .and_then(|frame| frame.lines().next())
+            .expect("a data frame");
+        let last: serde_json::Value = serde_json::from_str(last).unwrap();
+        assert_eq!(last["children"].as_array().unwrap().len(), 2);
+        for child in last["children"].as_array().unwrap() {
+            assert!(
+                ["complete", "failed", "cancelled", "held"]
+                    .contains(&child["state"].as_str().unwrap()),
+                "{last}"
+            );
+        }
+    }
+
+    /// Two concurrent prints must both come back as prints.
+    ///
+    /// The feeder prefers claiming rows that have an attached observer, and an
+    /// exact claim that fails used to discard the hint AND the observer. Under
+    /// concurrency the ordinary FIFO claim routinely wins a row first, so the
+    /// second request's observer was destroyed and its caller received a `202`
+    /// reconciliation body for a print that rendered perfectly well. Only a
+    /// row that is genuinely gone may discard its observer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_prints_keep_their_own_observers() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
+        let responses = (0..4)
+            .map(|index| {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    app.oneshot(
+                        Request::post("/api/generate")
+                            .header("content-type", "application/json")
+                            .body(Body::from(generate_body(
+                                &format!("concurrent print {index}"),
+                                512,
+                                512,
+                            )))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for (index, response) in responses.into_iter().enumerate() {
+            let response = tokio::time::timeout(Duration::from_secs(20), response)
+                .await
+                .expect("every concurrent print must settle")
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "print {index} lost its observer"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("image/png"),
+                "print {index} returned no media"
+            );
+        }
+    }
+
     /// Verify that both streaming and non-streaming requests are properly
     /// serialized through the queue.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_streaming_generate_queues_correctly() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
 
         // Submit two non-streaming requests concurrently
         let resp1 = {
@@ -12946,59 +13266,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn snapshot_consistent_after_queue_load() {
         let load_count = Arc::new(AtomicUsize::new(0));
-        let (tx, rx) = tokio::sync::mpsc::channel(16);
-        let queue = crate::state::QueueHandle::new(tx);
-        let engine = MockEngine::unloaded(load_count, Duration::from_millis(10));
-        let mut cache = crate::model_cache::ModelCache::new(3);
-        cache.insert(Box::new(engine), 0);
-        let state = AppState {
-            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
-            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
-            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
-            discovery: Arc::new(crate::state::DiscoveryState::default()),
-            gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new().into(),
-            }),
-            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
-            device_registry: crate::device_registry::DeviceRegistry::empty(),
-            queue_capacity: 200,
-            model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
-            active_generation: Arc::new(std::sync::RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
-            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
-            output_disabled_override: true,
-            reload_config_from_disk: false,
-            start_time: std::time::Instant::now(),
-            model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
-            pull_lock: Arc::new(tokio::sync::Mutex::new(())),
-            queue,
-            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
-            job_registry: crate::job_registry::JobRegistry::new(),
-            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
-            queue_pause: crate::queue::QueuePause::new(),
-            shared_pool: Arc::new(std::sync::Mutex::new(
-                mold_inference::shared_pool::SharedPool::new(),
-            )),
-            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
-            metadata_db: Arc::new(None),
-            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
-            chain_jobs: None,
-            downloads: crate::downloads::DownloadQueue::new(),
-            resources: crate::resources::ResourceBroadcaster::new(),
-            events: crate::events::EventBroadcaster::new(),
-            catalog_live_cache: mold_catalog::live::LiveCache::new(
-                std::time::Duration::from_secs(300),
-                64,
-            ),
-            catalog_live_civitai_base: std::sync::Arc::new(
-                crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
-            ),
-            catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            models_disk_cache: Arc::new(crate::state::ModelsDiskCache::default()),
-        };
+        let (state, rx, _gallery_root) =
+            durable_test_state(MockEngine::unloaded(load_count, Duration::from_millis(10)));
+        spawn_durable_feeder(&state);
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state.clone());
@@ -15520,7 +15790,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_rejects_gpu_outside_worker_pool() {
-        let app = app_with_worker_pool(MockEngine::ready(), &[1]);
+        let (app, _gallery_root) = app_with_worker_pool(MockEngine::ready(), &[1]);
         let body = serde_json::json!({
             "prompt": "a cat",
             "model": "mock-model",
@@ -18487,19 +18757,13 @@ mod tests {
         serde_json::from_str(&generate_body("a cat", 64, 64)).unwrap()
     }
 
-    /// Durable DIRECT admission deliberately does not require an authoritative
-    /// scheduler, and this pins that as a contract rather than an oversight.
-    ///
-    /// The durable feeder is spawned on `start_generation_runner` alone and
-    /// runs in legacy and observe dispatch too, so a direct generation on such
-    /// a host is genuinely durable. Requiring V2 here would remove real
-    /// durability from every legacy and observe host in exchange for nothing a
-    /// client can observe — a headerless request receives the same attached
-    /// media bytes either way. The batch PROTOCOL is what needs V2, because
-    /// that is what `capabilities.queue.heterogeneous_batch` advertises, and
-    /// `a_non_authoritative_host_refuses_the_batch_protocol` covers that half.
+    /// ONE admission path. A host that cannot admit durably refuses
+    /// generation on every route rather than silently running a second,
+    /// non-durable pipeline. Scheduler V2 is a conjunct like any other: the
+    /// durable feeder's restart safety is only real when the authoritative
+    /// dispatcher owns the row.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_non_authoritative_host_still_admits_direct_generations_durably() {
+    async fn a_non_authoritative_host_refuses_every_generation_route() {
         for mode in [
             crate::dispatch_mode::DispatchMode::Legacy,
             crate::dispatch_mode::DispatchMode::Observe,
@@ -18510,68 +18774,68 @@ mod tests {
             install_dispatch_mode(&mut state, mode);
 
             let mut request = readiness_request();
-            let admission = crate::routes::direct_durable_admission(&state, &mut request, false)
-                .await
-                .expect("a non-authoritative host still admits durably");
-            assert!(
-                admission.is_some(),
-                "{mode:?}: durable direct admission does not depend on Scheduler V2"
+            let Err(refusal) = crate::routes::direct_durable_admission(&state, &mut request).await
+            else {
+                panic!("a non-authoritative host admits nothing");
+            };
+            assert_eq!(refusal.code, "DURABLE_ADMISSION_UNAVAILABLE", "{mode:?}");
+
+            let app = app_with_state(state);
+            let capabilities = json_body(
+                app.clone()
+                    .oneshot(empty_request("GET", "/api/capabilities"))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                capabilities["queue"]["heterogeneous_batch_max_outputs"],
+                serde_json::Value::Null,
+                "{mode:?}: a refusing host advertises no batch limit"
             );
+
+            let single: serde_json::Value =
+                serde_json::from_str(&generate_body("a cat", 64, 64)).unwrap();
+            for (method, path, body) in [
+                ("POST", "/api/generate", single.clone()),
+                ("POST", "/api/generate/stream", single.clone()),
+                (
+                    "POST",
+                    "/api/generation-batches",
+                    serde_json::json!({
+                        "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                        "requests": [single.clone()],
+                    }),
+                ),
+            ] {
+                let refused = app
+                    .clone()
+                    .oneshot(json_request(method, path, body))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    refused.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{mode:?} {path}"
+                );
+                assert_eq!(
+                    json_body(refused).await["code"],
+                    "DURABLE_ADMISSION_UNAVAILABLE",
+                    "{mode:?} {path}"
+                );
+            }
         }
     }
 
-    /// The batch protocol DOES require V2, and the capability says so, so the
-    /// route must agree with the capability.
+    /// One precedence, one code. The direct and batch routes used to keep
+    /// opposite conjunct orders and two refusal codes for the same host state;
+    /// a client cannot act differently on them, so they are one answer now.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_non_authoritative_host_refuses_the_batch_protocol() {
+    async fn one_refusal_precedence_serves_every_generation_route() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, _rx) = durable_state(db, root.path());
-        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::Legacy);
-        let app = app_with_state(state);
-
-        let capabilities = json_body(
-            app.clone()
-                .oneshot(empty_request("GET", "/api/capabilities"))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(capabilities["queue"]["heterogeneous_batch"], false);
-        assert!(capabilities["queue"]["admission_protocol_version"].is_null());
-
-        let refused = app
-            .oneshot(json_request(
-                "POST",
-                "/api/generation-batches",
-                serde_json::json!({
-                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
-                    "requests": [serde_json::from_str::<serde_json::Value>(
-                        &generate_body("a cat", 64, 64)
-                    ).unwrap()],
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            json_body(refused).await["code"],
-            "HETEROGENEOUS_BATCH_UNAVAILABLE"
-        );
-    }
-
-    /// The direct and batch routes keep OPPOSITE refusal precedence, and a host
-    /// failing more than one conjunct is where that becomes observable. Direct
-    /// has always answered `DURABLE_ADMISSION_UNAVAILABLE` for disabled gallery
-    /// output; batch has always answered `HETEROGENEOUS_BATCH_UNAVAILABLE`
-    /// because it tests scheduler/journal/admission first. Resolving both from
-    /// one value must not collapse them onto a single order.
-    #[tokio::test(flavor = "current_thread")]
-    async fn direct_and_batch_keep_their_own_refusal_precedence() {
-        let root = tempfile::tempdir().unwrap();
-        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        // Output disabled AND no admission service: both conjuncts unmet, so
-        // each route's own precedence decides which code it reports.
+        // Output disabled AND no admission service: two unmet conjuncts, so
+        // the shared precedence is what decides the reported code.
         let (mut state, _rx) = durable_state_with_admission_policy(
             db,
             root.path(),
@@ -18584,10 +18848,11 @@ mod tests {
         state.output_disabled_override = true;
 
         let mut request = readiness_request();
-        match crate::routes::direct_durable_admission(&state, &mut request, true).await {
-            Ok(_) => panic!("an explicit durable direct request must be refused"),
-            Err(refusal) => assert_eq!(refusal.code, "DURABLE_ADMISSION_UNAVAILABLE"),
-        }
+        let Err(refusal) = crate::routes::direct_durable_admission(&state, &mut request).await
+        else {
+            panic!("a durable direct request must be refused");
+        };
+        assert_eq!(refusal.code, "DURABLE_ADMISSION_UNAVAILABLE");
 
         let refused = app_with_state(state)
             .oneshot(json_request(
@@ -18605,19 +18870,17 @@ mod tests {
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             json_body(refused).await["code"],
-            "HETEROGENEOUS_BATCH_UNAVAILABLE"
+            "DURABLE_ADMISSION_UNAVAILABLE"
         );
     }
 
-    /// N1. A degraded encrypted-media store must route a media-carrying request
-    /// to the attached path, not refuse it. This gate ignored
-    /// `explicitly_requested` while the gate six lines below it consulted it, so
-    /// every conditioning field 503'd on a host whose clients were already
-    /// negotiating the attached path — behind a status both client classifiers
-    /// read as transient. The table is the point: the blast radius was every
-    /// conditioning field, not just `source_image`.
+    /// A degraded encrypted-media store refuses the request that needs it.
+    /// There is no attached path to fall back to, and rendering a conditioning
+    /// field the host cannot durably retain is exactly the silent
+    /// non-durability this rule exists to remove. The table is the point: it
+    /// is every conditioning field, not just `source_image`.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_degraded_media_store_falls_back_instead_of_refusing() {
+    async fn a_degraded_media_store_refuses_a_media_carrying_request() {
         const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
         for field in ["source_image", "id_image", "mask_image", "control_image"] {
             let root = tempfile::tempdir().unwrap();
@@ -18638,39 +18901,33 @@ mod tests {
             body[field] = serde_json::Value::String(PIXEL.to_string());
             let mut request: mold_core::GenerateRequest = serde_json::from_value(body).unwrap();
 
-            let admission = crate::routes::direct_durable_admission(&state, &mut request, false)
-                .await
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "{field}: a degraded media store must fall back, got {}",
-                        error.code
-                    )
-                });
-            assert!(
-                admission.is_none(),
-                "{field}: fallback means no durable admission"
-            );
+            let Err(refusal) = crate::routes::direct_durable_admission(&state, &mut request).await
+            else {
+                panic!("{field}: a degraded media store must refuse");
+            };
+            assert_eq!(refusal.code, "DURABLE_MEDIA_UNAVAILABLE", "{field}");
         }
     }
 
     /// The overreach tripwire. `v2_authoritative()` serves five distinct roles
-    /// and only the durability role belongs behind the readiness authority. The
-    /// can-this-host-execute sites are always `|| gpu_pool.worker_count() > 0`;
-    /// folding them into a durability gate takes legacy and observe hosts
-    /// offline, and this fails loudly if that happens.
+    /// and only the durability role belongs behind the readiness authority.
+    /// A plain text-to-image request on an authoritative host must still be
+    /// admitted with the media store degraded — the encrypted store gates
+    /// media, not generation.
     #[tokio::test(flavor = "current_thread")]
-    async fn legacy_dispatch_still_falls_back_rather_than_refusing() {
+    async fn a_degraded_media_store_still_admits_a_mediafree_request() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
-        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::Legacy);
+        install_authoritative_v2(&mut state);
+        state.queue_journal.set_durable_media_ready(false);
 
         let mut request = readiness_request();
         assert!(
-            crate::routes::direct_durable_admission(&state, &mut request, false)
+            crate::routes::direct_durable_admission(&state, &mut request)
                 .await
-                .expect("legacy hosts still generate")
-                .is_some()
+                .is_ok(),
+            "a media-free request does not need the encrypted store"
         );
     }
 

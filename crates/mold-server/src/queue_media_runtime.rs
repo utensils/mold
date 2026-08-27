@@ -505,6 +505,64 @@ mod tests {
         assert!(scrubbed.load(std::sync::atomic::Ordering::SeqCst));
     }
 
+    /// The feeder hydrates BEFORE `prepare_generation_after_durable_ack`, so a
+    /// sealed LoRA is back on the request when the scheduler resolves adapter
+    /// paths. This is the whole-store round trip: extract, seal, decrypt,
+    /// overlay — the adapter record comes back exactly as admitted.
+    #[test]
+    fn leased_hydration_restores_a_lora_sealed_beside_media() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Arc::new(QueueMediaStore::open(home.path()).unwrap().store);
+        let admitted: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "adapter beside media",
+            "model": "mock",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "source_image": "c291cmNlLWJ5dGVz",
+            "lora": { "path": "/private/one.safetensors", "scale": 0.5 },
+            "loras": [
+                { "path": "/private/two.safetensors", "scale": 0.7, "expert": "high" }
+            ]
+        }))
+        .unwrap();
+        let expected_lora = admitted.lora.clone();
+        let expected_loras = admitted.loras.clone();
+        let extracted =
+            extract_request_media("job-lora", admitted, &ProcessPrivateAuthorities::none())
+                .unwrap();
+        let projection = project_request_media(extracted.media()).unwrap();
+        let (request_json, opaque_media) = extracted.into_parts();
+        let mut sanitized: mold_core::GenerateRequest =
+            serde_json::from_str(&request_json).unwrap();
+        assert!(sanitized.lora.is_none() && sanitized.loras.is_none());
+        let media = into_seal_media(opaque_media).unwrap();
+        let reference = store
+            .seal_v2_with_operation_fingerprint(
+                "owner-lora",
+                "job-lora",
+                &QueueMediaOperationFingerprint::sha256_v1(b"lora operation"),
+                &projection,
+                media,
+            )
+            .unwrap();
+        let deferred = DeferredQueueMedia::new(store, reference, projection);
+
+        let _lease = deferred.hydrate_into("job-lora", &mut sanitized).unwrap();
+        assert_eq!(
+            sanitized.source_image.as_deref(),
+            Some(b"source-bytes".as_slice())
+        );
+        assert_eq!(
+            serde_json::to_value(&sanitized.lora).unwrap(),
+            serde_json::to_value(&expected_lora).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&sanitized.loras).unwrap(),
+            serde_json::to_value(&expected_loras).unwrap()
+        );
+    }
+
     #[test]
     fn leased_hydration_matches_projection_and_private_paths_are_raii_owned() {
         let home = tempfile::tempdir().unwrap();

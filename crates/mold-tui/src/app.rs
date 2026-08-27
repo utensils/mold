@@ -150,9 +150,13 @@ pub enum BackgroundEvent {
     GalleryDeleteFailed(String),
     /// Chain progress update from server SSE.
     ChainProgress(mold_core::ChainProgressEvent),
-    /// Chain generation completed — video bytes ready.
+    /// The durable sequence job settled successfully. Carries only what the
+    /// view renders: the compatibility endpoint that returned a whole
+    /// `ChainResponse` is gone, and the stitched print now lands in the
+    /// host's gallery rather than in this event.
     ChainComplete {
-        response: Box<mold_core::ChainResponse>,
+        stage_count: u32,
+        request_warnings: Vec<String>,
     },
     /// Chain generation failed.
     ChainError(String),
@@ -8959,26 +8963,22 @@ impl App {
                         style: ProgressStyle::Info,
                     });
                 }
-                BackgroundEvent::ChainComplete { response } => {
+                BackgroundEvent::ChainComplete {
+                    stage_count,
+                    request_warnings,
+                } => {
                     self.generate.generating = false;
                     self.generate.clear_live_preview();
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
                     self.generate.progress.push_log(ProgressLogEntry {
-                        message: format!(
-                            "Chain complete: {} stages, GPU {}",
-                            response.stage_count,
-                            response
-                                .gpu
-                                .map(|g| g.to_string())
-                                .unwrap_or_else(|| "unknown".into()),
-                        ),
+                        message: format!("Chain complete: {stage_count} stages"),
                         style: ProgressStyle::Done,
                     });
                     // A sequence's filing is stamped on the stitched print, so
                     // a host that could not apply it reports it here exactly
                     // as it does for a one-shot.
-                    self.surface_request_advisories(&response.request_warnings);
+                    self.surface_request_advisories(&request_warnings);
                 }
                 BackgroundEvent::ChainError(msg) => {
                     self.generate.generating = false;
@@ -14196,7 +14196,8 @@ mod tests {
             "tags and collection were not applied; the print was generated and saved normally";
         app.bg_tx
             .send(BackgroundEvent::ChainComplete {
-                response: Box::new(chain_response_with_advisories(vec![advisory.to_string()])),
+                stage_count: 2,
+                request_warnings: vec![advisory.to_string()],
             })
             .unwrap();
         app.process_background_events();
@@ -14221,7 +14222,8 @@ mod tests {
         let mut app = make_settings_test_app();
         app.bg_tx
             .send(BackgroundEvent::ChainComplete {
-                response: Box::new(chain_response_with_advisories(Vec::new())),
+                stage_count: 2,
+                request_warnings: Vec::new(),
             })
             .unwrap();
         app.process_background_events();

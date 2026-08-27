@@ -30,29 +30,29 @@ fn channel_observer(
     }
 }
 
-pub(crate) async fn try_canonical_generation(
+pub(crate) async fn canonical_generation(
     client: &MoldClient,
     requests: &[GenerateRequest],
-) -> Result<Option<CanonicalGenerationReport>> {
-    mold_core::durable_generation::try_canonical_generation(client, requests).await
+) -> Result<CanonicalGenerationReport> {
+    mold_core::durable_generation::canonical_generation(client, requests).await
 }
 
-pub(crate) async fn try_canonical_generation_observed(
+pub(crate) async fn canonical_generation_observed(
     client: &MoldClient,
     requests: &[GenerateRequest],
     events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
-) -> Result<Option<CanonicalGenerationReport>> {
+) -> Result<CanonicalGenerationReport> {
     match events {
         Some(events) => {
             let observer = channel_observer(events);
-            mold_core::durable_generation::try_canonical_generation_observed(
+            mold_core::durable_generation::canonical_generation_observed(
                 client,
                 requests,
                 Some(&observer),
             )
             .await
         }
-        None => mold_core::durable_generation::try_canonical_generation(client, requests).await,
+        None => mold_core::durable_generation::canonical_generation(client, requests).await,
     }
 }
 
@@ -104,14 +104,24 @@ pub(crate) async fn hydrate_canonical_artifact(
     })
 }
 
-pub(crate) async fn try_canonical_singleton_artifact(
+pub(crate) async fn canonical_singleton_artifact(
     client: &MoldClient,
     request: &GenerateRequest,
-) -> Result<Option<CanonicalGenerationArtifact>> {
-    let Some(report) = try_canonical_generation(client, std::slice::from_ref(request)).await?
-    else {
-        return Ok(None);
-    };
+) -> Result<CanonicalGenerationArtifact> {
+    canonical_singleton_artifact_observed(client, request, None).await
+}
+
+/// As [`canonical_singleton_artifact`], reporting each authoritative child
+/// transition as it commits. The durable path carries no per-step progress —
+/// that rides the observer `/api/generate/stream` registers — so a caller that
+/// wants to say something while a print renders says it from state changes.
+pub(crate) async fn canonical_singleton_artifact_observed(
+    client: &MoldClient,
+    request: &GenerateRequest,
+    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
+) -> Result<CanonicalGenerationArtifact> {
+    let report =
+        canonical_generation_observed(client, std::slice::from_ref(request), events).await?;
     if !report.failures.is_empty() {
         let mut failures = report.failures;
         if !report.admitted_client_ids.is_empty() {
@@ -131,12 +141,12 @@ pub(crate) async fn try_canonical_singleton_artifact(
         anyhow::bail!("canonical singleton outcome lost its admission authority");
     }
     let artifact = hydrate_canonical_artifact(client, &outcome.child).await?;
-    Ok(Some(CanonicalGenerationArtifact {
+    Ok(CanonicalGenerationArtifact {
         bytes: artifact.bytes,
         filename: artifact.filename,
         request: outcome.request,
         metadata: artifact.metadata,
-    }))
+    })
 }
 
 #[cfg(test)]

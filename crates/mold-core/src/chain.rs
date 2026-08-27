@@ -224,6 +224,22 @@ pub struct ChainRequest {
     #[serde(default = "default_output_format")]
     pub output_format: OutputFormat,
 
+    /// This sequence is an implementation detail of ONE print, not a sequence
+    /// the user authored.
+    ///
+    /// `mold run --frames 200` splits a long video into clips because the
+    /// model cannot render it in one pass; the user asked for a video, not for
+    /// a chain. An ephemeral job renders exactly like an authored one and
+    /// publishes the same stitched print, but it is absent from
+    /// `GET /api/chain-jobs`, its working directory is swept after
+    /// finalization, it refuses resume, and its print carries NO
+    /// `chain_job_id` — so "Reuse settings" restores a one-shot rather than
+    /// opening the clip rail (`studio/lib/sequenceReuse.ts`).
+    ///
+    /// Additive: absent means `false`, which is an authored sequence.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ephemeral: bool,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<DevicePlacement>,
 
@@ -1456,6 +1472,7 @@ mod tests {
             clip_frames: Some(clip_frames),
             source_image,
             enable_audio: None,
+            ephemeral: false,
         }
     }
 
@@ -1487,6 +1504,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         }
     }
 
@@ -1977,6 +1995,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         };
         let script = ChainScript::from(&req);
         assert_eq!(script.chain.model, "ltx-2-19b-distilled:fp8");
@@ -2168,6 +2187,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         }
     }
 
