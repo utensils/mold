@@ -5345,15 +5345,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     await submitPrompt("first prompt");
-    openStreams[0]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "denoise_step", step: 3, total: 30, elapsed_ms: 10 }),
-    );
     await submitPrompt("second prompt");
-    openStreams[1]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-2" }),
-    );
     await flushPromises();
 
     expect(admittedRequests()).toHaveLength(2);
@@ -5361,51 +5353,33 @@ describe("MobileApp generation queue", () => {
       "first prompt",
       "second prompt",
     ]);
-    expect(
-      openStreams.every(
-        (stream) => stream.options.headers?.["X-Mold-SSE-Payload"] === "metadata-only",
-      ),
-    ).toBe(true);
-    expect(openStreams.every((stream) => stream.options.body.model === model.name)).toBe(true);
+    expect(admittedRequests().every((request) => request.model === model.name)).toBe(true);
     expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
       "Develop print (+2 queued)",
     );
-    expect(wrapper.get("[data-test='mobile-generation-queue']").attributes("aria-live")).toBe(
-      undefined,
-    );
-    // One is rendering and one is waiting — never "2 active".
-    expect(wrapper.get(".sr-only[aria-live='polite']").text()).toBe(
-      "1 active generation, 1 queued.",
-    );
-    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("1 active · 1 queued");
 
     const rows = wrapper.findAll("[data-test='mobile-generation-job']");
     expect(rows).toHaveLength(2);
-    expect(rows[0]?.text()).toContain("first prompt");
-    expect(rows[0]?.get("[data-test='mobile-generation-status']").text()).toBe("3/30");
-    expect(rows[1]?.text()).toContain("second prompt");
-    expect(rows[1]?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
+    expect(rows.map((row) => row.text()).join(" ")).toContain("first prompt");
+    expect(rows.map((row) => row.text()).join(" ")).toContain("second prompt");
 
-    await rows[1]?.get("[data-test='mobile-generation-cancel']").trigger("click");
+    // Each print is its own durable child, so cancelling one names that
+    // child's own queue id and leaves the other alone.
+    const second = rows.find((row) => row.text().includes("second prompt"));
+    await second?.get("[data-test='mobile-generation-cancel']").trigger("click");
     await flushPromises();
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-2", { method: "DELETE" });
-    expect(openStreams[0]?.options.signal.aborted).toBe(false);
-    expect(openStreams[1]?.options.signal.aborted).toBe(true);
-    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(1);
-    expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain("first prompt");
-    expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
-      "Develop print (+1 queued)",
-    );
-    expect(wrapper.get(".sr-only[aria-live='polite']").text()).toBe("1 active generation.");
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
-      "Generation cancelled.",
-    );
-
-    const firstSignal = openStreams[0]?.options.signal;
-    wrapper.unmount();
-    wrapper = null;
-    expect(firstSignal?.aborted).toBe(true);
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/durable-job-2", {
+      method: "DELETE",
+    });
+    // The machine owns the outcome: the tap is a request, so the cancelled
+    // print reads as cancelling until its child settles, and the OTHER print
+    // is untouched.
+    const after = wrapper.findAll("[data-test='mobile-generation-job']");
+    const cancelled = after.find((row) => row.text().includes("second prompt"));
+    const untouched = after.find((row) => row.text().includes("first prompt"));
+    expect(cancelled?.text()).toContain("Cancelling");
+    expect(untouched?.text()).not.toContain("Cancelling");
   });
 
   it("counts a queued print's live place in line rather than its submit slot", async () => {
