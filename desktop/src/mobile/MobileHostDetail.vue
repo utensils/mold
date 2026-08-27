@@ -10,7 +10,7 @@ import {
   setQueueDevicePin,
   type QueuePlan,
 } from "@studio/api/queuePlan";
-import { watchSelectedQueuePreview, type QueueJobPreview } from "@studio/api/generationSelection";
+import { watchSelectedQueuePreview, type QueueJobProgress } from "@studio/api/generationSelection";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import SwipeActionRow from "@studio/components/SwipeActionRow.vue";
@@ -695,7 +695,7 @@ async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
 const inspectedQueueId = ref<string | null>(null);
 const queueRowError = ref<string | null>(null);
 const reorderingQueueIds = ref(new Set<string>());
-const queuePreview = ref<QueueJobPreview | null>(null);
+const queuePreview = ref<QueueJobProgress | null>(null);
 const queueDetailNowMs = ref(Date.now());
 let stopQueuePreview: (() => void) | null = null;
 let queueDetailTimer: ReturnType<typeof setInterval> | null = null;

@@ -3312,7 +3312,22 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(json_body(response).await, serde_json::Value::Null);
 
-        registry.record_preview("rendering-a", "UFJFVklFVw==".into(), 4, 20);
+        // With previews disabled the row still reports what it is doing and
+        // how far along it is: the snapshot is progress, not an image.
+        registry.record_progress(
+            "rendering-a",
+            &mold_core::types::SseProgressEvent::StageStart {
+                name: "Denoising".into(),
+            },
+        );
+        registry.record_progress(
+            "rendering-a",
+            &mold_core::types::SseProgressEvent::DenoiseStep {
+                step: 4,
+                total: 20,
+                elapsed_ms: 80,
+            },
+        );
 
         let response = app
             .clone()
@@ -3325,7 +3340,32 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
-        assert_eq!(body["image"], "UFJFVklFVw==");
+        assert_eq!(body["step"], 4);
+        assert_eq!(body["total"], 20);
+        assert_eq!(body["stage"], "Denoising");
+        assert!(body.get("preview_image").is_none());
+
+        registry.record_progress(
+            "rendering-a",
+            &mold_core::types::SseProgressEvent::Preview {
+                image: "UFJFVklFVw==".into(),
+                step: 4,
+                total: 20,
+            },
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/queue/rendering-a/preview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["preview_image"], "UFJFVklFVw==");
         assert_eq!(body["step"], 4);
         assert_eq!(body["total"], 20);
 

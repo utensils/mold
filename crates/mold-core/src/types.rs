@@ -4270,7 +4270,7 @@ pub struct AdvancedPlacement {
 
 /// Progress event for SSE streaming. Mirrors `mold_inference::ProgressEvent`
 /// but uses `u64` milliseconds instead of `Duration` for JSON serialization.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseProgressEvent {
     /// The job is waiting for a concrete model dependency to become locally

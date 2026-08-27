@@ -181,7 +181,7 @@ import {
 import {
   selectedQueueGeneration,
   watchSelectedQueuePreview,
-  type QueueJobPreview,
+  type QueueJobProgress,
 } from "@studio/api/generationSelection";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
@@ -2141,19 +2141,20 @@ function syncDurableGenerationJobs(): void {
       if (lifecycle) job.id = lifecycle.authority.jobId;
       const p = presentMobileDurableChild(recovery, presentation.index, job.hostLabel, now);
       if (p.kind === "running" && lifecycle) {
-        // The durable child carries no denoise preview or step count; poll
-        // the host for our own running print as a tapped queue row does.
+        // The durable child carries no progress frames of its own; poll the
+        // host for our own running print as a tapped queue row does.
         const previewHost = resolveMobileDurableHost(recovery, connectedHosts.value);
         if (previewHost) {
           ownPreviews.ensure(
             String(job.clientId),
             mobileHostTarget(previewHost),
             lifecycle.authority.jobId,
-            (preview) => {
+            (progress) => {
               if (job.status !== "loading") return;
-              job.previewUrl = previewDataUrl(preview);
-              job.step = preview.step;
-              job.total = preview.total;
+              const url = previewDataUrl(progress);
+              if (url) job.previewUrl = url;
+              if (progress.step !== null) job.step = progress.step;
+              if (progress.total !== null) job.total = progress.total;
             },
           );
         }
@@ -2334,7 +2335,7 @@ const selectedQueueRender = ref<{
   jobId: string;
   width: number;
   height: number;
-  preview: QueueJobPreview | null;
+  preview: QueueJobProgress | null;
 } | null>(null);
 let stopSelectedQueuePreview: (() => void) | null = null;
 
@@ -2782,11 +2783,27 @@ const missingGenerationPullEtaSeconds = computed(() => {
   return pending && job ? mobileDownloads.etaFor(pending.route.hostId, job.id) : null;
 });
 const queueAnnouncement = computed(() => activityAnnouncement(activityCounts.value));
+/** Fraction of the selected print's denoise the host has reported, or null
+ * before it reports a step counter. */
+const selectedQueuePreviewFraction = computed(() => {
+  const preview = selectedQueueRender.value?.preview;
+  return preview && preview.step !== null && preview.total !== null
+    ? preview.step / preview.total
+    : null;
+});
+const selectedQueuePreviewSrc = computed(() =>
+  selectedQueueRender.value?.preview?.preview_image
+    ? `data:image/png;base64,${selectedQueueRender.value.preview.preview_image}`
+    : null,
+);
 const generationStatus = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
     const preview = selected.preview;
-    return preview ? `Developing ${preview.step} / ${preview.total}` : progress.value;
+    if (preview && preview.step !== null && preview.total !== null) {
+      return `Developing ${preview.step} / ${preview.total}`;
+    }
+    return preview?.stage ?? progress.value;
   }
   const active = activeGeneration.value;
   if (!active) return progress.value;
@@ -10760,23 +10777,18 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 class="mobile-develop-preview"
                 data-test="mobile-develop-preview"
                 :src="
-                  selectedQueueRender?.preview
-                    ? `data:image/png;base64,${selectedQueueRender.preview.image}`
-                    : (activeGeneration?.previewUrl ?? '')
+                  selectedQueuePreviewSrc ?? (activeGeneration?.previewUrl ?? '')
                 "
                 alt=""
                 :style="{
-                  filter: `blur(${Math.max(2, 14 - 12 * (selectedQueueRender?.preview ? selectedQueueRender.preview.step / selectedQueueRender.preview.total : activeGeneration ? jobProgress(activeGeneration) : 0))}px)`,
+                  filter: `blur(${Math.max(2, 14 - 12 * (selectedQueuePreviewFraction ?? (activeGeneration ? jobProgress(activeGeneration) : 0)))}px)`,
                 }"
               />
               <DevelopCanvas
                 :seed="activeGeneration?.visualSeed ?? 0"
                 :progress="
-                  selectedQueueRender?.preview
-                    ? selectedQueueRender.preview.step / selectedQueueRender.preview.total
-                    : activeGeneration
-                      ? jobProgress(activeGeneration)
-                      : 0
+                  selectedQueuePreviewFraction ??
+                  (activeGeneration ? jobProgress(activeGeneration) : 0)
                 "
                 :phase="activeGeneration ? jobPhase(activeGeneration) : 'developing'"
                 class="mobile-develop-grain"
@@ -10785,11 +10797,8 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     Math.max(
                       0.18,
                       1 -
-                        (selectedQueueRender?.preview
-                          ? selectedQueueRender.preview.step / selectedQueueRender.preview.total
-                          : activeGeneration
-                            ? jobProgress(activeGeneration)
-                            : 0) *
+                        (selectedQueuePreviewFraction ??
+                          (activeGeneration ? jobProgress(activeGeneration) : 0)) *
                           0.9,
                     ),
                   ),

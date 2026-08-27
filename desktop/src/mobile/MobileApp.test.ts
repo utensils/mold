@@ -1140,7 +1140,13 @@ describe("MobileApp sequence generation", () => {
         });
       }
       if (path === "/api/queue/foreign-job/preview") {
-        return Promise.resolve({ image: "UFJFVklFVw==", step: 7, total: 18 });
+        return Promise.resolve({
+          preview_image: "UFJFVklFVw==",
+          step: 7,
+          total: 18,
+          stage: "Denoising",
+          updated_at_ms: 1,
+        });
       }
       return durableApiFallback(path, init, callTarget);
     });
@@ -5479,7 +5485,13 @@ describe("MobileApp generation queue", () => {
     const base = apiJsonTo.getMockImplementation()!;
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/queue/durable-job-1-1/preview") {
-        return Promise.resolve({ image: btoa("latent-png"), step: 2, total: 8 });
+        return Promise.resolve({
+          preview_image: btoa("latent-png"),
+          step: 2,
+          total: 8,
+          stage: "Denoising",
+          updated_at_ms: 1,
+        });
       }
       return base(callTarget, path, init);
     });

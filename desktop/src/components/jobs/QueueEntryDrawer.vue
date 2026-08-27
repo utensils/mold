@@ -9,11 +9,11 @@
 import { onMounted, onUnmounted } from "vue";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import type { QueueEntryDetailModel } from "@studio/lib/queueEntryDetail";
-import type { QueueJobPreview } from "@studio/api/generationSelection";
+import type { QueueJobProgress } from "@studio/api/generationSelection";
 
 defineProps<{
   model: QueueEntryDetailModel;
-  preview?: QueueJobPreview | null;
+  preview?: QueueJobProgress | null;
   cancelling?: boolean;
   retrying?: boolean;
   error?: string | null;

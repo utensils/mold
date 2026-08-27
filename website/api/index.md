@@ -70,6 +70,7 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/queue`                                  | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
 | `PATCH`  | `/api/queue/:id`                              | Update the preferred GPU lane and/or dispatch position for a queued job                                           |
 | `DELETE` | `/api/queue/:id`                              | Cancel a still-queued generation job                                                                              |
+| `GET`    | `/api/queue/:id/preview`                      | Latest folded progress snapshot for one live job (step, stage, weights, download, denoise preview)                |
 | `POST`   | `/api/queue/:id/retry`                        | Retry a held child using its complete fenced batch authority                                                      |
 | `POST`   | `/api/queue/held/sweep`                       | Purge held rows past `queue.held_retention_days` and release their staged media                                   |
 | `POST`   | `/api/generation-batches/sweep`               | Purge fully settled batch summaries past `queue.held_retention_days`                                              |
@@ -339,6 +340,35 @@ This is the state channel, not a progress channel. Per-step progress and
 denoise previews ride the single observer a job's own admission registered —
 `POST /api/generate/stream` is that observer for a singleton, and
 `GET /api/queue/{id}/preview` is the snapshot every other surface polls.
+
+### `GET /api/queue/{id}/preview`
+
+One live job's folded progress snapshot, or `null` before it has reported
+any. `404` means the row has left the queue.
+
+```json
+{
+  "step": 4,
+  "total": 20,
+  "stage": "Denoising",
+  "weight_load": { "bytes_loaded": 1, "bytes_total": 2, "component": "transformer" },
+  "download": {
+    "filename": "t5xxl_fp16.safetensors",
+    "file_index": 1,
+    "total_files": 3,
+    "bytes_downloaded": 10,
+    "bytes_total": 100
+  },
+  "queue_position": 0,
+  "preview_image": "<base64 PNG>",
+  "updated_at_ms": 1756200000000
+}
+```
+
+Every field except `updated_at_ms` is omitted until the job reports it. In
+particular `preview_image` is absent for the whole render on a host started
+with `MOLD_STEP_PREVIEW=0`, while `step`, `total` and `stage` still advance —
+so read the counter from those fields rather than from the image.
 
 ### Child revisions
 

@@ -78,8 +78,6 @@ export interface JobProgress {
   stage: string;
   step: number | null;
   totalSteps: number | null;
-  weightBytesLoaded: number | null;
-  weightBytesTotal: number | null;
   queuePosition: number | null;
   gpu: number | null;
   elapsedMs: number | null;
@@ -245,8 +243,6 @@ function emptyProgress(): JobProgress {
     stage: "Starting",
     step: null,
     totalSteps: null,
-    weightBytesLoaded: null,
-    weightBytesTotal: null,
     queuePosition: null,
     gpu: null,
     elapsedMs: null,
@@ -1393,11 +1389,13 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
         job.id,
         routeApiTarget(previewRoute),
         lifecycle.authority.jobId,
-        (preview) => {
+        (progress) => {
           if (job.state !== "running") return;
-          job.previewUrl = previewDataUrl(preview);
-          job.progress.step = preview.step;
-          job.progress.totalSteps = preview.total;
+          const url = previewDataUrl(progress);
+          if (url) job.previewUrl = url;
+          if (progress.step !== null) job.progress.step = progress.step;
+          if (progress.total !== null) job.progress.totalSteps = progress.total;
+          if (progress.stage) job.progress.stage = progress.stage;
           job.lastProgressAt = Date.now();
         },
       );

@@ -203,10 +203,11 @@ pub async fn run_generation(
     let base_seed = params.seed;
 
     // Batch N goes through `POST /api/generation-batches`, matching the CLI.
-    // A singleton keeps the `/api/generate/stream` facade, which is what feeds
-    // `SseProgressEvent::Preview` into the centered fixed-protocol preview sink
-    // CLAUDE.md protects by name — the batch path carries no preview frames,
-    // only `Info` strings. Both are the same durable admission underneath.
+    // A singleton keeps the `/api/generate/stream` facade. Both feed the same
+    // `SseProgressEvent::Preview` frames into the centered fixed-protocol
+    // preview sink CLAUDE.md protects by name: the batch path polls each
+    // running child's progress snapshot and unfolds it into those events.
+    // Both are the same durable admission underneath.
     if batch > 1 && params.inference_mode != InferenceMode::Local {
         let effective_url = params.host.clone().or_else(|| server_url.clone());
         if let Some(url) = effective_url {
@@ -740,7 +741,24 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
         String,
         GenerationBatchChildState,
     >::new());
+    // Unfolds each polled progress snapshot back into the same
+    // `SseProgressEvent`s the singleton stream delivers, so the protected
+    // centered denoise preview and the step counter work for a batch too.
+    let progress = std::sync::Mutex::new(mold_core::queue_progress::ProgressEventStream::new());
     let observer = |event: mold_core::durable_generation::CanonicalGenerationEvent| match event {
+        mold_core::durable_generation::CanonicalGenerationEvent::Progress {
+            job_id,
+            progress: snapshot,
+            ..
+        } => {
+            let events = progress
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .events(&job_id, &snapshot);
+            for event in events {
+                let _ = input.tx.send(BackgroundEvent::Progress(event));
+            }
+        }
         mold_core::durable_generation::CanonicalGenerationEvent::Admitted {
             status,
             request_offset,

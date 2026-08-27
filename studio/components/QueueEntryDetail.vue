@@ -15,7 +15,13 @@ const props = withDefaults(
   defineProps<{
     model: QueueEntryDetailModel;
     /** Live denoise snapshot for a running row, when the host emits one. */
-    preview?: { image: string; step: number; total: number } | null;
+    /** The host's folded progress snapshot: a denoise image is optional,
+     * and a host with previews disabled still reports the step counter. */
+    preview?: {
+      preview_image: string | null;
+      step: number | null;
+      total: number | null;
+    } | null;
     cancelling?: boolean;
     retrying?: boolean;
     /** Failure from the last action, shown inline and never as a toast. */
@@ -93,12 +99,18 @@ async function copyDetail(): Promise<void> {
 
     <div class="qed__body">
       <figure
-        v-if="preview"
+        v-if="preview && (preview.preview_image || preview.step !== null)"
         class="qed__preview"
         data-test="queue-detail-preview"
       >
-        <img :src="preview.image" alt="Latest denoise step for this job" />
-        <figcaption>Step {{ preview.step }} of {{ preview.total }}</figcaption>
+        <img
+          v-if="preview.preview_image"
+          :src="`data:image/png;base64,${preview.preview_image}`"
+          alt="Latest denoise step for this job"
+        />
+        <figcaption v-if="preview.step !== null && preview.total !== null">
+          Step {{ preview.step }} of {{ preview.total }}
+        </figcaption>
       </figure>
 
       <p

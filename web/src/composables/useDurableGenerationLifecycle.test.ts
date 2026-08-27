@@ -919,8 +919,6 @@ describe("web durable generation lifecycle", () => {
         stage: "Queued",
         step: null,
         totalSteps: null,
-        weightBytesLoaded: null,
-        weightBytesTotal: null,
         queuePosition: null,
         gpu: null,
         elapsedMs: null,
@@ -970,8 +968,6 @@ describe("web durable generation lifecycle", () => {
         stage: "Developing",
         step: null,
         totalSteps: null,
-        weightBytesLoaded: null,
-        weightBytesTotal: null,
         queuePosition: null,
         gpu: null,
         elapsedMs: null,
@@ -1496,10 +1492,29 @@ describe("web durable generation lifecycle", () => {
     expect(previewWatches).toHaveLength(1);
     expect(previewWatches[0]!.jobId).toBe(job.serverId);
 
-    previewWatches[0]!.onPreview({ image: "QUJD", step: 3, total: 8 });
+    previewWatches[0]!.onPreview({
+      preview_image: "QUJD",
+      step: 3,
+      total: 8,
+      stage: "Denoising",
+      queue_position: null,
+    });
     expect(job.previewUrl).toBe("data:image/png;base64,QUJD");
     expect(job.progress.step).toBe(3);
     expect(job.progress.totalSteps).toBe(8);
+    expect(job.progress.stage).toBe("Denoising");
+
+    // A host rendering with `MOLD_STEP_PREVIEW=0` still moves the counter,
+    // and never blanks the last image it did send.
+    previewWatches[0]!.onPreview({
+      preview_image: null,
+      step: 4,
+      total: 8,
+      stage: "Denoising",
+      queue_position: null,
+    });
+    expect(job.previewUrl).toBe("data:image/png;base64,QUJD");
+    expect(job.progress.step).toBe(4);
 
     // A second running snapshot re-asks for the same server job: no new poller.
     await __testing__.reconcileDurableHost(route.hostId);

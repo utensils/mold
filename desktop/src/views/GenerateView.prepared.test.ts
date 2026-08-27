@@ -211,7 +211,13 @@ describe("GenerateView prepared expansion batches", () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) =>
       Promise.resolve(
         path === "/api/queue/remote-print/preview"
-          ? { image: "UFJFVklFVw==", step: 8, total: 20 }
+          ? {
+              preview_image: "UFJFVklFVw==",
+              step: 8,
+              total: 20,
+              stage: "Denoising",
+              updated_at_ms: 1,
+            }
           : path === "/api/models"
             ? [model]
             : [],

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 #[cfg(test)]
 use crate::commands::durable_generation::admit_for_test;
-use crate::commands::durable_generation::canonical_generation;
+use crate::commands::durable_generation::canonical_generation_observed;
 use crate::commands::h3::ReferenceUpload;
 use crate::control::{stream_server_pull, CliContext};
 use crate::errors::RemoteInferenceError;
@@ -502,7 +502,34 @@ async fn run_canonical_remote_batch(
     preview: bool,
 ) -> Result<()> {
     let total = u32::try_from(requests.len()).context("batch is too large")?;
-    let report = canonical_generation(client, requests).await?;
+    // Batch children carry no progress frames of their own; the durable
+    // observer polls each running child's snapshot and unfolds it into the
+    // exact events `render_progress` already draws for a singleton, so a
+    // `--batch N` run shows the same bars instead of nothing for minutes.
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let render = tokio::spawn(render_progress(progress_rx));
+    let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let forward = tokio::spawn(async move {
+        let mut stream = mold_core::queue_progress::ProgressEventStream::new();
+        while let Some(event) = event_rx.recv().await {
+            let mold_core::durable_generation::CanonicalGenerationEvent::Progress {
+                job_id,
+                progress,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            for event in stream.events(&job_id, &progress) {
+                let _ = progress_tx.send(event);
+            }
+        }
+    });
+    let report = canonical_generation_observed(client, requests, Some(&events)).await;
+    drop(events);
+    let _ = forward.await;
+    let _ = render.await;
+    let report = report?;
     let admitted_client_ids = report.admitted_client_ids;
     let mut failures = report.orchestration_failures.clone();
     let mut outcomes = report.outcomes;

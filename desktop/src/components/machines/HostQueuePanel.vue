@@ -16,7 +16,7 @@ import { useGenerationStore, jobPhase, jobProgress, type Job } from "../../store
 import { type HostView } from "../../stores/hosts";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
-import { watchSelectedQueuePreview, type QueueJobPreview } from "@studio/api/generationSelection";
+import { watchSelectedQueuePreview, type QueueJobProgress } from "@studio/api/generationSelection";
 import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../../stores/jobs";
 import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -228,7 +228,7 @@ async function togglePause() {
 // ── Row info drawer (everything the host says about one queued job) ───────
 const queueDetail = ref<EnrichedQueueEntry | null>(null);
 const detailError = ref<string | null>(null);
-const detailPreview = ref<QueueJobPreview | null>(null);
+const detailPreview = ref<QueueJobProgress | null>(null);
 const detailNowMs = ref(Date.now());
 let stopPreview: (() => void) | null = null;
 let nowTimer: ReturnType<typeof setInterval> | null = null;

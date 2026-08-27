@@ -71,8 +71,26 @@ describe("OwnPrintPreviewWatchers", () => {
   });
 
   it("renders a preview as a PNG data URL", () => {
-    expect(previewDataUrl({ image: "QUJD", step: 3, total: 8 })).toBe(
-      "data:image/png;base64,QUJD",
-    );
+    expect(
+      previewDataUrl({
+        preview_image: "QUJD",
+        step: 3,
+        total: 8,
+        stage: null,
+        queue_position: null,
+      }),
+    ).toBe("data:image/png;base64,QUJD");
+  });
+
+  it("has no data URL for a host rendering without previews", () => {
+    expect(
+      previewDataUrl({
+        preview_image: null,
+        step: 3,
+        total: 8,
+        stage: "Denoising",
+        queue_position: null,
+      }),
+    ).toBeNull();
   });
 });

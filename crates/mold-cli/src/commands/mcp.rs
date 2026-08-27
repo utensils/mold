@@ -1109,6 +1109,10 @@ struct AsyncGenerationJob {
     started_at_ms: Option<u64>,
     finished_at_ms: Option<u64>,
     latest_progress: Option<SseProgressEvent>,
+    /// Baseline for unfolding the next polled progress snapshot. Never
+    /// serialized: it holds a denoise preview image, which has no MCP
+    /// consumer and would put a base64 PNG in every status response.
+    progress_snapshot: Option<mold_core::queue_progress::QueueJobProgress>,
     error: Option<String>,
     result: Option<GenerateResponse>,
     canonical_child: Option<GenerationBatchChild>,
@@ -1133,6 +1137,7 @@ impl AsyncGenerationJob {
             started_at_ms: None,
             finished_at_ms: None,
             latest_progress: None,
+            progress_snapshot: None,
             error: None,
             result: None,
             canonical_child: None,
@@ -1258,6 +1263,22 @@ impl AsyncJobRegistry {
                 job.updated_at_ms = now_ms();
                 return;
             }
+            CanonicalGenerationEvent::Progress { progress, .. } => {
+                let events = progress.events_since(job.progress_snapshot.as_ref());
+                job.progress_snapshot = Some(progress);
+                // The newest line that is not a preview: an MCP client reads
+                // `progress_summary`, and the preview's payload is an image
+                // it has nowhere to put.
+                if let Some(event) = events
+                    .into_iter()
+                    .rev()
+                    .find(|event| !matches!(event, SseProgressEvent::Preview { .. }))
+                {
+                    job.latest_progress = Some(event);
+                }
+                job.updated_at_ms = now_ms();
+                return;
+            }
         };
         let Some(child) = status.children.first() else {
             job.error = Some("canonical generation status returned no child".into());
@@ -1326,6 +1347,7 @@ impl AsyncJobRegistry {
             job.started_at_ms = None;
             job.finished_at_ms = None;
             job.latest_progress = None;
+            job.progress_snapshot = None;
             job.error = None;
             job.result = None;
             job.canonical_child = None;

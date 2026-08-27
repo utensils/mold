@@ -470,7 +470,13 @@ describe("CreatePage layout and behavior", () => {
     enterSequenceMode();
     promptHistoryApiMock.mockImplementation(async (...args: unknown[]) =>
       args[1] === "/api/queue/remote-print/preview"
-        ? { image: "UFJFVklFVw==", step: 8, total: 20 }
+        ? {
+            preview_image: "UFJFVklFVw==",
+            step: 8,
+            total: 20,
+            stage: "Denoising",
+            updated_at_ms: 1,
+          }
         : { entries: [] },
     );
     setGenerationHandoff({
@@ -556,8 +562,6 @@ describe("CreatePage layout and behavior", () => {
           stage: "complete",
           step: 25,
           totalSteps: 25,
-          weightBytesLoaded: null,
-          weightBytesTotal: null,
           queuePosition: null,
           gpu: null,
           elapsedMs: 11_800,
@@ -615,8 +619,6 @@ describe("CreatePage layout and behavior", () => {
           stage: "Loading model",
           step: null,
           totalSteps: null,
-          weightBytesLoaded: null,
-          weightBytesTotal: null,
           queuePosition: null,
           gpu: null,
           elapsedMs: null,
@@ -2649,8 +2651,6 @@ describe("CreatePage layout and behavior", () => {
           stage: "Queued",
           step: null,
           totalSteps: null,
-          weightBytesLoaded: null,
-          weightBytesTotal: null,
           queuePosition: null,
           gpu: null,
           elapsedMs: null,
@@ -3265,8 +3265,6 @@ describe("CreatePage layout and behavior", () => {
         stage: "Queued",
         step: null,
         totalSteps: null,
-        weightBytesLoaded: null,
-        weightBytesTotal: null,
         queuePosition: null,
         gpu: null,
         elapsedMs: null,
@@ -3324,8 +3322,6 @@ describe("CreatePage layout and behavior", () => {
         stage: "Queued",
         step: null,
         totalSteps: null,
-        weightBytesLoaded: null,
-        weightBytesTotal: null,
         queuePosition: null,
         gpu: null,
         elapsedMs: null,

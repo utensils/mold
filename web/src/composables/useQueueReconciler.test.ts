@@ -39,8 +39,6 @@ function makeJob(overrides: Partial<Job> = {}): Job {
       stage: "Denoising",
       step: 1,
       totalSteps: 10,
-      weightBytesLoaded: null,
-      weightBytesTotal: null,
       queuePosition: null,
       gpu: null,
       elapsedMs: 0,

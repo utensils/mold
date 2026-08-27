@@ -6122,17 +6122,17 @@ impl QueueListingResponse {
     tag = "queue",
     params(("id" = String, Path, description = "Server generation job ID")),
     responses(
-        (status = 200, description = "Latest live denoise preview, or null before the first preview", body = Option<crate::job_registry::QueueJobPreview>),
+        (status = 200, description = "Latest live progress snapshot, or null before the first progress event", body = Option<mold_core::queue_progress::QueueJobProgress>),
         (status = 404, description = "Job is no longer live"),
     )
 )]
 async fn get_queue_job_preview(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Option<crate::job_registry::QueueJobPreview>>, ApiError> {
+) -> Result<Json<Option<mold_core::queue_progress::QueueJobProgress>>, ApiError> {
     state
         .job_registry
-        .preview_snapshot(&id)
+        .progress_snapshot(&id)
         .map(Json)
         .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} is no longer live")))
 }

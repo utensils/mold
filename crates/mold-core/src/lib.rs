@@ -36,6 +36,7 @@ pub mod organization;
 pub mod print_title;
 pub mod prompt_text;
 pub mod pulid_assets;
+pub mod queue_progress;
 pub mod reference_upload;
 pub mod removal;
 pub mod runpod;

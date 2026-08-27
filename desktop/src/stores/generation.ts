@@ -869,8 +869,8 @@ export const useGenerationStore = defineStore("generation", {
           hostLabel: record.hostLabel,
           now,
         });
-        // The durable child carries no denoise preview or step count; poll
-        // the host's `/api/queue/{id}/preview` for our own running print
+        // The durable child carries no progress frames of its own; poll the
+        // host's `/api/queue/{id}/preview` snapshot for our own running print
         // exactly as an inspected queue row does, and stop when it leaves
         // `running`.
         const previewTarget = targets.get(job.clientId) ?? null;
@@ -879,11 +879,12 @@ export const useGenerationStore = defineStore("generation", {
             String(job.clientId),
             previewTarget,
             lifecycle.authority.jobId,
-            (preview) => {
+            (progress) => {
               if (jobHasSettled(job)) return;
-              job.previewUrl = previewDataUrl(preview);
-              job.step = preview.step;
-              job.total = preview.total;
+              const url = previewDataUrl(progress);
+              if (url) job.previewUrl = url;
+              if (progress.step !== null) job.step = progress.step;
+              if (progress.total !== null) job.total = progress.total;
             },
           );
         } else {

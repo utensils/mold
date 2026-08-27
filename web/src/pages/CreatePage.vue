@@ -139,7 +139,7 @@ import { apiJsonTo } from "@studio/api/client";
 import {
   settingsRestoreMetadata,
   watchSelectedQueuePreview,
-  type QueueJobPreview,
+  type QueueJobProgress,
   type SelectedQueuePreviewSource,
 } from "@studio/api/generationSelection";
 import {
@@ -2629,7 +2629,7 @@ const selectedQueueRender = ref<{
   source: SelectedQueuePreviewSource;
   width: number;
   height: number;
-  preview: QueueJobPreview | null;
+  preview: QueueJobProgress | null;
 } | null>(null);
 let stopSelectedQueuePreview: (() => void) | null = null;
 
@@ -2847,13 +2847,9 @@ const advCount = computed(() =>
 // ── Canvas state ──────────────────────────────────────────────────────
 function percentFor(job: Job): number | null {
   const p = job.progress;
-  if (p.step !== null && p.totalSteps) {
-    return Math.round((p.step / p.totalSteps) * 100);
-  }
-  if (p.weightBytesLoaded !== null && p.weightBytesTotal) {
-    return Math.round((p.weightBytesLoaded / p.weightBytesTotal) * 100);
-  }
-  return null;
+  return p.step !== null && p.totalSteps
+    ? Math.round((p.step / p.totalSteps) * 100)
+    : null;
 }
 
 // The job the canvas develops: the running job with a live preview (the one
@@ -2918,23 +2914,26 @@ const canvasMode = computed<
   return "empty";
 });
 
-const genProgress = computed(() =>
-  selectedQueueRender.value?.preview
-    ? Math.round(
-        (selectedQueueRender.value.preview.step /
-          selectedQueueRender.value.preview.total) *
-          100,
-      )
-    : runningJob.value
-      ? (percentFor(runningJob.value) ?? 0)
-      : 0,
-);
+/** The step counter a polled snapshot reports, once it has one. */
+function progressSteps(
+  progress: QueueJobProgress | null | undefined,
+): { step: number; total: number } | null {
+  return progress && progress.step !== null && progress.total !== null
+    ? { step: progress.step, total: progress.total }
+    : null;
+}
+
+const genProgress = computed(() => {
+  const steps = progressSteps(selectedQueueRender.value?.preview);
+  if (steps) return Math.round((steps.step / steps.total) * 100);
+  return runningJob.value ? (percentFor(runningJob.value) ?? 0) : 0;
+});
 const genStage = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
-    return selected.preview
-      ? `Developing ${selected.preview.step} / ${selected.preview.total}`
-      : "Preparing selected print";
+    const steps = progressSteps(selected.preview);
+    if (steps) return `Developing ${steps.step} / ${steps.total}`;
+    return selected.preview?.stage ?? "Preparing selected print";
   }
   const j = runningJob.value;
   if (!j) return "";
@@ -5697,8 +5696,8 @@ onBeforeUnmount(() => {
             :progress="genProgress"
             :stage="genStage"
             :preview-src="
-              selectedQueueRender?.preview
-                ? `data:image/png;base64,${selectedQueueRender.preview.image}`
+              selectedQueueRender?.preview?.preview_image
+                ? `data:image/png;base64,${selectedQueueRender.preview.preview_image}`
                 : (runningJob?.previewUrl ?? undefined)
             "
             :progress-fraction="genProgress / 100"

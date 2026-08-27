@@ -35,7 +35,7 @@ import {
 import {
   settingsRestoreMetadata,
   watchSelectedQueuePreview,
-  type QueueJobPreview,
+  type QueueJobProgress,
 } from "@studio/api/generationSelection";
 import { setGenerationHandoff } from "../composables/useGenerationHandoff";
 import {
@@ -566,7 +566,7 @@ async function onCancel(id: string) {
 // ── Queue row detail ─────────────────────────────────────────────────────
 const inspectedId = ref<string | null>(null);
 const inspectError = ref<string | null>(null);
-const inspectPreview = ref<QueueJobPreview | null>(null);
+const inspectPreview = ref<QueueJobProgress | null>(null);
 const inspectNowMs = ref(Date.now());
 let stopInspectPreview: (() => void) | null = null;
 let inspectTimer: ReturnType<typeof setInterval> | null = null;

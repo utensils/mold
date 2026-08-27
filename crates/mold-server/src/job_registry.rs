@@ -16,6 +16,8 @@
 //! actively running on some worker.
 
 use crate::events::EventBroadcaster;
+use mold_core::queue_progress::QueueJobProgress;
+use mold_core::types::SseProgressEvent;
 use mold_core::ServerEvent;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -135,9 +137,9 @@ struct EntryInternal {
     target_gpu: Option<usize>,
     seed_pinned: Option<bool>,
     metadata: Option<Box<mold_core::OutputMetadata>>,
-    /// Latest denoise preview for this live row. It is served separately so
+    /// Latest folded progress for this live row. It is served separately so
     /// `/api/queue` polling never carries image payloads.
-    preview: Option<QueueJobPreview>,
+    progress: Option<QueueJobProgress>,
     /// Cancellation signal for `DELETE /api/queue/:id`. The submitting
     /// handler holds the clone returned by `register*()` and selects on
     /// `notified()` alongside the job's result channel; `cancel_queued`
@@ -217,13 +219,6 @@ pub struct JobRegistry {
 
 /// Cheap-cloneable handle. Workers and routes pass this around by value.
 pub type SharedJobRegistry = Arc<JobRegistry>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
-pub struct QueueJobPreview {
-    pub image: String,
-    pub step: usize,
-    pub total: usize,
-}
 
 impl JobRegistry {
     pub fn new() -> SharedJobRegistry {
@@ -343,7 +338,7 @@ impl JobRegistry {
                     target_gpu,
                     seed_pinned,
                     metadata,
-                    preview: None,
+                    progress: None,
                     cancel: cancel.clone(),
                     running_cancel: None,
                     cancel_requested: false,
@@ -759,10 +754,13 @@ impl JobRegistry {
         })
     }
 
-    /// Replace the selected job's ephemeral preview. A late callback cannot
-    /// resurrect terminal work because only a currently-live registry row is
-    /// allowed to publish.
-    pub fn record_preview(&self, id: &str, image: String, step: usize, total: usize) {
+    /// Fold one progress event into the selected job's live snapshot. A late
+    /// callback cannot resurrect terminal work because only a currently-live
+    /// registry row is allowed to publish.
+    ///
+    /// This is fed from the same `progress_tx` fan-out the attached observer
+    /// reads, so a durable child and an attached stream describe one render.
+    pub fn record_progress(&self, id: &str, event: &SseProgressEvent) {
         let mut entries = self
             .inner
             .write()
@@ -770,18 +768,21 @@ impl JobRegistry {
         let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
             return;
         };
-        entry.preview = Some(QueueJobPreview { image, step, total });
+        entry
+            .progress
+            .get_or_insert_with(QueueJobProgress::default)
+            .apply(event, mold_core::time::now_epoch_ms_u64());
     }
 
     /// The outer option is live-row existence; the inner option is whether
-    /// that live row has emitted a denoise preview yet.
-    pub fn preview_snapshot(&self, id: &str) -> Option<Option<QueueJobPreview>> {
+    /// that live row has reported any progress yet.
+    pub fn progress_snapshot(&self, id: &str) -> Option<Option<QueueJobProgress>> {
         self.inner
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .iter()
             .find(|entry| entry.id == id)
-            .map(|entry| entry.preview.clone())
+            .map(|entry| entry.progress.clone())
     }
 
     /// Drop the entry — call once on every terminal path (success, error,
@@ -1216,22 +1217,64 @@ mod tests {
     }
 
     #[test]
-    fn preview_exists_only_for_the_live_job() {
+    fn progress_exists_only_for_the_live_job() {
         let reg = JobRegistry::new();
         reg.register("a", "flux-dev:fp16");
-        reg.record_preview("a", "UFJFVklFVw==".into(), 3, 20);
-        assert_eq!(
-            reg.preview_snapshot("a"),
-            Some(Some(QueueJobPreview {
+        reg.record_progress(
+            "a",
+            &SseProgressEvent::Preview {
                 image: "UFJFVklFVw==".into(),
                 step: 3,
                 total: 20,
-            }))
+            },
         );
+        let progress = reg
+            .progress_snapshot("a")
+            .expect("live row")
+            .expect("progress recorded");
+        assert_eq!(progress.preview_image.as_deref(), Some("UFJFVklFVw=="));
+        assert_eq!(progress.step, Some(3));
+        assert_eq!(progress.total, Some(20));
         reg.remove("a");
-        assert_eq!(reg.preview_snapshot("a"), None);
-        reg.record_preview("a", "TEFURQ==".into(), 20, 20);
-        assert_eq!(reg.preview_snapshot("a"), None);
+        assert_eq!(reg.progress_snapshot("a"), None);
+        reg.record_progress(
+            "a",
+            &SseProgressEvent::Preview {
+                image: "TEFURQ==".into(),
+                step: 20,
+                total: 20,
+            },
+        );
+        assert_eq!(reg.progress_snapshot("a"), None);
+    }
+
+    #[test]
+    fn a_step_counter_is_recorded_with_previews_disabled() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.record_progress(
+            "a",
+            &SseProgressEvent::StageStart {
+                name: "Denoising".into(),
+            },
+        );
+        reg.record_progress(
+            "a",
+            &SseProgressEvent::DenoiseStep {
+                step: 4,
+                total: 8,
+                elapsed_ms: 90,
+            },
+        );
+        let progress = reg
+            .progress_snapshot("a")
+            .expect("live row")
+            .expect("progress recorded");
+        assert_eq!(progress.step, Some(4));
+        assert_eq!(progress.total, Some(8));
+        assert_eq!(progress.stage.as_deref(), Some("Denoising"));
+        assert_eq!(progress.preview_image, None);
+        assert!(progress.updated_at_ms > 0);
     }
 
     #[test]
@@ -1467,7 +1510,14 @@ mod tests {
             Some(true),
             Some(metadata),
         );
-        reg.record_preview("queued", "preview".repeat(8 * 1024), 3, 20);
+        reg.record_progress(
+            "queued",
+            &SseProgressEvent::Preview {
+                image: "preview".repeat(8 * 1024),
+                step: 3,
+                total: 20,
+            },
+        );
         reg.register("running", "sdxl:q8");
         reg.mark_running("running", Some(1));
 
@@ -1521,7 +1571,7 @@ mod tests {
         );
         assert_eq!(reg.scheduler_lifecycle("missing"), None);
         assert!(full.entries[0].metadata.is_some());
-        assert!(reg.preview_snapshot("queued").flatten().is_some());
+        assert!(reg.progress_snapshot("queued").flatten().is_some());
     }
 
     #[test]
@@ -1548,7 +1598,14 @@ mod tests {
                     Some(index % 2 == 0),
                     Some(metadata),
                 );
-                reg.record_preview(&id, "p".repeat(payload_bytes), 1, 2);
+                reg.record_progress(
+                    &id,
+                    &SseProgressEvent::Preview {
+                        image: "p".repeat(payload_bytes),
+                        step: 1,
+                        total: 2,
+                    },
+                );
                 if index % 5 == 0 {
                     reg.mark_running(&id, Some(index % 3));
                 }

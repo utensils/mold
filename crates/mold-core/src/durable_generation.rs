@@ -52,6 +52,20 @@ pub enum CanonicalGenerationEvent {
         authority: GenerationBatchAuthority,
         error: String,
     },
+    /// Live progress for one running child, polled from the host's own
+    /// `GET /api/queue/{id}/preview` snapshot.
+    ///
+    /// A durable child publishes no progress frames of its own, so this is
+    /// the only per-step signal any surface gets. It carries the whole
+    /// snapshot rather than a rendered line: consumers unfold it back into
+    /// [`SseProgressEvent`](crate::types::SseProgressEvent)s through
+    /// [`ProgressEventStream`](crate::queue_progress::ProgressEventStream)
+    /// and render them with the code the attached path already has.
+    Progress {
+        job_id: String,
+        request_offset: u32,
+        progress: crate::queue_progress::QueueJobProgress,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -131,6 +145,49 @@ fn observe(observer: Option<&CanonicalGenerationObserver<'_>>, event: CanonicalG
     }
 }
 
+/// How often a running child's progress snapshot is read, and how many of
+/// those reads happen per batch-listing reconciliation.
+const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const PROGRESS_POLLS_PER_RECONCILE: usize = 2;
+
+/// Read each running child's live progress and report what changed.
+///
+/// A failed read is silence, never an error: the row leaving the queue is the
+/// ordinary end of a render, and a transient failure is answered by the next
+/// poll 500 ms later. Progress is advisory — the batch listing remains the
+/// only authority for what a child actually did.
+async fn poll_running_progress(
+    client: &MoldClient,
+    status: &GenerationBatchStatus,
+    request_offset: u32,
+    seen: &mut std::collections::HashMap<String, crate::queue_progress::QueueJobProgress>,
+    observer: Option<&CanonicalGenerationObserver<'_>>,
+) {
+    if observer.is_none() {
+        return;
+    }
+    for child in &status.children {
+        if child.state != GenerationBatchChildState::Running {
+            continue;
+        }
+        let Ok(Some(progress)) = client.queue_job_progress(&child.job_id).await else {
+            continue;
+        };
+        if seen.get(&child.job_id) == Some(&progress) {
+            continue;
+        }
+        seen.insert(child.job_id.clone(), progress.clone());
+        observe(
+            observer,
+            CanonicalGenerationEvent::Progress {
+                job_id: child.job_id.clone(),
+                request_offset,
+                progress,
+            },
+        );
+    }
+}
+
 async fn wait_for_batch(
     client: &MoldClient,
     mut status: GenerationBatchStatus,
@@ -141,6 +198,10 @@ async fn wait_for_batch(
     authority
         .validate_status(&status)
         .map_err(anyhow::Error::msg)?;
+    let mut progress_seen: std::collections::HashMap<
+        String,
+        crate::queue_progress::QueueJobProgress,
+    > = std::collections::HashMap::new();
     loop {
         if status
             .children
@@ -149,7 +210,20 @@ async fn wait_for_batch(
         {
             return Ok(status);
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Poll every running child's progress snapshot twice per batch read.
+        // 500 ms is the cadence the browser surfaces already use, and it
+        // keeps the batch listing on its original one-second beat.
+        for _ in 0..PROGRESS_POLLS_PER_RECONCILE {
+            tokio::time::sleep(PROGRESS_POLL_INTERVAL).await;
+            poll_running_progress(
+                client,
+                &status,
+                request_offset,
+                &mut progress_seen,
+                observer,
+            )
+            .await;
+        }
         // The OUTER settle loop is deliberately unbounded — a queued job may
         // legitimately wait hours. Only this transient-error retry is bounded,
         // so a host that has genuinely gone away reports it instead of spinning
@@ -817,6 +891,103 @@ mod tests {
             report.failures[0].contains("returned client id"),
             "unexpected failure: {}",
             report.failures[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_running_child_forwards_its_polled_progress_to_the_observer() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue/job-1/preview"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "step": 4,
+                "total": 8,
+                "stage": "Denoising",
+                "updated_at_ms": 1_700_000_000_000u64
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": "accepted-id",
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "job-1",
+                    "state": "complete",
+                    "result": {"filename": "print.png"}
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let initial = GenerationBatchStatus {
+            id: "batch-1".into(),
+            client_batch_id: "accepted-id".into(),
+            instance_id: "instance-1".into(),
+            durable: true,
+            children: vec![GenerationBatchChild {
+                index: 1,
+                job_id: "job-1".into(),
+                state: GenerationBatchChildState::Running,
+                error: None,
+                error_code: None,
+                retryable: None,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                revision: 1,
+                completed_at_ms: None,
+                terminal_error: None,
+                result: None,
+            }],
+        };
+        let authority = GenerationBatchAuthority::from_admission(&initial, "accepted-id").unwrap();
+        let seen: Arc<Mutex<Vec<CanonicalGenerationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        let observer = move |event: CanonicalGenerationEvent| {
+            recorder
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(event);
+        };
+
+        wait_for_batch(
+            &MoldClient::new(&server.uri()),
+            initial,
+            &authority,
+            7,
+            Some(&observer),
+        )
+        .await
+        .unwrap();
+
+        let events = seen.lock().unwrap_or_else(|poison| poison.into_inner());
+        let progress = events
+            .iter()
+            .find_map(|event| match event {
+                CanonicalGenerationEvent::Progress {
+                    job_id,
+                    request_offset,
+                    progress,
+                } => Some((job_id.clone(), *request_offset, progress.clone())),
+                _ => None,
+            })
+            .expect("a running child reports progress");
+        assert_eq!(progress.0, "job-1");
+        assert_eq!(progress.1, 7);
+        assert_eq!(progress.2.step, Some(4));
+        assert_eq!(progress.2.total, Some(8));
+        assert_eq!(progress.2.stage.as_deref(), Some("Denoising"));
+        // The same snapshot is polled twice per reconcile; only the change
+        // is reported.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, CanonicalGenerationEvent::Progress { .. }))
+                .count(),
+            1
         );
     }
 

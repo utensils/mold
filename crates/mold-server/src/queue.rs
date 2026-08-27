@@ -35,9 +35,7 @@ fn forward_generation_progress(
     event: mold_inference::ProgressEvent,
 ) {
     let event = progress_to_sse(event);
-    if let SseProgressEvent::Preview { image, step, total } = &event {
-        registry.record_preview(job_id, image.clone(), *step, *total);
-    }
+    registry.record_progress(job_id, &event);
     if let Some(tx) = tx {
         let _ = tx.send(SseMessage::Progress(event));
     }

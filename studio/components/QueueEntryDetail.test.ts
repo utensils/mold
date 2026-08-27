@@ -139,12 +139,31 @@ describe("QueueEntryDetail", () => {
     const wrapper = mount(QueueEntryDetail, {
       props: {
         model: model({ state: "running" }),
-        preview: { image: "data:image/png;base64,AAA", step: 7, total: 28 },
+        preview: { preview_image: "AAA", step: 7, total: 28 },
       },
     });
 
     expect(wrapper.get('[data-test="queue-detail-preview"]').text()).toContain(
       "Step 7 of 28",
+    );
+    expect(wrapper.get('[data-test="queue-detail-preview"] img').attributes("src")).toBe(
+      "data:image/png;base64,AAA",
+    );
+  });
+
+  it("keeps the step counter on a host that renders without previews", () => {
+    const wrapper = mount(QueueEntryDetail, {
+      props: {
+        model: model({ state: "running" }),
+        preview: { preview_image: null, step: 7, total: 28 },
+      },
+    });
+
+    expect(wrapper.get('[data-test="queue-detail-preview"]').text()).toContain(
+      "Step 7 of 28",
+    );
+    expect(wrapper.find('[data-test="queue-detail-preview"] img').exists()).toBe(
+      false,
     );
   });
 

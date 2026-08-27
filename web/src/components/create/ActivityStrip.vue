@@ -168,13 +168,9 @@ function sequenceStageLabel(vm: ActivityJobVM): string | null {
 
 function percentFor(job: Job): number | null {
   const p = job.progress;
-  if (p.step !== null && p.totalSteps) {
-    return Math.round((p.step / p.totalSteps) * 100);
-  }
-  if (p.weightBytesLoaded !== null && p.weightBytesTotal) {
-    return Math.round((p.weightBytesLoaded / p.weightBytesTotal) * 100);
-  }
-  return null;
+  return p.step !== null && p.totalSteps
+    ? Math.round((p.step / p.totalSteps) * 100)
+    : null;
 }
 
 function isFinalizing(job: Job): boolean {

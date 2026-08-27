@@ -29,7 +29,7 @@ import {
 } from "@studio/api/generationPlacement";
 import {
   watchSelectedQueuePreview,
-  type QueueJobPreview,
+  type QueueJobProgress,
   type SelectedQueuePreviewSource,
 } from "@studio/api/generationSelection";
 import CreateHeader from "../components/create/CreateHeader.vue";
@@ -859,7 +859,7 @@ const selectedQueueRender = ref<{
   width: number;
   height: number;
   model: string;
-  preview: QueueJobPreview | null;
+  preview: QueueJobProgress | null;
 } | null>(null);
 let stopSelectedQueuePreview: (() => void) | null = null;
 
@@ -2183,12 +2183,28 @@ const previewFrameStyle = computed(() => ({
   width: `min(100cqw, ${(100 * previewWidth.value) / previewHeight.value}cqh)`,
 }));
 
+/** Fraction of the selected print's denoise the host has reported, or null
+ * before it reports a step counter. */
+const selectedQueuePreviewFraction = computed(() => {
+  const preview = selectedQueueRender.value?.preview;
+  return preview && preview.step !== null && preview.total !== null
+    ? preview.step / preview.total
+    : null;
+});
+const selectedQueuePreviewSrc = computed(() =>
+  selectedQueueRender.value?.preview?.preview_image
+    ? `data:image/png;base64,${selectedQueueRender.value.preview.preview_image}`
+    : null,
+);
+
 const liveGenerationStatus = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
-    return selected.preview
-      ? `Developing ${selected.preview.step}/${selected.preview.total}`
-      : "Preparing selected print…";
+    const preview = selected.preview;
+    if (preview && preview.step !== null && preview.total !== null) {
+      return `Developing ${preview.step}/${preview.total}`;
+    }
+    return preview?.stage ? `${preview.stage}…` : "Preparing selected print…";
   }
   const j = job.value;
   if (!j || j.status === "complete" || j.status === "error") return "";
@@ -2202,9 +2218,11 @@ const edgeCode = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
     const name = modelDisplayNameForId(selected.model, installedModels.value);
-    const progress = selected.preview
-      ? `${selected.preview.step}/${selected.preview.total}`
-      : "waiting for preview";
+    const preview = selected.preview;
+    const progress =
+      preview && preview.step !== null && preview.total !== null
+        ? `${preview.step}/${preview.total}`
+        : (preview?.stage ?? "waiting for progress");
     return `${name} · ${progress}`;
   }
   const j = job.value;
@@ -4323,19 +4341,15 @@ onBeforeUnmount(() => {
                      over it, so the print literally develops on the canvas. -->
                 <img
                   v-if="
-                    selectedQueueRender?.preview ||
+                    selectedQueuePreviewSrc ||
                     (job && job.status !== 'complete' && job.previewUrl)
                   "
                   data-test="develop-preview"
-                  :src="
-                    selectedQueueRender?.preview
-                      ? `data:image/png;base64,${selectedQueueRender.preview.image}`
-                      : (job?.previewUrl ?? '')
-                  "
+                  :src="selectedQueuePreviewSrc ?? (job?.previewUrl ?? '')"
                   alt=""
                   class="absolute inset-0 h-full w-full object-contain"
                   :style="{
-                    filter: `blur(${Math.max(2, 14 - 12 * (selectedQueueRender?.preview ? selectedQueueRender.preview.step / selectedQueueRender.preview.total : job ? jobProgress(job) : 0))}px)`,
+                    filter: `blur(${Math.max(2, 14 - 12 * (selectedQueuePreviewFraction ?? (job ? jobProgress(job) : 0)))}px)`,
                   }"
                 />
                 <!-- The grain canvas paints edge-to-edge (temperature wash), so
@@ -4345,27 +4359,19 @@ onBeforeUnmount(() => {
                   v-if="selectedQueueRender || (job && job.status !== 'complete')"
                   :seed="job?.visualSeed ?? 'selected-queue-render'"
                   :progress="
-                    selectedQueueRender?.preview
-                      ? selectedQueueRender.preview.step / selectedQueueRender.preview.total
-                      : job
-                        ? jobProgress(job)
-                        : 0
+                    selectedQueuePreviewFraction ?? (job ? jobProgress(job) : 0)
                   "
                   :phase="job ? jobPhase(job) : 'developing'"
                   class="absolute inset-0"
                   :style="{
                     opacity:
-                      selectedQueueRender?.preview || job?.previewUrl
+                      selectedQueuePreviewSrc || job?.previewUrl
                         ? String(
                             Math.max(
                               0.18,
                               1 -
-                                (selectedQueueRender?.preview
-                                  ? selectedQueueRender.preview.step /
-                                    selectedQueueRender.preview.total
-                                  : job
-                                    ? jobProgress(job)
-                                    : 0) *
+                                (selectedQueuePreviewFraction ??
+                                  (job ? jobProgress(job) : 0)) *
                                   0.9,
                             ),
                           )
@@ -4378,7 +4384,7 @@ onBeforeUnmount(() => {
                      where the grain cannot obscure it. -->
                 <div
                   v-if="
-                    (selectedQueueRender && !selectedQueueRender.preview) ||
+                    (selectedQueueRender && !selectedQueuePreviewSrc) ||
                     (job && job.status !== 'complete' && !job.previewUrl)
                   "
                   data-test="develop-progress"
@@ -4386,9 +4392,8 @@ onBeforeUnmount(() => {
                 >
                   <ProgressRing
                     :value="
-                      selectedQueueRender?.preview
-                        ? (selectedQueueRender.preview.step / selectedQueueRender.preview.total) *
-                          100
+                      selectedQueuePreviewFraction !== null
+                        ? selectedQueuePreviewFraction * 100
                         : job
                           ? jobProgress(job) * 100
                           : 0

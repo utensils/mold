@@ -30,13 +30,6 @@ fn channel_observer(
     }
 }
 
-pub(crate) async fn canonical_generation(
-    client: &MoldClient,
-    requests: &[GenerateRequest],
-) -> Result<CanonicalGenerationReport> {
-    mold_core::durable_generation::canonical_generation(client, requests).await
-}
-
 pub(crate) async fn canonical_generation_observed(
     client: &MoldClient,
     requests: &[GenerateRequest],
@@ -112,9 +105,8 @@ pub(crate) async fn canonical_singleton_artifact(
 }
 
 /// As [`canonical_singleton_artifact`], reporting each authoritative child
-/// transition as it commits. The durable path carries no per-step progress —
-/// that rides the observer `/api/generate/stream` registers — so a caller that
-/// wants to say something while a print renders says it from state changes.
+/// transition as it commits, plus the live progress the observer polls from
+/// the host's own queue snapshot while a child runs.
 pub(crate) async fn canonical_singleton_artifact_observed(
     client: &MoldClient,
     request: &GenerateRequest,

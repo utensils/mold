@@ -22,14 +22,14 @@ use crate::commands::durable_generation::{
     canonical_singleton_artifact_observed, CanonicalGenerationArtifact, CanonicalGenerationEvent,
 };
 
-/// Render one print on a pod, keeping a spinner alive from the durable batch's
-/// own state transitions.
+/// Render one print on a pod, keeping a spinner alive from the durable
+/// batch's own progress and state transitions.
 ///
-/// A pod render takes minutes and the durable path carries no per-step
-/// progress — that rides the observer `/api/generate/stream` registers, which
-/// this path deliberately does not use because RunPod's proxy times out at 100
-/// seconds. What it does have is one authoritative event per committed child
-/// transition, which is enough to say what the job is doing.
+/// A pod render takes minutes, and this path deliberately does not attach to
+/// `/api/generate/stream` because RunPod's proxy times out at 100 seconds.
+/// The durable observer polls each running child's progress snapshot instead,
+/// which restores the per-step and model-pull lines on top of one
+/// authoritative event per committed child transition.
 async fn generate_with_runpod_transport(
     client: &mold_core::MoldClient,
     request: &mold_core::GenerateRequest,
@@ -37,14 +37,30 @@ async fn generate_with_runpod_transport(
     let (events, mut rx) = tokio::sync::mpsc::unbounded_channel::<CanonicalGenerationEvent>();
     let spinner = tokio::spawn(async move {
         let mut pb: Option<indicatif::ProgressBar> = None;
+        let mut progress = mold_core::queue_progress::ProgressEventStream::new();
         while let Some(event) = rx.recv().await {
-            let (CanonicalGenerationEvent::Admitted { status, .. }
-            | CanonicalGenerationEvent::Snapshot { status, .. }) = event
-            else {
-                continue;
-            };
-            let Some(child) = status.children.first() else {
-                continue;
+            let message = match event {
+                // Per-step progress, including the model-pull download bars
+                // this path exists for: RunPod's proxy times out at 100
+                // seconds, so a silent pull looks like a dead pod.
+                CanonicalGenerationEvent::Progress {
+                    job_id,
+                    progress: snapshot,
+                    ..
+                } => {
+                    let Some(last) = progress.events(&job_id, &snapshot).pop() else {
+                        continue;
+                    };
+                    format_progress_event(&last)
+                }
+                CanonicalGenerationEvent::Admitted { status, .. }
+                | CanonicalGenerationEvent::Snapshot { status, .. } => {
+                    let Some(child) = status.children.first() else {
+                        continue;
+                    };
+                    format!("{:?}", child.state).to_lowercase()
+                }
+                CanonicalGenerationEvent::ReconcileDelayed { .. } => continue,
             };
             let bar = pb.get_or_insert_with(|| {
                 let bar = indicatif::ProgressBar::new_spinner();
@@ -58,7 +74,7 @@ async fn generate_with_runpod_transport(
                 bar.enable_steady_tick(std::time::Duration::from_millis(80));
                 bar
             });
-            bar.set_message(format!("{:?}", child.state).to_lowercase());
+            bar.set_message(message);
         }
         if let Some(bar) = pb {
             bar.finish_and_clear();
@@ -90,6 +106,61 @@ pub struct RunPodState {
     pub last_pod_gpu: Option<String>,
     /// Hourly cost of the warm pod.
     pub last_pod_cost_per_hr: Option<f64>,
+}
+
+/// One spinner line per progress event, matching what the attached
+/// `/api/generate/stream` path used to print on this transport.
+fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
+    use mold_core::types::SseProgressEvent as E;
+    match ev {
+        E::DependencyWait { dependency, reason } => {
+            format!("waiting for dependency {dependency}: {reason}")
+        }
+        E::Preview { step, total, .. } => format!("denoise preview {step}/{total}"),
+        E::StageStart { name } => format!("stage: {name}"),
+        E::StageProgress {
+            name,
+            current,
+            total,
+        } => format!("{name} {current}/{total}"),
+        E::StageDone { name, elapsed_ms } => format!("done: {name} ({elapsed_ms}ms)"),
+        E::Info { message } => message.clone(),
+        E::CacheHit { resource } => format!("cached: {resource}"),
+        E::DenoiseStep { step, total, .. } => format!("denoise {step}/{total}"),
+        E::DownloadProgress {
+            filename,
+            file_index,
+            total_files,
+            bytes_downloaded,
+            bytes_total,
+            ..
+        } => format!(
+            "pull [{file_index}/{total_files}] {filename} {}/{}",
+            human_bytes(*bytes_downloaded),
+            human_bytes(*bytes_total)
+        ),
+        E::DownloadDone {
+            filename,
+            file_index,
+            total_files,
+            ..
+        } => format!("\u{2713} [{file_index}/{total_files}] {filename}"),
+        E::PullComplete { model } => format!("pull complete: {model}"),
+        E::Queued { position, .. } => format!("queued (#{position})"),
+        E::WeightLoad {
+            component,
+            bytes_loaded,
+            bytes_total,
+        } => format!(
+            "loading {component} {}/{}",
+            human_bytes(*bytes_loaded),
+            human_bytes(*bytes_total)
+        ),
+    }
+}
+
+fn human_bytes(b: u64) -> String {
+    mold_core::format::human_bytes_compact(b)
 }
 
 fn runpod_state_dir() -> Result<std::path::PathBuf> {

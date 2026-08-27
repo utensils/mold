@@ -4,6 +4,7 @@ use crate::chain_job::{
     RetakeRequest,
 };
 use crate::error::MoldError;
+use crate::queue_progress::QueueJobProgress;
 use crate::types::{
     AudioData, Collection, CollectionCreateRequest, CollectionItemsRequest,
     CollectionUpdateRequest, DeviceState, EmptyTrashResult, ExpandRequest, ExpandResponse,
@@ -1444,6 +1445,31 @@ impl MoldClient {
             .await?;
         listing.merge_live_only_entries();
         Ok(listing)
+    }
+
+    /// Read one live job's folded progress snapshot
+    /// (`GET /api/queue/{id}/preview`).
+    ///
+    /// The outer `Option` is live-row existence — a `404` means the row has
+    /// left the queue and is reported as `Ok(None)` rather than an error,
+    /// because that is the ordinary end of a render rather than a fault.
+    pub async fn queue_job_progress(&self, id: &str) -> Result<Option<QueueJobProgress>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/queue/{}/preview",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(resp
+            .error_for_status()?
+            .json::<Option<QueueJobProgress>>()
+            .await?)
     }
 
     /// Cancel a still-queued job (`DELETE /api/queue/{id}`).
