@@ -1,4 +1,4 @@
-use crate::chain::{ChainProgressEvent, ChainRequest, ChainResponse, SseChainCompleteEvent};
+use crate::chain::{ChainProgressEvent, ChainRequest};
 use crate::chain_job::{
     ChainJobDetail, ChainJobListing, ChainJobSummary, CreateChainJobResponse, GcOutcome,
     RetakeRequest,
@@ -94,6 +94,16 @@ fn annotate_lost_stream(err: anyhow::Error, job_id: Option<&str>, host: &str) ->
     let note = format!("job {job_id} is retained on {host} and will finish there");
     tracing::warn!(job_id = %job_id, host = %host, "{note}");
     err.context(note)
+}
+
+/// Terminal outcome of one durable chain job, as observed from its event
+/// stream.
+#[derive(Debug, Clone)]
+pub struct ChainJobOutcome {
+    pub state: crate::chain_job::ChainJobState,
+    pub error: Option<String>,
+    /// Gallery filename of the stitched print, from the `Finalized` event.
+    pub output: Option<String>,
 }
 
 impl MoldClient {
@@ -763,161 +773,113 @@ impl MoldClient {
         ))
     }
 
-    /// Submit a chained video generation request (non-streaming).
+    /// Follow one durable chain job to settlement, forwarding its stage
+    /// progress as [`ChainProgressEvent`] so the CLI and TUI renderers see the
+    /// same shape they always have.
     ///
-    /// The server normalises the auto-expand form into stages, runs each
-    /// stage sequentially with motion-tail latent carryover, stitches the
-    /// result into a single video, and returns a [`ChainResponse`]. Large
-    /// chains take minutes — prefer [`Self::generate_chain_stream`] for
-    /// interactive clients that want progress updates.
-    pub async fn generate_chain(&self, req: &ChainRequest) -> Result<ChainResponse> {
-        let wire_req = crate::prompt_text::protect_chain_request_for_wire(req);
-        let resp = self
-            .client
-            .post(format!("{}/api/generate/chain", self.base_url))
-            .json(&wire_req)
-            .send()
-            .await?;
-
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            let body = resp.text().await.unwrap_or_default();
-            if body.is_empty() {
-                anyhow::bail!("chain endpoint not found — server predates render-chain v1");
-            }
-            return Err(MoldError::ModelNotFound(body).into());
-        }
-        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(MoldError::Validation(api_error_detail(&body)).into());
-        }
-        if resp.status().is_client_error() || resp.status().is_server_error() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("server error {status}: {body}");
-        }
-
-        // Read before `resp` is consumed by `json()`. The body has its own
-        // `request_warnings` slot, but the server puts advisories on the
-        // header, so the header is the authority and the body's value (empty
-        // today) must not win over it.
-        let request_warnings = parse_request_warnings(resp.headers());
-        let mut chain: ChainResponse = resp.json().await?;
-        if !request_warnings.is_empty() {
-            chain.request_warnings = request_warnings;
-        }
-        Ok(chain)
-    }
-
-    /// Submit a chained video generation request with SSE progress streaming.
-    ///
-    /// Returns:
-    /// - `Ok(Some(response))` — streaming succeeded and the `complete` event
-    ///   carried the stitched video.
-    /// - `Ok(None)` — server doesn't have the chain endpoint (empty 404).
-    ///   Callers can fall back to [`Self::generate_chain`] or error.
-    /// - `Err(_)` — validation, model-not-found, or mid-stream server error.
-    pub async fn generate_chain_stream(
+    /// The stream opens with a snapshot, so a caller that attaches after some
+    /// stages have already run still learns the stage count and where the job
+    /// is — which the old fire-and-forget chain endpoint could not do.
+    pub async fn stream_chain_job_events(
         &self,
-        req: &ChainRequest,
+        job_id: &str,
         progress_tx: tokio::sync::mpsc::UnboundedSender<ChainProgressEvent>,
-    ) -> Result<Option<ChainResponse>> {
-        let wire_req = crate::prompt_text::protect_chain_request_for_wire(req);
+    ) -> Result<ChainJobOutcome> {
+        use crate::chain_job::{ChainJobEvent, ChainJobState};
+
         let mut resp = self
             .client
-            .post(format!("{}/api/generate/chain/stream", self.base_url))
-            .json(&wire_req)
+            .get(format!(
+                "{}/api/chain-jobs/{}/events",
+                self.base_url, job_id
+            ))
             .send()
             .await?;
-
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            let body = resp.text().await.unwrap_or_default();
-            if body.is_empty() {
-                return Ok(None);
-            }
-            return Err(MoldError::ModelNotFound(body).into());
-        }
-        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(MoldError::Validation(api_error_detail(&body)).into());
-        }
         if resp.status().is_client_error() || resp.status().is_server_error() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("server error {status}: {body}");
         }
 
-        // Captured before the body is drained chunk by chunk; the chain SSE
-        // headers arrive ahead of the first frame exactly as the one-shot's do.
-        let request_warnings = parse_request_warnings(resp.headers());
-
-        let b64 = base64::engine::general_purpose::STANDARD;
+        let mut outcome = ChainJobOutcome {
+            state: ChainJobState::Running,
+            error: None,
+            output: None,
+        };
         let mut buffer = String::new();
         while let Some(chunk) = resp.chunk().await? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
-
             while let Some(event_text) = next_sse_event(&mut buffer) {
-                let (event_type, data) = parse_sse_event(&event_text);
-                match event_type.as_str() {
-                    "progress" => {
-                        if let Ok(p) = serde_json::from_str::<ChainProgressEvent>(&data) {
-                            let _ = progress_tx.send(p);
+                let (_, data) = parse_sse_event(&event_text);
+                let Ok(event) = serde_json::from_str::<ChainJobEvent>(&data) else {
+                    continue;
+                };
+                match event {
+                    ChainJobEvent::Snapshot { job } => {
+                        outcome.state = job.summary.state;
+                        outcome.error = job.summary.error.clone();
+                        let _ = progress_tx.send(ChainProgressEvent::ChainStart {
+                            stage_count: job.summary.stage_count,
+                            estimated_total_frames: job
+                                .stages
+                                .iter()
+                                .filter_map(|stage| stage.frames_emitted)
+                                .sum(),
+                        });
+                        if crate::chain_job::settled(job.summary.state) {
+                            return Ok(outcome);
                         }
                     }
-                    "complete" => {
-                        let complete: SseChainCompleteEvent = serde_json::from_str(&data)?;
-                        let payload = b64.decode(&complete.video)?;
-                        let thumbnail = complete
-                            .thumbnail
-                            .as_deref()
-                            .and_then(|s| b64.decode(s).ok())
-                            .unwrap_or_default();
-                        let gif_preview = complete
-                            .gif_preview
-                            .as_deref()
-                            .and_then(|s| b64.decode(s).ok())
-                            .unwrap_or_default();
-                        let video = VideoData {
-                            data: payload,
-                            format: complete.format,
-                            width: complete.width,
-                            height: complete.height,
-                            frames: complete.frames,
-                            fps: complete.fps,
-                            pipeline: complete.metadata.as_ref().and_then(|m| m.pipeline),
-                            pipeline_provenance_sha256: complete
-                                .metadata
-                                .as_ref()
-                                .and_then(|metadata| metadata.pipeline_provenance_sha256.clone()),
-                            source_preprocessing: complete
-                                .metadata
-                                .as_ref()
-                                .and_then(|metadata| metadata.source_preprocessing.clone()),
-                            thumbnail,
-                            gif_preview,
-                            has_audio: complete.has_audio,
-                            duration_ms: complete.duration_ms,
-                            audio_sample_rate: complete.audio_sample_rate,
-                            audio_channels: complete.audio_channels,
-                        };
-                        return Ok(Some(ChainResponse {
-                            video,
-                            stage_count: complete.stage_count,
-                            gpu: complete.gpu,
-                            script: complete.script,
-                            vram_estimate: complete.vram_estimate,
-                            request_warnings,
-                        }));
+                    ChainJobEvent::StageStart { stage_idx } => {
+                        let _ = progress_tx.send(ChainProgressEvent::StageStart { stage_idx });
                     }
-                    "error" => {
-                        let error: SseErrorEvent = serde_json::from_str(&data)?;
-                        anyhow::bail!("server error: {}", error.message);
+                    ChainJobEvent::DenoiseStep {
+                        stage_idx,
+                        step,
+                        total,
+                    } => {
+                        let _ = progress_tx.send(ChainProgressEvent::DenoiseStep {
+                            stage_idx,
+                            step,
+                            total,
+                        });
                     }
-                    _ => {}
+                    ChainJobEvent::StageDone {
+                        stage_idx,
+                        frames_emitted,
+                        ..
+                    } => {
+                        let _ = progress_tx.send(ChainProgressEvent::StageDone {
+                            stage_idx,
+                            frames_emitted,
+                        });
+                    }
+                    ChainJobEvent::Finalizing { total_frames } => {
+                        let _ = progress_tx.send(ChainProgressEvent::Stitching { total_frames });
+                    }
+                    ChainJobEvent::Finalized { output, .. } => outcome.output = Some(output),
+                    ChainJobEvent::StateChanged { state, error } => {
+                        outcome.state = state;
+                        if error.is_some() {
+                            outcome.error = error;
+                        }
+                        if crate::chain_job::settled(state) {
+                            return Ok(outcome);
+                        }
+                    }
+                    ChainJobEvent::Yielded { .. } => {}
                 }
             }
         }
-
-        anyhow::bail!("chain SSE stream ended without complete event")
+        // The runner closes the broadcast when the job settles, so a stream
+        // that ends without a terminal frame means the state changed while
+        // nobody was subscribed. Ask.
+        outcome.state = self
+            .get_chain_job(job_id)
+            .await
+            .map(|detail| detail.summary.state)
+            .unwrap_or(outcome.state);
+        Ok(outcome)
     }
 
     pub async fn create_chain_job(&self, req: &ChainRequest) -> Result<CreateChainJobResponse> {

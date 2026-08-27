@@ -331,8 +331,6 @@ use crate::queue::clean_error_message;
         capabilities_ltx2_camera_controls,
         list_licenses_endpoint,
         stream_events,
-        crate::routes_chain::generate_chain,
-        crate::routes_chain::generate_chain_stream,
         crate::routes_chain::validate_chain,
         crate::routes_chain_jobs::create_chain_job,
         crate::routes_chain_jobs::preview_chain_job_placement,
@@ -547,14 +545,6 @@ pub fn create_router(state: AppState) -> Router {
                 )
                 .unwrap_or(usize::MAX),
             )),
-        )
-        .route(
-            "/api/generate/chain",
-            post(crate::routes_chain::generate_chain),
-        )
-        .route(
-            "/api/generate/chain/stream",
-            post(crate::routes_chain::generate_chain_stream),
         )
         .route(
             "/api/generate/chain/validate",

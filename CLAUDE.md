@@ -187,6 +187,7 @@ pulid-flux` deletes the derived EVA safetensors and its sidecar, whose names
 - Sugar: `mold run <model> --prompt "..." --prompt "..." --frames-per-clip 97` (uniform smooth only).
 - Transitions: `smooth` (default, motion-tail morph), `cut` (fresh latent), `fade` (cut + RGB crossfade).
 - Per-stage source images: `source_image_path` (relative to script file) or `source_image_b64`. Resolved by `mold_core::chain_toml::read_script_resolving_paths`.
+- **A remote sequence is a DURABLE CHAIN JOB, on every surface.** `POST /api/chain-jobs` creates one and `GET /api/chain-jobs/{id}/events` streams its stage progress; `mold run --script` and the TUI both take that route and hydrate the stitched print from the host's gallery. The synchronous `POST /api/generate/chain` and SSE `POST /api/generate/chain/stream` shims are DELETED — they ran a chain as a hidden ephemeral job and deleted its artifacts after answering, so a dropped connection lost work that could not be resumed, retaken, or reattached. `POST /api/generate/chain/validate` survives and is the only thing left in `routes_chain.rs`, which is read-only planning. A `--script` run therefore leaves a job `mold chain list` can find, and the CLI no longer receives the host-side thumbnail or GIF preview inline.
 
 ## Config
 

@@ -420,19 +420,35 @@ pub async fn run_chain_generation(
         }
     });
 
-    match client.generate_chain_stream(&req, progress_tx).await {
-        Ok(Some(response)) => {
-            let _ = tx.send(BackgroundEvent::ChainComplete {
-                response: Box::new(response),
-            });
-        }
-        Ok(None) => {
-            let _ = tx.send(BackgroundEvent::ChainError(
-                "server does not support chain generation (404)".into(),
-            ));
+    // A sequence is a durable chain job: create it, then follow its event
+    // stream. The compatibility endpoint that ran one as a hidden ephemeral
+    // job is gone, so a TUI that loses its connection leaves a job the host
+    // finishes rather than a render nobody owns.
+    let stage_count = req.stages.len() as u32;
+    match client.create_chain_job(&req).await {
+        Ok(created) => {
+            match client
+                .stream_chain_job_events(&created.job_id, progress_tx)
+                .await
+            {
+                Ok(outcome) if outcome.state == mold_core::chain_job::ChainJobState::Completed => {
+                    let _ = tx.send(BackgroundEvent::ChainComplete {
+                        stage_count,
+                        request_warnings: Vec::new(),
+                    });
+                }
+                Ok(outcome) => {
+                    let _ = tx.send(BackgroundEvent::ChainError(outcome.error.unwrap_or_else(
+                        || format!("sequence job ended as {:?}", outcome.state),
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundEvent::ChainError(format!("{e:#}")));
+                }
+            }
         }
         Err(e) => {
-            let _ = tx.send(BackgroundEvent::ChainError(format!("{e}")));
+            let _ = tx.send(BackgroundEvent::ChainError(format!("{e:#}")));
         }
     }
 

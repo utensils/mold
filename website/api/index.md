@@ -15,9 +15,7 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/generation-batches/by-client/:id`       | Recover a durable generation batch by its client idempotency ID                                                   |
 | `POST`   | `/api/generation-batches/status`              | Reconcile a bounded set of durable generation batches                                                             |
 | `POST`   | `/api/generate/estimate`                      | Estimate request-sensitive peak memory for a generation request                                                   |
-| `POST`   | `/api/generate/chain`                         | Chained video generation (LTX-2, LTX-Video, Wan)                                                                  |
 | `GET`    | `/api/capabilities/ltx2-control-adapters`     | Compatible official IC-LoRA controls for an installed LTX-2 model                                                 |
-| `POST`   | `/api/generate/chain/stream`                  | Chained video with SSE progress                                                                                   |
 | `POST`   | `/api/generate/chain/validate`                | Normalize and validate a chain without queueing work                                                              |
 | `POST`   | `/api/chain-jobs`                             | Create a durable async chain job                                                                                  |
 | `GET`    | `/api/chain-jobs`                             | List durable chain jobs                                                                                           |
@@ -994,7 +992,7 @@ The three `chain_job_*` events are additive and deliberately distinct from
 `job_queued` / `job_started` / `job_ended`: chain jobs do not support the
 print-queue affordances (`PATCH`/`DELETE /api/queue/:id`), and older clients
 ignore unknown `type` tags. The ephemeral jobs backing
-`/api/generate/chain` stay silent — only durable `/api/chain-jobs` work is
+chain planning stay silent — only durable `/api/chain-jobs` work is
 announced. Clients that render sequences in a unified activity surface can
 use these instead of polling `GET /api/chain-jobs`.
 
@@ -1010,135 +1008,31 @@ this endpoint omit the field. Keep-alive pings arrive every 15 s.
 curl -N http://localhost:7680/api/events
 ```
 
-## `/api/generate/chain`
+## Chained video generation
 
-Chained video generation for the LTX-2, LTX-Video, and Wan families, including
-installed catalog checkpoints with opaque `cv:` / `hf:` IDs. Splits a long
-video into N per-clip renders and returns a single stitched MP4. The seam is
-family- and checkpoint-specific: LTX-2 threads a motion tail of latents across
-each boundary (default 17 frames), Wan continues via last-frame image
-conditioning on image-conditioned checkpoints (the overlap is always 1 frame;
-text-to-video checkpoints concatenate independent clips), and LTX-Video joins
-independently rendered clips. See the
+Chained video for the LTX-2, LTX-Video, and Wan families — including installed
+catalog checkpoints with opaque `cv:` / `hf:` IDs — splits a long video into N
+per-clip renders and returns a single stitched MP4. The seam is family- and
+checkpoint-specific: LTX-2 threads a motion tail of latents across each
+boundary (default 17 frames), Wan continues via last-frame image conditioning
+on image-conditioned checkpoints (the overlap is always 1 frame; text-to-video
+checkpoints concatenate independent clips), and LTX-Video joins independently
+rendered clips. See the
 [LTX-2 chained video output guide](/models/ltx2#chained-video-output) for the
-user-facing story; this section documents the wire format.
+user-facing story.
 
-The request body maps to `mold_core::chain::ChainRequest`; the response body
-maps to `mold_core::chain::ChainResponse`. The canonical schema lives in the
-interactive docs at `/api/docs` (served by the running mold server) and in the
-OpenAPI JSON at `/api/openapi.json`.
-
-This legacy endpoint now executes through the durable chain-job runner
-internally. The response shape stays the same, while the backing ephemeral job
-is cleaned up after a successful response is assembled.
-
-The server accepts either a pre-authored `stages[]` body or the auto-expand
-form (single `prompt` + `total_frames` + `clip_frames`). Auto-expand is the
-shape `mold run` sends; the canonical `stages[]` shape is reserved for the
-forthcoming movie-maker UI that will author per-stage prompts/keyframes. Both
-normalise to the same internal `Vec<ChainStage>` before any engine work kicks
-off.
-
-Both forms also accept optional `original_prompt`, `batch_id`, `batch_index`,
-and `batch_count` provenance. These fields survive normalization and durable
-resume and are copied into the stitched output's completion and Gallery
-metadata.
-
-Both forms also accept the same optional `title`, `tags`, and `collection`
-fields as `/api/generate` — see
-[Creation-time filing](#creation-time-filing). They apply to the **stitched**
-print the chain produces: intermediate clips are working artifacts inside the
-job directory, never reach the gallery, and are never filed.
-
-**Auto-expand body** (what `mold run --frames N` emits):
-
-```json
-{
-  "model": "ltx-2-19b-distilled:fp8",
-  "prompt": "a cat walking through autumn leaves",
-  "total_frames": 400,
-  "clip_frames": 97,
-  "source_image": "<base64 PNG>",
-  "motion_tail_frames": 4,
-  "width": 1216,
-  "height": 704,
-  "fps": 24,
-  "seed": 42,
-  "steps": 8,
-  "guidance": 3.0,
-  "strength": 1.0,
-  "output_format": "mp4"
-}
-```
-
-**Canonical body** (what the v2 movie-maker UI will author):
-
-```json
-{
-  "model": "ltx-2-19b-distilled:fp8",
-  "stages": [
-    { "prompt": "a cat walking", "frames": 97, "source_image": "<base64 PNG>" },
-    { "prompt": "a cat walking", "frames": 97 },
-    { "prompt": "a cat walking", "frames": 97 },
-    { "prompt": "a cat walking", "frames": 97 }
-  ],
-  "motion_tail_frames": 4,
-  "width": 1216,
-  "height": 704,
-  "fps": 24,
-  "seed": 42,
-  "steps": 8,
-  "guidance": 3.0,
-  "strength": 1.0,
-  "output_format": "mp4"
-}
-```
-
-**Response:**
-
-```json
-{
-  "video": {
-    "data": "<base64 mp4>",
-    "format": "mp4",
-    "width": 1216,
-    "height": 704,
-    "frames": 400,
-    "fps": 24,
-    "thumbnail": "<base64 png>",
-    "gif_preview": "<base64 gif>",
-    "has_audio": false,
-    "duration_ms": 16666
-  },
-  "stage_count": 5,
-  "gpu": 0
-}
-```
-
-**Error cases:**
-
-- `422 Unprocessable Entity` — validation failure (missing `prompt` +
-  `total_frames` in the auto-expand form, a stage whose `frames` is off the
-  family's advertised grid (`k · frame_step + 1` — 8 for the LTX families, 4
-  for Wan), `motion_tail_frames >= clip_frames`, more than 16 stages, etc.).
-- `422 Unprocessable Entity` — unsupported model family. Only LTX-2,
-  LTX-Video, and Wan expose a chain renderer; other families are rejected with
-  an error that names the constraint.
-- `502 Bad Gateway` — the backing job failed before a legacy `ChainResponse`
-  could be assembled. Use `/api/chain-jobs` for explicit durable
-  resume/retake workflows.
-
-::: tip Runner behaviour
-The legacy chain endpoints are shims over the durable runner. The runner
-checkpoints each stage under `MOLD_HOME/jobs/<job_id>`, yields at stage
-boundaries when other work is waiting, then deletes successful ephemeral shim
-artifacts after building the legacy response. The public chain-job API keeps
-artifacts for resume and retake.
-:::
+A sequence is a **durable chain job** on every surface:
+[`POST /api/chain-jobs`](#api-chain-jobs) creates one and
+`GET /api/chain-jobs/{id}/events` streams its stage progress to settlement.
+The synchronous `POST /api/generate/chain` and SSE
+`POST /api/generate/chain/stream` endpoints, which ran a chain as a hidden
+ephemeral job and deleted its artifacts after answering, have been removed:
+they could not be resumed, retaken, or reattached after a dropped connection,
+and every client now creates a real job instead.
 
 ## `/api/generate/chain/validate`
 
-Accepts the same `ChainRequest` body as `/api/generate/chain`, but performs
+Accepts the same `ChainRequest` body as `POST /api/chain-jobs`, but performs
 only build-feature, model-family, and structural normalization. It does not
 create a durable job, start a download, lease a device, or touch inference.
 The response reports normalized stage transitions, each stage's contributed
@@ -1185,65 +1079,12 @@ serially) and an advisory `fits` verdict computed against stable device
 capacity. It is `null` when the server cannot price the run (model not
 downloaded, or no device sample); it is advisory and never gates submission.
 
-## `/api/generate/chain/stream`
-
-Same request body as `/api/generate/chain`, with the response delivered as
-Server-Sent Events. Progress frames stream as `event: progress` and the
-terminal frame is either `event: complete` (success) or `event: error`
-(failure; the connection closes after the error frame).
-
-Progress event payloads map to `mold_core::chain::ChainProgressEvent` variants:
-
-```text
-event: progress
-data: {"type":"chain_start","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_count":5,"estimated_total_frames":485}
-
-event: progress
-data: {"type":"stage_start","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_idx":0}
-
-event: progress
-data: {"type":"denoise_step","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_idx":0,"step":1,"total":8}
-
-event: progress
-data: {"type":"stage_done","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_idx":0,"frames_emitted":97}
-
-event: progress
-data: {"type":"stitching","job_id":"550e8400-e29b-41d4-a716-446655440000","total_frames":385}
-
-event: complete
-data: {"video":"<base64 mp4>","format":"mp4","width":1216,"height":704,"frames":400,"fps":24,"thumbnail":"<base64 png>","gif_preview":"<base64 gif>","has_audio":false,"duration_ms":16666,"stage_count":5,"gpu":0,"generation_time_ms":226812}
-```
-
-The `complete` event payload maps to `mold_core::chain::SseChainCompleteEvent`.
-Non-denoise engine events (weight loads, cache hits, etc.) are intentionally
-not forwarded in v1 — the UX goal is per-stage progress, not per-component
-telemetry.
-
-`job_id` is an additive field on progress events so clients can correlate a
-legacy stream with the backing durable job. The terminal `complete` payload
-keeps the legacy shape.
-
-```bash
-curl -N -X POST http://localhost:7680/api/generate/chain/stream \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "ltx-2-19b-distilled:fp8",
-    "prompt": "a cat walking through autumn leaves",
-    "total_frames": 400,
-    "clip_frames": 97,
-    "motion_tail_frames": 4,
-    "width": 1216, "height": 704, "fps": 24,
-    "steps": 8, "guidance": 3.0,
-    "output_format": "mp4"
-  }'
-```
-
 ## `/api/chain-jobs`
 
 Durable async chain jobs persist the request, per-stage state, retakes, and
 final outputs under `MOLD_HOME/jobs/<job_id>` and mirror query state in
 `mold.db`. They use the same `mold_core::chain::ChainRequest` body as
-`/api/generate/chain`, but return immediately with `202 Accepted`:
+a chain plan, but return immediately with `202 Accepted`:
 
 ```json
 { "job_id": "550e8400-e29b-41d4-a716-446655440000" }
@@ -1277,7 +1118,7 @@ surfaces call behind **Update sequence**.
 
 The body maps to `mold_core::chain_job::AmendRequest`. `stages` is the
 **complete** edited stage list in canonical order (not a patch) — the same
-`ChainStage` shape `/api/generate/chain` accepts. Everything else is an
+`ChainStage` shape `POST /api/chain-jobs` accepts. Everything else is an
 optional chain-level overlay applied over the job's current effective
 request:
 
@@ -1359,7 +1200,7 @@ are folded and cleared. `GET /api/chain-jobs/:id` exposes the additive
 **Errors:**
 
 - `409 CHAIN_JOB_RUNNING` — the job is rendering; cancel it first.
-- `409 CHAIN_JOB_EPHEMERAL` — the job backs a legacy `/api/generate/chain` shim.
+- `409 CHAIN_JOB_EPHEMERAL` — the job is ephemeral and owns no retained artifacts.
 - `409 CHAIN_JOB_NOT_AMENDABLE` — the job left an amendable state mid-request. Amendable states are `queued`, `interrupted`, `failed`, `cancelled`, and `completed`.
 - `422` — the amended request failed validation (bad frame counts, motion tail ≥ clip frames, too many stages, a non-`mp4` output format, an unsupported family, audio on a checkpoint without an audio path).
 - `404 CHAIN_JOB_NOT_FOUND` — unknown id.
@@ -1860,8 +1701,7 @@ provenance, when sent, is echoed verbatim here as `source_fit`. Two additive
 fields record sequence provenance:
 
 - `chain_job_id` — the durable chain job this output was finalized from.
-  Absent for single generations, the ephemeral `/api/generate/chain` shim, and
-  legacy rows.
+  Absent for single generations and legacy rows.
 - `chain` — structured per-clip provenance, so a sequence is never recorded
   under clip 1's prompt alone. Absent for single generations and legacy rows.
 

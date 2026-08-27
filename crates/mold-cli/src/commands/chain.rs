@@ -13,10 +13,11 @@
 use std::io::Write;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use mold_core::chain::{ChainProgressEvent, ChainRequest};
+use mold_core::chain_job::ChainJobState;
 #[cfg(any(feature = "cuda", feature = "metal"))]
 use mold_core::Config;
 use mold_core::{MoldClient, OutputFormat, VideoData};
@@ -496,34 +497,65 @@ pub async fn run_chain(
     Ok(())
 }
 
-/// Remote chain: streaming SSE with stacked progress bars.
+/// Remote chain: create the durable job, follow its event stream with stacked
+/// progress bars, then hydrate the stitched print from the host's gallery.
+///
+/// A sequence is a durable chain job on every surface now — the compatibility
+/// endpoints that ran one as a hidden ephemeral job are gone — so a `--script`
+/// run that loses its connection leaves a job the host finishes and
+/// `mold chain list` can still find.
 async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<VideoData> {
+    let created = client.create_chain_job(req).await?;
+    let job_id = created.job_id;
+    status!("{} Sequence job {}", theme::icon_info(), job_id.bold());
+
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainProgressEvent>();
     let stage_labels: Vec<StageLabel> = req.stages.iter().map(StageLabel::from_stage).collect();
     let render = tokio::spawn(render_chain_progress(rx, stage_labels));
-
-    let stream_result = client.generate_chain_stream(req, tx).await;
+    let outcome = client.stream_chain_job_events(&job_id, tx).await;
     let _ = render.await;
+    let outcome = outcome?;
 
-    match stream_result {
-        Ok(Some(resp)) => {
-            // A sequence's filing rides the stitched print, so a host that
-            // could not apply it says so on the same header a one-shot uses.
-            crate::commands::generate::report_request_warnings(&resp.request_warnings);
-            Ok(resp.video)
-        }
-        Ok(None) => {
-            // Server predates chain endpoint; fall back to non-streaming.
-            status!(
-                "{} Server SSE chain endpoint unavailable, falling back to blocking endpoint",
-                theme::prefix_warning(),
-            );
-            let resp = client.generate_chain(req).await?;
-            crate::commands::generate::report_request_warnings(&resp.request_warnings);
-            Ok(resp.video)
-        }
-        Err(e) => Err(e),
+    if outcome.state != ChainJobState::Completed {
+        let detail = outcome
+            .error
+            .unwrap_or_else(|| format!("sequence job {job_id} ended as {:?}", outcome.state));
+        anyhow::bail!("{detail}");
     }
+    let filename = outcome
+        .output
+        .context("sequence completed without a stitched print")?;
+    let bytes = client
+        .get_gallery_image(&filename)
+        .await
+        .with_context(|| format!("could not download stitched print {filename}"))?;
+    let item = client
+        .gallery_item(&filename)
+        .await
+        .with_context(|| format!("could not read metadata for {filename}"))?
+        .with_context(|| format!("stitched print {filename} is missing from the gallery index"))?;
+    let metadata = item.metadata;
+
+    Ok(VideoData {
+        data: bytes,
+        format: item.format.unwrap_or(OutputFormat::Mp4),
+        width: metadata.width,
+        height: metadata.height,
+        frames: metadata.frames.unwrap_or(0),
+        fps: metadata.fps.unwrap_or(0),
+        pipeline: metadata.pipeline,
+        pipeline_provenance_sha256: metadata.pipeline_provenance_sha256.clone(),
+        source_preprocessing: metadata.source_preprocessing.clone(),
+        // The gallery serves the stitched MP4 itself. Its derived thumbnail
+        // and GIF preview are host-side gallery assets, not part of what a
+        // `--script` run writes locally.
+        thumbnail: Vec::new(),
+        gif_preview: Vec::new(),
+        has_audio: false,
+        duration_ms: None,
+        audio_sample_rate: None,
+        audio_channels: None,
+    })
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]

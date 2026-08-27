@@ -44,7 +44,6 @@ pub struct ChainJobRunnerHandle {
     cancel: Arc<CancelRegistry>,
     events: Arc<JobEventBus>,
     job_locks: Arc<JobMutationLocks>,
-    claims: Arc<EphemeralClaims>,
     mutation_cancels: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
@@ -427,7 +426,6 @@ impl ChainJobRunnerHandle {
             cancel: Arc::new(CancelRegistry::new()),
             events: Arc::new(JobEventBus::new()),
             job_locks: Arc::new(JobMutationLocks::new()),
-            claims: Arc::new(EphemeralClaims::default()),
             mutation_cancels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -491,16 +489,8 @@ impl ChainJobRunnerHandle {
         self.job_locks.lock(job_id).await
     }
 
-    pub(crate) fn blocking_lock_job(&self, job_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        self.job_locks.blocking_lock(job_id)
-    }
-
     pub fn remove_job_lock(&self, job_id: &str) {
         self.job_locks.remove(job_id);
-    }
-
-    pub(crate) fn claim_ephemeral(&self, job_id: &str) -> EphemeralClaimGuard {
-        self.claims.claim(job_id)
     }
 
     pub async fn request_gc(&self) -> anyhow::Result<GcOutcome> {
@@ -548,7 +538,6 @@ pub fn spawn_runner(deps: RunnerDeps) -> ChainJobRunnerHandle {
     let cancel = deps.cancel.clone();
     let events = deps.events.clone();
     let job_locks = deps.job_locks.clone();
-    let claims = deps.claims.clone();
     let deps = Arc::new(deps);
     tokio::spawn(run_loop(deps, kick_rx));
     ChainJobRunnerHandle {
@@ -556,13 +545,12 @@ pub fn spawn_runner(deps: RunnerDeps) -> ChainJobRunnerHandle {
         cancel,
         events,
         job_locks,
-        claims,
         mutation_cancels: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
 /// Factored creation entry (P1 pin): called by routes_chain_jobs.rs
-/// create_chain_job (generated id, ephemeral=false) AND the shims
+/// create_chain_job (generated id, ephemeral=false)
 /// (pre-generated claimed id, ephemeral=true). VALIDATION SPLIT PIN: the
 /// async CALLERS perform family validation (validate_and_normalize_chain_
 /// family is async + &AppState), normalise(), and the non-Mp4 422 gate
@@ -4940,7 +4928,6 @@ mod tests {
             cancel: Arc::new(CancelRegistry::new()),
             events: Arc::new(JobEventBus::new()),
             job_locks: Arc::new(JobMutationLocks::new()),
-            claims: Arc::new(EphemeralClaims::default()),
             mutation_cancels: Arc::new(Mutex::new(HashMap::new())),
         };
 
