@@ -799,7 +799,11 @@ curl http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000
     "state": "queued",
     "position": 3,
     "durable": true,
-    "metadata": { "prompt": "a lighthouse in a storm", "width": 1024, "steps": 28 }
+    "metadata": {
+      "prompt": "a lighthouse in a storm",
+      "width": 1024,
+      "steps": 28
+    }
   },
   "work_item": { "work_id": "00000000-...", "blocked_reason": "preparing" }
 }
