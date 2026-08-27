@@ -2753,7 +2753,7 @@ mod tests {
         let output = state.config.try_read().unwrap().effective_output_dir();
         let direct_ticket = state
             .queue_journal
-            .record(JournalAdmission {
+            .record_for_test(JournalAdmission {
                 id: "legacy-direct",
                 request: &request,
                 output_dir: Some(&output),
@@ -2839,7 +2839,7 @@ mod tests {
         let output = state.config.try_read().unwrap().effective_output_dir();
         let interrupted_ticket = state
             .queue_journal
-            .record(JournalAdmission {
+            .record_for_test(JournalAdmission {
                 id: "interrupted-direct",
                 request: &request,
                 output_dir: Some(&output),
@@ -2861,7 +2861,7 @@ mod tests {
         // again and erase this live submitter's ownership token.
         let live_ticket = state
             .queue_journal
-            .record(JournalAdmission {
+            .record_for_test(JournalAdmission {
                 id: "post-barrier-direct",
                 request: &request,
                 output_dir: Some(&output),

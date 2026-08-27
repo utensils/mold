@@ -9232,15 +9232,15 @@ impl ServerCapabilities {
             if request.batch_size != 1 {
                 return refuse("server-side batch expansion");
             }
-            if request.hdr_exr_dir.is_some() {
-                return refuse("HDR EXR output");
-            }
             let h3 = crate::minimax_h3::task_for_model(&request.model).is_some();
             let media = request.has_durable_media_inputs();
-            if media && (request.lora.is_some() || request.loras.is_some()) {
-                return refuse("a LoRA alongside conditioning media");
-            }
-            if media || h3 || request.references.is_some() {
+            // `references` is deliberately absent from this gate. Ordered
+            // references carry one-use upload handles that `mold.db` must
+            // never hold, so the host admits them through this same path and
+            // marks the child `durable: false` — not restart-safe, but
+            // admitted. `h3_references` says which of those two it is, and a
+            // client must not refuse on it.
+            if media || h3 {
                 let Some(capabilities) = self.durable_media.as_ref() else {
                     return refuse("restart-safe request media");
                 };
@@ -9252,9 +9252,6 @@ impl ServerCapabilities {
                 }
                 if h3 && !capabilities.private_h3 {
                     return refuse("durable MiniMax H3 admission");
-                }
-                if request.references.is_some() && !capabilities.h3_references {
-                    return refuse("durable ordered references");
                 }
                 if (request.id_image.is_some() || request.id_images.is_some())
                     && !capabilities.identity

@@ -8076,19 +8076,20 @@ mod tests {
 
         let (mut job, mut result) = fake_generation("preparation-failed");
         job.output_dir = Some(output.clone());
-        job.journal = state
-            .queue_journal
-            .clone()
-            .record(crate::queue_journal::JournalAdmission {
-                id: &job.id,
-                request: &job.request,
-                output_dir: Some(&output),
-                target_gpu: None,
-                target_device_id: None,
-                completion_payload: SseCompletionPayload::Full,
-                batch_child: false,
-                carries_reference_authority: false,
-            });
+        job.journal =
+            state
+                .queue_journal
+                .clone()
+                .record_for_test(crate::queue_journal::JournalAdmission {
+                    id: &job.id,
+                    request: &job.request,
+                    output_dir: Some(&output),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    batch_child: false,
+                    carries_reference_authority: false,
+                });
         state
             .job_registry
             .register(&job.id, job.request.model.clone());
@@ -8128,7 +8129,7 @@ mod tests {
         let (job, _result) = fake_generation("settlement-retry");
         let admission = journal
             .clone()
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id: &job.id,
                 request: &job.request,
                 output_dir: Some(&output),
@@ -8178,7 +8179,7 @@ mod tests {
         let (job, _result) = fake_generation("completion-retry");
         let admission = journal
             .clone()
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id: &job.id,
                 request: &job.request,
                 output_dir: Some(&output),
@@ -8225,7 +8226,7 @@ mod tests {
         let (job, _result) = fake_generation("completion-retained");
         let admission = journal
             .clone()
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id: &job.id,
                 request: &job.request,
                 output_dir: Some(&output),

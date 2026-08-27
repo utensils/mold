@@ -11586,7 +11586,7 @@ mod tests {
         ));
         let request = fake_upscale_job(Config::default(), "unused").request;
         let ticket = journal
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id: "publish-fails",
                 request: &request,
                 output_dir: Some(&blocked),
@@ -11655,7 +11655,7 @@ mod tests {
         ));
         let request = fake_upscale_job(Config::default(), "unused").request;
         let ticket = journal
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id: "publishes",
                 request: &request,
                 output_dir: Some(tmp.path()),

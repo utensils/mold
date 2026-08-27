@@ -1145,17 +1145,6 @@ async fn prepare_generation_inner(
     // for every non-H3 configured alias and catalog ID.
     mold_core::minimax_h3::canonicalize_request_model(request);
 
-    // `hdr_exr_dir` names an output directory on the machine doing inference.
-    // An HTTP client must never choose that server-local path: unlike media
-    // inputs there is no useful remote artifact to return and no safe root to
-    // resolve it beneath. Forced-local CLI generation bypasses this boundary
-    // and continues to own EXR export and metadata recording.
-    if request.hdr_exr_dir.is_some() {
-        return Err(ApiError::validation(
-            "hdr_exr_dir is local-only and cannot be set through the server API; \
-             re-run the CLI with --local so the EXR sidecar is written on your machine",
-        ));
-    }
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
         request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
@@ -1416,6 +1405,21 @@ async fn prepare_generation_inner(
         )));
     }
     materialize_builtin_ltx2_camera_controls(state, &planned_camera_controls).await?;
+    // Durable admission accepts a request naming a server-local adapter and
+    // preparation may run minutes — or a restart — later, so the path is
+    // re-asked HERE rather than trusted from admission. A LoRA that has since
+    // been moved or deleted holds its row by name, which is the same shape a
+    // missing model takes: the print is parked with an actionable reason, not
+    // rendered without the adapter it asked for and not silently dropped.
+    {
+        let config = state.config.read().await;
+        if let Some(missing) = missing_lora_path(&config, request) {
+            return Err(ApiError::not_found(format!(
+                "LoRA adapter is no longer readable at {missing}; \
+                 restore the file and retry this job"
+            )));
+        }
+    }
 
     let dim_warning = {
         let config = state.config.read().await;
@@ -2285,6 +2289,55 @@ pub(crate) fn canonical_client_batch_id(value: &str) -> Result<String, ApiError>
     uuid::Uuid::parse_str(value.trim())
         .map(|id| id.to_string())
         .map_err(|_| ApiError::validation("client_batch_id must be a UUID"))
+}
+
+/// `hdr_exr_dir` names an output directory on the machine doing inference.
+///
+/// An HTTP client must never choose that server-local path: unlike media
+/// inputs there is no useful remote artifact to return and no safe root to
+/// resolve it beneath. Forced-local CLI generation bypasses this boundary and
+/// continues to own EXR export and metadata recording.
+///
+/// Asked at ADMISSION, before the row is durable, because it is a property of
+/// the request that no amount of retrying changes — deferring it to
+/// preparation would turn an actionable `422` into an accepted job that holds.
+/// The first LoRA this request would load whose file is not readable.
+///
+/// Camera-control aliases resolve through the config and are checked by their
+/// own materialization, so only plain paths are asked here. A zero-scale entry
+/// is skipped for the same reason `effective_loras` drops it: it is never
+/// merged, so its file is never opened.
+fn missing_lora_path(
+    config: &mold_core::Config,
+    request: &mold_core::GenerateRequest,
+) -> Option<String> {
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+    let loras = request
+        .loras
+        .as_ref()
+        .filter(|stack| !stack.is_empty())
+        .cloned()
+        .or_else(|| request.lora.clone().map(|lora| vec![lora]))?;
+    let _ = config;
+    loras
+        .into_iter()
+        .filter(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
+        .find(|lora| {
+            !lora.path.starts_with("camera-control:") && !std::path::Path::new(&lora.path).is_file()
+        })
+        .map(|lora| lora.path)
+}
+
+pub(crate) fn reject_client_supplied_hdr_output(
+    request: &mold_core::GenerateRequest,
+) -> Result<(), ApiError> {
+    if request.hdr_exr_dir.is_some() {
+        return Err(ApiError::validation(
+            "hdr_exr_dir is local-only and cannot be set through the server API; \
+             re-run the CLI with --local so the EXR sidecar is written on your machine",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_direct_generation_request(

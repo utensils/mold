@@ -8013,7 +8013,7 @@ mod tests {
             .register_with_target_gpu(&id, &request.model, Some(0));
         let ticket = state
             .queue_journal
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id: &id,
                 request: &request,
                 output_dir: Some(&output),
@@ -8302,7 +8302,7 @@ mod tests {
             .register_with_target_gpu(id, &request.model, Some(0));
         let ticket = state
             .queue_journal
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id,
                 request: &request,
                 output_dir: Some(&output),

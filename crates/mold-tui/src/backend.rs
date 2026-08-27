@@ -1753,6 +1753,9 @@ mod tests {
             })
         );
 
+        // A LoRA beside media is an ordinary durable request: `lora.path` is a
+        // request field the host persists and re-validates at dispatch, and
+        // refusing the pair took out every img2img render that used one.
         source.lora = Some(LoraWeight {
             path: "adapter.safetensors".into(),
             scale: 1.0,
@@ -1760,30 +1763,25 @@ mod tests {
         });
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[source]),
-            Err(UnsupportedRequestTrait {
-                index: 1,
-                trait_name: "a LoRA alongside conditioning media"
-            })
+            Ok(64)
         );
 
+        // Ordered references and `hdr_exr_dir` are the SERVER's calls to make
+        // — one-use upload authority and a server-local output directory — so
+        // the client submits and lets the host answer by name rather than
+        // second-guessing it from a capability bit.
         let mut references = ordinary_request();
         references.references = Some(Vec::new());
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[references]),
-            Err(UnsupportedRequestTrait {
-                index: 1,
-                trait_name: "durable ordered references"
-            })
+            Ok(64)
         );
 
         let mut hdr = ordinary_request();
         hdr.hdr_exr_dir = Some("/trusted/output".into());
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[hdr]),
-            Err(UnsupportedRequestTrait {
-                index: 1,
-                trait_name: "HDR EXR output"
-            })
+            Ok(64)
         );
     }
 
