@@ -1246,7 +1246,29 @@ export const useGenerationStore = defineStore("generation", {
           return;
         }
         attach(await admitGenerationBatch(target, body));
-      } catch {
+      } catch (retryError) {
+        if (isDefiniteGenerationAdmissionRejection(retryError)) {
+          // The second, identical POST was refused by name: nothing is queued
+          // and the host's own sentence is the answer, not a silent wait.
+          record.tracker = reduceGenerationLifecycle(record.tracker, {
+            type: "admission_rejected",
+            error: retryError instanceof Error ? retryError.message : String(retryError),
+          });
+          for (const clientId of durableJobIds.get(record.tracker.clientBatchId)?.values() ?? []) {
+            const job = this.jobs.find((candidate) => candidate.clientId === clientId);
+            if (!job || jobHasSettled(job)) continue;
+            settleJob(job, "error");
+            job.error = record.tracker.admission.error;
+          }
+          persistDurableRecords();
+          const jobs = [...(durableJobIds.get(record.tracker.clientBatchId)?.values() ?? [])]
+            .map((clientId) => this.jobs.find((candidate) => candidate.clientId === clientId))
+            .filter((job): job is Job => !!job);
+          durableSettlements.get(record.tracker.clientBatchId)?.resolve(jobs);
+          durableSettlements.delete(record.tracker.clientBatchId);
+          void this.finishDurableBatchEffects(record, jobs);
+          return;
+        }
         // Authority remains uncertain and persisted. Reconnect/wake performs
         // the bulk by-client reconciliation; no duplicate endpoint is used.
         this.ensureDurableHostStream(record.tracker.hostId);

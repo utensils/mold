@@ -79,15 +79,41 @@ export interface GenerationBatchStatusResponse {
 export type GenerationBatchLookup =
   { kind: "found"; batch: GenerationBatchStatus } | { kind: "missing" };
 
+/**
+ * Typed `503` refusals the host answers BEFORE anything is committed. A bare
+ * 5xx is ambiguous (the POST may have landed), but these name the exact
+ * pre-commit gate that refused — a host that cannot admit durably, a degraded
+ * encrypted-media store, a full queue, or a restart in progress — so the
+ * print is definitely not queued and the message (often naming the fix) must
+ * reach the user rather than a silent "confirming admission" forever.
+ */
+const PRE_COMMIT_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "DURABLE_ADMISSION_UNAVAILABLE",
+  "DURABLE_MEDIA_UNAVAILABLE",
+  "QUEUE_FULL",
+  "SERVER_RESTARTING",
+]);
+
+function apiErrorCode(error: ApiError): string | null {
+  const body = error.body;
+  if (typeof body !== "object" || body === null) return null;
+  const code = (body as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
 /** A response that proves the server rejected the operation before commit.
- * Timeout-style client responses, throttling, server errors, transport loss,
- * and response-decode failures are all ambiguous and must be reconciled by
- * the caller's durable identity. */
+ * Timeout-style client responses, throttling, untyped server errors,
+ * transport loss, and response-decode failures are all ambiguous and must be
+ * reconciled by the caller's durable identity. */
 export function isDefiniteGenerationAdmissionRejection(
   error: unknown,
 ): boolean {
+  if (!(error instanceof ApiError)) return false;
+  if (error.status === 503) {
+    const code = apiErrorCode(error);
+    return code !== null && PRE_COMMIT_REFUSAL_CODES.has(code);
+  }
   return (
-    error instanceof ApiError &&
     error.status >= 400 &&
     error.status < 500 &&
     error.status !== 408 &&

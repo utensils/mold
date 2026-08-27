@@ -3299,6 +3299,14 @@ async function submitMobileDurableGenerationChunk(input: {
           type: "batch_snapshot",
           batch: lookup.batch,
         });
+      } else if (lookup?.kind === "missing") {
+        // The host answered and has no such batch: the POST never committed,
+        // so the print is rejected with the host's own sentence rather than
+        // left "waiting for host confirmation" forever.
+        recovery = reduceMobileDurableGenerationRecovery(recovery, {
+          type: "admission_rejected",
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }

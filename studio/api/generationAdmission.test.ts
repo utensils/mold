@@ -39,6 +39,37 @@ function batch(overrides: Record<string, unknown> = {}) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("durable generation admission API", () => {
+  it("reads a typed pre-commit 503 as a definite rejection, a bare one as ambiguous", () => {
+    for (const code of [
+      "DURABLE_ADMISSION_UNAVAILABLE",
+      "DURABLE_MEDIA_UNAVAILABLE",
+      "QUEUE_FULL",
+      "SERVER_RESTARTING",
+    ]) {
+      expect(
+        isDefiniteGenerationAdmissionRejection(
+          new ApiError("refused before commit", 503, {
+            error: "refused",
+            code,
+          }),
+        ),
+      ).toBe(true);
+    }
+    expect(
+      isDefiniteGenerationAdmissionRejection(
+        new ApiError("gateway", 503, {
+          error: "upstream",
+          code: "UPSTREAM_TIMEOUT",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isDefiniteGenerationAdmissionRejection(
+        new ApiError("gateway", 503, "not json"),
+      ),
+    ).toBe(false);
+  });
+
   it("distinguishes definite rejection from ambiguous delivery failures", () => {
     for (const status of [400, 401, 404, 409, 422, 426]) {
       expect(

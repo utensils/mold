@@ -52,6 +52,28 @@ vi.mock("../lib/galleryMedia", () => ({
   fetchGalleryThumbnailBlob,
 }));
 
+const previewWatches: Array<{
+  jobId: string;
+  onPreview: (preview: { image: string; step: number; total: number }) => void;
+  stop: ReturnType<typeof vi.fn>;
+}> = [];
+vi.mock("@studio/api/generationSelection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/generationSelection")>()),
+  watchSelectedQueuePreview: (
+    _target: unknown,
+    jobId: string,
+    onPreview: (preview: {
+      image: string;
+      step: number;
+      total: number;
+    }) => void,
+  ) => {
+    const stop = vi.fn();
+    previewWatches.push({ jobId, onPreview, stop });
+    return stop;
+  },
+}));
+
 import { __testing__, useGenerateStream, type Job } from "./useGenerateStream";
 
 const nativeStorageSetItem = localStorage.setItem;
@@ -1441,5 +1463,86 @@ describe("web durable generation lifecycle", () => {
     ).toHaveLength(10);
     expect(admitGenerationBatch).toHaveBeenCalledTimes(10);
     expect(generateStream).not.toHaveBeenCalled();
+  });
+
+  it("polls the host's queue preview for our own running print and stops when it settles", async () => {
+    previewWatches.length = 0;
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      request("previewed print"),
+      { kind: "single" },
+      route,
+    );
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    reconcileGenerationBatches.mockResolvedValue(
+      statusResponse([batch(clientBatchId, ["running"])]),
+    );
+    await __testing__.reconcileDurableHost(route.hostId);
+    expect(previewWatches).toHaveLength(1);
+    expect(previewWatches[0]!.jobId).toBe(job.serverId);
+
+    previewWatches[0]!.onPreview({ image: "QUJD", step: 3, total: 8 });
+    expect(job.previewUrl).toBe("data:image/png;base64,QUJD");
+    expect(job.progress.step).toBe(3);
+    expect(job.progress.totalSteps).toBe(8);
+
+    // A second running snapshot re-asks for the same server job: no new poller.
+    await __testing__.reconcileDurableHost(route.hostId);
+    expect(previewWatches).toHaveLength(1);
+
+    reconcileGenerationBatches.mockResolvedValue(
+      statusResponse([batch(clientBatchId, ["complete"])]),
+    );
+    await __testing__.reconcileDurableHost(route.hostId);
+    expect(previewWatches[0]!.stop).toHaveBeenCalled();
+  });
+
+  it("fails the print with the host's own sentence on a typed pre-commit 503", async () => {
+    admitGenerationBatch.mockRejectedValueOnce(
+      new ApiError("durable admission is unavailable: run chown", 503, {
+        error: "durable admission is unavailable: run chown",
+        code: "DURABLE_ADMISSION_UNAVAILABLE",
+      }),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      request("refused print"),
+      { kind: "single" },
+      route,
+    );
+    await vi.waitFor(() =>
+      expect(stream.jobs.value.find((job) => job.id === id)?.state).toBe(
+        "error",
+      ),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.error).toContain("durable admission is unavailable");
+  });
+
+  it("fails the print when the host confirms it never received an ambiguous POST", async () => {
+    admitGenerationBatch.mockRejectedValueOnce(
+      new ApiError("bad gateway", 502),
+    );
+    lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
+    const stream = useGenerateStream();
+    const id = stream.submit(request("lost print"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(stream.jobs.value.find((job) => job.id === id)?.state).toBe(
+        "error",
+      ),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.error).toContain("bad gateway");
+    expect(job.detached).not.toBe(true);
   });
 });

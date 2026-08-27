@@ -1492,6 +1492,23 @@ function applyDurableBatchStatus(
   applyDurableTracker(next);
 }
 
+/** The host refused (or never received) the batch: fail every job with the
+ * server's own sentence and mark the tracker rejected so nothing waits. */
+function rejectDurableAdmission(clientBatchId: string, error: string): void {
+  const tracker = durableTrackers.get(clientBatchId);
+  if (tracker) {
+    durableTrackers.set(
+      clientBatchId,
+      reduceGenerationLifecycle(tracker, { type: "admission_rejected", error }),
+    );
+  }
+  for (const job of jobsForClientBatch(clientBatchId)) {
+    if (job.state !== "running") continue;
+    job.error = error;
+    recordFailedSettlement(job);
+  }
+}
+
 async function recoverAmbiguousAdmission(
   route: HostRoute,
   clientBatchId: string,
@@ -1505,22 +1522,24 @@ async function recoverAmbiguousAdmission(
       applyDurableBatchStatus(clientBatchId, lookup.batch);
       return;
     }
+    // The host answered and has no such batch: the POST never committed.
+    // Waiting longer would only hide the error the host gave for it.
     const tracker = durableTrackers.get(clientBatchId);
-    if (tracker) {
-      durableTrackers.set(
-        clientBatchId,
-        reduceGenerationLifecycle(tracker, { type: "lookup_missing" }),
-      );
-    }
+    rejectDurableAdmission(
+      clientBatchId,
+      tracker?.admission.error ??
+        "The host did not accept this print; try again.",
+    );
+  } catch {
+    // The host is unreachable: the redacted client UUID remains persisted and
+    // reconnect/wake reconciliation retries against that same authority. It
+    // never submits a second job.
     for (const job of jobsForClientBatch(clientBatchId)) {
       if (job.state === "running") {
         job.detached = true;
         job.progress.stage = "Confirming durable admission";
       }
     }
-  } catch {
-    // The redacted client UUID remains persisted; reconnect/wake reconciliation
-    // retries against that same authority and never submits a second job.
   }
 }
 
@@ -1538,20 +1557,7 @@ async function admitDurableBatch(
   } catch (error) {
     const tracker = durableTrackers.get(clientBatchId);
     if (isDefiniteGenerationAdmissionRejection(error)) {
-      if (tracker) {
-        durableTrackers.set(
-          clientBatchId,
-          reduceGenerationLifecycle(tracker, {
-            type: "admission_rejected",
-            error: errorText(error),
-          }),
-        );
-      }
-      for (const job of jobsForClientBatch(clientBatchId)) {
-        if (job.state !== "running") continue;
-        job.error = errorText(error);
-        recordFailedSettlement(job);
-      }
+      rejectDurableAdmission(clientBatchId, errorText(error));
       return;
     }
     if (tracker) {
