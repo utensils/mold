@@ -495,6 +495,7 @@ fn save_durable_batch_download(
 
 async fn run_canonical_remote_batch(
     client: &MoldClient,
+    config: &Config,
     requests: &[GenerateRequest],
     output: &Option<String>,
     piped: bool,
@@ -503,9 +504,82 @@ async fn run_canonical_remote_batch(
     let total = u32::try_from(requests.len()).context("batch is too large")?;
     let report = canonical_generation(client, requests).await?;
     let admitted_client_ids = report.admitted_client_ids;
-    let mut failures = report.failures;
+    let mut failures = report.orchestration_failures.clone();
+    let mut outcomes = report.outcomes;
 
-    for outcome in report.outcomes {
+    // A child the host parked for a MISSING MODEL is the one hold this
+    // client can repair: pull the model on that host, retry each such child,
+    // and wait for its batch to settle again — the same auto-pull the
+    // singleton stream path performs, so `--batch 4` on a fresh host renders
+    // instead of leaving four held rows.
+    let held: Vec<usize> = outcomes
+        .iter()
+        .enumerate()
+        .filter(|(_, outcome)| mold_core::durable_generation::is_missing_model_hold(&outcome.child))
+        .map(|(index, _)| index)
+        .collect();
+    if !held.is_empty() {
+        let mut pulled: Vec<String> = Vec::new();
+        for &index in &held {
+            let model = outcomes[index].request.model.clone();
+            if pulled.contains(&model) {
+                continue;
+            }
+            require_remote_auto_pull_acquisition(&outcomes[index].request, config)?;
+            print_server_pull_missing_model(&model);
+            stream_server_pull(client, &model, &[]).await?;
+            pulled.push(model);
+        }
+        status!("{} Resuming held prints...", theme::icon_info());
+        let mut affected: Vec<mold_core::GenerationBatchAuthority> = Vec::new();
+        for &index in &held {
+            let outcome = &outcomes[index];
+            let authority = report
+                .authorities
+                .iter()
+                .find(|authority| authority.client_batch_id == outcome.client_batch_id)
+                .context("held child has no admitted batch authority")?;
+            crate::commands::durable_generation::retry_canonical_child(
+                client,
+                authority,
+                &outcome.child.job_id,
+                outcome.child.revision,
+            )
+            .await
+            .with_context(|| format!("could not resume held job {}", outcome.child.job_id))?;
+            if !affected
+                .iter()
+                .any(|known| known.batch_id == authority.batch_id)
+            {
+                affected.push(authority.clone());
+            }
+        }
+        for authority in &affected {
+            let settled =
+                mold_core::durable_generation::wait_for_settled_batch(client, authority).await?;
+            for outcome in outcomes
+                .iter_mut()
+                .filter(|outcome| outcome.client_batch_id == authority.client_batch_id)
+            {
+                if let Some(child) = settled
+                    .children
+                    .iter()
+                    .find(|child| child.job_id == outcome.child.job_id)
+                {
+                    outcome.child = child.clone();
+                }
+            }
+        }
+    }
+    for outcome in &outcomes {
+        if let Some(failure) =
+            mold_core::durable_generation::child_failure(&outcome.client_batch_id, &outcome.child)
+        {
+            failures.push(failure);
+        }
+    }
+
+    for outcome in outcomes {
         if outcome.child.state == mold_core::GenerationBatchChildState::Complete {
             let request = &outcome.request;
             let child = &outcome.child;
@@ -1609,7 +1683,7 @@ pub async fn run(
         // host does not have yet.
         if batch > 1 {
             let requests = remote_batch_requests(&req, batch, base_seed, batch_prompts.as_deref());
-            run_canonical_remote_batch(ctx.client(), &requests, &output, piped, preview)
+            run_canonical_remote_batch(ctx.client(), &config, &requests, &output, piped, preview)
                 .await
                 .map_err(|error| tag_remote(ctx.client(), error))?;
             if let Some(lease) = reference_session.as_mut() {
@@ -6278,6 +6352,7 @@ mod audio_batch_passthrough_tests {
         .unwrap();
         run_canonical_remote_batch(
             &MoldClient::new(&server.uri()),
+            &Config::default(),
             &[request],
             &output,
             false,
@@ -6354,6 +6429,7 @@ mod audio_batch_passthrough_tests {
         let requests = remote_batch_requests(&base, 2, 7, None);
         let error = run_canonical_remote_batch(
             &MoldClient::new(&server.uri()),
+            &Config::default(),
             &requests,
             &output,
             false,

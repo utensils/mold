@@ -123,7 +123,10 @@ describe("mobile durable generation recovery", () => {
     );
   });
 
-  it("refuses a machine that does not advertise durable request media", () => {
+  it("admits a machine that advertises no durable request media", () => {
+    // durable_media is the server's per-request refusal (a typed 503 the
+    // client surfaces), never a client fence: a degraded media store still
+    // admits every media-free print.
     expect(
       mobileDurableGenerationRefusal({
         queue: canonicalQueue,
@@ -131,9 +134,7 @@ describe("mobile durable generation recovery", () => {
         hostLabel: "Render",
         instanceId: "instance-1",
       }),
-    ).toBe(
-      "Render cannot queue this print: this machine does not advertise durable request media. Nothing was queued.",
-    );
+    ).toBeNull();
   });
 
   it("asks nothing about the request itself — the machine is the only client gate", () => {

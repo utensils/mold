@@ -42,9 +42,9 @@ describe("desktop durable generation recovery", () => {
     expect(generationRefusalReason({ heterogeneous_batch_max_outputs: 0 }, durableMedia)).toBe(
       "this machine does not advertise the durable generation queue",
     );
-    expect(generationRefusalReason(queue, null)).toBe(
-      "this machine does not advertise durable request media",
-    );
+    // durable_media is the server's per-request refusal, not a client fence:
+    // a host whose media store is degraded still admits every media-free print.
+    expect(generationRefusalReason(queue, null)).toBeNull();
   });
 
   it("persists recovery authority without API secrets, prompts, or media", () => {

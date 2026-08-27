@@ -179,7 +179,11 @@ describe("submitBatch connection cap", () => {
     const stream = streams.find((candidate) => candidate.seed === seed);
     stream!.onEvent(
       "chain_job",
-      JSON.stringify({ type: "finalized", output: `sequence-${seed}.mp4` }),
+      JSON.stringify({
+        type: "finalized",
+        output: "final/output-1.mp4",
+        gallery_filename: `sequence-${seed}.mp4`,
+      }),
     );
   }
 

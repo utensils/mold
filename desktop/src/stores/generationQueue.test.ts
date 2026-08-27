@@ -102,7 +102,8 @@ const chainDecision = {
 function chainComplete(overrides: { seed?: number; video?: string; format?: string } = {}): string {
   return JSON.stringify({
     type: "finalized",
-    output: `sequence-${overrides.seed ?? 1}.${overrides.format ?? "mp4"}`,
+    output: "final/output-1.mp4",
+    gallery_filename: `sequence-${overrides.seed ?? 1}.${overrides.format ?? "mp4"}`,
   });
 }
 

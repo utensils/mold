@@ -369,7 +369,14 @@ describe("generation store multi-host routing", () => {
           "chain_job",
           JSON.stringify({ type: "denoise_step", stage_idx: 1, step: 2, total: 4 }),
         );
-        opts.onEvent("chain_job", JSON.stringify({ type: "finalized", output: "chain-42.mp4" }));
+        opts.onEvent(
+          "chain_job",
+          JSON.stringify({
+            type: "finalized",
+            output: "final/output-1.mp4",
+            gallery_filename: "chain-42.mp4",
+          }),
+        );
         return Promise.resolve();
       },
     );
@@ -430,7 +437,11 @@ describe("generation store multi-host routing", () => {
         opts.onEvent("chain_job", JSON.stringify({ type: "snapshot", job: chainSnapshot() }));
         opts.onEvent(
           "chain_job",
-          JSON.stringify({ type: "finalized", output: "metadata chain.mp4" }),
+          JSON.stringify({
+            type: "finalized",
+            output: "final/output-1.mp4",
+            gallery_filename: "metadata chain.mp4",
+          }),
         );
         return Promise.resolve();
       },

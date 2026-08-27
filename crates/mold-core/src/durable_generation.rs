@@ -421,6 +421,37 @@ pub async fn reconcile_ambiguous_retry_observed(
     unreachable!("ambiguous retry confirmation loop always returns")
 }
 
+/// The user-facing failure sentence for a child that did not complete, or
+/// `None` for a completed one. Exposed so a client that resumed held children
+/// can re-derive its failure set from the settled children.
+pub fn child_failure(client_batch_id: &str, child: &GenerationBatchChild) -> Option<String> {
+    terminal_failure(client_batch_id, child)
+}
+
+/// A child the host parked because the MODEL ITSELF is absent — the one hold a
+/// client can repair by pulling and retrying. Read off the typed `error_code`,
+/// never the sentence.
+pub fn is_missing_model_hold(child: &GenerationBatchChild) -> bool {
+    child.state == GenerationBatchChildState::Held
+        && matches!(
+            child.error_code.as_deref(),
+            Some(crate::SSE_ERROR_CODE_MODEL_NOT_FOUND) | Some(crate::SSE_ERROR_CODE_UNKNOWN_MODEL)
+        )
+}
+
+/// Read an admitted batch afresh and wait for every child to settle — the
+/// re-wait a client performs after retrying held children.
+pub async fn wait_for_settled_batch(
+    client: &MoldClient,
+    authority: &GenerationBatchAuthority,
+) -> Result<GenerationBatchStatus> {
+    let status = client
+        .generation_batch(&authority.batch_id)
+        .await?
+        .with_context(|| format!("generation batch {} disappeared", authority.batch_id))?;
+    wait_for_batch(client, status, authority, 0, None).await
+}
+
 fn terminal_failure(client_batch_id: &str, child: &GenerationBatchChild) -> Option<String> {
     if child.state == GenerationBatchChildState::Complete {
         return None;
