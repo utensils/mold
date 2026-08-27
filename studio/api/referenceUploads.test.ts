@@ -639,8 +639,12 @@ describe("MiniMax H3 reference upload leases", () => {
 
   it("chunks a reference-bearing batch no wider than the host's open-session cap", async () => {
     const request = await requestFixture();
-    expect(referenceUploadBatchLimit([request], TARGET, CAPABILITIES, 64)).toBe(4);
-    expect(referenceUploadBatchLimit([request], TARGET, CAPABILITIES, 2)).toBe(2);
+    expect(referenceUploadBatchLimit([request], TARGET, CAPABILITIES, 64)).toBe(
+      4,
+    );
+    expect(referenceUploadBatchLimit([request], TARGET, CAPABILITIES, 2)).toBe(
+      2,
+    );
     // No upload work keeps the batch limit: an authless host, or a batch
     // without references at all.
     expect(
@@ -648,7 +652,7 @@ describe("MiniMax H3 reference upload leases", () => {
     ).toBe(64);
     expect(
       referenceUploadBatchLimit(
-        [{ ...request, references: undefined }],
+        [(({ references: _references, ...rest }) => rest)(request)],
         TARGET,
         CAPABILITIES,
         64,
@@ -701,7 +705,9 @@ describe("MiniMax H3 reference upload leases", () => {
           );
         }
         expect(method).toBe("DELETE");
-        expect(String(input)).toBe(`${TARGET.baseUrl}${CAPABILITIES.session_path}`);
+        expect(String(input)).toBe(
+          `${TARGET.baseUrl}${CAPABILITIES.session_path}`,
+        );
         return new Response(null, { status: 204 });
       }),
     );
@@ -736,7 +742,9 @@ describe("MiniMax H3 reference upload leases", () => {
       now: () => 10_000,
     });
     expect(
-      staged.requests[0]!.references?.map((reference) => reference.media.authority),
+      staged.requests[0]!.references?.map(
+        (reference) => reference.media.authority,
+      ),
     ).toEqual(["upload", "upload"]);
     await staged.release();
     await staged.release();

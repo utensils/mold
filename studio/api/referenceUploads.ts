@@ -745,8 +745,8 @@ export async function prepareReferenceUploads<
   expectedInstanceId: string;
   capabilities: ReferenceUploadCapabilities | null | undefined;
   request: T;
-  signal?: AbortSignal;
-  now?: () => number;
+  signal?: AbortSignal | undefined;
+  now?: (() => number) | undefined;
 }): Promise<ReferenceUploadLease<T>> {
   throwIfAborted(options.signal);
   const capabilities = validateCapabilities(options.capabilities);
@@ -1018,7 +1018,8 @@ export async function prepareReferenceUploadBatch<
 export function requestShouldUseReferenceUploads(
   request: ReferenceUploadRequest,
   target: { apiKey?: ApiTarget["apiKey"] } | null | undefined,
-  capabilities: Pick<ReferenceUploadCapabilities, "available"> | null | undefined,
+  capabilities:
+    Pick<ReferenceUploadCapabilities, "available"> | null | undefined,
 ): boolean {
   return (
     requestNeedsReferenceUpload(request) &&
