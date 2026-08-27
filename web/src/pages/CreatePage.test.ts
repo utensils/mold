@@ -32,7 +32,6 @@ import {
   takeGenerationHandoff,
 } from "../composables/useGenerationHandoff";
 import { ApiHttpError } from "../api";
-import { ApiError } from "@studio/api/client";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
@@ -265,6 +264,24 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
   }),
 }));
 
+/** The default machine's inventory for a test that actually queues a print:
+ *  routing is inventory-driven now, so the machine must hold the checkpoint. */
+function installedModelRow(name: string, family: string) {
+  return {
+    name,
+    family,
+    size_gb: 12,
+    is_loaded: false,
+    last_used: null,
+    hf_repo: "",
+    downloaded: true,
+    default_width: 1024,
+    default_height: 1024,
+    default_steps: 20,
+    default_guidance: 3.5,
+  };
+}
+
 vi.mock("../composables/useStatusPoll", () => ({
   useStatusPoll: () => ({ status: { value: null } }),
 }));
@@ -426,7 +443,9 @@ describe("CreatePage layout and behavior", () => {
     hostModelsMock.mockClear();
     hostModelsMock.mockResolvedValue([]);
     hostCapabilitiesMock.mockClear();
-    hostCapabilitiesMock.mockResolvedValue({});
+    hostCapabilitiesMock.mockResolvedValue({
+      queue: { heterogeneous_batch_max_outputs: 64 },
+    });
     hostModelDownloadMock.mockClear();
     listCollectionsMock.mockClear();
     listCollectionsMock.mockResolvedValue([]);
@@ -436,8 +455,9 @@ describe("CreatePage layout and behavior", () => {
     vi.stubGlobal("prompt", vi.fn());
   });
 
-  it("uses the Mold Studio composer + controls-region workspace", () => {
+  it("uses the Mold Studio composer + controls-region workspace", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     expect(wrapper.get("[data-test='generate-shell']").classes()).toContain(
       "max-w-[1600px]",
     );
@@ -683,6 +703,7 @@ describe("CreatePage layout and behavior", () => {
       })),
     );
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     expect(wrapper.find("[data-test='phone-create-title']").exists()).toBe(
       true,
     );
@@ -1226,7 +1247,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("acknowledges Generate immediately and swallows a double click", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -1244,7 +1269,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("submits an off-profile custom size — the server is the authority", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -1261,7 +1290,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("carries the print title field into the generate request and validates it inline", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -1301,7 +1334,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("blocks a submit for an invalid title that never went through the field", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -1319,7 +1356,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("still blocks a malformed non-integer size", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -1336,7 +1377,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("blocks non-Qwen mask submissions until a source image is selected", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -1356,7 +1401,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("blocks submission on an STG block list it cannot parse", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("ltx-2-19b-distilled:fp8", "ltx2"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "ltx-2-19b-distilled:fp8";
     form.state.value.modelFamily = "ltx2";
@@ -1377,7 +1426,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("blocks submission on a skip stride the wire cannot carry", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("ltx-2-19b-distilled:fp8", "ltx2"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "ltx-2-19b-distilled:fp8";
     form.state.value.modelFamily = "ltx2";
@@ -1400,7 +1453,11 @@ describe("CreatePage layout and behavior", () => {
   // #772: the advertised contract gates submit, and #779's first/last-frame
   // pair rides the existing keyframes field.
   it("holds Generate until an image-to-video checkpoint has its first frame", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("wan22-i2v-a14b:q8", "wan"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "wan22-i2v-a14b:q8";
     form.state.value.modelFamily = "wan";
@@ -1431,7 +1488,11 @@ describe("CreatePage layout and behavior", () => {
   // reading here, the Continue-a-video control this branch made visible for a
   // Wan I2V checkpoint offered work submit refused.
   it("lets a Wan I2V continuation through with no attached image", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("wan22-i2v-a14b:q8", "wan"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "wan22-i2v-a14b:q8";
     form.state.value.modelFamily = "wan";
@@ -1452,7 +1513,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("holds Generate for a Wan continuation on a text-to-video checkpoint", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("wan22-t2v-a14b:q8", "wan"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "wan22-t2v-a14b:q8";
     form.state.value.modelFamily = "wan";
@@ -1469,7 +1534,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("holds Generate when a text-to-video checkpoint carries a source image", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("wan22-t2v-a14b:q5", "wan"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "wan22-t2v-a14b:q5";
     form.state.value.modelFamily = "wan";
@@ -1487,7 +1556,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("holds Generate for an end frame with no first frame", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("wan22-ti2v-5b:fp16", "wan"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "wan22-ti2v-5b:fp16";
     form.state.value.modelFamily = "wan";
@@ -1508,7 +1581,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("submits a first/last-frame pair as two keyframes plus the source image", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("wan22-ti2v-5b:fp16", "wan"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "wan22-ti2v-5b:fp16";
     form.state.value.modelFamily = "wan";
@@ -1593,6 +1670,17 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("fits only Qwen edit's target and preserves ordered references", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "qwen-image-edit:q4",
+        family: "qwen-image-edit",
+        size_gb: 12,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+      },
+    ]);
     class LoadedImage {
       onload: (() => void) | null = null;
       onerror: (() => void) | null = null;
@@ -1614,6 +1702,7 @@ describe("CreatePage layout and behavior", () => {
       .spyOn(HTMLCanvasElement.prototype, "toDataURL")
       .mockReturnValue("data:image/png;base64,FITTED_TARGET");
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "qwen-image-edit:q4";
     form.state.value.modelFamily = "qwen-image-edit";
@@ -1701,7 +1790,11 @@ describe("CreatePage layout and behavior", () => {
     upscaleStreamMock.mockImplementation(async (_request, handlers) => {
       handlers.onComplete({ image: "UPSCALED" });
     });
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("ltx-2-19b-distilled:fp8", "ltx2"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "ltx-2-19b-distilled:fp8";
     form.state.value.modelFamily = "ltx2";
@@ -1741,7 +1834,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("asks before replacing a source image while a mask exists", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -2340,16 +2437,14 @@ describe("CreatePage layout and behavior", () => {
       batchIds.add(call[0].batch_id);
     }
     expect(batchIds.size).toBe(1);
-    expect(placementPreviewMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ batch_size: 1 }),
-      3,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
   });
 
   it("prepares a batch on the server and queues provenance on every sibling", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -2360,16 +2455,16 @@ describe("CreatePage layout and behavior", () => {
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
     expect(submitMock).not.toHaveBeenCalled();
-    expect(expandPromptMock).toHaveBeenCalledWith(
-      {
-        prompt: "a lighthouse",
-        model_family: "flux",
-        variations: 3,
-        task: "text-to-image",
-      },
-      undefined,
-      undefined,
-    );
+    const expandCall = expandPromptMock.mock.calls[0] as unknown as unknown[];
+    const [expandPayload, expandTarget] = expandCall;
+    expect(expandPayload).toEqual({
+      prompt: "a lighthouse",
+      model_family: "flux",
+      variations: 3,
+      task: "text-to-image",
+    });
+    // The origin expands through relative dispatch: same machine, no target.
+    expect(expandTarget).toBeUndefined();
     expect(
       wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
     ).toEqual(["north light", "storm light", "harbor light"]);
@@ -2403,7 +2498,11 @@ describe("CreatePage layout and behavior", () => {
           releaseExpansion = resolve;
         }),
     );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -2465,7 +2564,11 @@ describe("CreatePage layout and behavior", () => {
         serverId: null,
       } as Job,
     ];
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.prompt = "new work";
     await nextTick();
@@ -2477,51 +2580,12 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
-  it("owns route revalidation so a prepared batch cannot be queued twice", async () => {
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    const form = useGenerateForm();
-    form.state.value.model = "flux-dev:q4";
-    form.state.value.modelFamily = "flux";
-    form.state.value.prompt = "a lighthouse";
-    form.state.value.batchSize = 3;
-    await nextTick();
-    await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await flushPromises();
-
-    let release!: (
-      value: Awaited<ReturnType<typeof placementPreviewMock>>,
-    ) => void;
-    placementPreviewMock.mockImplementationOnce(
-      () => new Promise((resolve) => (release = resolve)),
-    );
-    const callsBeforeQueue = placementPreviewMock.mock.calls.length;
-    await wrapper.get("[data-test='queue-variations']").trigger("click");
-    await wrapper.get("[data-test='queue-variations']").trigger("click");
-    expect(placementPreviewMock.mock.calls.length - callsBeforeQueue).toBe(1);
-    expect(submitMock).not.toHaveBeenCalled();
-
-    release({
-      version: 1,
-      authoritative: true,
-      state_version: 1,
-      plan_version: 1,
-      outcome: "planned",
-      candidate: {
-        device_id: "cuda:0",
-        execution_fingerprint: "test",
-        predicted_start_after_ms: 0,
-        predicted_completion_after_ms: 100,
-        setup_ms: 0,
-        setup_kind: "warm",
-        estimate_confidence: "high",
-      },
-    });
-    await flushPromises();
-    expect(submitMock).toHaveBeenCalledTimes(3);
-  });
-
   it("preserves reviewed variations as stale when the model changes", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -2544,58 +2608,12 @@ describe("CreatePage layout and behavior", () => {
     ).toHaveLength(3);
   });
 
-  it.each([
-    [
-      "authoritative infeasible",
-      {
-        version: 1,
-        authoritative: true,
-        state_version: 2,
-        plan_version: 2,
-        outcome: "infeasible",
-        candidate: null,
-        reason: "insufficient_vram",
-      },
-    ],
-    ["null", null],
-    ["malformed unsupported", { outcome: "unsupported" }],
-    [
-      "planned without a candidate",
-      {
-        version: 1,
-        authoritative: true,
-        state_version: 2,
-        plan_version: 2,
-        outcome: "planned",
-      },
-    ],
-  ])(
-    "preserves every reviewed variation and submits zero siblings after %s revalidation",
-    async (_case, response) => {
-      const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-      const form = useGenerateForm();
-      form.state.value.model = "flux-dev:q4";
-      form.state.value.modelFamily = "flux";
-      form.state.value.prompt = "a lighthouse";
-      form.state.value.batchSize = 3;
-      await nextTick();
-      await wrapper.get("[data-test='composer-expand']").trigger("click");
-      await flushPromises();
-      placementPreviewMock.mockResolvedValueOnce(response as never);
-
-      await wrapper.get("[data-test='queue-variations']").trigger("click");
-      await flushPromises();
-
-      expect(submitMock).not.toHaveBeenCalled();
-      expect(
-        wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
-      ).toHaveLength(3);
-      expect(wrapper.text()).toContain("Nothing was queued");
-    },
-  );
-
   it("sends the active style as a directive on the main-prompt expand", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("sdxl-base:fp16", "sdxl"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
@@ -2614,7 +2632,9 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("never steers a clip expand with the composer's style chip", async () => {
+    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "ltx2:q8";
     form.state.value.modelFamily = "ltx2";
@@ -2634,7 +2654,9 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("resolves image-conditioned video expansion without sending source bytes", async () => {
+    hostModelsMock.mockResolvedValue([installedModelRow("ltx2:q8", "ltx2")]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "ltx2:q8";
     form.state.value.modelFamily = "ltx2";
@@ -2654,6 +2676,7 @@ describe("CreatePage layout and behavior", () => {
 
   it("bakes and clears the chip when a quick expansion is applied", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
@@ -2690,6 +2713,7 @@ describe("CreatePage layout and behavior", () => {
 
   it("retires dormant original-prompt provenance when a new prompt is authored", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.originalPrompt =
       "the source for an earlier generated print";
@@ -2706,6 +2730,7 @@ describe("CreatePage layout and behavior", () => {
 
   it("retires dormant provenance when a LoRA trigger phrase edits the prompt", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.prompt = "a portrait";
     form.state.value.originalPrompt = "an earlier generated print";
@@ -2723,6 +2748,7 @@ describe("CreatePage layout and behavior", () => {
 
   it("preserves the source while an active quick expansion becomes stale", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
@@ -2749,7 +2775,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("undoes an original-source Remix to the latest live composer edit", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("sdxl-base:fp16", "sdxl"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
@@ -2785,7 +2815,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("bakes and clears an active style when a Remix is applied", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("sdxl-base:fp16", "sdxl"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
@@ -2921,7 +2955,7 @@ describe("CreatePage layout and behavior", () => {
 
     expect(submitMock).toHaveBeenCalledTimes(1);
     expect(submitMock.mock.calls[0]?.[0].original_prompt).toBe("a lighthouse");
-    expect(submitMock.mock.calls[0]?.[2]).toEqual({
+    expect(submitMock.mock.calls[0]?.[2]).toMatchObject({
       hostId: studio.id,
       label: "Studio",
       instanceId: null,
@@ -2979,11 +3013,15 @@ describe("CreatePage layout and behavior", () => {
       prompt: "storm light over the harbor",
       original_prompt: "a lighthouse",
     });
-    expect(submitMock.mock.calls[0]?.[2]).toBeNull();
+    expect(submitMock.mock.calls[0]?.[2]).toMatchObject({
+      hostId: ORIGIN_HOST_ID,
+    });
   });
 
   it("applies a clip expansion to the clip, never the composer's prompt or style", async () => {
+    hostModelsMock.mockResolvedValue([installedSequenceModel()]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "ltx2:q8";
     form.state.value.modelFamily = "ltx2";
@@ -3009,7 +3047,11 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("carries the preset negative when a variation is adopted into the composer", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("sdxl-base:fp16", "sdxl"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
@@ -3036,6 +3078,9 @@ describe("CreatePage layout and behavior", () => {
   });
 
   it("resets to a fresh print on the mold:new-print event, keeping the model", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises(); // onMounted registers the mold:new-print listener
     const form = useGenerateForm();
@@ -3058,9 +3103,9 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.prompt).toBe("");
     // The selected model survives — New print is a fresh canvas, not a reset.
     expect(form.state.value.model).toBe("flux-dev:q4");
-    // Variations cleared → the variations canvas gives way to the cold-start guide.
-    expect(wrapper.find("[data-test='result-canvas']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
+    // Variations cleared → nothing reviewed is left on the canvas.
+    const canvas = wrapper.find("[data-test='result-canvas']");
+    expect(canvas.exists() ? canvas.attributes("data-count") : "0").toBe("0");
   });
 
   it("feeds durable sequence jobs from every host into the activity strip", async () => {
@@ -3810,10 +3855,16 @@ describe("CreatePage layout and behavior", () => {
   });
 
   // ── File under (Create-time Library organization) ─────────────────────
-  const filingCapabilities = { gallery: { organize: true } };
+  const filingCapabilities = {
+    gallery: { organize: true },
+    queue: { heterogeneous_batch_max_outputs: 64 },
+  };
 
   function filingFleet() {
     hostCapabilitiesMock.mockResolvedValue(filingCapabilities);
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     listTagsMock.mockResolvedValue([
       { name: "blue", count: 9 },
       { name: "dusk", count: 2 },
@@ -3846,6 +3897,9 @@ describe("CreatePage layout and behavior", () => {
   }
 
   it("hides File under entirely on a fleet that cannot organize", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     expect(wrapper.find("[data-test='file-under-group']").exists()).toBe(false);
@@ -4073,7 +4127,7 @@ describe("CreatePage host routing", () => {
     vi.stubGlobal("prompt", vi.fn());
   });
 
-  it("submits unrouted when this server is the only machine", async () => {
+  it("submits against this server's own route when it is the only machine", async () => {
     hostModelsMock.mockResolvedValue([flux]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -4082,8 +4136,11 @@ describe("CreatePage host routing", () => {
     await flushPromises();
 
     expect(submitMock).toHaveBeenCalledTimes(1);
-    // Third argument is the route — null means "stay on the serving origin".
-    expect(submitMock.mock.calls[0]?.[2]).toBeNull();
+    // Durable admission reconciles against a machine's instance identity, so
+    // the origin carries a real route now — never `null`.
+    expect(submitMock.mock.calls[0]?.[2]).toMatchObject({
+      hostId: ORIGIN_HOST_ID,
+    });
   });
 
   it("dispatches to the pinned machine with its base URL and key", async () => {
@@ -4101,7 +4158,7 @@ describe("CreatePage host routing", () => {
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
 
-    expect(submitMock.mock.calls[0]?.[2]).toEqual({
+    expect(submitMock.mock.calls[0]?.[2]).toMatchObject({
       hostId: studio.id,
       label: "Studio",
       instanceId: null,
@@ -4115,6 +4172,9 @@ describe("CreatePage host routing", () => {
   function expandCapabilityFor(present: Record<string, boolean>) {
     return async (host: { id: string }) => ({
       gallery: { can_delete: true },
+      // Every machine in this fleet can queue a print; the axis under test
+      // is which of them holds the expander.
+      queue: { heterogeneous_batch_max_outputs: 64 },
       expand: {
         configured: true,
         model_present: present[host.id] ?? null,
@@ -4123,97 +4183,6 @@ describe("CreatePage host routing", () => {
       },
     });
   }
-
-  it("cancels an in-flight placement check without queueing late work", async () => {
-    hostModelsMock.mockResolvedValue([flux]);
-    let release!: (
-      value: Awaited<ReturnType<typeof placementPreviewMock>>,
-    ) => void;
-    placementPreviewMock.mockImplementationOnce(
-      () => new Promise((resolve) => (release = resolve)),
-    );
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    const form = useGenerateForm();
-    form.state.value.prompt = "cancel this plan";
-    await flushPromises();
-
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await vi.waitFor(() =>
-      expect(placementPreviewMock).toHaveBeenCalledTimes(1),
-    );
-    const button = wrapper.get("[data-test='composer-submit']");
-    expect(button.text()).toContain("Cancel");
-    expect(wrapper.text()).toContain("Checking machine fit");
-    expect(button.attributes("disabled")).toBeUndefined();
-
-    await button.trigger("click");
-    const previewOptions = placementPreviewMock.mock.calls[0]?.[3] as
-      { signal?: AbortSignal } | undefined;
-    expect(previewOptions?.signal?.aborted).toBe(true);
-    expect(submitMock).not.toHaveBeenCalled();
-
-    release({
-      version: 1,
-      authoritative: true,
-      state_version: 1,
-      plan_version: 1,
-      outcome: "planned",
-      candidate: {
-        device_id: "cuda:0",
-        execution_fingerprint: "test",
-        predicted_start_after_ms: 0,
-        predicted_completion_after_ms: 100,
-        setup_ms: 0,
-        setup_kind: "warm",
-        estimate_confidence: "high",
-      },
-    });
-    await flushPromises();
-    expect(submitMock).not.toHaveBeenCalled();
-    expect(button.text()).toContain("Generate");
-  });
-
-  it("aborts an in-flight placement check when Create unmounts", async () => {
-    hostModelsMock.mockResolvedValue([flux]);
-    let release!: (
-      value: Awaited<ReturnType<typeof placementPreviewMock>>,
-    ) => void;
-    placementPreviewMock.mockImplementationOnce(
-      () => new Promise((resolve) => (release = resolve)),
-    );
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    const form = useGenerateForm();
-    form.state.value.prompt = "leave this plan";
-    await flushPromises();
-
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await vi.waitFor(() =>
-      expect(placementPreviewMock).toHaveBeenCalledTimes(1),
-    );
-    const previewOptions = placementPreviewMock.mock.calls[0]?.[3] as
-      { signal?: AbortSignal } | undefined;
-    wrapper.unmount();
-    expect(previewOptions?.signal?.aborted).toBe(true);
-
-    release({
-      version: 1,
-      authoritative: true,
-      state_version: 1,
-      plan_version: 1,
-      outcome: "planned",
-      candidate: {
-        device_id: "cuda:0",
-        execution_fingerprint: "test",
-        predicted_start_after_ms: 0,
-        predicted_completion_after_ms: 100,
-        setup_ms: 0,
-        setup_kind: "warm",
-        estimate_confidence: "high",
-      },
-    });
-    await flushPromises();
-    expect(submitMock).not.toHaveBeenCalled();
-  });
 
   it("expands on a machine that has the expander while the print stays put", async () => {
     const studio = addHost({
@@ -4305,9 +4274,11 @@ describe("CreatePage host routing", () => {
     await flushPromises();
 
     // Rewritten on Studio, printed here: the quick snapshot must freeze the
-    // generation route, which for the origin stays relative dispatch.
+    // generation route, which for the origin is this server's own route.
     expect(submitMock).toHaveBeenCalledTimes(1);
-    expect(submitMock.mock.calls[0]?.[2]).toBeNull();
+    expect(submitMock.mock.calls[0]?.[2]).toMatchObject({
+      hostId: ORIGIN_HOST_ID,
+    });
   });
 
   it("routes Remix through the same expansion policy", async () => {
@@ -4324,8 +4295,8 @@ describe("CreatePage host routing", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     const form = useGenerateForm();
-    form.state.value.model = "flux-dev:q4";
-    form.state.value.modelFamily = "flux";
+    form.state.value.model = "flux2-klein:q4";
+    form.state.value.modelFamily = "flux2";
     form.state.value.prompt = "a lighthouse";
     await nextTick();
 
@@ -4431,103 +4402,6 @@ describe("CreatePage host routing", () => {
     );
   });
 
-  it("shows the server reason and only absent structured component names", async () => {
-    hostModelsMock.mockResolvedValue([flux]);
-    placementPreviewMock.mockResolvedValue({
-      version: 1,
-      authoritative: true,
-      state_version: 1,
-      plan_version: 1,
-      outcome: "infeasible",
-      reason: "model 'flux-dev:bf16' is missing required components",
-      candidate: null,
-      missing_components: [
-        {
-          kind: "vae",
-          name: "ae.safetensors",
-          present: false,
-          repair_model: "flux-dev:bf16",
-        },
-        {
-          kind: "tokenizer",
-          name: "tokenizer.json",
-          present: false,
-          repair_model: "flux-dev:bf16",
-        },
-        {
-          kind: "transformer",
-          name: "flux-dev.safetensors",
-          present: true,
-          repair_model: "flux-dev:bf16",
-        },
-      ],
-    } as never);
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await flushPromises();
-
-    expect(submitMock).not.toHaveBeenCalled();
-    expect(
-      useNotifications()
-        .toasts.map((item) => item.text)
-        .join(" "),
-    ).toBe(
-      "This server can't run this print: model 'flux-dev:bf16' is missing required components. Missing components: ae.safetensors, tokenizer.json.",
-    );
-  });
-
-  it("names the machine and HTTP error when its feasibility probe fails", async () => {
-    hostModelsMock.mockResolvedValue([flux]);
-    placementPreviewMock.mockRejectedValue(
-      new ApiError("API key was rejected", 401),
-    );
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await flushPromises();
-
-    expect(submitMock).not.toHaveBeenCalled();
-    expect(
-      useNotifications()
-        .toasts.map((item) => item.text)
-        .join(" "),
-    ).toBe(
-      "This server didn't answer the feasibility check: HTTP 401: API key was rejected.",
-    );
-  });
-
-  it("uses retry language for temporary scheduler preview failures", async () => {
-    hostModelsMock.mockResolvedValue([flux]);
-    placementPreviewMock.mockResolvedValue({
-      version: 1,
-      authoritative: false,
-      state_version: 1,
-      plan_version: 1,
-      outcome: "temporarily_unavailable",
-      reason: "scheduler snapshot moved",
-      candidate: null,
-    } as never);
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await flushPromises();
-
-    expect(submitMock).not.toHaveBeenCalled();
-    expect(
-      useNotifications()
-        .toasts.map((item) => item.text)
-        .join(" "),
-    ).toBe(
-      "This server couldn't compute a placement plan right now: scheduler snapshot moved. Try again.",
-    );
-  });
-
-  // An offline pinned machine reports no models, so a model-first check would
-  // blame the model. Name the machine — that's the thing the user can fix.
   it("blames the unreachable machine, not the empty model list", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
     localStorage.setItem("mold.web.generateTarget.v1", studio.id);
@@ -4800,149 +4674,6 @@ describe("CreatePage host routing", () => {
 
   // The pull is only ever offered on a machine that reported the model
   // absent; one that refused for capacity would refuse again after a repair.
-  it("never offers a machine that refused for capacity as a pull target", async () => {
-    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
-    hostModelsMock.mockImplementation(async (host: { id: string }) =>
-      host.id === ORIGIN_HOST_ID ? [] : [{ ...flux, name: "z-image-turbo:q6" }],
-    );
-    placementPreviewMock.mockImplementation(
-      async (...args: unknown[]): Promise<Record<string, unknown>> => {
-        const target = args[0] as { baseUrl: string };
-        return target.baseUrl.includes("studio")
-          ? {
-              version: 1,
-              authoritative: true,
-              state_version: 1,
-              plan_version: 1,
-              outcome: "infeasible",
-              reason: "no device can host this generation: needs 48.0 GB",
-            }
-          : {
-              version: 1,
-              authoritative: true,
-              state_version: 1,
-              plan_version: 1,
-              outcome: "infeasible",
-              reason:
-                "model 'z-image-turbo:q6' has no concrete local artifacts",
-              missing_components: [
-                {
-                  kind: "transformer",
-                  name: "transformer",
-                  present: false,
-                  repair_model: "z-image-turbo:q6",
-                },
-              ],
-            };
-      },
-    );
-    postDownloadMock.mockClear();
-    postCatalogDownloadMock.mockClear();
-
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const form = useGenerateForm();
-    form.state.value.model = "z-image-turbo:q6";
-    form.state.value.modelFamily = "zimage";
-    form.state.value.prompt = "a lighthouse at dusk";
-    await nextTick();
-
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await flushPromises();
-    await wrapper.get("[data-test='install-target-option']").trigger("click");
-    await flushPromises();
-
-    // Only the origin lacks it, so no picker: the download lands there and
-    // Studio (which has it and cannot fit it) is never touched.
-    expect(postDownloadMock).toHaveBeenCalledWith("z-image-turbo:q6");
-    expect(
-      useNotifications().toasts.some((t) =>
-        new RegExp(`Pulling z-image-turbo:q6 on `).test(t.text),
-      ),
-    ).toBe(true);
-    expect(studio.id).toBeTruthy();
-  });
-
-  // A source-conditioned print is fitted against the chosen machine AFTER
-  // routing, so the pre-routing request is not what would render. Download it,
-  // but do not promise a resume that would use different conditioning.
-  it("downloads without promising a resume for a source-conditioned print", async () => {
-    hostModelsMock.mockResolvedValue([]);
-    placementPreviewMock.mockResolvedValue({
-      version: 1,
-      authoritative: true,
-      state_version: 1,
-      plan_version: 1,
-      outcome: "infeasible",
-      reason: "model 'flux-dev:q8' has no concrete local artifacts",
-      missing_components: [
-        {
-          kind: "transformer",
-          name: "transformer",
-          present: false,
-          repair_model: "flux-dev:q8",
-        },
-      ],
-    });
-    postDownloadMock.mockClear();
-
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const form = useGenerateForm();
-    form.state.value.model = "flux-dev:q8";
-    form.state.value.modelFamily = "flux";
-    form.state.value.prompt = "a lighthouse at dusk";
-    form.state.value.imageAttachments = [
-      { kind: "upload", filename: "open.png", base64: "FIRST" },
-    ];
-    await nextTick();
-
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await flushPromises();
-    await wrapper.get("[data-test='install-target-option']").trigger("click");
-    await flushPromises();
-
-    expect(postDownloadMock).toHaveBeenCalledWith("flux-dev:q8");
-    const toasts = useNotifications().toasts;
-    expect(
-      toasts.some((t) => /press Generate again once it's ready/.test(t.text)),
-    ).toBe(true);
-    expect(
-      toasts.some((t) => /generation starts when it's ready/.test(t.text)),
-    ).toBe(false);
-  });
-
-  it("keeps the dead-end message when the machine simply cannot fit it", async () => {
-    hostModelsMock.mockResolvedValue([flux]);
-    placementPreviewMock.mockResolvedValue({
-      version: 1,
-      authoritative: true,
-      state_version: 1,
-      plan_version: 1,
-      outcome: "infeasible",
-      reason: "no device can host this generation: needs 48.0 GB",
-    });
-    postDownloadMock.mockClear();
-
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
-    await flushPromises();
-    const form = useGenerateForm();
-    form.state.value.model = "flux2-klein:q4";
-    form.state.value.modelFamily = "flux2";
-    form.state.value.prompt = "a lighthouse at dusk";
-    await nextTick();
-
-    await wrapper.get("[data-test='composer-submit']").trigger("click");
-    await flushPromises();
-
-    expect(submitMock).not.toHaveBeenCalled();
-    expect(postDownloadMock).not.toHaveBeenCalled();
-    expect(
-      useNotifications().toasts.some((t) =>
-        /can't run this print/.test(t.text),
-      ),
-    ).toBe(true);
-  });
 
   it("still re-homes a genuinely unset model onto an installed one", async () => {
     const form = useGenerateForm();

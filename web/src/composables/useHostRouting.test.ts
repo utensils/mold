@@ -169,6 +169,42 @@ function device(
   };
 }
 
+/** A print: admitted durably, never previewed for placement. */
+function printFor(model: string, overrides: Record<string, unknown> = {}) {
+  return {
+    prompt: "print",
+    model,
+    width: 1024,
+    height: 1024,
+    steps: 20,
+    guidance: 3.5,
+    seed: null,
+    batch_size: 1,
+    ...overrides,
+  };
+}
+
+/** A sequence carrying one model. A PRINT is admitted durably and never asks
+ *  for a placement plan, so every placement contract is pinned on the one
+ *  submission that still previews. */
+function chainFor(model: string, overrides: Record<string, unknown> = {}) {
+  return {
+    model,
+    width: 768,
+    height: 512,
+    fps: 24,
+    steps: 20,
+    guidance: 3.5,
+    motion_tail_frames: 17,
+    output_format: "mp4" as const,
+    stages: [
+      { prompt: "one", frames: 97 },
+      { prompt: "two", frames: 97 },
+    ],
+    ...overrides,
+  };
+}
+
 function routeOf(result: FeasibilityResult) {
   expect(result.kind).toBe("route");
   if (result.kind !== "route")
@@ -238,16 +274,7 @@ describe("useHostRouting", () => {
     capabilities.set(remote.id, canonical);
     const routing = useHostRouting();
     await routing.refresh();
-    const request = {
-      prompt: "fast admission",
-      model: "flux-dev:q4",
-      width: 512,
-      height: 512,
-      steps: 4,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    };
+    const request = printFor("flux-dev:q4");
 
     setGenerateTargetId(ORIGIN_HOST_ID);
     await expect(routing.resolveFeasible(request)).resolves.toMatchObject({
@@ -279,16 +306,7 @@ describe("useHostRouting", () => {
     setGenerateTargetId(ORIGIN_HOST_ID);
 
     await expect(
-      routing.resolveFeasible({
-        prompt: "missing",
-        model: "ltx-2.5-22b-distilled:int8-conv",
-        width: 512,
-        height: 512,
-        steps: 4,
-        guidance: 1,
-        seed: null,
-        batch_size: 1,
-      }),
+      routing.resolveFeasible(printFor("ltx-2.5-22b-distilled:int8-conv")),
     ).resolves.toMatchObject({
       kind: "infeasible",
       perHost: [
@@ -469,16 +487,7 @@ describe("useHostRouting", () => {
     expect(routing.resolve("hf:MiniMaxAI/MiniMaxH3")).toBeNull();
     placementCall.mockClear();
     await expect(
-      routing.resolveFeasible({
-        prompt: "blocked",
-        model: "hf:MiniMaxAI/MiniMaxH3",
-        width: 768,
-        height: 512,
-        steps: 20,
-        guidance: 3.5,
-        seed: null,
-        batch_size: 1,
-      }),
+      routing.resolveFeasible(printFor("hf:MiniMaxAI/MiniMaxH3")),
     ).resolves.toEqual({
       kind: "infeasible",
       perHost: [
@@ -671,16 +680,9 @@ describe("useHostRouting", () => {
     const routing = useHostRouting();
     await routing.refresh();
 
-    const route = await routing.resolveFeasible({
-      prompt: "shot",
-      model: "ltx2.3-dev:bf16",
-      width: 768,
-      height: 512,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    });
+    const route = await routing.resolveFeasibleChain(
+      chainFor("ltx2.3-dev:bf16"),
+    );
     expect(routeOf(route).hostId).toBe(studio.id);
   });
 
@@ -698,16 +700,7 @@ describe("useHostRouting", () => {
     const routing = useHostRouting();
     await routing.refresh();
 
-    const route = await routing.resolveFeasible({
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    });
+    const route = await routing.resolveFeasibleChain(chainFor("flux-dev:q4"));
     expect(routeOf(route).hostId).toBe(ORIGIN_HOST_ID);
     expect(placementCall).toHaveBeenCalledTimes(2);
   });
@@ -739,49 +732,13 @@ describe("useHostRouting", () => {
     const routing = useHostRouting();
     await routing.refresh();
 
-    const result = await routing.resolveFeasible({
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    });
+    const result = await routing.resolveFeasibleChain(chainFor("flux-dev:q4"));
 
     expect(routeOf(result).hostId).toBe(studio.id);
   });
 
-  it("previews Batch N as N one-image siblings without mutating the reviewed request", async () => {
-    statuses.set(ORIGIN_HOST_ID, status());
-    models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
-    const routing = useHostRouting();
-    await routing.refresh();
-    const request = {
-      prompt: "reviewed",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 4,
-    };
-
-    await expect(routing.resolveFeasible(request, 4)).resolves.toBeTruthy();
-
-    expect(placementCall).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ batch_size: 1 }),
-      4,
-      {},
-    );
-    expect(request.batch_size).toBe(4);
-  });
-
   it.each([401, 403, 426, 500])(
-    "treats placement HTTP %s as definitive rather than legacy fallback",
+    "reports a sequence placement HTTP %s as unreachable",
     async (statusCode) => {
       statuses.set(ORIGIN_HOST_ID, status());
       models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
@@ -792,16 +749,7 @@ describe("useHostRouting", () => {
       await routing.refresh();
 
       await expect(
-        routing.resolveFeasible({
-          prompt: "print",
-          model: "flux-dev:q4",
-          width: 1024,
-          height: 1024,
-          steps: 20,
-          guidance: 3.5,
-          seed: null,
-          batch_size: 1,
-        }),
+        routing.resolveFeasibleChain(chainFor("flux-dev:q4")),
       ).resolves.toEqual({
         kind: "unreachable",
         perHost: [
@@ -816,7 +764,7 @@ describe("useHostRouting", () => {
   );
 
   it.each([404, 405])(
-    "uses the exact selected legacy host when placement HTTP %s is unsupported",
+    "reports a sequence placement HTTP %s as unreachable rather than routing anyway",
     async (statusCode) => {
       const studio = addHost({
         url: "http://studio:7680",
@@ -832,28 +780,17 @@ describe("useHostRouting", () => {
       const routing = useHostRouting();
       await routing.refresh();
 
-      const route = await routing.resolveFeasibleChain({
-        model: "ltx2.3-dev:bf16",
-        width: 768,
-        height: 512,
-        fps: 24,
-        steps: 20,
-        guidance: 3.5,
-        motion_tail_frames: 17,
-        output_format: "mp4",
-        stages: [
-          { prompt: "one", frames: 97 },
-          { prompt: "two", frames: 97 },
+      await expect(
+        routing.resolveFeasibleChain(chainFor("ltx2.3-dev:bf16")),
+      ).resolves.toEqual({
+        kind: "unreachable",
+        perHost: [
+          {
+            hostId: studio.id,
+            label: "Studio",
+            error: `HTTP ${statusCode}: not supported`,
+          },
         ],
-      });
-
-      expect(route).toMatchObject({
-        kind: "route",
-        route: {
-          hostId: studio.id,
-          instanceId: "instance-a",
-          target: { baseUrl: studio.url },
-        },
       });
     },
   );
@@ -931,29 +868,20 @@ describe("useHostRouting", () => {
       models.set(id, [model("flux-dev:q4")]);
       devices.set(id, { plan_version: 1, devices: [device(0)] });
     }
-    const request = {
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    };
+    const request = chainFor("flux-dev:q4");
     placementCall.mockImplementation((target: { baseUrl: string }) =>
       Promise.resolve(placement(target.baseUrl.includes("studio") ? 200 : 50)),
     );
     const routing = useHostRouting();
     await routing.refresh();
-    const frozen = routeOf(await routing.resolveFeasible(request));
+    const frozen = routeOf(await routing.resolveFeasibleChain(request));
     expect(frozen.hostId).toBe(ORIGIN_HOST_ID);
 
     placementCall.mockClear();
     placementCall.mockImplementation((target: { baseUrl: string }) =>
       Promise.resolve(placement(target.baseUrl.includes("studio") ? 10 : 500)),
     );
-    const revalidated = await routing.revalidateFeasible(frozen!, request);
+    const revalidated = await routing.revalidateFeasibleChain(frozen!, request);
 
     expect(routeOf(revalidated).hostId).toBe(ORIGIN_HOST_ID);
     expect(placementCall).toHaveBeenCalledTimes(1);
@@ -970,19 +898,10 @@ describe("useHostRouting", () => {
       models.set(id, [model("flux-dev:q4")]);
       devices.set(id, { plan_version: 1, devices: [device(0)] });
     }
-    const request = {
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    };
+    const request = chainFor("flux-dev:q4");
     const routing = useHostRouting();
     await routing.refresh();
-    const frozen = routeOf(await routing.resolveFeasible(request));
+    const frozen = routeOf(await routing.resolveFeasibleChain(request));
     placementCall.mockClear();
 
     let release!: (value: GenerationPlacementPreview) => void;
@@ -992,7 +911,7 @@ describe("useHostRouting", () => {
           release = resolve;
         }),
     );
-    const pending = routing.revalidateFeasible(frozen, request);
+    const pending = routing.revalidateFeasibleChain(frozen, request);
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledOnce());
     routing.setTarget(ORIGIN_HOST_ID);
     release(placement(100));
@@ -1001,9 +920,69 @@ describe("useHostRouting", () => {
     expect(placementCall).toHaveBeenCalledOnce();
   });
 
-  it.each(["explicit unsupported", "HTTP 404", "HTTP 405"])(
-    "keeps the exact frozen chain route during %s revalidation",
-    async (kind) => {
+  it("keeps the exact frozen chain route during an explicit unsupported revalidation", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "same-key",
+      instanceId: "instance-a",
+    });
+    setGenerateTargetId(studio.id);
+    statuses.set(studio.id, status());
+    models.set(studio.id, [model("ltx2.3-dev:bf16")]);
+    devices.set(studio.id, { plan_version: 1, devices: [device(0)] });
+    const routing = useHostRouting();
+    await routing.refresh();
+    const request: ChainRequestWire = {
+      model: "ltx2.3-dev:bf16",
+      width: 768,
+      height: 512,
+      fps: 24,
+      steps: 20,
+      guidance: 3.5,
+      motion_tail_frames: 17,
+      output_format: "mp4",
+      stages: [
+        { prompt: "one", frames: 97 },
+        { prompt: "two", frames: 97 },
+      ],
+    };
+    placementCall.mockResolvedValueOnce(
+      placement(0, {
+        authoritative: false,
+        outcome: "unsupported",
+        candidate: null,
+      }),
+    );
+    const frozen = routeOf(await routing.resolveFeasibleChain(request));
+    expect(frozen).toMatchObject({
+      hostId: studio.id,
+      instanceId: "instance-a",
+    });
+
+    placementCall.mockResolvedValueOnce(
+      placement(0, {
+        authoritative: false,
+        outcome: "unsupported",
+        candidate: null,
+      }),
+    );
+
+    await expect(
+      routing.revalidateFeasibleChain(frozen, request, 3),
+    ).resolves.toMatchObject({
+      kind: "route",
+      route: {
+        hostId: studio.id,
+        instanceId: "instance-a",
+        target: { baseUrl: studio.url, apiKey: "same-key" },
+      },
+    });
+  });
+
+  it.each([404, 405])(
+    "reports a frozen chain revalidation HTTP %s as unreachable",
+    async (statusCode) => {
       const studio = addHost({
         url: "http://studio:7680",
         name: "Studio",
@@ -1016,20 +995,7 @@ describe("useHostRouting", () => {
       devices.set(studio.id, { plan_version: 1, devices: [device(0)] });
       const routing = useHostRouting();
       await routing.refresh();
-      const request: ChainRequestWire = {
-        model: "ltx2.3-dev:bf16",
-        width: 768,
-        height: 512,
-        fps: 24,
-        steps: 20,
-        guidance: 3.5,
-        motion_tail_frames: 17,
-        output_format: "mp4",
-        stages: [
-          { prompt: "one", frames: 97 },
-          { prompt: "two", frames: 97 },
-        ],
-      };
+      const request = chainFor("ltx2.3-dev:bf16");
       placementCall.mockResolvedValueOnce(
         placement(0, {
           authoritative: false,
@@ -1038,34 +1004,21 @@ describe("useHostRouting", () => {
         }),
       );
       const frozen = routeOf(await routing.resolveFeasibleChain(request));
-      expect(frozen).toMatchObject({
-        hostId: studio.id,
-        instanceId: "instance-a",
-      });
 
-      if (kind === "explicit unsupported") {
-        placementCall.mockResolvedValueOnce(
-          placement(0, {
-            authoritative: false,
-            outcome: "unsupported",
-            candidate: null,
-          }),
-        );
-      } else {
-        placementCall.mockRejectedValueOnce(
-          new ApiError("unsupported", kind === "HTTP 404" ? 404 : 405),
-        );
-      }
+      placementCall.mockRejectedValueOnce(
+        new ApiError("unsupported", statusCode),
+      );
 
       await expect(
         routing.revalidateFeasibleChain(frozen, request, 3),
       ).resolves.toMatchObject({
-        kind: "route",
-        route: {
-          hostId: studio.id,
-          instanceId: "instance-a",
-          target: { baseUrl: studio.url, apiKey: "same-key" },
-        },
+        kind: "unreachable",
+        perHost: [
+          {
+            hostId: studio.id,
+            error: `HTTP ${statusCode}: unsupported`,
+          },
+        ],
       });
     },
   );
@@ -1081,19 +1034,10 @@ describe("useHostRouting", () => {
     statuses.set(studio.id, status());
     models.set(studio.id, [model("flux-dev:q4")]);
     devices.set(studio.id, { plan_version: 1, devices: [device(0)] });
-    const request = {
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    };
+    const request = chainFor("flux-dev:q4");
     const routing = useHostRouting();
     await routing.refresh();
-    const frozen = routeOf(await routing.resolveFeasible(request));
+    const frozen = routeOf(await routing.resolveFeasibleChain(request));
     expect(frozen).toMatchObject({
       hostId: studio.id,
       instanceId: "instance-a",
@@ -1106,7 +1050,7 @@ describe("useHostRouting", () => {
           release = resolve;
         }),
     );
-    const pending = routing.revalidateFeasible(frozen, request, 4);
+    const pending = routing.revalidateFeasibleChain(frozen, request, 4);
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledTimes(2));
     updateHost(studio.id, { instanceId: "instance-b" });
     release(placement(100));
@@ -1125,19 +1069,10 @@ describe("useHostRouting", () => {
     statuses.set(studio.id, status());
     models.set(studio.id, [model("flux-dev:q4")]);
     devices.set(studio.id, { plan_version: 1, devices: [device(0)] });
-    const request = {
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    };
+    const request = chainFor("flux-dev:q4");
     const routing = useHostRouting();
     await routing.refresh();
-    const frozen = routeOf(await routing.resolveFeasible(request));
+    const frozen = routeOf(await routing.resolveFeasibleChain(request));
     expect(frozen).toMatchObject({
       hostId: studio.id,
       instanceId: "instance-a",
@@ -1146,7 +1081,9 @@ describe("useHostRouting", () => {
     updateHost(studio.id, { instanceId: "instance-b" });
     placementCall.mockClear();
 
-    await expect(routing.revalidateFeasible(frozen, request)).resolves.toEqual({
+    await expect(
+      routing.revalidateFeasibleChain(frozen, request),
+    ).resolves.toEqual({
       kind: "transient",
       perHost: [],
     });
@@ -1160,19 +1097,10 @@ describe("useHostRouting", () => {
       plan_version: 1,
       devices: [device(0)],
     });
-    const request = {
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    };
+    const request = chainFor("flux-dev:q4");
     const routing = useHostRouting();
     await routing.refresh();
-    const frozen = routeOf(await routing.resolveFeasible(request));
+    const frozen = routeOf(await routing.resolveFeasibleChain(request));
     expect(frozen).toMatchObject({
       hostId: ORIGIN_HOST_ID,
       instanceId: "origin-instance-a",
@@ -1185,7 +1113,7 @@ describe("useHostRouting", () => {
           release = resolve;
         }),
     );
-    const pending = routing.revalidateFeasible(frozen, request, 4);
+    const pending = routing.revalidateFeasibleChain(frozen, request, 4);
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledTimes(2));
     statuses.set(ORIGIN_HOST_ID, status({ instance_id: "origin-instance-b" }));
     await routing.refresh();
@@ -1212,16 +1140,7 @@ describe("useHostRouting", () => {
           release = resolve;
         }),
     );
-    const pending = routing.resolveFeasible({
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    });
+    const pending = routing.resolveFeasibleChain(chainFor("flux-dev:q4"));
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledOnce());
     routing.setTarget(ORIGIN_HOST_ID);
     release(placement(100));
@@ -1253,16 +1172,7 @@ describe("useHostRouting", () => {
           release = resolve;
         }),
     );
-    const pending = routing.resolveFeasible({
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    });
+    const pending = routing.resolveFeasibleChain(chainFor("flux-dev:q4"));
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledOnce());
     updateHost(studio.id, { apiKey: "rotated-key" });
     release(placement(100));
@@ -1293,16 +1203,7 @@ describe("useHostRouting", () => {
           release = resolve;
         }),
     );
-    const pending = routing.resolveFeasible({
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    });
+    const pending = routing.resolveFeasibleChain(chainFor("flux-dev:q4"));
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledOnce());
     updateHost(studio.id, { url: "http://replacement:7680" });
     release(placement(100));
@@ -1333,16 +1234,7 @@ describe("useHostRouting", () => {
           release = resolve;
         }),
     );
-    const pending = routing.resolveFeasible({
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    });
+    const pending = routing.resolveFeasibleChain(chainFor("flux-dev:q4"));
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledOnce());
     statuses.set(studio.id, status({ instance_id: "instance-b" }));
     updateHost(studio.id, { instanceId: "instance-b" });
@@ -1370,16 +1262,7 @@ describe("useHostRouting", () => {
     const routing = useHostRouting();
     await routing.refresh();
 
-    const route = await routing.resolveFeasible({
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    });
+    const route = await routing.resolveFeasibleChain(chainFor("flux-dev:q4"));
 
     expect(route).toEqual({
       kind: "infeasible",
@@ -1432,16 +1315,7 @@ describe("useHostRouting", () => {
     await routing.refresh();
 
     await expect(
-      routing.resolveFeasible({
-        prompt: "print",
-        model: "flux-dev:q4",
-        width: 1024,
-        height: 1024,
-        steps: 20,
-        guidance: 3.5,
-        seed: null,
-        batch_size: 1,
-      }),
+      routing.resolveFeasibleChain(chainFor("flux-dev:q4")),
     ).resolves.toEqual({
       kind: "infeasible",
       perHost: [
@@ -1505,16 +1379,7 @@ describe("useHostRouting", () => {
     await routing.refresh();
 
     await expect(
-      routing.resolveFeasible({
-        prompt: "print",
-        model: "flux-dev:q4",
-        width: 1024,
-        height: 1024,
-        steps: 20,
-        guidance: 3.5,
-        seed: null,
-        batch_size: 1,
-      }),
+      routing.resolveFeasibleChain(chainFor("flux-dev:q4")),
     ).resolves.toEqual({
       kind: "infeasible",
       perHost: [
@@ -1546,16 +1411,7 @@ describe("useHostRouting", () => {
     );
     const routing = useHostRouting();
 
-    const result = await routing.resolveFeasible({
-      prompt: "print",
-      model: "flux-dev:q4",
-      width: 1024,
-      height: 1024,
-      steps: 20,
-      guidance: 3.5,
-      seed: null,
-      batch_size: 1,
-    });
+    const result = await routing.resolveFeasibleChain(chainFor("flux-dev:q4"));
 
     expect(routeOf(result).hostId).toBe(ORIGIN_HOST_ID);
   });
@@ -1575,16 +1431,7 @@ describe("useHostRouting", () => {
     await routing.refresh();
 
     await expect(
-      routing.resolveFeasible({
-        prompt: "print",
-        model: "flux-dev:q4",
-        width: 1024,
-        height: 1024,
-        steps: 20,
-        guidance: 3.5,
-        seed: null,
-        batch_size: 1,
-      }),
+      routing.resolveFeasibleChain(chainFor("flux-dev:q4")),
     ).resolves.toEqual({
       kind: "transient",
       perHost: [
@@ -1612,16 +1459,7 @@ describe("useHostRouting", () => {
     await routing.refresh();
 
     await expect(
-      routing.resolveFeasible({
-        prompt: "print",
-        model: "flux-dev:q4",
-        width: 1024,
-        height: 1024,
-        steps: 20,
-        guidance: 3.5,
-        seed: null,
-        batch_size: 1,
-      }),
+      routing.resolveFeasibleChain(chainFor("flux-dev:q4")),
     ).resolves.toEqual({
       kind: "transient",
       perHost: [
@@ -1708,7 +1546,7 @@ describe("useHostRouting", () => {
     models.set(studio.id, [model("flux-dev:q4")]);
     capabilities.set(studio.id, {
       gallery: { can_delete: true },
-      queue: { heterogeneous_batch: true },
+      queue: { heterogeneous_batch_max_outputs: 64 },
     });
     hostQueueCall.mockImplementation((host: HostEntry) =>
       Promise.resolve({
@@ -2033,16 +1871,7 @@ describe("useHostRouting", () => {
     ]);
     expect(routing.resolve("flux-dev:q4")).toBeNull();
     await expect(
-      routing.resolveFeasible({
-        prompt: "print",
-        model: "flux-dev:q4",
-        width: 1024,
-        height: 1024,
-        steps: 20,
-        guidance: 3.5,
-        seed: null,
-        batch_size: 1,
-      }),
+      routing.resolveFeasible(printFor("flux-dev:q4")),
     ).resolves.toEqual({
       kind: "profile_mismatch",
       perHost: [
