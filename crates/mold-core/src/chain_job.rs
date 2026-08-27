@@ -880,6 +880,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: Some(true),
+            ephemeral: false,
         }
     }
 
@@ -1395,6 +1396,7 @@ request_json = "{}"
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         };
         ChainJobDetail {
             summary: ChainJobSummary {

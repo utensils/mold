@@ -672,6 +672,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         }
     }
 

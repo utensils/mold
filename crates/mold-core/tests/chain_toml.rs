@@ -121,6 +121,7 @@ fn normalised_request_survives_round_trip() {
         clip_frames: None,
         source_image: None,
         enable_audio: None,
+        ephemeral: false,
     };
     let normalised = req.normalise().unwrap();
     let script = ChainScript::from(&normalised);

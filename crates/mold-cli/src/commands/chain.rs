@@ -355,6 +355,11 @@ impl ChainInputs {
             clip_frames: Some(self.clip_frames),
             source_image: self.source_image.clone(),
             enable_audio: self.enable_audio,
+            // `--frames` past one clip is a long VIDEO the model cannot render
+            // in a single pass, not a sequence the user authored. It renders as
+            // a chain and publishes one print, but it takes no listing entry, is
+            // swept after finalization, and reuses as a one-shot.
+            ephemeral: true,
         }
     }
 }
@@ -507,7 +512,11 @@ pub async fn run_chain(
 async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<VideoData> {
     let created = client.create_chain_job(req).await?;
     let job_id = created.job_id;
-    status!("{} Sequence job {}", theme::icon_info(), job_id.bold());
+    // An authored sequence is a job the user can find again; an auto-chained
+    // one-shot is not, so only the first is worth naming.
+    if !req.ephemeral {
+        status!("{} Sequence job {}", theme::icon_info(), job_id.bold());
+    }
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainProgressEvent>();
     let stage_labels: Vec<StageLabel> = req.stages.iter().map(StageLabel::from_stage).collect();
@@ -1349,6 +1358,7 @@ pub(crate) fn build_request_from_script(
         clip_frames: None,
         source_image: None,
         enable_audio: script.chain.enable_audio,
+        ephemeral: false,
     })
 }
 
@@ -1465,6 +1475,7 @@ pub async fn run_from_sugar(
         clip_frames: None,
         source_image: None,
         enable_audio,
+        ephemeral: false,
     };
 
     // `--motion-tail` defaults to LTX-2's 17 for every family, so repeated
@@ -1725,6 +1736,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         }
     }
 
@@ -2312,6 +2324,7 @@ mod tests {
             clip_frames: Some(97),
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         }
         .normalise()
         .unwrap();
@@ -2367,6 +2380,7 @@ mod tests {
                     clip_frames: Some(clip),
                     source_image: None,
                     enable_audio: None,
+                    ephemeral: false,
                 };
                 // Totals needing more than MAX_CHAIN_STAGES stages reject at
                 // normalise; skip them (the property is about the fit, not
@@ -2424,6 +2438,7 @@ mod tests {
             clip_frames: Some(97),
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         }
         .normalise()
         .unwrap();

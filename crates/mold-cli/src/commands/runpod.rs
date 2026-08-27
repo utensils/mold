@@ -19,16 +19,55 @@ use mold_core::runpod::{
 };
 
 use crate::commands::durable_generation::{
-    canonical_singleton_artifact, CanonicalGenerationArtifact,
+    canonical_singleton_artifact_observed, CanonicalGenerationArtifact, CanonicalGenerationEvent,
 };
 
+/// Render one print on a pod, keeping a spinner alive from the durable batch's
+/// own state transitions.
+///
+/// A pod render takes minutes and the durable path carries no per-step
+/// progress — that rides the observer `/api/generate/stream` registers, which
+/// this path deliberately does not use because RunPod's proxy times out at 100
+/// seconds. What it does have is one authoritative event per committed child
+/// transition, which is enough to say what the job is doing.
 async fn generate_with_runpod_transport(
     client: &mold_core::MoldClient,
     request: &mold_core::GenerateRequest,
 ) -> Result<CanonicalGenerationArtifact> {
-    canonical_singleton_artifact(client, request)
-        .await
-        .with_context(|| "durable generation failed")
+    let (events, mut rx) = tokio::sync::mpsc::unbounded_channel::<CanonicalGenerationEvent>();
+    let spinner = tokio::spawn(async move {
+        let mut pb: Option<indicatif::ProgressBar> = None;
+        while let Some(event) = rx.recv().await {
+            let (CanonicalGenerationEvent::Admitted { status, .. }
+            | CanonicalGenerationEvent::Snapshot { status, .. }) = event
+            else {
+                continue;
+            };
+            let Some(child) = status.children.first() else {
+                continue;
+            };
+            let bar = pb.get_or_insert_with(|| {
+                let bar = indicatif::ProgressBar::new_spinner();
+                bar.set_style(
+                    indicatif::ProgressStyle::with_template(&format!(
+                        "{{spinner:.{}}} {{msg}}",
+                        theme::SPINNER_STYLE
+                    ))
+                    .unwrap(),
+                );
+                bar.enable_steady_tick(std::time::Duration::from_millis(80));
+                bar
+            });
+            bar.set_message(format!("{:?}", child.state).to_lowercase());
+        }
+        if let Some(bar) = pb {
+            bar.finish_and_clear();
+        }
+    });
+    let artifact = canonical_singleton_artifact_observed(client, request, Some(&events)).await;
+    drop(events);
+    let _ = spinner.await;
+    artifact.with_context(|| "durable generation failed")
 }
 use crate::theme;
 use crate::AlreadyReported;
