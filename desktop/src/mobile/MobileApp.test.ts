@@ -8678,6 +8678,11 @@ describe("MobileApp gallery", () => {
     await flushPromises();
     await flushPromises();
 
+    // A durable print's media is fetched from the host gallery, so the tile
+    // appears a tick after the completion lands.
+    await vi.waitFor(() =>
+      expect(wrapper!.find("[data-test='mobile-generated-result']").exists()).toBe(true),
+    );
     await wrapper.get("[data-test='mobile-generated-result']").trigger("click");
     await flushPromises();
 
@@ -10546,7 +10551,6 @@ describe("MobileApp routing target consistency", () => {
     await develop();
     expect(admissionTargets()[0]).toEqual(renderTarget);
   });
-
 });
 
 describe("MobileApp Library organization", () => {
@@ -11236,9 +11240,7 @@ describe("MobileApp Create File under", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           ...durableQueueCapabilities,
-          ...(organize
-            ? filingCapabilities
-            : { gallery: { can_delete: true, organize: false } }),
+          ...(organize ? filingCapabilities : { gallery: { can_delete: true, organize: false } }),
         });
       }
       if (path === "/api/gallery") return Promise.resolve([]);
@@ -11754,8 +11756,7 @@ describe("MobileApp Create File under", () => {
           hostname: render ? "render" : "studio",
           instance_id: render ? "render-id" : "studio-id",
           // Auto ranks a print from each machine's own captured queue depth.
-          queue_depth:
-            autoWinnerBaseUrl === null ? 0 : probe.baseUrl === autoWinnerBaseUrl ? 0 : 9,
+          queue_depth: autoWinnerBaseUrl === null ? 0 : probe.baseUrl === autoWinnerBaseUrl ? 0 : 9,
         });
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/capabilities") {
@@ -11805,7 +11806,6 @@ describe("MobileApp Create File under", () => {
     previewGenerationPlacement.mockImplementation(plan);
     previewChainPlacement.mockImplementation(plan);
   }
-
 
   async function openFleetCreate(): Promise<void> {
     twoMachines();
@@ -12585,7 +12585,6 @@ describe("MobileApp identity photo", () => {
     expect(admissionTargets()[0]).toEqual(target);
     expect(admittedRequests()[0]?.id_image).toBe(PNG_1X1);
   });
-
 
   it("refuses an oversized photo without ever reading it", async () => {
     serveIdentity([identityModel]);
