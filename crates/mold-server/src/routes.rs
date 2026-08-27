@@ -1328,7 +1328,10 @@ async fn prepare_generation_inner(
     // durable Ref2VA print here.
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let validation = if private_h3_ingress {
-        mold_core::validation::validate_h3_private_uat_request(validation_request)
+        mold_core::validation::validate_h3_private_uat_request_with(
+            validation_request,
+            mold_core::ReferenceForm::Resolved,
+        )
     } else {
         validate_generate_request(
             validation_request,

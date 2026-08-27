@@ -1937,6 +1937,18 @@ pub fn validate_generate_request_fields(
 /// public compliance gate before applying the same field validation.
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub fn validate_h3_private_uat_request(req: &GenerateRequest) -> Result<(), String> {
+    validate_h3_private_uat_request_with(req, ReferenceForm::Admitted)
+}
+
+/// [`validate_h3_private_uat_request`] naming the form the references are
+/// in: the door validates client media, and everything after durable
+/// admission — deferred preparation, replay — validates the descriptors the
+/// row actually carries.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub fn validate_h3_private_uat_request_with(
+    req: &GenerateRequest,
+    reference_form: ReferenceForm,
+) -> Result<(), String> {
     if !crate::minimax_h3::is_reviewed_compact_model(&req.model) {
         return Err(
             "private MiniMax H3 validation requires an exact reviewed task model".to_string(),
@@ -1950,7 +1962,11 @@ pub fn validate_h3_private_uat_request(req: &GenerateRequest) -> Result<(), Stri
     // keeps the last word on both routes.
     crate::minimax_h3::validate_reviewed_canvas(req)
         .map_err(|error| format!("{}: {}", error.code, error.message))?;
-    validate_generate_request_after_activation(req, Some(crate::minimax_h3::FAMILY))
+    validate_generate_request_after_activation_with(
+        req,
+        Some(crate::minimax_h3::FAMILY),
+        reference_form,
+    )
 }
 
 /// Shape/feature validation after the caller has passed the model-activation
@@ -3727,14 +3743,38 @@ mod tests {
         req
     }
 
+    /// The private door refuses a client-supplied descriptor; the resolved
+    /// form — what the durable row carries into deferred preparation —
+    /// must pass the same door, or every durable Ref2VA print is held.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn private_h3_validation_accepts_resolved_descriptors_after_admission() {
+        let mut req = valid_h3_request(crate::minimax_h3::REF2VA_COMFY);
+        req.references = Some(vec![crate::GenerationReference::Image {
+            media: crate::GenerationReferenceAuthority::Descriptor,
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some("reference.png".to_string()),
+                sha256: Some("b".repeat(64)),
+                crop: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 1920,
+            height: 1080,
+        }]);
+        let door = validate_h3_private_uat_request(&req).unwrap_err();
+        assert!(door.contains("descriptor authority"), "{door}");
+        validate_h3_private_uat_request_with(&req, ReferenceForm::Resolved)
+            .expect("deferred preparation validates the row's own form");
+    }
+
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     #[test]
     fn private_h3_validation_bypasses_only_activation_for_exact_reviewed_models() {
         let req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
-        let public_error =
-            validate_generate_request_with_family(&req, Some(crate::minimax_h3::FAMILY))
-                .unwrap_err();
-        assert!(public_error.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        // Since #1013 the reviewed compact identities are ordinary public
+        // models: the public door admits them, and the private door agrees.
+        validate_generate_request_with_family(&req, Some(crate::minimax_h3::FAMILY))
+            .expect("a reviewed compact identity is public");
         validate_h3_private_uat_request(&req).unwrap();
 
         let mut official = req;

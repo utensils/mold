@@ -7008,7 +7008,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let db_path = root.path().join("mold.db");
         let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
-        let (mut state, _rx) = durable_state_with_engine(
+        let (mut state, rx) = durable_state_with_engine(
             db.clone(),
             root.path(),
             MockEngine::ready_for_model(mold_core::minimax_h3::REF2VA_COMFY),
@@ -7029,6 +7029,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let status = json_body(accepted).await;
         let rows = journal.list_all();
         assert_eq!(rows.len(), 1, "the reference print is one durable row");
         let row = &rows[0];
@@ -7069,6 +7070,47 @@ mod tests {
         )
         .unwrap_err();
         assert!(admitted.contains("descriptor authority"), "{admitted}");
+
+        // Now the real thing: the feeder prepares that row. Whatever else a
+        // mock H3 runtime refuses, it must never be the descriptor form —
+        // that is the refusal hal9000 held the first live print with.
+        let batch_id = status["id"].as_str().unwrap().to_string();
+        spawn_durable_feeder(&state);
+        tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut last = serde_json::Value::Null;
+        loop {
+            let detail = json_body(
+                authless_app(state.clone())
+                    .oneshot(
+                        Request::get(format!("/api/generation-batches/{batch_id}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let child = detail["children"][0].clone();
+            let error = child["error"].as_str().unwrap_or_default().to_string();
+            assert!(
+                !error.contains("descriptor authority"),
+                "deferred preparation re-ran the admission form: {detail}"
+            );
+            last = child;
+            if matches!(
+                last["state"].as_str(),
+                Some("held" | "failed" | "cancelled" | "complete" | "running")
+            ) || std::time::Instant::now() > deadline
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_ne!(
+            last["state"], "accepted",
+            "the feeder never moved the row: {last}"
+        );
     }
 
     #[cfg(feature = "h3")]
