@@ -82,6 +82,7 @@ describe("buildQueueStatusIndex", () => {
     expect(queueStatusFor(index, "alpha", "job-1")).toEqual({
       position: null,
       blockedReason: null,
+      preparation: null,
     });
   });
 
@@ -260,5 +261,83 @@ describe("resolveQueueWait", () => {
     expect(
       resolveQueueWait({ position: 4, blockedReason: "no_idle_device" }),
     ).toEqual({ kind: "position", position: 4 });
+  });
+});
+
+describe("preparing", () => {
+  it("names a preparing job's phase and progress from the plan", () => {
+    const index = buildQueueStatusIndex([
+      {
+        hostId: "h",
+        entries: [{ id: "job" }],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "job",
+              parent_id: "job",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              estimate_confidence: "low",
+              reason: "not_ready",
+              blocked_reason: "preparing",
+              preparation_elapsed_ms: 4_200,
+              preparation_progress: {
+                component: "Verifying MiniMax H3 artifacts",
+                bytes_done: 41,
+                bytes_total: 100,
+              },
+            },
+          ],
+        },
+      } as never,
+    ]);
+    const status = queueStatusFor(index, "h", "job");
+    expect(status?.preparation).toEqual({
+      component: "Verifying MiniMax H3 artifacts",
+      fraction: 0.41,
+      elapsedMs: 4_200,
+    });
+    expect(queueWaitLabel(resolveQueueWait(status))).toBe(
+      "Preparing · Verifying MiniMax H3 artifacts 41%",
+    );
+    expect(queueWaitCode(resolveQueueWait(status))).toBe(
+      "PREPARING · VERIFYING MINIMAX H3 ARTIFACTS 41%",
+    );
+  });
+
+  it("still says Preparing when the preparer reports no progress", () => {
+    expect(
+      queueWaitLabel(
+        resolveQueueWait({ position: 3, blockedReason: "preparing" }),
+      ),
+    ).toBe("Preparing");
+    expect(
+      queueWaitLabel(
+        resolveQueueWait({
+          blockedReason: "preparing",
+          preparation: {
+            component: "Preparing flux-dev:q8",
+            fraction: null,
+            elapsedMs: 10,
+          },
+        }),
+      ),
+    ).toBe("Preparing · Preparing flux-dev:q8");
+  });
+
+  it("outranks the position because the host is already working on it", () => {
+    expect(
+      resolveQueueWait({ position: 2, blockedReason: "preparing" }),
+    ).toEqual({
+      kind: "blocked",
+      label: "Preparing",
+    });
   });
 });

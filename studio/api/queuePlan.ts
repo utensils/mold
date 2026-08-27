@@ -66,6 +66,14 @@ export interface QueueWorkItem {
   reason?: string | null;
   blocked_reason?: string | null;
   assignment_reason?: string | null;
+  /** Milliseconds this job's preparation has been running (additive). */
+  preparation_elapsed_ms?: number | null;
+  /** What the preparation is working through, when the preparer reports it. */
+  preparation_progress?: {
+    component: string;
+    bytes_done: number;
+    bytes_total: number;
+  } | null;
   warm_wait_deadline_unix_ms?: number | null;
   activity_phase?:
     | "queued"
