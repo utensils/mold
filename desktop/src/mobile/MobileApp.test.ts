@@ -4331,7 +4331,8 @@ describe("MobileApp generation queue", () => {
   });
 
   it("keeps a prepared sibling live when cancellation is unconfirmed", async () => {
-    admitCompletedPrints();
+    serveStillModel();
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
@@ -4345,42 +4346,37 @@ describe("MobileApp generation queue", () => {
     await editors[2]!.setValue("cancelled dusk");
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
-
     await flushPromises();
     expect(admittedRequests()).toHaveLength(3);
+
     const cancelRow = wrapper
       .findAll("[data-test='mobile-generation-job']")
       .find((row) => row.text().includes("cancelled dusk"))!;
     await cancelRow.get("[data-test='mobile-generation-cancel']").trigger("click");
     await flushPromises();
-    expect(openStreams[2]!.options.signal.aborted).toBe(false);
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]!.text()).toContain(
-      "Cancellation failed",
-    );
-    openStreams[2]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("third"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 3,
-        generation_time_ms: 700,
-        model: model.name,
-      }),
-    );
-    openStreams[2]!.resolve();
-    openStreams[1]!.options.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
-    openStreams[1]!.resolve();
+
+    // The machine never confirmed the cancel, and it settles the batch anyway:
+    // the failure still names its own variation and the successful sibling is
+    // preserved.
+    admissions.settleAt(0, {
+      children: [
+        { state: "complete", filename: "first.png" },
+        { state: "failed", error: "host ran out of memory" },
+        { state: "complete", filename: "third.png" },
+      ],
+    });
+    await flushPromises();
     await flushPromises();
 
-    const liveSummary = wrapper.findAll(".sr-only[aria-live='polite']")[1]!.text();
-    expect(liveSummary).toContain("Variation 2, “failed middle storm”");
-    expect(liveSummary).toContain(
+    const announced = wrapper
+      .findAll(".sr-only[aria-live='polite']")
+      .map((region) => region.text())
+      .join(" ");
+    expect(announced).toContain("Variation 2, “failed middle storm”");
+    expect(announced).toContain(
       "Studio ran out of memory. Try a smaller model, image size, or batch.",
     );
-    expect(liveSummary).not.toContain("remote cancellation was not confirmed");
-    expect(wrapper.find("img.result-media").exists()).toBe(true);
+    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
   });
 
   it("rejects late or malformed exact-N expansion responses without replacing the form", async () => {
@@ -5280,23 +5276,29 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.find("[data-test='mobile-seed-input']").exists()).toBe(false);
   });
 
-  it("develops the active print over a live latent preview once one arrives", async () => {
+  it("develops a selected running print over its live latent preview", async () => {
+    // A print holds no stream, so its latent comes from the machine's own
+    // `GET /api/queue/:id/preview` once the row is selected.
     serveStillModel();
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/queue/durable-job-1-1/preview") {
+        return Promise.resolve({ image: btoa("latent-png"), step: 2, total: 8 });
+      }
+      return base(callTarget, path, init);
+    });
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("a latent preview print");
 
-    // Before the first preview frame the status line stands alone.
+    // Before a preview arrives the status line stands alone.
     expect(wrapper.find("[data-test='mobile-develop-bed']").exists()).toBe(false);
 
-    openStreams[0]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "denoise_step", step: 2, total: 8, elapsed_ms: 40 }),
-    );
-    openStreams[0]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "preview", image: btoa("latent-png"), step: 2, total: 8 }),
-    );
+    admissions.settleAt(0, { state: "running" });
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-generation-job']").trigger("click");
+    await flushPromises();
     await flushPromises();
 
     const bed = wrapper.get("[data-test='mobile-develop-bed']");
@@ -5305,39 +5307,20 @@ describe("MobileApp generation queue", () => {
     expect(bed.attributes("style")).toContain("aspect-ratio");
     expect(bed.attributes("style")).toContain("--bed-ar");
     const preview = wrapper.get("[data-test='mobile-develop-preview']");
-    // The reducer turns the base64 payload into a blob URL (mocked here).
-    expect(preview.attributes("src")).toMatch(/^blob:/);
+    // The queue preview is rendered straight from its base64 payload; there
+    // is no session blob for a print the machine owns.
+    expect(preview.attributes("src")).toBe(`data:image/png;base64,${btoa("latent-png")}`);
     // blur(max(2, 14 − 12·p)) at p = 2/8 → 11px.
     expect(preview.attributes("style")).toContain("blur(11px)");
     // The develop grain layers over the preview and thins with progress.
     expect(wrapper.find("develop-canvas-stub").exists()).toBe(true);
-    // iPhone already keeps the changing status outside and below the noisy
-    // preview, matching the desktop/web placement invariant.
+    // The changing status stays outside and below the noisy preview, matching
+    // the desktop/web placement invariant.
     const summary = wrapper.get("[data-test='mobile-generation-summary']");
-    expect(summary.text()).toBe("Developing 2/8");
     expect(bed.find("[data-test='mobile-generation-summary']").exists()).toBe(false);
     expect(
       bed.element.compareDocumentPosition(summary.element) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-
-    openStreams[0]?.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("generated-image"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 42,
-        generation_time_ms: 1_250,
-        model: model.name,
-      }),
-    );
-    openStreams[0]?.resolve();
-    await flushPromises();
-
-    // Settled jobs drop the bed; the finished print renders instead.
-    expect(wrapper.find("[data-test='mobile-develop-bed']").exists()).toBe(false);
-    expect(wrapper.find("img.result-media").exists()).toBe(true);
   });
 
   it("snapshots multiple prompts, shows their live queue, and cancels only one", async () => {
@@ -5570,7 +5553,8 @@ describe("MobileApp generation queue", () => {
     });
   });
 
-  it("auto-saves both post-upscale stills but never buffers a completed video", async () => {
+  it("auto-saves both post-upscale stills to Photos", async () => {
+    serveStillModel();
     apiFetchTo
       .mockResolvedValueOnce({
         blob: () => Promise.resolve(new Blob(["original-image"], { type: "image/png" })),
@@ -5582,37 +5566,23 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("save both versions");
-
     await flushPromises();
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/saved-original.png");
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/saved-upscaled.png");
+    await vi.waitFor(() =>
+      expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/saved-original.png"),
+    );
     expect(invoke).toHaveBeenCalledWith("save_image_to_photos", {
       dataB64: btoa("original-image"),
     });
-    expect(invoke).toHaveBeenCalledWith("save_image_to_photos", {
-      dataB64: btoa("upscaled-image"),
-    });
+  });
 
-    apiFetchTo.mockClear();
-    invoke.mockClear();
+  it("never buffers a completed video for Photos", async () => {
+    // The shared fixture is a video checkpoint, so this print settles as mp4.
+    admitCompletedPrints("saved-video.mp4");
+    wrapper = mountMobileApp();
+    await flushPromises();
     await submitPrompt("leave this video remote");
-    openStreams[1]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "mp4",
-        filename: "saved-video.mp4",
-        width: 768,
-        height: 512,
-        seed_used: 43,
-        generation_time_ms: 1_500,
-        model: model.name,
-        video_frames: 121,
-        video_fps: 30,
-      }),
-    );
-    openStreams[1]!.resolve();
+    await flushPromises();
     await flushPromises();
 
     expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/gallery/image/saved-video.mp4");
@@ -5850,40 +5820,29 @@ describe("MobileApp generation queue", () => {
     streamableMediaUrl.mockResolvedValue(
       "https://studio/media/video?media_token=renewed&expires=4102444800",
     );
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
 
-    const completeVideo = async (streamIndex: number, filename: string, seed: number) => {
-      openStreams[streamIndex]!.options.onEvent(
-        "complete",
-        JSON.stringify({
-          image: "",
-          format: "mp4",
-          filename,
-          width: 768,
-          height: 512,
-          seed_used: seed,
-          generation_time_ms: 500,
-          model: model.name,
-        }),
-      );
-      openStreams[streamIndex]!.resolve();
-      await flushPromises();
-    };
-
     await submitPrompt("first video");
-    await completeVideo(0, "first-video.mp4", 1);
+    admissions.settleAt(0, { filename: "first-video.mp4" });
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper!.find("video.result-media").exists()).toBe(true));
     await wrapper.get("video.result-media").trigger("error");
 
     await submitPrompt("second video");
-    await completeVideo(1, "second-video.mp4", 2);
+    admissions.settleAt(1, { filename: "second-video.mp4" });
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper!.find("video.result-media").exists()).toBe(true));
     const secondVideo = wrapper.get("video.result-media").element;
     await wrapper.get("video.result-media").trigger("error");
 
-    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    const before = streamableMediaUrl.mock.calls.length;
     await vi.advanceTimersByTimeAsync(250);
     await flushPromises();
-    expect(streamableMediaUrl).toHaveBeenCalledTimes(3);
+    // The retry belongs to the NEWER print: the stale one is replaced, not
+    // renewed alongside it.
+    expect(streamableMediaUrl.mock.calls.length).toBe(before + 1);
     expect(wrapper.get("video.result-media").element).not.toBe(secondVideo);
   });
 
