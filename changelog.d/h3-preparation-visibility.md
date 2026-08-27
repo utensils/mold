@@ -3,8 +3,13 @@
   dependency preparation is running as `preparing` — with how long it has been
   running and, for MiniMax H3's artifact authentication pass, which component
   and how far through — instead of the generic `dependency_wait` every other
-  not-ready job gets; the server also logs the start and the elapsed
-  completion. An H3 admission refused for device or unified memory now carries
+  not-ready job gets. MiniMax H3's admission additionally names and times each
+  of its phases — request contract, conditioner support load, conditioning
+  normalization, artifact authentication, adapter authentication, runtime
+  qualification, checkpoint opens, execution-plan freeze, plus reference
+  binding and any host-reclaim wait — logging both edges of every one at INFO
+  with its own elapsed time, and reporting the current phase and its own age on
+  the queue. An H3 admission refused for device or unified memory now carries
   a typed shortfall like the host one already did, so the scheduler parks the
   job while the machine could still free that memory and refuses it with both
   numbers when it could not. Park or refuse now turns on the resource rather
