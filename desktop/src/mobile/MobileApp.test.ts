@@ -547,6 +547,52 @@ afterEach(() => {
 });
 
 describe("MobileApp sequence generation", () => {
+  /** A machine serving one sequence-capable model, with Create already on
+   *  Sequence output — the only shape that still opens a placement probe. */
+  function serveSequence(): void {
+    const sequenceModel = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-distilled:bf16",
+      family: "ltx-video",
+      default_steps: 7,
+      default_guidance: 1,
+    };
+    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "bf16",
+          supports_audio: false,
+        });
+      }
+      if (path === "/api/chain-jobs" && init?.method === "POST") {
+        return Promise.resolve({ job_id: "sequence-job-1" });
+      }
+      if (path === "/api/chain-jobs/sequence-job-1") return new Promise(() => {});
+      return durableApiFallback(path, init, callTarget);
+    });
+  }
+
+  async function fillSequenceClips(): Promise<void> {
+    const prompts = wrapper!.findAll("[data-test='mobile-sequence-clip'] textarea");
+    await prompts[0]!.setValue("A responsive placement check");
+    await prompts[1]!.setValue("A second clip so the rail is valid");
+    await flushPromises();
+  }
+
   it("enters Wan on its default duration after an H3 model", async () => {
     const h3: ModelEntry = {
       ...model,
@@ -613,30 +659,32 @@ describe("MobileApp sequence generation", () => {
     expect(wrapper.find("[data-test='mobile-quick-expansion-stale']").exists()).toBe(true);
   });
 
-  it("lets the user cancel a placement preview before anything is queued", async () => {
+  it("lets the user cancel a sequence placement preview before anything is queued", async () => {
+    // Only a SEQUENCE is planned before it is created; a print is admitted
+    // durably and never opens a placement probe.
     const preview = deferred<ReturnType<typeof plannedPlacement>>();
-    previewGenerationPlacement.mockReturnValueOnce(preview.promise);
+    previewChainPlacement.mockReturnValueOnce(preview.promise);
+    serveSequence();
     wrapper = mountMobileApp();
     await flushPromises();
-    await fieldControl("Prompt").setValue("a responsive placement check");
+    await fillSequenceClips();
 
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
-    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(1));
 
-    const button = wrapper.get("[data-test='mobile-develop-button']");
-    expect(button.text()).toBe("Cancel · Checking placement…");
+    const button = wrapper.get("[data-test='mobile-generate-sequence']");
+    expect(button.text()).toBe("Cancel · Preparing sequence…");
     expect(button.attributes("disabled")).toBeUndefined();
     await button.trigger("click");
-    expect(previewGenerationPlacement).toHaveBeenCalledTimes(1);
-    expect(openStreams).toHaveLength(0);
+    expect(previewChainPlacement).toHaveBeenCalledTimes(1);
 
-    const previewOptions = previewGenerationPlacement.mock.calls[0]?.[3];
+    const previewOptions = previewChainPlacement.mock.calls[0]?.[3];
     expect(previewOptions?.signal?.aborted).toBe(true);
 
     preview.resolve(plannedPlacement());
     await flushPromises();
-    expect(openStreams).toHaveLength(0);
-    expect(button.text()).toContain("Develop print");
+    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/chain-jobs")).toHaveLength(0);
+    expect(button.text()).toContain("Generate sequence");
   });
 
   it("releases iOS background execution exactly once after placement cancellation settles", async () => {
@@ -649,14 +697,15 @@ describe("MobileApp sequence generation", () => {
       return Promise.resolve(null);
     });
     const preview = deferred<ReturnType<typeof plannedPlacement>>();
-    previewGenerationPlacement.mockReturnValueOnce(preview.promise);
+    previewChainPlacement.mockReturnValueOnce(preview.promise);
+    serveSequence();
     wrapper = mountMobileApp();
     await flushPromises();
-    await fieldControl("Prompt").setValue("a placement cancellation cleanup check");
+    await fillSequenceClips();
 
-    const button = wrapper.get("[data-test='mobile-develop-button']");
+    const button = wrapper.get("[data-test='mobile-generate-sequence']");
     await button.trigger("click");
-    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(1));
     await button.trigger("click");
     preview.resolve(plannedPlacement());
 
@@ -668,10 +717,43 @@ describe("MobileApp sequence generation", () => {
     expect(
       invoke.mock.calls.filter(([command]) => command === "end_mobile_background_task"),
     ).toHaveLength(1);
-    expect(openStreams).toHaveLength(0);
   });
 
-  it("holds iOS background execution through placement and server admission", async () => {
+  it("holds iOS background execution through sequence placement and creation", async () => {
+    isNativeIOSRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "begin_mobile_background_task") {
+        return Promise.resolve("mobile-background-sequence");
+      }
+      return Promise.resolve(null);
+    });
+    const preview = deferred<ReturnType<typeof plannedPlacement>>();
+    previewChainPlacement.mockReturnValueOnce(preview.promise);
+    serveSequence();
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fillSequenceClips();
+
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("begin_mobile_background_task", {
+        name: "Preparing remote sequence",
+      }),
+    );
+    expect(invoke).not.toHaveBeenCalledWith("end_mobile_background_task", expect.anything());
+
+    preview.resolve(plannedPlacement());
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
+        token: "mobile-background-sequence",
+      }),
+    );
+  });
+
+  it("holds iOS background execution across a print's durable admission", async () => {
+    // A print no longer waits on a placement probe, so the assertion the
+    // phone still owes is that the background task spans admission itself.
     isNativeIOSRuntime.mockReturnValue(true);
     invoke.mockImplementation((command: string) => {
       if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
@@ -680,11 +762,20 @@ describe("MobileApp sequence generation", () => {
       }
       return Promise.resolve(null);
     });
-    const preview = deferred<ReturnType<typeof plannedPlacement>>();
-    previewGenerationPlacement.mockReturnValueOnce(preview.promise);
+    const admission = deferred<unknown>();
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") return admission.promise;
+      return durableApiFallback(path, init, callTarget);
+    });
     wrapper = mountMobileApp();
     await flushPromises();
-    await fieldControl("Prompt").setValue("a background-safe placement check");
+    await fieldControl("Prompt").setValue("a background-safe admission");
 
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await vi.waitFor(() =>
@@ -694,11 +785,9 @@ describe("MobileApp sequence generation", () => {
     );
     expect(invoke).not.toHaveBeenCalledWith("end_mobile_background_task", expect.anything());
 
-    preview.resolve(plannedPlacement());
-    await vi.waitFor(() => expect(openStreams).toHaveLength(1));
-    expect(invoke).not.toHaveBeenCalledWith("end_mobile_background_task", expect.anything());
-
-    openStreams[0]!.options.onOpen?.(new Response());
+    admission.resolve(
+      durableBatchResponse({ body: JSON.stringify({ client_batch_id: "b", requests: [{}] }) }),
+    );
     await vi.waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
         token: "mobile-background-generation",
@@ -706,7 +795,7 @@ describe("MobileApp sequence generation", () => {
     );
   });
 
-  it("releases iOS background execution when placement fails", async () => {
+  it("releases iOS background execution when sequence placement fails", async () => {
     isNativeIOSRuntime.mockReturnValue(true);
     invoke.mockImplementation((command: string) => {
       if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
@@ -715,39 +804,20 @@ describe("MobileApp sequence generation", () => {
       }
       return Promise.resolve(null);
     });
-    previewGenerationPlacement.mockRejectedValueOnce(new Error("placement unavailable"));
+    serveSequence();
+    previewChainPlacement.mockRejectedValueOnce(new Error("placement unavailable"));
     wrapper = mountMobileApp();
     await flushPromises();
-    await fieldControl("Prompt").setValue("a placement failure cleanup check");
+    await fillSequenceClips();
 
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
 
     await vi.waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
         token: "mobile-background-placement-failure",
       }),
     );
-    expect(admittedRequests()).toHaveLength(0);
-  });
-
-  it("cancels a placement-pending submission when prompt work takes authority", async () => {
-    const preview = deferred<ReturnType<typeof plannedPlacement>>();
-    previewGenerationPlacement.mockReturnValueOnce(preview.promise);
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await fieldControl("Prompt").setValue("a placement-pending prompt");
-
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
-    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
-    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
-    await flushPromises();
-    preview.resolve(plannedPlacement());
-    await flushPromises();
-
-    expect(openStreams).toHaveLength(0);
-    expect(
-      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
-    ).toBeUndefined();
+    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/chain-jobs")).toHaveLength(0);
   });
 
   it("cancels source preparation and releases Generate when prompt work takes authority", async () => {
@@ -2793,10 +2863,9 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/gallery") return Promise.resolve([print]);
       if (path === "/api/capabilities") {
         return Promise.resolve({
+          ...durableQueueCapabilities,
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 1,
-          },
+          queue: { heterogeneous_batch_max_outputs: 1 },
         });
       }
       if (path === "/api/activity") {
@@ -5248,6 +5317,8 @@ describe("MobileApp generation queue", () => {
   });
 
   it("counts a queued print's live place in line rather than its submit slot", async () => {
+    // A print carries no held stream, so its place in line comes from the
+    // machine's own queue listing keyed on the durable child's job id.
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
@@ -5257,8 +5328,20 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/queue")
         return Promise.resolve({
           entries: [
-            { id: "job-a", model: "m", state: "running", started_at_unix_ms: 1, position: 0 },
-            { id: "job-2", model: "m", state: "queued", started_at_unix_ms: 2, position: 1 },
+            {
+              id: "durable-job-1",
+              model: "m",
+              state: "running",
+              started_at_unix_ms: 1,
+              position: 0,
+            },
+            {
+              id: "durable-job-2",
+              model: "m",
+              state: "queued",
+              started_at_unix_ms: 2,
+              position: 1,
+            },
           ],
           plan: {
             plan_version: 1,
@@ -5275,22 +5358,14 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     await submitPrompt("first prompt");
-    openStreams[0]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "denoise_step", step: 3, total: 30, elapsed_ms: 10 }),
-    );
     await submitPrompt("second prompt");
-    // The one-shot SSE frame says 7; the live listing says 1 and wins.
-    openStreams[1]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 7, id: "job-2" }),
-    );
-    await flushPromises();
     window.dispatchEvent(new Event("pageshow"));
     await flushPromises();
 
-    const rows = wrapper.findAll("[data-test='mobile-generation-job']");
-    expect(rows[1]?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
+    const second = wrapper
+      .findAll("[data-test='mobile-generation-job']")
+      .find((row) => row.text().includes("second prompt"));
+    expect(second?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
   });
 
   it("counts the line on a busy single-GPU host instead of naming the planner", async () => {
@@ -5306,8 +5381,20 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/queue")
         return Promise.resolve({
           entries: [
-            { id: "job-a", model: "m", state: "running", started_at_unix_ms: 1, position: 0 },
-            { id: "job-2", model: "m", state: "queued", started_at_unix_ms: 2, position: 1 },
+            {
+              id: "durable-job-1",
+              model: "m",
+              state: "running",
+              started_at_unix_ms: 1,
+              position: 0,
+            },
+            {
+              id: "durable-job-2",
+              model: "m",
+              state: "queued",
+              started_at_unix_ms: 2,
+              position: 1,
+            },
           ],
           plan: {
             plan_version: 1,
@@ -5318,7 +5405,7 @@ describe("MobileApp generation queue", () => {
             work_items: [
               {
                 work_id: "w2",
-                parent_id: "job-2",
+                parent_id: "durable-job-2",
                 work_kind: "generation",
                 priority_class: "normal",
                 queue_rank: 1,
@@ -5335,27 +5422,21 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     await submitPrompt("first prompt");
-    openStreams[0]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "denoise_step", step: 7, total: 9, elapsed_ms: 10 }),
-    );
     await submitPrompt("second prompt");
-    openStreams[1]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-2" }),
-    );
     await flushPromises();
     window.dispatchEvent(new Event("pageshow"));
     await flushPromises();
 
-    const rows = wrapper.findAll("[data-test='mobile-generation-job']");
-    expect(rows[0]?.get("[data-test='mobile-generation-status']").text()).toBe("7/9");
-    expect(rows[1]?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
-    // One job is rendering; the other is waiting. The header says so.
-    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("1 active · 1 queued");
-    expect(wrapper.get(".sr-only[aria-live='polite']").text()).toBe(
-      "1 active generation, 1 queued.",
-    );
+    const second = wrapper
+      .findAll("[data-test='mobile-generation-job']")
+      .find((row) => row.text().includes("second prompt"));
+    // The point of this test is the WAITING row's vocabulary: `no_idle_device`
+    // is ordinary serialization on a one-GPU host, so it must fall through to
+    // the position rather than name the planner.
+    expect(second?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
+    // The active/queued header is not asserted here: a durable print's
+    // liveness comes from its own batch lifecycle rather than this listing,
+    // and `activityCountLabel` is pinned directly in studio.
   });
 
   it("keeps a pre-ID job live when remote cancellation is unconfirmed", async () => {
@@ -6574,9 +6655,12 @@ describe("MobileApp wan source conditioning", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
+    // 81 frames on wan auto-chains, so this print rides the chain stream
+    // rather than durable batch admission.
     expect(openStreams).toHaveLength(1);
-    expect(admittedRequests()[0]?.source_image).toBe(btoa("opening"));
-    expect(admittedRequests()[0]).not.toHaveProperty("keyframes");
+    const body = openStreams[0]!.options.body;
+    expect(body.source_image).toBe(btoa("opening"));
+    expect(body).not.toHaveProperty("keyframes");
   });
 
   it("says the reused end frame cannot be restored from saved metadata", async () => {
