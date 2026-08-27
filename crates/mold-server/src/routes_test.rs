@@ -11853,6 +11853,10 @@ mod tests {
             "spec should document POST /api/queue/held/sweep"
         );
         assert!(
+            spec["paths"]["/api/generation-batches/sweep"]["post"].is_object(),
+            "spec should document POST /api/generation-batches/sweep"
+        );
+        assert!(
             spec["paths"]["/api/generate/reference-upload-sessions"]["post"].is_object(),
             "spec should document reference upload session creation"
         );
@@ -19462,6 +19466,260 @@ mod tests {
         .await
         .unwrap();
         assert!(row.is_some());
+    }
+
+    const DAY_MS: i64 = 86_400_000;
+
+    /// Admit one durable batch through the public route and settle its only
+    /// child terminally at `settled_at_ms`, the way the worker does once the
+    /// print lands. Returns `(batch_id, job_id)`.
+    async fn settle_one_durable_batch(state: &AppState, settled_at_ms: i64) -> (String, String) {
+        let request: serde_json::Value =
+            serde_json::from_str(&generate_body("a settled cat", 512, 512)).unwrap();
+        let response = app_with_state(state.clone())
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [request],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = json_body(response).await;
+        let batch_id = body["id"].as_str().unwrap().to_string();
+        let job_id = body["children"][0]["job_id"].as_str().unwrap().to_string();
+
+        let db = state.metadata_db.clone();
+        let owner = state
+            .queue_journal
+            .owner_uuid()
+            .expect("claimed owner")
+            .to_string();
+        let settled_job = job_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = db.as_ref().as_ref().expect("db");
+            let commit = mold_db::generation_batches::finish_unclaimed_queued(
+                db,
+                &owner,
+                &settled_job,
+                mold_db::generation_batches::GenerationBatchTerminal {
+                    state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+                    error: None,
+                    terminal_error_json: None,
+                    result_json: Some(r#"{"filename":"settled.png"}"#),
+                    completed_at_ms: settled_at_ms,
+                },
+            )
+            .expect("settle");
+            assert!(commit.queue_deleted && commit.batch_child_updated);
+        })
+        .await
+        .unwrap();
+        (batch_id, job_id)
+    }
+
+    async fn generation_batch_status(state: &AppState, batch_id: &str) -> StatusCode {
+        app_with_state(state.clone())
+            .oneshot(
+                Request::get(format!("/api/generation-batches/{batch_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// The whole client-facing contract of a purge: the batch answers 404 by
+    /// name, the bulk lookup files it under `missing.batch_ids`, and the
+    /// print itself is untouched — a settled batch is only a receipt.
+    #[tokio::test]
+    async fn a_settled_batch_is_purged_after_retention_and_reads_as_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::V2);
+        let now = mold_core::time::now_epoch_ms();
+        let (stale, _) = settle_one_durable_batch(&state, now - 31 * DAY_MS).await;
+        let (fresh, _) = settle_one_durable_batch(&state, now - DAY_MS).await;
+        assert_eq!(
+            generation_batch_status(&state, &stale).await,
+            StatusCode::OK
+        );
+
+        state.config.write().await.queue.held_retention_days = 30;
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::post("/api/generation-batches/sweep")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let swept = json_body(response).await;
+        assert_eq!(
+            swept["purged"], 1,
+            "only the batch past its window is purged"
+        );
+        assert_eq!(
+            swept["remaining"], 1,
+            "the fresh receipt waits for its own window"
+        );
+
+        let missing = app_with_state(state.clone())
+            .oneshot(
+                Request::get(format!("/api/generation-batches/{stale}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body(missing).await["code"],
+            "GENERATION_BATCH_NOT_FOUND"
+        );
+        assert_eq!(
+            generation_batch_status(&state, &fresh).await,
+            StatusCode::OK
+        );
+
+        let lookup = json_body(
+            app_with_state(state.clone())
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches/status",
+                    serde_json::json!({ "batch_ids": [stale, fresh] }),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(lookup["missing"]["batch_ids"], serde_json::json!([stale]));
+        assert_eq!(lookup["batches"].as_array().unwrap().len(), 1);
+        assert_eq!(lookup["batches"][0]["id"], serde_json::json!(fresh));
+    }
+
+    /// A held child is not settled, however old the hold: the batch waits for
+    /// the held sweep to settle that child, and only then starts its own clock.
+    #[tokio::test]
+    async fn a_batch_with_a_held_child_outlives_the_settled_sweep() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::V2);
+        let now = mold_core::time::now_epoch_ms();
+        hold_one_durable_job(&state, 0, now - 45 * DAY_MS).await;
+
+        state.config.write().await.queue.held_retention_days = 30;
+        let result = crate::queue_retention::sweep_settled_batches_once(&state)
+            .await
+            .expect("sweep runs");
+        assert_eq!(result, mold_core::SettledBatchSweepResult::default());
+        assert_eq!(
+            generation_batch_status(&state, "held-batch-0").await,
+            StatusCode::OK
+        );
+    }
+
+    /// The two passes compose: the held sweep settles the abandoned child as
+    /// `failed`, which starts the batch's own retention clock, and the settled
+    /// sweep reclaims the summary once THAT has elapsed — never in the same
+    /// pass, because a client reconnecting after the hold expired still needs
+    /// to read the terminal outcome.
+    #[tokio::test]
+    async fn held_sweep_then_settled_sweep_reclaims_an_expired_hold_entirely() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::V2);
+        let now = mold_core::time::now_epoch_ms();
+        let job = hold_one_durable_job(&state, 0, now - 45 * DAY_MS).await;
+        state.config.write().await.queue.held_retention_days = 30;
+
+        let held = crate::queue_retention::sweep_held_once(&state)
+            .await
+            .expect("held sweep runs");
+        assert_eq!(held.purged, 1);
+        let settled = crate::queue_retention::sweep_settled_batches_once(&state)
+            .await
+            .expect("settled sweep runs");
+        assert_eq!(
+            settled,
+            mold_core::SettledBatchSweepResult {
+                purged: 0,
+                remaining: 1,
+            },
+            "the child settled just now, so the summary is inside its own window"
+        );
+        assert_eq!(
+            generation_batch_status(&state, "held-batch-0").await,
+            StatusCode::OK
+        );
+
+        // Thirty-one days later.
+        let aged_db = db.clone();
+        tokio::task::spawn_blocking(move || {
+            aged_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE generation_batch_children SET updated_at_ms = ?2 WHERE job_id = ?1",
+                        (job.as_str(), now - 31 * DAY_MS),
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        let settled = crate::queue_retention::sweep_settled_batches_once(&state)
+            .await
+            .expect("settled sweep runs");
+        assert_eq!(
+            settled,
+            mold_core::SettledBatchSweepResult {
+                purged: 1,
+                remaining: 0,
+            }
+        );
+        assert_eq!(
+            generation_batch_status(&state, "held-batch-0").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_route_returns_501_without_metadata_db() {
+        // `MOLD_DB_DISABLE` hosts have no durable queue at all; the route says
+        // so by name rather than reporting an empty sweep as success.
+        let root = tempfile::tempdir().unwrap();
+        let (state, _rx) = durable_state(Arc::new(None), root.path());
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::post("/api/generation-batches/sweep")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            json_body(response).await["code"],
+            "DURABLE_QUEUE_UNAVAILABLE"
+        );
+        assert_eq!(
+            crate::queue_retention::sweep_settled_batches_once(&state)
+                .await
+                .expect("sweep runs"),
+            mold_core::SettledBatchSweepResult::default()
+        );
     }
 
     #[tokio::test]

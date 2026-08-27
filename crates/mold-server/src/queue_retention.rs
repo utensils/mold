@@ -1,4 +1,5 @@
-//! Retention for HELD durable queue rows.
+//! Retention for the durable queue's leftovers: HELD rows and SETTLED batch
+//! summaries, on one horizon (`queue.held_retention_days`).
 //!
 //! A hold is durable on purpose: it is work parked for a human, and the
 //! durable queue exists so a restart does not lose it. But nothing ever
@@ -7,25 +8,45 @@
 //! that row's `media_set_id` so a retry still has its source images — so the
 //! encrypted media store grew with it, unbounded.
 //!
+//! A settled batch is the other leftover. Once every child is terminal the
+//! `generation_batches` row is only a receipt for a client reconnecting
+//! after a dropped stream — its media left with the queue rows — and nothing
+//! ever deleted one either. Both answer "how long does the durable queue
+//! remember work that can no longer run", so they share the one key and
+//! `0 = forever` stays coherent. A batch's age is its last child settlement;
+//! a batch with a held child therefore waits for the held pass to settle
+//! that child (worst case twice the retention), which is why each tick runs
+//! held first, then settled.
+//!
 //! This is the queue's peer of `gallery_trash`'s retention sweeper and is
 //! shaped like it on purpose: one `sweep_*_once` pass reading its retention
 //! fresh from the live config, one hourly background task, one manual POST
-//! route. What it deliberately does NOT share is the deletion mechanism —
-//! a trashed print is a file to unlink, whereas a held row's encrypted media
-//! is released by the `generation_queue_media_retire` trigger the moment the
-//! queue row is deleted. The sweeper never writes `generation_queue_media`
-//! itself; it deletes the row and then asks the lifecycle to collect what
-//! the trigger just marked.
+//! route per pass. What it deliberately does NOT share is the deletion
+//! mechanism — a trashed print is a file to unlink, whereas a held row's
+//! encrypted media is released by the `generation_queue_media_retire`
+//! trigger the moment the queue row is deleted. The sweeper never writes
+//! `generation_queue_media` itself; it deletes the row and then asks the
+//! lifecycle to collect what the trigger just marked. A settled batch purge
+//! releases nothing but the rows.
 
 use crate::routes::ApiError;
 use crate::state::AppState;
 
-/// Interval between held-row retention sweeps. Matches the trash sweeper:
-/// retention is measured in days, so an hour is already far finer than the
-/// smallest window a user can configure.
-pub(crate) const HELD_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// Interval between retention sweeps. Matches the trash sweeper: retention
+/// is measured in days, so an hour is already far finer than the smallest
+/// window a user can configure.
+pub(crate) const QUEUE_SWEEP_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
 
-pub(crate) use mold_core::HeldSweepResult;
+pub(crate) use mold_core::{HeldSweepResult, SettledBatchSweepResult};
+
+fn durable_queue_unavailable() -> ApiError {
+    ApiError::with_code(
+        "the metadata DB is disabled; the durable queue is unavailable",
+        "DURABLE_QUEUE_UNAVAILABLE",
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+    )
+}
 
 /// Run one retention sweep now.
 #[utoipa::path(
@@ -41,16 +62,49 @@ pub(crate) async fn sweep_held_queue(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Result<axum::Json<HeldSweepResult>, ApiError> {
     if state.metadata_db.as_ref().is_none() {
-        return Err(ApiError::with_code(
-            "the metadata DB is disabled; the durable queue is unavailable",
-            "DURABLE_QUEUE_UNAVAILABLE",
-            axum::http::StatusCode::NOT_IMPLEMENTED,
-        ));
+        return Err(durable_queue_unavailable());
     }
     let result = sweep_held_once(&state)
         .await
         .map_err(|e| ApiError::internal(format!("queue retention sweep failed: {e:#}")))?;
     Ok(axum::Json(result))
+}
+
+/// Run one settled-batch retention sweep now.
+#[utoipa::path(
+    post,
+    path = "/api/generation-batches/sweep",
+    tag = "generation",
+    responses(
+        (status = 200, description = "Purged and remaining settled-batch counts", body = mold_core::SettledBatchSweepResult),
+        (status = 501, description = "Metadata DB disabled — the durable queue is unavailable"),
+    )
+)]
+pub(crate) async fn sweep_settled_batches(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<SettledBatchSweepResult>, ApiError> {
+    if state.metadata_db.as_ref().is_none() {
+        return Err(durable_queue_unavailable());
+    }
+    let result = sweep_settled_batches_once(&state)
+        .await
+        .map_err(|e| ApiError::internal(format!("settled-batch retention sweep failed: {e:#}")))?;
+    Ok(axum::Json(result))
+}
+
+/// The retention both passes read, fresh from the live config every pass
+/// (`0` keeps everything forever), exactly as the trash sweeper reads its own.
+async fn effective_retention_days(state: &AppState) -> u32 {
+    let config = state.config.read().await;
+    config.queue.effective_held_retention_days()
+}
+
+/// The owner whose durable rows a pass may touch. `None` when the durable
+/// queue is off (no metadata DB) or no owner was claimed this boot, in which
+/// case nothing durable was written and there is nothing to sweep.
+fn sweep_owner(state: &AppState) -> Option<String> {
+    state.metadata_db.as_ref().as_ref()?;
+    state.queue_journal.owner_uuid().map(str::to_string)
 }
 
 /// One retention pass over this owner's held rows.
@@ -63,15 +117,8 @@ pub(crate) async fn sweep_held_queue(
 /// rows would otherwise hold a Tokio worker for the length of the sweep — on
 /// the startup pass and on every manual `POST /api/queue/held/sweep`.
 pub(crate) async fn sweep_held_once(state: &AppState) -> anyhow::Result<HeldSweepResult> {
-    let retention = {
-        let config = state.config.read().await;
-        config.queue.effective_held_retention_days()
-    };
-    if state.metadata_db.as_ref().is_none() {
-        return Ok(HeldSweepResult::default());
-    }
-    let Some(owner_uuid) = state.queue_journal.owner_uuid().map(str::to_string) else {
-        // No claimed queue owner: nothing durable was written this boot.
+    let retention = effective_retention_days(state).await;
+    let Some(owner_uuid) = sweep_owner(state) else {
         return Ok(HeldSweepResult::default());
     };
     let db = state.metadata_db.clone();
@@ -158,15 +205,61 @@ pub(crate) async fn sweep_held_once(state: &AppState) -> anyhow::Result<HeldSwee
     .await?
 }
 
+/// One retention pass over this owner's settled batches.
+///
+/// Reads the same `queue.held_retention_days` as the held pass. Runs on the
+/// blocking pool for the same reason: it is synchronous SQLite work whose
+/// backlog must not hold a Tokio worker.
+pub(crate) async fn sweep_settled_batches_once(
+    state: &AppState,
+) -> anyhow::Result<SettledBatchSweepResult> {
+    let retention = effective_retention_days(state).await;
+    let Some(owner_uuid) = sweep_owner(state) else {
+        return Ok(SettledBatchSweepResult::default());
+    };
+    let db = state.metadata_db.clone();
+
+    tokio::task::spawn_blocking(move || -> anyhow::Result<SettledBatchSweepResult> {
+        let Some(db) = db.as_ref().as_ref() else {
+            return Ok(SettledBatchSweepResult::default());
+        };
+        let expired = mold_db::generation_batches::expired_settled(
+            db,
+            &owner_uuid,
+            retention,
+            mold_core::time::now_epoch_ms(),
+        )?;
+        let mut purged = 0_u64;
+        for batch in expired {
+            // `purge_settled` re-checks eligibility inside its transaction:
+            // a retry that re-queued a child since the listing wins.
+            if mold_db::generation_batches::purge_settled(
+                db,
+                &owner_uuid,
+                &batch.id,
+                retention,
+                mold_core::time::now_epoch_ms(),
+            )? {
+                purged += 1;
+            }
+        }
+        let remaining = mold_db::generation_batches::settled_count(db, &owner_uuid)?;
+        Ok(SettledBatchSweepResult { purged, remaining })
+    })
+    .await?
+}
+
 /// Background retention sweeper: one pass at startup, then hourly, until
-/// `shutdown` is cancelled.
-pub(crate) fn spawn_held_sweeper(
+/// `shutdown` is cancelled. Each tick runs the held pass and then the
+/// settled pass, in that order, so a hold the first pass settles is a
+/// receipt the second pass can age from the next tick on.
+pub(crate) fn spawn_queue_sweeper(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     use tokio::time::{interval, MissedTickBehavior};
     tokio::spawn(async move {
-        let mut tick = interval(HELD_SWEEP_INTERVAL);
+        let mut tick = interval(QUEUE_SWEEP_INTERVAL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -182,9 +275,23 @@ pub(crate) fn spawn_held_sweeper(
                 ),
                 Ok(result) => tracing::debug!(
                     remaining = result.remaining,
-                    "queue retention sweep found nothing to purge"
+                    "queue retention sweep found no held work to purge"
                 ),
                 Err(error) => tracing::warn!(%error, "queue retention sweep failed"),
+            }
+            match sweep_settled_batches_once(&state).await {
+                Ok(result) if result.purged > 0 => tracing::info!(
+                    purged = result.purged,
+                    remaining = result.remaining,
+                    "queue retention sweep purged settled batch summaries"
+                ),
+                Ok(result) => tracing::debug!(
+                    remaining = result.remaining,
+                    "queue retention sweep found no settled batch to purge"
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "settled-batch retention sweep failed")
+                }
             }
         }
     })

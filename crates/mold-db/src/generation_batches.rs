@@ -536,6 +536,140 @@ pub fn finish_claimed(
     })
 }
 
+/// A fully settled batch whose retention has elapsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredSettledBatch {
+    pub id: String,
+    /// The newest child settlement — the moment the batch became a receipt.
+    pub settled_at_ms: i64,
+}
+
+/// The one definition of "settled": every child terminal and no child still
+/// owning a `generation_queue` row. Bound as an aggregate `HAVING` clause over
+/// `generation_batches AS b JOIN generation_batch_children AS c`, so the
+/// listing, the count, and the purge cannot disagree.
+///
+/// A batch with an `accepted`-only child that never reached the queue is not
+/// settled and is deliberately out of scope here.
+const SETTLED_BATCH_HAVING_SQL: &str = "SUM(c.state NOT IN ('complete', 'failed', 'cancelled')) = 0
+     AND NOT EXISTS (
+         SELECT 1 FROM generation_queue AS q
+           JOIN generation_batch_children AS cc ON cc.job_id = q.id
+          WHERE cc.batch_id = b.id
+     )";
+
+fn settled_retention_cutoff_ms(retention_days: u32, now_ms: i64) -> Option<i64> {
+    (retention_days > 0).then(|| now_ms.saturating_sub(i64::from(retention_days) * 86_400_000))
+}
+
+/// List this owner's settled batches whose retention has elapsed, oldest
+/// settlement first.
+///
+/// Shares `queue.held_retention_days` with the held-row sweep: both answer
+/// how long the durable queue remembers work that can no longer run, and
+/// `retention_days == 0` keeps settled summaries forever exactly as it keeps
+/// held rows. Age is `MAX(children.updated_at_ms)`, the last child
+/// settlement, so a batch with a held child waits for the held sweep to
+/// settle that child and only then starts its own clock.
+pub fn expired_settled(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    retention_days: u32,
+    now_ms: i64,
+) -> Result<Vec<ExpiredSettledBatch>> {
+    let Some(cutoff) = settled_retention_cutoff_ms(retention_days, now_ms) else {
+        return Ok(Vec::new());
+    };
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT b.id, MAX(c.updated_at_ms) AS settled_at_ms
+               FROM generation_batches AS b
+               JOIN generation_batch_children AS c ON c.batch_id = b.id
+              WHERE b.owner_uuid = ?1
+              GROUP BY b.id
+             HAVING {SETTLED_BATCH_HAVING_SQL}
+                AND MAX(c.updated_at_ms) <= ?2
+              ORDER BY settled_at_ms, b.rowid"
+        ))?;
+        let rows = stmt
+            .query_map(params![owner_uuid, cutoff], |row| {
+                Ok(ExpiredSettledBatch {
+                    id: row.get(0)?,
+                    settled_at_ms: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })
+}
+
+/// Count this owner's settled batches, expired or not — the sweep's
+/// "remaining" report: receipts that retention will reclaim someday.
+pub fn settled_count(db: &MetadataDb, owner_uuid: &str) -> Result<u64> {
+    db.with_conn(|conn| {
+        let count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM (
+                    SELECT b.id
+                      FROM generation_batches AS b
+                      JOIN generation_batch_children AS c ON c.batch_id = b.id
+                     WHERE b.owner_uuid = ?1
+                     GROUP BY b.id
+                    HAVING {SETTLED_BATCH_HAVING_SQL}
+                 )"
+            ),
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    })
+}
+
+/// Purge one settled batch; its child summaries cascade with it.
+///
+/// Eligibility is re-checked inside the transaction — owned, every child
+/// still terminal, no child back in the queue, and the newest settlement
+/// still past `retention_days` — so a retry that re-queued a child between
+/// the listing and this call wins, and this returns `false` having touched
+/// nothing. A settled batch holds no media: its media obligations were
+/// retired when its queue rows were deleted, so nothing else is released.
+pub fn purge_settled(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    id: &str,
+    retention_days: u32,
+    now_ms: i64,
+) -> Result<bool> {
+    let Some(cutoff) = settled_retention_cutoff_ms(retention_days, now_ms) else {
+        return Ok(false);
+    };
+    db.transact_immediate(|conn| {
+        let eligible: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT b.id
+                       FROM generation_batches AS b
+                       JOIN generation_batch_children AS c ON c.batch_id = b.id
+                      WHERE b.id = ?1 AND b.owner_uuid = ?2
+                      GROUP BY b.id
+                     HAVING {SETTLED_BATCH_HAVING_SQL}
+                        AND MAX(c.updated_at_ms) <= ?3"
+                ),
+                params![id, owner_uuid, cutoff],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if eligible.is_none() {
+            return Ok(false);
+        }
+        let removed = conn.execute(
+            "DELETE FROM generation_batches WHERE id = ?1 AND owner_uuid = ?2",
+            params![id, owner_uuid],
+        )?;
+        Ok(removed == 1)
+    })
+}
+
 /// Cancel exactly one durable row owned by `owner_uuid`.
 ///
 /// This is one immediate transaction because a feeder may claim or hold the
@@ -2784,6 +2918,279 @@ mod tests {
             child.revision > 0,
             "settlement is an authoritative transition"
         );
+    }
+
+    const DAY_MS: i64 = 86_400_000;
+
+    /// One batch under `owner-1` with the given child job ids, admitted with
+    /// its queue rows exactly as `insert_or_get` does.
+    fn admit_batch(db: &MetadataDb, batch_id: &str, job_ids: &[&str]) {
+        let batch = GenerationBatchRow {
+            id: batch_id.into(),
+            client_batch_id: format!("client-{batch_id}"),
+            owner_uuid: "owner-1".into(),
+            request_sha256: format!("sha-{batch_id}"),
+            created_at_ms: 1,
+        };
+        let rows = job_ids
+            .iter()
+            .enumerate()
+            .map(|(index, job_id)| {
+                let (mut child, mut queue) = rows(1).pop().unwrap();
+                child.batch_id = batch_id.into();
+                child.job_id = (*job_id).into();
+                child.batch_index = index as u32 + 1;
+                queue.id = (*job_id).into();
+                (child, queue)
+            })
+            .collect::<Vec<_>>();
+        insert_or_get(db, &batch, &rows).unwrap();
+    }
+
+    /// Settle one unclaimed queued child terminally at `at_ms`, deleting its
+    /// queue row in the same transaction exactly as the worker does.
+    fn settle(db: &MetadataDb, job_id: &str, state: GenerationBatchTerminalState, at_ms: i64) {
+        let commit = finish_unclaimed_queued(
+            db,
+            "owner-1",
+            job_id,
+            GenerationBatchTerminal {
+                state,
+                error: None,
+                terminal_error_json: None,
+                result_json: None,
+                completed_at_ms: at_ms,
+            },
+        )
+        .unwrap();
+        assert!(commit.queue_deleted && commit.batch_child_updated);
+    }
+
+    fn child_count(db: &MetadataDb, batch_id: &str) -> i64 {
+        db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM generation_batch_children WHERE batch_id = ?1",
+                params![batch_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn expired_settled_lists_only_batches_whose_every_child_is_terminal_and_old() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let now = 100 * DAY_MS;
+        // Fully settled, newest settlement 35 days old: eligible.
+        admit_batch(&db, "old", &["old-0", "old-1"]);
+        settle(
+            &db,
+            "old-0",
+            GenerationBatchTerminalState::Complete,
+            now - 40 * DAY_MS,
+        );
+        settle(
+            &db,
+            "old-1",
+            GenerationBatchTerminalState::Failed,
+            now - 35 * DAY_MS,
+        );
+        // One child still queued (its queue row survives): never eligible.
+        admit_batch(&db, "open", &["open-0", "open-1"]);
+        settle(
+            &db,
+            "open-0",
+            GenerationBatchTerminalState::Complete,
+            now - 40 * DAY_MS,
+        );
+        // Fully settled but the newest settlement is two days old.
+        admit_batch(&db, "fresh", &["fresh-0", "fresh-1"]);
+        settle(
+            &db,
+            "fresh-0",
+            GenerationBatchTerminalState::Cancelled,
+            now - 40 * DAY_MS,
+        );
+        settle(
+            &db,
+            "fresh-1",
+            GenerationBatchTerminalState::Complete,
+            now - 2 * DAY_MS,
+        );
+        // A held child is not terminal, however old the hold is.
+        admit_batch(&db, "parked", &["parked-0", "parked-1"]);
+        settle(
+            &db,
+            "parked-0",
+            GenerationBatchTerminalState::Complete,
+            now - 40 * DAY_MS,
+        );
+        hold_owned(
+            &db,
+            "owner-1",
+            "parked-1",
+            None,
+            "model went missing",
+            None,
+            true,
+            now - 40 * DAY_MS,
+        )
+        .unwrap();
+
+        let expired = expired_settled(&db, "owner-1", 30, now).unwrap();
+        assert_eq!(
+            expired,
+            vec![ExpiredSettledBatch {
+                id: "old".into(),
+                settled_at_ms: now - 35 * DAY_MS,
+            }],
+            "age is the NEWEST child settlement; a queued, fresh, or held child keeps the batch"
+        );
+        assert_eq!(
+            settled_count(&db, "owner-1").unwrap(),
+            2,
+            "`old` and `fresh` are settled receipts; `open` and `parked` still own work"
+        );
+    }
+
+    #[test]
+    fn expired_settled_is_scoped_to_the_owner_and_off_at_zero() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let now = 100 * DAY_MS;
+        admit_batch(&db, "old", &["old-0"]);
+        settle(
+            &db,
+            "old-0",
+            GenerationBatchTerminalState::Complete,
+            now - 40 * DAY_MS,
+        );
+
+        assert_eq!(
+            expired_settled(&db, "owner-1", 30, now)
+                .unwrap()
+                .iter()
+                .map(|batch| batch.id.as_str())
+                .collect::<Vec<_>>(),
+            ["old"]
+        );
+        assert!(
+            expired_settled(&db, "owner-1", 0, now).unwrap().is_empty(),
+            "0 keeps settled summaries forever, exactly as it keeps held rows"
+        );
+        assert!(
+            expired_settled(&db, "other-owner", 30, now)
+                .unwrap()
+                .is_empty(),
+            "another installation's receipts are not ours to purge"
+        );
+        assert_eq!(settled_count(&db, "other-owner").unwrap(), 0);
+        assert!(
+            !purge_settled(&db, "other-owner", "old", 30, now).unwrap(),
+            "nor ours to purge by id"
+        );
+        assert!(get_durable(&db, "owner-1", "old").unwrap().is_some());
+    }
+
+    #[test]
+    fn purge_settled_cascades_children() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let now = 100 * DAY_MS;
+        admit_batch(&db, "old", &["old-0", "old-1"]);
+        settle(
+            &db,
+            "old-0",
+            GenerationBatchTerminalState::Complete,
+            now - 40 * DAY_MS,
+        );
+        settle(
+            &db,
+            "old-1",
+            GenerationBatchTerminalState::Failed,
+            now - 40 * DAY_MS,
+        );
+        assert_eq!(child_count(&db, "old"), 2);
+
+        assert!(purge_settled(&db, "owner-1", "old", 30, now).unwrap());
+        assert!(get_durable(&db, "owner-1", "old").unwrap().is_none());
+        assert_eq!(
+            child_count(&db, "old"),
+            0,
+            "the child summaries go with their batch"
+        );
+        assert_eq!(settled_count(&db, "owner-1").unwrap(), 0);
+        assert!(
+            !purge_settled(&db, "owner-1", "old", 30, now).unwrap(),
+            "a second purge finds nothing"
+        );
+    }
+
+    /// The listing is a snapshot; the purge re-checks inside its transaction
+    /// so an explicit retry that landed in between wins over retention.
+    #[test]
+    fn purge_settled_refuses_a_batch_whose_child_was_re_queued() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let now = 100 * DAY_MS;
+        admit_batch(&db, "old", &["old-0", "old-1"]);
+        settle(
+            &db,
+            "old-0",
+            GenerationBatchTerminalState::Complete,
+            now - 40 * DAY_MS,
+        );
+        settle(
+            &db,
+            "old-1",
+            GenerationBatchTerminalState::Failed,
+            now - 40 * DAY_MS,
+        );
+        let listed = expired_settled(&db, "owner-1", 30, now).unwrap();
+        assert_eq!(listed.len(), 1);
+
+        // Between the listing and the purge, a child is back in the queue.
+        let (_, mut queue) = rows(1).pop().unwrap();
+        queue.id = "old-1".into();
+        generation_queue::insert(&db, &queue).unwrap();
+        assert!(
+            !purge_settled(&db, "owner-1", "old", 30, now).unwrap(),
+            "a surviving queue row keeps the batch"
+        );
+        assert_eq!(child_count(&db, "old"), 2);
+        assert!(expired_settled(&db, "owner-1", 30, now).unwrap().is_empty());
+
+        // The queue row is gone again but the child is no longer terminal.
+        db.with_conn(|conn| {
+            conn.execute("DELETE FROM generation_queue WHERE id = 'old-1'", [])?;
+            conn.execute(
+                "UPDATE generation_batch_children SET state = 'queued' WHERE job_id = 'old-1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            !purge_settled(&db, "owner-1", "old", 30, now).unwrap(),
+            "a non-terminal child keeps the batch"
+        );
+        // And retention must still hold at purge time, not only at listing.
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE generation_batch_children SET state = 'failed', updated_at_ms = ?1
+                  WHERE job_id = 'old-1'",
+                params![now - DAY_MS],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            !purge_settled(&db, "owner-1", "old", 30, now).unwrap(),
+            "a fresh settlement keeps the batch"
+        );
+        assert!(
+            !purge_settled(&db, "owner-1", "old", 0, now).unwrap(),
+            "0 keeps forever at the purge too"
+        );
+        assert_eq!(child_count(&db, "old"), 2);
     }
 
     /// A hold persists its typed cause beside the sentence, and a retry

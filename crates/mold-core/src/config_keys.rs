@@ -28,6 +28,9 @@ pub enum ValueType {
 /// purges it. `0` keeps trashed prints forever. Profile-scoped DB key.
 pub const GALLERY_TRASH_RETENTION_DAYS_KEY: &str = "gallery.trash_retention_days";
 pub const GALLERY_TRASH_RETENTION_DAYS_ENV: &str = "MOLD_GALLERY_TRASH_RETENTION_DAYS";
+/// Days a held durable queue row is kept before the sweeper purges it, and
+/// days a fully settled batch summary is kept after its last child settled.
+/// `0` keeps both forever. Profile-scoped DB key.
 pub const QUEUE_HELD_RETENTION_DAYS_KEY: &str = "queue.held_retention_days";
 pub const QUEUE_HELD_RETENTION_DAYS_ENV: &str = "MOLD_QUEUE_HELD_RETENTION_DAYS";
 

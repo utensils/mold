@@ -8563,6 +8563,16 @@ pub struct HeldSweepResult {
     pub media_deferred: u64,
 }
 
+/// Result of `POST /api/generation-batches/sweep` (settled-batch retention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SettledBatchSweepResult {
+    /// Fully settled batches purged because their newest child settlement
+    /// exceeded `queue.held_retention_days`.
+    pub purged: u64,
+    /// Fully settled batches still inside their retention window.
+    pub remaining: u64,
+}
+
 /// Result of `DELETE /api/gallery/trash` (empty trash).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EmptyTrashResult {

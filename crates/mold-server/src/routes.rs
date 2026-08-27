@@ -305,6 +305,7 @@ use crate::queue::clean_error_message;
         crate::gallery_trash::empty_gallery_trash,
         crate::gallery_trash::sweep_gallery_trash,
         crate::queue_retention::sweep_held_queue,
+        crate::queue_retention::sweep_settled_batches,
         server_status,
         list_devices,
         patch_device,
@@ -751,6 +752,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/queue/held/sweep",
             post(crate::queue_retention::sweep_held_queue),
+        )
+        .route(
+            "/api/generation-batches/sweep",
+            post(crate::queue_retention::sweep_settled_batches),
         )
         .route("/api/queue/:id/preview", get(get_queue_job_preview))
         .route("/api/history", get(list_history).delete(delete_history))

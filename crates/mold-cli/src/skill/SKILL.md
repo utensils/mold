@@ -1163,7 +1163,7 @@ mold config set expand.enabled true       # User-preference → written to mold.
 mold config set default_width 1024        # Generation default → written to mold.db
 mold config set scheduler.replan_debounce_ms 2000  # Scheduler timing → mold.db
 mold config set gallery.trash_retention_days 7     # Library trash retention → mold.db (0 = keep forever, max 3650)
-mold config set queue.held_retention_days 7        # Held durable-queue retention → mold.db (0 = keep forever, max 3650)
+mold config set queue.held_retention_days 7        # Held-row + settled-batch retention → mold.db (0 = keep forever, max 3650)
 mold config set output_dir none           # Clear an optional field
 mold config set models.flux-dev:q4.default_steps 30   # Per-model generation default → model_prefs (DB)
 mold config where expand.enabled          # Print "db" or "file" so operators know the surface
@@ -1178,7 +1178,7 @@ Keys use dot-notation matching the TOML / DB layout. Boolean values accept `true
 
 Scheduler timing preferences are profile-scoped and loaded when the server's V2 coordinator starts: `scheduler.replan_debounce_ms` defaults to 2000, `scheduler.replan_max_delay_ms` to 5000, and `scheduler.warm_wait_max_ms` to 2000. Each accepts 0–30000, and max delay must be at least the debounce. Restart the server after changing them.
 
-`queue.held_retention_days` (section Queue, `queue.` ⇒ DB surface, env `MOLD_QUEUE_HELD_RETENTION_DAYS`) is the per-host held-row retention: days a HELD durable queue row waits before the hourly/on-demand sweep purges it and releases the encrypted request media it pinned; default 30, `0` keeps held rows forever, max 3650. Age runs from when the row was held, not when it was admitted. Purging settles the batch child as `failed` so a reconnecting client still reads a terminal outcome; a retry or cancel landing first wins.
+`queue.held_retention_days` (section Queue, `queue.` ⇒ DB surface, env `MOLD_QUEUE_HELD_RETENTION_DAYS`) is the per-host held-row retention: days a HELD durable queue row waits before the hourly/on-demand sweep purges it and releases the encrypted request media it pinned; default 30, `0` keeps held rows forever, max 3650. Age runs from when the row was held, not when it was admitted. Purging settles the batch child as `failed` so a reconnecting client still reads a terminal outcome; a retry or cancel landing first wins. The same key bounds settled batch summaries: a batch whose every child is terminal is purged once its newest child settlement is older than the retention (a batch with a held child waits for the held sweep first), and a purged batch reads as `404 GENERATION_BATCH_NOT_FOUND` / bulk `missing.batch_ids`.
 
 `gallery.trash_retention_days` (section Gallery, `gallery.` ⇒ DB surface, env `MOLD_GALLERY_TRASH_RETENTION_DAYS`) is the per-host Library trash retention: days a trashed print waits in `<output_dir>/.trash/` before the hourly/startup sweep purges it; default 30, `0` keeps trashed prints forever, max 3650. It is read fresh on every sweep (no restart) and advertised as `capabilities.gallery.trash.retention_days`; desktop/web/iPhone edit a remote host's value through that host's `/api/config`.
 
@@ -1408,6 +1408,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/queue` — authoritative server-side listing plus additive scheduler `plan` (per-device lanes, timing estimates, blocked reasons, plan/replan versions). The plan is advisory until the worker revalidates its exact execution fingerprint and frozen artifacts.
 - `PATCH /api/queue/:id` — re-lane and/or reorder a queued job (`target_gpu?`, queued-only 0-based `position?`); omitted fields stay unchanged
 - `POST /api/queue/held/sweep` — run one held-row retention pass now; returns `{ "purged", "remaining", "media_deferred" }`. `501` when the metadata DB is disabled.
+- `POST /api/generation-batches/sweep` — run one settled-batch retention pass now (batches whose every child is terminal, newest settlement older than `queue.held_retention_days`); returns `{ "purged", "remaining" }`. `501` when the metadata DB is disabled.
 - `POST /api/queue/:id/retry` — resume an explicitly retryable held durable child. Send the complete authority captured from its admitted batch status as `{ "instance_id": "...", "batch_id": "...", "client_batch_id": "...", "job_id": "..." }`; the path and body job IDs must match. The server transactionally fences the serving instance and batch/client/job identity before returning 202. This is the unversioned canonical retry route; do not invent a versioned or bodyless variant.
 - `DELETE /api/queue/:id` — cancel a still-queued generation job (204; 404 unknown; 409 once running)
 - Durable chain summaries expose additive `cancelling: true` after a running cancellation is accepted. Keep the UI in Cancelling until the runner settles `cancelled`; do not infer completion from a finalized file alone.

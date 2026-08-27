@@ -763,8 +763,14 @@ impl GallerySettings {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub struct QueueSettings {
     /// Days a HELD durable queue row survives before the retention sweeper
-    /// purges it and releases its encrypted request media. `0` keeps held
-    /// rows forever. Default 30. Env: `MOLD_QUEUE_HELD_RETENTION_DAYS`.
+    /// purges it and releases its encrypted request media, and — on the same
+    /// horizon — days a fully settled batch summary survives after its last
+    /// child settled. `0` keeps both forever. Default 30.
+    /// Env: `MOLD_QUEUE_HELD_RETENTION_DAYS`.
+    ///
+    /// One key on purpose: both answer how long the durable queue remembers
+    /// work that can no longer run — a held row is that work waiting for a
+    /// human, a settled batch is its receipt for a reconnecting client.
     ///
     /// A hold is deliberately durable — it is work parked for a human, and
     /// the whole point of the durable queue is that a restart does not lose

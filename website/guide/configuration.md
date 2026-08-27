@@ -244,7 +244,7 @@ Environment variables take precedence over config file values.
 | `MOLD_DB_PATH`                      | `MOLD_HOME/mold.db` | Override the SQLite gallery metadata DB location                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `MOLD_DB_DISABLE`                   | —                   | `1` to disable the SQLite metadata DB entirely — server and CLI fall back to filesystem walks. **`mold serve` cannot generate in this mode**: the durable queue is the only admission path, so every generation route answers `503 DURABLE_ADMISSION_UNAVAILABLE`. Gallery, models, catalog, and queue routes still serve, and `/health` stays 200. The same refusal applies with gallery output disabled (`MOLD_OUTPUT_DIR=`) or a non-authoritative dispatcher (`MOLD_DISPATCH_MODE=legacy` / `observe`) |
 | `MOLD_GALLERY_TRASH_RETENTION_DAYS` | `30`                | Days a trashed print stays in `<output_dir>/.trash/` before the sweeper purges it; `0` keeps trashed prints forever (max 3650). Env override of the `gallery.trash_retention_days` key — see [Library trash](#library-trash)                                                                                                                                                                                                                                                                               |
-| `MOLD_QUEUE_HELD_RETENTION_DAYS`    | `30`                | Days a held durable queue row is kept before the sweeper purges it and releases its staged media; `0` keeps held rows forever (max 3650). Env override of the `queue.held_retention_days` key — see [Held-queue retention](#held-queue-retention)                                                                                                                                                                                                                                                          |
+| `MOLD_QUEUE_HELD_RETENTION_DAYS`    | `30`                | Days a held durable queue row is kept before the sweeper purges it and releases its staged media, and days a fully settled batch summary is kept after its last child settled; `0` keeps both forever (max 3650). Env override of the `queue.held_retention_days` key — see [Held-queue retention](#held-queue-retention)                                                                                                                                                                                  |
 | `MOLD_CORS_ORIGIN`                  | —                   | Restrict CORS to specific origin                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `MOLD_API_KEY`                      | —                   | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`)                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `MOLD_RATE_LIMIT`                   | —                   | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -528,13 +528,13 @@ stays listed in `GET /api/queue`, keeps its staged request media, and waits for
 someone to fix the cause and retry it. A hold nobody ever returns to is not
 waiting for anything, so it is swept.
 
-| Key                         | Env var                          | Default | Description                                                                                 |
-| --------------------------- | -------------------------------- | ------- | ------------------------------------------------------------------------------------------- |
-| `queue.held_retention_days` | `MOLD_QUEUE_HELD_RETENTION_DAYS` | `30`    | Days a held queue row is kept before it is purged. `0` keeps held rows forever; max `3650`. |
+| Key                         | Env var                          | Default | Description                                                                                                                                                   |
+| --------------------------- | -------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queue.held_retention_days` | `MOLD_QUEUE_HELD_RETENTION_DAYS` | `30`    | Days a held queue row is kept before it is purged, and days a settled batch summary is kept after its last child settled. `0` keeps both forever; max `3650`. |
 
 ```bash
 mold config set queue.held_retention_days 7     # purge a week after the hold
-mold config set queue.held_retention_days 0     # keep held work until retried or cancelled by hand
+mold config set queue.held_retention_days 0     # keep held work (and settled batch summaries) until removed by hand
 mold config where queue.held_retention_days     # → db
 ```
 
@@ -548,6 +548,15 @@ settles its batch child as `failed` so a reconnecting client still sees a
 terminal outcome instead of a print that appears never to have been admitted.
 A retry or a cancel that lands before the sweep wins — an explicit decision
 always outranks retention.
+
+The same key bounds **settled batch summaries**. Once every print in a batch
+has finished, failed, or been cancelled, the batch record is only a receipt for
+a client reconnecting after a dropped stream, and it holds no media. The
+sweeper purges it once its newest child settlement is older than
+`queue.held_retention_days` (a batch with a held child waits for the held sweep
+to settle that child first), and `POST /api/generation-batches/sweep` runs that
+pass on demand. A purged batch answers `404 GENERATION_BATCH_NOT_FOUND`, which
+clients treat as "missing" without reopening work that already finished.
 
 ### Auto-tagging titled prints
 

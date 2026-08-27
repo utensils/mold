@@ -72,6 +72,7 @@ clients, and custom integrations on one generation contract.
 | `DELETE` | `/api/queue/:id`                              | Cancel a still-queued generation job                                                                              |
 | `POST`   | `/api/queue/:id/retry`                        | Retry a held child using its complete fenced batch authority                                                      |
 | `POST`   | `/api/queue/held/sweep`                       | Purge held rows past `queue.held_retention_days` and release their staged media                                   |
+| `POST`   | `/api/generation-batches/sweep`               | Purge fully settled batch summaries past `queue.held_retention_days`                                              |
 | `GET`    | `/api/history`                                | Prompt history, newest first (`?query=` substring filter, `?limit=` up to 500)                                    |
 | `DELETE` | `/api/history`                                | Clear prompt history (`?keep=N` trims to the most recent N)                                                       |
 | `GET`    | `/api/capabilities`                           | Feature capabilities, including optional per-host expansion and LAN-discovery state                               |
@@ -367,6 +368,14 @@ on demand, returning `{ "purged", "remaining", "media_deferred" }`. Purging a
 row releases the encrypted request media it pinned and settles its batch child
 as `failed`, so a reconnecting client still sees a terminal outcome rather
 than a missing print. A retry or cancel that lands before the purge wins.
+
+The same horizon bounds settled batch summaries: a batch whose every child is
+`complete`, `failed`, or `cancelled` is purged once its newest child settlement
+is older than `queue.held_retention_days`, and `POST /api/generation-batches/sweep`
+runs that pass on demand, returning `{ "purged", "remaining" }`. A purged batch
+answers `404 GENERATION_BATCH_NOT_FOUND` from `GET /api/generation-batches/:id`
+and appears under `missing.batch_ids` in the bulk status lookup; clients read
+that as missing and never reopen a job they already saw settle.
 
 ```bash
 curl -i -X POST http://localhost:7680/api/generate \

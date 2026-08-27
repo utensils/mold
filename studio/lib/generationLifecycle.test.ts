@@ -368,6 +368,65 @@ describe("canonical durable generation lifecycle", () => {
     });
   });
 
+  it("lookup_missing on a tracker whose jobs are all terminal keeps every terminal phase", () => {
+    // The server purges a settled batch summary after
+    // `queue.held_retention_days`; a reconnecting client then reads it as
+    // missing. Every job was already terminal, so nothing may reopen.
+    const settled = reduceGenerationLifecycle(tracker(), {
+      type: "batch_snapshot",
+      batch: batch("complete", 30, {
+        children: [
+          child("complete", 30, {
+            index: 1,
+            job_id: "job-1",
+            completed_at_ms: 30,
+            result: { filename: "first.png" },
+          }),
+          child("failed", 31, {
+            index: 2,
+            job_id: "job-2",
+            completed_at_ms: 31,
+            terminal_error: { code: "RENDER_FAILED" },
+          }),
+          child("cancelled", 32, {
+            index: 3,
+            job_id: "job-3",
+            completed_at_ms: 32,
+          }),
+        ],
+      }),
+    });
+    const phases = (state: ReturnType<typeof tracker>) =>
+      Object.values(state.jobs)
+        .sort((a, b) => a.childIndex - b.childIndex)
+        .map((job) => job.phase);
+    expect(phases(settled)).toEqual(["complete", "failed", "cancelled"]);
+
+    const purged = reduceGenerationLifecycle(settled, {
+      type: "lookup_missing",
+      batchId: "batch-1",
+    });
+    expect(purged.jobs).toBe(settled.jobs);
+    expect(purged.admission.lookup).toBe("missing");
+    expect(purged.reconciliation).toEqual({
+      required: true,
+      reason: "missing",
+    });
+
+    // A stale snapshot arriving after the purge cannot reopen settled work.
+    const reopened = reduceGenerationLifecycle(purged, {
+      type: "batch_snapshot",
+      batch: batch("queued", 40, {
+        children: [
+          child("queued", 40, { index: 1, job_id: "job-1" }),
+          child("running", 40, { index: 2, job_id: "job-2" }),
+          child("queued", 40, { index: 3, job_id: "job-3" }),
+        ],
+      }),
+    });
+    expect(phases(reopened)).toEqual(["complete", "failed", "cancelled"]);
+  });
+
   it("fences every same-host tracker when a bulk response comes from a replacement", () => {
     const sameHost = tracker();
     const otherHost = { ...tracker("client-2"), hostId: "host-2" };
