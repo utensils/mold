@@ -12,6 +12,8 @@ use crate::execution_plan::{
 use crate::scheduler::worker_device_id;
 use crate::state::{AppState, SseMessage};
 use mold_core::{Config, GenerateRequest, ModelPaths, SseProgressEvent};
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

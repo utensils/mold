@@ -2100,6 +2100,9 @@ pub(crate) fn private_prepare_error_message(
         mold_inference::H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall) => {
             shortfall.to_string()
         }
+        mold_inference::H3PrivateFl2VaPrepareError::InsufficientDeviceHeadroom(shortfall) => {
+            shortfall.to_string()
+        }
         mold_inference::H3PrivateFl2VaPrepareError::InvalidEvidence(reason) => {
             format!("MiniMax H3 preparation evidence was rejected: {reason}")
         }
