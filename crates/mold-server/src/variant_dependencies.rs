@@ -1889,6 +1889,58 @@ fn h3_reclaim_requirement(
     Some(shortfall?.required_host_bytes)
 }
 
+/// The one phase the server owns rather than the engine: opening and verifying
+/// the staged Ref2VA references before admission can derive its shapes.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+const H3_REFERENCE_BINDING_PHASE: &str = "Binding MiniMax H3 references";
+
+/// The other phase the server owns: waiting for its own model cache to hand
+/// host memory back before admission is retried (#1289).
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+const H3_HOST_RECLAIM_PHASE: &str = "Releasing MiniMax H3 host memory";
+
+/// Turn one admission progress event into a queue observation and a log line.
+///
+/// The two halves are deliberately different. The SINK holds only what is
+/// current, because `/api/queue` renders one row and a phase that finished is
+/// not what the job is doing. The LOG keeps every phase with its own
+/// `elapsed_ms`, because the question an operator asks about a seven-minute
+/// `Preparing` window is which of eight phases it was, and that is only
+/// answerable after the fact.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+fn observe_h3_admission_phase(
+    event: &mold_inference::progress::ProgressEvent,
+    work_id: &str,
+    device_id: &str,
+    sink: Option<&PreparationProgressSink>,
+) {
+    use mold_inference::progress::ProgressEvent;
+    match event {
+        ProgressEvent::StageStart { name } => {
+            publish_preparation_progress(sink, name, 0, 0);
+            tracing::info!(job_id = %work_id, device_id = %device_id, phase = %name, "H3 admission phase started");
+        }
+        ProgressEvent::StageDone { name, elapsed } => {
+            tracing::info!(
+                job_id = %work_id,
+                device_id = %device_id,
+                phase = %name,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "H3 admission phase finished"
+            );
+        }
+        // Byte progress inside whichever phase reports it — today only the
+        // artifact authentication does, and its component name is that
+        // phase's own name, so the phase clock survives the update.
+        ProgressEvent::WeightLoad {
+            bytes_loaded,
+            bytes_total,
+            component,
+        } => publish_preparation_progress(sink, component, *bytes_loaded, *bytes_total),
+        _ => {}
+    }
+}
+
 /// Park or refuse — decided on the RESOURCE, never on who is busy.
 ///
 /// The old rule parked only when a HOST shortfall coincided with a busy
@@ -1992,7 +2044,7 @@ impl H3AdmissionAttemptError {
 #[allow(clippy::too_many_arguments)]
 async fn prepare_h3_private_inputs_for_devices(
     state: Option<&AppState>,
-    _work_id: &str,
+    work_id: &str,
     request: &GenerateRequest,
     config: &Config,
     devices: Vec<DeviceFact>,
@@ -2053,6 +2105,13 @@ async fn prepare_h3_private_inputs_for_devices(
         failures.clear();
         host_shortfall = None;
         device_shortfall = None;
+        // The artifact pass is memoized per file identity (#1364), so "how
+        // many files did this attempt actually read" is the difference in the
+        // process-wide pinned-digest counter. It is the one number that tells
+        // a cold first admission apart from a warm repeat, and without it a
+        // slow `Preparing` window is indistinguishable between the two.
+        let attempt_started = std::time::Instant::now();
+        let hashes_before = mold_core::download::pinned_digest_hash_count();
         for mut device in devices.clone() {
             #[cfg(not(feature = "h3"))]
             if device.backend != mold_core::GpuBackend::Cuda {
@@ -2108,6 +2167,8 @@ async fn prepare_h3_private_inputs_for_devices(
             let available_device_bytes = device.available_vram_bytes;
             let progress_tx = progress.cloned();
             let progress_sink = preparation_progress.clone();
+            let phase_work_id = work_id.to_string();
+            let phase_device_id = device_id.clone();
             let evidence = tokio::task::spawn_blocking(move || {
                 let mut reporter = mold_inference::progress::ProgressReporter::default();
                 // The decode checkpoints through this reporter, so the token has
@@ -2118,25 +2179,27 @@ async fn prepare_h3_private_inputs_for_devices(
                 // sink, so an admission with no SSE client attached must still
                 // be able to say what it is doing.
                 reporter.set_callback(Box::new(move |event| {
-                    if let mold_inference::progress::ProgressEvent::WeightLoad {
-                        bytes_loaded,
-                        bytes_total,
-                        component,
-                    } = &event
-                    {
-                        publish_preparation_progress(
-                            progress_sink.as_ref(),
-                            component,
-                            *bytes_loaded,
-                            *bytes_total,
-                        );
-                    }
+                    observe_h3_admission_phase(
+                        &event,
+                        &phase_work_id,
+                        &phase_device_id,
+                        progress_sink.as_ref(),
+                    );
                     crate::gpu_worker::record_h3_progress(event, progress_tx.as_ref());
                 }));
                 // Cooperative abort: a cancelled preparation stops decoding at
                 // the next checkpoint instead of burning CPU on media whose job is
                 // already gone. The staging and its quota stay alive regardless,
                 // because the view shares the resolved set's hold.
+                //
+                // Timed through the same reporter as the phases inside
+                // admission, because a Ref2VA set is opened and verified here
+                // and that is not free — leaving it outside the timeline would
+                // put its cost in the gap between "preparation started" and
+                // the first phase, which is exactly the unaccounted window
+                // this is meant to remove.
+                let binding_started = std::time::Instant::now();
+                reporter.stage_start(H3_REFERENCE_BINDING_PHASE);
                 let bindings = match references
                     .as_ref()
                     .map(|references| {
@@ -2146,11 +2209,13 @@ async fn prepare_h3_private_inputs_for_devices(
                 {
                     Ok(bindings) => bindings.unwrap_or_default(),
                     Err(error) => {
+                        reporter.stage_done(H3_REFERENCE_BINDING_PHASE, binding_started.elapsed());
                         return Err(H3AdmissionAttemptError::Bindings(format!(
                             "MiniMax H3 admission could not bind its staged references: {error}"
-                        )))
+                        )));
                     }
                 };
+                reporter.stage_done(H3_REFERENCE_BINDING_PHASE, binding_started.elapsed());
                 mold_inference::prepare_h3_private_fl2va_admission(
                     mold_inference::H3PrivateFl2VaAdmissionInput {
                         request: &mut admission_request,
@@ -2213,6 +2278,17 @@ async fn prepare_h3_private_inputs_for_devices(
             resolved_request = next_request;
             evidence_by_device.insert(device.id.clone(), (device, evidence));
         }
+        tracing::info!(
+            job_id = %work_id,
+            model = %request.model,
+            attempt,
+            devices = devices.len(),
+            admitted = evidence_by_device.len(),
+            files_hashed = mold_core::download::pinned_digest_hash_count()
+                .saturating_sub(hashes_before),
+            elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+            "MiniMax H3 admission attempt finished"
+        );
         if !evidence_by_device.is_empty() {
             break;
         }
@@ -2235,6 +2311,12 @@ async fn prepare_h3_private_inputs_for_devices(
         // The eviction is awaited and its host memory handed back before the
         // sample is re-taken: an OS sample can no more prove an unfinished
         // release than it can prove an unsettled allocation.
+        // Awaiting an eviction can be the longest thing a `Preparing` window
+        // does — the model being released may be mid-render — so it is named
+        // and timed like every other phase rather than disappearing into the
+        // gap between two attempts.
+        let reclaim_started = std::time::Instant::now();
+        publish_preparation_progress(preparation_progress.as_ref(), H3_HOST_RECLAIM_PHASE, 0, 0);
         reclaim = crate::host_reclaim::reclaim_host_headroom(
             state,
             &resolved_request.model,
@@ -2242,6 +2324,13 @@ async fn prepare_h3_private_inputs_for_devices(
             &|| crate::h3_admission::current_h3_host_memory().headroom_bytes(),
         )
         .await;
+        tracing::info!(
+            job_id = %work_id,
+            required_host_bytes,
+            released = reclaim.released_anything(),
+            elapsed_ms = reclaim_started.elapsed().as_millis() as u64,
+            "MiniMax H3 host reclaim finished"
+        );
         available_host_headroom_bytes =
             crate::h3_admission::current_h3_host_memory().headroom_bytes();
         if available_host_headroom_bytes < required_host_bytes {
@@ -2398,14 +2487,50 @@ const fn h3_preparation_capacity_sensitive(backend: mold_core::GpuBackend) -> bo
     }
 }
 
+/// What a running dependency preparation is working through right now.
+///
+/// Richer than the wire shape by exactly one field: `started_ms` is when this
+/// PHASE became current, so the queue can report a phase age without the
+/// preparer having to carry a clock of its own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparationProgressState {
+    pub component: String,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub started_ms: u64,
+}
+
 /// What a running dependency preparation is currently working through.
 ///
 /// A shared cell rather than a channel: the scheduler reads the LATEST value
 /// when it projects the queue, and a pass that emits a progress event per
 /// megabyte of a ~37 GB artifact set must not queue thirty-seven thousand
 /// messages nobody is going to read.
-pub type PreparationProgressSink =
-    Arc<std::sync::Mutex<Option<mold_core::QueuePreparationProgress>>>;
+pub type PreparationProgressSink = Arc<std::sync::Mutex<Option<PreparationProgressState>>>;
+
+/// Advance the published observation, keeping a phase's own start time.
+///
+/// The rule is the whole point of the type: `started_ms` survives byte updates
+/// WITHIN a component and resets when the component changes, so "verifying
+/// artifacts, 41%, 214 s in this phase" is a phase age and not the whole
+/// preparation's. Pure so the rule can be tested without a scheduler.
+pub(crate) fn advance_preparation_progress(
+    current: Option<PreparationProgressState>,
+    component: &str,
+    bytes_done: u64,
+    bytes_total: u64,
+    now_ms: u64,
+) -> PreparationProgressState {
+    let started_ms = current
+        .filter(|held| held.component == component)
+        .map_or(now_ms, |held| held.started_ms);
+    PreparationProgressState {
+        component: component.to_string(),
+        bytes_done,
+        bytes_total,
+        started_ms,
+    }
+}
 
 /// Publish one preparation progress observation, ignoring a poisoned cell —
 /// a stale queue percentage is never worth failing a preparation over.
@@ -2417,11 +2542,13 @@ pub(crate) fn publish_preparation_progress(
 ) {
     let Some(sink) = sink else { return };
     let mut slot = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    *slot = Some(mold_core::QueuePreparationProgress {
-        component: component.to_string(),
+    *slot = Some(advance_preparation_progress(
+        slot.take(),
+        component,
         bytes_done,
         bytes_total,
-    });
+        crate::scheduler::monotonic_ms(),
+    ));
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2561,6 +2688,39 @@ const H3_PUBLIC_LOCAL_INSTANCE_ID: &str = "mold-public-forced-local";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A phase age is the phase's, not the preparation's.
+    ///
+    /// The artifact pass publishes a progress event per megabyte; if each one
+    /// restarted the clock the queue would report "0 s" forever, and if the
+    /// clock never reset every later phase would inherit the first one's age.
+    /// Both readings are useless for the question this exists to answer.
+    #[test]
+    fn a_phase_clock_survives_byte_updates_and_resets_on_a_new_phase() {
+        let opened = advance_preparation_progress(None, "Binding references", 0, 0, 1_000);
+        assert_eq!(opened.started_ms, 1_000);
+
+        let same_phase = advance_preparation_progress(
+            Some(opened.clone()),
+            "Binding references",
+            512,
+            2_048,
+            9_000,
+        );
+        assert_eq!(
+            same_phase.started_ms, 1_000,
+            "byte progress inside one phase must not restart its clock"
+        );
+        assert_eq!(same_phase.bytes_done, 512);
+        assert_eq!(same_phase.bytes_total, 2_048);
+
+        let next_phase =
+            advance_preparation_progress(Some(same_phase), "Verifying artifacts", 0, 0, 9_500);
+        assert_eq!(
+            next_phase.started_ms, 9_500,
+            "a new phase must not inherit the previous phase's age"
+        );
+    }
 
     /// Only a HOST shortfall may be answered by releasing the model cache, only
     /// once, and never from a placement preview (#1289). A device shortfall

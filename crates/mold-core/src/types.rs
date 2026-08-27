@@ -3614,6 +3614,13 @@ pub struct QueuePreparationProgress {
     /// `0` means the pass reports no size — render the component name alone,
     /// never a percentage.
     pub bytes_total: u64,
+    /// How long THIS phase has been running, as distinct from
+    /// `QueueWorkItem.preparation_elapsed_ms`, which covers the whole
+    /// preparation. A minutes-long preparation is a sequence of
+    /// authentications, opens, and decodes; the total says it was slow and
+    /// this says which part is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

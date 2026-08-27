@@ -1851,11 +1851,20 @@ impl Coordinator {
                             .preparation_started_ms
                             .map(|started| now_ms.saturating_sub(started))
                             .unwrap_or_default(),
+                        // The sink holds a phase clock the wire does not; the
+                        // wire gets the phase's own age, which is what a queue
+                        // row can act on.
                         progress: pending
                             .preparation_progress
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .clone(),
+                            .as_ref()
+                            .map(|state| mold_core::QueuePreparationProgress {
+                                component: state.component.clone(),
+                                bytes_done: state.bytes_done,
+                                bytes_total: state.bytes_total,
+                                phase_elapsed_ms: Some(now_ms.saturating_sub(state.started_ms)),
+                            }),
                     },
                 )
             })
@@ -14341,6 +14350,7 @@ mod tests {
                         component: "Verifying MiniMax H3 artifacts".to_string(),
                         bytes_done: 15_000_000_000,
                         bytes_total: 37_000_000_000,
+                        phase_elapsed_ms: Some(96_000),
                     }),
                 },
             )]),
@@ -14360,6 +14370,11 @@ mod tests {
             .expect("a reporting preparation must name what it is working through");
         assert_eq!(progress.component, "Verifying MiniMax H3 artifacts");
         assert_eq!(progress.bytes_done, 15_000_000_000);
+        assert_eq!(
+            progress.phase_elapsed_ms,
+            Some(96_000),
+            "a phase age is not the whole preparation's age"
+        );
 
         let wire = serde_json::to_value(item).unwrap();
         assert_eq!(wire["blocked_reason"], "preparing");
