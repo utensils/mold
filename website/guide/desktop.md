@@ -487,6 +487,15 @@ wire types as the CLI and web UI:
   Reorder, Pause, and Cancel all are feature-detected via `/api/capabilities`
   (`queue.can_reorder` gates reorder), so older servers simply hide the
   controls. The same queue mirrors as an activity strip on Create.
+  Click a job to open its detail panel: the prompt, the settings it was
+  submitted with, where it sits in line, when it was submitted, whether it
+  survives a restart, and — for a job the machine has parked — the full reason
+  and error with a **Copy details** button. A running job shows its live
+  denoise preview there too. From the panel you can **Reuse settings** (which
+  opens Create with everything restored), **Cancel** the job, or **Retry** one
+  this app submitted that the machine parked. A job that has only just been
+  accepted may not show its settings yet — the machine lists it before it loads
+  the request — and the panel says so rather than pretending they are missing.
 - **History (in Library)** — three lenses: **Runs** (every finished generation
   with its thumbnail, model, size, seed, and step count — click to reuse the
   full settings including the seed), **Prompts** (the raw prompt log,

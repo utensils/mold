@@ -269,10 +269,27 @@ pushed screen opened from the header.
   Keychain storage. Host detail shows telemetry, models-disk usage, queue,
   downloads, loaded models, and installed models (all using catalog display
   names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
-  unload, open-in-Models, and forget actions. Queued rows and running singleton
-  generations have a 44pt two-tap **Cancel** action against that exact
-  Keychain-authenticated host when it advertises cooperative cancellation;
-  older hosts keep running work visible and read-only.
+  unload, open-in-Models, and forget actions. Queue rows are swipe-to-act
+  (`studio/components/SwipeActionRow.vue`, gesture math in
+  `studio/lib/swipeAction.ts`): a right-to-left swipe reveals a 44pt tray and a
+  full swipe past 60% of the row commits **Cancel**, which reaches queued rows
+  always and running singletons where the host advertises cooperative
+  cancellation. The reveal is step one and the tap or full swipe is step two,
+  so the destructive action still takes two deliberate moves, and the tray is
+  equally reachable from the row's **Actions** button so VoiceOver and hardware
+  keyboards never depend on the gesture. The horizontal pan is scoped to the
+  row (`touch-action: pan-y`), leaving the list scroll, the Library grid's
+  column pinch, and the gallery viewer's swipe untouched, and the settle
+  animation honours `prefers-reduced-motion`. A host advertising
+  `capabilities.queue.can_reorder` adds a non-destructive **To back**, which
+  sends `PATCH /api/queue/:id {position}` — the server clamps a large index to
+  the tail, so the phone never has to read a queue depth its bounded page
+  cannot see. There is deliberately no per-job pause: only the whole queue
+  pauses. Tapping the row body opens the shared `QueueEntryDetail` in a bottom
+  sheet with the prompt, setting groups, queue facts, the running preview, any
+  hold reason in full with Copy, and its own inline two-step cancel; failures
+  stay in a persistent inline line, never a toast. Android renders the same
+  component — nothing in the gesture is iOS-only.
   When a host advertises `capabilities.gallery.trash`, host detail adds a
   **Library** card: a **Trash retention** select reading and writing that
   host's `gallery.trash_retention_days` through `GET`/`PUT /api/config/:key`

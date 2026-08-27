@@ -189,6 +189,16 @@ When several jobs are submitted, the Queue section keeps them visible while
 you continue composing. Mold limits simultaneous streams so generation does
 not starve gallery or download requests.
 
+Queue rows on a machine's own screen swipe like any iOS list: drag right to
+left to reveal **Cancel**, or keep going and a full swipe cancels the job.
+Revealing the buttons is the first step and tapping one is the second, so
+nothing is cancelled by a single flick. Every action is also on the **⋯**
+button at the end of the row, so VoiceOver and a hardware keyboard reach it
+without the gesture. Machines that support reordering also offer **To back**,
+which sends the job to the end of the line. Tap the row itself to see the whole
+job — its prompt, its settings, where it is in line, its live preview while it
+runs, and the full reason if the machine has parked it.
+
 For model families that stream live latent previews (FLUX.1, Flux.2,
 Z-Image, and Wan 2.1/2.2), the active print develops right on the Create screen: the preview
 sharpens as denoising progresses under a thinning film-grain wash, in a bed
