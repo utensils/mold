@@ -230,12 +230,14 @@ every terminal, stale, superseded, or aborted attempt releases the lease before
 Retry reacquires the same frozen route. Editing/removing reviewed work cancels
 a pending replacement. Siblings remain independently cancellable and keep
 deterministic seeds, the source prompt, and durable batch position through
-long-video chains. Protocol-v2 hosts accept them through one durable
-`/api/generation-batches` operation, chunked at the advertised limit; held
-children survive app/server restarts with an error and retry action. A partial result names each failed variation and reviewed
+long-video chains. Every print is admitted through one durable
+`/api/generation-batches` operation, chunked at the machine's advertised limit;
+held children survive app/server restarts with an error and retry action. A
+machine that cannot carry a request refuses it inline by name, and nothing is
+queued. A partial result names each failed variation and reviewed
 prompt, plus any separate unconfirmed-cancellation caveat, while keeping
 successful prints. Library shows **Batch N of M** and the source prompt when
-that provenance is present; prints from older servers remain unchanged.
+that provenance is present.
 
 When iOS suspends the app, interrupted generation streams carry a structured
 recovery marker rather than relying on localized WebKit error text. On resume,
@@ -397,8 +399,7 @@ From the same screen you can rename or retry the host, select it for Create,
 unload a model, open it in Models, or forget it. Forgetting a host also deletes
 its API key from the iOS Keychain. Queue cancellation uses that host's
 Keychain-authenticated route and refreshes the list after the server confirms
-it. Current hosts revoke running inference cooperatively at its next safe point;
-older hosts keep running work read-only.
+it. Running inference is revoked cooperatively at its next safe point.
 
 ## Settings and themes
 

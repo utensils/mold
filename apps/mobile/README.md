@@ -65,10 +65,10 @@ pushed screen opened from the header.
   `mold.mobile.generate-target.v1` and resolved through
   `desktop/src/mobile/generateTarget.ts`. Under either policy the model picker
   is the union of every reachable machine's installed models, tagged with the
-  machine that has one when they differ. Protocol-v2 machines are ranked from
-  their cached model and queue telemetry, so Develop does not block on a
-  placement round trip before durable admission. Legacy candidates still use
-  `POST /api/generate/placement-preview` with their own Keychain keys. Auto
+  machine that has one when they differ. Machines are ranked from their cached
+  model and queue telemetry, so Develop does not block on a placement round
+  trip before durable admission; the placement preview remains the sequence
+  planner. Auto
   chooses the least-busy model owner; Most capable uses the machine's reported
   `gpu_info.backend`, then VRAM and queue depth. The winner is frozen into the same immutable route record
   a pinned machine uses (host id, URL, Keychain key, instance id), so prepared
@@ -139,9 +139,9 @@ pushed screen opened from the header.
   the machines whose OWN `/api/models` row advertises `supports_identity` for
   that model (the picker row is the fleet union and cannot answer for the
   winner), the frozen route is re-checked before submission, and
-  `requiresAuthoritativePlacement` now covers `id_image` so an identity request
-  can never take the legacy 404/405 placement fallback on a server that would
-  ignore the face. Every rule comes from
+  `requiresAuthoritativePlacement` covers `id_image`, so an identity request is
+  refused inline by name rather than routed to a machine that does not
+  advertise the face. Every rule comes from
   `@studio/lib/identityConditioning`; `desktop/src/mobile/identity.ts` holds
   only the phone-shaped parts (budget, native ingest, Info rows, reuse
   outcome).
@@ -347,17 +347,15 @@ conditioning names the work as stale, and `/api/expand` receives only the task,
 never source media bytes.
 Once the host accepts the batch, the composer is immediately available to
 prepare another while earlier siblings remain queued or running.
-On a protocol-v2 host, that acceptance is one durable
-`POST /api/generation-batches` operation of ordered singleton children; larger
-sets are chunked at the advertised limit without changing global sibling
-provenance. Held children survive app/server restarts and remain visible with
-their error and retry action. Protocol-v2 ordinary work goes directly to
-durable admission after source preprocessing; the server persists it before
-expensive preparation. Legacy hosts retain singleton stream fan-out and a
-read-only placement preview for the finalized sibling shape (`batch_size: 1`,
-`copies: N`). A URL, Keychain key, or instance change, an authoritative legacy
-infeasible result, a malformed response, or any non-legacy HTTP failure
-preserves the reviewed work and queues nothing. The UI names the host's reason,
+That acceptance is one durable `POST /api/generation-batches` operation of
+ordered singleton children; larger sets are chunked at the machine's advertised
+limit without changing global sibling provenance. Held children survive
+app/server restarts and remain visible with their error and retry action.
+Ordinary work goes directly to durable admission after source preprocessing;
+the server persists it before expensive preparation. A machine that cannot
+carry the request refuses it inline by name. A URL, Keychain key, or instance
+change, a refusal, a malformed response, or any HTTP failure preserves the
+reviewed work and queues nothing. The UI names the host's reason,
 transport error, or host-identity race instead of collapsing them into one
 route error. Additive
 `missing_components` metadata is informational until Create owns a finalized
@@ -365,9 +363,9 @@ held request and the exact host's complete grouped repair pull; it must not
 promise automatic resume before then. Additive `pending_downloads` and their
 low-confidence estimate describe only devices selected by the candidate plan; cold
 installed catalog IDs remain valid across server model-list refreshes. Only a
-strictly valid version-1
-non-authoritative `unsupported` result or a missing legacy endpoint
-(`404`/`405`) may retain compatible routing without an authoritative plan.
+strictly valid
+non-authoritative `unsupported` result may retain compatible routing without an
+authoritative plan — a chain plan is documented to answer it.
 MiniMax H3 Ref2VA is the staged-media exception: Create first freezes a host
 that advertises the selected model, uploads the ordered references there, and
 relies on that host's exact admission validation before queueing because an
@@ -459,7 +457,7 @@ The **Opening sequence image** — the still clip 1 is conditioned on, with its
 source strength and fit-to-video-frame controls — is a primary-stack
 disclosure, the seat One shot gives its own source media, not an Advanced
 control; it is hidden entirely for a checkpoint whose `source_image` contract
-is `unsupported`, and an older server that advertises no contract keeps it.
+is `unsupported`.
 **Advanced sequence controls** therefore hosts only the active clip's negative
 prompt and camera motion, and its Reset clears exactly those two — the staged
 opening image, strength, and fit survive it, exactly as One shot's staged

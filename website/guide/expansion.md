@@ -33,10 +33,8 @@ not introduce camera or image language.
 
 The additive `/api/expand` `task` values are `text-to-image`, `text-to-video`,
 `image-to-video`, `video-to-video`, `retake`, `keyframe-interpolation`,
-`audio-driven-video`, and `text-to-audio`. Older clients may omit the field;
-the server then chooses image or text-to-video behavior from the model family.
-Only this semantic value is sent for preview expansion—source media stays on the
-generation request.
+`audio-driven-video`, and `text-to-audio`. Only this semantic value is sent for
+preview expansion — source media stays on the generation request.
 
 ## Generate with Expansion
 
