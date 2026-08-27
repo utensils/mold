@@ -3427,7 +3427,7 @@ pub struct DiskUsage {
 ///   `#[serde(default)]` so older servers that omit them still parse, and
 ///   `skip_serializing_if` so re-serializing matches the server's contract
 ///   (queued rows carry no `gpu` key at all — never `"gpu": null`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueueJobEntryWire {
     pub id: String,
     pub model: String,
@@ -3460,6 +3460,67 @@ pub struct QueueJobEntryWire {
     /// Why a durable row is parked in the additive `held` state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_reason: Option<String>,
+    /// Durable preparation error for a held row — the same sentence as
+    /// [`Self::held_reason`] under the field name the batch child uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Whether `POST /api/queue/{id}/retry` may safely resume this held row.
+    /// A held row that answers `false` needs operator repair, not a retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// Whether the row was resumed from the journal rather than submitted by
+    /// a live client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    /// How many times a worker has claimed this row for execution. Diagnoses
+    /// a hold: a job that keeps taking the process down shows its count here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_attempts: Option<u32>,
+    /// Durable batch this row is a child of. Retry needs the whole authority
+    /// (instance + batch + client batch + job) and only the instance belongs
+    /// to the server, so these three are what make a bare job id retryable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// The client-minted idempotency id of [`Self::batch_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_batch_id: Option<String>,
+    /// One-based position of this row within its batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u32>,
+}
+
+impl QueueJobEntryWire {
+    /// The complete retry authority for this row, or `None` when the row is
+    /// not a durable batch child and therefore has no batch to retry against.
+    pub fn retry_request(&self, instance_id: &str) -> Option<GenerationRetryRequest> {
+        Some(GenerationRetryRequest {
+            instance_id: instance_id.to_string(),
+            batch_id: self.batch_id.clone()?,
+            client_batch_id: self.client_batch_id.clone()?,
+            job_id: self.id.clone(),
+        })
+    }
+}
+
+/// One queued job in full, as `GET /api/queue/{id}` answers it: the row plus
+/// the planner's own work item for it when the job has been placed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueueJobDetailWire {
+    pub job: QueueJobEntryWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item: Option<QueueWorkItem>,
+}
+
+/// Response of `POST /api/queue/pause` and `POST /api/queue/resume`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuePauseState {
+    pub paused: bool,
+}
+
+/// Response of `DELETE /api/queue` — how many queued jobs were cancelled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueCancelAllResult {
+    pub cancelled: usize,
 }
 
 /// Confidence attached to a learned scheduler ETA.
@@ -3578,24 +3639,12 @@ impl QueueBlockedReason {
             Self::Unknown(value) => value,
         }
     }
-}
 
-impl Serialize for QueueBlockedReason {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for QueueBlockedReason {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(match value.as_str() {
+    /// Parse the wire identifier. The one place the mapping lives, so
+    /// `Deserialize` and every caller holding a legacy `reason` string (which
+    /// is typed as a bare `String` on the wire) agree by construction.
+    pub fn parse(value: &str) -> Self {
+        match value {
             "device_disabled" => Self::DeviceDisabled,
             "device_draining" => Self::DeviceDraining,
             "device_startup_excluded" => Self::DeviceStartupExcluded,
@@ -3617,8 +3666,26 @@ impl<'de> Deserialize<'de> for QueueBlockedReason {
             "no_schedulable_device" => Self::NoSchedulableDevice,
             "no_idle_device" => Self::NoIdleDevice,
             "lower_priority_opening" => Self::LowerPriorityOpening,
-            _ => Self::Unknown(value),
-        })
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
+impl Serialize for QueueBlockedReason {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueBlockedReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self::parse(&String::deserialize(deserializer)?))
     }
 }
 
@@ -5126,6 +5193,7 @@ mod tests {
             metadata: None,
             durable: None,
             held_reason: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""state":"queued""#), "got: {json}");

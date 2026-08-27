@@ -380,6 +380,7 @@ mod tests {
             metadata: None,
             durable: Some(true),
             held_reason: None,
+            ..Default::default()
         };
         let queue = mold_core::QueueListingWire {
             entries: vec![row; 3],

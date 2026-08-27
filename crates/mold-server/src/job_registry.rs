@@ -100,6 +100,19 @@ pub struct JobEntry {
     /// Whether `POST /api/queue/{id}/retry` may safely resume this held job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    /// Durable batch this row is a child of. Retry demands the whole
+    /// authority (instance + batch + client batch + job) and only the
+    /// instance belongs to the server, so a listing that withheld this left
+    /// every client guessing which batch a held job belonged to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// The client-minted idempotency id of [`Self::batch_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_batch_id: Option<String>,
+    /// One-based position of this child within its batch, as
+    /// `GenerationBatchChild::index` reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u32>,
 }
 
 /// Whole-queue listing returned by `GET /api/queue`. Wrapped in a struct so
@@ -781,6 +794,11 @@ impl JobRegistry {
                 held_reason: None,
                 error: None,
                 retryable: None,
+                // Batch membership is durable state, projected by the route
+                // from the journal for the same reason `durable` is.
+                batch_id: None,
+                client_batch_id: None,
+                batch_index: None,
             })
         })
     }
@@ -908,6 +926,11 @@ impl JobRegistry {
                 held_reason: None,
                 error: None,
                 retryable: None,
+                // Batch membership is durable state, projected by the route
+                // from the journal for the same reason `durable` is.
+                batch_id: None,
+                client_batch_id: None,
+                batch_index: None,
             })
             .collect();
         QueueListing {

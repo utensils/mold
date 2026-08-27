@@ -1626,6 +1626,22 @@ impl QueueJournal {
         Ok(generation_queue::get(db, id)?.is_some_and(|row| row.owner_uuid == owner))
     }
 
+    /// Which batch a durable row belongs to, when it belongs to one.
+    ///
+    /// The paged listing gets this from its own join; a single-job read has no
+    /// page to join against, so it asks here. Both read the same two tables,
+    /// so the identity a client composes a retry from cannot depend on which
+    /// route it came in through.
+    pub fn batch_identity_for_job(
+        &self,
+        job_id: &str,
+    ) -> anyhow::Result<Option<generation_batches::QueueRowBatchIdentity>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        generation_batches::identity_for_job(db, owner, job_id)
+    }
+
     /// Rows this server owns, oldest first. Backs the `held` listing.
     pub fn list_all(&self) -> Vec<GenerationQueueRow> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {

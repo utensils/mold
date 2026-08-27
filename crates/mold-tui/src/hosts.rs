@@ -1948,6 +1948,7 @@ mod tests {
             metadata: None,
             durable: Some(true),
             held_reason: None,
+            ..Default::default()
         }
     }
 

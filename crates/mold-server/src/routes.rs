@@ -6070,7 +6070,20 @@ async fn get_queue_job(
                 item
             })
     });
-    if let Some(job) = state.job_registry.entry(&id) {
+    // Batch membership is durable, so a live registry row carries none of it.
+    // Asked once, before either branch, so the identity a client composes a
+    // retry from does not depend on whether the row happens to be hydrated.
+    let batch = if state.queue_journal.is_enabled() {
+        let journal = state.queue_journal.clone();
+        let lookup_id = id.clone();
+        spawn_queue_read(move || journal.batch_identity_for_job(&lookup_id)).await?
+    } else {
+        None
+    };
+    if let Some(mut job) = state.job_registry.entry(&id) {
+        job.batch_id = batch.as_ref().map(|batch| batch.batch_id.clone());
+        job.client_batch_id = batch.as_ref().map(|batch| batch.client_batch_id.clone());
+        job.batch_index = batch.as_ref().map(|batch| batch.batch_index);
         return Ok(Json(QueueJobEntry { job, work_item }));
     }
     if !state.queue_journal.is_enabled() {
@@ -6101,7 +6114,7 @@ async fn get_queue_job(
         .position(|projected| projected.id == row.id)
         .unwrap_or(window.rows.len());
     Ok(Json(QueueJobEntry {
-        job: job_entry_from_durable_row(row, position),
+        job: job_entry_from_durable_row(row, batch, position),
         work_item,
     }))
 }
@@ -6111,6 +6124,7 @@ async fn get_queue_job(
 /// here and the same job after replay describe themselves identically.
 fn job_entry_from_durable_row(
     row: mold_db::generation_queue::GenerationQueueRow,
+    batch: Option<mold_db::generation_batches::QueueRowBatchIdentity>,
     position: usize,
 ) -> crate::job_registry::JobEntry {
     let metadata = serde_json::from_str::<mold_core::GenerateRequest>(&row.request_json)
@@ -6137,6 +6151,9 @@ fn job_entry_from_durable_row(
         // a non-retryable row answers 409 rather than re-dispatching.
         retryable: true,
         created_at_ms: row.created_at_ms,
+        batch_id: batch.as_ref().map(|batch| batch.batch_id.clone()),
+        client_batch_id: batch.as_ref().map(|batch| batch.client_batch_id.clone()),
+        batch_index: batch.as_ref().map(|batch| batch.batch_index),
     };
     let mut entry = job_entry_from_durable_projection(projection, position);
     entry.metadata = metadata;
@@ -6338,6 +6355,9 @@ fn project_durable_queue_page(
             entry.durable = Some(true);
             entry.replayed = Some(row.replay_seen > 0);
             entry.dispatch_attempts = Some(row.dispatch_attempts);
+            entry.batch_id = row.batch_id;
+            entry.client_batch_id = row.client_batch_id;
+            entry.batch_index = row.batch_index;
             // The durable row is the traversal authority. Keeping the
             // registry's old position here and then offsetting SQLite-only
             // rows by the registry length counted this same job twice.
@@ -6378,6 +6398,9 @@ fn job_entry_from_durable_projection(
         held_reason: row.held_reason,
         error,
         retryable: (state == crate::job_registry::JobLifecycle::Held).then_some(row.retryable),
+        batch_id: row.batch_id,
+        client_batch_id: row.client_batch_id,
+        batch_index: row.batch_index,
     }
 }
 

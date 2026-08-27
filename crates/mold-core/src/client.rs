@@ -1493,6 +1493,149 @@ impl MoldClient {
         Ok(())
     }
 
+    /// Read ONE queued job with the planner's own work item for it
+    /// (`GET /api/queue/{id}`).
+    ///
+    /// Unlike [`Self::find_queue_job`], which scans the paged listing, this
+    /// asks the host directly — so it answers for a durable row deeper than
+    /// the runtime window, and it carries the request settings the
+    /// payload-free listing projection deliberately omits. A job that has
+    /// left the queue is `Ok(None)`, never an error: finishing is not a
+    /// failure.
+    pub async fn queue_job(&self, id: &str) -> Result<Option<crate::QueueJobDetailWire>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/queue/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(
+            error_for_status_with_body(resp)
+                .await?
+                .json::<crate::QueueJobDetailWire>()
+                .await?,
+        ))
+    }
+
+    /// Reorder one queued job (`PATCH /api/queue/{id}`), returning the row as
+    /// the server re-projected it. Positions past the tail are clamped by the
+    /// server, so the returned `position` is the authority, not the request.
+    pub async fn move_queue_job(
+        &self,
+        id: &str,
+        position: usize,
+    ) -> Result<crate::QueueJobEntryWire> {
+        let resp = self
+            .client
+            .patch(format!(
+                "{}/api/queue/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .json(&serde_json::json!({ "position": position }))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::QueueJobEntryWire>()
+            .await?)
+    }
+
+    /// Cancel every still-queued job on this host (`DELETE /api/queue`).
+    ///
+    /// Running work is deliberately left alone; the count is the number of
+    /// queued rows the server removed.
+    pub async fn cancel_all_queue_jobs(&self) -> Result<usize> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/queue", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::QueueCancelAllResult>()
+            .await?
+            .cancelled)
+    }
+
+    /// Cancel every non-terminal child of one durable batch
+    /// (`DELETE /api/generation-batches/{id}`), returning the authoritative
+    /// child states the server settled on.
+    pub async fn cancel_generation_batch(&self, id: &str) -> Result<GenerationBatchStatus> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/generation-batches/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<GenerationBatchStatus>()
+            .await?)
+    }
+
+    /// Hold dispatch of new generation jobs (`POST /api/queue/pause`). The
+    /// job already on a worker finishes. Returns the resulting pause state.
+    pub async fn pause_queue(&self) -> Result<bool> {
+        self.set_queue_paused("pause").await
+    }
+
+    /// Resume dispatch (`POST /api/queue/resume`). Returns the resulting
+    /// pause state, so a caller reports what the host settled on rather than
+    /// what it asked for.
+    pub async fn resume_queue(&self) -> Result<bool> {
+        self.set_queue_paused("resume").await
+    }
+
+    async fn set_queue_paused(&self, action: &str) -> Result<bool> {
+        let resp = self
+            .client
+            .post(format!("{}/api/queue/{action}", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::QueuePauseState>()
+            .await?
+            .paused)
+    }
+
+    /// Run the held-row retention sweep now (`POST /api/queue/held/sweep`).
+    pub async fn sweep_held_queue(&self) -> Result<crate::HeldSweepResult> {
+        let resp = self
+            .client
+            .post(format!("{}/api/queue/held/sweep", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::HeldSweepResult>()
+            .await?)
+    }
+
+    /// Run the settled-batch retention sweep now
+    /// (`POST /api/generation-batches/sweep`).
+    pub async fn sweep_settled_batches(&self) -> Result<crate::SettledBatchSweepResult> {
+        let resp = self
+            .client
+            .post(format!("{}/api/generation-batches/sweep", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::SettledBatchSweepResult>()
+            .await?)
+    }
+
     /// List gallery images from the server's output directory.
     pub async fn list_gallery(&self) -> Result<Vec<GalleryImage>> {
         let resp = self
@@ -3118,6 +3261,225 @@ mod tests {
             msg.contains("already running"),
             "body text missing from error: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_queue_carries_the_hold_and_batch_identity_a_retry_needs() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": "job-held",
+                    "model": "flux-dev:q8",
+                    "state": "held",
+                    "started_at_unix_ms": 1_711_305_600_000_u64,
+                    "position": 0,
+                    "held_reason": "dependency download failed",
+                    "error": "dependency download failed",
+                    "retryable": true,
+                    "replayed": true,
+                    "dispatch_attempts": 2,
+                    "batch_id": "batch-1",
+                    "client_batch_id": "client-1",
+                    "batch_index": 3
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let listing = client.list_queue_for_capacity(None).await.unwrap();
+        let row = &listing.entries[0];
+        assert_eq!(row.error.as_deref(), Some("dependency download failed"));
+        assert_eq!(row.retryable, Some(true));
+        assert_eq!(row.replayed, Some(true));
+        assert_eq!(row.dispatch_attempts, Some(2));
+        let retry = row.retry_request("instance-a").expect("batch identity");
+        assert_eq!(
+            retry,
+            crate::GenerationRetryRequest {
+                instance_id: "instance-a".into(),
+                batch_id: "batch-1".into(),
+                client_batch_id: "client-1".into(),
+                job_id: "job-held".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_row_with_no_batch_composes_no_retry_authority() {
+        // Half an authority is worse than none: the server rejects a
+        // mismatched body with a 409 the user cannot act on.
+        let row = crate::QueueJobEntryWire {
+            id: "solo".into(),
+            batch_id: Some("batch-1".into()),
+            ..Default::default()
+        };
+        assert!(row.retry_request("instance-a").is_none());
+        assert!(crate::QueueJobEntryWire::default()
+            .retry_request("instance-a")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn queue_job_reads_one_row_with_its_work_item() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue/job-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job": {
+                    "id": "job-1",
+                    "model": "flux-dev:q8",
+                    "state": "queued",
+                    "started_at_unix_ms": 1_711_305_600_000_u64,
+                    "position": 2
+                },
+                "work_item": {
+                    "work_id": "job-1",
+                    "parent_id": "job-1",
+                    "work_kind": "generation",
+                    "activity_phase": "denoise",
+                    "estimate_confidence": "high",
+                    "priority_class": "user",
+                    "queue_rank": 4,
+                    "bypass_count": 0,
+                    "blocked_reason": "insufficient_vram"
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue/missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "queue job missing not found"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let detail = client.queue_job("job-1").await.unwrap().expect("job");
+        assert_eq!(detail.job.id, "job-1");
+        assert_eq!(detail.job.position, 2);
+        assert_eq!(
+            detail
+                .work_item
+                .as_ref()
+                .and_then(|item| item.blocked_reason.clone()),
+            Some(crate::QueueBlockedReason::InsufficientVram)
+        );
+        // A job that left the queue is an answer, not an error.
+        assert!(client.queue_job("missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn queue_lifecycle_calls_report_the_server_s_own_numbers() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/queue"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"cancelled": 4})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/pause"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"paused": true})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/resume"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"paused": false})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/held/sweep"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"purged": 2, "remaining": 5, "media_deferred": 1}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches/sweep"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"purged": 3, "remaining": 6})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/queue/job-1"))
+            .and(body_json(serde_json::json!({"position": 0})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "job-1",
+                "model": "flux-dev:q8",
+                "state": "queued",
+                "started_at_unix_ms": 1_u64,
+                "position": 0
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": "client-1",
+                "instance_id": "instance-a",
+                "durable": true,
+                "children": []
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        assert_eq!(client.cancel_all_queue_jobs().await.unwrap(), 4);
+        assert!(client.pause_queue().await.unwrap());
+        assert!(!client.resume_queue().await.unwrap());
+        let held = client.sweep_held_queue().await.unwrap();
+        assert_eq!(
+            (held.purged, held.remaining, held.media_deferred),
+            (2, 5, 1)
+        );
+        let batches = client.sweep_settled_batches().await.unwrap();
+        assert_eq!((batches.purged, batches.remaining), (3, 6));
+        let moved = client.move_queue_job("job-1", 0).await.unwrap();
+        assert_eq!(moved.position, 0);
+        let cancelled = client.cancel_generation_batch("batch-1").await.unwrap();
+        assert_eq!(cancelled.id, "batch-1");
+    }
+
+    #[tokio::test]
+    async fn queue_lifecycle_errors_carry_the_server_s_own_sentence() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/queue/job-1"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "queue job job-1 is already running"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let err = client.move_queue_job("job-1", 0).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("409"), "{msg}");
+        assert!(msg.contains("already running"), "{msg}");
     }
 
     #[test]

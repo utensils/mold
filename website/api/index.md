@@ -914,6 +914,14 @@ start/finish times, confidence, blocked reasons, and the next tentative replan
 deadline. Clients must treat it as advisory: the server revalidates the exact
 execution fingerprint and frozen artifacts before CUDA.
 
+Every row — in the listing and in the single-job read below — also carries its
+durable batch identity when it has one: `batch_id`, the client-minted
+`client_batch_id`, and the one-based `batch_index`. `POST /api/queue/:id/retry`
+requires the whole authority (`instance_id`, `batch_id`, `client_batch_id`,
+`job_id`) and only `instance_id` belongs to the server, so these three are what
+let a client holding a bare job id compose a retry. A row that was admitted
+outside a batch omits all three.
+
 Use `GET /api/queue/:id` to read ONE job in full, settings included:
 
 ```bash

@@ -5830,6 +5830,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_queue_row_names_the_batch_that_can_retry_it() {
+        // `POST /api/queue/{id}/retry` needs the whole authority. Everything
+        // but the serving instance is a property of the row, so a listing
+        // that omitted it made every client guess the parent batch — which is
+        // why there was no CLI retry at all.
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        admit_one_durable_batch(&state, "child-job", "batch-1");
+        let app = app_with_state(state);
+
+        let listing = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let row = &listing["entries"][0];
+        assert_eq!(row["id"], "child-job");
+        assert_eq!(row["batch_id"], "batch-1");
+        assert_eq!(row["client_batch_id"], "client-batch-1");
+        assert_eq!(row["batch_index"], 1, "batch indices are one-based");
+
+        // Asking about the one job answers the same identity, so a client
+        // that holds only a job id can compose the retry without a listing.
+        let detail = json_body(
+            app.oneshot(
+                Request::get("/api/queue/child-job")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(detail["job"]["batch_id"], "batch-1");
+        assert_eq!(detail["job"]["client_batch_id"], "client-batch-1");
+        assert_eq!(detail["job"]["batch_index"], 1);
+    }
+
+    #[tokio::test]
     async fn retryable_dependency_hold_is_visible_and_resumes_through_the_retry_api() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));

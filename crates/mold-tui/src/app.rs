@@ -17886,6 +17886,7 @@ mod tests {
                     metadata: None,
                     durable: None,
                     held_reason: None,
+                    ..Default::default()
                 }],
                 live_only_entries: vec![],
                 plan: None,
@@ -18182,6 +18183,7 @@ mod tests {
                         metadata: None,
                         durable: None,
                         held_reason: None,
+                        ..Default::default()
                     },
                     mold_core::QueueJobEntryWire {
                         id: "job-q".into(),
@@ -18195,6 +18197,7 @@ mod tests {
                         metadata: None,
                         durable: None,
                         held_reason: None,
+                        ..Default::default()
                     },
                 ],
                 live_only_entries: vec![],

@@ -636,6 +636,76 @@ pub enum RetakeModeArg {
 }
 
 #[derive(clap::Subcommand)]
+pub enum QueueAction {
+    /// List queued, running, and held jobs
+    ///
+    /// Columns: job id, state (running step counter, `Next up`, `#N in
+    /// line`, or the scheduler's own actionable reason), model, batch, the
+    /// submitted prompt, and when the row was admitted. Held rows are listed
+    /// again beneath with the server's error sentence and whether a retry is
+    /// allowed.
+    List {
+        /// Show only held rows
+        #[arg(long)]
+        held: bool,
+        /// Print the raw `GET /api/queue` document as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one job in full, with its plan entry and batch progress
+    Show {
+        /// Job id as shown by `mold queue list`
+        #[arg(value_name = "JOB-ID")]
+        job_id: String,
+        /// Print the raw server documents as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel jobs by id, the whole waiting queue, or one batch
+    Cancel {
+        /// Job ids as shown by `mold queue list`
+        #[arg(value_name = "JOB-ID")]
+        job_ids: Vec<String>,
+        /// Cancel every still-queued job; running work is left alone
+        #[arg(long, conflicts_with_all = ["job_ids", "batch"])]
+        all: bool,
+        /// Cancel every non-terminal child of one batch
+        #[arg(long, value_name = "BATCH-ID", conflicts_with = "job_ids")]
+        batch: Option<String>,
+        /// Skip the confirmation prompt for `--all`
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Return held jobs to the durable queue
+    ///
+    /// Only an explicitly retryable hold resumes; one that needs operator
+    /// repair is refused by name rather than skipped.
+    Retry {
+        /// Job ids as shown by `mold queue list --held`
+        #[arg(value_name = "JOB-ID")]
+        job_ids: Vec<String>,
+        /// Retry every retryable hold
+        #[arg(long, conflicts_with = "job_ids")]
+        held: bool,
+    },
+    /// Move one queued job to a new place in line
+    Move {
+        /// Job id as shown by `mold queue list`
+        #[arg(value_name = "JOB-ID")]
+        job_id: String,
+        /// New 0-based position; a value past the tail is clamped by the host
+        #[arg(long, value_name = "POSITION")]
+        to: usize,
+    },
+    /// Hold dispatch of new jobs; work already on a worker finishes
+    Pause,
+    /// Resume dispatch
+    Resume,
+    /// Run the held-row and settled-batch retention sweeps now
+    Sweep,
+}
+
+#[derive(clap::Subcommand)]
 pub enum TrashAction {
     /// List trashed prints with their purge countdowns
     ///
@@ -1305,6 +1375,29 @@ Examples:
     Jobs {
         #[command(subcommand)]
         action: JobsAction,
+    },
+
+    /// Inspect and control the generation queue on a running server
+    #[command(after_long_help = "\
+Examples:
+  mold queue list                      Everything queued, running, or held
+  mold queue list --held               Only the parked rows, with their errors
+  mold queue show job-abc123           One job in full, with its batch progress
+  mold queue cancel job-abc123
+  mold queue cancel --all --yes        Clear the backlog; running work finishes
+  mold queue cancel --batch batch-7    Cancel one batch's remaining children
+  mold queue retry --held              Resume every retryable hold
+  mold queue move job-abc123 --to 0    Send a job to the head of the line
+  mold queue pause / mold queue resume
+  mold queue sweep                     Run the retention sweeps now
+
+Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). There is
+no local fallback: a queue belongs to one serving host. `list`, `show`, and
+the waiting vocabulary (`Next up`, `#N in line`) are the same policy the web,
+desktop, and iPhone surfaces render.")]
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
     },
 
     /// Inspect, restore, or empty the gallery trash on a running server
@@ -2374,6 +2467,9 @@ async fn run() -> anyhow::Result<()> {
             let config = mold_core::Config::load_or_default();
             commands::jobs::run(action, &config).await?;
         }
+        Commands::Queue { action } => {
+            commands::queue::run(action).await?;
+        }
         Commands::Trash { action } => {
             commands::trash::run(action).await?;
         }
@@ -3406,6 +3502,138 @@ mod tests {
         match cli.command {
             Commands::Stats { json } => assert!(json),
             _ => panic!("expected Stats"),
+        }
+    }
+
+    // ── queue tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn queue_list_parses_held_and_json_flags() {
+        assert!(matches!(
+            parse(&["queue", "list"]).command,
+            Commands::Queue {
+                action: QueueAction::List {
+                    held: false,
+                    json: false
+                }
+            }
+        ));
+        assert!(matches!(
+            parse(&["queue", "list", "--held", "--json"]).command,
+            Commands::Queue {
+                action: QueueAction::List {
+                    held: true,
+                    json: true
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn queue_cancel_accepts_ids_all_or_a_batch_but_never_two_of_them() {
+        match parse(&["queue", "cancel", "job-1", "job-2"]).command {
+            Commands::Queue {
+                action: QueueAction::Cancel { job_ids, all, .. },
+            } => {
+                assert_eq!(job_ids, vec!["job-1", "job-2"]);
+                assert!(!all);
+            }
+            _ => panic!("expected Queue cancel"),
+        }
+        assert!(matches!(
+            parse(&["queue", "cancel", "--all", "--yes"]).command,
+            Commands::Queue {
+                action: QueueAction::Cancel {
+                    all: true,
+                    yes: true,
+                    ..
+                }
+            }
+        ));
+        match parse(&["queue", "cancel", "--batch", "batch-7"]).command {
+            Commands::Queue {
+                action: QueueAction::Cancel { batch, .. },
+            } => assert_eq!(batch.as_deref(), Some("batch-7")),
+            _ => panic!("expected Queue cancel"),
+        }
+        // Naming a job and `--all` would leave the outcome ambiguous.
+        for conflicting in [
+            vec!["queue", "cancel", "job-1", "--all"],
+            vec!["queue", "cancel", "job-1", "--batch", "batch-7"],
+            vec!["queue", "cancel", "--all", "--batch", "batch-7"],
+        ] {
+            assert!(
+                try_parse(&conflicting).is_err(),
+                "{conflicting:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_retry_takes_ids_or_held_but_not_both() {
+        match parse(&["queue", "retry", "job-1"]).command {
+            Commands::Queue {
+                action: QueueAction::Retry { job_ids, held },
+            } => {
+                assert_eq!(job_ids, vec!["job-1"]);
+                assert!(!held);
+            }
+            _ => panic!("expected Queue retry"),
+        }
+        assert!(matches!(
+            parse(&["queue", "retry", "--held"]).command,
+            Commands::Queue {
+                action: QueueAction::Retry { held: true, .. }
+            }
+        ));
+        assert!(
+            try_parse(&["queue", "retry", "job-1", "--held"]).is_err(),
+            "--held with explicit ids must not parse"
+        );
+    }
+
+    #[test]
+    fn queue_move_show_and_the_lifecycle_verbs_parse() {
+        match parse(&["queue", "move", "job-1", "--to", "0"]).command {
+            Commands::Queue {
+                action: QueueAction::Move { job_id, to },
+            } => {
+                assert_eq!(job_id, "job-1");
+                assert_eq!(to, 0);
+            }
+            _ => panic!("expected Queue move"),
+        }
+        assert!(
+            try_parse(&["queue", "move", "job-1"]).is_err(),
+            "a move with no destination must not parse"
+        );
+        match parse(&["queue", "show", "job-1", "--json"]).command {
+            Commands::Queue {
+                action: QueueAction::Show { job_id, json },
+            } => {
+                assert_eq!(job_id, "job-1");
+                assert!(json);
+            }
+            _ => panic!("expected Queue show"),
+        }
+        for (args, expected) in [
+            (vec!["queue", "pause"], "pause"),
+            (vec!["queue", "resume"], "resume"),
+            (vec!["queue", "sweep"], "sweep"),
+        ] {
+            let matched = match parse(&args).command {
+                Commands::Queue {
+                    action: QueueAction::Pause,
+                } => "pause",
+                Commands::Queue {
+                    action: QueueAction::Resume,
+                } => "resume",
+                Commands::Queue {
+                    action: QueueAction::Sweep,
+                } => "sweep",
+                _ => panic!("expected a Queue lifecycle verb"),
+            };
+            assert_eq!(matched, expected);
         }
     }
 

@@ -466,6 +466,46 @@ pub fn lookup_durable(
     })
 }
 
+/// Which batch a queue row belongs to, and under which client identity.
+///
+/// `POST /api/queue/{id}/retry` demands instance + batch + client batch + job.
+/// Only the instance is a property of the server; the rest belong to the row,
+/// so this is the one lookup that turns a bare job id into a retryable
+/// authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueRowBatchIdentity {
+    pub batch_id: String,
+    pub client_batch_id: String,
+    /// One-based, as `GenerationBatchChild::index` reports it.
+    pub batch_index: u32,
+}
+
+/// Resolve one queue row's batch identity, or `None` when the row belongs to
+/// no batch on this owner.
+pub fn identity_for_job(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+) -> Result<Option<QueueRowBatchIdentity>> {
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT c.batch_id, b.client_batch_id, c.batch_index
+               FROM generation_batch_children AS c
+               JOIN generation_batches AS b ON b.id = c.batch_id
+              WHERE c.job_id = ?1 AND b.owner_uuid = ?2",
+        )?;
+        let mut rows = stmt.query(params![job_id, owner_uuid])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(QueueRowBatchIdentity {
+            batch_id: row.get(0)?,
+            client_batch_id: row.get(1)?,
+            batch_index: row.get::<_, i64>(2)? as u32,
+        }))
+    })
+}
+
 pub fn set_child_state(
     db: &MetadataDb,
     job_id: &str,

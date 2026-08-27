@@ -35,6 +35,9 @@ mold lambda deploy --instance-type gpu_1x_a10 --region us-west-1  # Private Lamb
 mold gpu list                                       # Stable GPU/MIG inventory
 mold gpu disable cuda:<stable-id>                   # Drain, then disable
 mold gpu enable cuda:<stable-id>                    # Re-enable runtime scheduling
+mold queue list [--held]                            # Queued/running/held jobs on $MOLD_HOST, shared wait vocabulary
+mold queue retry --held                             # Resume every retryable hold
+mold queue cancel --all --yes                       # Clear the backlog; running work finishes
 mold trash list                                     # Trashed prints on $MOLD_HOST with purge countdowns
 mold trash restore <filename>...                    # Back to the live gallery
 mold skill install --detected                       # Install this skill for detected agents
@@ -537,6 +540,39 @@ The commands use `MOLD_HOST` and `MOLD_API_KEY` like other remote
 CLI surfaces. `mold jobs gc` mirrors `POST /api/chain-jobs/gc`, pruning
 successful ephemeral shim jobs and completed non-ephemeral artifacts older than
 `chain.jobs_artifact_ttl_days`.
+
+### mold queue CLI
+
+`mold queue` is the CLI surface for the durable generation queue, over HTTP
+against `MOLD_HOST` (with `MOLD_API_KEY`); there is deliberately no local
+fallback, because a queue belongs to one serving host.
+
+```bash
+mold queue list [--held] [--json]     # GET /api/queue — JOB · STATE · MODEL · BATCH · PROMPT · ADMITTED
+mold queue show <JOB-ID> [--json]     # GET /api/queue/{id} + /preview + /api/generation-batches/{batch}
+mold queue cancel <JOB-ID>...         # DELETE /api/queue/{id}
+mold queue cancel --all [--yes]       # DELETE /api/queue — queued rows only; confirms [y/N] unless --yes
+mold queue cancel --batch <BATCH-ID>  # DELETE /api/generation-batches/{id}
+mold queue retry <JOB-ID>... | --held # POST /api/queue/{id}/retry
+mold queue move <JOB-ID> --to <N>     # PATCH /api/queue/{id} {position} — the host clamps past the tail
+mold queue pause | resume             # POST /api/queue/pause | /api/queue/resume
+mold queue sweep                      # POST /api/queue/held/sweep + POST /api/generation-batches/sweep
+```
+
+The `STATE` column resolves through `mold_core::queue_wait`, the Rust twin of
+`studio/lib/queuePosition.ts`: a running row counts denoise steps from
+`GET /api/queue/{id}/preview`, position 0 is `Next up`, everyone behind is
+`#N in line`, and only an ACTIONABLE `QueueBlockedReason` replaces the
+position — `no_idle_device`, `warm_wait`, `lower_priority_opening`, and
+`dependency_wait` are ordinary serialization and fall through. A reason this
+build has never heard of reads `Waiting on the host`, never a raw underscored
+identifier.
+
+Retry needs the whole authority (`instance_id`, `batch_id`,
+`client_batch_id`, `job_id`). Only the instance belongs to the server, so
+`GET /api/queue` and `GET /api/queue/{id}` carry the additive `batch_id` /
+`client_batch_id` / `batch_index` (one-based) that make a bare job id
+retryable. A held row that is not explicitly retryable is refused by name.
 
 ### mold trash CLI
 

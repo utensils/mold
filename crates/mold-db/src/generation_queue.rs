@@ -150,6 +150,19 @@ pub struct GenerationQueueProjection {
     /// Whether an explicit retry may safely return this held row to the queue.
     pub retryable: bool,
     pub created_at_ms: i64,
+    /// Durable batch this row is a child of, when it has one.
+    ///
+    /// `POST /api/queue/{id}/retry` requires the whole authority — instance,
+    /// batch, client batch, job — and every part but the instance belongs to
+    /// the row. Projecting it here is what lets a listing offer the retry
+    /// instead of making each client guess the parent. `None` is an honest
+    /// answer: a queue row admitted outside a batch has no parent.
+    pub batch_id: Option<String>,
+    /// The client-minted idempotency id of [`Self::batch_id`].
+    pub client_batch_id: Option<String>,
+    /// One-based position of this child within its batch, as
+    /// `GenerationBatchChild::index` reports it.
+    pub batch_index: Option<u32>,
 }
 
 /// Exclusive keyset cursor for [`list_projection_page`]. `rowid` is SQLite's
@@ -206,8 +219,10 @@ pub enum OwnedQueuedPatchOutcome {
 const QUEUE_PROJECTION_FIRST_PAGE_SQL: &str = "
     SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
            q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
-           q.rowid
+           q.rowid, c.batch_id, c.batch_index, b.client_batch_id
       FROM generation_queue AS q
+      LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
+      LEFT JOIN generation_batches AS b ON b.id = c.batch_id
      WHERE q.owner_uuid = ?1
      ORDER BY q.created_at, q.rowid
      LIMIT ?2";
@@ -215,8 +230,10 @@ const QUEUE_PROJECTION_FIRST_PAGE_SQL: &str = "
 const QUEUE_PROJECTION_AFTER_SQL: &str = "
     SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
            q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
-           q.rowid
+           q.rowid, c.batch_id, c.batch_index, b.client_batch_id
       FROM generation_queue AS q
+      LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
+      LEFT JOIN generation_batches AS b ON b.id = c.batch_id
      WHERE q.owner_uuid = ?1
        AND (q.created_at, q.rowid) > (?2, ?3)
      ORDER BY q.created_at, q.rowid
@@ -671,6 +688,9 @@ fn projection_page_row(
             held_reason: row.get(7)?,
             retryable: row.get::<_, i64>(8)? != 0,
             created_at_ms: row.get(9)?,
+            batch_id: row.get(11)?,
+            batch_index: row.get::<_, Option<i64>>(12)?.map(|index| index as u32),
+            client_batch_id: row.get(13)?,
         },
         QueueProjectionCursor {
             created_at_ms: row.get(9)?,
@@ -1438,25 +1458,34 @@ impl QueuePatchClaimFence {
     fn projection_sql(self) -> &'static str {
         match self {
             Self::Unclaimed => {
-                "SELECT id, state, model, target_gpu, seed_pinned,
-                        dispatch_attempts, replay_seen, held_reason, retryable, created_at
-                   FROM generation_queue
-                  WHERE id = ?1 AND owner_uuid = ?2
-                    AND state = 'queued' AND claim_token IS NULL"
+                "SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
+                        q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable,
+                        q.created_at, c.batch_id, c.batch_index, b.client_batch_id
+                   FROM generation_queue AS q
+                   LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
+                   LEFT JOIN generation_batches AS b ON b.id = c.batch_id
+                  WHERE q.id = ?1 AND q.owner_uuid = ?2
+                    AND q.state = 'queued' AND claim_token IS NULL"
             }
             Self::Claimed => {
-                "SELECT id, state, model, target_gpu, seed_pinned,
-                        dispatch_attempts, replay_seen, held_reason, retryable, created_at
-                   FROM generation_queue
-                  WHERE id = ?1 AND owner_uuid = ?2
-                    AND state = 'queued' AND claim_token IS NOT NULL"
+                "SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
+                        q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable,
+                        q.created_at, c.batch_id, c.batch_index, b.client_batch_id
+                   FROM generation_queue AS q
+                   LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
+                   LEFT JOIN generation_batches AS b ON b.id = c.batch_id
+                  WHERE q.id = ?1 AND q.owner_uuid = ?2
+                    AND q.state = 'queued' AND claim_token IS NOT NULL"
             }
             Self::AnyExact => {
-                "SELECT id, state, model, target_gpu, seed_pinned,
-                        dispatch_attempts, replay_seen, held_reason, retryable, created_at
-                   FROM generation_queue
-                  WHERE id = ?1 AND owner_uuid = ?2
-                    AND state = 'queued' AND claim_token IS ?3"
+                "SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
+                        q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable,
+                        q.created_at, c.batch_id, c.batch_index, b.client_batch_id
+                   FROM generation_queue AS q
+                   LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
+                   LEFT JOIN generation_batches AS b ON b.id = c.batch_id
+                  WHERE q.id = ?1 AND q.owner_uuid = ?2
+                    AND q.state = 'queued' AND claim_token IS ?3"
             }
         }
     }
@@ -1597,6 +1626,9 @@ fn patch_owned_queued_with_claim_fence(
                 held_reason: row.get(7)?,
                 retryable: row.get::<_, i64>(8)? != 0,
                 created_at_ms: row.get(9)?,
+                batch_id: row.get(10)?,
+                batch_index: row.get::<_, Option<i64>>(11)?.map(|index| index as u32),
+                client_batch_id: row.get(12)?,
             })
         };
         let projection = if matches!(claim_fence, QueuePatchClaimFence::AnyExact) {
@@ -2056,6 +2088,9 @@ mod tests {
             held_reason: _,
             retryable: _,
             created_at_ms: _,
+            batch_id: _,
+            batch_index: _,
+            client_batch_id: _,
         } = &first.rows[0];
         assert_eq!(id, "queued");
         assert_eq!(*target_gpu, Some(2));
@@ -2073,6 +2108,56 @@ mod tests {
             vec!["held"]
         );
         assert!(second.next_cursor.is_none());
+    }
+
+    #[test]
+    fn the_projection_carries_a_row_s_batch_identity_so_a_client_can_retry_it() {
+        // `POST /api/queue/{id}/retry` demands the complete authority
+        // (instance, batch, client batch, job). Everything but the instance is
+        // a property of the row, so a listing that omits it forces every
+        // client to guess which batch a held job belongs to.
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut child_row = row("child", "owner-a", 10);
+        child_row.state = QueueRowState::Held;
+        let solo = row("solo", "owner-a", 20);
+        crate::generation_batches::insert_or_get(
+            &db,
+            &crate::generation_batches::GenerationBatchRow {
+                id: "batch-1".into(),
+                client_batch_id: "client-1".into(),
+                owner_uuid: "owner-a".into(),
+                request_sha256: "sha".into(),
+                created_at_ms: 10,
+            },
+            &[(
+                crate::generation_batches::GenerationBatchChildRow {
+                    batch_id: "batch-1".into(),
+                    job_id: "child".into(),
+                    batch_index: 2,
+                    state: "held".into(),
+                    error: None,
+                    updated_at_ms: 10,
+                },
+                child_row,
+            )],
+        )
+        .unwrap();
+        insert(&db, &solo).unwrap();
+
+        let page = list_projection_page(&db, "owner-a", None, 10).unwrap();
+        let batched = page.rows.iter().find(|row| row.id == "child").unwrap();
+        assert_eq!(batched.batch_id.as_deref(), Some("batch-1"));
+        assert_eq!(batched.client_batch_id.as_deref(), Some("client-1"));
+        assert_eq!(
+            batched.batch_index,
+            Some(2),
+            "one-based, as the wire reports it"
+        );
+        // A row that belongs to no batch says so rather than inventing one.
+        let unbatched = page.rows.iter().find(|row| row.id == "solo").unwrap();
+        assert_eq!(unbatched.batch_id, None);
+        assert_eq!(unbatched.client_batch_id, None);
+        assert_eq!(unbatched.batch_index, None);
     }
 
     #[test]
