@@ -368,6 +368,8 @@ export function jobStatusCode(job: Job): string {
     case "complete":
       return "DONE";
     case "error":
+      // An unknown outcome is advisory and carries its own stage label.
+      if (job.outcomeUnknown) return job.stage?.toUpperCase() ?? "OUTCOME UNKNOWN";
       return isCancelledError(job.error) ? "CANCELLED" : "FAILED";
   }
   return "UNKNOWN";

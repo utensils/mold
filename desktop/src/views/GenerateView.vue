@@ -2249,7 +2249,7 @@ async function loadTemplate(template: GenerationTemplate) {
 
 function siblingDot(s: Job): string {
   if (s.status === "complete") return "text-ink"; // ◉ developed
-  if (s.status === "error") return "text-stop";
+  if (s.status === "error") return s.outcomeUnknown ? "text-ink-2" : "text-stop";
   return "text-ink-3"; // ◎ pending
 }
 
@@ -3694,8 +3694,9 @@ async function generate() {
         toasts.push(warning, "warning");
       }
       const ok = done.filter((s) => s.status === "complete").length;
-      const failedCount = done.filter((s) => s.status === "error").length;
-      const failed = done.find((s) => s.status === "error");
+      // An unknown outcome is advisory, never counted as a failure.
+      const failedCount = done.filter((s) => s.status === "error" && !s.outcomeUnknown).length;
+      const failed = done.find((s) => s.status === "error" && !s.outcomeUnknown);
       if (ok > 0) {
         if (failedCount > 0) {
           toasts.push(

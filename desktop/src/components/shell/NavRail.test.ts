@@ -159,6 +159,28 @@ describe("NavRail developing jobs", () => {
     expect(wrapper.text()).toContain("nothing developing");
   });
 
+  it("shows an unknown outcome in the muted ink, never as a failure", async () => {
+    const wrapper = await mountAt("/create");
+    useGenerationStore().jobs = [
+      {
+        clientId: 8,
+        model: "flux-dev:q8",
+        prompt: "replaced mid-print",
+        status: "error",
+        outcomeUnknown: true,
+        stage: "Outcome unknown",
+        error: "hal9000 was replaced by a new server instance.",
+        settledAtMs: Date.now(),
+      } as never,
+    ];
+    await flushPromises();
+
+    const row = wrapper.get("[data-test='developing-print']");
+    expect(row.text()).toContain("outcome unknown");
+    expect(row.text()).not.toContain("failed");
+    expect(row.find(".text-stop").exists()).toBe(false);
+  });
+
   it("cancels another client's running job from its context menu", async () => {
     const wrapper = await mountAt("/create");
     setLocalAuthority();

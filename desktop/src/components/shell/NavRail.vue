@@ -457,7 +457,9 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
             </span>
             <span
               class="block font-utility text-[9.5px]"
-              :class="job.status === 'error' ? 'text-stop' : 'text-safelight'"
+              :class="
+                job.status === 'error' && !job.outcomeUnknown ? 'text-stop' : 'text-safelight'
+              "
             >
               {{ developingLabel(job) }}
             </span>
