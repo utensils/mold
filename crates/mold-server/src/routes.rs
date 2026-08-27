@@ -6158,11 +6158,19 @@ async fn get_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<QueueJobEntry>, ApiError> {
+    // The drawer's own rule (`studio/lib/queuePosition.ts`): a job's work item
+    // is the one whose `work_id` IS the job, or — for a batch parent, whose
+    // plan entries are its children — the first child that names it as parent.
+    // Matching only `work_id` would answer `null` for exactly the batch parent
+    // whose phase a client is asking about.
     let work_item = state.scheduled_work.latest_plan().and_then(|plan| {
-        plan.work_items
-            .into_iter()
-            .find(|item| item.work_id == id)
-            .map(|mut item| {
+        let items = plan.work_items;
+        items
+            .iter()
+            .position(|item| item.work_id == id)
+            .or_else(|| items.iter().position(|item| item.parent_id == id))
+            .map(|index| {
+                let mut item = items[index].clone();
                 item.normalize_planned_lane_for_presentation();
                 item
             })

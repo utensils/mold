@@ -5575,6 +5575,97 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
+    /// The detail endpoint has to carry the PHASE, or the drawer it exists for
+    /// still cannot say what a minutes-long `Preparing` window is doing.
+    ///
+    /// The work item is matched the way `studio/lib/queuePosition.ts` matches
+    /// it: the entry whose `work_id` IS the job, or — for a batch parent, whose
+    /// plan entries are its children — the first entry naming it as parent.
+    /// Matching only `work_id` answers `null` for exactly the parent a client
+    /// asks about.
+    #[tokio::test]
+    async fn one_queue_job_carries_its_planned_phase_including_for_a_batch_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for id in ["solo-job", "batch-parent"] {
+            mold_db::generation_queue::insert(
+                db.as_ref().as_ref().unwrap(),
+                &mold_db::generation_queue::GenerationQueueRow {
+                    id: id.to_string(),
+                    owner_uuid: owner.clone(),
+                    state: mold_db::generation_queue::QueueRowState::Queued,
+                    model: "minimax-h3-fl2va:comfy-pruned-int8".to_string(),
+                    request_json: serde_json::json!({
+                        "prompt": "a lighthouse in a storm",
+                        "model": "minimax-h3-fl2va:comfy-pruned-int8",
+                        "width": 1344,
+                        "height": 768,
+                    })
+                    .to_string(),
+                    media_set_id: None,
+                    admission_authority: None,
+                    output_dir: root.path().to_path_buf(),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: "full".to_string(),
+                    seed_pinned: false,
+                    dispatch_attempts: 0,
+                    replay_seen: 0,
+                    held_reason: None,
+                    created_at_ms: 1_000,
+                    updated_at_ms: 1_000,
+                    started_at_ms: None,
+                },
+            )
+            .unwrap();
+        }
+        let preparing = |work_id: &str, parent_id: &str| mold_core::QueueWorkItem {
+            work_id: work_id.to_string(),
+            parent_id: parent_id.to_string(),
+            work_kind: "generation".to_string(),
+            blocked_reason: Some(mold_core::QueueBlockedReason::Preparing),
+            reason: Some("preparing".to_string()),
+            preparation_elapsed_ms: Some(214_000),
+            preparation_progress: Some(mold_core::QueuePreparationProgress {
+                component: "Verifying MiniMax H3 artifacts".to_string(),
+                bytes_done: 15_000_000_000,
+                bytes_total: 37_000_000_000,
+                phase_elapsed_ms: Some(96_000),
+            }),
+            ..Default::default()
+        };
+        state.scheduled_work.set_queue_work_items_for_tests(vec![
+            preparing("solo-job", "solo-job"),
+            preparing("batch-parent:0", "batch-parent"),
+        ]);
+
+        for id in ["solo-job", "batch-parent"] {
+            let response = app_with_state(state.clone())
+                .oneshot(
+                    Request::get(format!("/api/queue/{id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{id}");
+            let body = json_body(response).await;
+            let item = &body["work_item"];
+            assert_eq!(item["blocked_reason"], "preparing", "{id}: {body}");
+            assert_eq!(item["preparation_elapsed_ms"], 214_000, "{id}");
+            assert_eq!(
+                item["preparation_progress"]["component"], "Verifying MiniMax H3 artifacts",
+                "{id}"
+            );
+            assert_eq!(
+                item["preparation_progress"]["phase_elapsed_ms"], 96_000,
+                "{id}: the phase's own age must survive the round trip"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn paginated_queue_reads_payload_free_pages_and_keeps_live_only_work_visible() {
         let root = tempfile::tempdir().unwrap();
