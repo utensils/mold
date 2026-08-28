@@ -797,7 +797,9 @@ describe("LibraryPage multi-host identity", () => {
       expect.objectContaining({ id: "studio-7680", apiKey: "studio-key" }),
       "twin.png",
     );
-    expect(useGenerateForm().state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
+    expect(useGenerateForm().state.value.sourceFitPolicy).toEqual({
+      mode: "crop-fill",
+    });
     expect(pushMock).toHaveBeenCalledWith({ name: "create" });
   });
 

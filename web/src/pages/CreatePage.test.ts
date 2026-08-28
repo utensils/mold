@@ -2005,12 +2005,10 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.sourceFitPolicy = { mode: "pad-fit" };
     await nextTick();
 
-    wrapper
-      .getComponent({ name: "ImagePickerModal" })
-      .vm.$emit("pick", [
-        { kind: "upload", filename: "target.png", base64: "TARGET" },
-        { kind: "upload", filename: "reference.png", base64: "REFERENCE" },
-      ]);
+    wrapper.getComponent({ name: "ImagePickerModal" }).vm.$emit("pick", [
+      { kind: "upload", filename: "target.png", base64: "TARGET" },
+      { kind: "upload", filename: "reference.png", base64: "REFERENCE" },
+    ]);
     await nextTick();
 
     expect(form.state.value.imageAttachments).toHaveLength(2);

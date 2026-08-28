@@ -3901,7 +3901,8 @@ async function onSubmitInner(
     ? {
         ...form.state.value.imageAttachments[0],
         sourceFit:
-          parseSourceFitPolicy(form.state.value.sourceFitPolicy) ?? defaultSourceFitPolicy(),
+          parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
+          defaultSourceFitPolicy(),
       }
     : form.state.value.h3Authoring?.firstFrame?.data
       ? {
@@ -3911,7 +3912,8 @@ async function onSubmitInner(
           height: form.state.value.h3Authoring.firstFrame.height,
           mime: form.state.value.h3Authoring.firstFrame.mimeType,
           sourceFit:
-            parseSourceFitPolicy(form.state.value.sourceFitPolicy) ?? defaultSourceFitPolicy(),
+            parseSourceFitPolicy(form.state.value.sourceFitPolicy) ??
+            defaultSourceFitPolicy(),
         }
       : null;
   const copies = requestCopyCount(currentRequest);
@@ -4602,7 +4604,9 @@ async function onPickSource(v: SourceImageState[]) {
           )
         : v.slice(0, 1);
   if (
-    (!referenceEdit || (qwenEdit && replaceTargetOnPick.value) || establishesTarget) &&
+    (!referenceEdit ||
+      (qwenEdit && replaceTargetOnPick.value) ||
+      establishesTarget) &&
     v.length > 0
   ) {
     // Every newly selected source starts from the shared crop-fill policy.
@@ -4798,9 +4802,8 @@ function openJob(job: Job) {
     variations: 1,
     familyOverride: null,
   };
-  form.state.value.sourceFitPolicy = parseSourceFitPolicy(
-    request.source_fit,
-  ) ?? defaultSourceFitPolicy();
+  form.state.value.sourceFitPolicy =
+    parseSourceFitPolicy(request.source_fit) ?? defaultSourceFitPolicy();
   form.state.value.cameraControl = null;
   form.state.value.model = request.model;
   const requestModel = models.value.find(
@@ -4877,9 +4880,8 @@ function openJob(job: Job) {
           return;
         form.state.value.width = request.width;
         form.state.value.height = request.height;
-        form.state.value.sourceFitPolicy = parseSourceFitPolicy(
-          request.source_fit,
-        ) ?? defaultSourceFitPolicy();
+        form.state.value.sourceFitPolicy =
+          parseSourceFitPolicy(request.source_fit) ?? defaultSourceFitPolicy();
       });
   }
   // Unlike saved metadata, a queued request still holds the face payload, so
