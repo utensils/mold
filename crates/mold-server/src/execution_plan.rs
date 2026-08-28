@@ -4289,9 +4289,10 @@ fn hash_equivalence_artifact_contents(path: &Path) -> std::io::Result<Equivalenc
 }
 
 fn verified_sha256_marker_digest(path: &Path) -> Option<String> {
-    let marker = mold_core::download::sha256_marker_path(path);
-    let digest = std::fs::read_to_string(marker).ok()?;
-    let digest = digest.trim();
+    // The marker's first line is the digest; a second `len=` line (added so
+    // `Config::file_is_complete` can tell a marker that still describes the
+    // file from a stale one) is read and discarded by the shared helper.
+    let digest = mold_core::download::recorded_sha256_marker(path)?;
     (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| digest.to_ascii_lowercase())
 }
