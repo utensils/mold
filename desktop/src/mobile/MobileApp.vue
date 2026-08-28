@@ -664,6 +664,7 @@ const draft = useSequenceDraftStore();
 const licenseAcceptance = useLicenseAcceptance();
 draft.hydrate();
 const mobileContent = ref<HTMLElement | null>(null);
+const createHeading = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
 const settingsButton = ref<HTMLButtonElement | null>(null);
 const settingsBackButton = ref<HTMLButtonElement | null>(null);
@@ -2552,6 +2553,16 @@ function clearSelectedQueueRender(): void {
   selectedQueueRender.value = null;
 }
 
+function revealRestoredMobileGeneration(): void {
+  tab.value = "generate";
+  void nextTick(() => {
+    if (!mobileContent.value) return;
+    mobileContent.value.scrollTop = 0;
+    mobileContent.value.scrollLeft = 0;
+    createHeading.value?.focus({ preventScroll: true });
+  });
+}
+
 async function selectMobilePrint(job: Job): Promise<void> {
   const epoch = ++mobilePrintSelectionEpoch;
   clearSelectedQueueRender();
@@ -2589,7 +2600,7 @@ async function selectMobilePrint(job: Job): Promise<void> {
   draft.stopEditing();
   draft.output = "single";
   latestResultClientId.value = job.status === "complete" ? job.clientId : null;
-  tab.value = "generate";
+  revealRestoredMobileGeneration();
   if (
     durable &&
     job.id &&
@@ -10474,7 +10485,14 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </div>
         <template v-else>
           <div class="mobile-create-head">
-            <h1 class="section-title">Create</h1>
+            <h1
+              ref="createHeading"
+              class="section-title"
+              tabindex="-1"
+              data-test="mobile-create-heading"
+            >
+              Create
+            </h1>
             <button
               class="mobile-settings-reset"
               type="button"
