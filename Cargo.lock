@@ -3471,6 +3471,7 @@ dependencies = [
  "mold-ai-scheduler",
  "mp4",
  "nvml-wrapper",
+ "rayon",
  "rust-embed",
  "serde",
  "serde_json",
