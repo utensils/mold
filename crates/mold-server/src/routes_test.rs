@@ -11516,7 +11516,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
@@ -11559,7 +11559,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
@@ -11679,7 +11679,7 @@ mod tests {
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
@@ -11847,7 +11847,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
@@ -11892,7 +11892,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
