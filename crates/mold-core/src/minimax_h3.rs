@@ -2220,10 +2220,69 @@ pub fn validate_resolved_request_contract(
     validate_request_contract_with_reference_authority(req, task, true)
 }
 
+/// Media the persisted (scrubbed) form of a request no longer carries but
+/// the queue's media store still holds for it.
+///
+/// `scrub_request_media` strips every media payload from a durable row and
+/// the scheduler resolves that row, so a FL2VA job whose first frame is in
+/// the encrypted media set reads as `source_image: None` — and therefore as
+/// `TextToAudioVideo` — unless the resolver says what the store holds. This
+/// is the H3 shape of the queue-media projection; a caller holding a hydrated
+/// request passes `from_request`, which is what the worker does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResolvedMediaPresence {
+    pub source_image: bool,
+}
+
+impl ResolvedMediaPresence {
+    pub fn from_request(request: &GenerateRequest) -> Self {
+        Self {
+            source_image: request.source_image.is_some(),
+        }
+    }
+}
+
+/// [`validate_resolved_request_contract`] for a request whose media may have
+/// been scrubbed into the queue-media store: the boundary endpoints are
+/// derived from what the request carries OR what `media` says the store
+/// holds for it.
+pub fn validate_resolved_request_contract_with_media(
+    req: &GenerateRequest,
+    task: Task,
+    media: ResolvedMediaPresence,
+) -> Result<Mode, ContractError> {
+    validate_request_contract_with_authorities(req, task, true, media)
+}
+
+/// [`validate_request_contract`] for a request whose media may have been
+/// scrubbed into the queue's media store — the FL2VA twin of
+/// [`validate_resolved_request_contract_with_media`].
+pub fn validate_request_contract_with_media(
+    req: &GenerateRequest,
+    task: Task,
+    media: ResolvedMediaPresence,
+) -> Result<Mode, ContractError> {
+    validate_request_contract_with_authorities(req, task, false, media)
+}
+
 fn validate_request_contract_with_reference_authority(
     req: &GenerateRequest,
     task: Task,
     resolved_references: bool,
+) -> Result<Mode, ContractError> {
+    validate_request_contract_with_authorities(
+        req,
+        task,
+        resolved_references,
+        ResolvedMediaPresence::from_request(req),
+    )
+}
+
+fn validate_request_contract_with_authorities(
+    req: &GenerateRequest,
+    task: Task,
+    resolved_references: bool,
+    media: ResolvedMediaPresence,
 ) -> Result<Mode, ContractError> {
     let fps = req.fps.unwrap_or(FIXED_FPS);
     if fps != FIXED_FPS {
@@ -2364,7 +2423,7 @@ fn validate_request_contract_with_reference_authority(
             "MiniMax H3 does not accept mask, ControlNet, CFG+, LoRA, LTX-2 pipeline, HDR, post/upscale-stage, extend-overlap, or guidance-override fields",
         ));
     }
-    if req.source_image.is_none() && req.source_image_name.is_some() {
+    if req.source_image.is_none() && !media.source_image && req.source_image_name.is_some() {
         return Err(violation(
             "MINIMAX_H3_ORPHAN_SOURCE_NAME",
             "MiniMax H3 source_image_name requires a first-frame source image",
@@ -2427,7 +2486,7 @@ fn validate_request_contract_with_reference_authority(
                 ));
             }
             let last = frames - 1;
-            let mut first = req.source_image.is_some();
+            let mut first = req.source_image.is_some() || media.source_image;
             let mut end = false;
             for keyframe in req.keyframes.as_deref().unwrap_or_default() {
                 match keyframe.frame {
@@ -3372,6 +3431,52 @@ mod tests {
             channels: 1,
             sample_count: Some(duration_ms.saturating_mul(48)),
         }
+    }
+
+    /// The scheduler resolves the payload-free durable row, so a FL2VA job
+    /// whose first frame sits in the queue-media store reads as
+    /// `source_image: None`; the resolver's presence projection is what keeps
+    /// it a first-frame render. A hydrated request needs no projection, and
+    /// a projection never invents a frame the request itself contradicts.
+    #[test]
+    fn resolved_media_presence_restores_the_scrubbed_first_frame_mode() {
+        let mut hydrated = request();
+        hydrated.source_image = Some(vec![0_u8; 16]);
+        assert_eq!(
+            validate_resolved_request_contract(&hydrated, Task::Fl2va).unwrap(),
+            Mode::FirstFrameToAudioVideo
+        );
+        let mut scrubbed = hydrated.clone();
+        crate::request_media::scrub_request_media(&mut scrubbed);
+        assert!(scrubbed.source_image.is_none());
+        assert_eq!(
+            validate_resolved_request_contract(&scrubbed, Task::Fl2va).unwrap(),
+            Mode::TextToAudioVideo
+        );
+        assert_eq!(
+            validate_resolved_request_contract_with_media(
+                &scrubbed,
+                Task::Fl2va,
+                ResolvedMediaPresence { source_image: true }
+            )
+            .unwrap(),
+            Mode::FirstFrameToAudioVideo
+        );
+        assert_eq!(
+            validate_resolved_request_contract_with_media(
+                &hydrated,
+                Task::Fl2va,
+                ResolvedMediaPresence {
+                    source_image: false
+                }
+            )
+            .unwrap(),
+            Mode::FirstFrameToAudioVideo
+        );
+        assert_eq!(
+            ResolvedMediaPresence::from_request(&hydrated),
+            ResolvedMediaPresence { source_image: true }
+        );
     }
 
     fn request() -> GenerateRequest {

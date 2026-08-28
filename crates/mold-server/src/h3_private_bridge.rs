@@ -1572,14 +1572,30 @@ impl H3PreparedMediaContract {
     /// is compared against a prepared attempt by deriving and comparing, never
     /// by trusting a fingerprint handed in beside it.
     pub(crate) fn from_request(request: &mold_core::GenerateRequest) -> Result<Self, String> {
+        Self::from_request_with_media(
+            request,
+            mold_core::minimax_h3::ResolvedMediaPresence::from_request(request),
+        )
+    }
+
+    /// [`Self::from_request`] for a request whose media may have been scrubbed
+    /// into the queue's media store (#1427): the worker holds the payload-free
+    /// row, so the first frame's presence comes from the media projection or
+    /// the contract derives a text-only mode for an FL2VA print.
+    pub(crate) fn from_request_with_media(
+        request: &mold_core::GenerateRequest,
+        media: mold_core::minimax_h3::ResolvedMediaPresence,
+    ) -> Result<Self, String> {
         let task = mold_core::minimax_h3::task_for_model(&request.model)
             .ok_or_else(|| "MiniMax H3 prepared media lost its task partition".to_string())?;
         let mode = match task {
             mold_core::minimax_h3::Task::Fl2va => {
-                mold_core::minimax_h3::validate_request_contract(request, task)
+                mold_core::minimax_h3::validate_request_contract_with_media(request, task, media)
             }
             mold_core::minimax_h3::Task::Ref2va => {
-                mold_core::minimax_h3::validate_resolved_request_contract(request, task)
+                mold_core::minimax_h3::validate_resolved_request_contract_with_media(
+                    request, task, media,
+                )
             }
         }
         .map_err(|error| format!("{}: {}", error.code, error.message))?;
@@ -1649,13 +1665,41 @@ impl H3PreparedMediaContract {
         &self,
         request: &mold_core::GenerateRequest,
     ) -> Result<(), String> {
-        let expected = Self::from_request(request)?;
+        self.validate_for_request_with_media(
+            request,
+            mold_core::minimax_h3::ResolvedMediaPresence::from_request(request),
+        )
+    }
+
+    /// [`Self::validate_for_request`] against a payload-free row plus the
+    /// media its queue projection still holds for it.
+    pub(crate) fn validate_for_request_with_media(
+        &self,
+        request: &mold_core::GenerateRequest,
+        media: mold_core::minimax_h3::ResolvedMediaPresence,
+    ) -> Result<(), String> {
+        let expected = Self::from_request_with_media(request, media)?;
         if &expected != self {
             return Err(
                 "MiniMax H3 prepared media changed from its ordered request authority".to_string(),
             );
         }
         Ok(())
+    }
+}
+
+/// The media a claimed job's request carries once its durable projection is
+/// counted: `job.request` is the scrubbed row for the whole attempt, so the
+/// first frame of an FL2VA print is present only in `deferred_media`.
+pub(crate) fn job_media_presence(
+    job: &crate::gpu_pool::GpuJob,
+) -> mold_core::minimax_h3::ResolvedMediaPresence {
+    mold_core::minimax_h3::ResolvedMediaPresence {
+        source_image: job.request.source_image.is_some()
+            || job
+                .deferred_media
+                .as_ref()
+                .is_some_and(|media| media.projection().source_image),
     }
 }
 
@@ -2032,9 +2076,14 @@ pub(crate) fn prepare_for_owner(
             available_host_headroom_bytes,
         )
         .map_err(|error| error.error)?;
+    // The scrubbed `job.request` has no first frame; the owner's own hydration
+    // does. Validating the persisted form would resolve an FL2VA print as
+    // text-only and refuse the mode admission accepted (#1427), so the live
+    // check reads the hydrated copy — its persisted-form identity is the same.
     admission_evidence
         .validate_for(
-            &job.request,
+            &request,
+            mold_core::minimax_h3::ResolvedMediaPresence::from_request(&request),
             &device_id,
             worker.gpu.ordinal,
             compute_capability,
@@ -3563,6 +3612,61 @@ mod structural_tests {
         assert!(restored
             .validate_for_request(&changed, INSTANCE_ID)
             .is_err());
+    }
+
+    /// #1427: the owner's live revalidation must read its own hydrated copy.
+    /// `job.request` is the scrubbed row — no first frame — so validating it
+    /// resolves an FL2VA print as text-only and refuses the mode admission
+    /// accepted. Pinned structurally because the site needs a leased worker.
+    #[test]
+    fn owner_revalidation_reads_the_hydrated_copy_not_the_scrubbed_row() {
+        let source = include_str!("h3_private_bridge.rs");
+        let hydrated = "validate_for(\n            &request,\n            mold_core::minimax_h3::ResolvedMediaPresence::from_request(&request),";
+        // Composed at run time so this test's own literal is not a match.
+        let scrubbed = format!("ResolvedMediaPresence::from_request(&job.{})", "request");
+        assert!(
+            source.contains(hydrated),
+            "owner revalidation must validate the hydrated copy"
+        );
+        assert!(
+            !source.contains(&scrubbed),
+            "owner revalidation must not read the scrubbed row"
+        );
+    }
+
+    /// #1427: the prepared media contract of an FL2VA print derived from its
+    /// scrubbed row plus the projection's first frame is the contract derived
+    /// from the hydrated request; from the scrubbed row alone it is text-only.
+    #[test]
+    fn fl2va_media_contract_reads_the_first_frame_from_the_projection() {
+        let mut hydrated = request(mold_core::minimax_h3::FL2VA_COMFY);
+        hydrated.seed = Some(7);
+        hydrated.guidance = 0.0;
+        hydrated.strength = 1.0;
+        hydrated.source_image = Some(b"first-frame-bytes".to_vec());
+        hydrated.source_image_name = Some("first-frame.png".to_string());
+        let contract = super::H3PreparedMediaContract::from_request(&hydrated)
+            .expect("hydrated FL2VA request derives a contract");
+        assert_eq!(
+            contract.mode,
+            mold_core::minimax_h3::Mode::FirstFrameToAudioVideo
+        );
+
+        let persisted = mold_core::request_media::persisted_request_form(&hydrated);
+        assert!(persisted.source_image.is_none());
+        let present = mold_core::minimax_h3::ResolvedMediaPresence { source_image: true };
+        assert_eq!(
+            super::H3PreparedMediaContract::from_request_with_media(&persisted, present)
+                .expect("scrubbed row plus projection derives a contract"),
+            contract
+        );
+        contract
+            .validate_for_request_with_media(&persisted, present)
+            .expect("the projection restores the first frame's authority");
+        assert!(
+            contract.validate_for_request(&persisted).is_err(),
+            "the scrubbed row alone resolves as text-only and must not validate"
+        );
     }
 
     /// The grant binds the PERSISTED request form — what `mold.db` holds and
