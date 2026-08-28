@@ -54,6 +54,13 @@ so those two files retain Apache-2.0 portions — see the repository's
 | `ltx-2.5-22b-distilled:bf16-conv`      | Distilled | Full-precision Conv-VAE pack; deferred        |
 | `ltx-2.5-22b-dev:bf16-diffusion`       | Two-stage | Diffusion-VAE reference pack; deferred        |
 | `ltx-2.5-22b-distilled:bf16-diffusion` | Distilled | Diffusion-VAE reference; deferred             |
+| `ltx-2.5-22b-distilled:q3-k-s`          | Distilled | 11.78 GiB GGUF transformer; download-only     |
+| `ltx-2.5-22b-distilled:q3`              | Distilled | Q3_K_M GGUF transformer; download-only        |
+| `ltx-2.5-22b-distilled:q4-k-s`          | Distilled | 14.27 GiB GGUF transformer; download-only     |
+| `ltx-2.5-22b-distilled:q4`              | Distilled | Q4_K_M GGUF transformer; download-only        |
+| `ltx-2.5-22b-distilled:q5`              | Distilled | Q5_K_M GGUF transformer; download-only        |
+| `ltx-2.5-22b-distilled:q6`              | Distilled | Q6_K GGUF transformer; download-only          |
+| `ltx-2.5-22b-distilled:q8`              | Distilled | Q8_0 GGUF transformer; download-only          |
 
 Bare `ltx-2.3-22b-dev` and `ltx-2.3-22b-distilled` names continue to select
 FP8. Choose `:bf16` explicitly for the upstream reference precision used for
@@ -71,6 +78,13 @@ selected files are pinned by SHA-256 and retained under `MOLD_HOME`. The BF16
 split pack is roughly 71 GB. Every LTX-2.5 variant is gated by the upstream
 [LTX-2 Community License](https://huggingface.co/Lightricks/LTX-2.5), so accept
 the repository terms and configure a Hugging Face token before pulling.
+
+The GGUF transformer files come from the public Abiray derivative at a pinned
+revision and reuse the official gated companion pack. Mold validates their
+GGUF v3 metadata, A/V tensors, shapes, and supported dtypes, but advertises
+them as download-only until native QTensor execution and quantized residency
+pricing are complete. `:q3` and `:q4` mean K_M; K_S uses explicit tags. LoRAs
+fail before queueing on these variants.
 
 ## LTX-2.5 Metal quick start
 

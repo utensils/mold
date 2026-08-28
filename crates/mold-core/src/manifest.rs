@@ -328,7 +328,8 @@ impl ModelManifest {
 /// a family so that full-precision appears first and smaller quantizations
 /// appear last.
 ///
-/// Ordering: bf16 (0) > fp16 (1) > fp8 (2) > q8 (3) > q6 (4) > q5 (5) > q4 (6) > q3 (7) > q2 (8)
+/// Ordering: bf16 (0) > fp16 (1) > fp8 (2) > q8 (3) > q6 (4) > q5 (5) >
+/// q4/q4-k-s (6) > q3/q3-k-s (7) > q2 (8).
 ///
 /// Unknown tags get rank 100 (sorted last).
 pub fn variant_quality_rank(model_name: &str) -> u32 {
@@ -340,8 +341,8 @@ pub fn variant_quality_rank(model_name: &str) -> u32 {
         "q8" => 3,
         "q6" => 4,
         "q5" => 5,
-        "q4" => 6,
-        "q3" => 7,
+        "q4" | "q4-k-s" => 6,
+        "q3" | "q3-k-s" => 7,
         "q2" => 8,
         _ => 100,
     }
@@ -7846,6 +7847,19 @@ mod tests {
     fn variant_quality_rank_unknown_tag_sorts_last() {
         use super::variant_quality_rank;
         assert!(variant_quality_rank("custom-model") > variant_quality_rank("flux-dev:q3"));
+    }
+
+    #[test]
+    fn variant_quality_rank_includes_explicit_k_s_tags() {
+        use super::variant_quality_rank;
+        assert_eq!(
+            variant_quality_rank("ltx-2.5-22b-distilled:q4-k-s"),
+            variant_quality_rank("ltx-2.5-22b-distilled:q4")
+        );
+        assert_eq!(
+            variant_quality_rank("ltx-2.5-22b-distilled:q3-k-s"),
+            variant_quality_rank("ltx-2.5-22b-distilled:q3")
+        );
     }
 
     #[test]

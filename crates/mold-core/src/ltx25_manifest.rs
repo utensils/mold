@@ -11,6 +11,7 @@ use crate::manifest::{ManifestDefaults, ModelComponent, ModelFile, ModelManifest
 use crate::types::SourceImageCapability;
 
 const REPO: &str = "Lightricks/LTX-2.5";
+const GGUF_REPO: &str = "Abiray/LTX-2.5-Distilled-GGUF";
 pub const FAMILY: &str = "ltx2";
 pub const DEV: &str = "ltx-2.5-22b-dev:bf16";
 pub const DEV_CONV: &str = "ltx-2.5-22b-dev:bf16-conv";
@@ -18,6 +19,24 @@ pub const DEV_INT8_CONV: &str = "ltx-2.5-22b-dev:int8-conv";
 pub const DISTILLED: &str = "ltx-2.5-22b-distilled:bf16";
 pub const DISTILLED_CONV: &str = "ltx-2.5-22b-distilled:bf16-conv";
 pub const DISTILLED_INT8_CONV: &str = "ltx-2.5-22b-distilled:int8-conv";
+pub const DISTILLED_Q3_K_S: &str = "ltx-2.5-22b-distilled:q3-k-s";
+pub const DISTILLED_Q3: &str = "ltx-2.5-22b-distilled:q3";
+pub const DISTILLED_Q4_K_S: &str = "ltx-2.5-22b-distilled:q4-k-s";
+pub const DISTILLED_Q4: &str = "ltx-2.5-22b-distilled:q4";
+pub const DISTILLED_Q5: &str = "ltx-2.5-22b-distilled:q5";
+pub const DISTILLED_Q6: &str = "ltx-2.5-22b-distilled:q6";
+pub const DISTILLED_Q8: &str = "ltx-2.5-22b-distilled:q8";
+pub const GGUF_RUNTIME_UNAVAILABLE_REASON: &str =
+    "LTX-2.5 GGUF download and header qualification are available, but the native quantized joint audio/video transformer runtime is not implemented yet";
+const DISTILLED_GGUF_VARIANTS: &[&str] = &[
+    DISTILLED_Q3_K_S,
+    DISTILLED_Q3,
+    DISTILLED_Q4_K_S,
+    DISTILLED_Q4,
+    DISTILLED_Q5,
+    DISTILLED_Q6,
+    DISTILLED_Q8,
+];
 const ALL: &[&str] = &[
     DEV,
     DEV_CONV,
@@ -25,14 +44,43 @@ const ALL: &[&str] = &[
     DISTILLED,
     DISTILLED_CONV,
     DISTILLED_INT8_CONV,
+    DISTILLED_Q3_K_S,
+    DISTILLED_Q3,
+    DISTILLED_Q4_K_S,
+    DISTILLED_Q4,
+    DISTILLED_Q5,
+    DISTILLED_Q6,
+    DISTILLED_Q8,
 ];
 const DEV_BF16_VARIANTS: &[&str] = &[DEV, DEV_CONV];
 const DISTILLED_BF16_VARIANTS: &[&str] = &[DISTILLED, DISTILLED_CONV];
 const BF16_VARIANTS: &[&str] = &[DEV, DEV_CONV, DISTILLED, DISTILLED_CONV];
-const INT8_VARIANTS: &[&str] = &[DEV_INT8_CONV, DISTILLED_INT8_CONV];
+const INT8_VARIANTS: &[&str] = &[
+    DEV_INT8_CONV,
+    DISTILLED_INT8_CONV,
+    DISTILLED_Q3_K_S,
+    DISTILLED_Q3,
+    DISTILLED_Q4_K_S,
+    DISTILLED_Q4,
+    DISTILLED_Q5,
+    DISTILLED_Q6,
+    DISTILLED_Q8,
+];
 const DEV_VARIANTS: &[&str] = &[DEV, DEV_CONV, DEV_INT8_CONV];
 const DIFFUSION_VAE_VARIANTS: &[&str] = &[DEV, DISTILLED];
-const CONV_VAE_VARIANTS: &[&str] = &[DEV_CONV, DEV_INT8_CONV, DISTILLED_CONV, DISTILLED_INT8_CONV];
+const CONV_VAE_VARIANTS: &[&str] = &[
+    DEV_CONV,
+    DEV_INT8_CONV,
+    DISTILLED_CONV,
+    DISTILLED_INT8_CONV,
+    DISTILLED_Q3_K_S,
+    DISTILLED_Q3,
+    DISTILLED_Q4_K_S,
+    DISTILLED_Q4,
+    DISTILLED_Q5,
+    DISTILLED_Q6,
+    DISTILLED_Q8,
+];
 const REFERENCE_ONLY: &[&str] = &[];
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +131,55 @@ const ASSETS: &[Asset] = &[
         size_bytes: 18_721_548_408,
         sha256: "4b94231e734c1950f8f6826cb8bd8715d94be5b3e04f8256ee060c5bc3886c30",
         manifests: REFERENCE_ONLY,
+    },
+    Asset {
+        filename: "LTX-2.5-Distilled-Q3_K_S.gguf",
+        component: ModelComponent::Transformer,
+        size_bytes: 12_649_891_264,
+        sha256: "a71473c8b7fe68151d7c117cd245d764aae309822417d1382287d7915335e808",
+        manifests: &[DISTILLED_Q3_K_S],
+    },
+    Asset {
+        filename: "LTX-2.5-Distilled-Q3_K_M.gguf",
+        component: ModelComponent::Transformer,
+        size_bytes: 12_923_897_280,
+        sha256: "f593274e67dc0c4714240539c57b76fc6ecac2256fbab9fb32b2a0f72b8d3dea",
+        manifests: &[DISTILLED_Q3],
+    },
+    Asset {
+        filename: "LTX-2.5-Distilled-Q4_K_S.gguf",
+        component: ModelComponent::Transformer,
+        size_bytes: 15_327_650_240,
+        sha256: "91ad1ccc9c909a2e021b20c3951b7a6299914bc35a2da07c5b4bd44024002c4b",
+        manifests: &[DISTILLED_Q4_K_S],
+    },
+    Asset {
+        filename: "LTX-2.5-Distilled-Q4_K_M.gguf",
+        component: ModelComponent::Transformer,
+        size_bytes: 15_687_639_488,
+        sha256: "0f51eb0d82b19bddbfb3b0371a65217844ea03750f27dd733528f22152e0e0d0",
+        manifests: &[DISTILLED_Q4],
+    },
+    Asset {
+        filename: "LTX-2.5-Distilled-Q5_K_M.gguf",
+        component: ModelComponent::Transformer,
+        size_bytes: 18_116_120_000,
+        sha256: "9cc79799a7416be3aaa749c79879ca9a617dfab7d81400d0b24c01c94091039a",
+        manifests: &[DISTILLED_Q5],
+    },
+    Asset {
+        filename: "LTX-2.5-Distilled-Q6_K.gguf",
+        component: ModelComponent::Transformer,
+        size_bytes: 18_624_033_216,
+        sha256: "ee8835ff8f11e4f59fa4be7bf31b1200172659364e724de444d790ddf4869a58",
+        manifests: &[DISTILLED_Q6],
+    },
+    Asset {
+        filename: "LTX-2.5-Distilled-Q8_0.gguf",
+        component: ModelComponent::Transformer,
+        size_bytes: 23_604_666_816,
+        sha256: "524a1410c6476d942ed00a181d5cacd6f748aae4400c08298b2ab29eb32c26af",
+        manifests: &[DISTILLED_Q8],
     },
     Asset {
         filename: "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
@@ -154,11 +251,17 @@ fn files_for(manifest_name: &str) -> Vec<ModelFile> {
         .iter()
         .filter(|asset| asset.manifests.contains(&manifest_name))
         .map(|asset| ModelFile {
-            hf_repo: REPO.to_string(),
+            hf_repo: if asset.filename.ends_with(".gguf") {
+                GGUF_REPO.to_string()
+            } else {
+                REPO.to_string()
+            },
             hf_filename: asset.filename.to_string(),
             component: asset.component,
             size_bytes: asset.size_bytes,
-            gated: true,
+            // The derivative GGUF mirror is public; the official companion
+            // pack remains gated and still carries the LTX-2.x license gate.
+            gated: !asset.filename.ends_with(".gguf"),
             sha256: Some(asset.sha256),
         })
         .collect()
@@ -187,13 +290,24 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         (DISTILLED, "distilled", "diffusion", 8, 1.0),
         (DISTILLED_CONV, "distilled", "convolutional", 8, 1.0),
         (DISTILLED_INT8_CONV, "distilled", "convolutional", 8, 1.0),
+        (DISTILLED_Q3_K_S, "distilled", "convolutional", 8, 1.0),
+        (DISTILLED_Q3, "distilled", "convolutional", 8, 1.0),
+        (DISTILLED_Q4_K_S, "distilled", "convolutional", 8, 1.0),
+        (DISTILLED_Q4, "distilled", "convolutional", 8, 1.0),
+        (DISTILLED_Q5, "distilled", "convolutional", 8, 1.0),
+        (DISTILLED_Q6, "distilled", "convolutional", 8, 1.0),
+        (DISTILLED_Q8, "distilled", "convolutional", 8, 1.0),
     ]
     .into_iter()
     .map(
         |(name, checkpoint, decoder, steps, guidance)| ModelManifest {
             name: name.to_string(),
             family: FAMILY.to_string(),
-            description: if name.contains(":int8-conv") {
+            description: if let Some(tier) = gguf_tier(name) {
+                format!(
+                    "LTX-2.5 22B distilled {tier} GGUF — public quantized transformer with the official split companion pack"
+                )
+            } else if name.contains(":int8-conv") {
                 format!(
                     "LTX-2.5 22B {checkpoint} INT8 ConvRot — compact native Conv-VAE split pack"
                 )
@@ -210,6 +324,23 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         },
     )
     .collect()
+}
+
+pub fn is_gguf_manifest(name: &str) -> bool {
+    DISTILLED_GGUF_VARIANTS.contains(&name)
+}
+
+pub fn gguf_tier(name: &str) -> Option<&'static str> {
+    match name {
+        DISTILLED_Q3_K_S => Some("Q3_K_S"),
+        DISTILLED_Q3 => Some("Q3_K_M"),
+        DISTILLED_Q4_K_S => Some("Q4_K_S"),
+        DISTILLED_Q4 => Some("Q4_K_M"),
+        DISTILLED_Q5 => Some("Q5_K_M"),
+        DISTILLED_Q6 => Some("Q6_K"),
+        DISTILLED_Q8 => Some("Q8_0"),
+        _ => None,
+    }
 }
 
 pub fn is_contract_manifest(name: &str) -> bool {
@@ -310,7 +441,7 @@ impl Ltx25ModelPaths {
     }
 
     pub fn qualify(&self) -> std::io::Result<()> {
-        crate::ltx25_probe::validate_ltx25_transformer_gemma(&self.transformer, &self.gemma)?;
+        crate::ltx25_probe::validate_ltx25_transformer_gemma_any(&self.transformer, &self.gemma)?;
         crate::ltx25_probe::probe_ltx25_video_vae(&self.video_vae)?;
         crate::ltx25_probe::validate_ltx25_audio_components(&self.audio_vae)?;
         crate::ltx25_probe::validate_ltx25_duration_head(&self.duration_head)?;
@@ -337,7 +468,7 @@ mod tests {
     #[test]
     fn official_asset_contract_has_unique_paths_and_complete_hashes() {
         let mut paths = HashSet::new();
-        assert_eq!(ASSETS.len(), 14);
+        assert_eq!(ASSETS.len(), 21);
         for asset in ASSETS {
             assert!(paths.insert(asset.filename), "duplicate {}", asset.filename);
             assert!(asset.size_bytes > 0, "{} has no size", asset.filename);
@@ -380,7 +511,68 @@ mod tests {
                     manifest.name
                 );
             }
-            assert!(manifest.files.iter().all(|file| file.gated));
+            if is_gguf_manifest(&manifest.name) {
+                let transformer = manifest
+                    .files
+                    .iter()
+                    .find(|file| file.component == ModelComponent::Transformer)
+                    .unwrap();
+                assert_eq!(transformer.hf_repo, GGUF_REPO);
+                assert!(!transformer.gated);
+                assert!(transformer.hf_filename.ends_with(".gguf"));
+                assert!(manifest
+                    .files
+                    .iter()
+                    .filter(|file| file.component != ModelComponent::Transformer)
+                    .all(|file| file.gated));
+            } else {
+                assert!(manifest.files.iter().all(|file| file.gated));
+            }
+        }
+    }
+
+    #[test]
+    fn gguf_tags_are_unambiguous_and_reuse_the_exact_official_companion_graph() {
+        assert_eq!(DISTILLED_GGUF_VARIANTS.len(), 7);
+        assert_eq!(gguf_tier(DISTILLED_Q3), Some("Q3_K_M"));
+        assert_eq!(gguf_tier(DISTILLED_Q4), Some("Q4_K_M"));
+        assert_eq!(gguf_tier(DISTILLED_Q3_K_S), Some("Q3_K_S"));
+        assert_eq!(gguf_tier(DISTILLED_Q4_K_S), Some("Q4_K_S"));
+
+        let baseline = Ltx25ModelPaths::resolve_in(Path::new("/models"), DISTILLED_INT8_CONV)
+            .expect("official compact pack");
+        for name in DISTILLED_GGUF_VARIANTS {
+            let paths = Ltx25ModelPaths::resolve_in(Path::new("/models"), name)
+                .unwrap_or_else(|| panic!("missing split graph for {name}"));
+            assert_ne!(paths.transformer, baseline.transformer);
+            assert_eq!(paths.gemma, baseline.gemma);
+            assert_eq!(paths.video_vae, baseline.video_vae);
+            assert_eq!(paths.audio_vae, baseline.audio_vae);
+            assert_eq!(paths.duration_head, baseline.duration_head);
+            assert_eq!(paths.spatial_upscaler, baseline.spatial_upscaler);
+            assert_eq!(paths.temporal_upscaler, baseline.temporal_upscaler);
+            assert!(paths.distilled_lora.is_none());
+        }
+    }
+
+    #[test]
+    fn gguf_manifest_sizes_count_each_shared_component_once() {
+        let expected = [
+            (DISTILLED_Q3_K_S, 31_101_563_542),
+            (DISTILLED_Q3, 31_375_569_558),
+            (DISTILLED_Q4_K_S, 33_779_322_518),
+            (DISTILLED_Q4, 34_139_311_766),
+            (DISTILLED_Q5, 36_567_792_278),
+            (DISTILLED_Q6, 37_075_705_494),
+            (DISTILLED_Q8, 42_056_339_094),
+        ];
+        for (name, bytes) in expected {
+            let manifest = manifests()
+                .into_iter()
+                .find(|manifest| manifest.name == name)
+                .unwrap();
+            assert_eq!(manifest.total_size_bytes(), bytes, "{name}");
+            assert_eq!(manifest.files.len(), 7, "{name}");
         }
     }
 

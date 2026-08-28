@@ -16,6 +16,7 @@ pub const MINIMAX_H3_AUTHORIZATION_REQUIRED: &str = "MINIMAX_H3_AUTHORIZATION_RE
 /// record, and reporting it for unwritten code tells the user to go read a
 /// legal document about a problem that is ours.
 pub const MINIMAX_H3_RUNTIME_UNAVAILABLE: &str = "MINIMAX_H3_RUNTIME_UNAVAILABLE";
+pub const LTX25_GGUF_RUNTIME_UNAVAILABLE: &str = "LTX25_GGUF_RUNTIME_UNAVAILABLE";
 
 /// Repository record that owns the authorization decision.
 pub const MINIMAX_H3_AUTHORIZATION_ISSUE_URL: &str = "https://github.com/utensils/mold/issues/831";
@@ -42,6 +43,8 @@ pub enum ModelActivation {
     /// identity on a binary compiled without the `h3` feature. `mold pull`,
     /// inventory, repair, and `mold rm` all work; only execution is refused.
     RuntimeUnavailable(minimax_h3::RuntimeUnavailableReason),
+    /// LTX-2.5 GGUF acquisition is supported, but native QTensor execution is not.
+    Ltx25GgufRuntimeUnavailable,
 }
 
 /// Why an activation was refused. Carried by [`ModelActivationError`] so the
@@ -51,6 +54,7 @@ pub enum ModelActivation {
 pub enum ActivationRefusal {
     ComplianceGated,
     RuntimeUnavailable(minimax_h3::RuntimeUnavailableReason),
+    Ltx25GgufRuntimeUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +94,11 @@ impl fmt::Display for ModelActivationError {
                 "{} ({MINIMAX_H3_RUNTIME_UNAVAILABLE})",
                 reason.message()
             ),
+            ActivationRefusal::Ltx25GgufRuntimeUnavailable => write!(
+                formatter,
+                "{} ({LTX25_GGUF_RUNTIME_UNAVAILABLE})",
+                crate::ltx25_manifest::GGUF_RUNTIME_UNAVAILABLE_REASON
+            ),
         }
     }
 }
@@ -111,6 +120,7 @@ impl ModelActivationError {
         match self.0 {
             ActivationRefusal::ComplianceGated => Some(minimax_h3_restriction()),
             ActivationRefusal::RuntimeUnavailable(_) => None,
+            ActivationRefusal::Ltx25GgufRuntimeUnavailable => None,
         }
     }
 }
@@ -136,7 +146,10 @@ fn minimax_h3_restriction() -> ModelAccessRestriction {
 /// The family is required when the public identifier is opaque (for example a
 /// `cv:` catalog ID). Callers that have resolved catalog metadata must pass it.
 pub fn model_activation(identifier: &str, family: Option<&str>) -> ModelActivation {
-    if is_reviewed_minimax_h3_model(identifier) {
+    let canonical = crate::manifest::resolve_model_name(identifier);
+    if crate::ltx25_manifest::is_gguf_manifest(&canonical) {
+        ModelActivation::Ltx25GgufRuntimeUnavailable
+    } else if is_reviewed_minimax_h3_model(identifier) {
         // Reviewed for acquisition, which is a separate authority from
         // execution. Whether *this* build can run it is
         // `minimax_h3::model_runtime_availability`'s answer and nothing
@@ -188,7 +201,10 @@ pub fn model_activation_available(identifier: &str, family: Option<&str>) -> boo
 /// [`model_activation`]. Keeping those authorities separate prevents a
 /// downloadable checkpoint from becoming an implicit runtime approval.
 pub fn model_acquisition(identifier: &str, family: Option<&str>) -> ModelActivation {
-    if is_reviewed_minimax_h3_acquisition_identity(identifier) {
+    let canonical = crate::manifest::resolve_model_name(identifier);
+    if crate::ltx25_manifest::is_gguf_manifest(&canonical)
+        || is_reviewed_minimax_h3_acquisition_identity(identifier)
+    {
         ModelActivation::Available
     } else if cfg!(feature = "h3")
         && (is_minimax_h3_identity(identifier) || family.is_some_and(is_minimax_h3_identity))
@@ -215,6 +231,9 @@ pub fn require_model_acquisition(
         ModelActivation::RuntimeUnavailable(reason) => Err(ModelActivationError(
             ActivationRefusal::RuntimeUnavailable(reason),
         )),
+        ModelActivation::Ltx25GgufRuntimeUnavailable => Err(ModelActivationError(
+            ActivationRefusal::Ltx25GgufRuntimeUnavailable,
+        )),
     }
 }
 
@@ -229,6 +248,9 @@ pub fn require_model_activation(
         }
         ModelActivation::RuntimeUnavailable(reason) => Err(ModelActivationError(
             ActivationRefusal::RuntimeUnavailable(reason),
+        )),
+        ModelActivation::Ltx25GgufRuntimeUnavailable => Err(ModelActivationError(
+            ActivationRefusal::Ltx25GgufRuntimeUnavailable,
         )),
     }
 }
@@ -312,6 +334,9 @@ pub fn require_model_artifact_activation(
         ModelActivation::RuntimeUnavailable(reason) => Err(ModelActivationError(
             ActivationRefusal::RuntimeUnavailable(reason),
         )),
+        ModelActivation::Ltx25GgufRuntimeUnavailable => Err(ModelActivationError(
+            ActivationRefusal::Ltx25GgufRuntimeUnavailable,
+        )),
     }
 }
 
@@ -383,6 +408,37 @@ fn is_minimax_h3_compact_alias(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ltx25_gguf_acquires_but_refuses_execution_before_queueing() {
+        for identifier in [
+            crate::ltx25_manifest::DISTILLED_Q3_K_S,
+            crate::ltx25_manifest::DISTILLED_Q3,
+            crate::ltx25_manifest::DISTILLED_Q4_K_S,
+            crate::ltx25_manifest::DISTILLED_Q4,
+            crate::ltx25_manifest::DISTILLED_Q5,
+            crate::ltx25_manifest::DISTILLED_Q6,
+            crate::ltx25_manifest::DISTILLED_Q8,
+        ] {
+            assert_eq!(
+                model_acquisition(identifier, Some(crate::ltx25_manifest::FAMILY)),
+                ModelActivation::Available,
+                "{identifier}"
+            );
+            assert_eq!(
+                model_activation(identifier, Some(crate::ltx25_manifest::FAMILY)),
+                ModelActivation::Ltx25GgufRuntimeUnavailable,
+                "{identifier}"
+            );
+            let error = require_model_activation(identifier, Some(crate::ltx25_manifest::FAMILY))
+                .expect_err("GGUF execution must be refused before admission");
+            assert_eq!(
+                error.refusal(),
+                ActivationRefusal::Ltx25GgufRuntimeUnavailable
+            );
+            assert!(error.to_string().contains(LTX25_GGUF_RUNTIME_UNAVAILABLE));
+        }
+    }
 
     #[test]
     #[cfg(not(feature = "h3"))]

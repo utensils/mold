@@ -66,6 +66,10 @@ impl ApiError {
                 mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE,
                 StatusCode::NOT_IMPLEMENTED,
             ),
+            mold_core::ActivationRefusal::Ltx25GgufRuntimeUnavailable => (
+                mold_core::LTX25_GGUF_RUNTIME_UNAVAILABLE,
+                StatusCode::NOT_IMPLEMENTED,
+            ),
         };
         Self::with_code(error.to_string(), code, status)
     }
