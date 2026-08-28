@@ -123,6 +123,8 @@ pub fn blocked_reason_label(reason: Option<&QueueBlockedReason>) -> Option<Strin
 /// decides the vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueWaitStatus {
+    /// Parked by the host: never dispatched on its own, so never "in line".
+    Held,
     /// An actionable reason outranks the position: say what to fix.
     Blocked(String),
     /// Head of the line — running next, with nobody in front.
@@ -136,6 +138,9 @@ pub enum QueueWaitStatus {
 /// One row's evidence, in whatever shape the caller already holds.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QueueWaitInput<'a> {
+    /// The row is `held`. It still carries a listing position, and reading
+    /// that as a place in line is how a parked job rendered as "Next up".
+    pub held: bool,
     pub position: Option<usize>,
     pub blocked_reason: Option<&'a QueueBlockedReason>,
     pub preparation: Option<QueuePreparation>,
@@ -143,6 +148,9 @@ pub struct QueueWaitInput<'a> {
 
 /// Resolve one waiting row. Absent evidence degrades to a plain `Queued`.
 pub fn resolve_queue_wait(input: &QueueWaitInput<'_>) -> QueueWaitStatus {
+    if input.held {
+        return QueueWaitStatus::Held;
+    }
     if matches!(input.blocked_reason, Some(QueueBlockedReason::Preparing)) {
         return QueueWaitStatus::Blocked(preparation_label(input.preparation.as_ref()));
     }
@@ -212,12 +220,14 @@ pub fn resolve_listed_wait(
     plan: Option<&QueuePlan>,
     job_id: &str,
     position: Option<usize>,
+    held: bool,
 ) -> QueueWaitStatus {
     let (reason, preparation) = match plan {
         Some(plan) => plan_reason_for_job(plan, job_id),
         None => (None, None),
     };
     resolve_queue_wait(&QueueWaitInput {
+        held,
         position,
         blocked_reason: reason.as_ref(),
         preparation,
@@ -227,6 +237,7 @@ pub fn resolve_listed_wait(
 /// Sentence-case copy, the idiom every list and pill uses.
 pub fn queue_wait_label(wait: &QueueWaitStatus) -> String {
     match wait {
+        QueueWaitStatus::Held => "Held".to_string(),
         QueueWaitStatus::Blocked(label) => label.clone(),
         QueueWaitStatus::Next => "Next up".to_string(),
         QueueWaitStatus::Position(position) => format!("#{position} in line"),
@@ -237,6 +248,7 @@ pub fn queue_wait_label(wait: &QueueWaitStatus) -> String {
 /// Compact uppercase code, for surfaces whose existing idiom is a code column.
 pub fn queue_wait_code(wait: &QueueWaitStatus) -> String {
     match wait {
+        QueueWaitStatus::Held => "HELD".to_string(),
         QueueWaitStatus::Blocked(label) => label.to_uppercase(),
         QueueWaitStatus::Next => "NEXT UP".to_string(),
         QueueWaitStatus::Position(position) => format!("QUEUED #{position}"),
@@ -249,8 +261,30 @@ mod tests {
     use super::*;
     use crate::types::QueueWorkItem;
 
+    #[test]
+    fn a_held_row_is_held_whatever_position_the_listing_gave_it() {
+        let held = resolve_queue_wait(&QueueWaitInput {
+            held: true,
+            position: Some(0),
+            blocked_reason: Some(&QueueBlockedReason::InsufficientVram),
+            preparation: None,
+        });
+        assert_eq!(held, QueueWaitStatus::Held);
+        assert_eq!(queue_wait_label(&held), "Held");
+        assert_eq!(queue_wait_code(&held), "HELD");
+        assert_eq!(
+            resolve_listed_wait(None, "job", Some(0), true),
+            QueueWaitStatus::Held
+        );
+        assert_eq!(
+            resolve_listed_wait(None, "job", Some(0), false),
+            QueueWaitStatus::Next
+        );
+    }
+
     fn wait(position: Option<usize>, reason: Option<QueueBlockedReason>) -> QueueWaitStatus {
         resolve_queue_wait(&QueueWaitInput {
+            held: false,
             position,
             blocked_reason: reason.as_ref(),
             preparation: None,
@@ -345,18 +379,18 @@ mod tests {
             item("job-1", Some("model_not_installed")),
         ]);
         assert_eq!(
-            resolve_listed_wait(Some(&plan), "job-1", Some(2)),
+            resolve_listed_wait(Some(&plan), "job-1", Some(2), false),
             QueueWaitStatus::Blocked("Model not installed".into())
         );
         // A benign reason on the plan still leaves the row counting.
         let benign = plan_with(vec![item("job-1", Some("no_idle_device"))]);
         assert_eq!(
-            resolve_listed_wait(Some(&benign), "job-1", Some(2)),
+            resolve_listed_wait(Some(&benign), "job-1", Some(2), false),
             QueueWaitStatus::Position(2)
         );
         // No plan is absence of evidence, never a fault.
         assert_eq!(
-            resolve_listed_wait(None, "job-1", Some(0)),
+            resolve_listed_wait(None, "job-1", Some(0), false),
             QueueWaitStatus::Next
         );
     }
@@ -367,7 +401,7 @@ mod tests {
         child.parent_id = "job-1".to_string();
         let plan = plan_with(vec![child]);
         assert_eq!(
-            resolve_listed_wait(Some(&plan), "job-1", Some(1)),
+            resolve_listed_wait(Some(&plan), "job-1", Some(1), false),
             QueueWaitStatus::Blocked("Waiting for GPU memory".into())
         );
     }
@@ -377,7 +411,7 @@ mod tests {
         let mut legacy = item("job-1", None);
         legacy.reason = Some("device_disabled".to_string());
         assert_eq!(
-            resolve_listed_wait(Some(&plan_with(vec![legacy])), "job-1", Some(1)),
+            resolve_listed_wait(Some(&plan_with(vec![legacy])), "job-1", Some(1), false),
             QueueWaitStatus::Blocked("Device turned off".into())
         );
         // An assignment reason describes why work WON a device and is never
@@ -385,7 +419,7 @@ mod tests {
         let mut assignment = item("job-1", None);
         assignment.reason = Some("warm_resident".to_string());
         assert_eq!(
-            resolve_listed_wait(Some(&plan_with(vec![assignment])), "job-1", Some(1)),
+            resolve_listed_wait(Some(&plan_with(vec![assignment])), "job-1", Some(1), false),
             QueueWaitStatus::Position(1)
         );
     }
@@ -400,7 +434,7 @@ mod tests {
             phase_elapsed_ms: None,
         });
         assert_eq!(
-            resolve_listed_wait(Some(&plan_with(vec![preparing])), "job-1", Some(0)),
+            resolve_listed_wait(Some(&plan_with(vec![preparing])), "job-1", Some(0), false),
             QueueWaitStatus::Blocked("Preparing · MiniMax H3 artifacts 25%".into())
         );
     }
@@ -408,6 +442,7 @@ mod tests {
     #[test]
     fn preparing_names_its_component_and_percentage() {
         let status = resolve_queue_wait(&QueueWaitInput {
+            held: false,
             position: Some(0),
             blocked_reason: Some(&QueueBlockedReason::Preparing),
             preparation: Some(QueuePreparation::from_bytes(

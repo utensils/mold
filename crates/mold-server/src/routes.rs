@@ -6003,9 +6003,7 @@ async fn list_queue(
     // durable overlay once in the registry and again in SQLite.
     let mut entries = entries;
     entries.extend(live_only_entries);
-    for (position, entry) in entries.iter_mut().enumerate() {
-        entry.position = position;
-    }
+    crate::job_registry::assign_positions(&mut entries, 0);
     let page = page.next_cursor.is_some().then_some(page);
     Ok(Json(QueueListingResponse {
         entries,
@@ -6356,6 +6354,9 @@ fn project_durable_queue_page(
 
         entries.push(job_entry_from_durable_projection(row, position));
     }
+    // The durable page is traversed by `(created_at, rowid)`, held rows
+    // included; the public position only counts rows that can run.
+    crate::job_registry::assign_positions(&mut entries, offset);
     Ok((entries, live_only_entries))
 }
 

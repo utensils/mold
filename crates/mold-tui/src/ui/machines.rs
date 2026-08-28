@@ -480,6 +480,11 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                         &queue_elapsed_label(job.started_at_unix_ms, now_ms),
                         job.gpu,
                     )
+                } else if job.state == "held" {
+                    held_lane(&mold_core::ModelInfoExtended::human_name_for(
+                        &job.model,
+                        &app.models.catalog,
+                    ))
                 } else {
                     queued_lane(
                         &mold_core::ModelInfoExtended::human_name_for(
@@ -868,6 +873,13 @@ pub(crate) fn queued_lane(model: &str, position: usize) -> String {
     format!("● {model} · #{}", position + 1)
 }
 
+/// Held lane: parked by the host, never in line. A held row still carries a
+/// listing position, and rendering it through `queued_lane` told the operator
+/// to wait for work the host will never start on its own.
+pub(crate) fn held_lane(model: &str) -> String {
+    format!("⏸ {model} · held")
+}
+
 /// Elapsed label for a running job from its accepted-at timestamp.
 pub(crate) fn queue_elapsed_label(started_at_unix_ms: u64, now_ms: u64) -> String {
     let secs = now_ms.saturating_sub(started_at_unix_ms) / 1000;
@@ -1177,6 +1189,11 @@ mod tests {
     fn queued_lane_positions_are_one_based() {
         assert_eq!(queued_lane("sdxl:fp16", 0), "● sdxl:fp16 · #1");
         assert_eq!(queued_lane("sdxl:fp16", 2), "● sdxl:fp16 · #3");
+    }
+
+    #[test]
+    fn a_held_row_renders_held_and_never_a_place_in_line() {
+        assert_eq!(held_lane("sdxl:fp16"), "⏸ sdxl:fp16 · held");
     }
 
     #[test]

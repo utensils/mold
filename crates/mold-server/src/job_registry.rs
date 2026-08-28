@@ -43,6 +43,24 @@ pub enum JobLifecycle {
     Held,
 }
 
+/// Number a listing's rows in dispatch order, skipping held ones.
+///
+/// `position` answers "how many jobs are ahead of me", and a held row is
+/// ahead of nobody: it is parked until an operator retries it. Counting it
+/// put a parked job at 0 (rendered "Next up") and everything queued behind
+/// it one place further back than the host would actually run it. A held row
+/// keeps the position of the next schedulable row so the field stays a
+/// `usize`; every renderer reads `state` first and never shows it.
+pub(crate) fn assign_positions(entries: &mut [JobEntry], offset: usize) {
+    let mut next = offset;
+    for entry in entries.iter_mut() {
+        entry.position = next;
+        if entry.state != JobLifecycle::Held {
+            next += 1;
+        }
+    }
+}
+
 /// One row in the `GET /api/queue` response.
 ///
 /// `position` is the 0-based index in the registry's dispatch-priority order
@@ -1085,6 +1103,56 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(registry.progress_snapshot("quiet").flatten().is_some());
+    }
+
+    #[test]
+    fn held_rows_take_no_place_in_line() {
+        let mut entries = ["held-a", "queued-b", "held-c", "queued-d"]
+            .into_iter()
+            .map(|id| JobEntry {
+                id: id.to_string(),
+                model: "m".to_string(),
+                state: if id.starts_with("held") {
+                    JobLifecycle::Held
+                } else {
+                    JobLifecycle::Queued
+                },
+                started_at_unix_ms: 0,
+                position: 99,
+                gpu: None,
+                target_gpu: None,
+                seed_pinned: None,
+                metadata: None,
+                durable: None,
+                replayed: None,
+                dispatch_attempts: None,
+                held_reason: None,
+                error: None,
+                retryable: None,
+                batch_id: None,
+                client_batch_id: None,
+                batch_index: None,
+            })
+            .collect::<Vec<_>>();
+        assign_positions(&mut entries, 0);
+        let positions = entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.position))
+            .collect::<Vec<_>>();
+        // The first queued row is next up even though a held row is listed
+        // ahead of it; the second is #1, not #3.
+        assert_eq!(
+            positions,
+            vec![
+                ("held-a", 0),
+                ("queued-b", 0),
+                ("held-c", 1),
+                ("queued-d", 1)
+            ]
+        );
+        let mut paged = entries.split_off(2);
+        assign_positions(&mut paged, 5);
+        assert_eq!(paged[1].position, 5);
     }
 
     #[test]

@@ -225,6 +225,30 @@ describe("queue blocked-reason vocabulary", () => {
 });
 
 describe("resolveQueueWait", () => {
+  it("reads a held row as held, whatever position the listing gave it", () => {
+    // A held row keeps its traversal index in `GET /api/queue`; index 0 is not
+    // "Next up" for work the host will never start on its own.
+    expect(resolveQueueWait({ state: "held", position: 0 })).toEqual({
+      kind: "held",
+    });
+    expect(
+      resolveQueueWait({
+        state: "held",
+        position: 1,
+        blockedReason: "insufficient_vram",
+      }),
+    ).toEqual({ kind: "held" });
+    expect(
+      queueWaitLabel(resolveQueueWait({ state: "held", position: 0 })),
+    ).toBe("Held");
+    expect(
+      queueWaitCode(resolveQueueWait({ state: "held", position: 0 })),
+    ).toBe("HELD");
+    expect(resolveQueueWait({ state: "queued", position: 0 })).toEqual({
+      kind: "next",
+    });
+  });
+
   it("names the head of the line rather than staying silent", () => {
     expect(resolveQueueWait({ position: 0 })).toEqual({ kind: "next" });
     expect(queueWaitLabel(resolveQueueWait({ position: 0 }))).toBe("Next up");

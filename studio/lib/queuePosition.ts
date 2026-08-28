@@ -283,6 +283,8 @@ export function queuePositionLabel(
  * queued jobs three different ways.
  */
 export type QueueWaitStatus =
+  /** Parked by the host: never dispatched on its own, so never "in line". */
+  | { kind: "held" }
   /** An actionable reason outranks the position: say what to fix. */
   | { kind: "blocked"; label: string }
   /** Head of the line — running next, with nobody in front. */
@@ -293,6 +295,13 @@ export type QueueWaitStatus =
   | { kind: "queued" };
 
 export interface QueueWaitInput {
+  /**
+   * The row's lifecycle. A `held` row still carries a listing position, and
+   * reading that position as a place in line is how a parked job came to
+   * render as "Next up" on the phone — telling the operator to wait for work
+   * the host will never start on its own.
+   */
+  state?: string | null | undefined;
   position?: number | null | undefined;
   blockedReason?: string | null | undefined;
   preparation?: QueuePreparation | null | undefined;
@@ -302,6 +311,7 @@ export interface QueueWaitInput {
 export function resolveQueueWait(
   input: QueueWaitInput | null | undefined,
 ): QueueWaitStatus {
+  if (input?.state === "held") return { kind: "held" };
   if (input?.blockedReason === "preparing") {
     return { kind: "blocked", label: preparationLabel(input.preparation) };
   }
@@ -315,6 +325,8 @@ export function resolveQueueWait(
 /** Sentence-case copy — web and desktop pills, and the iPhone status line. */
 export function queueWaitLabel(wait: QueueWaitStatus): string {
   switch (wait.kind) {
+    case "held":
+      return "Held";
     case "blocked":
       return wait.label;
     case "next":
@@ -329,6 +341,8 @@ export function queueWaitLabel(wait: QueueWaitStatus): string {
 /** Compact uppercase code — the iPhone queue list's existing idiom. */
 export function queueWaitCode(wait: QueueWaitStatus): string {
   switch (wait.kind) {
+    case "held":
+      return "HELD";
     case "blocked":
       return wait.label.toUpperCase();
     case "next":

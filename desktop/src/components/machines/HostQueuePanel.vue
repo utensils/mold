@@ -102,12 +102,9 @@ function entryCode(entry: EnrichedQueueEntry): string {
     if (job && job.total > 0 && job.status === "denoising") return `${job.step}/${job.total}`;
     return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
   }
-  // Held work is parked, not in line. Showing it a position tells the operator
-  // to wait for something the host will never start on its own — and the
-  // shared waiting vocabulary below is about a row that IS in line.
-  if (entry.state === "held") return "HELD";
-  // Same waiting vocabulary as Create and iPhone, resolved once in studio.
-  return queueWaitCode(resolveQueueWait({ position: entry.position }));
+  // Same waiting vocabulary as Create and iPhone, resolved once in studio —
+  // including "held", which is parked rather than in line.
+  return queueWaitCode(resolveQueueWait({ state: entry.state, position: entry.position }));
 }
 
 /** The host's own words for why a job is parked, shown beside the row so the

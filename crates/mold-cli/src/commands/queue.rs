@@ -113,7 +113,12 @@ async fn build_row(
     } else {
         None
     };
-    let wait = resolve_listed_wait(plan, &entry.id, Some(entry.position));
+    let wait = resolve_listed_wait(
+        plan,
+        &entry.id,
+        Some(entry.position),
+        entry.state == STATE_HELD,
+    );
     QueueRow {
         entry,
         wait,
@@ -170,7 +175,12 @@ async fn queue_show(client: &MoldClient, job_id: &str, json: bool) -> Result<()>
         work_items: vec![item],
         ..Default::default()
     });
-    let wait = resolve_listed_wait(plan.as_ref(), &detail.job.id, Some(detail.job.position));
+    let wait = resolve_listed_wait(
+        plan.as_ref(),
+        &detail.job.id,
+        Some(detail.job.position),
+        detail.job.state == STATE_HELD,
+    );
     let row = QueueRow {
         entry: detail.job.clone(),
         wait,

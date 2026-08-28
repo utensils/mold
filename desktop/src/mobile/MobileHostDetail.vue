@@ -841,8 +841,9 @@ async function unload(name: string): Promise<void> {
 function queueCode(entry: QueueEntry): string {
   if (entry.state === "running")
     return entry.gpu == null ? "RUNNING" : `RUNNING · GPU ${entry.gpu}`;
-  // Same waiting vocabulary as the Create queue, resolved once in studio.
-  return queueWaitCode(resolveQueueWait({ position: entry.position }));
+  // Same waiting vocabulary as the Create queue, resolved once in studio —
+  // a held row reads HELD, never a place in line.
+  return queueWaitCode(resolveQueueWait({ state: entry.state, position: entry.position }));
 }
 
 function downloadPercent(done: number, total: number): number {
