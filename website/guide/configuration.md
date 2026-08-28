@@ -728,6 +728,7 @@ For Qwen-Image and Qwen-Image-Edit:
 | `MOLD_LTX2_DEBUG_LOAD_BLOCKS`                         | —                          | Log native LTX-2 transformer block loading details                                                                    |
 | `MOLD_LTX2_FORCE_EAGER`                               | —                          | Force eager native LTX-2 transformer loading instead of layer streaming                                               |
 | `MOLD_LTX2_FORCE_STREAMING`                           | —                          | Force native LTX-2 transformer layer streaming                                                                        |
+| `MOLD_LTX2_ATTN_F32`                                 | —                          | Pin LTX-2 self-attention on the legacy F32 chunked path instead of the BF16 `MOLD_ATTN` dispatcher. Output-changing A/B control for #735; prints record the executed route as `attention_path`. |
 | `MOLD_LTX2_FP8_INPUT_SCALE_MODE`                      | `skip`                     | Debug override for native LTX-2 FP8 input-scale handling (`skip`, `emulate`, `divide`, `multiply`)                    |
 | `MOLD_LTX2_FP8_WEIGHT_SCALE_MODE`                     | `apply`                    | Debug override for native LTX-2 FP8 checkpoint weight-scale handling (`apply`, `skip`, `scaled-mm`)                   |
 | `MOLD_WUERSTCHEN_DEBUG`                               | —                          | Enable verbose Wuerstchen pipeline logging                                                                            |
