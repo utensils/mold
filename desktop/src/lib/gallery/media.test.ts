@@ -437,8 +437,10 @@ describe("prepareNativeThumbnail", () => {
 describe("galleryMediaPath", () => {
   it("keeps host gallery media on the authenticated API", () => {
     expect(galleryMediaPath("print one.png", "host")).toBe("/api/gallery/image/print%20one.png");
-    expect(galleryMediaPath("print one.png", "host", true)).toBe(
-      "/api/gallery/thumbnail/print%20one.png",
+    // The host tile carries the shared rendition query on every surface (the
+    // phone reaches the host through this path); an older server ignores it.
+    expect(galleryMediaPath("print one.png", "host", true)).toMatch(
+      /^\/api\/gallery\/thumbnail\/print%20one\.png\?size=(256|512)&fmt=jpeg$/,
     );
   });
 

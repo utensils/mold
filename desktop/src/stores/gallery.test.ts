@@ -706,7 +706,7 @@ describe("remove", () => {
     expect(ipc.localGalleryDelete).not.toHaveBeenCalled();
     expect(gallery.buckets["hal9000-7680"]!.items).toHaveLength(0);
     expect(evictMedia).toHaveBeenCalledWith(
-      "/api/gallery/thumbnail/print%20one.png",
+      expect.stringMatching(/^\/api\/gallery\/thumbnail\/print%20one\.png\?size=/),
       "hal9000-7680",
     );
     expect(evictMedia).toHaveBeenCalledWith("/api/gallery/image/print%20one.png", "hal9000-7680");

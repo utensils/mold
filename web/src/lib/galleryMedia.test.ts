@@ -9,7 +9,12 @@ import {
   resolveStreamableSrc,
   resolveThumbnailSrc,
 } from "./galleryMedia";
-import { ORIGIN_HOST_ID, type HostEntry } from "./hostRegistry";
+import {
+  ORIGIN_HOST_ID,
+  addHost,
+  removeHost,
+  type HostEntry,
+} from "./hostRegistry";
 
 const origin: HostEntry = { id: ORIGIN_HOST_ID, name: "this server", url: "" };
 const keylessRemote: HostEntry = {
@@ -254,7 +259,102 @@ describe("fetchGalleryThumbnailBlob", () => {
   });
 });
 
+function installFakeCaches(): Map<string, Blob> {
+  const stored = new Map<string, Blob>();
+  const fakeCache = {
+    match: async (url: string) => {
+      const blob = stored.get(url);
+      return blob ? new Response(blob) : undefined;
+    },
+    put: async (url: string, response: Response) => {
+      stored.set(url, await response.blob());
+    },
+    keys: async () => [...stored.keys()].map((u) => new Request(u)),
+    delete: async (url: string | Request) =>
+      stored.delete(typeof url === "string" ? url : url.url),
+  };
+  (globalThis as { caches?: unknown }).caches = {
+    open: async () => fakeCache,
+  };
+  return stored;
+}
+
+describe("persistent tier honesty", () => {
+  afterEach(() => {
+    delete (globalThis as { caches?: unknown }).caches;
+    globalThis.devicePixelRatio = 1;
+  });
+
+  it("does not persist an older host's 256 px PNG under the 512 tier key", async () => {
+    const stored = installFakeCaches();
+    globalThis.devicePixelRatio = 2;
+    // An older server ignores `?size=512` and answers without the additive
+    // rendition header: the bytes are displayed but never keyed as 512.
+    mockFetch(() => ({
+      ok: true,
+      headers: new Headers(),
+      blob: async () => new Blob(["png-256"]),
+    }));
+    await resolveThumbnailSrc(authedRemote, "cat.png", {
+      mediaVersion: "1:10",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stored.size).toBe(0);
+
+    // A current server confirms the rendition: persisted.
+    __resetGalleryMediaForTests();
+    mockFetch(() => ({
+      ok: true,
+      headers: new Headers({ "x-mold-thumbnail-rendition": "512-jpg" }),
+      blob: async () => new Blob(["jpg-512"]),
+    }));
+    await resolveThumbnailSrc(authedRemote, "cat.png", {
+      mediaVersion: "1:10",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stored.size).toBe(1);
+    expect([...stored.keys()][0]).toContain(encodeURIComponent("|512"));
+  });
+
+  it("persists the 256 tier from an older host, whose PNG is that tier", async () => {
+    const stored = installFakeCaches();
+    globalThis.devicePixelRatio = 1;
+    mockFetch(() => ({
+      ok: true,
+      headers: new Headers(),
+      blob: async () => new Blob(["png-256"]),
+    }));
+    await resolveThumbnailSrc(authedRemote, "cat.png", {
+      mediaVersion: "1:10",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stored.size).toBe(1);
+  });
+});
+
 describe("evictHostMedia", () => {
+  it("drops a forgotten host's persistent tiles when the registry removes it", async () => {
+    const stored = installFakeCaches();
+    try {
+      const added = addHost({
+        url: "http://halcyon:7680",
+        name: "halcyon",
+        apiKey: "secret-key",
+      });
+      mockFetch(() => ({ ok: true, blob: async () => new Blob(["x"]) }));
+      await resolveThumbnailSrc(added, "cat.png", { mediaVersion: "1:10" });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(stored.size).toBe(1);
+
+      removeHost(added.id);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(stored.size).toBe(0);
+    } finally {
+      delete (globalThis as { caches?: unknown }).caches;
+      localStorage.clear();
+    }
+  });
+
   it("revokes cached object URLs for the host", async () => {
     mockFetch(() => ({ ok: true, blob: async () => new Blob(["x"]) }));
     const src = await resolveThumbnailSrc(authedRemote, "cat.png");
