@@ -786,6 +786,10 @@ export interface OutputMetadata {
   pipeline?: Ltx2PipelineMode | null;
   pipeline_requested?: boolean | null;
   duration_prediction_requested?: boolean | null;
+  /** LTX-2 attention arithmetic the print was rendered with (newer servers):
+   * `ltx2-bf16-math` | `ltx2-bf16-flash` | `ltx2-f32-chunked` |
+   * `ltx2-metal-sdpa`. Output-changing, so it is recorded, never inferred. */
+  attention_path?: string | null;
   ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;

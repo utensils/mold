@@ -5025,6 +5025,7 @@ mod tests {
             audio: None,
             images: Vec::new(),
             video: Some(mold_core::VideoData {
+                attention_path: None,
                 data: b"successful-video".to_vec(),
                 format: OutputFormat::Mp4,
                 width: 512,

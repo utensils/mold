@@ -2047,6 +2047,7 @@ impl WanEngine {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                attention_path: None,
                 data: video_bytes,
                 format: output_format,
                 width,
@@ -2440,6 +2441,7 @@ impl crate::chain::ChainStageRenderer for WanEngine {
             audio: None,
             hdr_frames_written: None,
             generation_time_ms,
+            attention_path: None,
         })
     }
 }

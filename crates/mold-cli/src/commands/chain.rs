@@ -546,6 +546,7 @@ async fn run_chain_remote(client: &MoldClient, req: &ChainRequest) -> Result<Vid
     let metadata = item.metadata;
 
     Ok(VideoData {
+        attention_path: None,
         data: bytes,
         format: item.format.unwrap_or(OutputFormat::Mp4),
         width: metadata.width,
@@ -819,6 +820,7 @@ fn encode_local_frames(
     };
 
     Ok(VideoData {
+        attention_path: None,
         data: bytes,
         format: actual_format,
         width,

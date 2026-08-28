@@ -4581,6 +4581,7 @@ fn private_run_output(
         images: Vec::new(),
         request_warnings: Vec::new(),
         video: Some(VideoData {
+            attention_path: None,
             data: output.mp4,
             format: OutputFormat::Mp4,
             width: owner.media.width,

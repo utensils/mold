@@ -4534,6 +4534,7 @@ mod tests {
         GalleryImage {
             filename: filename.into(),
             metadata: mold_core::OutputMetadata {
+                attention_path: None,
                 collection: None,
                 tags: None,
                 title: None,

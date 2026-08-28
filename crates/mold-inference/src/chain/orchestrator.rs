@@ -165,6 +165,10 @@ pub struct StageOutcome {
     /// EXR frames this stage's decode wrote, when a sidecar was requested.
     pub hdr_frames_written: Option<usize>,
     pub generation_time_ms: u64,
+    /// Attention arithmetic the stage's transformer ran (LTX-2 provenance
+    /// vocabulary; see `ltx2::provenance`). `None` for families that do not
+    /// record one.
+    pub attention_path: Option<String>,
 }
 
 /// Abstraction over "render one chain stage". Production impls: `Ltx2Engine`
@@ -718,6 +722,7 @@ mod tests {
                 audio,
                 hdr_frames_written,
                 generation_time_ms: 100,
+                attention_path: None,
             })
         }
     }

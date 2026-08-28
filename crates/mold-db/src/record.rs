@@ -175,6 +175,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            attention_path: None,
             collection: None,
             tags: None,
             title: None,

@@ -2160,6 +2160,14 @@ pub struct VideoData {
     /// Absent for T2V, other families, and older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_preprocessing: Option<Ltx2SourcePreprocessing>,
+    /// Which attention arithmetic the LTX-2 transformer actually ran
+    /// (`ltx2-bf16-math`, `ltx2-bf16-flash`, `ltx2-f32-chunked`,
+    /// `ltx2-metal-sdpa`; the literals live in
+    /// `mold_inference::ltx2::provenance`). Output-changing, so it is
+    /// recorded rather than inferred. Absent for other families, for a
+    /// synthetic placeholder render, and for older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_path: Option<String>,
     /// First frame as PNG thumbnail for gallery grid.
     pub thumbnail: Vec<u8>,
     /// Animated GIF preview for gallery detail view / TUI playback.
@@ -2432,6 +2440,10 @@ pub struct OutputMetadata {
     /// (recorded from the response, like `pipeline`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_preprocessing: Option<Ltx2SourcePreprocessing>,
+    /// LTX-2 attention arithmetic actually run (recorded from the response,
+    /// like `pipeline`; see `VideoData::attention_path`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ic_lora_control: Option<String>,
     /// Where the HDR EXR sidecar was written. The gallery holds the tonemapped
@@ -2657,6 +2669,7 @@ impl OutputMetadata {
                 .then_some(req.frames.is_none()),
             pipeline_provenance_sha256: None,
             source_preprocessing: None,
+            attention_path: None,
             ic_lora_control: req.ic_lora_control.clone(),
             hdr_exr_dir: req.hdr_exr_dir.clone(),
             hdr_exr_full_float: req.hdr_exr_full_float,
@@ -2693,6 +2706,9 @@ impl OutputMetadata {
         self.pipeline_provenance_sha256 = video.pipeline_provenance_sha256.clone();
         if let Some(preprocessing) = &video.source_preprocessing {
             self.source_preprocessing = Some(preprocessing.clone());
+        }
+        if let Some(attention_path) = &video.attention_path {
+            self.attention_path = Some(attention_path.clone());
         }
     }
 }
@@ -5003,6 +5019,7 @@ mod tests {
         .unwrap();
         let provenance = std::iter::repeat_n('a', 64).collect::<String>();
         let video = VideoData {
+            attention_path: None,
             data: vec![1],
             format: OutputFormat::Mp4,
             width: 768,
@@ -5052,6 +5069,7 @@ mod tests {
         )
         .unwrap();
         let video = VideoData {
+            attention_path: None,
             data: vec![1],
             format: OutputFormat::Mp4,
             width: 768,
@@ -5650,6 +5668,59 @@ mod tests {
         let round: OutputMetadata =
             serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
         assert_eq!(round.source_preprocessing, Some(preprocessing));
+    }
+
+    /// `attention_path` is additive on both the response and the metadata:
+    /// older rows/servers deserialize to `None`, `None` serializes to nothing,
+    /// and every vocabulary value round-trips verbatim — the Metal one
+    /// included, so a Metal print can never be mis-stamped as a CUDA one.
+    #[test]
+    fn attention_path_serde_is_additive_and_round_trips_every_value() {
+        let metadata: OutputMetadata =
+            serde_json::from_str(r#"{"version":"1","prompt":"p","model":"m","seed":1,"steps":8,"guidance":3.0,"width":8,"height":8}"#)
+                .unwrap();
+        assert!(metadata.attention_path.is_none());
+        assert!(!serde_json::to_string(&metadata)
+            .unwrap()
+            .contains("attention_path"));
+
+        for value in [
+            "ltx2-bf16-math",
+            "ltx2-bf16-flash",
+            "ltx2-f32-chunked",
+            "ltx2-metal-sdpa",
+        ] {
+            let video: VideoData = serde_json::from_value(serde_json::json!({
+                "data": [], "format": "mp4", "width": 8, "height": 8,
+                "frames": 9, "fps": 24, "thumbnail": [],
+                "attention_path": value,
+            }))
+            .unwrap();
+            assert_eq!(video.attention_path.as_deref(), Some(value));
+            let round: VideoData =
+                serde_json::from_str(&serde_json::to_string(&video).unwrap()).unwrap();
+            assert_eq!(round.attention_path.as_deref(), Some(value));
+
+            let mut stamped = metadata.clone();
+            stamped.apply_video_output(&video);
+            assert_eq!(stamped.attention_path.as_deref(), Some(value));
+            let round: OutputMetadata =
+                serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
+            assert_eq!(round.attention_path.as_deref(), Some(value));
+        }
+
+        // A response without the field (older server, other family) must not
+        // erase a recorded value.
+        let mut stamped = metadata.clone();
+        stamped.attention_path = Some("ltx2-bf16-math".to_string());
+        let bare: VideoData = serde_json::from_value(serde_json::json!({
+            "data": [], "format": "mp4", "width": 8, "height": 8,
+            "frames": 9, "fps": 24, "thumbnail": [],
+        }))
+        .unwrap();
+        assert!(bare.attention_path.is_none());
+        stamped.apply_video_output(&bare);
+        assert_eq!(stamped.attention_path.as_deref(), Some("ltx2-bf16-math"));
     }
 
     #[test]

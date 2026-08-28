@@ -389,6 +389,7 @@ impl MoldClient {
         }
 
         let video = video_meta.map(|meta| VideoData {
+            attention_path: None,
             data: data.clone(),
             format,
             width: meta.width.unwrap_or(width),
@@ -693,6 +694,7 @@ impl MoldClient {
                                 .and_then(|s| b64.decode(s).ok())
                                 .unwrap_or_default();
                             let vd = VideoData {
+                                attention_path: None,
                                 data: payload,
                                 format: complete.format,
                                 width: complete.width,

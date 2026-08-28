@@ -44,6 +44,7 @@ use super::model::{
 };
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use super::preprocess;
+use super::provenance;
 use super::sampler::sampler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
@@ -100,6 +101,10 @@ pub struct NativeRenderedVideo {
     pub has_audio: bool,
     pub audio_sample_rate: Option<u32>,
     pub audio_channels: Option<u32>,
+    /// Which attention arithmetic the transformer ran — one of
+    /// `provenance::ATTENTION_PATHS`. `None` only for the synthetic
+    /// placeholder path, which runs no transformer at all.
+    pub attention_path: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -945,6 +950,11 @@ impl Ltx2RuntimeSession {
                 || plan.execution_graph.uses_audio_conditioning
                 || prompt_has_audio_conditioning
         };
+        tracing::info!(
+            target: provenance::LOG_TARGET,
+            "{}",
+            provenance::audio_branch_line(wants_audio_latents)
+        );
         let (audio_latent_shape, audio_positions, cross_modal_temporal_positions) =
             if wants_audio_latents {
                 let audio_shape = AudioLatentShape::from_video_pixel_shape(
@@ -1048,9 +1058,20 @@ impl Ltx2RuntimeSession {
             .device
             .as_ref()
             .context("native LTX-2 compute device was not initialized")?;
-        if let Some(rendered) =
+        if let Some(mut rendered) =
             self.try_render_real_video(plan, prepared, device, progress, cancellation)?
         {
+            let attention_path = ltx2_attention_path(
+                device,
+                compute_dtype(device),
+                plan.preset.transformer.attention_head_dim,
+            );
+            rendered.attention_path = Some(attention_path);
+            tracing::info!(
+                target: provenance::LOG_TARGET,
+                "{}",
+                provenance::attention_path_line(attention_path)
+            );
             if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
                 eprintln!(
                     "[ltx2-debug] render_native_video using real path pipeline={:?}",
@@ -1113,6 +1134,7 @@ impl Ltx2RuntimeSession {
         }
 
         Ok(NativeRenderedVideo {
+            attention_path: None,
             frames,
             hdr_frames_written: None,
             audio_track: None,
@@ -1204,6 +1226,39 @@ impl Ltx2RuntimeSession {
         // reported it as a successful save while hiding the corruption.
         render.map(Some)
     }
+}
+
+/// The attention provenance value for a real render on `device`.
+///
+/// Mirrors the routing `LtxAttention::forward` performs — Metal takes the
+/// fused SDPA, CUDA takes `crate::attention` unless `MOLD_LTX2_ATTN_F32=1`
+/// pins the F32 tiles, and everything else is the F32 chunked path — and asks
+/// the dispatcher which backend it would actually run at the video head dim,
+/// so a `MOLD_ATTN=flash` request on a build without the kernel, or at a head
+/// dim the kernel refuses, is recorded as the math it was.
+fn ltx2_attention_path(
+    device: &candle_core::Device,
+    dtype: DType,
+    head_dim: usize,
+) -> &'static str {
+    if device.is_metal() {
+        return provenance::ATTENTION_PATH_METAL_SDPA;
+    }
+    if !device.is_cuda() || super::model::video_transformer::ltx2_attention_f32_forced() {
+        return provenance::ATTENTION_PATH_F32_CHUNKED;
+    }
+    match crate::attention::effective_backend(device, dtype, head_dim) {
+        crate::attention::AttentionBackend::Flash => provenance::ATTENTION_PATH_BF16_FLASH,
+        crate::attention::AttentionBackend::Math => provenance::ATTENTION_PATH_BF16_MATH,
+    }
+}
+
+fn log_ltx2_residency_mode(mode: &str, resident: usize, streamed: usize) {
+    tracing::info!(
+        target: provenance::LOG_TARGET,
+        "{}",
+        provenance::residency_mode_line(mode, resident, streamed)
+    );
 }
 
 fn move_prompt_encoding_to_device(
@@ -3300,6 +3355,7 @@ fn render_real_distilled_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4279,6 +4335,7 @@ fn render_real_two_stage_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4478,6 +4535,7 @@ fn render_real_one_stage_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4675,6 +4733,7 @@ fn render_real_retake_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -7009,6 +7068,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
         0,
     ) == Ltx2TransformerResidencyMode::Eager
     {
+        log_ltx2_residency_mode(provenance::RESIDENCY_MODE_EAGER, config.num_layers, 0);
         Ok(Ltx2AvTransformer3DModel::new(&config, vb, lora_registry)?)
     } else if device.is_cuda() && !force_streaming {
         let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
@@ -7056,7 +7116,17 @@ fn load_ltx2_av_transformer_with_loras_inner(
                         lora_registry.clone(),
                         residency_plan.clone(),
                     ) {
-                        Ok(transformer) => break Ok(transformer),
+                        Ok(transformer) => {
+                            // Logged from the plan that actually allocated,
+                            // after every demotion rung, so the line names
+                            // the split that renders.
+                            log_ltx2_residency_mode(
+                                provenance::RESIDENCY_MODE_ADAPTIVE,
+                                residency_plan.resident_count(),
+                                residency_plan.streamed_count(),
+                            );
+                            break Ok(transformer);
+                        }
                         Err(err)
                             if device.is_cuda()
                                 && residency_plan.resident_count() > 0
@@ -7079,13 +7149,17 @@ fn load_ltx2_av_transformer_with_loras_inner(
                     }
                 }
             }
-            Ok(_) | Err(_) => Ok(Ltx2AvTransformer3DModel::new_streaming(
-                &config,
-                vb,
-                lora_registry,
-            )?),
+            Ok(_) | Err(_) => {
+                log_ltx2_residency_mode(provenance::RESIDENCY_MODE_STREAMING, 0, config.num_layers);
+                Ok(Ltx2AvTransformer3DModel::new_streaming(
+                    &config,
+                    vb,
+                    lora_registry,
+                )?)
+            }
         }
     } else {
+        log_ltx2_residency_mode(provenance::RESIDENCY_MODE_STREAMING, 0, config.num_layers);
         Ok(Ltx2AvTransformer3DModel::new_streaming(
             &config,
             vb,
@@ -9679,6 +9753,63 @@ mod tests {
         assert!(rendered.has_audio);
         assert_eq!(rendered.audio_sample_rate, Some(48_000));
         assert_eq!(rendered.audio_channels, Some(2));
+    }
+
+    /// The stamp is the device's route, narrowed by the dispatcher's own
+    /// answer — never a `cfg!` guess. CPU is the F32 tier on every build; a
+    /// CUDA device reports the math dispatcher under the default policy; and
+    /// the synthetic placeholder path, which runs no transformer, stamps
+    /// nothing rather than inventing a route.
+    #[test]
+    fn attention_path_follows_the_device_and_the_effective_backend() {
+        use super::provenance;
+        assert_eq!(
+            super::ltx2_attention_path(&candle_core::Device::Cpu, DType::F32, 128),
+            provenance::ATTENTION_PATH_F32_CHUNKED
+        );
+        #[cfg(feature = "cuda")]
+        if let Ok(device) = candle_core::Device::new_cuda(0) {
+            let expected = if super::super::model::video_transformer::ltx2_attention_f32_forced() {
+                provenance::ATTENTION_PATH_F32_CHUNKED
+            } else if crate::attention::effective_backend(&device, DType::BF16, 128)
+                == crate::attention::AttentionBackend::Flash
+            {
+                provenance::ATTENTION_PATH_BF16_FLASH
+            } else {
+                provenance::ATTENTION_PATH_BF16_MATH
+            };
+            assert_eq!(
+                super::ltx2_attention_path(&device, DType::BF16, 128),
+                expected
+            );
+            // A head dim the kernel refuses can only ever be the math path.
+            assert_ne!(
+                super::ltx2_attention_path(&device, DType::BF16, 100),
+                provenance::ATTENTION_PATH_BF16_FLASH
+            );
+        }
+        #[cfg(feature = "metal")]
+        if let Ok(device) = candle_core::Device::new_metal(0) {
+            assert_eq!(
+                super::ltx2_attention_path(&device, DType::BF16, 128),
+                provenance::ATTENTION_PATH_METAL_SDPA
+            );
+        }
+
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+        let rendered = session
+            .render_native_video(&plan, &prepared, None, None)
+            .unwrap();
+        assert!(
+            rendered.attention_path.is_none(),
+            "placeholder rendering must not invent an attention path"
+        );
     }
 
     #[test]

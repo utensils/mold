@@ -543,6 +543,7 @@ mod tests {
 
     fn meta(prompt: &str, model: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            attention_path: None,
             collection: None,
             tags: None,
             title: None,
