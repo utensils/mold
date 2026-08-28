@@ -233,14 +233,9 @@ export function needsAttention(vm: ActivityJobVM): boolean {
     : vm.state === "failed" || vm.state === "interrupted";
 }
 
-function isRunning(vm: ActivityJobVM): boolean {
-  return vm.kind === "print"
-    ? vm.phase === "running"
-    : vm.phase === "running" || vm.phase === "finalizing";
-}
-
-/** Merge prints and sequences into one list: active work first (running
- * before queued), then everything by recency. */
+/** Merge prints and sequences into one list. Active work stays in chronological
+ * submission order, regardless of whether a row is queued or running; settled
+ * work follows by recency and is partitioned into attention/history below. */
 export function mergeActivity(
   prints: readonly ActivityJobVM[],
   sequences: readonly ActivityJobVM[],
@@ -248,8 +243,7 @@ export function mergeActivity(
   return [...prints, ...sequences].sort((a, b) => {
     const activeDelta = Number(isActive(b)) - Number(isActive(a));
     if (activeDelta !== 0) return activeDelta;
-    const runningDelta = Number(isRunning(b)) - Number(isRunning(a));
-    if (runningDelta !== 0) return runningDelta;
+    if (isActive(a)) return a.createdAtMs - b.createdAtMs;
     return b.createdAtMs - a.createdAtMs;
   });
 }

@@ -172,16 +172,12 @@ export function mergeFleetActivity(
       });
     }
   }
-  const phaseRank = (phase: string) =>
-    phase === "running" || phase === "downloading"
-      ? 0
-      : phase === "loading"
-        ? 1
-        : 2;
+  // A phase transition must never move a row. Across a fleet an older job can
+  // still be queued on one machine while a newer job is already running on
+  // another, so grouping by phase makes "developing" work jump to the top.
+  // Submission time is the only ordering shared by every work kind and host.
   return rows.sort(
     (a, b) =>
-      phaseRank(a.phase) - phaseRank(b.phase) ||
-      a.created_at_unix_ms - b.created_at_unix_ms ||
-      a.key.localeCompare(b.key),
+      a.created_at_unix_ms - b.created_at_unix_ms || a.key.localeCompare(b.key),
   );
 }

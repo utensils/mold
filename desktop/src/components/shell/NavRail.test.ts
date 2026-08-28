@@ -121,6 +121,48 @@ describe("NavRail developing jobs", () => {
     };
   }
 
+  it("keeps recovered and local work in chronological order across phase changes", async () => {
+    const wrapper = await mountAt("/create");
+    useGenerationStore().jobs = [
+      {
+        clientId: 1,
+        id: "older-local",
+        model: "flux-dev:q8",
+        prompt: "older queued print",
+        status: "queued",
+        submittedAtUnixMs: 1_000,
+      } as never,
+    ];
+    useLiveActivityStore().hosts = {
+      render: {
+        hostId: "render",
+        hostLabel: "Render box",
+        target: { baseUrl: "http://render:7680", apiKey: null },
+        routeUrl: "http://render:7680",
+        instanceId: "render-instance",
+        observedAtUnixMs: 3_000,
+        stale: false,
+        error: null,
+        unavailableKinds: [],
+        items: [
+          {
+            id: "newer-running",
+            kind: "generation",
+            phase: "running",
+            model: "flux-schnell",
+            created_at_unix_ms: 2_000,
+            updated_at_unix_ms: 3_000,
+            can_cancel: false,
+          },
+        ],
+      },
+    };
+    await flushPromises();
+
+    const text = wrapper.get("[data-test='developing-jobs']").text();
+    expect(text.indexOf("flux-dev")).toBeLessThan(text.indexOf("flux-schnell"));
+  });
+
   it("shows cancellation progress, then offers to remove the cancelled row", async () => {
     const wrapper = await mountAt("/create");
     const generation = useGenerationStore();

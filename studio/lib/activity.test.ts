@@ -108,14 +108,14 @@ describe("sequenceToVM", () => {
     expect(waiting.phase).toBe("queued");
     expect(leased.phase).toBe("running");
     expect(mergeActivity([], [waiting, leased]).map((vm) => vm.key)).toEqual([
-      leased.key,
       waiting.key,
+      leased.key,
     ]);
   });
 });
 
 describe("mergeActivity", () => {
-  it("orders active work first, then by recency", () => {
+  it("keeps active work chronological regardless of phase, then settled by recency", () => {
     const settledPrint = print({
       key: "print:1",
       phase: "done",
@@ -140,8 +140,8 @@ describe("mergeActivity", () => {
       [queuedSeq, settledSeq],
     );
     expect(merged.map((vm) => vm.key)).toEqual([
-      "print:2", // running first
-      "seq:plato:c1", // queued second
+      "print:2", // older running work stays where it was submitted
+      "seq:plato:c1", // newer queued work follows it
       "seq:plato:c2", // then settled, newest first
       "print:1",
     ]);

@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import SequenceJobRow from "@ui/components/SequenceJobRow.vue";
+import type { FleetActiveWork } from "@studio/api/activity";
 import {
   activityDigestLabel,
   mergeActivity,
@@ -118,7 +119,6 @@ const hiddenQueuedCount = computed(() =>
 const runningPct = computed(() =>
   running.value ? Math.round(jobProgress(running.value) * 100) : 0,
 );
-const runningFinalizing = computed(() => running.value?.status === "finishing");
 const runningHost = computed(() =>
   running.value?.hostId
     ? (hosts.all.find((host) => host.id === running.value?.hostId) ?? null)
@@ -261,6 +261,51 @@ const sequenceRows = computed(() =>
     (vm): vm is ActivityJobVM & { kind: "sequence" } => vm.kind === "sequence",
   ),
 );
+
+type DesktopActivityRow =
+  | { key: string; createdAtMs: number; kind: "shared"; shared: FleetActiveWork }
+  | { key: string; createdAtMs: number; kind: "print"; print: Job }
+  | {
+      key: string;
+      createdAtMs: number;
+      kind: "sequence";
+      sequence: ActivityJobVM & { kind: "sequence" };
+    };
+
+/** One visual queue across local prints, sequences, and recovered fleet work.
+ * A phase transition changes only the row contents, never its position. */
+const activeRows = computed<DesktopActivityRow[]>(() =>
+  [
+    ...sharedRows.value.map((shared): DesktopActivityRow => ({
+      key: `shared:${shared.key}`,
+      createdAtMs: shared.created_at_unix_ms,
+      kind: "shared",
+      shared,
+    })),
+    ...(running.value
+      ? [
+          {
+            key: `print:${running.value.clientId}`,
+            createdAtMs: running.value.submittedAtUnixMs,
+            kind: "print" as const,
+            print: running.value,
+          },
+        ]
+      : []),
+    ...visibleQueued.value.map((print): DesktopActivityRow => ({
+      key: `print:${print.clientId}`,
+      createdAtMs: print.submittedAtUnixMs,
+      kind: "print",
+      print,
+    })),
+    ...sequenceRows.value.map((sequence): DesktopActivityRow => ({
+      key: sequence.key,
+      createdAtMs: sequence.createdAtMs,
+      kind: "sequence",
+      sequence,
+    })),
+  ].sort((a, b) => a.createdAtMs - b.createdAtMs || a.key.localeCompare(b.key)),
+);
 const attentionSequences = computed(() =>
   partition.value.attention.filter(
     (vm): vm is ActivityJobVM & { kind: "sequence" } => vm.kind === "sequence",
@@ -332,88 +377,7 @@ function deleteConfirmed() {
   <div v-if="show" data-test="activity-strip" class="ms-activity">
     <div class="ms-activity__row">
       <span class="ms-activity__kicker">Activity</span>
-      <template v-if="running">
-        <span class="ms-activity__thumb ms-shimmer" aria-hidden="true" />
-        <button
-          type="button"
-          class="ms-activity__running text-left"
-          data-test="activity-running-select"
-          @click="selectPrint(running)"
-        >
-          <div class="ms-activity__line">
-            <span class="ms-activity__prompt">{{ running.prompt }}</span>
-            <PodCostMeter
-              v-if="runningPod"
-              data-test="activity-pod-cost"
-              class="ms-activity__cost"
-              :cost-per-hr="runningPod.costPerHr"
-              :uptime-seconds="runningPod.uptimeSeconds"
-            />
-            <span class="ms-activity__pct data-mono">
-              {{ runningFinalizing ? "Finalizing" : `${runningPct}%` }}
-            </span>
-          </div>
-          <ProgressBar
-            :value="runningPct"
-            :height="4"
-            :label="runningFinalizing ? 'Finalizing print' : 'Print progress'"
-          />
-        </button>
-        <button
-          type="button"
-          class="ms-activity__cancel"
-          data-test="activity-running-cancel"
-          :disabled="running.cancelling"
-          :aria-label="
-            running.cancelling ? `Cancelling ${running.prompt}` : `Cancel ${running.prompt}`
-          "
-          @click="cancel(running)"
-        >
-          {{ running.cancelling ? "…" : "✕" }}
-        </button>
-      </template>
-      <div v-else class="ms-activity__idle-spacer" />
-      <div
-        v-for="job in visibleQueued"
-        :key="job.clientId"
-        class="ms-activity__pill"
-        data-test="activity-queued"
-        role="button"
-        tabindex="0"
-        :title="`${queuedLabel(job)} · ${job.prompt}`"
-        @click="selectPrint(job)"
-        @keydown.enter.prevent="selectPrint(job)"
-        @keydown.space.prevent="selectPrint(job)"
-      >
-        <span class="ms-activity__pill-text">
-          <span class="ms-activity__pill-queue" data-test="activity-queued-position">{{
-            queuedLabel(job)
-          }}</span>
-          · {{ job.prompt }}
-          <span v-if="job.holdError" class="ms-activity__seq-error"> · {{ job.holdError }}</span>
-        </span>
-        <button
-          v-if="job.retryable"
-          type="button"
-          class="ms-activity__seq-action"
-          data-test="activity-held-retry"
-          :disabled="job.retrying"
-          @click.stop="retry(job)"
-        >
-          {{ job.retrying ? "Retrying…" : "Retry" }}
-        </button>
-        <button
-          type="button"
-          class="ms-activity__cancel"
-          :aria-label="
-            job.cancelling ? `Cancelling ${job.prompt}` : `Cancel queued print: ${job.prompt}`
-          "
-          :disabled="job.cancelling"
-          @click.stop="cancel(job)"
-        >
-          {{ job.cancelling ? "…" : "✕" }}
-        </button>
-      </div>
+      <div class="ms-activity__idle-spacer" />
       <span
         v-if="hiddenQueuedCount > 0"
         class="ms-activity__overflow data-mono"
@@ -421,7 +385,6 @@ function deleteConfirmed() {
       >
         +{{ hiddenQueuedCount }} queued
       </span>
-      <!-- Everything settled the strip is not listing, in one mono count. -->
       <button
         v-if="digest"
         type="button"
@@ -435,19 +398,113 @@ function deleteConfirmed() {
     </div>
 
     <div data-test="activity-list-scroll" class="ms-activity__list">
-      <LiveActivityList :rows="sharedRows" interactive @select="openLiveWork" />
+      <template v-for="row in activeRows" :key="row.key">
+        <LiveActivityList
+          v-if="row.kind === 'shared'"
+          :rows="[row.shared]"
+          interactive
+          @select="openLiveWork"
+        />
 
-      <!-- In-flight sequence rows (merged jobs surface) -->
-      <SequenceJobRow
-        v-for="vm in sequenceRows"
-        :key="vm.key"
-        data-test="activity-sequence"
-        :vm="vm"
-        :model-label="modelLabel(vm.model)"
-        :show-error="false"
-        @action="runAction"
-        @select="selectSequence"
-      />
+        <div
+          v-else-if="row.kind === 'print' && row.print.status !== 'queued'"
+          class="ms-activity__row"
+        >
+          <span class="ms-activity__thumb ms-shimmer" aria-hidden="true" />
+          <button
+            type="button"
+            class="ms-activity__running text-left"
+            data-test="activity-running-select"
+            @click="selectPrint(row.print)"
+          >
+            <div class="ms-activity__line">
+              <span class="ms-activity__prompt">{{ row.print.prompt }}</span>
+              <PodCostMeter
+                v-if="runningPod"
+                data-test="activity-pod-cost"
+                class="ms-activity__cost"
+                :cost-per-hr="runningPod.costPerHr"
+                :uptime-seconds="runningPod.uptimeSeconds"
+              />
+              <span class="ms-activity__pct data-mono">
+                {{ row.print.status === "finishing" ? "Finalizing" : `${runningPct}%` }}
+              </span>
+            </div>
+            <ProgressBar
+              :value="runningPct"
+              :height="4"
+              :label="row.print.status === 'finishing' ? 'Finalizing print' : 'Print progress'"
+            />
+          </button>
+          <button
+            type="button"
+            class="ms-activity__cancel"
+            data-test="activity-running-cancel"
+            :disabled="row.print.cancelling"
+            :aria-label="
+              row.print.cancelling ? `Cancelling ${row.print.prompt}` : `Cancel ${row.print.prompt}`
+            "
+            @click="cancel(row.print)"
+          >
+            {{ row.print.cancelling ? "…" : "✕" }}
+          </button>
+        </div>
+
+        <div
+          v-else-if="row.kind === 'print'"
+          class="ms-activity__pill"
+          data-test="activity-queued"
+          role="button"
+          tabindex="0"
+          :title="`${queuedLabel(row.print)} · ${row.print.prompt}`"
+          @click="selectPrint(row.print)"
+          @keydown.enter.prevent="selectPrint(row.print)"
+          @keydown.space.prevent="selectPrint(row.print)"
+        >
+          <span class="ms-activity__pill-text">
+            <span class="ms-activity__pill-queue" data-test="activity-queued-position">{{
+              queuedLabel(row.print)
+            }}</span>
+            · {{ row.print.prompt }}
+            <span v-if="row.print.holdError" class="ms-activity__seq-error">
+              · {{ row.print.holdError }}
+            </span>
+          </span>
+          <button
+            v-if="row.print.retryable"
+            type="button"
+            class="ms-activity__seq-action"
+            data-test="activity-held-retry"
+            :disabled="row.print.retrying"
+            @click.stop="retry(row.print)"
+          >
+            {{ row.print.retrying ? "Retrying…" : "Retry" }}
+          </button>
+          <button
+            type="button"
+            class="ms-activity__cancel"
+            :aria-label="
+              row.print.cancelling
+                ? `Cancelling ${row.print.prompt}`
+                : `Cancel queued print: ${row.print.prompt}`
+            "
+            :disabled="row.print.cancelling"
+            @click.stop="cancel(row.print)"
+          >
+            {{ row.print.cancelling ? "…" : "✕" }}
+          </button>
+        </div>
+
+        <SequenceJobRow
+          v-else
+          data-test="activity-sequence"
+          :vm="row.sequence"
+          :model-label="modelLabel(row.sequence.model)"
+          :show-error="false"
+          @action="runAction"
+          @select="selectSequence"
+        />
+      </template>
 
       <!-- Settled but still wanting a decision: capped, expiring, dismissible. -->
       <SequenceJobRow

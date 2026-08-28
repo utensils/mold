@@ -2294,11 +2294,7 @@ const queueStatusIndex = computed(() =>
 );
 const printActivity = computed<ActivityJobVM[]>(() => {
   const ordered = queuedJobs.value;
-  // `mergeActivity` sorts active work by RECENCY, but a print queue is FIFO.
-  // Re-express each rail position as a descending timestamp so the merge can
-  // interleave sequences without ever reversing the queue the user submitted.
-  const newest = ordered.reduce((max, job) => Math.max(max, job.clientId), 0);
-  return ordered.map((job, index) => {
+  return ordered.map((job) => {
     const vm: PrintActivityVM = {
       kind: "print" as const,
       key: `print:${job.clientId}`,
@@ -2310,7 +2306,7 @@ const printActivity = computed<ActivityJobVM[]>(() => {
       progress: null,
       chain: null,
       actions: ["cancel" as const],
-      createdAtMs: newest - index,
+      createdAtMs: job.submittedAtUnixMs,
       // The iPhone queue renders `generation.pending` only, so nothing settled
       // ever reaches this list — the strip's attention/expiry rules are a
       // desktop and web concern for now.
@@ -2494,6 +2490,29 @@ const sharedMobileActivity = computed(() => {
     (row) => !local.has(row.key),
   );
 });
+
+type MobileActivityDisplayRow =
+  | { key: string; createdAtMs: number; kind: "local"; local: ActivityRow }
+  | { key: string; createdAtMs: number; kind: "shared"; shared: FleetActiveWork };
+
+/** One chronological queue across this session and server-owned/recovered
+ * work. Ownership and phase change row contents, never visual position. */
+const mobileActivityRows = computed<MobileActivityDisplayRow[]>(() =>
+  [
+    ...activityRows.value.map((local): MobileActivityDisplayRow => ({
+      key: `local:${local.key}`,
+      createdAtMs: local.print?.submittedAtUnixMs ?? local.sequence?.createdAtMs ?? 0,
+      kind: "local",
+      local,
+    })),
+    ...sharedMobileActivity.value.map((shared): MobileActivityDisplayRow => ({
+      key: `shared:${shared.key}`,
+      createdAtMs: shared.created_at_unix_ms,
+      kind: "shared",
+      shared,
+    })),
+  ].sort((a, b) => a.createdAtMs - b.createdAtMs || a.key.localeCompare(b.key)),
+);
 const expandedQueueFailures = ref(new Set<string>());
 
 function toggleQueueFailure(key: string): void {
@@ -11123,7 +11142,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           <!-- ONE queue for both outputs: single prints and durable sequences
                land in the same list (mockup 1c). -->
           <section
-            v-if="activityRows.length || sharedMobileActivity.length"
+            v-if="mobileActivityRows.length"
             class="mobile-generation-queue"
             aria-label="Generation queue"
             data-test="mobile-generation-queue"
@@ -11132,113 +11151,138 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               <h2>Queue</h2>
               <span data-test="mobile-queue-count">{{ activityCountLabel(activityCounts) }}</span>
             </div>
-            <ol>
-              <li v-for="row in activityRows" :key="row.key" class="mobile-generation-row">
-                <SwipeActionRow
-                  :actions="mobileQueueRowActions(row)"
-                  :label="row.print ? row.print.prompt : modelLabel(row.sequence?.model ?? '')"
-                  :disabled="
-                    row.print?.cancelling === true ||
-                    queueControlHostIds.has(activityRowHostId(row))
-                  "
-                  :data-test="row.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
-                  @act="onMobileQueueRowAction(row, $event)"
-                >
-                  <div
-                    class="mobile-generation-job"
-                    role="button"
-                    tabindex="0"
-                    @click="
-                      row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()
+            <div class="mobile-generation-queue-list">
+              <template v-for="entry in mobileActivityRows" :key="entry.key">
+                <div v-if="entry.kind === 'local'" class="mobile-generation-row">
+                  <SwipeActionRow
+                    :actions="mobileQueueRowActions(entry.local)"
+                    :label="
+                      entry.local.print
+                        ? entry.local.print.prompt
+                        : modelLabel(entry.local.sequence?.model ?? '')
                     "
-                    @keydown.enter.prevent="
-                      row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()
+                    :disabled="
+                      entry.local.print?.cancelling === true ||
+                      queueControlHostIds.has(activityRowHostId(entry.local))
                     "
+                    :data-test="entry.local.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
+                    @act="onMobileQueueRowAction(entry.local, $event)"
                   >
-                    <template v-if="row.print">
-                      <div class="mobile-generation-job-copy">
-                        <p>{{ row.print.prompt }}</p>
-                        <span>{{ modelLabel(row.print.model) }} · {{ row.print.hostLabel }}</span>
-                        <p
-                          v-if="durableHold(row.print)?.error"
-                          class="mobile-generation-held-error"
-                          data-test="mobile-generation-held-error"
-                        >
-                          {{ durableHold(row.print)?.error }}
-                        </p>
-                      </div>
-                      <div class="mobile-generation-job-action">
-                        <span data-test="mobile-generation-status">{{
-                          activityRowStatus(row)
-                        }}</span>
-                        <span v-if="row.print.cancelling" data-test="mobile-generation-cancelling">
-                          Cancelling…
-                        </span>
-                      </div>
-                    </template>
-                    <template v-else-if="row.sequence">
-                      <div class="mobile-generation-job-copy">
-                        <p>
-                          {{ modelLabel(row.sequence.model) || "Sequence" }} ·
-                          {{ row.sequence.stageCount }} clips
-                        </p>
-                        <span>
-                          {{ row.sequence.phase ?? row.sequence.state }} · clip
-                          {{ Math.min(row.sequence.currentStage + 1, row.sequence.stageCount) }}/{{
-                            row.sequence.stageCount
-                          }}
-                          <template v-if="sequenceRowProgress !== null">
-                            · {{ sequenceRowProgress }}%
-                          </template>
-                        </span>
-                        <button
-                          v-if="row.sequence.error"
-                          type="button"
-                          class="mobile-sequence-row-error"
-                          :class="{
-                            'mobile-sequence-row-error--expanded': expandedQueueFailures.has(
-                              row.key,
-                            ),
-                          }"
-                          data-test="mobile-sequence-error-disclosure"
-                          :aria-expanded="expandedQueueFailures.has(row.key)"
-                          @click.stop="toggleQueueFailure(row.key)"
-                        >
-                          <span>{{ row.sequence.error }}</span>
-                          <span aria-hidden="true">
-                            {{ expandedQueueFailures.has(row.key) ? "Less" : "Details" }}
+                    <div
+                      class="mobile-generation-job"
+                      role="button"
+                      tabindex="0"
+                      @click="
+                        entry.local.print
+                          ? selectMobilePrint(entry.local.print)
+                          : selectCurrentMobileSequence()
+                      "
+                      @keydown.enter.prevent="
+                        entry.local.print
+                          ? selectMobilePrint(entry.local.print)
+                          : selectCurrentMobileSequence()
+                      "
+                    >
+                      <template v-if="entry.local.print">
+                        <div class="mobile-generation-job-copy">
+                          <p>{{ entry.local.print.prompt }}</p>
+                          <span>
+                            {{ modelLabel(entry.local.print.model) }} ·
+                            {{ entry.local.print.hostLabel }}
                           </span>
-                        </button>
-                      </div>
-                      <div class="mobile-generation-job-action">
-                        <span data-test="mobile-sequence-status">{{ row.sequence.hostLabel }}</span>
-                      </div>
-                    </template>
-                  </div>
-                </SwipeActionRow>
-              </li>
-            </ol>
-            <LiveActivityList
-              :rows="sharedMobileActivity"
-              interactive
-              swipe-actions
-              :can-swipe="canPauseFleetActivity"
-              @select="openMobileLiveWork"
-            >
-              <template #actions="{ row }">
-                <button
-                  type="button"
-                  data-test="mobile-fleet-queue-control"
-                  :disabled="queueControlHostIds.has(row.hostId)"
-                  :aria-label="`${hostTelemetry[row.hostId]?.queuePaused ? 'Resume' : 'Pause'} ${row.hostLabel} queue`"
-                  @click.stop="
-                    setFleetHostQueuePaused(row, !(hostTelemetry[row.hostId]?.queuePaused === true))
-                  "
+                          <p
+                            v-if="durableHold(entry.local.print)?.error"
+                            class="mobile-generation-held-error"
+                            data-test="mobile-generation-held-error"
+                          >
+                            {{ durableHold(entry.local.print)?.error }}
+                          </p>
+                        </div>
+                        <div class="mobile-generation-job-action">
+                          <span data-test="mobile-generation-status">{{
+                            activityRowStatus(entry.local)
+                          }}</span>
+                          <span
+                            v-if="entry.local.print.cancelling"
+                            data-test="mobile-generation-cancelling"
+                          >
+                            Cancelling…
+                          </span>
+                        </div>
+                      </template>
+                      <template v-else-if="entry.local.sequence">
+                        <div class="mobile-generation-job-copy">
+                          <p>
+                            {{ modelLabel(entry.local.sequence.model) || "Sequence" }} ·
+                            {{ entry.local.sequence.stageCount }} clips
+                          </p>
+                          <span>
+                            {{ entry.local.sequence.phase ?? entry.local.sequence.state }} · clip
+                            {{
+                              Math.min(
+                                entry.local.sequence.currentStage + 1,
+                                entry.local.sequence.stageCount,
+                              )
+                            }}/{{ entry.local.sequence.stageCount }}
+                            <template v-if="sequenceRowProgress !== null">
+                              · {{ sequenceRowProgress }}%
+                            </template>
+                          </span>
+                          <button
+                            v-if="entry.local.sequence.error"
+                            type="button"
+                            class="mobile-sequence-row-error"
+                            :class="{
+                              'mobile-sequence-row-error--expanded': expandedQueueFailures.has(
+                                entry.local.key,
+                              ),
+                            }"
+                            data-test="mobile-sequence-error-disclosure"
+                            :aria-expanded="expandedQueueFailures.has(entry.local.key)"
+                            @click.stop="toggleQueueFailure(entry.local.key)"
+                          >
+                            <span>{{ entry.local.sequence.error }}</span>
+                            <span aria-hidden="true">
+                              {{ expandedQueueFailures.has(entry.local.key) ? "Less" : "Details" }}
+                            </span>
+                          </button>
+                        </div>
+                        <div class="mobile-generation-job-action">
+                          <span data-test="mobile-sequence-status">
+                            {{ entry.local.sequence.hostLabel }}
+                          </span>
+                        </div>
+                      </template>
+                    </div>
+                  </SwipeActionRow>
+                </div>
+                <LiveActivityList
+                  v-else
+                  :rows="[entry.shared]"
+                  interactive
+                  swipe-actions
+                  :can-swipe="canPauseFleetActivity"
+                  @select="openMobileLiveWork"
                 >
-                  {{ hostTelemetry[row.hostId]?.queuePaused ? "Resume" : "Pause" }}
-                </button>
+                  <template #actions="{ row }">
+                    <button
+                      type="button"
+                      data-test="mobile-fleet-queue-control"
+                      :disabled="queueControlHostIds.has(row.hostId)"
+                      :aria-label="`${hostTelemetry[row.hostId]?.queuePaused ? 'Resume' : 'Pause'} ${row.hostLabel} queue`"
+                      @click.stop="
+                        setFleetHostQueuePaused(
+                          row,
+                          !(hostTelemetry[row.hostId]?.queuePaused === true),
+                        )
+                      "
+                    >
+                      {{ hostTelemetry[row.hostId]?.queuePaused ? "Resume" : "Pause" }}
+                    </button>
+                  </template>
+                </LiveActivityList>
               </template>
-            </LiveActivityList>
+            </div>
           </section>
           <p
             v-if="sequenceError && sequenceRoute && !isSequence"
