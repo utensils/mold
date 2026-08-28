@@ -1318,7 +1318,9 @@ async fn live_search_marks_installed_when_sidecar_and_file_present() {
 /// can stop rendering opaque `cv:<id>` slugs. Manifest rows stay
 /// untouched — no `display_name` key at all.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn list_models_carries_display_name_for_catalog_rows() {
+    let _env = crate::test_support::hermetic_store_env();
     let (state, _server, tmp) = build_state().await;
 
     let ckpt_dir = tmp.path().join("cv-1759168");

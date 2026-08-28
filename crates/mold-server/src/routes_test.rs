@@ -1426,6 +1426,10 @@ mod tests {
 
     #[tokio::test]
     async fn ltx2_camera_capabilities_return_only_compatible_19b_presets() {
+        // `installed == false` assertions read the store through
+        // `resolved_models_dir()`; a direnv MOLD_MODELS_DIR points that at a
+        // real store and flips them.
+        let _env = crate::test_support::hermetic_store_env();
         let app = app_empty();
         for model in ["ltx-2-19b-distilled%3Afp8", "ltx-2-19b-dev%3Afp8"] {
             let response = app
@@ -18124,6 +18128,7 @@ mod tests {
 
     #[tokio::test]
     async fn capabilities_chain_limits_accepts_installed_catalog_ltx2_sidecar() {
+        let _env = crate::test_support::hermetic_store_env();
         let models_dir = tempfile::tempdir().unwrap();
         let install_dir = models_dir.path().join("cv-3143864");
         std::fs::create_dir_all(&install_dir).unwrap();

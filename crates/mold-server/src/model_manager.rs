@@ -3307,14 +3307,19 @@ mod tests {
 
     #[test]
     fn downloaded_ltx25_uses_split_audio_component_for_capability() {
-        let _env = crate::test_support::env_lock();
+        let _env = crate::test_support::hermetic_store_env();
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config {
             models_dir: dir.path().to_string_lossy().into_owned(),
             ..Default::default()
         };
         let model = mold_core::ltx25_manifest::DISTILLED_INT8_CONV;
-        let split = mold_core::ltx25_manifest::Ltx25ModelPaths::resolve(&config, model).unwrap();
+        // `resolve_in` pins the split-pack roots to THIS test's tempdir even
+        // if a store-redirecting env var slips past the guard — the fixture
+        // writer below must never be able to reach a real store.
+        let split =
+            mold_core::ltx25_manifest::Ltx25ModelPaths::resolve_in(dir.path(), model).unwrap();
+        assert!(split.audio_vae.starts_with(dir.path()));
         config.models.insert(
             model.to_string(),
             mold_core::ModelConfig {
@@ -5237,6 +5242,55 @@ mod tests {
     /// keys in the JSON header (each as a 1-element F32 tensor sharing the
     /// same 4-byte zero blob). Sufficient for the header-peek probe; no
     /// dep on the `safetensors` crate.
+    /// The regression half of the fixture above, run with a direnv-style
+    /// `MOLD_MODELS_DIR` deliberately IN PLACE: the writer's paths must land
+    /// under its own tempdir and the sentinel "production store" must come
+    /// through byte-identical. This is the exact leak that overwrote
+    /// hal9000's real audio VAE with a 194-byte stub (2026-08-28); a shell
+    /// wrapper protects one developer, this protects all of them.
+    #[test]
+    fn split_audio_fixture_never_writes_through_a_direnv_models_dir() {
+        // The guard saved the real values; anything set below is undone by
+        // its drop, panic included.
+        let _env = crate::test_support::hermetic_store_env();
+        let sentinel = tempfile::tempdir().unwrap();
+        let store = sentinel.path().join("shared/ltx2/vae");
+        std::fs::create_dir_all(&store).unwrap();
+        let canary = store.join("ltx-2.5-audio-vae-bf16.safetensors");
+        std::fs::write(&canary, b"production bytes - do not touch").unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", sentinel.path());
+
+        let dir = tempfile::tempdir().unwrap();
+        let model = mold_core::ltx25_manifest::DISTILLED_INT8_CONV;
+        let split =
+            mold_core::ltx25_manifest::Ltx25ModelPaths::resolve_in(dir.path(), model).unwrap();
+        assert!(
+            split.audio_vae.starts_with(dir.path()),
+            "the fixture root must be the test's own tempdir, got {}",
+            split.audio_vae.display()
+        );
+        std::fs::create_dir_all(split.audio_vae.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &split.audio_vae,
+            &[
+                "audio_vae.per_channel_statistics.mean-of-means",
+                "vocoder.vocoder.conv_pre.weight",
+            ],
+        );
+        assert!(split.audio_vae.exists());
+
+        assert_eq!(
+            std::fs::read(&canary).unwrap(),
+            b"production bytes - do not touch",
+            "the fixture writer reached the MOLD_MODELS_DIR store"
+        );
+        assert_eq!(
+            std::fs::read_dir(&store).unwrap().count(),
+            1,
+            "nothing may be created beside the canary"
+        );
+    }
+
     fn write_safetensors_with_keys(path: &std::path::Path, keys: &[&str]) {
         use std::io::Write;
         let mut header = serde_json::Map::new();
