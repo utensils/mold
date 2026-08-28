@@ -2644,6 +2644,71 @@ mod tests {
         assert_eq!(names, [deconflicted, name]);
     }
 
+    /// The persistent cache is consulted before AND inside the per-digest
+    /// flight, so a tile the app already holds costs zero fetches — the
+    /// property a cold launch of a 1 000-print Library depends on.
+    #[tokio::test]
+    async fn cached_thumbnail_performs_zero_fetches() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(ThumbnailCache::new(dir.path().join("thumbs")));
+        let digest = ThumbKey {
+            origin: "local",
+            filename: "a.png",
+            media_version: "1:10",
+            size: SizeTier::S256,
+        }
+        .digest();
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+        for _ in 0..3 {
+            let counter = fetches.clone();
+            let bytes = png.clone();
+            resolve_thumbnail(&cache, &digest, || async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(bytes)
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(fetches.load(Ordering::SeqCst), 1, "hits must never fetch");
+        assert!(cache.contains(&digest));
+
+        // A refused fetch stores nothing, so the next request tries again.
+        let other = ThumbKey {
+            origin: "local",
+            filename: "b.png",
+            media_version: "1:10",
+            size: SizeTier::S256,
+        }
+        .digest();
+        let refused = resolve_thumbnail(&cache, &other, || async { Err("offline".to_string()) }).await;
+        assert!(refused.is_err());
+        assert!(!cache.contains(&other));
+    }
+
+    #[test]
+    fn thumbnail_protocol_urls_round_trip_and_reject_traversal() {
+        let url = thumbnail_protocol_url("local", SizeTier::S512, "print one #2.png", "17:20");
+        assert_eq!(
+            url,
+            "mold-thumb://localhost/local/512/print%20one%20%232%2Epng?v=17%3A20"
+        );
+        let uri: tauri::http::Uri = url.parse().unwrap();
+        let (origin, size, filename, version) =
+            parse_thumbnail_protocol_request(uri.path(), uri.query()).unwrap();
+        assert_eq!(origin, "local");
+        assert_eq!(size, SizeTier::S512);
+        assert_eq!(filename, "print one #2.png");
+        assert_eq!(version, "17:20");
+
+        assert!(parse_thumbnail_protocol_request("/../etc/256/a.png", Some("v=1")).is_err());
+        assert!(parse_thumbnail_protocol_request("/local/300/a.png", Some("v=1")).is_err());
+        assert!(parse_thumbnail_protocol_request("/local/256/..%2Fa.png", Some("v=1")).is_err());
+        assert!(parse_thumbnail_protocol_request("/local/256/a.png", None).is_err());
+        assert!(parse_thumbnail_protocol_request("/local/256/a.png", Some("v=%2F")).is_err());
+    }
+
     #[test]
     fn offline_media_path_prefers_trash_for_the_trash_view() {
         let dir = tempfile::tempdir().unwrap();
