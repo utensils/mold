@@ -4026,6 +4026,7 @@ dependencies = [
  "ureq",
  "utoipa",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -4126,6 +4127,7 @@ dependencies = [
  "mold-ai-inference",
  "mold-ai-scheduler",
  "nvml-wrapper",
+ "rayon",
  "rust-embed",
  "serde",
  "serde_json",
