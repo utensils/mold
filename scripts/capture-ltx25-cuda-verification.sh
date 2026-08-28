@@ -56,6 +56,10 @@ mold_bin="${LTX25_MOLD_BIN:-}"
 build_json="${LTX25_BUILD_JSON:-}"
 runtime_env_source="${LTX25_RUNTIME_ENV_SOURCE:-$repo_root/crates/mold-inference/src/runtime_env.rs}"
 row_timeout="${LTX25_ROW_TIMEOUT:-7200}"
+# halcyon's sealed Metal evidence, copied to this host for the A/B rows.
+metal_reference_root="${LTX25_METAL_REFERENCE_ROOT:-/storage-fast/mold/uat-1398/metal-reference}"
+ab_python="${LTX25_AB_PYTHON:-python3}"
+ab_script="$repo_root/scripts/ltx25-metal-ab.py"
 
 fail() {
   echo "LTX-2.5 CUDA verification failed: $*" >&2
@@ -953,8 +957,9 @@ seal_mode() {
       '. + [($m[0] | {id, model, case, profile, kind, status, reason, reason_source, started_at, finished_at,
         seconds, exit_code, command, stdout_log_path, stdout_log_sha256, server_log_path,
         server_log_sha256, media, generation, provenance_expected, provenance_observed,
-        metadata_expected, gpu, host, generator_commit}
-        | with_entries(select(.value != null))
+        metadata_expected, gpu, host, generator_commit, metal_ab}
+        | with_entries(select(.value != null or .key == "metal_ab"))
+        | if has("metal_ab") and ($m[0] | has("metal_ab") | not) then del(.metal_ab) else . end
         | . + {manifest_path: $manifest, manifest_sha256: $sha})]' <<<"$rows")"
   done < <(jq -r '.rows[].id' "$matrix")
 
@@ -1102,6 +1107,59 @@ seal_mode() {
   fi
 }
 
+# Metal <-> CUDA A/B for the int8-conv smoke rows: the reference is whatever
+# media the NEWEST sealed Metal report under $metal_reference_root retained
+# for the row's label, located by basename and authenticated against the
+# sha256 that report recorded. Prints the block as JSON, or `null` when no
+# reference root or no matching reference exists (never a failure).
+metal_ab_block() {
+  local row="$1" media="$2" dir="$3" label
+  case "$(jq -r '.model + "/" + .case' <<<"$row")" in
+    "ltx-2.5-22b-distilled:int8-conv/smoke_silent_apng") label=silent_video ;;
+    "ltx-2.5-22b-distilled:int8-conv/smoke_audio_mp4") label=audio_video ;;
+    *) return 0 ;;
+  esac
+  if [[ ! -d "$metal_reference_root/verification" ]]; then
+    echo null
+    return 0
+  fi
+  local newest="" candidate
+  shopt -s nullglob
+  for candidate in "$metal_reference_root"/verification/ltx25-metal-int8-verification-*.json; do
+    if [[ -z "$newest" || "$candidate" -nt "$newest" ]]; then
+      newest="$candidate"
+    fi
+  done
+  shopt -u nullglob
+  if [[ -z "$newest" ]]; then
+    echo null
+    return 0
+  fi
+  local entry reference_name reference_sha reference
+  entry="$(jq -c --arg label "$label" '.media[]? | select(.label == $label)' "$newest")"
+  if [[ -z "$entry" ]]; then
+    echo null
+    return 0
+  fi
+  reference_name="$(basename "$(jq -r '.path' <<<"$entry")")"
+  reference_sha="$(jq -r '.sha256' <<<"$entry")"
+  reference="$(find "$metal_reference_root" -type f -name "$reference_name" | head -1)"
+  if [[ -z "$reference" ]]; then
+    echo null
+    return 0
+  fi
+  [[ "$(file_sha256 "$reference")" == "$reference_sha" ]] \
+    || fail "Metal reference $reference does not match the sha256 its report $newest recorded"
+  "$ab_python" "$ab_script" --reference "$reference" --candidate "$media" --out "$dir/metal-ab.json" >/dev/null \
+    || fail "Metal A/B summary failed for $media against $reference"
+  jq -c --arg root "$metal_reference_root" --arg report "$newest" --arg label "$label" \
+    --arg summary "$dir/metal-ab.json" --arg summary_sha "$(file_sha256 "$dir/metal-ab.json")" \
+    --arg generator "$(jq -r '.generator_commit // "unknown"' <<<"$entry")" \
+    '. + {reference_root: $root, reference_report: $report, reference_label: $label,
+      reference_generator_commit: $generator, summary_path: $summary, summary_sha256: $summary_sha}' \
+    "$dir/metal-ab.json"
+}
+
 seal_passed_row() {
   local row="$1" manifest="$2" id media dir generation commit observed
   id="$(jq -r '.id' <<<"$row")"
@@ -1132,14 +1190,18 @@ seal_passed_row() {
   jq -e --argjson expected "$(jq -c '.expect.provenance' <<<"$row")" \
     '($expected - .provenance_expected) == []' "$manifest" >/dev/null \
     || fail "$id: row manifest dropped a matrix provenance expectation"
+  local metal_ab
+  metal_ab="$(metal_ab_block "$row" "$media" "$dir")"
   # Re-seal the derived fields from what was just re-verified so the report
-  # never carries a stale ffprobe, Library row, or observation.
+  # never carries a stale ffprobe, Library row, observation, or A/B summary.
   local tmp="$manifest.tmp.$$"
   jq --argjson generation "$generation" --arg commit "$commit" --argjson observed "$observed" \
     --arg probe "$dir/ffprobe.json" --arg probe_sha "$(file_sha256 "$dir/ffprobe.json")" \
-    --argjson bytes "$(file_size "$media")" \
+    --argjson bytes "$(file_size "$media")" --argjson metal_ab "${metal_ab:-null}" \
+    --argjson ab_row "$([[ -n "$metal_ab" ]] && echo true || echo false)" \
     '.generation = $generation | .generator_commit = $commit | .provenance_observed = $observed
-     | .media.bytes = $bytes | .media.ffprobe_path = $probe | .media.ffprobe_sha256 = $probe_sha' \
+     | .media.bytes = $bytes | .media.ffprobe_path = $probe | .media.ffprobe_sha256 = $probe_sha
+     | if $ab_row then .metal_ab = $metal_ab else del(.metal_ab) end' \
     "$manifest" >"$tmp"
   mv "$tmp" "$manifest"
 }

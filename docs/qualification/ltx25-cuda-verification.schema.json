@@ -672,6 +672,71 @@
         "generator_commit": {
           "type": "string",
           "minLength": 7
+        },
+        "metal_ab": {
+          "description": "Metal reference A/B for the int8-conv smoke rows: geometry parity plus per-frame PSNR/SSIM against halcyon's sealed render. Recorded provenance only; null when no reference root is available.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "reference_file",
+            "reference_sha256",
+            "candidate_sha256",
+            "parity",
+            "frames_compared",
+            "psnr_db",
+            "ssim",
+            "identical",
+            "method",
+            "summary_path",
+            "summary_sha256"
+          ],
+          "properties": {
+            "reference_file": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reference_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "candidate_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "parity": {
+              "type": "object"
+            },
+            "frames_compared": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "psnr_db": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "ssim": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "identical": {
+              "type": "boolean"
+            },
+            "method": {
+              "type": "string",
+              "minLength": 1
+            },
+            "summary_path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "summary_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
         }
       },
       "allOf": [

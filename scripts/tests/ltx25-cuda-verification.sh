@@ -105,6 +105,20 @@ case "${1:-}" in
     exit 1 ;;
 esac
 FAKE
+# rawvideo rgb24 frames: the Metal reference decodes to one constant, the
+# CUDA candidate to another, so PSNR is finite and SSIM is below one.
+cat >"$tmp/bin/ffmpeg" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+input=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == -i ]]; then input="$2"; shift; fi
+  shift
+done
+byte='\200'
+[[ "$input" == *metal* ]] || byte='\160'
+head -c $((256 * 256 * 3 * 9)) /dev/zero | tr '\0' "$byte"
+FAKE
 cat >"$tmp/bin/nvcc" <<'FAKE'
 #!/usr/bin/env bash
 printf 'nvcc: NVIDIA (R) Cuda compiler driver\nCuda compilation tools, release 12.8, V12.8.93\nBuild cuda_12.8.r12.8/compiler.35583870_0\n'
@@ -126,6 +140,22 @@ jq -n --arg candle_rev "$candle_rev" --arg git_sha "$head_sha" '{
   cargo_command: "cargo build --release -p mold-ai --features h3-cuda,preview,mp4,tui",
   features: ["h3-cuda", "preview", "mp4", "tui"],
   candle_rev: $candle_rev, git_sha: $git_sha}' >"$build_json"
+
+# A fake copy of halcyon's Metal evidence: the newest sealed Metal report
+# names the retained media by label, and the harness locates each file by
+# basename and authenticates it against the sha256 that report recorded.
+metal_ref="$tmp/metal-ref"
+mkdir -p "$metal_ref/verification"
+printf 'metal silent apng fixture\n' >"$metal_ref/verification/ltx25-fixture-int8-metal-silent-seed-25025.apng"
+printf 'metal audio mp4 fixture\n' >"$metal_ref/ltx25-fixture-int8-metal-audio-seed-25026.mp4"
+jq -n --arg silent_sha "$(sha256sum "$metal_ref/verification/ltx25-fixture-int8-metal-silent-seed-25025.apng" | awk '{print $1}')" \
+  --arg audio_sha "$(sha256sum "$metal_ref/ltx25-fixture-int8-metal-audio-seed-25026.mp4" | awk '{print $1}')" '
+  {schema_version:"mold.ltx25.metal-int8.verification.v1", media:[
+    {label:"silent_video", path:"/Volumes/ExternalStorage/mold2/output/verification/ltx-2.5/ltx25-fixture-int8-metal-silent-seed-25025.apng",
+      sha256:$silent_sha, seed:25025, generator_commit:"fixture"},
+    {label:"audio_video", path:"/Volumes/ExternalStorage/mold2/output/ltx25-fixture-int8-metal-audio-seed-25026.mp4",
+      sha256:$audio_sha, seed:25026, generator_commit:"fixture"}]}' \
+  >"$metal_ref/verification/ltx25-metal-int8-verification-fixture.json"
 
 campaign=fixture
 verification_root="$mold_home/output/verification/ltx-2.5/cuda"
@@ -285,6 +315,7 @@ run_seal() {
   PATH="$tmp/bin:$PATH" \
     MOLD_HOME="$mold_home" MOLD_MODELS_DIR="${MODELS_DIR_OVERRIDE-$models_dir}" \
     MOLD_DB_PATH="$mold_home/mold.db" \
+    LTX25_METAL_REFERENCE_ROOT="${METAL_REF_OVERRIDE-$metal_ref}" \
     LTX25_ALLOW_TEST_HOME=1 LTX25_CONTRACT_TEST=1 LTX25_SKIP_GATES=1 \
     LTX25_REFERENCES_ROOT="$refs" LTX25_CAMPAIGN="$campaign" \
     LTX25_MOLD_BIN="${MOLD_BIN_OVERRIDE-$tmp/bin/mold}" LTX25_BUILD_JSON="$build_json" \
@@ -295,7 +326,8 @@ run_seal() {
 run_seal --seal >/dev/null
 [[ -s "$report" ]] || fail "seal did not write $report"
 matrix_rows="$(jq '.rows | length' "$matrix")"
-jq -e --argjson rows "$matrix_rows" --arg mold_home "$mold_home" --arg models_dir "$models_dir" '
+jq -e --argjson rows "$matrix_rows" --arg mold_home "$mold_home" --arg models_dir "$models_dir" \
+  --arg metal_ref "$metal_ref" '
   .schema_version == "mold.ltx25.cuda.verification.v1"
   and .backend_scope == "cuda"
   and .mold_home == $mold_home and .models_dir == $models_dir
@@ -313,7 +345,18 @@ jq -e --argjson rows "$matrix_rows" --arg mold_home "$mold_home" --arg models_di
       and .provenance_observed == (.provenance_expected | map({line: .,
         scope: (if startswith("attention backend selected") then "process" else "slice" end)}))
       and any(.provenance_observed[]; .scope == "process")
-      and .media.sha256 != null)
+      and .media.sha256 != null
+      and .metal_ab.reference_file == ($metal_ref + "/verification/ltx25-fixture-int8-metal-silent-seed-25025.apng")
+      and (.metal_ab.reference_sha256 | test("^[0-9a-f]{64}$"))
+      and .metal_ab.candidate_sha256 == .media.sha256
+      and .metal_ab.parity == {frames:{reference:9,candidate:9,equal:true},
+        width:{reference:256,candidate:256,equal:true}, height:{reference:256,candidate:256,equal:true}}
+      and .metal_ab.frames_compared == 9
+      and (.metal_ab.psnr_db.mean | type) == "number" and .metal_ab.psnr_db.mean > 0
+      and (.metal_ab.ssim.mean | type) == "number" and .metal_ab.ssim.mean < 1
+      and .metal_ab.identical == false
+      and (.metal_ab.summary_sha256 | test("^[0-9a-f]{64}$")))
+  and ([.rows[] | select(.status != "passed") | has("metal_ab")] | all(. == false))
   and (.assets | length) == 45
   and ([.assets[].present] | all(. == true))
   and ([.assets[].actual_sha256] | all(. == null))
@@ -343,6 +386,19 @@ if run_seal --seal >/dev/null 2>&1; then
 fi
 cp "$tmp/server.bak" "$passed_dir/server.log"
 cp "$tmp/full.bak" "$evidence/server-default.log"
+run_seal --seal >/dev/null
+
+# Without a Metal reference root the block is null, never a failure.
+METAL_REF_OVERRIDE="$tmp/no-such-reference" run_seal --seal >/dev/null
+jq -e '(.rows[] | select(.status == "passed") | has("metal_ab") and .metal_ab == null)' "$report" >/dev/null \
+  || fail "missing Metal reference root must record metal_ab as null"
+"$validator" "$report" >/dev/null || fail "validator rejected a null metal_ab block"
+# A reference copy whose bytes disagree with the Metal report is refused.
+printf 'tampered\n' >>"$metal_ref/verification/ltx25-fixture-int8-metal-silent-seed-25025.apng"
+if run_seal --seal >/dev/null 2>&1; then
+  fail "runner accepted a Metal reference that disagrees with its sealed report"
+fi
+printf 'metal silent apng fixture\n' >"$metal_ref/verification/ltx25-fixture-int8-metal-silent-seed-25025.apng"
 run_seal --seal >/dev/null
 
 # --- the validator rejects mutated evidence ----------------------------------
