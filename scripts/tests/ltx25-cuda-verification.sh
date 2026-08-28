@@ -177,7 +177,7 @@ printf 'Generated in 12.0s\n' >"$passed_dir/stdout.log"
 # seal must resolve it through the process scope.
 jq -r --arg id "$passed_id" '.rows[] | select(.id == $id) | .expect.provenance[]
   | select(startswith("attention backend selected") | not)' "$matrix" \
-  | sed 's/^/INFO mold_inference::ltx2: /' >"$passed_dir/server.log"
+  | sed 's/^/INFO mold::ltx2: /' >"$passed_dir/server.log"
 echo "INFO mold_inference::attention: attention backend selected backend=Math" >"$evidence/server-default.log"
 jq -n '{model:"ltx-2.5-22b-distilled:int8-conv", args:["--width","256"]}' >"$passed_dir/request.json"
 printf 'polled_at_utc,memory_used_mib,utilization_gpu\n2026-08-28T00:00:00Z,20000,97\n' >"$passed_dir/vram.csv"
