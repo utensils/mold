@@ -1137,6 +1137,10 @@ fn read_manifest_optional(row: &ChainJobRow, _root: &FsPath) -> Option<ChainJobM
     ChainJobManifest::read_from_dir(&row.job_dir).ok()
 }
 
+pub(crate) fn chain_job_is_ephemeral(row: &ChainJobRow) -> bool {
+    ChainJobManifest::read_from_dir(&row.job_dir).is_ok_and(|manifest| manifest.ephemeral)
+}
+
 /// Re-check every persisted source of model identity before an old durable
 /// job becomes schedulable again. Jobs can outlive both the server process and
 /// the policy that admitted them, so the row, request, frozen snapshot,

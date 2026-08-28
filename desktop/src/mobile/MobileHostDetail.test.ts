@@ -256,6 +256,51 @@ afterEach(() => {
 });
 
 describe("MobileHostDetail remote host data", () => {
+  it("shows active sequence stages instead of calling the machine queue empty", async () => {
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path === "/api/status") return Promise.resolve(serverStatus({ queue_depth: 0 }));
+      if (path === "/api/queue?limit=8") {
+        return Promise.resolve({
+          entries: [],
+          plan: {
+            plan_version: 1,
+            state_version: 1,
+            optimizer_state: "optimized",
+            dirty_since_unix_ms: null,
+            next_replan_at_unix_ms: null,
+            work_items: [
+              {
+                work_id: "chain:sequence-1:attempt:0:stage:0",
+                parent_id: "sequence-1",
+                work_kind: "chain_stage",
+                chain_stage: 0,
+                priority_class: "user",
+                queue_rank: 4,
+                bypass_count: 0,
+                gpu: 2,
+                planned_device_id: "cuda:gpu-2",
+                planned_lane_kind: "device",
+                lane_order: 0,
+                estimate_confidence: "low",
+                activity_phase: "active",
+              },
+            ],
+          },
+        });
+      }
+      return originalApi(target, path);
+    });
+
+    const view = await mountDetail();
+
+    expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("1 total");
+    expect(view.get("[data-test='host-detail-planned-work']").text()).toContain(
+      "activeChain stage · stage 1sequence-1GPU 2",
+    );
+    expect(view.text()).not.toContain("Queue is empty.");
+  });
+
   it("shows a CPU utility lane when the host reports no GPUs", async () => {
     const originalApi = apiJsonTo.getMockImplementation()!;
     apiJsonTo.mockImplementation((target, path) => {

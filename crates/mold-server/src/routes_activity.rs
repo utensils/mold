@@ -150,7 +150,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 row.state,
                 mold_core::chain_job::ChainJobState::Queued
                     | mold_core::chain_job::ChainJobState::Running
-            )
+            ) && !crate::routes_chain_jobs::chain_job_is_ephemeral(row)
         }) {
             represented.insert(row.id.clone());
             let cancelling = row.state == mold_core::chain_job::ChainJobState::Running
