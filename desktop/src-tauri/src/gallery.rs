@@ -1750,6 +1750,7 @@ fn thumbnail_client() -> &'static reqwest::Client {
 /// server Off, rendered from the output dir. Cancellation and prioritisation
 /// stay with the JS scheduler through `request_id` exactly as before.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri commands are flat keyword arguments.
 pub async fn prepare_gallery_thumbnail(
     cache: tauri::State<'_, Arc<ThumbnailCache>>,
     target: Option<MediaSaveTarget>,
