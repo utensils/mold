@@ -26,7 +26,7 @@ describe("mobile viewport scaling", () => {
     const root = css.match(/html,\s*body,\s*#app\s*\{([^}]*)\}/s);
     const content = css.match(/\.mobile-content\s*\{([^}]*)\}/s);
     expect(root?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
-    expect(content?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(content?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
   });
 });
 
@@ -62,8 +62,10 @@ describe("mobile Library thumbnail sizing", () => {
 
   it("reserves the two-finger pinch while one-finger scrolling still works", () => {
     const base = css.match(/\.mobile-gallery-pinch-surface\s*\{([^}]*)\}/s);
+    const tile = css.match(/\.gallery-item\s*\{([^}]*)\}/s);
 
     expect(base?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
+    expect(tile?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
     expect(base?.[1]).toMatch(/flex:\s*1 0 auto\s*;/);
     expect(base?.[1]).toMatch(/min-height:\s*42vh\s*;/);
   });
@@ -103,6 +105,14 @@ describe("mobile scrolling", () => {
     expect(content?.[1]).toMatch(/overflow-y:\s*auto\s*;/);
     expect(content?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
     expect(content?.[1]).not.toMatch(/-webkit-overflow-scrolling/);
+  });
+
+  it("keeps the pull-to-refresh control in normal flow above the Library", () => {
+    const pull = css.match(/\.mobile-library-pull\s*\{([^}]*)\}/s);
+
+    expect(pull?.[1]).toMatch(/display:\s*grid\s*;/);
+    expect(pull?.[1]).toMatch(/flex:\s*none\s*;/);
+    expect(pull?.[1]).toMatch(/overflow:\s*hidden\s*;/);
   });
 
   it("turns wide mobile surfaces into a full-width responsive workspace", () => {
@@ -563,8 +573,17 @@ describe("mobile Library organization", () => {
     const scope = css.match(/\.mobile-library-scope\s*\{([^}]*)\}/s);
     const chips = css.match(/\.mobile-library-chips\s*\{([^}]*)\}/s);
     expect(scope?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
-    expect(chips?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(chips?.[1]).toMatch(/touch-action:\s*pan-x pan-y\s*;/);
     expect(chips?.[1]).toMatch(/overflow-x:\s*auto\s*;/);
+  });
+
+  it("keeps tag controls painted above the virtualized print layer", () => {
+    const chips = css.match(/\.mobile-library-chips\s*\{([^}]*)\}/s);
+    const window = css.match(/\.gallery-grid-window\s*\{([^}]*)\}/s);
+
+    expect(chips?.[1]).toMatch(/position:\s*relative\s*;/);
+    expect(chips?.[1]).toMatch(/z-index:\s*2\s*;/);
+    expect(window?.[1]).toMatch(/z-index:\s*0\s*;/);
   });
 
   it("keeps Select-mode scrolling native and selection labels inside their buttons", () => {

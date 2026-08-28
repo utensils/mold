@@ -536,9 +536,9 @@ describe("MobileSequenceComposer guardrails", () => {
   it("attaches a local-or-gallery image only to the opening clip", async () => {
     const draft = useSequenceDraftStore();
     mountComposer();
-    expect(wrapper!.findAll("[data-test='mobile-sequence-source-pick']")).toHaveLength(1);
+    expect(wrapper!.findAll("[data-test='mobile-sequence-source-well']")).toHaveLength(1);
 
-    await wrapper!.get("[data-test='mobile-sequence-source-pick']").trigger("click");
+    await wrapper!.get("[data-test='mobile-sequence-source-well']").trigger("click");
     const picker = wrapper!.getComponent({ name: "MobileImagePickerSheet" });
     expect(picker.props("open")).toBe(true);
     picker.vm.$emit("pick", { filename: "opening.jpg", base64: "wire-bytes" });
@@ -645,7 +645,7 @@ describe("MobileSequenceComposer opening image placement", () => {
     expect(disclosure.element.closest(".mobile-advanced-sheet")).toBeNull();
     expect(
       wrapper!
-        .get("[data-test='mobile-sequence-source-pick']")
+        .get("[data-test='mobile-sequence-source-well']")
         .element.closest(".mobile-advanced-sheet"),
     ).toBeNull();
     expect(wrapper!.find("[data-test='mobile-sequence-advanced-opening']").exists()).toBe(false);
@@ -674,7 +674,7 @@ describe("MobileSequenceComposer opening image placement", () => {
   it("hides the opening image for a checkpoint that reads no source image", () => {
     mountComposer({ selectedModel: { ...ltx2, source_image: "unsupported" } });
     expect(wrapper!.find("[data-test='mobile-sequence-source-disclosure']").exists()).toBe(false);
-    expect(wrapper!.find("[data-test='mobile-sequence-source-pick']").exists()).toBe(false);
+    expect(wrapper!.find("[data-test='mobile-sequence-source-well']").exists()).toBe(false);
   });
 
   it("keeps the opening image for an older server that advertises no contract", () => {

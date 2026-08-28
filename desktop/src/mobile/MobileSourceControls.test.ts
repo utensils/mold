@@ -77,8 +77,8 @@ describe("MobileSourceControls", () => {
     const wrapper = mount(MobileSourceControls, { props: { form } });
 
     expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='mobile-source-add']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='mobile-source-required']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-source-well']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(false);
     // An older server rejects wan keyframes outright, so an absent contract
     // must never surface the End frame well.
     expect(wrapper.find("[data-test='mobile-end-frame-controls']").exists()).toBe(false);
@@ -102,9 +102,11 @@ describe("MobileSourceControls", () => {
       global: { stubs: { MobileImagePickerSheet: true } },
     });
 
-    expect(wrapper.get("[data-test='mobile-source-required']").text()).toContain("Required");
-    expect(wrapper.get("[data-test='mobile-source-add']").attributes("aria-required")).toBe("true");
-    expect(wrapper.get("[data-test='mobile-source-conditioning-error']").text()).toContain(
+    expect(wrapper.get("[data-test='source-required-badge']").text()).toContain("Required");
+    expect(wrapper.get("[data-test='mobile-source-well']").attributes("aria-required")).toBe(
+      "true",
+    );
+    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toContain(
       "image-to-video only",
     );
     expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([false]);
@@ -142,7 +144,7 @@ describe("MobileSourceControls", () => {
     // opt-out of the contract.
     form.extendVideo = null;
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-source-conditioning-error']").text()).toContain(
+    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toContain(
       "image-to-video only",
     );
     expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([false]);
@@ -154,11 +156,11 @@ describe("MobileSourceControls", () => {
     const target = { baseUrl: "http://halcyon:7680", apiKey: "remote-key" };
     const wrapper = mount(MobileSourceControls, { props: { form, target } });
 
-    expect(wrapper.find("[data-test='mobile-source-required']").exists()).toBe(false);
-    const endWell = wrapper.get("[data-test='mobile-end-frame-controls']");
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(false);
+    const endWell = wrapper.get("[data-test='source-media-wells']");
     expect(endWell.text()).toContain("Optional");
 
-    await wrapper.get("[data-test='mobile-end-frame-add']").trigger("click");
+    await wrapper.get("[data-test='mobile-end-frame-gallery']").trigger("click");
     const endPicker = wrapper
       .findAllComponents(MobileImagePickerSheet)
       .find((sheet) => sheet.props("title") === "End frame");
@@ -179,14 +181,14 @@ describe("MobileSourceControls", () => {
 
     // A closing still with nothing to open the clip is refused, not silently
     // dropped or shipped as a lone keyframe.
-    expect(wrapper.get("[data-test='mobile-source-conditioning-error']").text()).toContain(
+    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toContain(
       "needs a first frame",
     );
     expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([false]);
 
     form.sourceImage = "T1BFTklORw==";
     await flushPromises();
-    expect(wrapper.find("[data-test='mobile-source-conditioning-error']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='source-conditioning-error']").exists()).toBe(false);
     expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([true]);
 
     await wrapper.get("[data-test='mobile-end-frame-remove']").trigger("click");
@@ -241,7 +243,7 @@ describe("MobileSourceControls", () => {
     ]);
     expect(wrapper.get("[data-test='mobile-source-error']").text()).toContain("Only PNG or JPEG");
 
-    await wrapper.get("[data-test='mobile-source-add']").trigger("click");
+    await wrapper.get("[data-test='mobile-source-gallery']").trigger("click");
     const picker = wrapper.getComponent(MobileImagePickerSheet);
     expect(picker.props()).toMatchObject({
       open: true,

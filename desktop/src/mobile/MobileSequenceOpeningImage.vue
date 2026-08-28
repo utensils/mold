@@ -26,7 +26,7 @@ import {
 import type { ApiTarget } from "../lib/api/client";
 import type { ModelEntry } from "../lib/api/types";
 import type { GenerateForm } from "../lib/generateForm";
-import { base64ToDataUrl } from "../lib/image";
+import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import MobileImagePickerSheet, {
   type MobileGallerySource,
   type MobilePickedImage,
@@ -76,41 +76,21 @@ function sourceImageMime(filename: string): string {
 
 <template>
   <div class="mobile-sequence-opening">
-    <figure v-if="draft.openingImage?.base64" class="mobile-source-preview-wrap">
-      <img
-        class="mobile-source-preview"
-        :src="
-          base64ToDataUrl(
-            draft.openingImage.base64 ?? '',
-            sourceImageMime(draft.openingImage.filename),
-          )
-        "
-        :alt="draft.openingImage.filename"
-        data-test="mobile-sequence-source-preview"
-      />
-      <figcaption>{{ draft.openingImage.filename }}</figcaption>
-    </figure>
-    <div class="mobile-media-actions">
-      <button
-        type="button"
-        class="secondary-button"
-        data-test="mobile-sequence-source-pick"
-        :disabled="locked || !target"
-        @click="imagePickerOpen = true"
-      >
-        {{ draft.openingImage ? "Replace opening image" : "Attach opening image" }}
-      </button>
-      <button
-        v-if="draft.openingImage"
-        type="button"
-        class="secondary-button"
-        data-test="mobile-sequence-source-clear"
-        :disabled="locked"
-        @click="draft.openingImage = null"
-      >
-        Remove
-      </button>
-    </div>
+    <ImageDropWell
+      :image="draft.openingImage?.base64 ?? null"
+      :mime-type="draft.openingImage ? sourceImageMime(draft.openingImage.filename) : null"
+      :filename="draft.openingImage?.filename ?? null"
+      placeholder="Attach opening image"
+      alt="Sequence opening image"
+      test-id="mobile-sequence-source"
+      touch-friendly
+      :touch-target-size="48"
+      native-picker
+      :disabled="locked"
+      :pick-disabled="!target"
+      @pick="imagePickerOpen = true"
+      @clear="draft.openingImage = null"
+    />
     <template v-if="draft.openingImage">
       <label class="mobile-range-field">
         <span>

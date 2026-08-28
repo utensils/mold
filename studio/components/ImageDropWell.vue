@@ -78,6 +78,12 @@ function pick(): void {
   if (props.nativePicker) emit("pick");
   else input.value?.click();
 }
+function replace(): void {
+  if (inert.value) return;
+  if (props.nativePicker) emit("pick");
+  else if (props.gallery) emit("gallery");
+  else input.value?.click();
+}
 function onChange(event: Event): void {
   const el = event.target as HTMLInputElement;
   const file = el.files?.[0];
@@ -115,19 +121,10 @@ function onDrop(event: DragEvent): void {
       @change="onChange"
     />
 
-    <div v-if="previewUrl" class="image-well__preview">
-      <img :src="previewUrl" :alt="alt" />
-      <button
-        type="button"
-        class="image-well__clear"
-        :disabled="disabled"
-        :aria-label="`Remove ${alt.toLowerCase()}`"
-        :data-test="`${testId}-remove`"
-        @click="emit('clear')"
-      >
-        ✕
-      </button>
-    </div>
+    <figure v-if="previewUrl" class="image-well__preview">
+      <img :src="previewUrl" :alt="alt" :data-test="`${testId}-preview`" />
+      <figcaption v-if="filename">{{ filename }}</figcaption>
+    </figure>
 
     <div
       v-else
@@ -156,11 +153,30 @@ function onDrop(event: DragEvent): void {
       <template v-else>{{ placeholder }}</template>
     </div>
 
-    <div v-if="gallery || needsReattach" class="image-well__actions">
+    <div
+      v-if="previewUrl || gallery || needsReattach"
+      class="image-well__actions"
+    >
+      <span
+        v-if="previewUrl"
+        class="image-well__action-alias"
+        :data-test="gallery ? `${testId}-gallery` : undefined"
+        @click="replace"
+      >
+        <button
+          type="button"
+          class="image-well__action"
+          :disabled="inert"
+          :data-test="`${testId}-replace`"
+          @click.stop="replace"
+        >
+          Replace photo
+        </button>
+      </span>
       <button
-        v-if="gallery"
+        v-else-if="gallery"
         type="button"
-        class="image-well__gallery"
+        class="image-well__action image-well__action--quiet"
         :disabled="inert"
         :data-test="`${testId}-gallery`"
         @click="emit('gallery')"
@@ -168,9 +184,9 @@ function onDrop(event: DragEvent): void {
         {{ galleryLabel }}
       </button>
       <button
-        v-if="needsReattach"
+        v-if="previewUrl || needsReattach"
         type="button"
-        class="image-well__gallery"
+        class="image-well__action"
         :disabled="disabled"
         :aria-label="`Remove ${alt.toLowerCase()}`"
         :data-test="`${testId}-remove`"
@@ -190,6 +206,9 @@ function onDrop(event: DragEvent): void {
 }
 .image-well__input {
   display: none;
+}
+.image-well__action-alias {
+  display: contents;
 }
 .image-well__zone {
   display: grid;
@@ -228,8 +247,9 @@ function onDrop(event: DragEvent): void {
   color: var(--ink, currentColor);
 }
 .image-well__preview {
-  position: relative;
-  display: inline-block;
+  display: grid;
+  gap: 5px;
+  margin: 0;
   max-width: 100%;
   justify-self: start;
 }
@@ -240,52 +260,61 @@ function onDrop(event: DragEvent): void {
   border: 1px solid var(--edge, #bbb);
   border-radius: 10px;
 }
-.image-well__clear {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--edge, #bbb);
-  border-radius: 6px;
-  background: var(--bench, rgba(255, 255, 255, 0.85));
-  color: var(--ink-2, inherit);
-  font-size: 11px;
-  cursor: pointer;
-}
-.image-well__clear:hover {
-  color: var(--stop, #b42318);
+.image-well__preview figcaption {
+  overflow: hidden;
+  color: var(--ink-3, #737373);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .image-well__actions {
   display: flex;
-  gap: 12px;
+  gap: 10px;
 }
-.image-well__gallery {
+.image-well__action {
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid var(--edge, #bbb);
+  border-radius: 8px;
+  background: var(--bench, transparent);
+  color: var(--ink-3, #737373);
+  font-size: 12px;
+  cursor: pointer;
+}
+.image-well__action--quiet {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--ink-3, #737373);
-  font-size: 12px;
   text-decoration: underline;
   text-underline-offset: 2px;
-  cursor: pointer;
 }
-.image-well__gallery:hover {
+.image-well__action:hover {
   color: var(--ink, currentColor);
 }
-.image-well__gallery:disabled,
-.image-well__clear:disabled {
+.image-well__action:disabled {
   opacity: 0.5;
   cursor: default;
 }
-.image-well--touch .image-well__gallery {
-  min-height: var(--image-well-touch-target, 44px);
+.image-well--touch .image-well__preview {
+  width: 100%;
+  justify-self: stretch;
 }
-.image-well--touch .image-well__clear {
-  width: var(--image-well-touch-target, 44px);
-  height: var(--image-well-touch-target, 44px);
+.image-well--touch .image-well__preview img {
+  width: 100%;
+  max-height: min(55vh, 440px);
+  object-fit: contain;
+  background: var(--color-print-surface, #111);
+}
+.image-well--touch .image-well__actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.image-well--touch .image-well__action {
+  min-height: var(--image-well-touch-target, 44px);
+  color: var(--ink, currentColor);
+  font-family: var(--font-utility, inherit);
   font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
 }
 </style>
