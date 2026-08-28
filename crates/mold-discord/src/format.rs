@@ -1033,6 +1033,7 @@ mod tests {
             audio: None,
             images: vec![],
             video: Some(mold_core::VideoData {
+                video_only: None,
                 attention_path: None,
                 data: vec![0u8; 16],
                 format: OutputFormat::Mp4,
@@ -1082,6 +1083,7 @@ mod tests {
             audio: None,
             images: vec![],
             video: Some(mold_core::VideoData {
+                video_only: None,
                 attention_path: None,
                 data: vec![0u8; 16],
                 format: OutputFormat::Gif,

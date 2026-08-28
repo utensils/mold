@@ -3495,6 +3495,7 @@ pub(crate) fn build_stage_generate_request(
     idx: usize,
 ) -> GenerateRequest {
     GenerateRequest {
+        video_only: None,
         collection: None,
         tags: None,
         title: None,

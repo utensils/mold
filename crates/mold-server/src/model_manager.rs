@@ -5109,6 +5109,7 @@ mod tests {
     #[test]
     fn activation_hint_from_request_classifies_correctly() {
         let mut req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

@@ -312,6 +312,7 @@ mod tests {
 
     fn req() -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

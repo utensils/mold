@@ -557,6 +557,8 @@ export interface GenerateRequest {
   frames?: number;
   fps?: number;
   enable_audio?: boolean;
+  /** LTX-2 video-only opt-in (#1037): true skips the audio branch. */
+  video_only?: boolean;
   // LTX-2 advanced video (ltx2 only). Omitted → engine auto-selects.
   /** Conditioning audio for the a2vid (audio-to-video) pipeline, base64 (no
    * data-URI prefix). mold-core `audio_file`. */
@@ -779,6 +781,8 @@ export interface OutputMetadata {
   upscale_model?: string | null;
   gif_preview?: boolean | null;
   enable_audio?: boolean | null;
+  /** LTX-2 video-only opt-in as recorded at creation (#1037). */
+  video_only?: boolean | null;
   audio_file_path?: string | null;
   source_video_path?: string | null;
   extend_video_path?: string | null;

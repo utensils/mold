@@ -313,7 +313,6 @@ pub enum RuntimeSemanticVariable {
     LoraBypass,
     LtxDebugAltPrompt,
     LtxDebugCompareUncond,
-    LtxDebugDisableAudioBranch,
     LtxDebugDisableCrossAttentionAdaLn,
     Ltx2DebugDisableTransformerGatedAttention,
     Ltx2DebugForceCpuPromptEncoder,
@@ -662,9 +661,6 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_LORA_BYPASS" => RuntimeSemanticVariable::LoraBypass,
         "MOLD_LTX_DEBUG_ALT_PROMPT" => RuntimeSemanticVariable::LtxDebugAltPrompt,
         "MOLD_LTX_DEBUG_COMPARE_UNCOND" => RuntimeSemanticVariable::LtxDebugCompareUncond,
-        "MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH" => {
-            RuntimeSemanticVariable::LtxDebugDisableAudioBranch
-        }
         "MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN" => {
             RuntimeSemanticVariable::LtxDebugDisableCrossAttentionAdaLn
         }
@@ -743,7 +739,6 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
             if matches!(
                 variable,
                 RuntimeSemanticVariable::LtxDebugCompareUncond
-                    | RuntimeSemanticVariable::LtxDebugDisableAudioBranch
                     | RuntimeSemanticVariable::LtxDebugDisableCrossAttentionAdaLn
                     | RuntimeSemanticVariable::Ltx2DebugDisableTransformerGatedAttention
                     | RuntimeSemanticVariable::Ltx2DebugLoadBlocks

@@ -940,10 +940,12 @@ impl Ltx2RuntimeSession {
         // silent exports. Keep the internal audio branch active whenever the
         // prompt encoder emitted audio conditioning so the denoiser stays on the
         // same multimodal path as upstream; export semantics remain silent
-        // unless the request explicitly wants audio output.
+        // unless the request explicitly wants audio output. An explicit
+        // `video_only` request (#1037) is the one structural off switch —
+        // the graph's `run_audio_branch` is false only for it.
         let prompt_has_audio_conditioning = prompt.conditional.audio_encoding.is_some()
             || prompt.unconditional.audio_encoding.is_some();
-        let wants_audio_latents = if ltx_debug_disable_audio_branch_enabled() {
+        let wants_audio_latents = if !plan.execution_graph.run_audio_branch {
             false
         } else {
             plan.execution_graph.wants_audio_output
@@ -8107,10 +8109,6 @@ fn ltx_debug_alt_prompt() -> Option<String> {
         .filter(|prompt| !prompt.is_empty())
 }
 
-fn ltx_debug_disable_audio_branch_enabled() -> bool {
-    crate::runtime_env::value("MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH").is_some()
-}
-
 fn ltx_debug_disable_cross_attention_adaln_enabled() -> bool {
     crate::runtime_env::value("MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN").is_some()
 }
@@ -8656,6 +8654,7 @@ mod tests {
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

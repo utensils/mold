@@ -643,6 +643,8 @@ fn extract_request_fields(
     // Intentionally exhaustive: adding any GenerateRequest field fails this
     // build until it is classified as retained JSON or extracted authority.
     let mold_core::GenerateRequest {
+        // A plain setting, retained in the durable JSON like `enable_audio`.
+        video_only,
         prompt,
         negative_prompt,
         model,
@@ -868,6 +870,7 @@ fn extract_request_fields(
         upscale_model,
         gif_preview,
         enable_audio,
+        video_only,
         audio_file: None,
         audio_file_path: None,
         source_video: None,

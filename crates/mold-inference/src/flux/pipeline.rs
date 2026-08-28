@@ -3714,6 +3714,7 @@ mod tests {
         plural: Option<Vec<LoraWeight>>,
     ) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

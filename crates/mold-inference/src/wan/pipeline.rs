@@ -2047,6 +2047,7 @@ impl WanEngine {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                video_only: None,
                 attention_path: None,
                 data: video_bytes,
                 format: output_format,
@@ -2764,6 +2765,7 @@ mod tests {
 
     fn request() -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

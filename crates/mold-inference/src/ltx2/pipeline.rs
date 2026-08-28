@@ -1087,6 +1087,7 @@ impl Ltx2Engine {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                video_only: (!plan.execution_graph.run_audio_branch).then_some(true),
                 attention_path: outcome_attention_path,
                 data: output_bytes,
                 format: req.resolved_output_format(),
@@ -1266,6 +1267,7 @@ impl Ltx2Engine {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                video_only: (!plan.execution_graph.run_audio_branch).then_some(true),
                 attention_path: rendered.attention_path.map(str::to_string),
                 data: output_bytes,
                 format: req.resolved_output_format(),
@@ -2148,6 +2150,7 @@ mod tests {
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -2477,6 +2480,7 @@ mod tests {
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -2556,6 +2560,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -2808,6 +2813,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

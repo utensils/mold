@@ -863,6 +863,7 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
     let scheduler_s: Option<String> = row.get(17)?;
     let scheduler = scheduler_s.as_deref().and_then(scheduler_from_str);
     let legacy_metadata = OutputMetadata {
+        video_only: None,
         attention_path: None,
         collection: None,
         tags: None,
@@ -1047,6 +1048,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            video_only: None,
             attention_path: None,
             collection: None,
             tags: None,

@@ -41,6 +41,8 @@ import {
   AUDIO_ONLY_PIPELINE,
   isAudioOnlyPipeline,
 } from "@studio/lib/ltx2Pipeline";
+import { videoOnlyBlockedReason } from "@studio/lib/videoOnly";
+import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import {
   emptyGuidanceOverrides,
   guidanceOverrideCount,
@@ -204,6 +206,21 @@ function setControlAdapter(raw: string) {
 }
 const showLipDubTimingHint = computed(
   () => props.modelValue.pipeline === "lip-dub",
+);
+
+// #1037: one policy decides when video-only may ride (shared with desktop),
+// so a blocked toggle explains itself here instead of as a server 422.
+const videoOnlyBlocked = computed(() =>
+  videoOnlyBlockedReason({
+    audioEnabled: props.modelValue.enableAudio === true,
+    audioOnlyPipeline: audioOnlyPipeline.value,
+    hasConditioningAudio:
+      props.modelValue.audioFile !== null ||
+      props.modelValue.audioFilePath.trim().length > 0,
+    isExtend:
+      props.modelValue.extendVideo !== null ||
+      props.modelValue.extendVideoPath.trim().length > 0,
+  }),
 );
 
 const cameraMode = ref(cameraMotionMode(props.modelValue.cameraControl));
@@ -451,6 +468,29 @@ function removeKeyframe(index: number) {
           cameraUnsupportedReason ??
           "Built-in camera motions are available for LTX-2 19B only. This model accepts a custom LoRA path."
         }}
+      </p>
+    </div>
+
+    <div class="ltx2__field">
+      <span class="ltx2__label">Video only</span>
+      <SwitchToggle
+        :model-value="modelValue.videoOnly === true"
+        :disabled="videoOnlyBlocked !== null"
+        label="Skip the audio branch (changes output)"
+        data-test="ltx2-video-only"
+        @update:model-value="patch({ videoOnly: $event })"
+      />
+      <p
+        v-if="videoOnlyBlocked"
+        class="ltx2__hint"
+        data-test="ltx2-video-only-blocked"
+      >
+        {{ videoOnlyBlocked }}
+      </p>
+      <p v-else class="ltx2__hint">
+        Skips the audio half of the transformer entirely. Output-changing:
+        the same seed renders different video than the default multimodal
+        path.
       </p>
     </div>
 

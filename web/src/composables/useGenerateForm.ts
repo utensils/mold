@@ -63,7 +63,11 @@ import {
 } from "@studio/lib/identityConditioning";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
-import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
+import {
+  isAudioOnlyPipeline,
+  stripAudioOnlyIncompatibleFields,
+} from "@studio/lib/ltx2Pipeline";
+import { requestVideoOnly } from "@studio/lib/videoOnly";
 import {
   emptyGuidanceOverrides,
   guidanceOverridesFromWire,
@@ -194,6 +198,7 @@ function defaultForm(): GenerateFormState {
     placement: null,
     loras: [],
     enableAudio: null,
+    videoOnly: false,
     h3Authoring: emptyMinimaxH3AuthoringState(),
   };
 }
@@ -340,6 +345,7 @@ function modelDefaultsPatch(
   next.enableAudio = capabilities.supportsAudio
     ? model.supports_audio !== false
     : null;
+  if (!capabilities.supportsAudio) next.videoOnly = false;
   if (!capabilities.supportsScheduler) {
     next.scheduler = null;
   } else if (
@@ -683,6 +689,7 @@ export function applyMetadataToForm(
     upscaleModel: metadata.upscale_model ?? "",
     gifPreview: metadata.gif_preview ?? false,
     enableAudio: metadata.enable_audio ?? next.enableAudio,
+    videoOnly: metadata.video_only === true,
     audioFilePath: metadata.audio_file_path ?? "",
     sourceVideoPath: metadata.source_video_path ?? "",
     extendVideoPath: metadata.extend_video_path ?? "",
@@ -1336,6 +1343,15 @@ export function useGenerateForm(): UseGenerateForm {
             : (s.enableAudio ?? undefined),
         ...(ltx2
           ? {
+              video_only: requestVideoOnly(s.videoOnly === true, {
+                audioEnabled:
+                  model?.supports_audio !== false && s.enableAudio === true,
+                audioOnlyPipeline: isAudioOnlyPipeline(s.pipeline),
+                hasConditioningAudio:
+                  s.audioFile !== null || audioPath.length > 0,
+                isExtend:
+                  s.extendVideo !== null || extendVideoPath.length > 0,
+              }),
               audio_file: s.audioFile?.base64 ?? undefined,
               audio_file_path: s.audioFile ? undefined : audioPath || undefined,
               source_video: s.sourceVideo?.base64 ?? undefined,

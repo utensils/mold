@@ -214,6 +214,7 @@ mod tests {
 
     fn test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            video_only: None,
             attention_path: None,
             collection: None,
             tags: None,

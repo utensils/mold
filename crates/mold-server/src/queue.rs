@@ -4381,6 +4381,7 @@ mod tests {
     /// hand to `OutputMetadata::from_generate_request` in tests.
     fn fake_request(model: &str) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -5971,6 +5972,7 @@ mod tests {
         request.enable_audio = Some(true);
 
         let video = mold_core::VideoData {
+            video_only: None,
             attention_path: None,
             data: b"synthetic-h3-mp4-with-synchronized-audio".to_vec(),
             format: OutputFormat::Mp4,
@@ -6127,6 +6129,7 @@ mod tests {
             },
         ]);
         let video = mold_core::VideoData {
+            video_only: None,
             attention_path: None,
             data: b"synthetic-ref2va-mp4-with-synchronized-audio".to_vec(),
             format: OutputFormat::Mp4,
@@ -6581,6 +6584,7 @@ mod tests {
         // thumbnail PNG and hard-coded every `video_*` field to `None`,
         // silently degrading every LTX-Video / LTX-2 response to an image.
         let video = mold_core::VideoData {
+            video_only: None,
             attention_path: None,
             data: vec![0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p'],
             format: OutputFormat::Mp4,
@@ -6688,6 +6692,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_video_empty_gif_preview_omits_field() {
         let video = mold_core::VideoData {
+            video_only: None,
             attention_path: None,
             data: vec![0x00, 0x00, 0x00, 0x18],
             format: OutputFormat::Mp4,
@@ -6923,6 +6928,7 @@ mod tests {
         let mut req = fake_request("ltx-video:fp16");
         req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
         let video = mold_core::VideoData {
+            video_only: None,
             attention_path: None,
             data: vec![0, 0, 0, 24],
             format: OutputFormat::Mp4,

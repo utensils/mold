@@ -1588,6 +1588,7 @@ fn build_request(
     });
 
     Ok(GenerateRequest {
+        video_only: None,
         collection: params
             .collection
             .as_deref()

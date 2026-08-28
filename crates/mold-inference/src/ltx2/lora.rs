@@ -233,6 +233,7 @@ mod tests {
 
     fn dummy_request() -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

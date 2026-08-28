@@ -2405,6 +2405,31 @@ fn validate_generate_request_after_activation_with(
     if req.enable_audio == Some(true) {
         require_ltx2_family(family, "enable_audio")?;
     }
+    if req.video_only == Some(true) {
+        require_ltx2_family(family, "video_only")?;
+        if req.enable_audio == Some(true) {
+            return Err("video_only cannot be combined with enable_audio=true".to_string());
+        }
+        if req.pipeline.is_some_and(Ltx2PipelineMode::is_audio_only) {
+            return Err(
+                "video_only cannot be combined with an audio-only pipeline (t2a)".to_string(),
+            );
+        }
+        if req.audio_file.is_some() || req.audio_file_path.is_some() {
+            return Err(
+                "video_only cannot be combined with conditioning audio; the audio branch it \
+                 skips is what the conditioning would drive"
+                    .to_string(),
+            );
+        }
+        if req.extend_video.is_some() || req.extend_video_path.is_some() {
+            return Err(
+                "video_only cannot be combined with extend_video; a continuation must keep \
+                 the source clip's rendering path"
+                    .to_string(),
+            );
+        }
+    }
     if req.retake_range.is_some() {
         require_ltx2_family(family, "retake_range")?;
     }
@@ -3636,6 +3661,7 @@ mod tests {
 
     fn valid_req() -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -4378,6 +4404,65 @@ mod tests {
         req.control_image = None;
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("ControlNet"), "got: {err}");
+    }
+
+    /// The #1037 conflict table: video_only refuses every combination whose
+    /// audio the skipped branch would have had to produce or consume, and is
+    /// LTX-2-only. `Some(false)` stays inert everywhere, like
+    /// `enable_audio: Some(false)`.
+    #[test]
+    fn video_only_conflicts_are_refused_and_the_plain_form_is_admitted() {
+        let base = || {
+            let mut req = valid_req();
+            req.model = "ltx-2.3-22b-dev:fp8".to_string();
+            req.width = 1216;
+            req.height = 704;
+            req.frames = Some(97);
+            req.output_format = Some(OutputFormat::Mp4);
+            req.video_only = Some(true);
+            req
+        };
+        // The plain opt-in is admitted, MP4 output included (it renders
+        // silent instead of taking the MP4 default-on audio).
+        validate_generate_request(&base()).unwrap();
+
+        let mut with_audio = base();
+        with_audio.enable_audio = Some(true);
+        let err = validate_generate_request(&with_audio).unwrap_err();
+        assert!(err.contains("enable_audio"), "got: {err}");
+
+        let mut t2a = base();
+        t2a.pipeline = Some(Ltx2PipelineMode::T2a);
+        t2a.output_format = Some(OutputFormat::Wav);
+        t2a.width = 0;
+        t2a.height = 0;
+        let err = validate_generate_request(&t2a).unwrap_err();
+        assert!(err.contains("audio-only"), "got: {err}");
+
+        let mut conditioned = base();
+        conditioned.audio_file = Some(vec![1, 2, 3]);
+        let err = validate_generate_request(&conditioned).unwrap_err();
+        assert!(err.contains("conditioning audio"), "got: {err}");
+
+        let mut conditioned_path = base();
+        conditioned_path.audio_file_path = Some("/tmp/a.wav".to_string());
+        let err = validate_generate_request(&conditioned_path).unwrap_err();
+        assert!(err.contains("conditioning audio"), "got: {err}");
+
+        let mut extend = base();
+        extend.extend_video = Some(vec![0; 32]);
+        let err = validate_generate_request(&extend).unwrap_err();
+        assert!(err.contains("extend_video"), "got: {err}");
+
+        // Family gate: a still-image family cannot opt in…
+        let mut wrong_family = valid_req();
+        wrong_family.video_only = Some(true);
+        let err = validate_generate_request(&wrong_family).unwrap_err();
+        assert!(err.contains("video_only"), "got: {err}");
+        // …but an explicit false is inert there, exactly like enable_audio.
+        let mut inert = valid_req();
+        inert.video_only = Some(false);
+        validate_generate_request(&inert).unwrap();
     }
 
     #[test]

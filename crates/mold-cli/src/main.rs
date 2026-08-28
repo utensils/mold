@@ -868,6 +868,12 @@ Examples:
         #[arg(long, help_heading = "Video", conflicts_with = "audio")]
         no_audio: bool,
 
+        /// Skip the LTX-2 audio branch entirely (#1037). Output-changing:
+        /// the branch feeds the video stream, so this is never a default.
+        /// Conflicts with --audio and --audio-file.
+        #[arg(long, help_heading = "Video", conflicts_with_all = ["audio", "audio_file"])]
+        video_only: bool,
+
         /// Conditioning audio file for audio-to-video generation.
         #[arg(long, help_heading = "Video", value_hint = ValueHint::FilePath)]
         audio_file: Option<String>,
@@ -2076,6 +2082,7 @@ async fn run() -> anyhow::Result<()> {
             motion_tail,
             audio,
             no_audio,
+            video_only,
             audio_file,
             video,
             extend,
@@ -2266,6 +2273,7 @@ async fn run() -> anyhow::Result<()> {
                 motion_tail,
                 audio,
                 no_audio,
+                video_only,
                 audio_file,
                 video,
                 extend,
@@ -2913,6 +2921,17 @@ mod tests {
     /// Try to parse CLI args, returning the clap error on failure.
     fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("mold").chain(args.iter().copied()))
+    }
+
+    /// `--video-only` skips the audio branch, so asking for audio beside it
+    /// — output or conditioning — is a contradiction clap refuses before a
+    /// request exists.
+    #[test]
+    fn video_only_conflicts_with_audio_flags() {
+        assert!(try_parse(&["run", "m", "p", "--video-only", "--audio"]).is_err());
+        assert!(try_parse(&["run", "m", "p", "--video-only", "--audio-file", "a.wav"]).is_err());
+        assert!(try_parse(&["run", "m", "p", "--video-only", "--no-audio"]).is_ok());
+        assert!(try_parse(&["run", "m", "p", "--video-only"]).is_ok());
     }
 
     #[test]

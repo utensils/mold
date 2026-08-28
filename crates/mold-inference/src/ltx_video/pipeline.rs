@@ -1708,6 +1708,7 @@ impl LtxVideoEngine {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                video_only: None,
                 attention_path: None,
                 data: video_bytes,
                 format: output_format,

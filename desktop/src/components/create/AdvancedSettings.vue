@@ -104,6 +104,7 @@ import {
   pipelineForControlId,
 } from "@studio/lib/ltx2Control";
 import { AUDIO_ONLY_PIPELINE, isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeline";
+import { videoOnlyBlockedReason } from "@studio/lib/videoOnly";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { attachPickedVideo } from "../../lib/sourceAttachment";
@@ -337,6 +338,16 @@ function setPipeline(v: string) {
   }
 }
 const audioOnlyPipeline = computed(() => isAudioOnlyPipeline(props.form.pipeline));
+// #1037: shared policy (same module web uses) so a blocked toggle explains
+// itself inline instead of as a server 422.
+const videoOnlyBlocked = computed(() =>
+  videoOnlyBlockedReason({
+    audioEnabled: props.form.enableAudio,
+    audioOnlyPipeline: audioOnlyPipeline.value,
+    hasConditioningAudio: props.form.audioFile !== null,
+    isExtend: props.form.extendVideo !== null,
+  }),
+);
 function setControlAdapter(value: string) {
   // Lip dub is a pipeline of its own; every other adapter drives `ic-lora`.
   if (value) {
@@ -1016,6 +1027,28 @@ function reset() {
                   <option v-for="v in temporalOptions" :key="v" :value="v">{{ v }}</option>
                 </select>
               </div>
+            </div>
+
+            <div class="ms-label--mt">
+              <SwitchToggle
+                :model-value="form.videoOnly"
+                :disabled="videoOnlyBlocked !== null"
+                label="Video only — skip the audio branch (changes output)"
+                data-test="ltx2-video-only"
+                @update:model-value="form.videoOnly = $event"
+              />
+              <p
+                v-if="videoOnlyBlocked"
+                class="ms-hint"
+                data-test="ltx2-video-only-blocked"
+              >
+                {{ videoOnlyBlocked }}
+              </p>
+              <p v-else class="ms-hint">
+                Skips the audio half of the transformer entirely.
+                Output-changing: the same seed renders different video than
+                the default multimodal path.
+              </p>
             </div>
 
             <div class="ms-guidance ms-label--mt">

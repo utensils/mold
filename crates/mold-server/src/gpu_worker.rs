@@ -6583,6 +6583,7 @@ mod tests {
         mismatched_echo: bool,
     ) -> crate::h3_private_bridge::H3ClaimedRunOutput {
         let video = complete.then(|| mold_core::VideoData {
+            video_only: None,
             attention_path: None,
             data: vec![0, 0, 0, 24, b'f', b't', b'y', b'p'],
             format: OutputFormat::Mp4,

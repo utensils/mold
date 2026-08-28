@@ -8326,6 +8326,7 @@ impl App {
                         .map(|composed| composed.tags)
                         .unwrap_or_else(|_| submitted_params.tags.clone());
                         let meta = mold_core::OutputMetadata {
+                            video_only: None,
                             attention_path: None,
                             collection: submitted_params.collection.clone(),
                             tags: (!submitted_filing.is_empty()).then_some(submitted_filing),
@@ -8853,6 +8854,7 @@ impl App {
                         .map(|e| e.metadata.clone());
 
                     let meta = mold_core::OutputMetadata {
+                        video_only: None,
                         attention_path: None,
                         // An upscale of a filed print stays filed: the copy
                         // is the same picture, and losing its title and tags
@@ -10188,6 +10190,7 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::from("/home/user/.mold/output/mold-flux-1234.png"),
             metadata: mold_core::OutputMetadata {
+                video_only: None,
                 attention_path: None,
                 collection: None,
                 tags: None,
@@ -10274,6 +10277,7 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::new(),
             metadata: mold_core::OutputMetadata {
+                video_only: None,
                 attention_path: None,
                 collection: None,
                 tags: None,
@@ -10421,6 +10425,7 @@ mod tests {
 
     fn make_test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            video_only: None,
             attention_path: None,
             collection: None,
             tags: None,
@@ -13061,6 +13066,7 @@ mod tests {
                 model: "ltx-2.3-22b-dev:fp8".to_string(),
                 seed_used: 42,
                 video: Some(mold_core::VideoData {
+                    video_only: None,
                     attention_path: None,
                     data: b"test-mp4".to_vec(),
                     format: OutputFormat::Mp4,
@@ -14491,6 +14497,7 @@ mod tests {
         mold_core::ChainResponse {
             request_warnings: warnings,
             video: mold_core::VideoData {
+                video_only: None,
                 attention_path: None,
                 data: vec![0u8; 4],
                 format: OutputFormat::Mp4,

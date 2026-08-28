@@ -217,6 +217,7 @@ mod tests {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                video_only: None,
                 attention_path: None,
                 data,
                 format,
