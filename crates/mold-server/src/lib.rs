@@ -87,6 +87,10 @@ pub mod thumbnails;
 pub mod variant_dependencies;
 mod wan_admission;
 pub mod web_ui;
+// The arcstats parser and credit policy are pure and unit-tested on every
+// platform, but only the Linux reader calls them; the other targets would
+// otherwise fail `-D warnings` on dead code (#1439).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod zfs_arc;
 
 #[cfg(test)]
