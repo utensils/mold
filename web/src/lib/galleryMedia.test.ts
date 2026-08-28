@@ -65,12 +65,16 @@ describe("resolveThumbnailSrc", () => {
       throw new Error("should not fetch");
     });
     const src = await resolveThumbnailSrc(origin, "cat.png");
-    expect(src).toBe("/api/gallery/thumbnail/cat.png");
+    // The rendition query asks a current server for the display's tier as
+    // JPEG; an older server ignores it and answers its 256 px PNG.
+    expect(src).toBe("/api/gallery/thumbnail/cat.png?size=256&fmt=jpeg");
   });
 
   it("returns a plain absolute URL for a keyless remote", async () => {
     const src = await resolveThumbnailSrc(keylessRemote, "cat.png");
-    expect(src).toBe("http://hal9000:7680/api/gallery/thumbnail/cat.png");
+    expect(src).toBe(
+      "http://hal9000:7680/api/gallery/thumbnail/cat.png?size=256&fmt=jpeg",
+    );
   });
 
   it("blob-fetches an authed remote thumbnail with the key and caches it", async () => {
@@ -88,9 +92,61 @@ describe("resolveThumbnailSrc", () => {
     expect(second).toBe("blob:mock-1"); // cached — no second fetch
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe(
-      "http://halcyon:7680/api/gallery/thumbnail/cat.png",
+      "http://halcyon:7680/api/gallery/thumbnail/cat.png?size=256&fmt=jpeg",
     );
     expect(calls[0]!.key).toBe("secret-key");
+  });
+
+  it("serves an authed tile from the persistent store with zero fetches, and fills it on a miss", async () => {
+    // A minimal Cache API: insertion-ordered, keyed by request URL.
+    const stored = new Map<string, Blob>();
+    const fakeCache = {
+      match: async (url: string) => {
+        const blob = stored.get(url);
+        return blob ? new Response(blob) : undefined;
+      },
+      put: async (url: string, response: Response) => {
+        stored.set(url, await response.blob());
+      },
+      keys: async () => [...stored.keys()].map((u) => new Request(u)),
+      delete: async (url: string | Request) => {
+        return stored.delete(typeof url === "string" ? url : url.url);
+      },
+    };
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => fakeCache,
+    };
+    try {
+      let fetches = 0;
+      mockFetch(() => {
+        fetches += 1;
+        return { ok: true, blob: async () => new Blob(["tile"]) };
+      });
+      // Miss: one fetch, then the bytes land in the store.
+      await resolveThumbnailSrc(authedRemote, "cat.png", { mediaVersion: "1:10" });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(fetches).toBe(1);
+      expect(stored.size).toBe(1);
+
+      // A fresh page (memory cache cleared) hits the store: zero fetches.
+      __resetGalleryMediaForTests();
+      (globalThis as { caches?: unknown }).caches = { open: async () => fakeCache };
+      const src = await resolveThumbnailSrc(authedRemote, "cat.png", { mediaVersion: "1:10" });
+      expect(src.startsWith("blob:")).toBe(true);
+      expect(fetches).toBe(1);
+
+      // A new content version is a different key: fetched again.
+      await resolveThumbnailSrc(authedRemote, "cat.png", { mediaVersion: "2:10" });
+      expect(fetches).toBe(2);
+      // Without a version nothing persists (a "legacy" key could go stale).
+      __resetGalleryMediaForTests();
+      (globalThis as { caches?: unknown }).caches = { open: async () => fakeCache };
+      await resolveThumbnailSrc(authedRemote, "dog.png");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(stored.size).toBe(2);
+    } finally {
+      delete (globalThis as { caches?: unknown }).caches;
+    }
   });
 });
 
