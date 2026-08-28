@@ -43,6 +43,20 @@ function routeForHost(candidate: MobileHost): HostRoute {
   };
 }
 
+function canonicalRouteForHost(candidate: MobileHost): HostRoute {
+  return {
+    ...routeForHost(candidate),
+    heterogeneousBatchMaxOutputs: 64,
+    durableMedia: {
+      protocol_version: 2,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      private_h3: true,
+    },
+  };
+}
+
 function planned(completion: number): GenerationPlacementPreview {
   return {
     version: 1,
@@ -60,6 +74,18 @@ function planned(completion: number): GenerationPlacementPreview {
       estimate_confidence: "high",
     },
   };
+}
+
+/** The non-authoritative answer a chain / local utility plan gives. Not a
+ * legacy server: the machine is still routable when authority is optional. */
+function nonAuthoritative(): GenerationPlacementPreview {
+  return {
+    version: 1,
+    authoritative: false,
+    state_version: 1,
+    plan_version: 1,
+    outcome: "unsupported",
+  } as GenerationPlacementPreview;
 }
 
 function candidate(
@@ -99,6 +125,18 @@ function options(candidates: ReturnType<typeof candidate>[]) {
   };
 }
 
+/** The placement comparator is a SEQUENCE concern now: a print is answered
+ * from each machine's captured queue/GPU snapshot without a probe. */
+function sequenceOptions(candidates: ReturnType<typeof candidate>[]) {
+  return {
+    ...options(candidates),
+    routeForHost: canonicalRouteForHost,
+    request: { model: "ltx-2", stages: [] },
+    chain: true,
+    subject: "sequence" as const,
+  };
+}
+
 describe("mobile automatic generation routing", () => {
   beforeEach(() => {
     previewChainPlacement.mockReset();
@@ -112,12 +150,12 @@ describe("mobile automatic generation routing", () => {
   it("chooses Auto's soonest predicted completion and freezes that route", async () => {
     const studio = host("studio");
     const render = host("render");
-    previewGenerationPlacement.mockImplementation((target: { baseUrl: string }) =>
+    previewChainPlacement.mockImplementation((target: { baseUrl: string }) =>
       Promise.resolve(planned(target.baseUrl === render.baseUrl ? 100 : 9_000)),
     );
 
     const result = await routeAutomaticMobileGeneration(
-      options([candidate(studio), candidate(render)]),
+      sequenceOptions([candidate(studio), candidate(render)]),
     );
 
     expect(result).toMatchObject({
@@ -128,19 +166,18 @@ describe("mobile automatic generation routing", () => {
         target: { baseUrl: render.baseUrl, apiKey: render.apiKey },
         instanceId: "render-instance",
       },
-      legacyUnsupported: false,
     });
   });
 
   it("uses each candidate's captured GPU when Most capable chooses", async () => {
     const studio = host("studio");
     const render = host("render");
-    previewGenerationPlacement.mockImplementation((target: { baseUrl: string }) =>
+    previewChainPlacement.mockImplementation((target: { baseUrl: string }) =>
       Promise.resolve(planned(target.baseUrl === render.baseUrl ? 9_000 : 100)),
     );
 
     const result = await routeAutomaticMobileGeneration({
-      ...options([
+      ...sequenceOptions([
         candidate(studio, { backend: "metal", vramTotalMb: 128_000 }),
         candidate(render, { backend: "cuda", vramTotalMb: 24_000 }),
       ]),
@@ -150,28 +187,98 @@ describe("mobile automatic generation routing", () => {
     expect(result).toMatchObject({ kind: "route", host: { id: "render" } });
   });
 
-  it("falls back to a legacy server only for media-free non-authoritative work", async () => {
+  it("routes Auto from cached v2 telemetry without opening placement probes", async () => {
     const studio = host("studio");
-    previewGenerationPlacement.mockRejectedValue(new ApiError("not found", 404));
+    const render = host("render");
+    const result = await routeAutomaticMobileGeneration({
+      ...options([candidate(studio, { queueDepth: 4 }), candidate(render, { queueDepth: 1 })]),
+      routeForHost: canonicalRouteForHost,
+    });
 
-    const result = await routeAutomaticMobileGeneration(options([candidate(studio)]));
+    expect(result).toMatchObject({ kind: "route", host: { id: "render" } });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+    expect(previewChainPlacement).not.toHaveBeenCalled();
+  });
+
+  it("keeps a machine that refuses the durable contract out of Auto", async () => {
+    const studio = host("studio");
+    const render = host("render");
+    const result = await routeAutomaticMobileGeneration({
+      ...options([candidate(studio, { queueDepth: 0 }), candidate(render, { queueDepth: 5 })]),
+      // The emptier machine advertises no durable queue: it would refuse at
+      // Develop, so the busier one that speaks the contract wins.
+      routeForHost: (candidate) =>
+        candidate.id === "studio" ? routeForHost(candidate) : canonicalRouteForHost(candidate),
+    });
+
+    expect(result).toMatchObject({ kind: "route", host: { id: "render" } });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
+  it("returns a download recovery when canonical telemetry knows every candidate is missing", async () => {
+    const studio = host("studio");
+    const result = await routeAutomaticMobileGeneration({
+      ...options([candidate(studio)]),
+      routeForHost: canonicalRouteForHost,
+      model: "test-model",
+      modelOwnerIds: [],
+      inventoryKnown: () => true,
+    });
+
+    expect(result).toMatchObject({
+      kind: "missing_model",
+      host: { id: "studio" },
+      model: "test-model",
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
+  it("routes Most capable from cached v2 GPU facts without opening probes", async () => {
+    const studio = host("studio");
+    const render = host("render");
+    const result = await routeAutomaticMobileGeneration({
+      ...options([
+        candidate(studio, { backend: "metal", vramTotalMb: 128_000 }),
+        candidate(render, { backend: "cuda", vramTotalMb: 24_000 }),
+      ]),
+      routeForHost: canonicalRouteForHost,
+      policy: "capable",
+    });
+
+    expect(result).toMatchObject({ kind: "route", host: { id: "render" } });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
+  it("still routes a non-authoritative plan when authority is not required", async () => {
+    const studio = host("studio");
+    previewChainPlacement.mockResolvedValue(nonAuthoritative());
+
+    const result = await routeAutomaticMobileGeneration(sequenceOptions([candidate(studio)]));
 
     expect(result).toMatchObject({
       kind: "route",
       host: { id: "studio" },
       placement: null,
-      legacyUnsupported: true,
     });
   });
 
-  it("refuses the legacy fallback for identity requests", async () => {
+  it("refuses a non-authoritative plan for an identity request", async () => {
     const studio = host("studio");
-    previewGenerationPlacement.mockRejectedValue(new ApiError("not found", 404));
+    previewChainPlacement.mockResolvedValue(nonAuthoritative());
 
     const result = await routeAutomaticMobileGeneration({
-      ...options([candidate(studio)]),
-      request: { model: "test-model", id_image: "face-bytes" },
+      ...sequenceOptions([candidate(studio)]),
+      request: { model: "ltx-2", stages: [], id_image: "face-bytes" },
     });
+
+    expect(result.kind).toBe("error");
+  });
+
+  it("reports a machine that could not answer the probe instead of routing to it", async () => {
+    const studio = host("studio");
+    previewChainPlacement.mockRejectedValue(new ApiError("not found", 404));
+
+    const result = await routeAutomaticMobileGeneration(sequenceOptions([candidate(studio)]));
 
     expect(result.kind).toBe("error");
   });
@@ -193,7 +300,7 @@ describe("mobile automatic generation routing", () => {
     const studio = host("studio");
     const render = host("render");
     const stalled: { signal: AbortSignal | null } = { signal: null };
-    previewGenerationPlacement.mockImplementation(
+    previewChainPlacement.mockImplementation(
       (
         target: { baseUrl: string },
         _request: unknown,
@@ -209,7 +316,7 @@ describe("mobile automatic generation routing", () => {
     );
 
     const routing = routeAutomaticMobileGeneration({
-      ...options([candidate(studio), candidate(render)]),
+      ...sequenceOptions([candidate(studio), candidate(render)]),
       settleMs: 25,
     });
     await vi.advanceTimersByTimeAsync(25);
@@ -236,59 +343,102 @@ describe("mobile pinned generation placement", () => {
     };
   }
 
-  it("accepts a planned placement on the frozen route", async () => {
-    previewGenerationPlacement.mockResolvedValue(planned(100));
+  it("accepts a planned placement on the frozen route for a sequence", async () => {
+    previewChainPlacement.mockResolvedValue(planned(100));
 
-    await expect(previewPinnedMobileGeneration(pinnedOptions())).resolves.toMatchObject({
+    await expect(
+      previewPinnedMobileGeneration({
+        ...pinnedOptions(),
+        route: canonicalRouteForHost(host("studio")),
+        request: { model: "ltx-2", stages: [] },
+        chain: true,
+        subject: "sequence" as const,
+      }),
+    ).resolves.toMatchObject({
       kind: "placement",
-      legacyUnsupported: false,
       placement: { outcome: "planned" },
     });
   });
 
-  it("permits the legacy fallback only when authoritative placement is unnecessary", async () => {
-    previewGenerationPlacement.mockRejectedValue(new ApiError("missing", 404));
+  it("reports a sequence probe that could not answer instead of routing anyway", async () => {
+    previewChainPlacement.mockRejectedValue(new ApiError("missing", 404));
 
-    await expect(previewPinnedMobileGeneration(pinnedOptions())).resolves.toEqual({
-      kind: "placement",
-      placement: null,
-      legacyUnsupported: true,
+    const result = await previewPinnedMobileGeneration({
+      ...pinnedOptions(),
+      route: canonicalRouteForHost(host("studio")),
+      request: { model: "ltx-2", stages: [] },
+      chain: true,
+      subject: "sequence" as const,
     });
+
+    expect(result.kind).toBe("error");
   });
 
-  it("submits pinned H3 directly so cold verification happens after queueing", async () => {
-    await expect(
-      previewPinnedMobileGeneration({
-        ...pinnedOptions(),
-        request: {
-          model: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
-          source_image: "frame",
-        },
-      }),
-    ).resolves.toEqual({
-      kind: "placement",
-      placement: null,
-      legacyUnsupported: false,
-    });
+  it("submits every pinned family directly to durable admission", async () => {
+    for (const request of [
+      { model: "flux-dev" },
+      { model: "ltx-2", source_image: "frame" },
+      {
+        model: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+        source_image: "frame",
+      },
+    ]) {
+      await expect(
+        previewPinnedMobileGeneration({
+          ...pinnedOptions(),
+          route: canonicalRouteForHost(host("studio")),
+          request,
+        }),
+      ).resolves.toEqual({ kind: "placement", placement: null });
+    }
     expect(previewGenerationPlacement).not.toHaveBeenCalled();
     expect(previewChainPlacement).not.toHaveBeenCalled();
   });
 
-  it("refuses a legacy identity placement", async () => {
-    previewGenerationPlacement.mockRejectedValue(new ApiError("missing", 404));
+  it("returns a download recovery for a canonical pinned host with a known absence", async () => {
+    await expect(
+      previewPinnedMobileGeneration({
+        ...pinnedOptions(),
+        route: canonicalRouteForHost(host("studio")),
+        model: "test-model",
+        modelOwnerIds: [],
+        inventoryKnown: true,
+      }),
+    ).resolves.toEqual({ kind: "missing_model", model: "test-model" });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
+  it("keeps pinned sequences on the placement contract", async () => {
+    previewChainPlacement.mockResolvedValue(planned(100));
+    await expect(
+      previewPinnedMobileGeneration({
+        ...pinnedOptions(),
+        route: canonicalRouteForHost(host("studio")),
+        request: { model: "ltx-2", stages: [] },
+        chain: true,
+      }),
+    ).resolves.toMatchObject({ kind: "placement", placement: { outcome: "planned" } });
+    expect(previewChainPlacement).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a non-authoritative sequence plan when authority is required", async () => {
+    previewChainPlacement.mockResolvedValue(nonAuthoritative());
 
     const result = await previewPinnedMobileGeneration({
       ...pinnedOptions(),
-      request: { model: "test-model", id_image: "face" },
+      route: canonicalRouteForHost(host("studio")),
+      request: { model: "ltx-2", stages: [], id_image: "face" },
+      chain: true,
+      subject: "sequence" as const,
       requireAuthoritative: true,
     });
 
     expect(result).toMatchObject({ kind: "error" });
-    if (result.kind === "error") expect(result.message).toContain("identity");
+    if (result.kind === "error") expect(result.message).toContain("authoritative");
   });
 
   it("abandons a late answer after cancellation", async () => {
-    previewGenerationPlacement.mockResolvedValue(planned(100));
+    previewChainPlacement.mockResolvedValue(planned(100));
 
     await expect(
       previewPinnedMobileGeneration({ ...pinnedOptions(), isCurrent: () => false }),

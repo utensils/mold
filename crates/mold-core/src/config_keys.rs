@@ -28,6 +28,11 @@ pub enum ValueType {
 /// purges it. `0` keeps trashed prints forever. Profile-scoped DB key.
 pub const GALLERY_TRASH_RETENTION_DAYS_KEY: &str = "gallery.trash_retention_days";
 pub const GALLERY_TRASH_RETENTION_DAYS_ENV: &str = "MOLD_GALLERY_TRASH_RETENTION_DAYS";
+/// Days a held durable queue row is kept before the sweeper purges it, and
+/// days a fully settled batch summary is kept after its last child settled.
+/// `0` keeps both forever. Profile-scoped DB key.
+pub const QUEUE_HELD_RETENTION_DAYS_KEY: &str = "queue.held_retention_days";
+pub const QUEUE_HELD_RETENTION_DAYS_ENV: &str = "MOLD_QUEUE_HELD_RETENTION_DAYS";
 
 /// Whether a titled print is also tagged with its title slug, by the CLIENT
 /// that submits it. Profile-scoped DB key, default true.
@@ -192,6 +197,13 @@ pub const ALL_KEYS: &[ConfigKeyInfo] = &[
         value_type: ValueType::U32,
         env_var: Some(GALLERY_TRASH_RETENTION_DAYS_ENV),
         section: "Gallery",
+    },
+    // Queue
+    ConfigKeyInfo {
+        key: QUEUE_HELD_RETENTION_DAYS_KEY,
+        value_type: ValueType::U32,
+        env_var: Some(QUEUE_HELD_RETENTION_DAYS_ENV),
+        section: "Queue",
     },
     // Generate
     ConfigKeyInfo {
@@ -488,6 +500,8 @@ pub fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
         "scheduler.warm_wait_max_ms" => ConfigValue::U32(config.scheduler.warm_wait_max_ms),
         // Gallery
         GALLERY_TRASH_RETENTION_DAYS_KEY => ConfigValue::U32(config.gallery.trash_retention_days),
+        // Queue
+        QUEUE_HELD_RETENTION_DAYS_KEY => ConfigValue::U32(config.queue.held_retention_days),
         // Generate
         GENERATE_AUTO_TAG_TITLE_KEY => ConfigValue::Bool(config.generate.auto_tag_title),
         // Logging
@@ -673,6 +687,12 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
             config.gallery.trash_retention_days =
                 parse_u32(raw, 0, crate::config::GALLERY_TRASH_RETENTION_MAX_DAYS, key)
                     .map_err(|error| anyhow!("{error} Use 0 to keep trashed prints forever."))?;
+        }
+        // Queue
+        QUEUE_HELD_RETENTION_DAYS_KEY => {
+            config.queue.held_retention_days =
+                parse_u32(raw, 0, crate::config::GALLERY_TRASH_RETENTION_MAX_DAYS, key)
+                    .map_err(|error| anyhow!("{error} Use 0 to keep held rows forever."))?;
         }
         // Generate
         GENERATE_AUTO_TAG_TITLE_KEY => {
@@ -886,6 +906,7 @@ pub fn surface_for_key(key: &str) -> Surface {
         || key.starts_with("generate.")
         || key.starts_with("scheduler.")
         || key.starts_with("gallery.")
+        || key.starts_with("queue.")
         || key.starts_with("model_prefs.")
     {
         return Surface::Db;

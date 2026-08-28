@@ -5,16 +5,23 @@ import {
   findQueueEntryById,
   listQueue,
   mergeQueueEntries,
+  mutateQueueJobOnExpectedInstance,
   parseQueueListing,
   predictedCompletionUnixMs,
   queuePageRequestForCapacity,
   reduceQueuePlanEvent,
+  retryQueueJob,
+  retryQueueJobRecoveringAmbiguity,
+  moveQueueJobToBack,
   setQueueDevicePin,
   type QueuePlan,
   type QueueListing,
 } from "./queuePlan";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("queue plan contract", () => {
   it("derives queue page size only from a positive host capacity", () => {
@@ -355,6 +362,34 @@ describe("queue plan contract", () => {
     });
   });
 
+  it("sends a queued job to the back without reading the queue depth", async () => {
+    let captured: [RequestInfo | URL, RequestInit | undefined] | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured = [input, init];
+        return Response.json({
+          id: "job/1",
+          model: "flux-dev:q8",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 4,
+        });
+      }),
+    );
+    await moveQueueJobToBack(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      "job/1",
+    );
+    const [url, init] = captured!;
+    expect(url).toBe("https://gpu.example/api/queue/job%2F1");
+    expect(init?.method).toBe("PATCH");
+    // The server clamps a large index to the tail, so no depth read is needed.
+    expect(JSON.parse(String(init?.body))).toEqual({
+      position: Number.MAX_SAFE_INTEGER,
+    });
+  });
+
   it("cancels a queued job on the explicit authenticated target", async () => {
     let captured: [RequestInfo | URL, RequestInit | undefined] | null = null;
     vi.stubGlobal(
@@ -374,5 +409,329 @@ describe("queue plan contract", () => {
     expect(url).toBe("https://gpu.example/api/queue/job%2F1");
     expect(init?.method).toBe("DELETE");
     expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
+  });
+
+  it("retries a held job on the explicit authenticated target", async () => {
+    let captured: [RequestInfo | URL, RequestInit | undefined] | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured = [input, init];
+        return new Response(null, { status: 202 });
+      }),
+    );
+
+    await retryQueueJob(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      {
+        instanceId: "instance-1",
+        batchId: "batch-1",
+        clientBatchId: "client-1",
+        jobId: "job/1",
+      },
+    );
+
+    const [url, init] = captured!;
+    expect(url).toBe("https://gpu.example/api/queue/job%2F1/retry");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      instance_id: "instance-1",
+      batch_id: "batch-1",
+      client_batch_id: "client-1",
+      job_id: "job/1",
+    });
+  });
+
+  it.each([
+    [
+      "commit-then-500",
+      () => Promise.resolve(new Response("failed", { status: 500 })),
+      "accepted",
+    ],
+    [
+      "disconnect",
+      () => Promise.reject(new TypeError("connection closed")),
+      "running",
+    ],
+  ])(
+    "holds an ambiguous retry %s fence until exact authority advances",
+    async (_case, failRetry, transitionedState) => {
+      vi.useFakeTimers();
+      let reads = 0;
+      const fetchMock = vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/queue/job%2F1/retry")) return failRetry();
+        if (url.endsWith("/api/generation-batches/batch-1")) {
+          const state = reads++ === 0 ? "held" : transitionedState;
+          return Promise.resolve(
+            Response.json({
+              id: "batch-1",
+              client_batch_id: "client-1",
+              instance_id: "instance-1",
+              durable: true,
+              children: [
+                {
+                  index: 1,
+                  job_id: "job/1",
+                  state,
+                  created_at_ms: 1,
+                  updated_at_ms: 2,
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.reject(new Error(`unexpected URL: ${url}`));
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const outcomePromise = retryQueueJobRecoveringAmbiguity(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
+      );
+      await vi.runAllTimersAsync();
+      const outcome = await outcomePromise;
+
+      expect(outcome).toMatchObject({
+        kind: "reconciled",
+        batch: {
+          id: "batch-1",
+          children: [{ job_id: "job/1", state: transitionedState }],
+        },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it.each([
+    [
+      "HTTP 500",
+      () => Promise.resolve(new Response("failed", { status: 500 })),
+    ],
+    ["HTTP 429", () => Promise.resolve(new Response("busy", { status: 429 }))],
+    [
+      "transport loss",
+      () => Promise.reject(new TypeError("read disconnected")),
+    ],
+    [
+      "temporary 404",
+      () => Promise.resolve(new Response("missing", { status: 404 })),
+    ],
+  ])(
+    "consumes transient retry reconciliation %s before Held advances to Accepted",
+    async (_case, failFirstRead) => {
+      vi.useFakeTimers();
+      let reads = 0;
+      const fetchMock = vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/queue/job%2F1/retry")) {
+          return Promise.reject(new TypeError("retry response disconnected"));
+        }
+        if (!url.endsWith("/api/generation-batches/batch-1")) {
+          return Promise.reject(new Error(`unexpected URL: ${url}`));
+        }
+        reads += 1;
+        if (reads === 1) return failFirstRead();
+        const state = reads === 2 ? "held" : "accepted";
+        return Promise.resolve(
+          Response.json({
+            id: "batch-1",
+            client_batch_id: "client-1",
+            instance_id: "instance-1",
+            durable: true,
+            children: [
+              {
+                index: 1,
+                job_id: "job/1",
+                state,
+                retryable: state === "held",
+                created_at_ms: 1,
+                updated_at_ms: reads,
+              },
+            ],
+          }),
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const outcomePromise = retryQueueJobRecoveringAmbiguity(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
+      );
+      await vi.runAllTimersAsync();
+
+      await expect(outcomePromise).resolves.toMatchObject({
+        kind: "reconciled",
+        batch: { children: [{ job_id: "job/1", state: "accepted" }] },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          String(input).endsWith("/api/queue/job%2F1/retry"),
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("returns an unchanged Held snapshot only after the full confirmation window", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const fetchMock = vi.fn(() => {
+      if (calls++ === 0)
+        return Promise.reject(new TypeError("connection closed"));
+      return Promise.resolve(
+        Response.json({
+          id: "batch-1",
+          client_batch_id: "client-1",
+          instance_id: "instance-1",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "job/1",
+              state: "held",
+              retryable: true,
+              created_at_ms: 1,
+              updated_at_ms: 2,
+            },
+          ],
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcomePromise = retryQueueJobRecoveringAmbiguity(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      {
+        instanceId: "instance-1",
+        batchId: "batch-1",
+        clientBatchId: "client-1",
+        jobId: "job/1",
+      },
+    );
+    await vi.runAllTimersAsync();
+
+    await expect(outcomePromise).resolves.toMatchObject({
+      kind: "reconciled",
+      batch: { children: [{ state: "held", retryable: true }] },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it.each([
+    ["cancel" as const, "DELETE", "/api/queue/job%2F1"],
+    ["retry" as const, "POST", "/api/queue/job%2F1/retry"],
+  ])(
+    "fences a durable %s mutation to the admitting server instance",
+    async (mutation, method, mutationPath) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          Response.json({
+            instance_id: "instance-1",
+            hostname: "render-box",
+            queue_depth: 1,
+          }),
+        )
+        .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await mutateQueueJobOnExpectedInstance(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
+        mutation,
+      );
+
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+        "https://gpu.example/api/status",
+        `https://gpu.example${mutationPath}`,
+      ]);
+      expect(fetchMock.mock.calls[1]?.[1]?.method).toBe(method);
+      if (mutation === "retry") {
+        expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+          instance_id: "instance-1",
+          batch_id: "batch-1",
+          client_batch_id: "client-1",
+          job_id: "job/1",
+        });
+      }
+      for (const [, init] of fetchMock.mock.calls) {
+        expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
+      }
+    },
+  );
+
+  it("refuses a durable queue mutation when the URL now reaches a replacement instance", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        instance_id: "replacement",
+        hostname: "render-box",
+        queue_depth: 0,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      mutateQueueJobOnExpectedInstance(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
+        "cancel",
+      ),
+    ).rejects.toThrow(/identity changed/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a transactional retry fence after the preflight instance read", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          instance_id: "instance-1",
+          hostname: "render-box",
+          queue_depth: 1,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          { code: "QUEUE_JOB_AUTHORITY_MISMATCH", error: "authority changed" },
+          { status: 409 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      mutateQueueJobOnExpectedInstance(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
+        "retry",
+      ),
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

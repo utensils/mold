@@ -38,7 +38,6 @@ pub struct ActiveGenerationSnapshot {
 pub enum SseMessage {
     Progress(mold_core::SseProgressEvent),
     Complete(Box<mold_core::SseCompleteEvent>),
-    BatchComplete(Box<mold_core::SseBatchCompleteEvent>),
     UpscaleComplete(mold_core::SseUpscaleCompleteEvent),
     Error(mold_core::SseErrorEvent),
 }
@@ -62,14 +61,13 @@ pub struct GenerationJob {
     /// non-empty for jobs created through the public API; tests that
     /// construct `GenerationJob` directly may leave it empty.
     pub id: String,
+    /// Stable durable admission order. Bounded preparation workers may finish
+    /// out of order; the scheduler still ranks accepted work by this value.
+    pub durable_queue_rank: Option<u64>,
     pub request: mold_core::GenerateRequest,
     /// Authenticated durable media remains opaque until this job owns its
     /// execution slot or concrete device lease.
     pub deferred_media: Option<crate::queue_media_runtime::DeferredQueueMedia>,
-    /// Private, payload-bearing reference authority. The public request is
-    /// descriptor-only by the time this exists; this owner keeps safe-open
-    /// staging alive without exposing paths to queue metadata or recovery.
-    pub resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     pub completion_payload: SseCompletionPayload,
     /// Channel to send SSE progress/complete/error events (None for non-streaming).
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
@@ -77,9 +75,6 @@ pub struct GenerationJob {
     pub result_tx: tokio::sync::oneshot::Sender<Result<GenerationJobResult, String>>,
     /// Pre-resolved output directory for server-side image saving.
     pub output_dir: Option<PathBuf>,
-    /// Server-owned adaptive-batch child authority. Public singleton and
-    /// client-owned prepared siblings leave this absent.
-    pub batch_child: Option<BatchChildExecution>,
     /// Durable-queue row ownership. Dropping this deletes the row unless the
     /// retention fence is up, which is what turns every existing discard path
     /// into "retain and replay" during shutdown. `None` for a job that is not
@@ -93,18 +88,20 @@ pub struct GenerationJob {
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
 }
 
-#[derive(Clone, Debug)]
-pub struct BatchChildExecution {
-    pub lease: crate::batch_parent::BatchChildLease,
-    /// Attempt-scoped cooperative cancellation authority. Cancelling the
-    /// parent signals every active child through the exact token returned by
-    /// its durable lease grant.
-    pub cancellation: mold_inference::InferenceCancellationToken,
-    /// Parent-level deterministic execution identity. The coordinator filters
-    /// every later re-resolution through this fence.
-    pub execution_equivalence_fingerprint: String,
-    /// Concrete dependency variants frozen once for the whole parent.
-    pub prepared_inputs: crate::execution_plan::PreparedExecutionInputs,
+impl GenerationJob {
+    /// A response channel is observation, not execution authority, once the
+    /// durable journal owns the job. Explicit cancellation is carried by the
+    /// registry/token path and remains authoritative.
+    pub(crate) fn should_cancel_for_observer_disconnect(&self) -> bool {
+        should_cancel_for_observer_disconnect(self.result_tx.is_closed(), self.journal.is_some())
+    }
+}
+
+pub(crate) const fn should_cancel_for_observer_disconnect(
+    response_closed: bool,
+    durably_owned: bool,
+) -> bool {
+    response_closed && !durably_owned
 }
 
 pub struct GenerationJobResult {
@@ -971,6 +968,16 @@ impl AppState {
     }
 }
 
+impl crate::durable_generation_settlement::IntoSettlementChannels for GenerationJob {
+    fn into_settlement_channels(self) -> crate::durable_generation_settlement::SettlementChannels {
+        crate::durable_generation_settlement::SettlementChannels {
+            journal: self.journal,
+            progress_tx: self.progress_tx,
+            result_tx: Some(self.result_tx),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,18 +994,30 @@ mod tests {
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         GenerationJob {
             id: id.to_string(),
+            durable_queue_rank: None,
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         }
+    }
+
+    #[test]
+    fn observer_disconnect_cancels_only_non_durable_generation() {
+        let mut job = queue_job("observer-detached");
+        assert!(job.should_cancel_for_observer_disconnect());
+
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+        job.journal = Some(journal.attach(&job.id));
+        assert!(
+            !job.should_cancel_for_observer_disconnect(),
+            "durable ownership must outlive its response observer"
+        );
     }
 
     #[test]
@@ -1259,16 +1278,11 @@ mod tests {
         let _rx = state.resources.subscribe();
     }
 
-    /// Serializes every test that touches a process-wide env var via
-    /// `std::env::set_var` — mutating env is global state, so without this
-    /// guard parallel tests would race on the env table.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Set `name` to `value` (or remove it when `value` is `None`), invoke
     /// `f`, then restore the original value. Lock-serialized so concurrent
     /// tests don't race on the env table.
     fn with_env<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::test_support::env_lock();
         let prev = std::env::var(name).ok();
         match value {
             Some(v) => std::env::set_var(name, v),

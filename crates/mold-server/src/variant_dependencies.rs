@@ -12,6 +12,8 @@ use crate::execution_plan::{
 use crate::scheduler::worker_device_id;
 use crate::state::{AppState, SseMessage};
 use mold_core::{Config, GenerateRequest, ModelPaths, SseProgressEvent};
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -1381,11 +1383,20 @@ pub(crate) async fn prepare_inputs_for_devices(
             policy,
             grant,
             context.h3_resolved_references.clone(),
+            context.preparation_progress.clone(),
         )
         .await;
     }
-    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-    let _ = &context;
+    // Every family names WHAT it is preparing, so a queue row can say more
+    // than "preparing"; an indeterminate `0/0` is the honest shape for a pass
+    // whose size is not known until it starts. Only H3's artifact
+    // authentication overwrites this with real byte progress today.
+    publish_preparation_progress(
+        context.preparation_progress.as_ref(),
+        &format!("Preparing {}", request.model),
+        0,
+        0,
+    );
     let resolution = crate::model_manager::resolve_existing_model_paths(&request.model, config)
         .map_err(|error| error.error)?
         .ok_or_else(|| format!("model '{}' has no concrete local artifacts", request.model))?;
@@ -1689,7 +1700,7 @@ pub(crate) async fn prepare_inputs_for_devices(
         authority_fingerprint,
         by_device,
         retryable_device_failures: failures,
-        host_memory_retry_after_devices: Default::default(),
+        capacity_park: None,
         model_config_overlay,
         identity_embedding,
         identity_warning,
@@ -1823,6 +1834,10 @@ mod preparation_cancellation_tests {
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 type HostShortfall = mold_inference::H3PrivateHostHeadroomShortfall;
 
+/// The other half of the same question (#1289 typed only the host half).
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+type DeviceShortfall = mold_inference::H3PrivateDeviceHeadroomShortfall;
+
 /// Host headroom private preparation may use without mutating server state.
 ///
 /// A real admission always uses the sampled value. A read-only preview may
@@ -1874,6 +1889,102 @@ fn h3_reclaim_requirement(
     Some(shortfall?.required_host_bytes)
 }
 
+/// The one phase the server owns rather than the engine: opening and verifying
+/// the staged Ref2VA references before admission can derive its shapes.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+const H3_REFERENCE_BINDING_PHASE: &str = "Binding MiniMax H3 references";
+
+/// The other phase the server owns: waiting for its own model cache to hand
+/// host memory back before admission is retried (#1289).
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+const H3_HOST_RECLAIM_PHASE: &str = "Releasing MiniMax H3 host memory";
+
+/// Turn one admission progress event into a queue observation and a log line.
+///
+/// The two halves are deliberately different. The SINK holds only what is
+/// current, because `/api/queue` renders one row and a phase that finished is
+/// not what the job is doing. The LOG keeps every phase with its own
+/// `elapsed_ms`, because the question an operator asks about a seven-minute
+/// `Preparing` window is which of eight phases it was, and that is only
+/// answerable after the fact.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+fn observe_h3_admission_phase(
+    event: &mold_inference::progress::ProgressEvent,
+    work_id: &str,
+    device_id: &str,
+    sink: Option<&PreparationProgressSink>,
+) {
+    use mold_inference::progress::ProgressEvent;
+    match event {
+        ProgressEvent::StageStart { name } => {
+            publish_preparation_progress(sink, name, 0, 0);
+            tracing::info!(job_id = %work_id, device_id = %device_id, phase = %name, "H3 admission phase started");
+        }
+        ProgressEvent::StageDone { name, elapsed } => {
+            tracing::info!(
+                job_id = %work_id,
+                device_id = %device_id,
+                phase = %name,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "H3 admission phase finished"
+            );
+        }
+        // Byte progress inside whichever phase reports it — today only the
+        // artifact authentication does, and its component name is that
+        // phase's own name, so the phase clock survives the update.
+        ProgressEvent::WeightLoad {
+            bytes_loaded,
+            bytes_total,
+            component,
+        } => publish_preparation_progress(sink, component, *bytes_loaded, *bytes_total),
+        _ => {}
+    }
+}
+
+/// Park or refuse — decided on the RESOURCE, never on who is busy.
+///
+/// The old rule parked only when a HOST shortfall coincided with a busy
+/// worker at the instant admission sampled, which made the outcome a race in
+/// both directions: a host shortfall observed while every worker was
+/// momentarily idle became a permanent hold, and a device shortfall never
+/// parked at all — so two production jobs were held forever on device samples
+/// taken while another render transiently owned an idle 4090.
+///
+/// The question is now the only one that cannot change from moment to moment:
+/// could this machine EVER hold this? A shortfall within the hardware's own
+/// ceiling waits for the fleet to settle; one beyond it is refused now, with
+/// both numbers, because no amount of waiting will free memory that does not
+/// exist. Unknown ceilings (a preview with no server state) read as
+/// satisfiable, because parking a job that will be refused in a minute is the
+/// safe direction and refusing one that would have run is not.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+fn h3_capacity_park(
+    host_ceiling_bytes: Option<u64>,
+    device_ceiling_bytes: Option<u64>,
+    retry_after_devices: BTreeSet<String>,
+    host_shortfall: Option<HostShortfall>,
+    device_shortfall: Option<DeviceShortfall>,
+) -> Option<crate::execution_plan::CapacityPark> {
+    let satisfiable = |required: u64, ceiling: Option<u64>| ceiling.is_none_or(|c| required <= c);
+    let mut reasons = Vec::new();
+    if let Some(shortfall) = host_shortfall {
+        if !satisfiable(shortfall.required_host_bytes, host_ceiling_bytes) {
+            return None;
+        }
+        reasons.push(shortfall.to_string());
+    }
+    if let Some(shortfall) = device_shortfall {
+        if !satisfiable(shortfall.required_device_bytes, device_ceiling_bytes) {
+            return None;
+        }
+        reasons.push(shortfall.to_string());
+    }
+    (!reasons.is_empty()).then(|| crate::execution_plan::CapacityPark {
+        reason: reasons.join("; "),
+        retry_after_devices,
+    })
+}
+
 /// Admit one bounded retry only when a newer host sample changes the answer.
 /// Attempt indexes 0 and 1 may advance to the second and third pass; attempt 2
 /// is terminal even if memory keeps moving.
@@ -1912,6 +2023,15 @@ impl H3AdmissionAttemptError {
         }
     }
 
+    fn device_shortfall(&self) -> Option<DeviceShortfall> {
+        match self {
+            Self::Bindings(_) => None,
+            Self::Prepare(error) => {
+                crate::h3_private_bridge::private_prepare_device_shortfall(error)
+            }
+        }
+    }
+
     fn message(self) -> String {
         match self {
             Self::Bindings(reason) => reason,
@@ -1924,7 +2044,7 @@ impl H3AdmissionAttemptError {
 #[allow(clippy::too_many_arguments)]
 async fn prepare_h3_private_inputs_for_devices(
     state: Option<&AppState>,
-    _work_id: &str,
+    work_id: &str,
     request: &GenerateRequest,
     config: &Config,
     devices: Vec<DeviceFact>,
@@ -1932,6 +2052,7 @@ async fn prepare_h3_private_inputs_for_devices(
     policy: DependencyMaterializationPolicy,
     ingress_grant: crate::h3_private_bridge::H3PrivateIngressGrant,
     resolved_references: Option<crate::reference_uploads::ResolvedReferenceAdmissionView>,
+    preparation_progress: Option<PreparationProgressSink>,
 ) -> Result<PreparedExecutionInputs, String> {
     use sha2::{Digest, Sha256};
 
@@ -1960,7 +2081,8 @@ async fn prepare_h3_private_inputs_for_devices(
     // layout stays fail-closed — its hand-built scope must already exist.
     #[cfg(feature = "h3")]
     uat_paths.ensure_staging_root();
-    let mut resolved_request = request.clone();
+    let mut resolved_request =
+        crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request.clone());
     // Dropped when this preparation returns or unwinds, which cancels every
     // spawned decode that is still running for it.
     let mut preparation_cancellation = PreparationCancellationGuard::new();
@@ -1975,12 +2097,21 @@ async fn prepare_h3_private_inputs_for_devices(
     // new sample proves that requirement now fits (for example, because the
     // active render finished during the artifact hash). Reclaim itself still
     // runs at most once.
-    let mut host_shortfall: Option<mold_inference::H3PrivateHostHeadroomShortfall> = None;
+    let mut host_shortfall: Option<HostShortfall> = None;
+    let mut device_shortfall: Option<DeviceShortfall> = None;
     let mut reclaim = crate::host_reclaim::HostReclaimOutcome::default();
     for attempt in 0..3 {
         evidence_by_device.clear();
         failures.clear();
         host_shortfall = None;
+        device_shortfall = None;
+        // The artifact pass is memoized per file identity (#1364), so "how
+        // many files did this attempt actually read" is the difference in the
+        // process-wide pinned-digest counter. It is the one number that tells
+        // a cold first admission apart from a warm repeat, and without it a
+        // slow `Preparing` window is indistinguishable between the two.
+        let attempt_started = std::time::Instant::now();
+        let hashes_before = mold_core::download::pinned_digest_hash_count();
         for mut device in devices.clone() {
             #[cfg(not(feature = "h3"))]
             if device.backend != mold_core::GpuBackend::Cuda {
@@ -2019,7 +2150,11 @@ async fn prepare_h3_private_inputs_for_devices(
                         device.available_vram_bytes,
                     );
             }
-            let admission_request = resolved_request.clone();
+            // Clone the zeroizing wrapper itself. A deref clone here would
+            // leave hydrated private media in an ordinary GenerateRequest on
+            // success, error, or panic unwind.
+            let mut admission_request: crate::queue_media_runtime::ZeroizingGenerateRequest =
+                resolved_request.clone();
             let paths = uat_paths.clone();
             // Each device's admission mints its own descriptors rather than
             // sharing one set: a binding owns an open file, and re-opening per
@@ -2031,21 +2166,40 @@ async fn prepare_h3_private_inputs_for_devices(
             let device_ordinal = device.ordinal;
             let available_device_bytes = device.available_vram_bytes;
             let progress_tx = progress.cloned();
+            let progress_sink = preparation_progress.clone();
+            let phase_work_id = work_id.to_string();
+            let phase_device_id = device_id.clone();
             let evidence = tokio::task::spawn_blocking(move || {
                 let mut reporter = mold_inference::progress::ProgressReporter::default();
                 // The decode checkpoints through this reporter, so the token has
                 // to live here — bindings retain none, and consulting it only
                 // while hashing would leave the media decode uninterruptible.
                 reporter.set_cancellation_token(cancellation.clone());
-                if let Some(progress_tx) = progress_tx {
-                    reporter.set_callback(Box::new(move |event| {
-                        crate::gpu_worker::record_h3_progress(event, Some(&progress_tx));
-                    }));
-                }
+                // Installed unconditionally: the queue projection reads the
+                // sink, so an admission with no SSE client attached must still
+                // be able to say what it is doing.
+                reporter.set_callback(Box::new(move |event| {
+                    observe_h3_admission_phase(
+                        &event,
+                        &phase_work_id,
+                        &phase_device_id,
+                        progress_sink.as_ref(),
+                    );
+                    crate::gpu_worker::record_h3_progress(event, progress_tx.as_ref());
+                }));
                 // Cooperative abort: a cancelled preparation stops decoding at
                 // the next checkpoint instead of burning CPU on media whose job is
                 // already gone. The staging and its quota stay alive regardless,
                 // because the view shares the resolved set's hold.
+                //
+                // Timed through the same reporter as the phases inside
+                // admission, because a Ref2VA set is opened and verified here
+                // and that is not free — leaving it outside the timeline would
+                // put its cost in the gap between "preparation started" and
+                // the first phase, which is exactly the unaccounted window
+                // this is meant to remove.
+                let binding_started = std::time::Instant::now();
+                reporter.stage_start(H3_REFERENCE_BINDING_PHASE);
                 let bindings = match references
                     .as_ref()
                     .map(|references| {
@@ -2055,14 +2209,16 @@ async fn prepare_h3_private_inputs_for_devices(
                 {
                     Ok(bindings) => bindings.unwrap_or_default(),
                     Err(error) => {
+                        reporter.stage_done(H3_REFERENCE_BINDING_PHASE, binding_started.elapsed());
                         return Err(H3AdmissionAttemptError::Bindings(format!(
                             "MiniMax H3 admission could not bind its staged references: {error}"
-                        )))
+                        )));
                     }
                 };
+                reporter.stage_done(H3_REFERENCE_BINDING_PHASE, binding_started.elapsed());
                 mold_inference::prepare_h3_private_fl2va_admission(
                     mold_inference::H3PrivateFl2VaAdmissionInput {
-                        request: &admission_request,
+                        request: &mut admission_request,
                         paths: paths.inference_paths(),
                         references: &bindings,
                         device_id: &device_id,
@@ -2090,12 +2246,20 @@ async fn prepare_h3_private_inputs_for_devices(
                             host_shortfall = Some(shortfall);
                         }
                     }
+                    if let Some(shortfall) = error.device_shortfall() {
+                        if device_shortfall.is_none_or(|held: DeviceShortfall| {
+                            held.required_device_bytes < shortfall.required_device_bytes
+                        }) {
+                            device_shortfall = Some(shortfall);
+                        }
+                    }
                     failures.insert(device.id, error.message());
                     continue;
                 }
             };
-            let next_request = evidence
-                .resolve_request(&resolved_request)
+            let mut next_request = resolved_request.clone();
+            evidence
+                .resolve_request(&mut next_request)
                 .map_err(|error| {
                     format!("MiniMax H3 admission seed resolution failed: {error:#}")
                 })?;
@@ -2114,6 +2278,17 @@ async fn prepare_h3_private_inputs_for_devices(
             resolved_request = next_request;
             evidence_by_device.insert(device.id.clone(), (device, evidence));
         }
+        tracing::info!(
+            job_id = %work_id,
+            model = %request.model,
+            attempt,
+            devices = devices.len(),
+            admitted = evidence_by_device.len(),
+            files_hashed = mold_core::download::pinned_digest_hash_count()
+                .saturating_sub(hashes_before),
+            elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+            "MiniMax H3 admission attempt finished"
+        );
         if !evidence_by_device.is_empty() {
             break;
         }
@@ -2136,6 +2311,12 @@ async fn prepare_h3_private_inputs_for_devices(
         // The eviction is awaited and its host memory handed back before the
         // sample is re-taken: an OS sample can no more prove an unfinished
         // release than it can prove an unsettled allocation.
+        // Awaiting an eviction can be the longest thing a `Preparing` window
+        // does — the model being released may be mid-render — so it is named
+        // and timed like every other phase rather than disappearing into the
+        // gap between two attempts.
+        let reclaim_started = std::time::Instant::now();
+        publish_preparation_progress(preparation_progress.as_ref(), H3_HOST_RECLAIM_PHASE, 0, 0);
         reclaim = crate::host_reclaim::reclaim_host_headroom(
             state,
             &resolved_request.model,
@@ -2143,6 +2324,13 @@ async fn prepare_h3_private_inputs_for_devices(
             &|| crate::h3_admission::current_h3_host_memory().headroom_bytes(),
         )
         .await;
+        tracing::info!(
+            job_id = %work_id,
+            required_host_bytes,
+            released = reclaim.released_anything(),
+            elapsed_ms = reclaim_started.elapsed().as_millis() as u64,
+            "MiniMax H3 host reclaim finished"
+        );
         available_host_headroom_bytes =
             crate::h3_admission::current_h3_host_memory().headroom_bytes();
         if available_host_headroom_bytes < required_host_bytes {
@@ -2150,20 +2338,39 @@ async fn prepare_h3_private_inputs_for_devices(
         }
     }
     if evidence_by_device.is_empty() {
-        let busy_devices = state
-            .filter(|_| host_shortfall.is_some())
-            .map(crate::host_reclaim::busy_worker_device_ids)
-            .unwrap_or_default();
-        if !busy_devices.is_empty() {
-            let reason = host_shortfall
-                .map(|shortfall| shortfall.to_string())
-                .unwrap_or_else(|| "MiniMax H3 is waiting for host memory".to_string());
-            send_dependency_wait(progress, "MiniMax H3 host memory", reason);
+        // Every request-eligible device, because any of them settling can
+        // change the answer — and because a park whose retry set is empty
+        // would be re-prepared on the very next tick, spinning the ~37 GB
+        // artifact pass against a machine that has freed nothing.
+        let retry_after_devices = devices
+            .iter()
+            .map(|device| device.id.clone())
+            .collect::<BTreeSet<_>>();
+        let host = crate::h3_admission::current_h3_host_memory();
+        let device_ceiling_bytes = state.and_then(|state| {
+            devices
+                .iter()
+                .filter_map(|device| {
+                    state
+                        .gpu_pool
+                        .worker_by_ordinal(device.ordinal)
+                        .map(|worker| worker.gpu.total_vram_bytes)
+                })
+                .max()
+        });
+        if let Some(park) = h3_capacity_park(
+            Some(host.total_bytes.saturating_sub(host.safety_floor_bytes())),
+            device_ceiling_bytes,
+            retry_after_devices,
+            host_shortfall,
+            device_shortfall,
+        ) {
+            send_dependency_wait(progress, "MiniMax H3 memory", park.reason.clone());
             return Ok(PreparedExecutionInputs {
                 authority_fingerprint: ingress_grant.authority_identity_sha256().to_string(),
                 by_device: BTreeMap::new(),
                 retryable_device_failures: failures,
-                host_memory_retry_after_devices: busy_devices,
+                capacity_park: Some(park),
                 model_config_overlay: None,
                 identity_embedding: None,
                 identity_warning: None,
@@ -2257,7 +2464,7 @@ async fn prepare_h3_private_inputs_for_devices(
         authority_fingerprint: format!("{:x}", authority.finalize()),
         by_device,
         retryable_device_failures: failures,
-        host_memory_retry_after_devices: Default::default(),
+        capacity_park: None,
         model_config_overlay: None,
         // The private H3 ingress has no face-identity path; FLUX is the only
         // family qualified for it. The pin is minted empty rather than omitted
@@ -2278,6 +2485,70 @@ const fn h3_preparation_capacity_sensitive(backend: mold_core::GpuBackend) -> bo
         mold_core::GpuBackend::Cuda => true,
         mold_core::GpuBackend::Metal => false,
     }
+}
+
+/// What a running dependency preparation is working through right now.
+///
+/// Richer than the wire shape by exactly one field: `started_ms` is when this
+/// PHASE became current, so the queue can report a phase age without the
+/// preparer having to carry a clock of its own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparationProgressState {
+    pub component: String,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub started_ms: u64,
+}
+
+/// What a running dependency preparation is currently working through.
+///
+/// A shared cell rather than a channel: the scheduler reads the LATEST value
+/// when it projects the queue, and a pass that emits a progress event per
+/// megabyte of a ~37 GB artifact set must not queue thirty-seven thousand
+/// messages nobody is going to read.
+pub type PreparationProgressSink = Arc<std::sync::Mutex<Option<PreparationProgressState>>>;
+
+/// Advance the published observation, keeping a phase's own start time.
+///
+/// The rule is the whole point of the type: `started_ms` survives byte updates
+/// WITHIN a component and resets when the component changes, so "verifying
+/// artifacts, 41%, 214 s in this phase" is a phase age and not the whole
+/// preparation's. Pure so the rule can be tested without a scheduler.
+pub(crate) fn advance_preparation_progress(
+    current: Option<PreparationProgressState>,
+    component: &str,
+    bytes_done: u64,
+    bytes_total: u64,
+    now_ms: u64,
+) -> PreparationProgressState {
+    let started_ms = current
+        .filter(|held| held.component == component)
+        .map_or(now_ms, |held| held.started_ms);
+    PreparationProgressState {
+        component: component.to_string(),
+        bytes_done,
+        bytes_total,
+        started_ms,
+    }
+}
+
+/// Publish one preparation progress observation, ignoring a poisoned cell —
+/// a stale queue percentage is never worth failing a preparation over.
+pub(crate) fn publish_preparation_progress(
+    sink: Option<&PreparationProgressSink>,
+    component: &str,
+    bytes_done: u64,
+    bytes_total: u64,
+) {
+    let Some(sink) = sink else { return };
+    let mut slot = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = Some(advance_preparation_progress(
+        slot.take(),
+        component,
+        bytes_done,
+        bytes_total,
+        crate::scheduler::monotonic_ms(),
+    ));
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2314,6 +2585,11 @@ pub struct DependencyPreparationContext {
     /// found, the largest was used" is exactly the note the person who supplied
     /// a group photograph needs on every print of the batch.
     pub(crate) frozen_identity_warning: Option<String>,
+    /// Where this preparation publishes what it is working through, so
+    /// `GET /api/queue` can say "Verifying MiniMax H3 artifacts 41%" instead
+    /// of leaving a minutes-long authentication pass indistinguishable from an
+    /// idle scheduler.
+    pub(crate) preparation_progress: Option<PreparationProgressSink>,
 }
 
 pub async fn prepare_execution_inputs(
@@ -2413,6 +2689,39 @@ const H3_PUBLIC_LOCAL_INSTANCE_ID: &str = "mold-public-forced-local";
 mod tests {
     use super::*;
 
+    /// A phase age is the phase's, not the preparation's.
+    ///
+    /// The artifact pass publishes a progress event per megabyte; if each one
+    /// restarted the clock the queue would report "0 s" forever, and if the
+    /// clock never reset every later phase would inherit the first one's age.
+    /// Both readings are useless for the question this exists to answer.
+    #[test]
+    fn a_phase_clock_survives_byte_updates_and_resets_on_a_new_phase() {
+        let opened = advance_preparation_progress(None, "Binding references", 0, 0, 1_000);
+        assert_eq!(opened.started_ms, 1_000);
+
+        let same_phase = advance_preparation_progress(
+            Some(opened.clone()),
+            "Binding references",
+            512,
+            2_048,
+            9_000,
+        );
+        assert_eq!(
+            same_phase.started_ms, 1_000,
+            "byte progress inside one phase must not restart its clock"
+        );
+        assert_eq!(same_phase.bytes_done, 512);
+        assert_eq!(same_phase.bytes_total, 2_048);
+
+        let next_phase =
+            advance_preparation_progress(Some(same_phase), "Verifying artifacts", 0, 0, 9_500);
+        assert_eq!(
+            next_phase.started_ms, 9_500,
+            "a new phase must not inherit the previous phase's age"
+        );
+    }
+
     /// Only a HOST shortfall may be answered by releasing the model cache, only
     /// once, and never from a placement preview (#1289). A device shortfall
     /// would evict engines for memory eviction cannot supply; a second reclaim
@@ -2457,6 +2766,79 @@ mod tests {
             None,
             "a read-only placement preview must never evict a model cache"
         );
+    }
+
+    /// Park or refuse turns on the RESOURCE, on both axes, and never on who
+    /// happened to be busy when admission sampled. The old rule needed a host
+    /// shortfall AND a busy worker at that instant, so a host shortfall on a
+    /// momentarily idle fleet became a permanent hold and a device shortfall
+    /// never waited at all — which is how two production jobs were held on an
+    /// idle 4090 by numbers that were true for one second.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn a_satisfiable_shortfall_parks_on_either_axis_and_an_impossible_one_refuses() {
+        const GIB: u64 = 1 << 30;
+        let devices = || ["cuda:0".to_string()].into_iter().collect::<BTreeSet<_>>();
+        let host = |required: u64| HostShortfall {
+            context: "private H3 admission",
+            required_host_bytes: required,
+            available_host_headroom_bytes: 4 * GIB,
+        };
+        let device = |required: u64| DeviceShortfall {
+            context: "private H3 canonical target",
+            resource: "device",
+            required_device_bytes: required,
+            available_device_bytes: 5 * GIB,
+        };
+
+        // No typed shortfall at all: this refusal is about something the fleet
+        // settling cannot change, so it must not be parked.
+        assert!(h3_capacity_park(Some(48 * GIB), Some(24 * GIB), devices(), None, None).is_none());
+
+        let host_park = h3_capacity_park(
+            Some(48 * GIB),
+            Some(24 * GIB),
+            devices(),
+            Some(host(22 * GIB)),
+            None,
+        )
+        .expect("a host shortfall inside the machine's ceiling parks");
+        assert!(host_park.reason.contains(&(22 * GIB).to_string()));
+        assert_eq!(host_park.retry_after_devices, devices());
+
+        let device_park = h3_capacity_park(
+            Some(48 * GIB),
+            Some(24 * GIB),
+            devices(),
+            None,
+            Some(device(15 * GIB)),
+        )
+        .expect("a device shortfall inside the card's ceiling parks");
+        assert!(device_park.reason.contains(&(15 * GIB).to_string()));
+
+        // Beyond the ceiling on either axis: waiting cannot free memory that
+        // does not exist, so the caller refuses now with both numbers.
+        assert!(h3_capacity_park(
+            Some(48 * GIB),
+            Some(24 * GIB),
+            devices(),
+            Some(host(80 * GIB)),
+            None
+        )
+        .is_none());
+        assert!(h3_capacity_park(
+            Some(48 * GIB),
+            Some(24 * GIB),
+            devices(),
+            None,
+            Some(device(40 * GIB))
+        )
+        .is_none());
+
+        // An unread ceiling (a preview with no server state) reads as
+        // satisfiable: parking a job that will be refused in a minute is the
+        // safe direction; refusing one that would have run is not.
+        assert!(h3_capacity_park(None, None, devices(), None, Some(device(u64::MAX))).is_some());
     }
 
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -3063,9 +3445,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn existing_only_dependency_check_does_not_create_cache_roots() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::test_support::env_lock();
         let parent = TempDir::new().unwrap();
         let models_root = parent.path().join("absent-models");
         let hf_home = parent.path().join("absent-hf-home");
@@ -3103,9 +3483,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn preview_and_admission_use_the_same_explicit_models_root() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::test_support::env_lock();
         let parent = TempDir::new().unwrap();
         let models_root = parent.path().join("config-owned-models");
         let repo = format!("test/explicit-root-parity-{}", std::process::id());
@@ -3167,9 +3545,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn admission_deduplicates_within_but_never_across_models_roots() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::test_support::env_lock();
         let parent = TempDir::new().unwrap();
         let first_root = parent.path().join("first-models");
         let second_root = parent.path().join("second-models");
@@ -3242,7 +3618,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn existing_only_preparation_plans_known_missing_encoder_without_downloading() {
-        let _env = crate::test_support::env_lock().lock().unwrap();
+        let _env = crate::test_support::env_lock();
         let cache = TempDir::new().unwrap();
         std::env::set_var("MOLD_MODELS_DIR", cache.path().join("models"));
         std::env::set_var("HF_HOME", cache.path().join("hf"));
@@ -3406,7 +3782,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn flux2_dev_preserves_checkpoint_native_mistral_dependencies() {
+        let _env = crate::test_support::env_lock();
         let root = TempDir::new().unwrap();
         for name in [
             "transformer.safetensors",
@@ -3499,7 +3877,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn transient_pressure_does_not_remove_a_prepared_sibling() {
+        let _env = crate::test_support::env_lock();
         let (_root, mut config, request) = zimage_case();
         config.qwen3_variant = Some("bf16".to_string());
         let prepared = prepare_local_execution_inputs(
@@ -3538,7 +3918,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn all_temporarily_low_devices_still_materialize_for_later_replanning() {
+        let _env = crate::test_support::env_lock();
         let (_root, mut config, request) = zimage_case();
         config.qwen3_variant = Some("bf16".to_string());
         let low_facts = (0..8)
@@ -3585,7 +3967,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn hard_pin_filters_irrelevant_devices_before_materialization() {
+        let _env = crate::test_support::env_lock();
         let (_root, config, mut request) = zimage_case();
         request.placement = Some(DevicePlacement {
             text_encoders: DeviceRef::device("cuda:1"),
@@ -3615,7 +3999,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn stale_device_pin_remains_hard_infeasible() {
+        let _env = crate::test_support::env_lock();
         let (_root, config, mut request) = zimage_case();
         request.placement = Some(DevicePlacement {
             text_encoders: DeviceRef::device("cuda:gone"),

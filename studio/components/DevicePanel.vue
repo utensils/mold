@@ -120,7 +120,7 @@ function planned(device: DeviceInfo): QueueWorkItem[] {
     props.plan?.work_items
       .filter(
         (work) =>
-          isDeviceLane(work) &&
+          work.planned_lane_kind === "device" &&
           work.planned_device_id === device.id &&
           !blockedReason(work),
       )
@@ -128,12 +128,14 @@ function planned(device: DeviceInfo): QueueWorkItem[] {
   );
 }
 
-function isDeviceLane(work: QueueWorkItem): boolean {
-  return work.planned_lane_kind === "device" || work.planned_lane_kind == null;
-}
-
+/**
+ * Work the scheduler has not placed on any lane yet carries neither a lane
+ * kind nor a device id — it is queued, not lost. Only a device-lane item that
+ * names no device, or names one this snapshot lacks, is genuinely unmatched.
+ */
 function hasUnmatchedDevice(work: QueueWorkItem): boolean {
-  if (work.planned_device_id == null) return isDeviceLane(work);
+  if (work.planned_device_id == null)
+    return work.planned_lane_kind === "device";
   return !props.devices.some((device) => device.id === work.planned_device_id);
 }
 

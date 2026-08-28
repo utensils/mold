@@ -172,7 +172,6 @@ export interface ServerCapabilities {
    * separately and may still keep H3 legally unavailable. */
   reference_uploads?: {
     available: boolean;
-    authless_inline?: boolean;
     protocol_version: number;
     requires_api_key: boolean;
     session_path: string;
@@ -181,6 +180,7 @@ export interface ServerCapabilities {
     upload_handle_header: string;
     max_file_bytes: number;
     max_session_bytes: number;
+    max_active_sessions: number;
     session_ttl_ms: number;
   } | null;
   /** Live lifecycle and restart-only recovery support. */
@@ -203,11 +203,9 @@ export interface ServerCapabilities {
     can_cancel_all?: boolean;
     can_reorder?: boolean;
     cooperative_cancellation?: boolean;
-    durable_queue?: boolean;
-    heterogeneous_batch?: boolean;
+    /** The batch chunk limit for durable admission. Its presence IS the
+     * durable-generation contract; there is no separate version probe. */
     heterogeneous_batch_max_outputs?: number | null;
-    /** Enriched durable outcomes, by-client recovery and bulk reconciliation. */
-    durable_batch_outcomes?: boolean;
   } | null;
   /** Absent on older servers means unknown, not unavailable. */
   expand?: ExpandCapabilities | null;

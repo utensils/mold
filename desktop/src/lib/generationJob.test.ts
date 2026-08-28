@@ -191,6 +191,20 @@ describe("settle stamps", () => {
   });
 });
 
+describe("jobStatusCode settled vocabulary", () => {
+  it("names an unknown outcome by its own stage rather than FAILED", () => {
+    const job = {
+      ...newJob({ prompt: "p", model: "m", width: 8, height: 8, steps: 1, guidance: 1 }),
+    };
+    job.status = "error";
+    job.error = "The host was replaced by a new server instance.";
+    expect(jobStatusCode(job)).toBe("FAILED");
+    job.outcomeUnknown = true;
+    job.stage = "Outcome unknown";
+    expect(jobStatusCode(job)).toBe("OUTCOME UNKNOWN");
+  });
+});
+
 describe("jobStatusCode queue vocabulary", () => {
   function queued(queuePosition: number | null) {
     return { ...newJob(request), status: "queued" as const, queuePosition };

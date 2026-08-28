@@ -1089,10 +1089,13 @@ is_schnell = false
     #[test]
     fn effective_output_dir_defaults_to_mold_output() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
         unsafe { std::env::remove_var("MOLD_OUTPUT_DIR") };
         unsafe { std::env::remove_var("MOLD_HOME") };
+        unsafe { std::env::set_var("MOLD_HOME_POINTER_PATH", temp.path().join("missing")) };
         let cfg = Config::default();
         let dir = cfg.effective_output_dir();
+        unsafe { std::env::remove_var("MOLD_HOME_POINTER_PATH") };
         assert!(
             dir.to_string_lossy().ends_with(".mold/output"),
             "should end with .mold/output: got {:?}",
@@ -1146,9 +1149,12 @@ is_schnell = false
     #[test]
     fn resolved_log_dir_defaults_to_mold_logs() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
         unsafe { std::env::remove_var("MOLD_HOME") };
+        unsafe { std::env::set_var("MOLD_HOME_POINTER_PATH", temp.path().join("missing")) };
         let cfg = Config::default();
         let dir = cfg.resolved_log_dir();
+        unsafe { std::env::remove_var("MOLD_HOME_POINTER_PATH") };
         assert!(
             dir.to_string_lossy().ends_with(".mold/logs"),
             "should end with .mold/logs: got {:?}",

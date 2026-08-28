@@ -2,8 +2,9 @@
 //! scheduler queue.
 //!
 //! SQLite owns every not-yet-hydrated child. This task is the sole producer
-//! for rows admitted through `/api/generation-batches`; legacy singleton rows
-//! are deliberately excluded by the batch-child ownership join.
+//! for generation, because `/api/generate`, `/api/generate/stream`, and
+//! `/api/generation-batches` are one admission path with three delivery
+//! shapes. Rows without a batch-child row are excluded by the ownership join.
 
 use std::sync::Arc;
 
@@ -44,6 +45,17 @@ struct FeederArbiter {
     prefer_attached: bool,
 }
 
+/// Wake publication waiters whenever one claimed row settles or enters the
+/// live registry. SQLite remains the ordering authority; this notification is
+/// only a latency optimization over the bounded retry timer.
+struct PublicationWake(Arc<tokio::sync::Notify>);
+
+impl Drop for PublicationWake {
+    fn drop(&mut self) {
+        self.0.notify_waiters();
+    }
+}
+
 /// Clear ownership tokens left by the prior runtime before any new HTTP
 /// admission can mint one. This is a serving precondition: callers must await
 /// it and propagate failure before constructing the router.
@@ -75,7 +87,32 @@ pub(crate) fn spawn(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run_with_retry_delay(state, shutdown, mold_db::METADATA_DB_BUSY_TIMEOUT).await;
+        // Dependency preparation is bounded independently from GPU execution.
+        // Multiple workers prevent one catalog/download/probe from blocking
+        // unrelated accepted work; SQLite claims and durable queue ranks keep
+        // ownership unique and scheduler ordering stable.
+        let worker_count = state.queue_capacity.clamp(1, 8);
+        tracing::info!(
+            capacity = state.queue_capacity,
+            workers = worker_count,
+            "durable generation queue feeder started"
+        );
+        let mut workers = tokio::task::JoinSet::new();
+        let publication = Arc::new(tokio::sync::Notify::new());
+        for _ in 0..worker_count {
+            workers.spawn(run_with_retry_delay(
+                state.clone(),
+                shutdown.clone(),
+                mold_db::METADATA_DB_BUSY_TIMEOUT,
+                Arc::clone(&publication),
+            ));
+        }
+        while let Some(result) = workers.join_next().await {
+            if let Err(error) = result {
+                tracing::error!(%error, "durable preparation worker stopped unexpectedly");
+                shutdown.cancel();
+            }
+        }
     })
 }
 
@@ -83,11 +120,8 @@ async fn run_with_retry_delay(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
     retry_delay: std::time::Duration,
+    publication: Arc<tokio::sync::Notify>,
 ) {
-    tracing::info!(
-        capacity = state.queue_capacity,
-        "durable generation queue feeder started"
-    );
     let current_output_dir = {
         let config = state.config.read().await;
         (!state.is_output_disabled(&config)).then(|| config.effective_output_dir())
@@ -107,6 +141,7 @@ async fn run_with_retry_delay(
             current_output_dir.as_deref(),
             &shutdown,
             &mut arbiter,
+            &publication,
         )
         .await;
         if report.submitted > 0 || report.held > 0 {
@@ -204,7 +239,8 @@ async fn retain_for_retry(
             }
         };
         match retained {
-            Ok(crate::queue_journal::RetainOutcome::Released) => return,
+            Ok(crate::queue_journal::RetainOutcome::Released)
+            | Ok(crate::queue_journal::RetainOutcome::Cancelled) => return,
             Ok(crate::queue_journal::RetainOutcome::Stale) => {
                 tracing::warn!(%job, "durable feeder claim became stale while retaining");
                 return;
@@ -231,13 +267,109 @@ async fn retain_for_retry(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldClaimOutcome {
+    Held,
+    Cancelled,
+    Retained,
+}
+
+/// Park one claimed row transactionally and resolve any attached HTTP
+/// observer. A failed hold returns the exact token to the replay backlog;
+/// attached callers receive a terminal error instead of hanging or seeing EOF.
+async fn hold_claimed(
+    ticket: crate::queue_journal::QueueTicket,
+    ingress: Option<&crate::queue_media_ingress::QueueMediaIngress>,
+    job_id: &str,
+    reason: String,
+    code: Option<String>,
+    retryable: bool,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> HoldClaimOutcome {
+    let message = reason.clone();
+    let held_code = code.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        ticket.hold_with_code(&reason, held_code.as_deref(), retryable)
+    })
+    .await;
+    match outcome {
+        Ok(crate::queue_journal::RetainOutcome::Released)
+        | Ok(crate::queue_journal::RetainOutcome::Stale) => {
+            if let Some(ingress) = ingress {
+                ingress.fail_claimed_with_code(job_id, message, code);
+            }
+            HoldClaimOutcome::Held
+        }
+        Ok(crate::queue_journal::RetainOutcome::Cancelled) => {
+            if let Some(ingress) = ingress {
+                ingress.cancel(job_id);
+            }
+            HoldClaimOutcome::Cancelled
+        }
+        Ok(crate::queue_journal::RetainOutcome::Retry { ticket, error }) => {
+            tracing::warn!(job = %job_id, %error, "hold transition failed; returning durable row to replay");
+            retain_for_retry(ticket, shutdown).await;
+            HoldClaimOutcome::Retained
+        }
+        Err(error) => {
+            tracing::error!(job = %job_id, %error, "hold transition worker failed; startup recovery retains the claim");
+            if let Some(ingress) = ingress {
+                ingress.fail_claimed(
+                    job_id,
+                    "generation remains queued after a persistence error".into(),
+                );
+            }
+            HoldClaimOutcome::Retained
+        }
+    }
+}
+
+/// Park one claimed row by its disposition and resolve any attached observer.
+///
+/// `Retain` returns the exact claim to the backlog for the next pass; both
+/// holds go through [`hold_claimed`] with their own retryability. This is the
+/// only place a [`DurableDisposition`] becomes a feeder action — the three
+/// ladders that used to decode it by hand each read one producer's private
+/// enum and could disagree about what "hold" meant.
+async fn park_claimed(
+    ticket: crate::queue_journal::QueueTicket,
+    ingress: Option<&crate::queue_media_ingress::QueueMediaIngress>,
+    job_id: &str,
+    reason: String,
+    code: Option<String>,
+    disposition: crate::durable_disposition::DurableDisposition,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> HoldClaimOutcome {
+    match disposition {
+        crate::durable_disposition::DurableDisposition::Retain => {
+            tracing::warn!(job = %job_id, reason = %reason, "durable generation is temporarily unpreparable; retaining its claim for replay");
+            retain_for_retry(ticket, shutdown).await;
+            HoldClaimOutcome::Retained
+        }
+        crate::durable_disposition::DurableDisposition::Hold { retryable } => {
+            let logged = reason.clone();
+            let parked =
+                hold_claimed(ticket, ingress, job_id, reason, code, retryable, shutdown).await;
+            if parked != HoldClaimOutcome::Retained {
+                if retryable {
+                    tracing::warn!(job = %job_id, reason = %logged, "held durable generation until its dependency becomes available");
+                } else {
+                    tracing::error!(job = %job_id, reason = %logged, "held durable generation for operator review");
+                }
+            }
+            parked
+        }
+    }
+}
+
 /// Make one best-effort release after the runtime queue transport has closed.
 /// There is no live feeder to resume, so a failed release deliberately drops
 /// the inert retry ticket and leaves the exact token for startup recovery.
 async fn retain_for_shutdown(ticket: crate::queue_journal::QueueTicket) {
     let job = ticket.id().to_owned();
     match tokio::task::spawn_blocking(move || ticket.retain()).await {
-        Ok(crate::queue_journal::RetainOutcome::Released) => {}
+        Ok(crate::queue_journal::RetainOutcome::Released)
+        | Ok(crate::queue_journal::RetainOutcome::Cancelled) => {}
         Ok(crate::queue_journal::RetainOutcome::Stale) => {
             tracing::warn!(%job, "shutdown found a stale durable feeder claim");
         }
@@ -271,6 +403,23 @@ fn claim_next(
                         claim,
                         claimed_as_attached: true,
                     }));
+                }
+                // An exact claim that fails means one of two things, and they
+                // need opposite answers. The row may be GONE — cancelled and
+                // deleted — in which case the hint and its observer are both
+                // dead and `discard_hint` resolves the caller. Or the row may
+                // simply be UNCLAIMABLE RIGHT NOW, most often because this
+                // same feeder just claimed it through the ordinary FIFO path,
+                // whose `take_claimed` will hand the observer over exactly
+                // once. Discarding the hint in that second case detaches a
+                // live observer and turns a print into a `202` the caller has
+                // to reconcile — which is what two concurrent `/api/generate`
+                // requests used to do to each other.
+                // A transient SQLite error answers "unknown", and unknown
+                // defers: discarding on a busy database would detach a live
+                // observer and hand the caller a 202 for a print that renders.
+                None if journal.owns_cancellable_row(&job_id).unwrap_or(true) => {
+                    ingress.defer_claimed_hint(&job_id);
                 }
                 None => ingress.discard_hint(&job_id),
             }
@@ -311,6 +460,66 @@ fn projection_failure_holds(error: &crate::queue_media_store::QueueMediaError) -
     )
 }
 
+fn restore_admission_authority(
+    lifecycle: Option<&crate::queue_media_lifecycle::QueueMediaLifecycle>,
+    instance_id: &str,
+    row: &mold_db::generation_queue::GenerationQueueRow,
+    request: mold_core::GenerateRequest,
+    deferred_media: Option<&crate::queue_media_runtime::DeferredQueueMedia>,
+) -> Result<
+    crate::durable_admission_authority::RuntimeAuthority,
+    crate::durable_admission_authority::Failure,
+> {
+    use crate::durable_admission_authority::Failure;
+    use crate::durable_disposition::DurableDisposition;
+    let envelope = match row.admission_authority.as_deref() {
+        Some(encoded) => {
+            let authority = crate::queue_media_store::QueueMediaAdmissionAuthority::parse(encoded)
+                .map_err(|error| Failure {
+                    disposition: DurableDisposition::Hold { retryable: false },
+                    message: error.to_string(),
+                })?;
+            let lifecycle = lifecycle.ok_or_else(|| Failure {
+                disposition: DurableDisposition::Retain,
+                message: "durable admission authority storage is unavailable".into(),
+            })?;
+            Some(
+                lifecycle
+                    .open_admission_authority(&row.id, &authority)
+                    .map_err(|error| Failure {
+                        disposition: if projection_failure_holds(&error) {
+                            DurableDisposition::Hold { retryable: false }
+                        } else {
+                            DurableDisposition::Retain
+                        },
+                        message: error.to_string(),
+                    })?,
+            )
+        }
+        None => None,
+    };
+    let mut request = crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request);
+    let hydration = match (envelope.as_ref(), deferred_media) {
+        (Some(_), Some(media)) => Some(media.hydrate_into(&row.id, &mut request).map_err(
+            |error| Failure {
+                disposition: error.disposition(),
+                message: error.to_string(),
+            },
+        )?),
+        _ => None,
+    };
+    let restored = crate::durable_admission_authority::restore(
+        &request,
+        envelope.as_deref().map(|value| value.as_slice()),
+        instance_id,
+    );
+    // Scrub hydrated request media before its private staging lease is
+    // released. The restored grant is payload-free and owns no request data.
+    drop(request);
+    drop(hydration);
+    restored
+}
+
 /// Resolve the exact claim's bounded durable position, then publish its
 /// current affinity and bounded durable position, then publish its runtime
 /// cancellation token under the scheduler fence.
@@ -324,9 +533,47 @@ fn projection_failure_holds(error: &crate::queue_media_store::QueueMediaError) -
 /// Valid claims outside the bounded prefix are released for a later FIFO pass;
 /// appending them would let an attached deep row bypass unhydrated predecessors.
 enum ClaimRegistration {
-    Registered(Arc<tokio::sync::Notify>),
+    Registered {
+        cancel: Arc<tokio::sync::Notify>,
+        /// Held until the reserved transport accepts the job, preventing a
+        /// successor from treating a registry-only predecessor as published.
+        publication_guard: tokio::sync::OwnedMutexGuard<()>,
+    },
+    WaitingForPredecessor,
     Stale,
     OutsideRuntimeWindow,
+}
+
+enum ClaimWindow {
+    Eligible,
+    Stale,
+    OutsideRuntimeWindow,
+}
+
+/// Validate every claim before deferred preparation. This closes cancellation
+/// that committed before the preparation token was installed; for an exact
+/// attached hint it also keeps deep rows out of the bounded runtime prefix.
+/// The authoritative registration repeats the check because PATCH and
+/// cancellation may still race preparation.
+async fn claimed_row_is_in_runtime_window(
+    state: &AppState,
+    row_id: &str,
+    claim_token: &str,
+) -> anyhow::Result<ClaimWindow> {
+    let journal = state.queue_journal.clone();
+    let order_id = row_id.to_string();
+    let order_claim = claim_token.to_string();
+    let window = state.queue_capacity;
+    let order = tokio::task::spawn_blocking(move || {
+        journal.claimed_runtime_position(&order_id, &order_claim, window)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("durable queue order task failed: {error}"))??;
+    Ok(match order {
+        None => ClaimWindow::Stale,
+        Some(order) if order.position.is_none() => ClaimWindow::OutsideRuntimeWindow,
+        Some(_) => ClaimWindow::Eligible,
+    })
 }
 
 async fn register_claimed_runtime(
@@ -335,7 +582,7 @@ async fn register_claimed_runtime(
     claim_token: &str,
     request: &mut mold_core::GenerateRequest,
 ) -> anyhow::Result<ClaimRegistration> {
-    let cancel = {
+    let (cancel, publication_guard) = {
         // Strict lock order: durable transition -> completed DB read ->
         // scheduler fence. Never move this DB await beneath `_mutation`.
         let _durable_transition = state.queue_journal.lock_durable_transition().await;
@@ -358,14 +605,7 @@ async fn register_claimed_runtime(
             request,
             order.target_gpu,
             order.target_device_id.as_deref(),
-            |device_id| {
-                state
-                    .gpu_pool
-                    .workers
-                    .iter()
-                    .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
-                    .map(|worker| worker.gpu.ordinal)
-            },
+            |device_id| crate::queue_journal::resolve_pinned_ordinal(state, device_id),
         );
         if order.target_gpu.is_some() && target_gpu.is_none() {
             tracing::warn!(
@@ -380,17 +620,28 @@ async fn register_claimed_runtime(
             request.scheduler,
             mold_core::build_info::version_string(),
         ));
-        let _mutation = state.scheduler_mutation_fence.lock().await;
-        state.job_registry.register_job_at_queued_position(
+        let publication_guard = state.scheduler_mutation_fence.clone().lock_owned().await;
+        if order
+            .predecessor_ids
+            .iter()
+            .any(|id| state.job_registry.scheduler_lifecycle(id).is_none())
+        {
+            return Ok(ClaimRegistration::WaitingForPredecessor);
+        }
+        let cancel = state.job_registry.register_job_at_queued_position(
             &row.id,
             &row.model,
             target_gpu,
             Some(row.seed_pinned),
             Some(metadata),
             position,
-        )
+        );
+        (cancel, publication_guard)
     };
-    Ok(ClaimRegistration::Registered(cancel))
+    Ok(ClaimRegistration::Registered {
+        cancel,
+        publication_guard,
+    })
 }
 
 async fn feed_available(
@@ -398,9 +649,10 @@ async fn feed_available(
     current_output_dir: Option<&std::path::Path>,
     shutdown: &tokio_util::sync::CancellationToken,
     arbiter: &mut FeederArbiter,
+    publication: &Arc<tokio::sync::Notify>,
 ) -> FeederReport {
     let mut report = FeederReport::default();
-    loop {
+    'feed: loop {
         let reservation = match state.queue.try_reserve(state.queue_capacity) {
             Ok(reservation) => reservation,
             Err(SubmitError::Full { .. }) => {
@@ -420,9 +672,10 @@ async fn feed_available(
         let ingress = journal
             .queue_media_admission()
             .map(|admission| admission.ingress().clone());
+        let claim_ingress = ingress.clone();
         let prefer_attached = arbiter.prefer_attached;
         let claim = match tokio::task::spawn_blocking(move || {
-            claim_next(&journal, ingress.as_deref(), prefer_attached)
+            claim_next(&journal, claim_ingress.as_deref(), prefer_attached)
         })
         .await
         {
@@ -445,21 +698,82 @@ async fn feed_available(
                 return report;
             }
         };
+        let _publication_wake = PublicationWake(Arc::clone(publication));
         arbiter.prefer_attached = !claim.claimed_as_attached;
 
-        let mut row = claim.claim.row;
-        let claim_token = claim.claim.claim_token;
-        let observer = state
-            .queue_journal
-            .queue_media_admission()
-            .and_then(|admission| admission.ingress().take_claimed(&row.id));
+        let mold_db::generation_queue::QueueClaim {
+            mut row,
+            claim_token,
+            queue_rank,
+        } = claim.claim;
         let ticket = state
             .queue_journal
             .attach_claimed(&row.id, claim_token.clone());
+        // DELETE must be able to revoke a claim before deferred model/media
+        // preparation publishes it to the runtime registry. Register first,
+        // then validate SQLite so cancellation on either side of this point
+        // is observed without a gap.
+        let preparation_cancel = state.queue_journal.begin_preparation(&row.id);
+        // One cancellation seam covers every pre-runtime await. DELETE has
+        // already terminalized SQLite before signalling this token, so the
+        // reserved slot and observer can be released immediately even when a
+        // filesystem, catalog, or media operation is still unwinding.
+        macro_rules! await_preparation {
+            ($future:expr) => {{
+                tokio::select! {
+                    biased;
+                    _ = preparation_cancel.cancelled() => {
+                        drop(reservation);
+                        if let Some(ingress) = ingress.as_deref() {
+                            ingress.cancel(&row.id);
+                        }
+                        tokio::task::spawn_blocking(move || ticket.discard());
+                        continue 'feed;
+                    }
+                    output = $future => output,
+                }
+            }};
+        }
+        match await_preparation!(claimed_row_is_in_runtime_window(
+            state,
+            &row.id,
+            &claim_token
+        )) {
+            Ok(ClaimWindow::Eligible) => {}
+            Ok(ClaimWindow::Stale) => {
+                if let Some(ingress) = ingress.as_deref() {
+                    ingress.discard_hint(&row.id);
+                }
+                let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
+                drop(reservation);
+                continue;
+            }
+            Ok(ClaimWindow::OutsideRuntimeWindow) if claim.claimed_as_attached => {
+                if let Some(ingress) = ingress.as_deref() {
+                    ingress.defer_claimed_hint(&row.id);
+                }
+                drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
+                continue;
+            }
+            // FIFO claims may sit beyond the bounded durable prefix while
+            // sibling preparation tasks own earlier runtime reservations.
+            // The exact owner/token lookup above is still the cancellation
+            // fence; only attached hints need the early position gate.
+            Ok(ClaimWindow::OutsideRuntimeWindow) => {}
+            Err(error) => {
+                drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
+                tracing::error!(job = %row.id, %error, "durable feeder attached-order lookup failed");
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
+            }
+        }
         let journal = state.queue_journal.clone();
         let completion_id = row.id.clone();
-        let db_completion =
-            tokio::task::spawn_blocking(move || journal.completed_output(&completion_id)).await;
+        let db_completion = await_preparation!(tokio::task::spawn_blocking(move || {
+            journal.completed_output(&completion_id)
+        }));
         let (mut completed_output, db_invalid_authority) = match db_completion {
             Ok(Ok(output)) => (output, None),
             Ok(Err(error)) if error.is_invalid_authority() => (None, Some(error.to_string())),
@@ -485,7 +799,9 @@ async fn feed_available(
             let gallery_gate = state.gallery_publication_gate.clone();
             let output_dir = row.output_dir.clone();
             let completion_id = row.id.clone();
-            let archive_completion = {
+            let archive_completion = await_preparation!(async {
+                #[cfg(test)]
+                state.queue_journal.mark_archive_lookup_started();
                 let _gallery_reader = state.gallery_publication_gate.read().await;
                 tokio::task::spawn_blocking(move || {
                     crate::batch_transaction::find_completed_output_in_committed_archive(
@@ -495,15 +811,28 @@ async fn feed_available(
                     )
                 })
                 .await
-            };
+            });
             match archive_completion {
                 Ok(Ok(output)) => completed_output = output,
                 Ok(Err(error)) if error.is_invalid_authority() => {
                     let reason = format!("durable publication authority is invalid: {error}");
-                    let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        false,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
+                    if held == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
                     tracing::error!(job = %row.id, %error, "held durable generation with invalid publication authority");
-                    report.held += 1;
+                    report.held += usize::from(held == HoldClaimOutcome::Held);
                     continue;
                 }
                 Ok(Err(error)) => {
@@ -525,18 +854,34 @@ async fn feed_available(
         if completed_output.is_none() {
             if let Some(error) = db_invalid_authority {
                 let reason = format!("durable publication metadata is invalid: {error}");
-                let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                let held = hold_claimed(
+                    ticket,
+                    ingress.as_deref(),
+                    &row.id,
+                    reason,
+                    None,
+                    false,
+                    shutdown,
+                )
+                .await;
                 drop(reservation);
+                if held == HoldClaimOutcome::Retained {
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
                 tracing::error!(job = %row.id, %error, "held durable generation with invalid publication metadata");
-                report.held += 1;
+                report.held += usize::from(held == HoldClaimOutcome::Held);
                 continue;
             }
         } else if let Some(output) = completed_output {
-            let result_json = serde_json::json!({
-                "filename": output.filename,
-                "original_filename": output.original_filename,
+            // The committed archive records the filenames only, so the
+            // terminal facts stay absent rather than reported as zero.
+            let result_json = serde_json::to_string(&mold_core::GenerationBatchResult {
+                filename: Some(output.filename),
+                original_filename: output.original_filename,
+                ..Default::default()
             })
-            .to_string();
+            .unwrap_or_default();
             let _ = tokio::task::spawn_blocking(move || {
                 ticket.complete_before_dispatch_with_result(Some(&result_json));
             })
@@ -551,51 +896,80 @@ async fn feed_available(
                     let id = row.id.clone();
                     let replacement = replacement.to_path_buf();
                     let db_replacement = replacement.clone();
-                    let repointed = tokio::task::spawn_blocking(move || {
+                    let repointed = await_preparation!(tokio::task::spawn_blocking(move || {
                         journal.repoint_output(&id, &db_replacement)
-                    })
-                    .await;
+                    }));
                     if let Err(error) = repointed
                         .map_err(|error| anyhow::anyhow!(error))
                         .and_then(|result| result)
                     {
-                        let _ = tokio::task::spawn_blocking(move || {
-                            ticket.hold("the gallery directory could not be reconciled")
-                        })
+                        let held = hold_claimed(
+                            ticket,
+                            ingress.as_deref(),
+                            &row.id,
+                            "the gallery directory could not be reconciled".into(),
+                            None,
+                            false,
+                            shutdown,
+                        )
                         .await;
                         drop(reservation);
+                        if held == HoldClaimOutcome::Retained {
+                            report.stop = FeederStop::RecoverableFailure;
+                            return report;
+                        }
                         tracing::warn!(job = %row.id, %error, "held durable generation with an unusable output target");
-                        report.held += 1;
+                        report.held += usize::from(held == HoldClaimOutcome::Held);
                         continue;
                     }
                     row.output_dir = replacement;
                 }
                 Some(_) => {
                     let output_dir = row.output_dir.clone();
-                    let created =
-                        tokio::task::spawn_blocking(move || std::fs::create_dir_all(output_dir))
-                            .await;
+                    let created = await_preparation!(tokio::task::spawn_blocking(move || {
+                        std::fs::create_dir_all(output_dir)
+                    }));
                     if let Err(error) = created
                         .map_err(|error| anyhow::anyhow!(error))
                         .and_then(|result| result.map_err(anyhow::Error::from))
                     {
-                        let _ = tokio::task::spawn_blocking(move || {
-                            ticket.hold("the gallery directory this job targets cannot be created")
-                        })
+                        let held = hold_claimed(
+                            ticket,
+                            ingress.as_deref(),
+                            &row.id,
+                            "the gallery directory this job targets cannot be created".into(),
+                            None,
+                            false,
+                            shutdown,
+                        )
                         .await;
                         drop(reservation);
+                        if held == HoldClaimOutcome::Retained {
+                            report.stop = FeederStop::RecoverableFailure;
+                            return report;
+                        }
                         tracing::warn!(job = %row.id, %error, "held durable generation with an unusable output target");
-                        report.held += 1;
+                        report.held += usize::from(held == HoldClaimOutcome::Held);
                         continue;
                     }
                 }
                 None => {
-                    let _ = tokio::task::spawn_blocking(move || {
-                        ticket.hold("server gallery output is disabled")
-                    })
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        "server gallery output is disabled".into(),
+                        None,
+                        false,
+                        shutdown,
+                    )
                     .await;
                     drop(reservation);
-                    report.held += 1;
+                    if held == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
+                    report.held += usize::from(held == HoldClaimOutcome::Held);
                     continue;
                 }
             }
@@ -604,16 +978,36 @@ async fn feed_available(
         {
             Ok(request) => request,
             Err(error) => {
-                let _ = tokio::task::spawn_blocking(move || {
-                    ticket.hold("the recorded request could not be deserialized")
-                })
+                let held = hold_claimed(
+                    ticket,
+                    ingress.as_deref(),
+                    &row.id,
+                    "the recorded request could not be deserialized".into(),
+                    None,
+                    false,
+                    shutdown,
+                )
                 .await;
                 drop(reservation);
+                if held == HoldClaimOutcome::Retained {
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
                 tracing::warn!(job = %row.id, %error, "held unreadable durable generation");
-                report.held += 1;
+                report.held += usize::from(held == HoldClaimOutcome::Held);
                 continue;
             }
         };
+        // Normalize a persisted accelerator identity before deferred
+        // preparation validates placement. A device missing after restart
+        // falls back to Auto; it must not be held as an invalid request before
+        // the final registry fence gets a chance to resolve replay affinity.
+        let _ = crate::queue_journal::resolve_replay_affinity(
+            &mut request,
+            row.target_gpu,
+            row.target_device_id.as_deref(),
+            |device_id| crate::queue_journal::resolve_pinned_ordinal(state, device_id),
+        );
         let deferred_media = if let Some(set_id) = row.media_set_id.as_ref() {
             let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() else {
                 drop(reservation);
@@ -631,10 +1025,23 @@ async fn feed_available(
                 Ok(deferred) => Some(deferred),
                 Err(error) if projection_failure_holds(&error) => {
                     let reason = format!("durable media projection is invalid: {error}");
-                    let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        false,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
+                    if held == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
                     tracing::error!(job = %row.id, %error, "held durable generation with invalid media projection");
-                    report.held += 1;
+                    report.held += usize::from(held == HoldClaimOutcome::Held);
                     continue;
                 }
                 Err(error) => {
@@ -648,47 +1055,154 @@ async fn feed_available(
         } else {
             None
         };
-        // Registry publication shares the scheduler mutation fence with
-        // DELETE /api/queue, but SQLite is synchronous and can be stalled by
-        // another connection. Publish the cancellation token under the fence,
-        // release it, and only then perform the blocking durable check. The
-        // runtime queue does not receive this job until the check completes:
-        // cancellation before/during the check is observed in SQLite, while a
-        // later cancellation observes and trips the registered live token.
-        let cancel = match register_claimed_runtime(state, &row, &claim_token, &mut request).await {
-            Ok(ClaimRegistration::Registered(cancel)) => cancel,
-            Ok(ClaimRegistration::Stale) => {
-                let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
-                drop(reservation);
-                continue;
-            }
-            Ok(ClaimRegistration::OutsideRuntimeWindow) => {
-                drop(reservation);
-                retain_for_retry(ticket, shutdown).await;
-                continue;
-            }
-            Err(error) => {
-                drop(reservation);
-                retain_for_retry(ticket, shutdown).await;
-                tracing::error!(job = %row.id, %error, "durable feeder order lookup failed");
-                report.stop = FeederStop::RecoverableFailure;
-                return report;
+        let runtime_authority = {
+            let lifecycle = state.queue_journal.queue_media_lifecycle();
+            let row_for_authority = row.clone();
+            let request_for_authority = request.clone();
+            let deferred_for_authority = deferred_media.clone();
+            let instance_id = state.instance_id.clone();
+            match await_preparation!(tokio::task::spawn_blocking(move || {
+                restore_admission_authority(
+                    lifecycle.as_deref(),
+                    &instance_id,
+                    &row_for_authority,
+                    request_for_authority,
+                    deferred_for_authority.as_ref(),
+                )
+            })) {
+                Ok(Ok(authority)) => authority,
+                Ok(Err(crate::durable_admission_authority::Failure {
+                    disposition,
+                    message: reason,
+                })) => {
+                    let parked = park_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        disposition,
+                        shutdown,
+                    )
+                    .await;
+                    drop(reservation);
+                    if parked == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
+                    report.held += usize::from(parked == HoldClaimOutcome::Held);
+                    continue;
+                }
+                Err(error) => {
+                    drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
+                    tracing::error!(job = %row.id, %error, "durable admission authority worker failed; retaining for replay");
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
             }
         };
+        // Durable acknowledgement is already complete. All model/catalog,
+        // expansion, media probing, server-path resolution, and dependency
+        // materialization now happens here, before registry/scheduler
+        // publication. A crash simply releases the claim for startup replay.
+        let mut preparation_request =
+            crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request);
+        let preparation_lease = if let Some(media) = deferred_media.as_ref() {
+            let media = media.clone();
+            let job_id = row.id.clone();
+            match await_preparation!(tokio::task::spawn_blocking(move || {
+                let result = media.hydrate_into(&job_id, &mut preparation_request);
+                (preparation_request, result)
+            })) {
+                Ok((hydrated, Ok(lease))) => {
+                    preparation_request = hydrated;
+                    Some(lease)
+                }
+                Ok((_request, Err(error))) => {
+                    let parked = park_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        error.to_string(),
+                        None,
+                        error.disposition(),
+                        shutdown,
+                    )
+                    .await;
+                    drop(reservation);
+                    if parked == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
+                    report.held += usize::from(parked == HoldClaimOutcome::Held);
+                    continue;
+                }
+                Err(error) => {
+                    drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
+                    tracing::error!(job = %row.id, %error, "deferred admission hydration worker failed");
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
+            }
+        } else {
+            None
+        };
+        let prepared_route =
+            await_preparation!(crate::routes::prepare_generation_after_durable_ack(
+                state,
+                &mut preparation_request,
+                runtime_authority,
+            ));
+        // Publish only a payload-free copy. Dropping the RAII owner before the
+        // staging lease preserves scrub-before-release on success; unwind and
+        // cancellation take the same order because locals drop in reverse.
+        let mut request = preparation_request.scrubbed_clone();
+        drop(preparation_request);
+        drop(preparation_lease);
+        let prepared_route = match prepared_route {
+            Ok(route) => route,
+            Err(error) => {
+                let reason = format!("deferred generation preparation failed: {}", error.error);
+                let held = park_claimed(
+                    ticket,
+                    ingress.as_deref(),
+                    &row.id,
+                    reason,
+                    Some(error.code.clone()),
+                    crate::durable_admission_authority::preparation_disposition(&error),
+                    shutdown,
+                )
+                .await;
+                drop(reservation);
+                if held == HoldClaimOutcome::Retained {
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
+                report.held += usize::from(held == HoldClaimOutcome::Held);
+                continue;
+            }
+        };
+        let preparation_warnings = prepared_route.warnings;
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+        let h3_private_ingress_grant = prepared_route.h3_private_ingress_grant;
+        // Check SQLite before taking the scheduler publication fence. A later
+        // cancellation waits on that fence, observes the registered token,
+        // and cancels the submitted job through the ordinary live path.
         let journal = state.queue_journal.clone();
         let cancel_id = row.id.clone();
-        let cancel_requested =
-            tokio::task::spawn_blocking(move || journal.feeder_cancel_requested(&cancel_id)).await;
+        let cancel_requested = await_preparation!(tokio::task::spawn_blocking(move || {
+            journal.feeder_cancel_requested(&cancel_id)
+        }));
         match cancel_requested {
             Ok(Ok(true)) => {
-                state.job_registry.remove(&row.id);
                 let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
                 drop(reservation);
                 continue;
             }
             Ok(Ok(false)) => {}
             Ok(Err(error)) => {
-                state.job_registry.remove(&row.id);
                 drop(reservation);
                 retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation check failed");
@@ -696,7 +1210,6 @@ async fn feed_available(
                 return report;
             }
             Err(error) => {
-                state.job_registry.remove(&row.id);
                 drop(reservation);
                 retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation task failed");
@@ -704,65 +1217,162 @@ async fn feed_available(
                 return report;
             }
         }
+        // Registry publication shares the scheduler mutation fence with
+        // DELETE /api/queue, but SQLite is synchronous and can be stalled by
+        // another connection. Publish the cancellation token under the fence,
+        // release it, and only then perform the blocking durable check. The
+        // runtime queue does not receive this job until the check completes:
+        // cancellation before/during the check is observed in SQLite, while a
+        // later cancellation observes and trips the registered live token.
+        let (cancel, publication_guard) = loop {
+            if preparation_cancel.is_cancelled() {
+                let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
+                drop(reservation);
+                continue 'feed;
+            }
+            let publication_wake = publication.notified();
+            match register_claimed_runtime(state, &row, &claim_token, &mut request).await {
+                Ok(ClaimRegistration::Registered {
+                    cancel,
+                    publication_guard,
+                }) => {
+                    drop(preparation_cancel);
+                    break (cancel, publication_guard);
+                }
+                Ok(ClaimRegistration::WaitingForPredecessor) => {
+                    // An attached hint may name any row in the bounded durable
+                    // window. Do not let all preparation workers sit on deep
+                    // exact claims while the unclaimed FIFO predecessors that
+                    // would release them have nobody left to feed. Preserve
+                    // the observer, release the exact claim, and let this
+                    // worker's next (FIFO-preferred) pass make progress.
+                    if claim.claimed_as_attached {
+                        if let Some(ingress) = ingress.as_deref() {
+                            ingress.defer_claimed_hint(&row.id);
+                        }
+                        drop(reservation);
+                        retain_for_retry(ticket, shutdown).await;
+                        continue 'feed;
+                    }
+                    tokio::select! {
+                        _ = shutdown.cancelled() => {
+                            drop(reservation);
+                            retain_for_retry(ticket, shutdown).await;
+                            report.stop = FeederStop::TransportClosed;
+                            return report;
+                        }
+                        _ = preparation_cancel.cancelled() => {
+                            let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
+                            drop(reservation);
+                            continue 'feed;
+                        }
+                        _ = publication_wake => {}
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                    }
+                }
+                Ok(ClaimRegistration::Stale) => {
+                    let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
+                    drop(reservation);
+                    continue 'feed;
+                }
+                Ok(ClaimRegistration::OutsideRuntimeWindow) => {
+                    drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
+                    continue 'feed;
+                }
+                Err(error) => {
+                    drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
+                    tracing::error!(job = %row.id, %error, "durable feeder order lookup failed");
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
+            }
+        };
+        // Transfer the observer only after every fallible preparation and the
+        // final durable-order/cancellation fence. Retains keep it attached;
+        // holds resolve it explicitly through `hold_claimed`.
+        let observer = ingress
+            .as_deref()
+            .and_then(|ingress| ingress.take_claimed(&row.id));
         let crate::job_supervisor::SupervisedJob {
             result_tx,
             outcome_rx,
         } = crate::job_supervisor::supervise_job(row.id.clone(), cancel);
-        let progress_tx = match observer {
+        // Every job gets a progress channel: the registry relay that folds
+        // each frame into the `/api/queue/{id}/preview` snapshot, with the
+        // attached SSE observer, when there is one, as a second reader.
+        let (observer_tx, sse_outcome_rx) = match observer {
             Some(observer) => match observer.mode() {
                 crate::queue_media_ingress::ObserverMode::Raw => {
                     observer.deliver(crate::queue_media_ingress::AttachedObserver::Raw {
                         outcome: outcome_rx,
+                        warnings: preparation_warnings,
                     });
-                    None
+                    (None, None)
                 }
                 crate::queue_media_ingress::ObserverMode::Sse(_) => {
-                    let (progress_tx, messages) = tokio::sync::mpsc::unbounded_channel();
-                    let cancellation_tx = progress_tx.clone();
-                    tokio::spawn(async move {
-                        if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) =
-                            outcome_rx.await
-                        {
-                            let _ = cancellation_tx.send(crate::state::SseMessage::Error(
-                                mold_core::SseErrorEvent::failed("cancelled".to_string()),
-                            ));
-                        }
-                    });
+                    let (observer_tx, messages) = tokio::sync::mpsc::unbounded_channel();
                     observer
                         .deliver(crate::queue_media_ingress::AttachedObserver::Sse { messages });
-                    Some(progress_tx)
+                    let warnings = preparation_warnings
+                        .all()
+                        .map(|warning| warning.to_string())
+                        .collect::<Vec<_>>();
+                    (Some(observer_tx), Some((outcome_rx, warnings)))
                 }
             },
             None => {
                 drop(outcome_rx);
-                None
+                (None, None)
             }
         };
+        let progress_tx =
+            crate::job_registry::progress_relay(&state.job_registry, &row.id, observer_tx);
+        if let Some((outcome_rx, warnings)) = sse_outcome_rx {
+            for message in warnings {
+                let _ = progress_tx.send(crate::state::SseMessage::Progress(
+                    mold_core::SseProgressEvent::Info { message },
+                ));
+            }
+            let cancellation_tx = progress_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) = outcome_rx.await {
+                    let _ = cancellation_tx.send(crate::state::SseMessage::Error(
+                        mold_core::SseErrorEvent::cancelled("cancelled".to_string()),
+                    ));
+                }
+            });
+        }
+        let progress_tx = Some(progress_tx);
         let id = row.id.clone();
         let job = GenerationJob {
             id: id.clone(),
+            durable_queue_rank: Some(queue_rank),
             request,
             deferred_media,
-            resolved_references: None,
             completion_payload: crate::queue_journal::completion_payload_from_str(
                 &row.completion_payload,
             ),
             progress_tx,
             result_tx,
             output_dir: Some(row.output_dir),
-            batch_child: None,
             journal: Some(ticket),
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-            h3_private_ingress_grant: None,
+            h3_private_ingress_grant,
         };
         match reservation.submit(job).await {
-            Ok(_) => report.submitted += 1,
+            Ok(_) => {
+                drop(publication_guard);
+                report.submitted += 1;
+            }
             Err(returned) => {
                 let (error, mut job) = *returned;
                 if let Some(ticket) = job.journal.take() {
                     retain_for_shutdown(ticket).await;
                 }
                 state.job_registry.remove(&id);
+                drop(publication_guard);
                 tracing::warn!(job = %id, ?error, "durable feeder transport stopped; row retained");
                 report.stop = FeederStop::TransportClosed;
                 return report;
@@ -784,8 +1394,8 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "prompt": prompt,
             "model": "mock-model",
-            "width": 64,
-            "height": 64,
+            "width": 512,
+            "height": 512,
             "steps": 1,
             "batch_size": 1,
             "output_format": "png"
@@ -818,7 +1428,22 @@ mod tests {
             Some(&root),
             "feeder-test",
         ));
-        state.config.try_write().unwrap().output_dir = Some(gallery.to_string_lossy().into());
+        let transformer = root.join("mock-model.safetensors");
+        let vae = root.join("mock-vae.safetensors");
+        std::fs::write(&transformer, b"test transformer fixture").unwrap();
+        std::fs::write(&vae, b"test vae fixture").unwrap();
+        let mut config = state.config.try_write().unwrap();
+        config.output_dir = Some(gallery.to_string_lossy().into());
+        config.models.insert(
+            "mock-model".to_string(),
+            mold_core::ModelConfig {
+                family: Some("sdxl".to_string()),
+                transformer: Some(transformer.to_string_lossy().into()),
+                vae: Some(vae.to_string_lossy().into()),
+                ..Default::default()
+            },
+        );
+        drop(config);
         (state, rx, root)
     }
 
@@ -841,7 +1466,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .collect::<Vec<_>>();
         state
@@ -920,7 +1544,7 @@ mod tests {
         let mut jobs = Vec::new();
         for _ in 0..3 {
             jobs.push(
-                tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
                     .await
                     .unwrap()
                     .unwrap(),
@@ -934,6 +1558,91 @@ mod tests {
         shutdown.cancel();
         handle.await.unwrap();
         drop(jobs);
+    }
+
+    #[tokio::test]
+    async fn default_capacity_publishes_more_than_one_worker_width_without_deadlock() {
+        let (state, mut rx) = state(200);
+        let ids = admit(&state, 9);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+
+        let mut jobs = Vec::new();
+        for _ in 0..ids.len() {
+            jobs.push(
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("durable publication must not wait for the full queue capacity")
+                    .expect("the runtime queue remains open"),
+            );
+        }
+        assert_eq!(
+            jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            ids.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(jobs);
+    }
+
+    #[tokio::test]
+    async fn attached_deep_hints_cannot_occupy_all_preparation_workers() {
+        let (state, mut rx, home) = state_with_home(200);
+        // Three worker-widths are required: 0..7 occupy the first wave,
+        // attached hints 16..23 compete for the second, and FIFO predecessors
+        // 8..15 must still publish before those deep hints can proceed.
+        let ids = admit(&state, 24);
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        let lifecycle = Arc::new(crate::queue_media_lifecycle::QueueMediaLifecycle::new(
+            state.metadata_db.clone(),
+            home,
+            owner,
+        ));
+        state
+            .queue_journal
+            .install_queue_media_lifecycle(lifecycle.clone())
+            .unwrap();
+        let admission =
+            crate::queue_media_admission::DurableMediaAdmission::new(lifecycle, 200, false)
+                .unwrap();
+        state
+            .queue_journal
+            .install_queue_media_admission(admission.clone())
+            .unwrap();
+        let registrations = ids[16..]
+            .iter()
+            .map(|id| {
+                let registration = admission
+                    .ingress()
+                    .reserve(id, crate::queue_media_ingress::ObserverMode::Raw)
+                    .unwrap();
+                admission.publish_observer(id);
+                registration
+            })
+            .collect::<Vec<_>>();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let mut jobs = Vec::new();
+        for _ in 0..16 {
+            jobs.push(
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("FIFO preparation must continue past one worker width")
+                    .expect("the runtime queue remains open"),
+            );
+        }
+        assert_eq!(
+            jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            ids[..16].iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(jobs);
+        drop(registrations);
     }
 
     #[tokio::test]
@@ -1055,6 +1764,238 @@ mod tests {
             ids[0],
             "the unhydrated FIFO predecessor remains authoritative"
         );
+    }
+
+    #[tokio::test]
+    async fn attached_deep_hint_is_deferred_without_consuming_its_observer() {
+        let (state, _rx) = state(2);
+        let ids = admit(&state, 3);
+        let ingress = crate::queue_media_ingress::QueueMediaIngress::new(2);
+        let _registration = ingress
+            .reserve(&ids[2], crate::queue_media_ingress::ObserverMode::Raw)
+            .unwrap();
+        ingress.publish_committed(&ids[2]);
+        let selected = claim_next(&state.queue_journal, Some(&ingress), true)
+            .unwrap()
+            .expect("the direct observer supplies an exact claim hint");
+        assert!(selected.claimed_as_attached);
+        assert!(matches!(
+            claimed_row_is_in_runtime_window(
+                &state,
+                &selected.claim.row.id,
+                &selected.claim.claim_token,
+            )
+            .await
+            .unwrap(),
+            ClaimWindow::OutsideRuntimeWindow
+        ));
+
+        ingress.defer_claimed_hint(&selected.claim.row.id);
+        assert!(matches!(
+            state
+                .queue_journal
+                .attach_claimed(&selected.claim.row.id, selected.claim.claim_token)
+                .retain(),
+            crate::queue_journal::RetainOutcome::Released
+        ));
+
+        assert_eq!(ingress.next_committed_id(), None);
+        assert_eq!(ingress.attached_len(), 1);
+        assert_eq!(
+            state
+                .queue_journal
+                .claim_next_feeder()
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            ids[0],
+            "the durable FIFO predecessor remains next"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_winning_a_feeder_hold_resolves_raw_and_sse_as_cancelled() {
+        use crate::queue_media_ingress::{AttachedObserver, ObserverMode, QueueMediaIngress};
+
+        let (state, _rx) = state(2);
+        let ids = admit(&state, 2);
+        let ingress = QueueMediaIngress::new(2);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+
+        let raw = ingress.reserve(&ids[0], ObserverMode::Raw).unwrap();
+        ingress.publish_committed(&ids[0]);
+        let raw_claim = state
+            .queue_journal
+            .claim_feeder_by_id(&ids[0])
+            .unwrap()
+            .unwrap();
+        let raw_ticket = state
+            .queue_journal
+            .attach_claimed(&ids[0], raw_claim.claim_token);
+        assert!(state.queue_journal.cancel_id(&ids[0]).unwrap());
+        assert_eq!(
+            hold_claimed(
+                raw_ticket,
+                Some(&ingress),
+                &ids[0],
+                "dependency unavailable".into(),
+                None,
+                true,
+                &shutdown,
+            )
+            .await,
+            HoldClaimOutcome::Cancelled
+        );
+        let AttachedObserver::Raw { outcome, .. } = raw.attached().await.unwrap() else {
+            panic!("raw registration received the wrong observer type");
+        };
+        assert!(matches!(
+            outcome.await.unwrap(),
+            crate::job_supervisor::SupervisedOutcome::Cancelled
+        ));
+
+        let sse = ingress
+            .reserve(
+                &ids[1],
+                ObserverMode::Sse(crate::state::SseCompletionPayload::Full),
+            )
+            .unwrap();
+        ingress.publish_committed(&ids[1]);
+        let sse_claim = state
+            .queue_journal
+            .claim_feeder_by_id(&ids[1])
+            .unwrap()
+            .unwrap();
+        let sse_ticket = state
+            .queue_journal
+            .attach_claimed(&ids[1], sse_claim.claim_token);
+        assert!(state.queue_journal.cancel_id(&ids[1]).unwrap());
+        assert_eq!(
+            hold_claimed(
+                sse_ticket,
+                Some(&ingress),
+                &ids[1],
+                "dependency unavailable".into(),
+                None,
+                true,
+                &shutdown,
+            )
+            .await,
+            HoldClaimOutcome::Cancelled
+        );
+        let AttachedObserver::Sse { mut messages } = sse.attached().await.unwrap() else {
+            panic!("SSE registration received the wrong observer type");
+        };
+        let Some(crate::state::SseMessage::Error(error)) = messages.recv().await else {
+            panic!("cancelled SSE observer must receive a terminal error");
+        };
+        assert_eq!(
+            error.code.as_deref(),
+            Some(mold_core::SSE_ERROR_CODE_QUEUED_CANCELLED)
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_claim_waits_for_an_unclaimed_durable_predecessor() {
+        let (state, _rx) = state(2);
+        let ids = admit(&state, 2);
+        let later = state
+            .queue_journal
+            .claim_feeder_by_id(&ids[1])
+            .unwrap()
+            .unwrap();
+        let mut later_request = request("later");
+        assert!(matches!(
+            register_claimed_runtime(&state, &later.row, &later.claim_token, &mut later_request,)
+                .await
+                .unwrap(),
+            ClaimRegistration::WaitingForPredecessor
+        ));
+
+        let first = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        let mut first_request = request("first");
+        let ClaimRegistration::Registered {
+            publication_guard, ..
+        } = register_claimed_runtime(&state, &first.row, &first.claim_token, &mut first_request)
+            .await
+            .unwrap()
+        else {
+            panic!("oldest claim must publish first");
+        };
+        drop(publication_guard);
+
+        let ClaimRegistration::Registered {
+            publication_guard, ..
+        } = register_claimed_runtime(&state, &later.row, &later.claim_token, &mut later_request)
+            .await
+            .unwrap()
+        else {
+            panic!("successor publishes after its predecessor");
+        };
+        drop(publication_guard);
+        state.job_registry.remove(&ids[0]);
+        state.job_registry.remove(&ids[1]);
+        state
+            .queue_journal
+            .attach_claimed(&first.row.id, first.claim_token)
+            .discard();
+        state
+            .queue_journal
+            .attach_claimed(&later.row.id, later.claim_token)
+            .discard();
+    }
+
+    #[tokio::test]
+    async fn claimed_reorder_is_authoritative_before_publication() {
+        let (state, _rx) = state(2);
+        let ids = admit(&state, 2);
+        let first = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        let second = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        assert!(matches!(
+            state
+                .queue_journal
+                .patch_owned_claimed_queued(&ids[1], None, None, Some(0))
+                .unwrap(),
+            mold_db::generation_queue::OwnedQueuedPatchOutcome::Updated { position: 0, .. }
+        ));
+
+        let mut first_request = request("formerly first");
+        assert!(matches!(
+            register_claimed_runtime(&state, &first.row, &first.claim_token, &mut first_request,)
+                .await
+                .unwrap(),
+            ClaimRegistration::WaitingForPredecessor
+        ));
+        let mut second_request = request("reordered first");
+        let ClaimRegistration::Registered {
+            publication_guard, ..
+        } = register_claimed_runtime(
+            &state,
+            &second.row,
+            &second.claim_token,
+            &mut second_request,
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("reordered claim must publish at its current durable position");
+        };
+        drop(publication_guard);
+        assert_eq!(
+            state.job_registry.queued_ids_in_order(),
+            vec![ids[1].clone()]
+        );
+
+        state.job_registry.remove(&ids[1]);
+        state
+            .queue_journal
+            .attach_claimed(&first.row.id, first.claim_token)
+            .discard();
+        state
+            .queue_journal
+            .attach_claimed(&second.row.id, second.claim_token)
+            .discard();
     }
 
     #[tokio::test]
@@ -1245,7 +2186,7 @@ mod tests {
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let handle = spawn(state.clone(), shutdown.clone());
-        let mut next = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let mut next = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("the next valid job must not be head-of-line blocked")
             .expect("the runtime queue remains open");
@@ -1316,6 +2257,7 @@ mod tests {
                         target_device_id: None,
                         completion_payload: SseCompletionPayload::MetadataOnly,
                         seed_pinned: false,
+                        admission_authority: None,
                     },
                     MediaJournalAdmission {
                         id: "job-1",
@@ -1327,9 +2269,10 @@ mod tests {
                         target_device_id: None,
                         completion_payload: SseCompletionPayload::MetadataOnly,
                         seed_pinned: false,
+                        admission_authority: None,
                     },
                 ],
-                observer_job_id: None,
+                observer_job_ids: &[],
             })
             .unwrap();
 
@@ -1375,7 +2318,15 @@ mod tests {
         let shutdown = tokio_util::sync::CancellationToken::new();
         let current_output = state.config.try_read().unwrap().effective_output_dir();
         let mut arbiter = FeederArbiter::default();
-        let report = feed_available(&state, Some(&current_output), &shutdown, &mut arbiter).await;
+        let publication = Arc::new(tokio::sync::Notify::new());
+        let report = feed_available(
+            &state,
+            Some(&current_output),
+            &shutdown,
+            &mut arbiter,
+            &publication,
+        )
+        .await;
         assert_eq!(report.held, 1);
         assert_eq!(report.submitted, 1);
         assert_eq!(report.stop, FeederStop::AtCapacity);
@@ -1398,7 +2349,14 @@ mod tests {
         later.journal.take().unwrap().complete_before_dispatch();
         state.job_registry.remove(&later.id);
         state.queue.decrement();
-        let drained = feed_available(&state, Some(&current_output), &shutdown, &mut arbiter).await;
+        let drained = feed_available(
+            &state,
+            Some(&current_output),
+            &shutdown,
+            &mut arbiter,
+            &publication,
+        )
+        .await;
         assert_eq!(drained, FeederReport::default());
         let rows = state.queue_journal.list_all();
         assert_eq!(rows.len(), 1);
@@ -1568,10 +2526,9 @@ mod tests {
                 detail.children[0].result_json.as_deref().unwrap()
             )
             .unwrap(),
-            serde_json::json!({
-                "filename": "mold-mock-model-1~portrait.png",
-                "original_filename": null,
-            })
+            // No pre-upscale original was saved, and no terminal facts
+            // survive an archive replay: absence is reported as absence.
+            serde_json::json!({ "filename": "mold-mock-model-1~portrait.png" })
         );
         shutdown.cancel();
         handle.await.unwrap();
@@ -1658,10 +2615,7 @@ mod tests {
                 detail.children[0].result_json.as_deref().unwrap()
             )
             .unwrap(),
-            serde_json::json!({
-                "filename": "mold-mock-model-1-original~portrait.png",
-                "original_filename": null,
-            })
+            serde_json::json!({ "filename": "mold-mock-model-1-original~portrait.png" })
         );
 
         let later = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -1759,7 +2713,7 @@ mod tests {
         let output = state.config.try_read().unwrap().effective_output_dir();
         let direct_ticket = state
             .queue_journal
-            .record(JournalAdmission {
+            .record_for_test(JournalAdmission {
                 id: "legacy-direct",
                 request: &request,
                 output_dir: Some(&output),
@@ -1767,7 +2721,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
         assert!(state.queue_journal.claim_next_feeder().unwrap().is_none());
@@ -1845,7 +2798,7 @@ mod tests {
         let output = state.config.try_read().unwrap().effective_output_dir();
         let interrupted_ticket = state
             .queue_journal
-            .record(JournalAdmission {
+            .record_for_test(JournalAdmission {
                 id: "interrupted-direct",
                 request: &request,
                 output_dir: Some(&output),
@@ -1853,7 +2806,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
         state.queue_journal.retain_all();
@@ -1867,7 +2819,7 @@ mod tests {
         // again and erase this live submitter's ownership token.
         let live_ticket = state
             .queue_journal
-            .record(JournalAdmission {
+            .record_for_test(JournalAdmission {
                 id: "post-barrier-direct",
                 request: &request,
                 output_dir: Some(&output),
@@ -1875,7 +2827,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
 
@@ -1930,7 +2881,6 @@ mod tests {
                     target_device_id: None,
                     completion_payload: SseCompletionPayload::MetadataOnly,
                     batch_child: false,
-                    carries_reference_authority: false,
                 }],
             })
             .unwrap();
@@ -2006,6 +2956,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_revokes_claimed_preparation_immediately() {
+        let (state, _rx) = state(1);
+        admit(&state, 1);
+        let claimed = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        let preparation = state.queue_journal.begin_preparation(&claimed.row.id);
+
+        assert!(state.queue_journal.cancel_id(&claimed.row.id).unwrap());
+        tokio::time::timeout(Duration::from_millis(100), preparation.cancelled())
+            .await
+            .expect("DELETE must interrupt deferred preparation");
+
+        let detail = state.queue_journal.generation_batch("batch").unwrap();
+        assert_eq!(detail.children[0].state, "cancelled");
+        assert!(state
+            .queue_journal
+            .list_all()
+            .iter()
+            .all(|row| row.id != claimed.row.id));
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_capacity_while_archive_lookup_is_blocked() {
+        let (state, mut rx, home) = state_with_home(1);
+        let ids = admit(&state, 2);
+        state
+            .queue_journal
+            .repoint_output(&ids[1], &home.join("missing-second-output"))
+            .unwrap();
+        let publication_writer = state.gallery_publication_gate.write().await;
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            state.queue_journal.wait_for_archive_lookup(),
+        )
+        .await
+        .expect("the first row reaches its blocked archive lookup");
+
+        assert!(state.queue_journal.cancel_id(&ids[0]).unwrap());
+        let next = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("cancellation releases the only runtime slot")
+            .expect("the feeder transport remains open");
+        assert_eq!(next.id, ids[1]);
+        assert_eq!(state.queue.pending(), 1);
+
+        drop(publication_writer);
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(next);
+    }
+
+    #[tokio::test]
+    async fn bulk_cancellation_releases_capacity_while_archive_lookup_is_blocked() {
+        let (state, mut rx, home) = state_with_home(1);
+        let ids = admit(&state, 1);
+        let publication_writer = state.gallery_publication_gate.write().await;
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            state.queue_journal.wait_for_archive_lookup(),
+        )
+        .await
+        .expect("the first row reaches its blocked archive lookup");
+
+        assert_eq!(state.queue_journal.cancel_all_queued(&[]).unwrap(), 1);
+        let next_request = request("next job");
+        let next_output = home.join("missing-next-output");
+        state
+            .queue_journal
+            .record_batch(BatchJournalAdmission {
+                id: "next-batch",
+                client_batch_id: "next-client",
+                request_sha256: "next-sha",
+                children: &[JournalAdmission {
+                    id: "next-job",
+                    request: &next_request,
+                    output_dir: Some(&next_output),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: SseCompletionPayload::MetadataOnly,
+                    batch_child: false,
+                }],
+            })
+            .unwrap();
+
+        let next = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("bulk cancellation releases the only runtime slot")
+            .expect("the feeder transport remains open");
+        assert_eq!(next.id, "next-job");
+        assert!(state
+            .queue_journal
+            .list_all()
+            .iter()
+            .all(|row| row.id != ids[0]));
+
+        drop(publication_writer);
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(next);
+    }
+
+    #[tokio::test]
     async fn blocking_durable_cancel_check_does_not_hold_scheduler_mutation_fence() {
         let (state, _rx) = state(1);
         admit(&state, 1);
@@ -2014,14 +3073,20 @@ mod tests {
             .claim_next_feeder()
             .unwrap()
             .expect("test row is claimed by the feeder handoff");
-        let mold_db::generation_queue::QueueClaim { row, claim_token } = claim;
+        let mold_db::generation_queue::QueueClaim {
+            row, claim_token, ..
+        } = claim;
         let mut request = request("fence");
         let registration = register_claimed_runtime(&state, &row, &claim_token, &mut request)
             .await
             .unwrap();
-        let ClaimRegistration::Registered(_cancel) = registration else {
+        let ClaimRegistration::Registered {
+            publication_guard, ..
+        } = registration
+        else {
             panic!("the exact claim belongs to the runtime window");
         };
+        drop(publication_guard);
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<bool>();
         let mut durable_check = Box::pin(async { release_rx.await.unwrap() });
 
@@ -2049,7 +3114,9 @@ mod tests {
             .claim_next_feeder()
             .unwrap()
             .expect("test row is claimed by the feeder handoff");
-        let mold_db::generation_queue::QueueClaim { row, claim_token } = claim;
+        let mold_db::generation_queue::QueueClaim {
+            row, claim_token, ..
+        } = claim;
         let row_id = row.id.clone();
         state.job_registry.register("grant-live", "model-grant");
         state.job_registry.register("cancel-live", "model-cancel");
@@ -2101,7 +3168,7 @@ mod tests {
         blocker.await.unwrap().unwrap();
         assert!(matches!(
             handoff.await.unwrap().unwrap(),
-            ClaimRegistration::Registered(_)
+            ClaimRegistration::Registered { .. }
         ));
         assert_eq!(
             state.job_registry.entry("grant-live").unwrap().state,
@@ -2185,6 +3252,7 @@ mod tests {
             state.clone(),
             shutdown.clone(),
             Duration::ZERO,
+            Arc::new(tokio::sync::Notify::new()),
         ));
         let job = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
@@ -2214,6 +3282,7 @@ mod tests {
             state.clone(),
             shutdown.clone(),
             Duration::ZERO,
+            Arc::new(tokio::sync::Notify::new()),
         ));
         while state
             .queue_journal
@@ -2260,6 +3329,7 @@ mod tests {
             state.clone(),
             shutdown.clone(),
             Duration::ZERO,
+            Arc::new(tokio::sync::Notify::new()),
         ));
         let claimed_token = loop {
             let token = state
@@ -2374,5 +3444,271 @@ mod tests {
 
         tokio::time::advance(mold_db::METADATA_DB_BUSY_TIMEOUT).await;
         assert_eq!(waiting.await.unwrap(), FeederControl::Continue);
+    }
+
+    async fn one_feeder_pass(
+        state: &AppState,
+        rx: &mut tokio::sync::mpsc::Receiver<GenerationJob>,
+    ) -> (FeederReport, Option<GenerationJob>) {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let current_output = state.config.try_read().unwrap().effective_output_dir();
+        let mut arbiter = FeederArbiter::default();
+        let publication = Arc::new(tokio::sync::Notify::new());
+        let report = feed_available(
+            state,
+            Some(&current_output),
+            &shutdown,
+            &mut arbiter,
+            &publication,
+        )
+        .await;
+        (report, rx.try_recv().ok())
+    }
+
+    /// Fail closed: a request this build cannot read is parked for
+    /// inspection, never guessed at and never silently dropped.
+    #[tokio::test]
+    async fn an_unreadable_durable_request_is_held_by_the_feeder() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+        state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE generation_queue SET request_json = '{\"prompt\":' WHERE id = 'job-0'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+
+        assert_eq!(report.held, 1);
+        assert_eq!(report.submitted, 0);
+        assert!(
+            job.is_none(),
+            "an unreadable request never reaches a worker"
+        );
+        let row = state.queue_journal.list_all().pop().unwrap();
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Held);
+        assert!(row
+            .held_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be deserialized")));
+    }
+
+    /// The relay is the mechanism every progress producer already feeds: a
+    /// frame sent on the job's `progress_tx` is in the snapshot the surfaces
+    /// poll, whether or not an observer is attached.
+    #[tokio::test]
+    async fn every_fed_job_carries_a_progress_relay_into_its_snapshot() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+        assert_eq!(report.submitted, 1);
+        let job = job.expect("the row is fed to a worker");
+        let progress_tx = job
+            .progress_tx
+            .as_ref()
+            .expect("a fed job always has a progress channel, observer or not");
+        progress_tx
+            .send(crate::state::SseMessage::Progress(
+                mold_core::SseProgressEvent::DenoiseStep {
+                    step: 2,
+                    total: 8,
+                    elapsed_ms: 0,
+                },
+            ))
+            .unwrap();
+        let mut folded = None;
+        for _ in 0..100 {
+            folded = state.job_registry.progress_snapshot(&job.id).flatten();
+            if folded.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let folded = folded.expect("the frame reached the snapshot every surface polls");
+        assert_eq!((folded.step, folded.total), (Some(2), Some(8)));
+    }
+
+    /// A directory that is simply absent is not a directory that moved. The
+    /// save helpers create it on demand, so holding every retained job
+    /// because somebody tidied up the gallery — or a mount came back empty —
+    /// would park work that runs perfectly well.
+    #[tokio::test]
+    async fn a_missing_gallery_directory_is_recreated_before_dispatch() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+        let gallery = state.config.try_read().unwrap().effective_output_dir();
+        std::fs::remove_dir_all(&gallery).unwrap();
+
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+
+        assert_eq!(report.held, 0, "nothing should be parked");
+        assert_eq!(report.submitted, 1);
+        assert!(gallery.is_dir(), "the configured gallery is made again");
+        let mut job = job.expect("the job is dispatched into the recreated gallery");
+        assert_eq!(job.id, "job-0");
+        assert_eq!(job.output_dir.as_deref(), Some(gallery.as_path()));
+        job.journal.take().unwrap().complete_before_dispatch();
+        state.job_registry.remove(&job.id);
+        state.queue.decrement();
+    }
+
+    /// A failure to CHECK the idempotence gate is not "nothing was completed".
+    /// Reading it as an empty result would re-render every job whose print
+    /// already exists, and those duplicates are unmergeable because output
+    /// filenames are wall-clock. So the pass sends nothing, releases the
+    /// claim, and leaves the row's replay budget untouched for the retry.
+    #[tokio::test]
+    async fn an_unverifiable_idempotence_gate_sends_nothing_and_spends_no_replay_budget() {
+        let (state, mut rx) = state(1);
+        admit(&state, 2);
+        state.queue_journal.fail_completion_lookup_for_tests();
+
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+
+        assert_eq!(report.stop, FeederStop::RecoverableFailure);
+        assert_eq!(report.submitted, 0, "nothing may be rendered unverified");
+        assert!(job.is_none());
+        assert!(rx.try_recv().is_err());
+        let rows = state.queue_journal.list_all();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["job-0", "job-1"]
+        );
+        assert!(rows
+            .iter()
+            .all(|row| row.state == mold_db::generation_queue::QueueRowState::Queued));
+        assert!(
+            rows.iter().all(|row| row.replay_seen == 0),
+            "the retry must get a full budget"
+        );
+        let claimed: i64 = state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM generation_queue WHERE claim_token IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(claimed, 0, "the claim is released for the in-process retry");
+        assert_eq!(
+            state.queue.pending(),
+            0,
+            "no runtime reservation survives the failed pass"
+        );
+    }
+    #[tokio::test]
+    async fn park_claimed_records_each_disposition_on_the_row() {
+        let (state, _rx) = state(3);
+        let ids = admit(&state, 3);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+
+        for (index, disposition) in [
+            crate::durable_disposition::DurableDisposition::Hold { retryable: true },
+            crate::durable_disposition::DurableDisposition::Hold { retryable: false },
+            crate::durable_disposition::DurableDisposition::Retain,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let claim = state
+                .queue_journal
+                .claim_next_feeder()
+                .unwrap()
+                .expect("one queued row per pass");
+            assert_eq!(claim.row.id, ids[index]);
+            let ticket = state
+                .queue_journal
+                .attach_claimed(&claim.row.id, claim.claim_token);
+            let parked = park_claimed(
+                ticket,
+                None,
+                &ids[index],
+                format!("parked {index}"),
+                None,
+                disposition,
+                &shutdown,
+            )
+            .await;
+            assert_eq!(
+                parked,
+                match disposition {
+                    crate::durable_disposition::DurableDisposition::Retain =>
+                        HoldClaimOutcome::Retained,
+                    crate::durable_disposition::DurableDisposition::Hold { .. } =>
+                        HoldClaimOutcome::Held,
+                },
+                "disposition {disposition:?} must park the row without a hand-mapped ladder"
+            );
+        }
+
+        let rows = state.queue_journal.list_all();
+        let row = |id: &str| {
+            rows.iter()
+                .find(|row| row.id == id)
+                .expect("every admitted row survives")
+                .clone()
+        };
+        assert_eq!(
+            row(&ids[0]).state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        assert_eq!(row(&ids[0]).held_reason.as_deref(), Some("parked 0"));
+        assert_eq!(
+            row(&ids[1]).state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        assert_eq!(row(&ids[1]).held_reason.as_deref(), Some("parked 1"));
+        assert_eq!(
+            row(&ids[2]).state,
+            mold_db::generation_queue::QueueRowState::Queued,
+            "a retained claim returns to the backlog unchanged"
+        );
+        assert!(row(&ids[2]).held_reason.is_none());
+
+        let children = mold_db::generation_batches::get_durable(
+            state.metadata_db.as_ref().as_ref().unwrap(),
+            state.queue_journal.owner_uuid().unwrap(),
+            "batch",
+        )
+        .unwrap()
+        .unwrap()
+        .children;
+        let child = |id: &str| {
+            children
+                .iter()
+                .find(|child| child.job_id == id)
+                .expect("every admitted child survives")
+                .clone()
+        };
+        assert!(
+            child(&ids[0]).retryable,
+            "a retryable hold stays user-retryable unchanged"
+        );
+        assert!(!child(&ids[1]).retryable);
+
+        let requeued = state
+            .queue_journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("the retained row is claimable again");
+        assert_eq!(
+            requeued.row.id, ids[2],
+            "retain clears the exact claim token instead of holding the row"
+        );
     }
 }

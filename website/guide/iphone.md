@@ -189,6 +189,16 @@ When several jobs are submitted, the Queue section keeps them visible while
 you continue composing. Mold limits simultaneous streams so generation does
 not starve gallery or download requests.
 
+Queue rows on a machine's own screen swipe like any iOS list: drag right to
+left to reveal **Cancel**, or keep going and a full swipe cancels the job.
+Revealing the buttons is the first step and tapping one is the second, so
+nothing is cancelled by a single flick. Every action is also on the **⋯**
+button at the end of the row, so VoiceOver and a hardware keyboard reach it
+without the gesture. Machines that support reordering also offer **To back**,
+which sends the job to the end of the line. Tap the row itself to see the whole
+job — its prompt, its settings, where it is in line, its live preview while it
+runs, and the full reason if the machine has parked it.
+
 For model families that stream live latent previews (FLUX.1, Flux.2,
 Z-Image, and Wan 2.1/2.2), the active print develops right on the Create screen: the preview
 sharpens as denoising progresses under a thinning film-grain wash, in a bed
@@ -220,10 +230,14 @@ every terminal, stale, superseded, or aborted attempt releases the lease before
 Retry reacquires the same frozen route. Editing/removing reviewed work cancels
 a pending replacement. Siblings remain independently cancellable and keep
 deterministic seeds, the source prompt, and durable batch position through
-long-video chains. A partial result names each failed variation and reviewed
+long-video chains. Every print is admitted through one durable
+`/api/generation-batches` operation, chunked at the machine's advertised limit;
+held children survive app/server restarts with an error and retry action. A
+machine that cannot carry a request refuses it inline by name, and nothing is
+queued. A partial result names each failed variation and reviewed
 prompt, plus any separate unconfirmed-cancellation caveat, while keeping
 successful prints. Library shows **Batch N of M** and the source prompt when
-that provenance is present; prints from older servers remain unchanged.
+that provenance is present.
 
 When iOS suspends the app, interrupted generation streams carry a structured
 recovery marker rather than relying on localized WebKit error text. On resume,
@@ -385,8 +399,7 @@ From the same screen you can rename or retry the host, select it for Create,
 unload a model, open it in Models, or forget it. Forgetting a host also deletes
 its API key from the iOS Keychain. Queue cancellation uses that host's
 Keychain-authenticated route and refreshes the list after the server confirms
-it. Current hosts revoke running inference cooperatively at its next safe point;
-older hosts keep running work read-only.
+it. Running inference is revoked cooperatively at its next safe point.
 
 ## Settings and themes
 

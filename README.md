@@ -180,6 +180,14 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
 See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
 [RunPod](https://utensils.io/mold/deployment/runpod-cli) guides.
 
+Watch and steer that host's queue from the terminal with `mold queue`:
+
+```bash
+mold queue list                 # queued, running, and held jobs with their place in line
+mold queue retry --held         # resume every retryable hold
+mold queue cancel --all --yes   # clear the backlog; running work finishes
+```
+
 Install Mold's embedded Agent Skill for your coding agent:
 
 ```bash

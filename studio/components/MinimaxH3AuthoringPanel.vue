@@ -13,6 +13,7 @@ import {
   minimaxH3ReferenceName,
   minimaxH3ReferenceNeedsMedia,
   moveMinimaxH3Reference,
+  reattachMinimaxH3Reference,
   type MinimaxH3AuthoringState,
   type MinimaxH3ReferenceDraft,
 } from "../lib/minimaxH3Authoring";
@@ -41,9 +42,13 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:modelValue": [state: MinimaxH3AuthoringState];
   "open-image-picker": [];
+  /** Open the surface's crop editor (dialog / bottom sheet) for this row. */
+  "crop-reference": [index: number];
 }>();
 
 const error = ref("");
+/** Non-error disclosure, e.g. a saved crop that could not follow a reattach. */
+const notice = ref("");
 const busy = ref(false);
 const imagePreviews = ref(
   new Map<MinimaxH3ReferenceDraft["reference"], string>(),
@@ -224,15 +229,13 @@ async function reattachReference(index: number, event: Event): Promise<void> {
   busy.value = true;
   try {
     const replacement = await referenceDraft(file);
-    const current = props.modelValue.references[index];
-    if (!current || replacement.reference.kind !== current.reference.kind) {
-      throw new Error(
-        `Reference ${index + 1} must be reattached as ${current?.reference.kind ?? "the same media kind"}.`,
-      );
-    }
-    const references = [...props.modelValue.references];
-    references[index] = replacement;
-    patch({ references });
+    const result = reattachMinimaxH3Reference(
+      props.modelValue,
+      index,
+      replacement,
+    );
+    notice.value = result.notice ?? "";
+    patch({ references: result.state.references });
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason);
   } finally {
@@ -254,6 +257,29 @@ function removeReference(index: number): void {
   patch({
     references: props.modelValue.references.filter((_, item) => item !== index),
   });
+}
+
+/** Only an attached image can be cropped; a redacted row needs its bytes first. */
+function canCrop(draft: MinimaxH3ReferenceDraft): boolean {
+  return (
+    draft.reference.kind === "image" &&
+    draft.reference.media.authority === "inline"
+  );
+}
+
+/** The pending crop as thumbnail percentages (`object-fit: cover` keeps the
+ * thumbnail's own aspect, so the outline is drawn in the same frame). */
+function cropOutlineStyle(
+  draft: MinimaxH3ReferenceDraft,
+): Record<string, string> | null {
+  if (!draft.crop || draft.reference.kind !== "image") return null;
+  const { width, height } = draft.reference;
+  return {
+    left: `${(draft.crop.x / width) * 100}%`,
+    top: `${(draft.crop.y / height) * 100}%`,
+    width: `${(draft.crop.width / width) * 100}%`,
+    height: `${(draft.crop.height / height) * 100}%`,
+  };
 }
 
 function durationLabel(
@@ -398,6 +424,13 @@ function imagePreview(
                 ? "AUD"
                 : "IMG"
           }}</span>
+          <span
+            v-if="cropOutlineStyle(draft)"
+            class="h3-authoring__crop-outline"
+            :style="cropOutlineStyle(draft) ?? undefined"
+            :data-test="`h3-reference-crop-outline-${index}`"
+            aria-hidden="true"
+          />
         </div>
         <div class="h3-authoring__reference-copy">
           <strong>{{ minimaxH3ReferenceName(draft.reference, index) }}</strong>
@@ -412,6 +445,9 @@ function imagePreview(
               "
             >
               · soundtrack attached
+            </template>
+            <template v-if="draft.crop">
+              · cropped to {{ draft.crop.width }}×{{ draft.crop.height }}
             </template>
           </span>
           <small v-if="minimaxH3ReferenceNeedsMedia(draft)" role="status">
@@ -437,6 +473,17 @@ function imagePreview(
               @change="reattachReference(index, $event)"
             />
           </label>
+          <button
+            v-if="draft.reference.kind === 'image'"
+            type="button"
+            :disabled="disabled || busy || !canCrop(draft)"
+            :aria-label="`Crop reference ${index + 1}`"
+            :aria-pressed="draft.crop ? 'true' : 'false'"
+            :data-test="`h3-reference-crop-${index}`"
+            @click="emit('crop-reference', index)"
+          >
+            Crop
+          </button>
           <button
             type="button"
             :disabled="disabled || index === 0"
@@ -518,6 +565,14 @@ function imagePreview(
       <li v-for="message in budget.errors" :key="message">{{ message }}</li>
     </ul>
 
+    <p
+      v-if="notice"
+      class="h3-authoring__notice"
+      role="status"
+      data-test="h3-reference-notice"
+    >
+      {{ notice }}
+    </p>
     <p
       v-if="error"
       class="h3-authoring__errors"
@@ -645,10 +700,26 @@ function imagePreview(
   font-weight: 700;
   letter-spacing: 0.08em;
 }
+.h3-authoring__preview {
+  position: relative;
+}
 .h3-authoring__preview img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+.h3-authoring__crop-outline {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--accent, #fff);
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+.h3-authoring__notice {
+  margin: 0;
+  color: var(--ink-3, #737373);
+  font-size: 12px;
+  line-height: 1.45;
 }
 .h3-authoring__order {
   display: grid;

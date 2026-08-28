@@ -2,17 +2,12 @@ import type {
   ChainProgressEvent,
   CompleteEvent,
   GenerateRequest,
-  ProgressEvent,
   SseChainCompleteEvent,
 } from "./api/types";
 import type { DevelopPhase } from "@ui/lib/grain";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { requestWarningsFromCompleteEvent } from "@studio/lib/requestWarnings";
-import {
-  generationProgressCopy,
-  phaseForStageStart,
-  type GenerationWorkPhase,
-} from "@studio/lib/generationProgress";
+import { generationProgressCopy, type GenerationWorkPhase } from "@studio/lib/generationProgress";
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
 
@@ -50,10 +45,20 @@ export interface Job {
   /** Total clips reported by the chain stream. */
   chainStageCount: number | null;
   error: string | null;
+  /** Nonterminal durable hold details and host-owned retry fence. */
+  holdError: string | null;
+  /** Typed cause of the hold (`MODEL_NOT_FOUND`, …); what the pull offer reads. */
+  holdCode: string | null;
+  retryable: boolean;
+  retrying: boolean;
   /** Advisories from an accepted request; each header value stays whole. */
   requestWarnings: string[];
   /** Structured transport-close marker used by resume reconciliation. */
   interrupted: boolean;
+  /** Settled with `status: "error"` because its outcome is not knowable on
+   *  this authority (the server instance was replaced, or the host disowned
+   *  the record) — advisory, never a failure the strip should label as one. */
+  outcomeUnknown?: boolean;
   /** The host ended this job's stream while KEEPING the job: it journalled the
    *  work, is restarting, and will run it. Reconciliation waits far longer for
    *  a host that said this than for one that merely stopped answering. */
@@ -127,6 +132,10 @@ export function newJob(req: GenerateRequest): Job {
     chainStageIndex: null,
     chainStageCount: null,
     error: null,
+    holdError: null,
+    holdCode: null,
+    retryable: false,
+    retrying: false,
     requestWarnings: [],
     interrupted: false,
     retainedByHost: false,
@@ -179,78 +188,6 @@ export function markJobSettled(job: Job): void {
 export function applyCompletionWarnings(job: Job, complete: unknown): Job {
   for (const warning of requestWarningsFromCompleteEvent(complete)) {
     if (!job.requestWarnings.includes(warning)) job.requestWarnings.push(warning);
-  }
-  return job;
-}
-
-export function applyProgress(job: Job, event: ProgressEvent): Job {
-  switch (event.type) {
-    case "queued":
-      job.status = "queued";
-      job.queuePosition = event.position;
-      if (event.id) job.id = event.id;
-      break;
-    case "dependency_wait":
-      job.status = "queued";
-      job.stage = `Waiting for ${event.dependency}`;
-      break;
-    case "download_progress": {
-      job.status = "queued";
-      const percent =
-        event.bytes_total > 0 ? Math.round((event.bytes_downloaded / event.bytes_total) * 100) : 0;
-      job.stage = `Downloading ${event.filename} (${percent}%)`;
-      break;
-    }
-    case "download_done":
-      job.status = "queued";
-      job.stage = `Dependency ready: ${event.filename}`;
-      break;
-    case "pull_complete":
-      job.status = "queued";
-      job.stage = `Dependency ready: ${event.model}`;
-      break;
-    case "weight_load":
-    case "stage_start":
-      // StageStart is also used for nested work inside a denoise evaluation.
-      // MiniMax H3, for example, starts a 50-block transformer stage before
-      // each DenoiseStep. Keep that work attached to its truthful N/N count;
-      // only a stage beginning after N/N is final output preparation.
-      if (job.status === "denoising" || job.status === "finishing") {
-        if (event.type === "stage_start") {
-          const current: GenerationWorkPhase =
-            job.status === "finishing" ? "finalizing" : "denoising";
-          job.status =
-            phaseForStageStart(current, job.step, job.total) === "finalizing"
-              ? "finishing"
-              : "denoising";
-          job.stage = event.name;
-        }
-      } else {
-        job.status = "loading";
-        job.stage = event.type === "stage_start" ? event.name : "Loading weights";
-      }
-      break;
-    case "stage_progress":
-      if (job.status !== "denoising" && job.status !== "finishing") job.status = "loading";
-      job.queuePosition = null;
-      job.stage = `${event.name} ${event.current}/${event.total}`;
-      break;
-    case "denoise_step":
-      job.status = "denoising";
-      job.queuePosition = null;
-      job.step = event.step;
-      job.total = event.total;
-      break;
-    case "preview": {
-      job.status = "denoising";
-      job.queuePosition = null;
-      const previous = job.previewUrl;
-      job.previewUrl = base64ToBlobUrl(event.image, "image/png");
-      if (previous) URL.revokeObjectURL(previous);
-      break;
-    }
-    default:
-      break;
   }
   return job;
 }
@@ -431,12 +368,9 @@ export function jobStatusCode(job: Job): string {
     case "complete":
       return "DONE";
     case "error":
+      // An unknown outcome is advisory and carries its own stage label.
+      if (job.outcomeUnknown) return job.stage?.toUpperCase() ?? "OUTCOME UNKNOWN";
       return isCancelledError(job.error) ? "CANCELLED" : "FAILED";
   }
   return "UNKNOWN";
-}
-
-export function base64ToBlobUrl(b64: string, mime: string): string {
-  const bytes = Uint8Array.from(atob(b64), (character) => character.charCodeAt(0));
-  return URL.createObjectURL(new Blob([bytes], { type: mime }));
 }

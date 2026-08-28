@@ -110,6 +110,7 @@ fn prepare_named_bytes<'a>(
                     .with_context(|| format!("reference {} filename is invalid", index + 1))?,
             ),
             sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+            crop: None,
         };
         let descriptor = probe_reference(&bytes, provenance)
             .with_context(|| format!("reference {} media probe failed", index + 1))?;

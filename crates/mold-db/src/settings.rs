@@ -92,6 +92,12 @@ pub const GALLERY_TRASH_RETENTION_DAYS: &str =
 /// Days a trashed print is retained before purge; `0` keeps it forever.
 pub const GALLERY_TRASH_RETENTION_DEFAULT: i64 = 30;
 
+/// Days a HELD durable queue row is retained before the queue retention
+/// sweeper purges it and releases its encrypted request media; `0` keeps
+/// held rows forever. Registered in `mold_core::config_keys::ALL_KEYS`
+/// (section Queue) and read fresh by the sweeper on every pass.
+pub const QUEUE_HELD_RETENTION_DAYS: &str = mold_core::config_keys::QUEUE_HELD_RETENTION_DAYS_KEY;
+
 /// Whether a titled print is also tagged with its title slug by the client
 /// that submits it. Registered in `mold_core::config_keys::ALL_KEYS`
 /// (section Generate). Unlike the older flat `generate.*` rows below, the

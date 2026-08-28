@@ -1,11 +1,10 @@
 import type { GenerateRequest, OutputFormat } from "./api/types";
 import type { GenerationBatchTracker } from "@studio/lib/generationLifecycle";
 import {
-  supportsDurableRequest,
   type DurableGenerationQueueCapabilities,
   type DurableMediaCapabilities,
 } from "@studio/api/generationAdmission";
-import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Identity";
+import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
 
 export const DURABLE_GENERATION_STORAGE_KEY = "mold.desktop.durable-generations.v1";
 
@@ -40,16 +39,23 @@ export interface DurableGenerationRecoveryEnvelope {
   records: DurableGenerationRecoveryRecord[];
 }
 
-/** Decide against the exact frozen host capability. Media stays on the legacy
- * attached stream unless that server promises the encrypted v1 contract. */
-export function requestIsEligibleForDurableGeneration(
-  request: GenerateRequest,
+/** The named reason this machine cannot be queued to, or `null` when it can.
+ * Host-level by construction: the durable protocol carries every request
+ * trait, so the server's typed admission refusal is the only authority for
+ * what it cannot take. */
+export function generationRefusalReason(
   queue: DurableGenerationQueueCapabilities | null | undefined,
   durableMedia: DurableMediaCapabilities | null | undefined,
-  modelFamily?: string | null,
-): boolean {
-  if (isMinimaxH3Identity(modelFamily, request.model)) return false;
-  return supportsDurableRequest(queue, durableMedia, request);
+): string | null {
+  const policy = generationHostSubmissionPolicy(
+    { kind: "pinned", hostId: "frozen" },
+    {
+      hostId: "frozen",
+      ...(queue === undefined ? {} : { queue }),
+      ...(durableMedia === undefined ? {} : { durableMedia }),
+    },
+  );
+  return policy.admission === "canonical_durable" ? null : policy.refusal;
 }
 
 export function durableChildSummary(
@@ -123,7 +129,7 @@ export function saveDurableGenerationRecovery(
     // Web Storage can synchronously reject writes in privacy mode or when its
     // quota is exhausted. Recovery then degrades to this process's in-memory
     // UUID/instance tracker; it must never become permission to skip durable
-    // server admission or fall back to a second, legacy submission.
+    // server admission or fall back to a second submission.
     return false;
   }
 }

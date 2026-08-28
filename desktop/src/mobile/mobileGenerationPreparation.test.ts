@@ -162,6 +162,74 @@ describe("mobile generation request preparation", () => {
     expect(applySourceFitPreprocess).not.toHaveBeenCalled();
   });
 
+  it("applies pending Ref2VA reference crops through the canvas ops before building the request", async () => {
+    const selected = model({
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+    });
+    const draft = newGenerateForm();
+    Object.assign(draft, {
+      model: selected.name,
+      family: selected.family,
+      prompt: "a subject",
+    });
+    draft.h3Authoring!.references = [
+      {
+        reference: {
+          kind: "image",
+          media: { authority: "inline", data: "SU1BR0U=" },
+          provenance: { name: "subject.png", sha256: "a".repeat(64) },
+          mime_type: "image/png",
+          width: 1024,
+          height: 768,
+        },
+        crop: { x: 256, y: 0, width: 512, height: 768 },
+      },
+    ];
+    const deps = services();
+    deps.ops.fitImage.mockResolvedValue("Q1JPUFBFRA==");
+
+    const request = await prepareMobileGenerationRequest(
+      {
+        target: { baseUrl: "http://studio.test:7680", apiKey: "secret" },
+        draft,
+        selectedModel: selected,
+      },
+      deps,
+    );
+
+    expect(deps.ops.fitImage).toHaveBeenCalledWith("SU1BR0U=", {
+      outputWidth: 512,
+      outputHeight: 768,
+      drawWidth: 1024,
+      drawHeight: 768,
+      offsetX: -256,
+      offsetY: 0,
+      maskPaddedPixels: false,
+    });
+    expect(request.references?.[0]).toMatchObject({
+      kind: "image",
+      media: { authority: "inline", data: "Q1JPUFBFRA==" },
+      width: 512,
+      height: 768,
+      provenance: {
+        name: "subject.png",
+        crop: {
+          x: 256,
+          y: 0,
+          width: 512,
+          height: 768,
+          source_width: 1024,
+          source_height: 768,
+          source_sha256: "a".repeat(64),
+        },
+      },
+    });
+    expect(request.references?.[0]?.provenance?.sha256).not.toBe("a".repeat(64));
+    expect(applyH3BoundaryFit).not.toHaveBeenCalled();
+    expect(applySourceFitPreprocess).not.toHaveBeenCalled();
+  });
+
   it("suppresses late preprocessing status after the caller becomes stale", async () => {
     const selected = model();
     const draft = newGenerateForm();

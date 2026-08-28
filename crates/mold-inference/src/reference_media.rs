@@ -478,6 +478,7 @@ mod tests {
             channels: None,
             sample_count: None,
             prepared_shape: None,
+            crop: None,
         };
         let opened = staged.reopen().unwrap();
         let binding = GenerationReferenceBinding::from_opened_file(

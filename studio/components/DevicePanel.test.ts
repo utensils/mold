@@ -299,7 +299,7 @@ describe("DevicePanel", () => {
     );
   });
 
-  it("keeps typed collisions authoritative while accepting an exact legacy GPU lane", () => {
+  it("keeps typed collisions authoritative beside a typed GPU lane on the same device", () => {
     const visible = device(0);
     const wrapper = mount(DevicePanel, {
       props: {
@@ -325,14 +325,14 @@ describe("DevicePanel", () => {
               activity_phase: "queued",
             },
             {
-              work_id: "legacy-device-work",
-              parent_id: "legacy-parent",
+              work_id: "typed-device-work",
+              parent_id: "typed-parent",
               work_kind: "generation",
               priority_class: "user",
               queue_rank: 1,
               bypass_count: 0,
               planned_device_id: visible.id,
-              planned_lane_kind: null,
+              planned_lane_kind: "device",
               lane_order: 1,
               estimate_confidence: "low",
               activity_phase: "queued",
@@ -346,13 +346,13 @@ describe("DevicePanel", () => {
       "future-collision",
     );
     expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
-      "legacy-device-work",
+      "typed-device-work",
     );
     expect(wrapper.get('[data-test="device-lane"]').text()).not.toContain(
       "future-collision",
     );
     expect(wrapper.text().match(/future-collision/g)).toHaveLength(1);
-    expect(wrapper.text().match(/legacy-device-work/g)).toHaveLength(1);
+    expect(wrapper.text().match(/typed-device-work/g)).toHaveLength(1);
     expect(
       wrapper.get('[data-test="other-compute-lane"]').text(),
     ).not.toContain("HOST");
@@ -395,16 +395,17 @@ describe("DevicePanel", () => {
               estimate_confidence: "medium",
             },
             {
-              work_id: "unassigned-legacy-work",
-              parent_id: "unassigned-parent",
+              work_id: "unplaced-waiting-work",
+              parent_id: "unplaced-parent",
               work_kind: "generation",
               priority_class: "user",
               queue_rank: 2,
               bypass_count: 0,
               planned_device_id: null,
-              planned_lane_kind: null,
               lane_order: 2,
               estimate_confidence: "low",
+              reason: "not_ready",
+              blocked_reason: "dependency_wait",
             },
             {
               work_id: "future-lane-missing-device",
@@ -456,14 +457,15 @@ describe("DevicePanel", () => {
     expect(known.text()).toContain("known-device-work");
     expect(unknown.text()).toContain("Unassigned / unknown device");
     expect(unknown.text()).toContain("missing-device-work");
-    expect(unknown.text()).toContain("unassigned-legacy-work");
     expect(unknown.text()).toContain("future-lane-missing-device");
+    // Not yet placed on any lane (no lane kind, no device) while it waits on
+    // a dependency: ordinary queued work, never an "unknown device" row.
+    expect(wrapper.text()).not.toContain("unplaced-waiting-work");
     expect(utility.text()).toContain("host-utility-work");
     expect(blocked.text()).toContain("blocked-unassigned-work");
     for (const workId of [
       "known-device-work",
       "missing-device-work",
-      "unassigned-legacy-work",
       "future-lane-missing-device",
       "host-utility-work",
       "blocked-unassigned-work",

@@ -17,8 +17,8 @@ use crate::queue_media_startup::{
     UntouchedEntry,
 };
 use crate::queue_media_store::{
-    MediaSetRef, QueueMediaError, QueueMediaOperationFingerprint, QueueMediaOperationReceipt,
-    QueueMediaProjection, QueueMediaStore, SealMedia,
+    MediaSetRef, QueueMediaAdmissionAuthority, QueueMediaError, QueueMediaOperationFingerprint,
+    QueueMediaOperationReceipt, QueueMediaProjection, QueueMediaStore, SealMedia,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,14 @@ pub(crate) struct QueueMediaLifecycle {
 }
 
 impl QueueMediaLifecycle {
+    pub(crate) fn mold_home(&self) -> &std::path::Path {
+        &self.mold_home
+    }
+
+    pub(crate) fn owner_uuid(&self) -> &str {
+        &self.owner_uuid
+    }
+
     pub(crate) fn new(db: Arc<Option<MetadataDb>>, mold_home: PathBuf, owner_uuid: String) -> Self {
         Self {
             db,
@@ -93,15 +101,6 @@ impl QueueMediaLifecycle {
             })
     }
 
-    pub(crate) fn seal_operation_receipt(
-        &self,
-        operation_id: &str,
-        fingerprint: &QueueMediaOperationFingerprint,
-    ) -> Result<QueueMediaOperationReceipt, QueueMediaError> {
-        self.runtime_store()?
-            .seal_operation_receipt_v1(&self.owner_uuid, operation_id, fingerprint)
-    }
-
     pub(crate) fn open_operation_receipt(
         &self,
         operation_id: &str,
@@ -109,6 +108,24 @@ impl QueueMediaLifecycle {
     ) -> Result<QueueMediaOperationFingerprint, QueueMediaError> {
         self.runtime_store()?
             .open_operation_receipt_v1(&self.owner_uuid, operation_id, receipt)
+    }
+
+    pub(crate) fn seal_admission_authority(
+        &self,
+        job_id: &str,
+        payload: &[u8],
+    ) -> Result<QueueMediaAdmissionAuthority, QueueMediaError> {
+        self.runtime_store()?
+            .seal_admission_authority_v1(&self.owner_uuid, job_id, payload)
+    }
+
+    pub(crate) fn open_admission_authority(
+        &self,
+        job_id: &str,
+        authority: &QueueMediaAdmissionAuthority,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, QueueMediaError> {
+        self.runtime_store()?
+            .open_admission_authority_v1(&self.owner_uuid, job_id, authority)
     }
 
     pub(crate) fn seal_v2(
@@ -461,9 +478,9 @@ fn db_error(error: anyhow::Error) -> AdapterError {
 
 fn store_error(error: QueueMediaError) -> AdapterError {
     let kind = match &error {
-        QueueMediaError::MissingKeyWithExistingStore | QueueMediaError::MissingKey => {
-            AdapterFailureKind::KeyMissing
-        }
+        QueueMediaError::MissingKeyWithExistingStore
+        | QueueMediaError::MissingKey
+        | QueueMediaError::MissingAdmissionKeyWithReceipts => AdapterFailureKind::KeyMissing,
         QueueMediaError::Authentication | QueueMediaError::Corrupt(_) => {
             AdapterFailureKind::KeyCorrupt
         }
@@ -523,6 +540,7 @@ mod tests {
             updated_at_ms: 1,
             started_at_ms: None,
             media_set_id: Some(set_id.to_string()),
+            admission_authority: None,
         }
     }
 
@@ -870,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn claimed_batch_cancellation_retains_media_until_token_settlement() {
+    fn claimed_batch_cancellation_retires_media_immediately() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
         let journal = Arc::new(QueueJournal::new(
@@ -919,19 +937,15 @@ mod tests {
         assert!(
             generation_queue::get(db.as_ref().as_ref().unwrap(), "batch-child")
                 .unwrap()
-                .is_some()
+                .is_none()
         );
-        assert_eq!(
-            generation_queue_media::obligation_by_id(
-                db.as_ref().as_ref().unwrap(),
-                &owner,
-                &set.set_id,
-            )
-            .unwrap()
-            .unwrap()
-            .state,
-            QueueMediaObligationState::Active
-        );
+        assert!(generation_queue_media::obligation_by_id(
+            db.as_ref().as_ref().unwrap(),
+            &owner,
+            &set.set_id,
+        )
+        .unwrap()
+        .is_none());
 
         journal
             .attach_claimed("batch-child", claim.claim_token)

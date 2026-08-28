@@ -1,14 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiTarget } from "./client";
+import { ApiError, type ApiTarget } from "./client";
 import {
+  canonicalGenerationBatchLimit,
+  chunkGenerationBatchRequests,
   admitGenerationBatch,
   getGenerationBatch,
+  isDefiniteGenerationAdmissionRejection,
   lookupGenerationBatchByClientId,
   parseGenerationBatchStatus,
   parseGenerationBatchStatusResponse,
   reconcileGenerationBatches,
-  supportsDurableRequest,
-  supportsDurableGenerationLifecycle,
 } from "./generationAdmission";
 
 const target: ApiTarget = {
@@ -38,108 +39,81 @@ function batch(overrides: Record<string, unknown> = {}) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("durable generation admission API", () => {
-  it("requires both capability bits so older batch hosts keep their legacy path", () => {
-    expect(supportsDurableGenerationLifecycle(undefined)).toBe(false);
-    expect(
-      supportsDurableGenerationLifecycle({ heterogeneous_batch: true }),
-    ).toBe(false);
-    expect(
-      supportsDurableGenerationLifecycle({ durable_batch_outcomes: true }),
-    ).toBe(false);
-    expect(
-      supportsDurableGenerationLifecycle({
-        heterogeneous_batch: true,
-        durable_batch_outcomes: true,
-      }),
-    ).toBe(true);
-  });
-
-  it("admits request media only behind the exact encrypted v1 capability", () => {
-    const queue = {
-      heterogeneous_batch: true,
-      durable_batch_outcomes: true,
-    };
-    const media = {
-      protocol_version: 1,
-      encrypted_at_rest: true,
-      generate_request_media: true,
-      identity: true,
-      h3_references: false,
-      private_h3: false,
-    };
-
-    expect(
-      supportsDurableRequest(queue, undefined, { model: "flux-dev" }),
-    ).toBe(true);
-    expect(
-      supportsDurableRequest(queue, media, {
-        model: "flux-dev",
-        source_image: "private bytes",
-      }),
-    ).toBe(true);
-    for (const incompatible of [
-      undefined,
-      { ...media, protocol_version: 2 },
-      { ...media, encrypted_at_rest: false },
-      { ...media, generate_request_media: false },
-      { ...media, identity: undefined },
-      { ...media, h3_references: undefined },
-      { ...media, private_h3: undefined },
-      { ...media, identity: "yes" },
+  it("reads a typed pre-commit 503 as a definite rejection, a bare one as ambiguous", () => {
+    for (const code of [
+      "DURABLE_ADMISSION_UNAVAILABLE",
+      "DURABLE_MEDIA_UNAVAILABLE",
+      "QUEUE_FULL",
+      "SERVER_RESTARTING",
     ]) {
       expect(
-        supportsDurableRequest(queue, incompatible, {
-          model: "flux-dev",
-          source_image: "private bytes",
-        }),
-      ).toBe(false);
+        isDefiniteGenerationAdmissionRejection(
+          new ApiError("refused before commit", 503, {
+            error: "refused",
+            code,
+          }),
+        ),
+      ).toBe(true);
     }
-  });
-
-  it("requires identity support and always excludes H3, references, LoRA combinations, and HDR", () => {
-    const queue = {
-      heterogeneous_batch: true,
-      durable_batch_outcomes: true,
-    };
-    const media = {
-      protocol_version: 1,
-      encrypted_at_rest: true,
-      generate_request_media: true,
-      identity: true,
-      h3_references: false,
-      private_h3: false,
-    };
-
     expect(
-      supportsDurableRequest(queue, media, {
-        model: "flux-dev",
-        id_image: "private face",
-      }),
-    ).toBe(true);
-    expect(
-      supportsDurableRequest(
-        queue,
-        { ...media, identity: false },
-        {
-          model: "flux-dev",
-          id_images: ["private face"],
-        },
+      isDefiniteGenerationAdmissionRejection(
+        new ApiError("gateway", 503, {
+          error: "upstream",
+          code: "UPSTREAM_TIMEOUT",
+        }),
       ),
     ).toBe(false);
+    expect(
+      isDefiniteGenerationAdmissionRejection(
+        new ApiError("gateway", 503, "not json"),
+      ),
+    ).toBe(false);
+  });
 
-    for (const request of [
-      { model: "minimax-h3-ref2va", source_image: "private bytes" },
-      { model: "opaque", references: [] },
-      {
-        model: "flux-dev",
-        source_image: "private bytes",
-        lora: { path: "one" },
-      },
-      { model: "flux-dev", source_image: "private bytes", loras: [] },
-      { model: "flux-dev", hdr_exr_dir: "/private/hdr" },
-    ]) {
-      expect(supportsDurableRequest(queue, media, request)).toBe(false);
+  it("distinguishes definite rejection from ambiguous delivery failures", () => {
+    for (const status of [400, 401, 404, 409, 422, 426]) {
+      expect(
+        isDefiniteGenerationAdmissionRejection(
+          new ApiError("rejected", status),
+        ),
+      ).toBe(true);
     }
+    for (const status of [408, 425, 429, 500, 503]) {
+      expect(
+        isDefiniteGenerationAdmissionRejection(
+          new ApiError("uncertain", status),
+        ),
+      ).toBe(false);
+    }
+    expect(
+      isDefiniteGenerationAdmissionRejection(
+        new TypeError("connection closed"),
+      ),
+    ).toBe(false);
+    expect(
+      isDefiniteGenerationAdmissionRejection(new SyntaxError("invalid JSON")),
+    ).toBe(false);
+  });
+
+  it("parses explicit retry authority without changing the child lifecycle", () => {
+    const parsed = parseGenerationBatchStatus(
+      batch({
+        children: [
+          {
+            index: 1,
+            job_id: "job-1",
+            state: "held",
+            retryable: true,
+            created_at_ms: 10,
+            updated_at_ms: 11,
+          },
+        ],
+      }),
+    );
+    expect(parsed.children[0]).toMatchObject({
+      state: "held",
+      retryable: true,
+    });
   });
 
   it("admits singleton batches without adding an invented client limit", async () => {
@@ -298,5 +272,33 @@ describe("durable generation admission API", () => {
         missing: { client_batch_ids: [], batch_ids: [] },
       }),
     ).toThrow("duplicates a client batch");
+  });
+
+  it("derives the canonical limit and chunks without changing request order", () => {
+    expect(
+      canonicalGenerationBatchLimit({ heterogeneous_batch_max_outputs: 2 }),
+    ).toBe(2);
+    expect(chunkGenerationBatchRequests([1, 2, 3, 4, 5], 2)).toEqual([
+      [1, 2],
+      [3, 4],
+      [5],
+    ]);
+    expect(() => chunkGenerationBatchRequests([1], 0)).toThrow(
+      "positive integer",
+    );
+  });
+
+  it("refuses a malformed or absent batch limit rather than inventing one", () => {
+    for (const queue of [
+      undefined,
+      null,
+      {},
+      { heterogeneous_batch_max_outputs: null },
+      { heterogeneous_batch_max_outputs: 0 },
+      { heterogeneous_batch_max_outputs: 1.5 },
+      { heterogeneous_batch_max_outputs: Number.NaN },
+    ]) {
+      expect(canonicalGenerationBatchLimit(queue)).toBeNull();
+    }
   });
 });

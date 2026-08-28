@@ -178,6 +178,7 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
             "POST",
             "/api/generate"
             | "/api/generate/stream"
+            | "/api/generation-batches"
             | "/api/generate/placement-preview"
             | "/api/chain-jobs/placement-preview"
             | "/api/expand"
@@ -185,6 +186,20 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
             | "/api/upscale/stream",
         ) => Some(RouteTier::Generation),
         ("POST", "/api/models/load" | "/api/models/pull") => Some(RouteTier::Generation),
+        // Re-queues real GPU work and restores the dispatch budget, so it
+        // belongs with generation rather than in the cheap read bucket it
+        // fell into by default.
+        ("POST", path) if path.starts_with("/api/queue/") && path.ends_with("/retry") => {
+            Some(RouteTier::Generation)
+        }
+        // A retention sweep walks the held rows and unlinks encrypted media.
+        // Cheap per call, but it takes DB write transactions and filesystem
+        // work, so it does not belong in the read bucket.
+        ("POST", "/api/queue/held/sweep") => Some(RouteTier::Generation),
+        // Read-only bulk reconciliation. Every Studio surface polls it on event
+        // gaps, reconnects and wakes; on the generation tier it drains the
+        // bucket new admissions need.
+        ("POST", "/api/generation-batches/status") => Some(RouteTier::Read),
         ("PATCH", path) if path.starts_with("/api/devices/") => Some(RouteTier::Generation),
         ("DELETE", "/api/models/unload") => Some(RouteTier::Generation),
         ("DELETE", _) if path.starts_with("/api/gallery/") => Some(RouteTier::Generation),
@@ -308,6 +323,18 @@ mod tests {
         );
         assert_eq!(
             classify_route("/api/generate/stream", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route("/api/generation-batches", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route("/api/generation-batches/status", &Method::POST),
+            Some(RouteTier::Read)
+        );
+        assert_eq!(
+            classify_route("/api/queue/abc-123/retry", &Method::POST),
             Some(RouteTier::Generation)
         );
         assert_eq!(

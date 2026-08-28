@@ -232,6 +232,7 @@ pub(crate) fn prepare_references(
                     .with_context(|| format!("reference {} filename is invalid", index + 1))?,
             ),
             sha256: Some(sha256),
+            crop: None,
         };
         let probe_file = file
             .try_clone()

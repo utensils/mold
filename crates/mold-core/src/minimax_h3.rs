@@ -1303,6 +1303,24 @@ fn validate_reference_provenance(
             ));
         }
     }
+    if let Some(crop) = provenance.crop.as_ref() {
+        let checked = match reference {
+            GenerationReference::Image { width, height, .. } => {
+                crop.validate_for_image(*width, *height)
+            }
+            GenerationReference::Video { .. } | GenerationReference::Audio { .. } => {
+                Err("a crop is provenance for image references only")
+            }
+        };
+        if let Err(reason) = checked {
+            return Err(reference_violation(
+                Some(index),
+                "MINIMAX_H3_REFERENCE_CROP",
+                Some("provenance.crop"),
+                reason,
+            ));
+        }
+    }
     match reference.media() {
         GenerationReferenceAuthority::Descriptor => {
             if !placement_preview {
@@ -3272,6 +3290,7 @@ mod tests {
             provenance: crate::GenerationReferenceProvenance {
                 name: Some(label.to_string()),
                 sha256: None,
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 1920,
@@ -3286,6 +3305,7 @@ mod tests {
             provenance: crate::GenerationReferenceProvenance {
                 name: Some(label.to_string()),
                 sha256: None,
+                crop: None,
             },
             mime_type: "video/mp4".to_string(),
             width: 1920,
@@ -3307,6 +3327,7 @@ mod tests {
             provenance: crate::GenerationReferenceProvenance {
                 name: Some(label.to_string()),
                 sha256: None,
+                crop: None,
             },
             mime_type: "audio/wav".to_string(),
             duration_ms,
@@ -3874,6 +3895,7 @@ mod tests {
                 provenance: crate::GenerationReferenceProvenance {
                     name: Some("upload.png".to_string()),
                     sha256: Some("a".repeat(64)),
+                    crop: None,
                 },
                 mime_type: "image/png".to_string(),
                 width: 1,
@@ -3886,6 +3908,7 @@ mod tests {
                 provenance: crate::GenerationReferenceProvenance {
                     name: Some("path.png".to_string()),
                     sha256: Some("b".repeat(64)),
+                    crop: None,
                 },
                 mime_type: "image/png".to_string(),
                 width: 1,
@@ -3959,6 +3982,7 @@ mod tests {
             provenance: crate::GenerationReferenceProvenance {
                 name: Some("anchor.png".to_string()),
                 sha256: None,
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 100,
@@ -3983,6 +4007,7 @@ mod tests {
             provenance: crate::GenerationReferenceProvenance {
                 name: Some("preview.png".to_string()),
                 sha256: Some("A".repeat(64)),
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 100,

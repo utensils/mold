@@ -1920,6 +1920,7 @@ mod tests {
             provenance: mold_core::GenerationReferenceProvenance {
                 name: Some("anchor.png".to_string()),
                 sha256: Some("0".repeat(64)),
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 24,

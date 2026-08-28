@@ -144,6 +144,41 @@ Durable chain jobs store checkpoints under `MOLD_HOME/jobs/<job_id>`.
 shim jobs and explicitly discarding completed jobs' editable scene caches.
 Automatic maintenance leaves durable scene caches intact.
 
+## `mold queue`
+
+Inspect and control the generation queue on a running `mold serve` instance.
+The commands use `MOLD_HOST` and send `MOLD_API_KEY` when configured; there is
+no local fallback, because a queue belongs to one serving host.
+
+```bash
+mold queue list [--held] [--json]        # job, state, model, batch, prompt, admitted
+mold queue show <JOB-ID> [--json]        # one job in full, with its batch progress
+mold queue cancel <JOB-ID>...            # DELETE /api/queue/{id}
+mold queue cancel --all [--yes]          # DELETE /api/queue — queued rows only
+mold queue cancel --batch <BATCH-ID>     # DELETE /api/generation-batches/{id}
+mold queue retry <JOB-ID>... | --held    # POST /api/queue/{id}/retry
+mold queue move <JOB-ID> --to <N>        # PATCH /api/queue/{id} {position}
+mold queue pause | mold queue resume     # POST /api/queue/pause | /resume
+mold queue sweep                         # POST /api/queue/held/sweep + /api/generation-batches/sweep
+```
+
+The `STATE` column is the same vocabulary the web, desktop, and iPhone
+surfaces render: a running row counts its denoise steps, position 0 is
+`Next up`, everyone behind is `#N in line`, and only an actionable scheduler
+reason (`Model not installed`, `Waiting for GPU memory`, …) replaces the
+position. Ordinary serialization on a busy host — no idle device, a warm
+wait, a lower-priority opening — keeps the row counting rather than reading
+as a fault.
+
+`mold queue list` and `mold queue retry --held` walk every durable
+continuation page, so a backlog longer than the host's queue window is not
+silently truncated. Held rows are listed again beneath the table with the
+server's own error sentence and whether a retry is allowed. `mold queue retry` composes the full
+retry authority (serving instance, batch, client batch, job) from the row's
+own `batch_id` / `client_batch_id`; a hold that needs operator repair is
+refused by name rather than silently skipped. `--json` prints the raw server
+documents.
+
 ## `mold trash`
 
 Inspect, restore, or empty the gallery trash on a running `mold serve`

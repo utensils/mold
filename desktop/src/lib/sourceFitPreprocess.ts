@@ -4,7 +4,7 @@
  * flow. Pure policy logic lives here with the canvas work behind an
  * injectable {@link SourceFitCanvasOps} boundary (happy-dom has no real 2D
  * canvas, and the tests want exact assertions anyway); the DOM-backed
- * implementation is `sourceFitCanvas.ts`.
+ * implementation is `@studio/lib/sourceFitCanvas`.
  *
  * Flow (mirrors web):
  *   1. `upscale-then-fit` first rewrites the source through the upscaler —
@@ -23,29 +23,13 @@ import {
   coerceSourceFitForMaskless,
   maskPaddingRectangles,
   resolveSourceFitTransform,
-  type Rect,
   type Size,
   type SourceFitPolicy,
-  type SourceFitTransform,
 } from "@studio/lib/sourceFit";
+import type { SourceFitCanvasOps } from "@studio/lib/sourceFitCanvas";
 import type { MinimaxH3AuthoringState } from "@studio/lib/minimaxH3Authoring";
 
-/** Canvas operations the preprocess needs — injectable for tests. */
-export interface SourceFitCanvasOps {
-  /** Decode a base64 image (no data-URI prefix) and report its pixel size. */
-  imageSize(base64: string): Promise<Size>;
-  /** Draw the image through `transform` onto a black target-sized canvas → base64 PNG. */
-  fitImage(base64: string, transform: SourceFitTransform): Promise<string>;
-  /**
-   * Build the fitted mask: black canvas, the existing mask (if any) drawn
-   * through `transform`, then `padRects` filled white (repaint). → base64 PNG.
-   */
-  buildMask(
-    existingMask: string | null,
-    transform: SourceFitTransform,
-    padRects: Rect[],
-  ): Promise<string>;
-}
+export type { SourceFitCanvasOps } from "@studio/lib/sourceFitCanvas";
 
 /** Runs the source through an upscaler model, returning the new base64 image. */
 export type UpscaleFn = (image: string, model: string) => Promise<string>;

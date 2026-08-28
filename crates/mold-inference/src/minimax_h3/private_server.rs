@@ -715,23 +715,26 @@ fn precheck_private_h3_admission_capacity(
     if compute_capability.is_none() {
         let unified_floor = device_floor.max(host_floor);
         if unified_floor > available_device_bytes {
-            bail!(
-                "private H3 Metal admission needs at least {unified_floor} unified-memory bytes \
-                 before any request-specific term, exceeding the {available_device_bytes} byte \
-                 admission sample"
-            )
+            return Err(anyhow!(H3PrivateDeviceHeadroomShortfall {
+                context: "private H3 Metal admission",
+                resource: "unified-memory",
+                required_device_bytes: unified_floor,
+                available_device_bytes,
+            }));
         }
         return Ok(());
     }
-    // Two independent resources, two independent refusals (#1214). The host arm
-    // is additionally typed, because a host shortfall is the one a caller can
-    // act on by releasing its own model cache (#1289).
+    // Two independent resources, two independent refusals (#1214), and BOTH
+    // are typed: a host shortfall is the one a caller can answer by releasing
+    // its own model cache (#1289), and a device shortfall is the one it must
+    // answer by waiting for the card rather than by holding the job forever.
     if device_floor > available_device_bytes {
-        bail!(
-            "private H3 admission needs at least {device_floor} device bytes before any \
-             request-specific term, exceeding the {available_device_bytes} byte device \
-             admission sample"
-        )
+        return Err(anyhow!(H3PrivateDeviceHeadroomShortfall {
+            context: "private H3 admission",
+            resource: "device",
+            required_device_bytes: device_floor,
+            available_device_bytes,
+        }));
     }
     if host_floor > available_host_headroom_bytes {
         return Err(anyhow!(H3PrivateHostHeadroomShortfall {
@@ -834,18 +837,22 @@ fn check_private_h3_target_budget_fits(
     if compute_capability.is_none() {
         let unified_peak = predicted_device_peak_bytes.max(predicted_host_increment_bytes);
         if unified_peak > available_device_bytes {
-            bail!(
-                "private H3 Metal canonical target needs {unified_peak} unified-memory bytes but \
-                 the admission sample offers {available_device_bytes}"
-            )
+            return Err(anyhow!(H3PrivateDeviceHeadroomShortfall {
+                context: "private H3 Metal canonical target",
+                resource: "unified-memory",
+                required_device_bytes: unified_peak,
+                available_device_bytes,
+            }));
         }
         return Ok(());
     }
     if predicted_device_peak_bytes > available_device_bytes {
-        bail!(
-            "private H3 canonical target needs {predicted_device_peak_bytes} device bytes but the \
-             admission sample offers {available_device_bytes}"
-        )
+        return Err(anyhow!(H3PrivateDeviceHeadroomShortfall {
+            context: "private H3 canonical target",
+            resource: "device",
+            required_device_bytes: predicted_device_peak_bytes,
+            available_device_bytes,
+        }));
     }
     if predicted_host_increment_bytes > available_host_headroom_bytes {
         return Err(anyhow!(H3PrivateHostHeadroomShortfall {
@@ -1256,6 +1263,32 @@ pub struct H3PrivateHostHeadroomShortfall {
     pub available_host_headroom_bytes: u64,
 }
 
+/// A refusal that turns on DEVICE memory alone.
+///
+/// The mirror of [`H3PrivateHostHeadroomShortfall`], and typed for the same
+/// reason: the caller's decision is park-or-refuse, and #1272 already paid for
+/// recovering that from prose. Untyped, a device shortfall sampled while
+/// another render transiently held the card became a PERMANENT hold — the
+/// scheduler could not tell it apart from a validation refusal, so a number
+/// that was true for one second answered the job forever.
+///
+/// `resource` is what the refusal names, because Metal has one pool: #1214
+/// requires a refusal to say WHICH resource fell short, and on unified memory
+/// "device" would be a lie about a charge the host shares.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "{context} needs at least {required_device_bytes} {resource} bytes, exceeding the \
+     {available_device_bytes} byte {resource} admission sample"
+)]
+pub struct H3PrivateDeviceHeadroomShortfall {
+    /// Which gate refused, so the sentence still reads as prose.
+    pub context: &'static str,
+    /// `"device"` on a discrete card, `"unified-memory"` on Metal.
+    pub resource: &'static str,
+    pub required_device_bytes: u64,
+    pub available_device_bytes: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum H3PrivateFl2VaPrepareError {
     #[error("private H3 runtime has no reviewed runtime qualification")]
@@ -1264,6 +1297,11 @@ pub enum H3PrivateFl2VaPrepareError {
     /// own reclaimable cache and retry before refusing the request.
     #[error("{0}")]
     InsufficientHostHeadroom(H3PrivateHostHeadroomShortfall),
+    /// Device (or unified) memory alone was short. Carried typed so a caller
+    /// can park the job until the fleet is idle instead of holding it on a
+    /// sample that was only momentarily true.
+    #[error("{0}")]
+    InsufficientDeviceHeadroom(H3PrivateDeviceHeadroomShortfall),
     #[error("private H3 preparation evidence was rejected: {0}")]
     InvalidEvidence(String),
 }
@@ -1307,7 +1345,7 @@ pub struct H3PrivateFl2VaUatPaths<'a> {
 /// target budget. The returned evidence remains valid while a later capacity
 /// sample is still at least the exact admitted peaks.
 pub struct H3PrivateFl2VaAdmissionInput<'a> {
-    pub request: &'a GenerateRequest,
+    pub request: &'a mut GenerateRequest,
     pub paths: H3PrivateFl2VaUatPaths<'a>,
     pub device_id: &'a str,
     pub device_ordinal: usize,
@@ -1547,25 +1585,30 @@ impl H3PrivateFl2VaAdmissionEvidence {
     /// Return the exact request the owner must retain. An omitted seed is
     /// replaced by the one resolved during preprocessing; every other byte of
     /// the serialized request must still match the admitted submission.
-    pub fn resolve_request(&self, request: &GenerateRequest) -> Result<GenerateRequest> {
+    pub fn resolve_request(&self, request: &mut GenerateRequest) -> Result<()> {
         let supplied_identity = private_h3_request_identity(request)?;
         if supplied_identity != self.submitted_request_identity_sha256
             && supplied_identity != self.resolved_request_identity_sha256
         {
             bail!("private H3 request changed after allocation-free admission")
         }
-        let mut resolved = request.clone();
-        match resolved.seed {
+        match request.seed {
             Some(seed) if seed != self.seed => {
                 bail!("private H3 request seed differs from allocation-free admission")
             }
             Some(_) => {}
-            None => resolved.seed = Some(self.seed),
+            None => request.seed = Some(self.seed),
         }
-        if private_h3_request_identity(&resolved)? != self.resolved_request_identity_sha256 {
+        self.validate_resolved_request(request)
+    }
+
+    pub fn validate_resolved_request(&self, request: &GenerateRequest) -> Result<()> {
+        if request.seed != Some(self.seed)
+            || private_h3_request_identity(request)? != self.resolved_request_identity_sha256
+        {
             bail!("private H3 resolved request differs from allocation-free admission")
         }
-        Ok(resolved)
+        Ok(())
     }
 
     /// Revalidate this immutable DTO against an exact request and GPU route.
@@ -1581,7 +1624,7 @@ impl H3PrivateFl2VaAdmissionEvidence {
         available_device_bytes: u64,
         available_host_headroom_bytes: u64,
     ) -> Result<()> {
-        let resolved = self.resolve_request(request)?;
+        self.validate_resolved_request(request)?;
         self.base_factory_authority.validate_engine_seam(
             &self.canonical_model,
             device_ordinal,
@@ -1600,10 +1643,9 @@ impl H3PrivateFl2VaAdmissionEvidence {
         // killed the Ref2VA evidence the rest of admission had just derived.
         let recorded_contract = contract::capability_contract_for_model(&self.canonical_model);
         if !recorded_contract.is_some_and(|recorded| recorded.task == self.task)
-            || contract::validate_resolved_request_contract(&resolved, self.task)
+            || contract::validate_resolved_request_contract(request, self.task)
                 .map_err(|error| anyhow!("{}: {}", error.code, error.message))?
                 != self.mode
-            || private_h3_request_identity(&resolved)? != self.resolved_request_identity_sha256
             || self.device_id != device_id
             || self.device_ordinal != device_ordinal
             || self.compute_capability != compute_capability
@@ -1701,12 +1743,82 @@ pub fn prepare_h3_private_fl2va_admission(
         prepare_reviewed_h3_private_fl2va_admission(input, progress).map_err(|error| {
             // Preserve the one refusal a caller can act on. Everything else
             // keeps the existing opaque evidence wording.
-            match error.downcast::<H3PrivateHostHeadroomShortfall>() {
-                Ok(shortfall) => H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall),
+            let error = match error.downcast::<H3PrivateHostHeadroomShortfall>() {
+                Ok(shortfall) => {
+                    return H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall)
+                }
+                Err(error) => error,
+            };
+            match error.downcast::<H3PrivateDeviceHeadroomShortfall>() {
+                Ok(shortfall) => H3PrivateFl2VaPrepareError::InsufficientDeviceHeadroom(shortfall),
                 Err(error) => H3PrivateFl2VaPrepareError::InvalidEvidence(error.to_string()),
             }
         })
     }
+}
+
+/// Name and time each phase of one H3 admission.
+///
+/// H3 preparation is a SEQUENCE — contract prechecks, a conditioner support
+/// load, media normalization, a ~37 GB artifact authentication, an adapter
+/// digest, three checkpoint opens, and a budget check — any of which can
+/// dominate a multi-minute `Preparing` window. Reporting only the total tells
+/// an operator that it was slow and never which part was, which is precisely
+/// the state #1272 set out to end one level up.
+///
+/// Emitting through the existing `StageStart`/`StageDone` events rather than
+/// logging here keeps mold-inference out of the server's tracing story: the
+/// caller already installs a callback, and it is the layer that knows the job
+/// id. `Drop` closes whatever phase was open, so a refusal reports the phase
+/// it refused in rather than going silent.
+#[cfg(feature = "mp4")]
+struct H3AdmissionTimeline<'a> {
+    progress: &'a ProgressReporter,
+    current: Option<(&'static str, std::time::Instant)>,
+}
+
+#[cfg(feature = "mp4")]
+impl<'a> H3AdmissionTimeline<'a> {
+    fn new(progress: &'a ProgressReporter) -> Self {
+        Self {
+            progress,
+            current: None,
+        }
+    }
+
+    fn enter(&mut self, name: &'static str) {
+        self.close();
+        self.progress.stage_start(name);
+        self.current = Some((name, std::time::Instant::now()));
+    }
+
+    fn close(&mut self) {
+        if let Some((name, started)) = self.current.take() {
+            self.progress.stage_done(name, started.elapsed());
+        }
+    }
+}
+
+#[cfg(feature = "mp4")]
+impl Drop for H3AdmissionTimeline<'_> {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Phase names, in the order one admission walks them. Constants because the
+/// server matches on them to decide what to publish, and a typo would silently
+/// produce a phase nobody can correlate with a log line.
+#[cfg(feature = "mp4")]
+mod admission_phase {
+    pub(super) const CONTRACT: &str = "Validating MiniMax H3 request contract";
+    pub(super) const SUPPORT: &str = "Loading MiniMax H3 conditioner support";
+    pub(super) const CONDITIONING: &str = "Normalizing MiniMax H3 conditioning";
+    pub(super) const ARTIFACTS: &str = super::H3_ARTIFACT_VERIFICATION_PROGRESS;
+    pub(super) const ADAPTER: &str = "Authenticating MiniMax H3 adapter";
+    pub(super) const QUALIFICATION: &str = "Minting MiniMax H3 runtime qualification";
+    pub(super) const CHECKPOINTS: &str = "Opening MiniMax H3 checkpoints";
+    pub(super) const ATTEMPT: &str = "Freezing MiniMax H3 execution plan";
 }
 
 #[cfg(feature = "mp4")]
@@ -1744,6 +1856,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // facts and provenance keep the full tag. Threading the tag into the
     // partition consumers is what refused every Turbo admission with
     // "requires an exact Comfy H3 canonical model name".
+    let mut timeline = H3AdmissionTimeline::new(progress);
+    timeline.enter(admission_phase::CONTRACT);
     let route = admitted_h3_route(&request.model)?;
     let admitted_model = route.admitted_model;
     let partition_model = route.partition_model;
@@ -1841,8 +1955,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // CUDA device, and nothing it produces is trusted on its own — the
     // authenticated envelope check below still validates the same request
     // against the record the artifact pass authorizes.
+    timeline.enter(admission_phase::SUPPORT);
     let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, admitted_task)?;
     let qwen_support = load_qualified_private_qwen_support(paths.models_root, partition_model)?;
+    timeline.enter(admission_phase::CONDITIONING);
     let mut prepare_observer = H3EngineProgressObserver::new(progress);
     // Conditioning is task-shaped: FL2VA normalizes its boundary endpoints
     // here, Ref2VA decodes and normalizes its ordered references through the
@@ -1909,6 +2025,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // there.
     #[cfg(not(feature = "h3"))]
     precheck_private_h3_record_canvas(&precheck_envelope, request.width, request.height)?;
+    timeline.enter(admission_phase::ARTIFACTS);
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
         partition_model,
@@ -1966,8 +2083,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // reviewed step count. Selection is by the request's model identity (a
     // reviewed Turbo manifest tag); the env pair survives only as the
     // capture-scope UAT override inside `resolve_turbo_selection`.
+    timeline.enter(admission_phase::ADAPTER);
     let turbo_adapter =
         super::turbo::resolve_turbo_authority_for_request(admitted_model, paths.models_root)?;
+    timeline.enter(admission_phase::QUALIFICATION);
     #[cfg(not(feature = "h3"))]
     let private_compute_capability = compute_capability
         .ok_or_else(|| anyhow!("private H3 reviewed evidence requires one concrete CUDA route"))?;
@@ -2002,6 +2121,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     )?;
     progress.checkpoint()?;
 
+    timeline.enter(admission_phase::CHECKPOINTS);
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
     let opened_transformer = open_h3_comfy_published_int8_checkpoint(
         storage.transformer_path(),
@@ -2025,9 +2145,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         turbo_adapter.as_ref(),
     )?;
     let seed = admission_request.seed;
-    let mut resolved_request = request.clone();
-    resolved_request.seed = Some(seed);
-    let resolved_request_identity_sha256 = private_h3_request_identity(&resolved_request)?;
+    request.seed = Some(seed);
+    let resolved_request_identity_sha256 = private_h3_request_identity(request)?;
 
     let qwen_artifact = exact_qualified_qwen_artifact(&artifact_report)?;
     let qwen_header_identity = qwen_artifact
@@ -2088,9 +2207,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
             qwen_host_resident_parameter_bytes: qwen_memory.host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: qwen_memory.device_resident_parameter_bytes,
-            // Request-derived for Ref2VA, the reviewed grant verbatim for
-            // FL2VA — the same seam the budget builder charges through, so
-            // the freeze-time projection comparison cannot drift.
+            // Request-derived for both tasks — FL2VA clamped by its reviewed
+            // grant, Ref2VA refused past its provisional one — through the
+            // same seam the budget builder charges from, so the freeze-time
+            // projection comparison cannot drift.
             qwen_activation_workspace_bytes: qwen_activation_workspace_demand_bytes(
                 &admission_request.request,
                 runtime_qualification
@@ -2147,6 +2267,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &base_factory_authority,
         &mut checkpoint,
     )?;
+    timeline.enter(admission_phase::ATTEMPT);
     let prepared_attempt = build_private_fl2va_admission_attempt(
         &execution_fingerprint,
         admission_request.request,
@@ -2232,7 +2353,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     };
     evidence.identity_sha256 = private_h3_admission_evidence_identity(&evidence);
     evidence.validate_for(
-        &resolved_request,
+        request,
         device_id,
         device_ordinal,
         compute_capability,
@@ -2261,12 +2382,13 @@ struct H3PrivateComponentDigest {
 }
 
 fn private_h3_request_identity(request: &GenerateRequest) -> Result<String> {
-    let bytes =
-        serde_json::to_vec(request).context("failed to serialize exact private H3 request")?;
+    let bytes = zeroize::Zeroizing::new(
+        serde_json::to_vec(request).context("failed to serialize exact private H3 request")?,
+    );
     let mut digest = Sha256::new();
     digest.update(b"mold.minimax-h3.private-admission-request.v1\0");
     digest.update((bytes.len() as u64).to_le_bytes());
-    digest.update(bytes);
+    digest.update(bytes.as_slice());
     Ok(format!("{:x}", digest.finalize()))
 }
 
@@ -2987,8 +3109,8 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         admission_evidence.admitted_available_device_bytes(),
         admission_evidence.admitted_host_headroom_bytes(),
     )?;
-    let resolved_request = admission_evidence.resolve_request(request)?;
-    let resolved_request_identity_sha256 = private_h3_request_identity(&resolved_request)?;
+    admission_evidence.validate_resolved_request(request)?;
+    let resolved_request_identity_sha256 = private_h3_request_identity(request)?;
     if frozen_factory != admission_evidence.base_factory_authority()
         || owner_fence.admission_evidence_identity_sha256 != admission_evidence.identity_sha256()
         || owner_fence.artifact_qualification_identity_sha256
@@ -7497,6 +7619,7 @@ mod tests {
         let provenance = |name: &str, seed: &[u8]| GenerationReferenceProvenance {
             name: Some(name.to_string()),
             sha256: Some(format!("{:x}", Sha256::digest(seed))),
+            crop: None,
         };
         vec![
             // A plain 16:9 photograph. Its short edge is normalized to 2048,
@@ -9315,6 +9438,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("portrait.png".to_string()),
                 sha256: Some(sha('9')),
+                crop: None,
             },
             mime_type: "image/png".into(),
             width: 48,
@@ -9467,11 +9591,11 @@ mod tests {
     fn ref2va_admission_proceeds_past_the_missing_reviewed_record() {
         let models_root = tempfile::tempdir().unwrap();
         let staging_root = tempfile::tempdir().unwrap();
-        let request = ref2va_reopen_request();
+        let mut request = ref2va_reopen_request();
         let progress = ProgressReporter::default();
         let error = prepare_reviewed_h3_private_fl2va_admission(
             H3PrivateFl2VaAdmissionInput {
-                request: &request,
+                request: &mut request,
                 paths: H3PrivateFl2VaUatPaths {
                     models_root: models_root.path(),
                     staging_root: staging_root.path(),
@@ -10615,6 +10739,120 @@ mod tests {
         assert!(device_error
             .downcast::<H3PrivateHostHeadroomShortfall>()
             .is_err());
+    }
+
+    /// #1272's rule, applied to the whole memory boundary: a budget refusal is
+    /// a TYPE, never prose. The host arm learned that in #1289; the device arm
+    /// did not, and an untyped device shortfall sampled while another render
+    /// transiently held the card became a PERMANENT hold on an idle GPU.
+    ///
+    /// Enumerates every refusal the two H3 memory gates can raise, on both
+    /// backends, and requires each to downcast.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn every_h3_memory_gate_refusal_carries_its_shortfall_as_a_type() {
+        #[cfg(feature = "h3")]
+        let bounds = public_runtime_bounds_for_shape(MEASURED_CANVAS, MEASURED_FRAMES);
+        #[cfg(not(feature = "h3"))]
+        let bounds = capture_runtime_bounds();
+        let device_floor = private_h3_admission_device_floor_bytes(&bounds).unwrap();
+        let host_floor = private_h3_admission_host_floor_bytes(&bounds).unwrap();
+        let unified_floor = device_floor.max(host_floor);
+
+        let device = |error: anyhow::Error| {
+            error
+                .downcast::<H3PrivateDeviceHeadroomShortfall>()
+                .expect("a device-memory refusal must carry its own type")
+        };
+        let host = |error: anyhow::Error| {
+            error
+                .downcast::<H3PrivateHostHeadroomShortfall>()
+                .expect("a host-memory refusal must carry its own type")
+        };
+
+        let cuda_floor = device(
+            precheck_private_h3_admission_capacity(
+                &bounds,
+                Some((8, 9)),
+                device_floor.saturating_sub(1),
+                u64::MAX,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(cuda_floor.resource, "device");
+        assert_eq!(cuda_floor.required_device_bytes, device_floor);
+        assert_eq!(
+            cuda_floor.available_device_bytes,
+            device_floor.saturating_sub(1)
+        );
+
+        assert_eq!(
+            host(
+                precheck_private_h3_admission_capacity(
+                    &bounds,
+                    Some((8, 9)),
+                    u64::MAX,
+                    host_floor.saturating_sub(1),
+                )
+                .unwrap_err(),
+            )
+            .required_host_bytes,
+            host_floor
+        );
+
+        let metal_floor = device(
+            precheck_private_h3_admission_capacity(
+                &bounds,
+                None,
+                unified_floor.saturating_sub(1),
+                0,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(metal_floor.resource, "unified-memory");
+        assert_eq!(metal_floor.required_device_bytes, unified_floor);
+
+        let cuda_target = device(
+            check_private_h3_target_budget_fits(
+                9_000_000_001,
+                7_000_000_000,
+                Some((8, 9)),
+                9_000_000_000,
+                7_000_000_000,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(cuda_target.resource, "device");
+        assert_eq!(cuda_target.required_device_bytes, 9_000_000_001);
+        assert_eq!(cuda_target.available_device_bytes, 9_000_000_000);
+
+        assert_eq!(
+            host(
+                check_private_h3_target_budget_fits(
+                    9_000_000_000,
+                    7_000_000_001,
+                    Some((8, 9)),
+                    9_000_000_000,
+                    7_000_000_000,
+                )
+                .unwrap_err(),
+            )
+            .required_host_bytes,
+            7_000_000_001
+        );
+
+        let metal_target = device(
+            check_private_h3_target_budget_fits(
+                9_000_000_001,
+                7_000_000_000,
+                None,
+                9_000_000_000,
+                1,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(metal_target.resource, "unified-memory");
+        assert_eq!(metal_target.required_device_bytes, 9_000_000_001);
     }
 
     #[cfg(feature = "mp4")]

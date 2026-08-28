@@ -43,6 +43,27 @@ function plan(blocked: Record<string, string>): QueuePlan {
 }
 
 describe("buildQueueStatusIndex", () => {
+  it("carries the row's lifecycle so a held row resolves as held", () => {
+    const index = buildQueueStatusIndex([
+      {
+        hostId: "alpha",
+        entries: [
+          { id: "parked", state: "held", position: 0 } as QueueEntry,
+          { id: "waiting", state: "queued", position: 0 } as QueueEntry,
+        ],
+      },
+    ]);
+    expect(queueStatusFor(index, "alpha", "parked")?.state).toBe("held");
+    expect(resolveQueueWait(queueStatusFor(index, "alpha", "parked"))).toEqual({
+      kind: "held",
+    });
+    expect(resolveQueueWait(queueStatusFor(index, "alpha", "waiting"))).toEqual(
+      {
+        kind: "next",
+      },
+    );
+  });
+
   it("keys live positions per host so ids from different hosts never collide", () => {
     const index = buildQueueStatusIndex([
       { hostId: "alpha", entries: [entry("job-1", 0), entry("job-2", 1)] },
@@ -80,8 +101,10 @@ describe("buildQueueStatusIndex", () => {
       { hostId: "alpha", entries: [broken] },
     ]);
     expect(queueStatusFor(index, "alpha", "job-1")).toEqual({
+      state: "running",
       position: null,
       blockedReason: null,
+      preparation: null,
     });
   });
 
@@ -224,6 +247,30 @@ describe("queue blocked-reason vocabulary", () => {
 });
 
 describe("resolveQueueWait", () => {
+  it("reads a held row as held, whatever position the listing gave it", () => {
+    // A held row keeps its traversal index in `GET /api/queue`; index 0 is not
+    // "Next up" for work the host will never start on its own.
+    expect(resolveQueueWait({ state: "held", position: 0 })).toEqual({
+      kind: "held",
+    });
+    expect(
+      resolveQueueWait({
+        state: "held",
+        position: 1,
+        blockedReason: "insufficient_vram",
+      }),
+    ).toEqual({ kind: "held" });
+    expect(
+      queueWaitLabel(resolveQueueWait({ state: "held", position: 0 })),
+    ).toBe("Held");
+    expect(
+      queueWaitCode(resolveQueueWait({ state: "held", position: 0 })),
+    ).toBe("HELD");
+    expect(resolveQueueWait({ state: "queued", position: 0 })).toEqual({
+      kind: "next",
+    });
+  });
+
   it("names the head of the line rather than staying silent", () => {
     expect(resolveQueueWait({ position: 0 })).toEqual({ kind: "next" });
     expect(queueWaitLabel(resolveQueueWait({ position: 0 }))).toBe("Next up");
@@ -260,5 +307,83 @@ describe("resolveQueueWait", () => {
     expect(
       resolveQueueWait({ position: 4, blockedReason: "no_idle_device" }),
     ).toEqual({ kind: "position", position: 4 });
+  });
+});
+
+describe("preparing", () => {
+  it("names a preparing job's phase and progress from the plan", () => {
+    const index = buildQueueStatusIndex([
+      {
+        hostId: "h",
+        entries: [{ id: "job" }],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "job",
+              parent_id: "job",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              estimate_confidence: "low",
+              reason: "not_ready",
+              blocked_reason: "preparing",
+              preparation_elapsed_ms: 4_200,
+              preparation_progress: {
+                component: "Verifying MiniMax H3 artifacts",
+                bytes_done: 41,
+                bytes_total: 100,
+              },
+            },
+          ],
+        },
+      } as never,
+    ]);
+    const status = queueStatusFor(index, "h", "job");
+    expect(status?.preparation).toEqual({
+      component: "Verifying MiniMax H3 artifacts",
+      fraction: 0.41,
+      elapsedMs: 4_200,
+    });
+    expect(queueWaitLabel(resolveQueueWait(status))).toBe(
+      "Preparing · Verifying MiniMax H3 artifacts 41%",
+    );
+    expect(queueWaitCode(resolveQueueWait(status))).toBe(
+      "PREPARING · VERIFYING MINIMAX H3 ARTIFACTS 41%",
+    );
+  });
+
+  it("still says Preparing when the preparer reports no progress", () => {
+    expect(
+      queueWaitLabel(
+        resolveQueueWait({ position: 3, blockedReason: "preparing" }),
+      ),
+    ).toBe("Preparing");
+    expect(
+      queueWaitLabel(
+        resolveQueueWait({
+          blockedReason: "preparing",
+          preparation: {
+            component: "Preparing flux-dev:q8",
+            fraction: null,
+            elapsedMs: 10,
+          },
+        }),
+      ),
+    ).toBe("Preparing · Preparing flux-dev:q8");
+  });
+
+  it("outranks the position because the host is already working on it", () => {
+    expect(
+      resolveQueueWait({ position: 2, blockedReason: "preparing" }),
+    ).toEqual({
+      kind: "blocked",
+      label: "Preparing",
+    });
   });
 });

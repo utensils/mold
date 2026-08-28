@@ -310,6 +310,7 @@ impl ScriptComposerState {
             clip_frames: None,
             source_image: None,
             enable_audio: self.script.chain.enable_audio,
+            ephemeral: false,
         }
     }
 }

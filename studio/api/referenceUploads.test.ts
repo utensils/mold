@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GenerationReference } from "../lib/generationReferences";
 import {
+  prepareReferenceUploadBatch,
   prepareReferenceUploads,
+  referenceUploadBatchLimit,
   requestNeedsReferenceUpload,
   requestShouldUseReferenceUploads,
   type ReferenceUploadCapabilities,
@@ -17,7 +19,6 @@ const SCOPE_DIGEST = "a".repeat(64);
 const REBOUND_SCOPE_DIGEST = "b".repeat(64);
 const CAPABILITIES: ReferenceUploadCapabilities = {
   available: true,
-  authless_inline: false,
   protocol_version: 2,
   requires_api_key: true,
   session_path: "/api/generate/reference-upload-sessions",
@@ -26,6 +27,7 @@ const CAPABILITIES: ReferenceUploadCapabilities = {
   upload_handle_header: "x-mold-reference-upload",
   max_file_bytes: 1024 * 1024,
   max_session_bytes: 4 * 1024 * 1024,
+  max_active_sessions: 4,
   session_ttl_ms: 30_000,
 };
 
@@ -635,6 +637,120 @@ describe("MiniMax H3 reference upload leases", () => {
     ).toBe("duplicate-session");
   });
 
+  it("chunks a reference-bearing batch no wider than the host's open-session cap", async () => {
+    const request = await requestFixture();
+    expect(referenceUploadBatchLimit([request], TARGET, CAPABILITIES, 64)).toBe(
+      4,
+    );
+    expect(referenceUploadBatchLimit([request], TARGET, CAPABILITIES, 2)).toBe(
+      2,
+    );
+    // No upload work keeps the batch limit: an authless host, or a batch
+    // without references at all.
+    expect(
+      referenceUploadBatchLimit([request], { apiKey: null }, CAPABILITIES, 64),
+    ).toBe(64);
+    expect(
+      referenceUploadBatchLimit(
+        [(({ references: _references, ...rest }) => rest)(request)],
+        TARGET,
+        CAPABILITIES,
+        64,
+      ),
+    ).toBe(64);
+  });
+
+  it("releases every lease already taken when a later sibling cannot take one", async () => {
+    const first = await requestFixture();
+    const second = { ...first, prompt: "second sibling" };
+    const calls: Array<{ method: string; headers: Headers }> = [];
+    let sessions = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        const headers = new Headers(init?.headers);
+        calls.push({ method, headers });
+        if (method === "POST") {
+          sessions += 1;
+          if (sessions > 1) {
+            return Response.json(
+              {
+                error: "too many open reference upload sessions",
+                code: "REFERENCE_UPLOAD_SESSION_LIMIT",
+              },
+              { status: 429 },
+            );
+          }
+          const payload = JSON.parse(String(init?.body)) as {
+            request: ReferenceUploadRequest;
+          };
+          const descriptors = payload.request.references ?? [];
+          return Response.json({
+            instance_id: INSTANCE_ID,
+            expires_at_ms: 20_000,
+            request_scope_sha256: SCOPE_DIGEST,
+            session_handle: "session-secret-one",
+            uploads: descriptors.map((_, index) => ({
+              reference: index + 1,
+              handle: `upload-secret-${index + 1}`,
+            })),
+          });
+        }
+        if (method === "PUT") {
+          const handle = headers.get("x-mold-reference-upload");
+          const index = handle === "upload-secret-1" ? 1 : 2;
+          return Response.json(
+            uploadComplete(first.references![index - 1]!, index, index === 2),
+          );
+        }
+        expect(method).toBe("DELETE");
+        expect(String(input)).toBe(
+          `${TARGET.baseUrl}${CAPABILITIES.session_path}`,
+        );
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    await expect(
+      prepareReferenceUploadBatch({
+        target: TARGET,
+        expectedInstanceId: INSTANCE_ID,
+        capabilities: CAPABILITIES,
+        requests: [first, second],
+        now: () => 10_000,
+      }),
+    ).rejects.toMatchObject({
+      status: 429,
+      body: { code: "REFERENCE_UPLOAD_SESSION_LIMIT" },
+    });
+    const cancellations = calls.filter((call) => call.method === "DELETE");
+    expect(cancellations).toHaveLength(1);
+    expect(
+      cancellations[0]!.headers.get(CAPABILITIES.session_handle_header),
+    ).toBe("session-secret-one");
+
+    // A staged chunk hands its release authority to the caller, for the
+    // host refusing the POST before anything consumed the sessions.
+    sessions = 0;
+    calls.length = 0;
+    const staged = await prepareReferenceUploadBatch({
+      target: TARGET,
+      expectedInstanceId: INSTANCE_ID,
+      capabilities: CAPABILITIES,
+      requests: [first],
+      now: () => 10_000,
+    });
+    expect(
+      staged.requests[0]!.references?.map(
+        (reference) => reference.media.authority,
+      ),
+    ).toEqual(["upload", "upload"]);
+    await staged.release();
+    await staged.release();
+    expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+  });
+
   it("identifies only fresh inline Ref2VA snapshots as upload work", async () => {
     const request = await requestFixture();
     expect(requestNeedsReferenceUpload(request)).toBe(true);
@@ -651,11 +767,11 @@ describe("MiniMax H3 reference upload leases", () => {
         CAPABILITIES,
       ),
     ).toBe(false);
-    expect(requestShouldUseReferenceUploads(request, TARGET, null)).toBe(true);
+    // No capability snapshot or a host without the upload protocol (API-key
+    // auth disabled) means validated inline references, never a probe.
+    expect(requestShouldUseReferenceUploads(request, TARGET, null)).toBe(false);
     expect(
-      requestShouldUseReferenceUploads(request, TARGET, {
-        authless_inline: true,
-      }),
+      requestShouldUseReferenceUploads(request, TARGET, { available: false }),
     ).toBe(false);
     expect(
       requestNeedsReferenceUpload({

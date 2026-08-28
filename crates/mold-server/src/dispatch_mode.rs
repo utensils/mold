@@ -149,8 +149,6 @@ impl DispatchObservationRecorder {
 mod tests {
     use super::*;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn rollout_modes_have_unambiguous_worker_ownership() {
         assert_eq!(DispatchMode::parse("legacy"), Ok(DispatchMode::Legacy));
@@ -188,7 +186,7 @@ mod tests {
 
     #[test]
     fn process_environment_defaults_to_v2_and_accepts_explicit_legacy() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::test_support::env_lock();
         let previous = std::env::var_os("MOLD_DISPATCH_MODE");
         std::env::remove_var("MOLD_DISPATCH_MODE");
         assert_eq!(DispatchMode::from_env(), Ok(DispatchMode::V2));

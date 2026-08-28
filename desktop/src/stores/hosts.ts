@@ -39,6 +39,8 @@ import type {
 } from "../lib/api/types";
 import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
 import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
+import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
+import { modelPresenceOnHost } from "@studio/lib/modelInstallTargets";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -190,11 +192,9 @@ export interface HostRoute {
   instanceId?: string | null;
   /** Frozen authenticated reference-ingress contract for this exact host. */
   referenceUploads?: ReferenceUploadCapabilities | null;
-  /** Exact host supports one durable heterogeneous prepared-batch admission. */
-  heterogeneousBatch?: boolean;
+  /** The exact host's durable batch chunk limit. Its presence IS the durable
+   * generation contract. */
   heterogeneousBatchMaxOutputs?: number | null;
-  /** Exact host exposes idempotent admission plus durable terminal outcomes. */
-  durableBatchOutcomes?: boolean;
   /** Exact host encrypts and durably replays supported request media. */
   durableMedia?: DurableMediaCapabilities | null;
   /** Authoritative family of the model frozen for this submission. */
@@ -242,6 +242,9 @@ export type FeasibleRouteResult =
   | { kind: "transient"; perHost: HostProbeFailure[] }
   | { kind: "mixed"; perHost: HostFeasibilityFailure[] };
 
+/** The ONE projection of a machine plus its advertised capabilities into a
+ * frozen submission route. Both the placement path and the pinned-target path
+ * read it, so they cannot disagree about what a host can carry. */
 function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute | null {
   if (!host.baseUrl) return null;
   return {
@@ -252,9 +255,7 @@ function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute
     instanceId: host.instanceId,
     referenceUploads: capabilities?.reference_uploads ?? null,
     ...(capabilities?.durable_media ? { durableMedia: capabilities.durable_media } : {}),
-    heterogeneousBatch: capabilities?.queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: capabilities?.queue?.heterogeneous_batch_max_outputs ?? null,
-    ...(capabilities?.queue?.durable_batch_outcomes === true ? { durableBatchOutcomes: true } : {}),
   };
 }
 
@@ -709,23 +710,7 @@ export const useHostsStore = defineStore("hosts", {
         chosen = pickAutoHost(withModel.length > 0 ? withModel : routable);
       }
       if (!chosen?.baseUrl) return null;
-      return {
-        hostId: chosen.id,
-        label: chosen.label,
-        kind: chosen.kind,
-        target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
-        instanceId: chosen.instanceId,
-        referenceUploads: this.capabilities[chosen.id]?.reference_uploads ?? null,
-        ...(this.capabilities[chosen.id]?.durable_media
-          ? { durableMedia: this.capabilities[chosen.id]!.durable_media! }
-          : {}),
-        heterogeneousBatch: this.capabilities[chosen.id]?.queue?.heterogeneous_batch === true,
-        heterogeneousBatchMaxOutputs:
-          this.capabilities[chosen.id]?.queue?.heterogeneous_batch_max_outputs ?? null,
-        ...(this.capabilities[chosen.id]?.queue?.durable_batch_outcomes === true
-          ? { durableBatchOutcomes: true }
-          : {}),
-      };
+      return hostRoute(chosen, this.capabilities[chosen.id] ?? undefined);
     },
     async resolveFeasible(
       selection: string | null,
@@ -861,7 +846,8 @@ export const useHostsStore = defineStore("hosts", {
           host: HostView;
           preview: Awaited<ReturnType<typeof previewGenerationPlacement>> | null;
           error: unknown;
-          legacyUnsupported: boolean;
+          telemetryOnly: boolean;
+          knownMissingModel: boolean;
           roundTripMs: number;
         };
         const probes: PlacementProbe[] = [];
@@ -882,6 +868,67 @@ export const useHostsStore = defineStore("hosts", {
             const started = performance.now();
             try {
               const target = { baseUrl: host.baseUrl!, apiKey: host.apiKey };
+              const submission = generationHostSubmissionPolicy(
+                selection === null
+                  ? { kind: "auto" }
+                  : selection === "capable"
+                    ? { kind: "capable" }
+                    : { kind: "pinned", hostId: selection },
+                {
+                  hostId: host.id,
+                  ...(this.capabilities[host.id]?.queue
+                    ? { queue: this.capabilities[host.id]!.queue! }
+                    : {}),
+                  ...(this.capabilities[host.id]?.durable_media
+                    ? { durableMedia: this.capabilities[host.id]!.durable_media! }
+                    : {}),
+                },
+                Array.isArray((request as ChainRequest).stages) || "total_frames" in request
+                  ? "sequence"
+                  : "generation",
+              );
+              if (
+                submission.admission === "refused" &&
+                submission.routing !== "placement_preview" &&
+                this.capabilities[host.id] !== undefined
+              ) {
+                // Only a READ capability snapshot can refuse: an unread one
+                // is "unknown", never "missing", and admission asks the host.
+                // The machine cannot admit this print at all; an error
+                // observation keeps it out of Auto / Most capable rather than
+                // letting the ranker pick a host that refuses at submit.
+                probes.push({
+                  host,
+                  preview: null,
+                  error: new Error(submission.refusal ?? "this machine cannot admit the print"),
+                  telemetryOnly: false,
+                  knownMissingModel: false,
+                  roundTripMs: Math.max(0, performance.now() - started),
+                });
+                return;
+              }
+              if (submission.routing === "telemetry_only" || submission.routing === "none") {
+                const models = useHostModelsStore();
+                const knownMissingModel =
+                  modelPresenceOnHost(
+                    host.id,
+                    models.hostsFor(request.model),
+                    (models.byHost[host.id]?.fetchedAt ?? 0) > 0,
+                  ) === "missing";
+                probes.push({
+                  host,
+                  preview: null,
+                  error: null,
+                  telemetryOnly: !knownMissingModel,
+                  knownMissingModel,
+                  roundTripMs: Math.max(0, performance.now() - started),
+                });
+                if (!knownMissingModel) {
+                  anyPlanned = true;
+                  resolveFirstPlanned();
+                }
+                return;
+              }
               const preview =
                 Array.isArray((request as ChainRequest).stages) || "total_frames" in request
                   ? await previewChainPlacement(
@@ -906,7 +953,8 @@ export const useHostsStore = defineStore("hosts", {
                 host,
                 preview,
                 error: null,
-                legacyUnsupported: false,
+                telemetryOnly: false,
+                knownMissingModel: false,
                 roundTripMs: Math.max(0, performance.now() - started),
               });
               if (classifyPlacementPreview(preview) === "planned") {
@@ -918,8 +966,8 @@ export const useHostsStore = defineStore("hosts", {
                 host,
                 preview: null,
                 error,
-                legacyUnsupported:
-                  error instanceof ApiError && (error.status === 404 || error.status === 405),
+                telemetryOnly: false,
+                knownMissingModel: false,
                 roundTripMs: Math.max(0, performance.now() - started),
               });
             } finally {
@@ -974,7 +1022,8 @@ export const useHostsStore = defineStore("hosts", {
               error: new Error(
                 `Auto placement timed out after ${Math.round(autoDeadlineMs / 1000)} seconds; retry or select this machine explicitly for a longer cold check`,
               ),
-              legacyUnsupported: false,
+              telemetryOnly: false,
+              knownMissingModel: false,
               roundTripMs: autoDeadlineMs,
             });
           }
@@ -1021,36 +1070,69 @@ export const useHostsStore = defineStore("hosts", {
             preview: probe.preview,
           }))
           .sort(comparePlacementPreviews);
+        const telemetryOnly = settledProbes.filter((probe) => probe.telemetryOnly);
+        if (telemetryOnly.length > 0) {
+          const usable = [
+            ...telemetryOnly,
+            ...planned.flatMap((entry) => {
+              const probe = settledProbes.find((candidate) => candidate.host.id === entry.hostId);
+              return probe ? [probe] : [];
+            }),
+          ];
+          const modelHostIds = useHostModelsStore()
+            .hostsFor(request.model)
+            .filter((id) => usable.some((probe) => probe.host.id === id));
+          const routable = usable.map((probe) => ({
+            ...probe.host,
+            gpu: strongestRoutableGpu(this.telemetry[probe.host.id]),
+          }));
+          const chosen =
+            selection === "capable"
+              ? pickMostCapableHost(routable, modelHostIds.length > 0 ? modelHostIds : null)
+              : selection !== null
+                ? (routable.find((host) => host.id === selection) ?? null)
+                : pickAutoHost(
+                    modelHostIds.length > 0
+                      ? routable.filter((host) => modelHostIds.includes(host.id))
+                      : routable,
+                  );
+          const observation = chosen ? usable.find((probe) => probe.host.id === chosen.id) : null;
+          const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
+          if (route) return { kind: "route", route, preview: observation?.preview ?? null };
+        }
         if (planned.length > 0) {
           const chosen = candidates.find((host) => host.id === planned[0]!.hostId);
           const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
           if (route) return { kind: "route", route, preview: planned[0]!.preview };
         }
 
+        // An `unsupported` plan is a NON-AUTHORITATIVE answer, not an old
+        // machine: chain and local utility plans are documented to answer it,
+        // so the machine stays routable when authority is not required.
         const unsupportedIds = settledProbes
-          .filter(
-            (probe) =>
-              probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
-          )
+          .filter((probe) => classifyPlacementPreview(probe.preview) === "unsupported")
           .map((probe) => probe.host.id);
-        const legacy = candidates
+        const nonAuthoritative = candidates
           .filter((host) => unsupportedIds.includes(host.id))
           .map((host) => ({
             ...host,
             gpu: strongestRoutableGpu(this.telemetry[host.id]),
           }));
-        if (!requireAuthoritative && legacy.length > 0) {
+        if (!requireAuthoritative && nonAuthoritative.length > 0) {
           const modelHostIds = useHostModelsStore()
             .hostsFor(request.model)
             .filter((id) => unsupportedIds.includes(id));
-          let chosen: (typeof legacy)[number] | null;
+          let chosen: (typeof nonAuthoritative)[number] | null;
           if (selection === "capable") {
-            chosen = pickMostCapableHost(legacy, modelHostIds.length > 0 ? modelHostIds : null);
+            chosen = pickMostCapableHost(
+              nonAuthoritative,
+              modelHostIds.length > 0 ? modelHostIds : null,
+            );
           } else if (selection !== null && this.all.some((host) => host.id === selection)) {
-            chosen = legacy.find((host) => host.id === selection) ?? null;
+            chosen = nonAuthoritative.find((host) => host.id === selection) ?? null;
           } else {
-            const withModel = legacy.filter((host) => modelHostIds.includes(host.id));
-            chosen = pickAutoHost(withModel.length > 0 ? withModel : legacy);
+            const withModel = nonAuthoritative.filter((host) => modelHostIds.includes(host.id));
+            chosen = pickAutoHost(withModel.length > 0 ? withModel : nonAuthoritative);
           }
           const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
           if (route) return { kind: "route", route, preview: null };
@@ -1058,10 +1140,22 @@ export const useHostsStore = defineStore("hosts", {
 
         const failures = settledProbes.flatMap<HostFeasibilityFailure>((probe) => {
           const classification = classifyPlacementPreview(probe.preview);
-          if (
-            requireAuthoritative &&
-            (probe.legacyUnsupported || classification === "unsupported")
-          ) {
+          if (probe.knownMissingModel) {
+            const route = hostRoute(probe.host, this.capabilities[probe.host.id]);
+            if (!route) return [];
+            return [
+              {
+                kind: "infeasible",
+                hostId: probe.host.id,
+                label: probe.host.label,
+                route,
+                reason: `model '${request.model}' is not installed on this machine`,
+                missingComponents: [],
+                missingModel: { model: request.model, missingComponents: [] },
+              },
+            ];
+          }
+          if (requireAuthoritative && classification === "unsupported") {
             return [
               {
                 kind: "unreachable",
@@ -1072,7 +1166,7 @@ export const useHostsStore = defineStore("hosts", {
               },
             ];
           }
-          if (probe.error && !probe.legacyUnsupported) {
+          if (probe.error) {
             return [
               {
                 kind: "unreachable",

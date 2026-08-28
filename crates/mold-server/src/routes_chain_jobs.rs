@@ -127,11 +127,17 @@ pub async fn create_chain_job(
     // manifest keeps this request verbatim, so an unresolved id would still
     // be unresolved on a resume days later.
     let filing_warnings = crate::routes::resolve_collection_reference(db, &mut req.collection);
-    if req.output_format != mold_core::OutputFormat::Mp4 {
-        return Err(ApiError::validation(
-            "durable chain jobs currently require output_format = mp4; legacy /api/generate/chain may request gif/webp/apng via the shim",
-        ));
+    if !req.output_format.is_video() {
+        return Err(ApiError::validation(format!(
+            "{:?} is not a video output format; a chain job stitches MP4 and publishes \
+             the requested mp4, gif, webp, or apng print",
+            req.output_format
+        )));
     }
+    // An ephemeral job is one print's implementation detail rather than a
+    // sequence the user authored: absent from the listing, swept after
+    // finalization, resume refused, and its print carries no `chain_job_id`.
+    let ephemeral = req.ephemeral;
     crate::routes::materialize_chain_camera_controls(&state, &authority.config, &req).await?;
     let operation_id = mutation_id(&headers)?;
     let job_id = operation_id
@@ -155,7 +161,7 @@ pub async fn create_chain_job(
         &jobs_root,
         crate::chain_job_runner::CreateJobParams {
             id: job_id.clone(),
-            ephemeral: false,
+            ephemeral,
             frozen_model: Some(crate::routes_chain::freeze_chain_model(
                 authority, &req.model,
             )?),
@@ -165,17 +171,25 @@ pub async fn create_chain_job(
     .map_err(|e| ApiError::internal(format!("failed to create chain job: {e:#}")))?;
 
     handle.kick();
-    state
-        .events
-        .publish(mold_core::ServerEvent::ChainJobQueued {
-            id: job_id.clone(),
-            model,
-            stage_count,
-        });
+    // The lifecycle broadcast drives History ▸ Sequences and "Now developing".
+    // An ephemeral job belongs in neither: it is one print being rendered in
+    // pieces, and the print's own `gallery_added` is what announces it.
+    if !ephemeral {
+        state
+            .events
+            .publish(mold_core::ServerEvent::ChainJobQueued {
+                id: job_id.clone(),
+                model,
+                stage_count,
+            });
+    }
     Ok((
         StatusCode::ACCEPTED,
         crate::routes::request_warning_headers(&filing_warnings),
-        Json(CreateChainJobResponse { job_id }),
+        Json(CreateChainJobResponse {
+            job_id,
+            request_warnings: filing_warnings,
+        }),
     ))
 }
 
@@ -590,10 +604,11 @@ pub async fn amend_chain_job(
         let candidate = candidate
             .normalise_with_family(Some(&family))
             .map_err(|error| ApiError::validation(error.to_string()))?;
-        if candidate.output_format != mold_core::OutputFormat::Mp4 {
-            return Err(ApiError::validation(
-                "durable chain jobs currently require output_format = mp4",
-            ));
+        if !candidate.output_format.is_video() {
+            return Err(ApiError::validation(format!(
+                "{:?} is not a video output format",
+                candidate.output_format
+            )));
         }
         crate::routes::materialize_chain_camera_controls(&state, &validation_config, &candidate)
             .await?;
@@ -1267,6 +1282,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         }
     }
 
@@ -1281,9 +1297,7 @@ mod tests {
     }
 
     fn with_mold_home<R>(home: &std::path::Path, f: impl FnOnce() -> R) -> R {
-        let _guard = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::test_support::env_lock();
         let prev = std::env::var_os("MOLD_HOME");
         std::env::set_var("MOLD_HOME", home);
         let out = f();
@@ -2006,6 +2020,63 @@ mod tests {
                 .is_none(),
             "a pre-cancelled create must never persist or queue a job"
         );
+    }
+
+    /// An ephemeral job is one print's implementation detail, and everything
+    /// that treats a job as an authored sequence must skip it: the listing
+    /// behind History ▸ Sequences, the lifecycle broadcast behind "Now
+    /// developing", and resume.
+    #[tokio::test]
+    async fn an_ephemeral_job_is_absent_from_the_listing_and_refuses_resume() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let mut request = freezable_amend_request(&state, home.path()).await;
+        request.ephemeral = true;
+        let mut events = state.events.subscribe();
+
+        let (_status, _headers, Json(created)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(request),
+            ))
+        })
+        .unwrap();
+
+        // Created and readable by id — it renders like any other job.
+        let listed = with_mold_home(home.path(), || {
+            futures::executor::block_on(list_chain_jobs(
+                State(state.clone()),
+                axum::extract::Query(ListChainJobsQuery::default()),
+            ))
+        })
+        .unwrap();
+        assert!(
+            !listed.0.jobs.iter().any(|job| job.id == created.job_id),
+            "an ephemeral job is not an authored sequence"
+        );
+
+        // ...and it does not announce itself as one.
+        assert!(
+            !matches!(
+                events.try_recv(),
+                Ok(mold_core::ServerEvent::ChainJobQueued { .. })
+            ),
+            "an ephemeral job must not drive Now developing"
+        );
+
+        let resumed = with_mold_home(home.path(), || {
+            futures::executor::block_on(resume_chain_job(
+                State(state.clone()),
+                Path(created.job_id.clone()),
+            ))
+        });
+        let error = resumed.expect_err("an ephemeral job cannot be resumed");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

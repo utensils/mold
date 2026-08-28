@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  applyCompletionWarnings,
-  applyProgress,
-  jobPhase,
   jobProgress,
-  jobProgressCopy,
   jobStatusCode,
   newJob,
   planBatchRequests,
@@ -12,6 +8,9 @@ import {
   type Job,
   type JobStatus,
 } from "./generation";
+// `applyCompletionWarnings` is a lib helper: the store no longer re-exports it
+// now that no completion arrives on a stream.
+import { applyCompletionWarnings } from "../lib/generationJob";
 
 const req = {
   prompt: "a lighthouse at dusk",
@@ -22,105 +21,6 @@ const req = {
 };
 
 describe("generation SSE reducer", () => {
-  it("walks queued → loading → denoising with server-assigned id", () => {
-    const job = newJob(req);
-    expect(jobPhase(job)).toBe("latent");
-
-    applyProgress(job, { type: "queued", position: 2, id: "abc" });
-    expect(job.queuePosition).toBe(2);
-    expect(job.id).toBe("abc");
-
-    applyProgress(job, {
-      type: "weight_load",
-      bytes_loaded: 1,
-      bytes_total: 10,
-      component: "t5",
-    });
-    expect(job.status).toBe("loading");
-
-    applyProgress(job, { type: "denoise_step", step: 2, total: 4, elapsed_ms: 100 });
-    expect(job.status).toBe("denoising");
-    expect(jobPhase(job)).toBe("developing");
-    expect(jobProgress(job)).toBe(0.5);
-    expect(job.queuePosition).toBeNull();
-  });
-
-  it("keeps dependency preparation queued before GPU work starts", () => {
-    const job = newJob(req);
-    applyProgress(job, { type: "queued", position: 1, id: "dep-job" });
-    applyProgress(job, {
-      type: "dependency_wait",
-      dependency: "T5 q6",
-      reason: "downloading selected encoder dependency",
-    });
-    expect(job.status).toBe("queued");
-    expect(job.stage).toBe("Waiting for T5 q6");
-    expect(job.id).toBe("dep-job");
-    applyProgress(job, {
-      type: "download_progress",
-      filename: "t5-q6.gguf",
-      file_index: 0,
-      total_files: 1,
-      bytes_downloaded: 50,
-      bytes_total: 100,
-      batch_bytes_downloaded: 50,
-      batch_bytes_total: 100,
-      batch_elapsed_ms: 20,
-    });
-    expect(job.status).toBe("queued");
-    expect(job.stage).toBe("Downloading t5-q6.gguf (50%)");
-  });
-
-  it("post-denoise stages become 'finishing', never regress to loading", () => {
-    // After the last denoise step the engine drops the transformer, loads
-    // the VAE, and decodes — steps read 4/4 but the print isn't done. Those
-    // trailing stage events are the fixer bath.
-    const job = newJob(req);
-    applyProgress(job, { type: "denoise_step", step: 4, total: 4, elapsed_ms: 1 });
-    applyProgress(job, { type: "stage_start", name: "VAE decode" });
-    expect(job.status).toBe("finishing");
-    expect(job.stage).toBe("VAE decode");
-    expect(jobPhase(job)).toBe("developing");
-    expect(jobProgress(job)).toBe(1);
-    // weight_load during finishing must not flip it back to loading either.
-    applyProgress(job, {
-      type: "weight_load",
-      bytes_loaded: 1,
-      bytes_total: 2,
-      component: "vae",
-    });
-    expect(job.status).toBe("finishing");
-  });
-
-  it("keeps MiniMax transformer blocks in the active denoise step", () => {
-    const job = newJob({ ...req, steps: 20 });
-    applyProgress(job, { type: "denoise_step", step: 4, total: 20, elapsed_ms: 1 });
-    applyProgress(job, {
-      type: "stage_start",
-      name: "Streaming MiniMax H3 transformer blocks",
-    });
-
-    expect(job.status).toBe("denoising");
-    expect(jobProgress(job)).toBe(0.2);
-    expect(jobProgressCopy(job)).toBe("Developing 4/20 — Streaming MiniMax H3 transformer blocks");
-  });
-
-  it("shows bounded inner progress without advancing the denoise step", () => {
-    const job = newJob({ ...req, steps: 4 });
-    applyProgress(job, { type: "denoise_step", step: 1, total: 4, elapsed_ms: 1 });
-    applyProgress(job, {
-      type: "stage_progress",
-      name: "Evaluating transformer",
-      current: 17,
-      total: 48,
-    });
-
-    expect(job.status).toBe("denoising");
-    expect(job.step).toBe(1);
-    expect(job.stage).toBe("Evaluating transformer 17/48");
-    expect(jobProgress(job)).toBe(0.25);
-  });
-
   it("uses the requested seed for the grain, or a stable stand-in", () => {
     expect(newJob({ ...req, seed: 42 }).visualSeed).toBe("42");
     const a = newJob(req).visualSeed;
@@ -323,27 +223,6 @@ describe("job reactivity wiring", () => {
 
     const { isReactive } = await import("vue");
     expect(isReactive(job)).toBe(true);
-  });
-});
-
-describe("live latent previews", () => {
-  it("preview events advance to denoising and hold an object URL", () => {
-    const job = newJob(req);
-    applyProgress(job, { type: "preview", image: btoa("fake-png"), step: 1, total: 4 });
-    expect(job.status).toBe("denoising");
-    expect(job.previewUrl).not.toBeNull();
-  });
-
-  it("each preview revokes the previous frame's URL", async () => {
-    const { vi } = await import("vitest");
-    const revoke = vi.spyOn(URL, "revokeObjectURL");
-    const job = newJob(req);
-    applyProgress(job, { type: "preview", image: btoa("a"), step: 1, total: 4 });
-    const first = job.previewUrl;
-    applyProgress(job, { type: "preview", image: btoa("b"), step: 2, total: 4 });
-    expect(revoke).toHaveBeenCalledWith(first);
-    expect(job.previewUrl).not.toBe(first);
-    revoke.mockRestore();
   });
 });
 

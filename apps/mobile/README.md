@@ -65,12 +65,12 @@ pushed screen opened from the header.
   `mold.mobile.generate-target.v1` and resolved through
   `desktop/src/mobile/generateTarget.ts`. Under either policy the model picker
   is the union of every reachable machine's installed models, tagged with the
-  machine that has one when they differ, and Develop fans
-  `POST /api/generate/placement-preview` out to the candidate machines (each
-  with its own Keychain key) before choosing, keeping slower machines in the
-  race only until one of them answers with a plan — Auto by soonest predicted
-  completion including round trip, Most capable by that machine's reported
-  `gpu_info.backend`. The winner is frozen into the same immutable route record
+  machine that has one when they differ. Machines are ranked from their cached
+  model and queue telemetry, so Develop does not block on a placement round
+  trip before durable admission; the placement preview remains the sequence
+  planner. Auto
+  chooses the least-busy model owner; Most capable uses the machine's reported
+  `gpu_info.backend`, then VRAM and queue depth. The winner is frozen into the same immutable route record
   a pinned machine uses (host id, URL, Keychain key, instance id), so prepared
   and quick expansion keep their own machine, durable sequences restore on the
   exact machine that ran them, and a fleet split across incompatible major Mold
@@ -139,9 +139,9 @@ pushed screen opened from the header.
   the machines whose OWN `/api/models` row advertises `supports_identity` for
   that model (the picker row is the fleet union and cannot answer for the
   winner), the frozen route is re-checked before submission, and
-  `requiresAuthoritativePlacement` now covers `id_image` so an identity request
-  can never take the legacy 404/405 placement fallback on a server that would
-  ignore the face. Every rule comes from
+  `requiresAuthoritativePlacement` covers `id_image`, so an identity request is
+  refused inline by name rather than routed to a machine that does not
+  advertise the face. Every rule comes from
   `@studio/lib/identityConditioning`; `desktop/src/mobile/identity.ts` holds
   only the phone-shaped parts (budget, native ingest, Info rows, reuse
   outcome).
@@ -269,10 +269,28 @@ pushed screen opened from the header.
   Keychain storage. Host detail shows telemetry, models-disk usage, queue,
   downloads, loaded models, and installed models (all using catalog display
   names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
-  unload, open-in-Models, and forget actions. Queued rows and running singleton
-  generations have a 44pt two-tap **Cancel** action against that exact
-  Keychain-authenticated host when it advertises cooperative cancellation;
-  older hosts keep running work visible and read-only.
+  unload, open-in-Models, and forget actions. Queue rows are swipe-to-act
+  (`studio/components/SwipeActionRow.vue`, gesture math in
+  `studio/lib/swipeAction.ts`): a right-to-left swipe reveals a 44pt tray, and
+  from that revealed tray a tap or a second full swipe past 60% of the row
+  commits **Cancel**, which reaches queued rows always and running singletons
+  where the host advertises cooperative cancellation. A single gesture from a
+  closed row can only reveal — never cancel — so the destructive action always
+  takes two deliberate moves, and the tray is
+  equally reachable from the row's **Actions** button so VoiceOver and hardware
+  keyboards never depend on the gesture. The horizontal pan is scoped to the
+  row (`touch-action: pan-y`), leaving the list scroll, the Library grid's
+  column pinch, and the gallery viewer's swipe untouched, and the settle
+  animation honours `prefers-reduced-motion`. A host advertising
+  `capabilities.queue.can_reorder` adds a non-destructive **To back**, which
+  sends `PATCH /api/queue/:id {position}` — the server clamps a large index to
+  the tail, so the phone never has to read a queue depth its bounded page
+  cannot see. There is deliberately no per-job pause: only the whole queue
+  pauses. Tapping the row body opens the shared `QueueEntryDetail` in a bottom
+  sheet with the prompt, setting groups, queue facts, the running preview, any
+  hold reason in full with Copy, and its own inline two-step cancel; failures
+  stay in a persistent inline line, never a toast. Android renders the same
+  component — nothing in the gesture is iOS-only.
   When a host advertises `capabilities.gallery.trash`, host detail adds a
   **Library** card: a **Trash retention** select reading and writing that
   host's `gallery.trash_retention_days` through `GET`/`PUT /api/config/:key`
@@ -330,21 +348,25 @@ conditioning names the work as stale, and `/api/expand` receives only the task,
 never source media bytes.
 Once the host accepts the batch, the composer is immediately available to
 prepare another while earlier siblings remain queued or running.
-After source preprocessing, Create performs one read-only placement preview for
-the finalized sibling shape (`batch_size: 1`, `copies: N`) on that exact frozen
-route. A URL, Keychain key, or instance change, an authoritative infeasible
-result, a malformed response, or any non-legacy HTTP failure preserves the
-reviewed work and queues nothing. The UI names the server's infeasible reason,
-temporary planner failure, malformed response, transport error, or host-identity
-race instead of collapsing them into one route error. Additive
+That acceptance is one durable `POST /api/generation-batches` operation of
+ordered singleton children; larger sets are chunked at the machine's advertised
+limit without changing global sibling provenance. Held children survive
+app/server restarts and remain visible with their error and retry action.
+Ordinary work goes directly to durable admission after source preprocessing;
+the server persists it before expensive preparation. A machine that cannot
+carry the request refuses it inline by name. A URL, Keychain key, or instance
+change, a refusal, a malformed response, or any HTTP failure preserves the
+reviewed work and queues nothing. The UI names the host's reason,
+transport error, or host-identity race instead of collapsing them into one
+route error. Additive
 `missing_components` metadata is informational until Create owns a finalized
 held request and the exact host's complete grouped repair pull; it must not
 promise automatic resume before then. Additive `pending_downloads` and their
 low-confidence estimate describe only devices selected by the candidate plan; cold
 installed catalog IDs remain valid across server model-list refreshes. Only a
-strictly valid version-1
-non-authoritative `unsupported` result or a missing legacy endpoint
-(`404`/`405`) may retain compatible routing without an authoritative plan.
+strictly valid
+non-authoritative `unsupported` result may retain compatible routing without an
+authoritative plan — a chain plan is documented to answer it.
 MiniMax H3 Ref2VA is the staged-media exception: Create first freezes a host
 that advertises the selected model, uploads the ordered references there, and
 relies on that host's exact admission validation before queueing because an
@@ -436,7 +458,7 @@ The **Opening sequence image** — the still clip 1 is conditioned on, with its
 source strength and fit-to-video-frame controls — is a primary-stack
 disclosure, the seat One shot gives its own source media, not an Advanced
 control; it is hidden entirely for a checkpoint whose `source_image` contract
-is `unsupported`, and an older server that advertises no contract keeps it.
+is `unsupported`.
 **Advanced sequence controls** therefore hosts only the active clip's negative
 prompt and camera motion, and its Reset clears exactly those two — the staged
 opening image, strength, and fit survive it, exactly as One shot's staged

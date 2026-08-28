@@ -12,21 +12,6 @@ function meaningfulStage(stage: string | null | undefined): string | null {
   return stage;
 }
 
-/**
- * A StageStart can be a nested phase inside a denoise evaluation (MiniMax H3
- * streams 50 transformer blocks per evaluation) or genuinely post-denoise
- * work. Only the completed denoise counter can distinguish those cases.
- */
-export function phaseForStageStart(
-  current: GenerationWorkPhase,
-  step: number,
-  total: number,
-): GenerationWorkPhase {
-  if (current === "finalizing") return "finalizing";
-  if (current !== "denoising") return "preparing";
-  return total > 0 && step >= total ? "finalizing" : "denoising";
-}
-
 /** One progress sentence shared by web, desktop, iPhone, and Android. */
 export function generationProgressCopy({
   phase,

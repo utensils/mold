@@ -4,7 +4,8 @@
 //! RAII [`QueueTicket`] on every ordinary terminal path. The row survives only
 //! when the process is dying: [`QueueJournal::retain_all`] raises a global
 //! fence that turns every subsequent ticket drop into a retention, so whatever
-//! the scheduler discards on the way out is replayed on the next boot.
+//! the scheduler discards on the way out is claimed again by the durable
+//! feeder on the next boot.
 //!
 //! **The fence must be raised by every abnormal-exit initiator, not just
 //! SIGTERM.** Fatal CUDA is the restart mold deliberately performs on itself;
@@ -12,16 +13,18 @@
 //! on exactly that path. The three call sites are `begin_runtime_shutdown`,
 //! the fatal-CUDA notifier, and `quarantine_poisoned_worker`.
 //!
-//! Rows never carry a secret. Reference-upload handles and resolved reference
-//! paths are excluded at admission rather than redacted here, which is why
-//! [`QueueJournal::record`] refuses any request carrying them. MiniMax H3
-//! requests are excluded too: replay cannot reconstruct their authenticated
-//! ingress grant, so claiming they are durable would be false.
+//! Rows never carry a secret. The legacy [`QueueJournal::record`] path refuses
+//! reference-upload handles, resolved paths, and MiniMax H3 requests because
+//! it cannot reconstruct their authenticated ingress authority. Canonical
+//! batch admission instead seals supported request media and journals only an
+//! opaque, owner/job/request-bound authority envelope for durable replay.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use mold_db::generation_batches::{
     self, GenerationBatchChildRow, GenerationBatchDetail, GenerationBatchMediaInsertOutcome,
@@ -42,7 +45,7 @@ pub const JOURNAL_DISABLE_ENV: &str = "MOLD_QUEUE_JOURNAL_DISABLE";
 pub const JOURNAL_MAX_BYTES_ENV: &str = "MOLD_QUEUE_JOURNAL_MAX_BYTES";
 /// How many times a row may be claimed for execution before it is held.
 pub const MAX_DISPATCH_ATTEMPTS_ENV: &str = "MOLD_QUEUE_MAX_DISPATCH_ATTEMPTS";
-/// How many boots may replay a row that is never claimed before it is held.
+/// How many boots may recover a claimed row that never ran before it is held.
 pub const MAX_REPLAY_SEEN_ENV: &str = "MOLD_QUEUE_MAX_REPLAY_SEEN";
 
 /// 32 MiB of serialized request. Comfortably holds an inline source image;
@@ -117,9 +120,6 @@ pub struct JournalAdmission<'a> {
     /// True when the job is a server-owned adaptive-batch child; those are
     /// owned by the batch transaction's own durable recovery.
     pub batch_child: bool,
-    /// True when the request carries reference-upload authority. Those bytes
-    /// are bearer secrets staged outside the DB and are never journaled.
-    pub carries_reference_authority: bool,
 }
 
 pub struct BatchJournalAdmission<'a> {
@@ -140,6 +140,7 @@ pub(crate) struct MediaJournalAdmission<'a> {
     pub target_device_id: Option<&'a str>,
     pub completion_payload: SseCompletionPayload,
     pub seed_pinned: bool,
+    pub admission_authority: Option<&'a str>,
 }
 
 pub(crate) struct MediaBatchJournalAdmission<'a> {
@@ -148,9 +149,9 @@ pub(crate) struct MediaBatchJournalAdmission<'a> {
     /// Randomized authenticated receipt, never a plaintext media fingerprint.
     pub operation_receipt: &'a str,
     pub children: &'a [MediaJournalAdmission<'a>],
-    /// Present only for a direct attached observer. Publication occurs after
-    /// the immediate transaction commits and before the feeder wake.
-    pub observer_job_id: Option<&'a str>,
+    /// Direct attached observers to publish after the immediate transaction
+    /// commits and before the feeder wake.
+    pub observer_job_ids: &'a [String],
 }
 
 /// Whether this request carries a face photograph.
@@ -489,7 +490,13 @@ pub struct QueueJournal {
     #[cfg(test)]
     fail_completion_lookup: AtomicBool,
     #[cfg(test)]
+    fail_batch_lookup: AtomicUsize,
+    #[cfg(test)]
     fail_claim_release: AtomicBool,
+    #[cfg(test)]
+    fail_hold_transition: AtomicBool,
+    #[cfg(test)]
+    fail_completion_transition: AtomicUsize,
     /// Held for the process's lifetime so a peer sharing this `MOLD_HOME`
     /// cannot adopt the same identity.
     _owner_claim: Option<QueueOwnerClaim>,
@@ -498,6 +505,13 @@ pub struct QueueJournal {
     max_dispatch_attempts: u32,
     max_replay_seen: u32,
     feeder_notify: tokio::sync::Notify,
+    /// Cancellation authority for durable rows claimed by the feeder but not
+    /// yet published to the runtime registry. Deferred model preparation can
+    /// block for a long time, so DELETE must be able to revoke that work and
+    /// release its queue reservation before preparation returns.
+    preparing: Mutex<HashMap<String, Arc<tokio_util::sync::CancellationToken>>>,
+    #[cfg(test)]
+    archive_lookup_started: tokio::sync::Notify,
     /// Serializes durable queue transitions whose SQLite result is later
     /// projected into the bounded runtime registry.
     ///
@@ -554,7 +568,13 @@ impl QueueJournal {
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
             #[cfg(test)]
+            fail_batch_lookup: AtomicUsize::new(0),
+            #[cfg(test)]
             fail_claim_release: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_hold_transition: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: env_usize(JOURNAL_MAX_BYTES_ENV, DEFAULT_JOURNAL_MAX_BYTES),
             max_dispatch_attempts: env_u32(
@@ -563,6 +583,9 @@ impl QueueJournal {
             ),
             max_replay_seen: env_u32(MAX_REPLAY_SEEN_ENV, DEFAULT_MAX_REPLAY_SEEN),
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -582,13 +605,63 @@ impl QueueJournal {
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
             #[cfg(test)]
+            fail_batch_lookup: AtomicUsize::new(0),
+            #[cfg(test)]
             fail_claim_release: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_hold_transition: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    /// Register cancellation for the claimed preparation window. The feeder
+    /// installs this before checking that its SQLite claim is still live, so
+    /// DELETE either removes the claim first or trips this token afterward.
+    pub(crate) fn begin_preparation(self: &Arc<Self>, id: &str) -> PreparationCancellation {
+        let token = Arc::new(tokio_util::sync::CancellationToken::new());
+        self.preparing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.to_string(), Arc::clone(&token));
+        PreparationCancellation {
+            journal: Arc::clone(self),
+            id: id.to_string(),
+            token,
+        }
+    }
+
+    fn cancel_preparation(&self, id: &str) {
+        let token = self
+            .preparing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .cloned();
+        if let Some(token) = token {
+            token.cancel();
+        }
+    }
+
+    fn cancel_all_preparations(&self) {
+        let tokens = self
+            .preparing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for token in tokens {
+            token.cancel();
         }
     }
 
@@ -604,6 +677,16 @@ impl QueueJournal {
     #[cfg(test)]
     pub(crate) fn durable_transition_is_locked(&self) -> bool {
         self.durable_transition_gate.try_lock().is_err()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_archive_lookup_started(&self) {
+        self.archive_lookup_started.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_archive_lookup(&self) {
+        self.archive_lookup_started.notified().await;
     }
 
     /// Whether this server can promise that a queued job survives a restart.
@@ -624,7 +707,10 @@ impl QueueJournal {
         (self.durable_media_ready.load(Ordering::Acquire)
             && self.queue_media_lifecycle.get().is_some()
             && self.queue_media_admission.get().is_some())
-        .then_some(mold_core::DurableMediaCapabilities::v1())
+        .then_some(mold_core::DurableMediaCapabilities::v2(cfg!(any(
+            feature = "h3",
+            feature = "h3-private-uat"
+        ))))
     }
 
     /// The operator-facing counterpart of [`Self::durable_media_capabilities`].
@@ -733,6 +819,14 @@ impl QueueJournal {
         self.queue_media_admission.get().cloned()
     }
 
+    pub(crate) fn has_generation_v2_receipt_evidence(&self) -> Result<bool, String> {
+        let Some(db) = self.db() else {
+            return Ok(false);
+        };
+        generation_batches::has_any_request_receipt_prefix(db, "generation-v2.")
+            .map_err(|error| format!("could not inspect durable generation receipts: {error:#}"))
+    }
+
     // Called by the default-dark startup coordinator once its independently
     // reviewed concrete DB/store adapter is integrated.
     #[allow(dead_code)]
@@ -777,108 +871,6 @@ impl QueueJournal {
         self.retain.load(Ordering::SeqCst)
     }
 
-    /// Persist an admitted job, returning the ticket that owns its row.
-    ///
-    /// `None` means the job is not durable. Every reason is deliberate:
-    /// no gallery target, reference-upload authority (bearer secrets), a face
-    /// photograph (biometric data), MiniMax H3 replay authority, a batch child
-    /// (owned by the batch transaction's own recovery), an oversized payload,
-    /// or no journal at all.
-    pub fn record(self: &Arc<Self>, admission: JournalAdmission<'_>) -> Option<QueueTicket> {
-        let owner_uuid = self.owner_uuid.as_deref()?;
-        let db = self.db()?;
-        let output_dir = admission.output_dir?;
-        if admission.batch_child || admission.carries_reference_authority {
-            return None;
-        }
-        // `mold.db` never holds a secret, and a face photograph is the most
-        // sensitive payload a request can carry: an identity image is
-        // biometric data about a real person, supplied for one render.
-        // Journaling it would leave it in a SQLite row on disk, surviving the
-        // process, for as long as the row is retained.
-        //
-        // Excluded at admission rather than redacted, exactly as
-        // reference-upload authority is (#1223). A redacted row is worse than
-        // no row: replay would resubmit the request with no `id_image`, and
-        // `resolve_identity_embedding` would either error or — if the weight
-        // fields went with it — render the print with a stranger's face and
-        // say nothing. The job runs normally and is advertised
-        // `durable: false`, which is the honest answer.
-        if carries_identity_photograph(admission.request) {
-            tracing::info!(
-                job = %admission.id,
-                "generation is not durable: it conditions on a reference photograph, \
-                 which is never written to the database"
-            );
-            return None;
-        }
-        if requires_h3_replay_authority(admission.request) {
-            tracing::info!(
-                job = %admission.id,
-                model = %admission.request.model,
-                "generation is not durable: MiniMax H3 replay cannot reconstruct its \
-                 authenticated ingress authority"
-            );
-            return None;
-        }
-        let request_json = match serde_json::to_string(admission.request) {
-            Ok(json) => json,
-            Err(error) => {
-                tracing::warn!(
-                    job = %admission.id,
-                    error = %error,
-                    "generation is not durable: its request could not be serialized"
-                );
-                return None;
-            }
-        };
-        if request_json.len() > self.max_bytes {
-            tracing::info!(
-                job = %admission.id,
-                bytes = request_json.len(),
-                max_bytes = self.max_bytes,
-                "generation is not durable: its request exceeds the journal payload ceiling"
-            );
-            return None;
-        }
-
-        let now = now_ms();
-        let row = GenerationQueueRow {
-            id: admission.id.to_string(),
-            owner_uuid: owner_uuid.to_string(),
-            state: QueueRowState::Queued,
-            model: admission.request.model.clone(),
-            request_json,
-            media_set_id: None,
-            output_dir: output_dir.to_path_buf(),
-            target_gpu: admission.target_gpu,
-            target_device_id: admission.target_device_id.map(ToOwned::to_owned),
-            completion_payload: completion_payload_as_str(admission.completion_payload).to_string(),
-            seed_pinned: admission.request.seed.is_some(),
-            dispatch_attempts: 0,
-            replay_seen: 0,
-            held_reason: None,
-            created_at_ms: now,
-            updated_at_ms: now,
-            started_at_ms: None,
-        };
-        let claim_token = uuid::Uuid::new_v4().to_string();
-        if let Err(error) = generation_queue::insert_claimed(db, &row, &claim_token) {
-            tracing::warn!(
-                job = %admission.id,
-                error = %format!("{error:#}"),
-                "generation is not durable: the journal row could not be written"
-            );
-            return None;
-        }
-        Some(QueueTicket {
-            journal: Arc::clone(self),
-            id: admission.id.to_string(),
-            claim_token: Some(claim_token),
-            settled: false,
-        })
-    }
-
     /// Persist one heterogeneous parent index and all ordinary queue children
     /// in a single SQLite transaction. The boolean reports whether this call
     /// inserted the batch rather than returning an idempotent retry.
@@ -902,10 +894,8 @@ impl QueueJournal {
             let output_dir = child
                 .output_dir
                 .ok_or_else(|| "heterogeneous batches require gallery output".to_string())?;
-            if child.batch_child || child.carries_reference_authority {
-                return Err(
-                    "heterogeneous batches cannot carry temporary reference authority".to_string(),
-                );
+            if child.batch_child {
+                return Err("heterogeneous batches cannot carry batch children".to_string());
             }
             if carries_identity_photograph(child.request) {
                 return Err("heterogeneous batches cannot persist identity photographs".to_string());
@@ -928,6 +918,7 @@ impl QueueJournal {
                 model: child.request.model.clone(),
                 request_json,
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: output_dir.to_path_buf(),
                 target_gpu: child.target_gpu,
                 target_device_id: child.target_device_id.map(ToOwned::to_owned),
@@ -968,6 +959,77 @@ impl QueueJournal {
     /// Persist one media-bearing operation in the same immediate transaction
     /// as all child rows and active media obligations. Existing media-free
     /// `record_batch` remains byte-for-byte on its legacy equality path.
+    /// Mint ONE durable row for a test, through the live writer.
+    ///
+    /// The media-free `record` / `record_batch` writers are gone: every
+    /// production admission goes through `record_batch_with_media`, which
+    /// serializes `request_json` from a request whose media has already been
+    /// extracted. Tests need a cheap single row, and getting one from the same
+    /// writer production uses is what keeps them honest — a fixture with its
+    /// own insert path can keep passing after the real one changes.
+    #[cfg(test)]
+    pub(crate) fn record_for_test(
+        self: &Arc<Self>,
+        admission: JournalAdmission<'_>,
+    ) -> Option<QueueTicket> {
+        let output_dir = admission.output_dir?;
+        // This helper does NOT extract media — it hands the request straight
+        // to the writer — so it must refuse exactly what production never
+        // presents in that shape. `mold.db` never holds a secret: a face
+        // photograph is biometric data about a real person supplied for one
+        // render, and an H3 request needs replay authority no plain row can
+        // reconstruct. In production those never arrive here because
+        // `admit_batch` seals them into the encrypted media store first and
+        // serializes what is left; a test fixture that skipped the seal and
+        // wrote them verbatim would be the very hole the rule exists to close.
+        // Exactly what must never be written down, and nothing more. An image
+        // NAME without its bytes is ordinary metadata — the deleted writers
+        // drew the line at the photograph itself, and widening it here to "any
+        // media field" would make this fixture refuse requests production
+        // journals happily.
+        if admission.batch_child
+            || carries_identity_photograph(admission.request)
+            || requires_h3_replay_authority(admission.request)
+        {
+            return None;
+        }
+        let request_json = serde_json::to_string(admission.request).ok()?;
+        let batch_id = uuid::Uuid::new_v4().to_string();
+        let client_batch_id = uuid::Uuid::new_v4().to_string();
+        let receipt = uuid::Uuid::new_v4().to_string();
+        let outcome = self
+            .record_batch_with_media(MediaBatchJournalAdmission {
+                id: &batch_id,
+                client_batch_id: &client_batch_id,
+                operation_receipt: &receipt,
+                children: &[MediaJournalAdmission {
+                    id: admission.id,
+                    model: &admission.request.model,
+                    request_json: &request_json,
+                    media_set: None,
+                    output_dir,
+                    target_gpu: admission.target_gpu,
+                    target_device_id: admission.target_device_id,
+                    completion_payload: admission.completion_payload,
+                    seed_pinned: admission.request.seed.is_some(),
+                    admission_authority: None,
+                }],
+                observer_job_ids: &[],
+            })
+            .ok()?;
+        if !matches!(
+            outcome,
+            mold_db::generation_batches::GenerationBatchMediaInsertOutcome::Inserted(_)
+        ) {
+            return None;
+        }
+        // Then take the row the way the feeder takes it. A ticket is minted by
+        // CLAIMING, not by inserting, so a test that wants one walks the same
+        // two steps production does.
+        let claim = self.claim_feeder_by_id(admission.id).ok()??;
+        Some(self.attach_claimed(admission.id, claim.claim_token))
+    }
+
     pub(crate) fn record_batch_with_media(
         self: &Arc<Self>,
         admission: MediaBatchJournalAdmission<'_>,
@@ -985,6 +1047,18 @@ impl QueueJournal {
         let now = now_ms();
         let mut rows = Vec::with_capacity(admission.children.len());
         let mut obligations = Vec::new();
+        // The identity-photograph and MiniMax H3 replay-authority exclusions
+        // that governed the older, media-free writers deliberately do NOT
+        // appear here, and their absence is the point of this path rather
+        // than an omission. A face photograph is biometric data that must
+        // never sit in a SQLite row, and an H3 request needs replay authority
+        // no plain row can reconstruct — so this writer does not put either
+        // in one. Media is extracted into the encrypted queue-media store and
+        // `request_json` is serialized from what is LEFT, and H3's authority
+        // rides the sealed `admission_authority` envelope beside it. That is
+        // what `capabilities.durable_media.identity` and `.private_h3`
+        // advertise. The payload ceiling still applies, because it is about
+        // the row's size rather than its contents.
         for (offset, child) in admission.children.iter().enumerate() {
             if child.request_json.len() > self.max_bytes {
                 return Err(format!(
@@ -1029,6 +1103,7 @@ impl QueueJournal {
                     model: child.model.to_string(),
                     request_json: child.request_json.to_string(),
                     media_set_id,
+                    admission_authority: child.admission_authority.map(ToOwned::to_owned),
                     output_dir: child.output_dir.to_path_buf(),
                     target_gpu: child.target_gpu,
                     target_device_id: child.target_device_id.map(ToOwned::to_owned),
@@ -1054,10 +1129,10 @@ impl QueueJournal {
         let outcome = generation_batches::insert_or_get_with_media(db, &batch, &rows, &obligations)
             .map_err(|error| format!("could not persist media generation batch: {error:#}"))?;
         if matches!(outcome, GenerationBatchMediaInsertOutcome::Inserted(_)) {
-            if let (Some(job_id), Some(service)) =
-                (admission.observer_job_id, self.queue_media_admission.get())
-            {
-                service.publish_observer(job_id);
+            if let Some(service) = self.queue_media_admission.get() {
+                for job_id in admission.observer_job_ids {
+                    service.publish_observer(job_id);
+                }
             }
             self.feeder_notify.notify_one();
         }
@@ -1083,10 +1158,35 @@ impl QueueJournal {
             .flatten()
     }
 
+    pub(crate) fn replace_generation_batch_receipt(
+        &self,
+        batch_id: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Err("durable generation database is unavailable".to_string());
+        };
+        generation_batches::replace_request_receipt(db, owner, batch_id, expected, replacement)
+            .map_err(|error| format!("could not migrate generation receipt: {error:#}"))
+    }
+
     pub fn durable_generation_batch(
         &self,
         id: &str,
     ) -> Result<Option<mold_db::generation_batches::DurableGenerationBatchDetail>, String> {
+        #[cfg(test)]
+        if self
+            .fail_batch_lookup
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok_and(|previous| previous == 1)
+        {
+            return Err("injected durable batch lookup failure".to_string());
+        }
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(None);
         };
@@ -1143,8 +1243,9 @@ impl QueueJournal {
         }
     }
 
-    /// Re-attach a ticket to a row that already exists. Used by replay, which
-    /// resubmits an existing row rather than writing a new one.
+    /// Test seam: a ticket over an existing row with no feeder claim token,
+    /// the shape a legacy single-worker dispatch owns.
+    #[cfg(test)]
     pub fn attach(self: &Arc<Self>, id: &str) -> QueueTicket {
         QueueTicket {
             journal: Arc::clone(self),
@@ -1197,6 +1298,7 @@ impl QueueJournal {
         generation_queue::claimed_runtime_position(db, owner, id, claim_token, limit)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn attach_claimed(self: &Arc<Self>, id: &str, claim_token: String) -> QueueTicket {
         QueueTicket {
             journal: Arc::clone(self),
@@ -1345,9 +1447,10 @@ impl QueueJournal {
         }
     }
 
-    /// Cancel an API-visible queue id without stealing a feeder claim.
-    /// Unhydrated batch children settle atomically; claimed children are left
-    /// for their token-bearing ticket, and legacy rows keep direct deletion.
+    /// Cancel an API-visible queue id through its durable owner fence.
+    /// Queued batch children settle atomically even after a feeder claim;
+    /// running children retain cooperative cancellation authority, and legacy
+    /// rows keep direct deletion.
     pub fn cancel_id(&self, id: &str) -> anyhow::Result<bool> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(false);
@@ -1362,10 +1465,13 @@ impl QueueJournal {
         };
         let candidate = self.media_candidate(id);
         let outcome = generation_batches::cancel_owned(db, owner, id, terminal)?;
+        if outcome != generation_batches::OwnedCancellation::NotOwned {
+            self.cancel_preparation(id);
+        }
         if outcome == generation_batches::OwnedCancellation::Settled {
             self.cleanup_media_candidate(candidate);
             if let Some(service) = self.queue_media_admission.get() {
-                service.ingress().discard_hint(id);
+                service.ingress().cancel(id);
             }
             self.publish_state_committed(id);
         }
@@ -1406,6 +1512,7 @@ impl QueueJournal {
         let candidates = self.active_media_candidates();
         let additional =
             generation_batches::cancel_all_queued(db, owner, already_counted_live, terminal)?;
+        self.cancel_all_preparations();
         self.cleanup_media_candidates(candidates);
         if additional > 0 || !already_counted_live.is_empty() {
             self.publish_states_committed();
@@ -1414,100 +1521,24 @@ impl QueueJournal {
         Ok(additional)
     }
 
-    /// Reconcile the journal against reality before anything is replayed.
-    ///
-    /// A `running` row means the process died mid-dispatch, so the state
-    /// column is rewritten to say what to do next. A row whose output
-    /// directory no longer exists is re-pointed at the currently configured
-    /// gallery, and held if even that is unusable — a replay whose output has
-    /// nowhere to land is a wasted render.
-    pub fn startup_reconcile(&self, current_output_dir: Option<&Path>) -> ReconcileReport {
-        let mut report = ReconcileReport::default();
-        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
-            return report;
-        };
-        let now = now_ms();
-        match generation_queue::requeue_running(db, owner, now) {
-            Ok(count) => report.requeued = count,
-            Err(error) => tracing::warn!(
-                error = %format!("{error:#}"),
-                "could not requeue interrupted durable generations"
-            ),
-        }
-        for row in self.list_all() {
-            if row.state == QueueRowState::Held {
-                report.held += 1;
-                continue;
-            }
-            if row.output_dir.is_dir() {
-                continue;
-            }
-            // Absent is not the same as moved. If the configured gallery is
-            // still this row's own directory, the save helpers would simply
-            // create it — so a routine cleanup or a remount must not park work
-            // that would have run perfectly well.
-            if current_output_dir == Some(row.output_dir.as_path()) {
-                match std::fs::create_dir_all(&row.output_dir) {
-                    Ok(()) => {
-                        tracing::info!(
-                            job = %row.id,
-                            dir = %row.output_dir.display(),
-                            "recreated a retained generation's gallery directory"
-                        );
-                        report.recreated += 1;
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            job = %row.id,
-                            dir = %row.output_dir.display(),
-                            %error,
-                            "a retained generation's gallery directory cannot be recreated"
-                        );
-                    }
-                }
-            }
-            match current_output_dir {
-                Some(replacement) if replacement != row.output_dir => {
-                    tracing::warn!(
-                        job = %row.id,
-                        was = %row.output_dir.display(),
-                        now = %replacement.display(),
-                        "a retained generation's gallery directory moved; re-pointing it"
-                    );
-                    let replacement = replacement.to_string_lossy().into_owned();
-                    if let Err(error) =
-                        generation_queue::set_output_dir(db, &row.id, &replacement, now)
-                    {
-                        tracing::warn!(
-                            job = %row.id,
-                            error = %format!("{error:#}"),
-                            "could not re-point a retained generation"
-                        );
-                    } else {
-                        report.repointed += 1;
-                    }
-                }
-                _ => {
-                    let _ = generation_queue::hold(
-                        db,
-                        &row.id,
-                        "the gallery directory this job was admitted for no longer exists",
-                        now,
-                    );
-                    report.held += 1;
-                }
-            }
-        }
-        report
-    }
-
     /// Test seam: force the idempotence gate to fail the way a malformed
     /// `metadata_json` or a transient SQLite error would.
     #[cfg(test)]
     pub(crate) fn fail_completion_lookup_for_tests(&self) {
         self.fail_completion_lookup
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completion_lookup_failure_pending_for_tests(&self) -> bool {
+        self.fail_completion_lookup
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_batch_lookup_after_for_tests(&self, successful_reads: usize) {
+        self.fail_batch_lookup
+            .store(successful_reads + 1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam: make the next feeder claim release fail after the database
@@ -1519,85 +1550,26 @@ impl QueueJournal {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: fail the next claimed hold transaction before it changes
+    /// SQLite, proving the ticket falls back to claim release.
+    #[cfg(test)]
+    pub(crate) fn fail_hold_transition_for_tests(&self) {
+        self.fail_hold_transition
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: fail the next `attempts` exact completion transactions
+    /// before SQLite changes, preserving the claimed ticket for retry.
+    #[cfg(test)]
+    pub(crate) fn fail_completion_transition_for_tests(&self, attempts: usize) {
+        self.fail_completion_transition
+            .store(attempts, std::sync::atomic::Ordering::SeqCst);
+    }
+
     #[cfg(test)]
     pub(crate) fn claim_release_failure_pending_for_tests(&self) -> bool {
         self.fail_claim_release
             .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Drop every row whose output already exists.
-    ///
-    /// A print records the queue job that produced it, so a job that finished
-    /// between its last save and the crash is recognised and never re-run.
-    /// Without this, replay duplicates prints: output filenames are wall-clock,
-    /// so no downstream dedupe can merge the two afterwards.
-    pub fn drop_already_completed(&self) -> Result<usize, String> {
-        let Some(db) = self.db() else {
-            return Ok(0);
-        };
-        #[cfg(test)]
-        if self
-            .fail_completion_lookup
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err("injected completion-lookup failure".to_string());
-        }
-        let candidates: Vec<String> = self
-            .list_all()
-            .into_iter()
-            .filter(|row| row.state != QueueRowState::Held)
-            .map(|row| row.id)
-            .collect();
-        // A failure here is NOT "nothing was completed". Reporting it as an
-        // empty result would let replay re-render every job whose output was
-        // already published, so one malformed `metadata_json` or a transient
-        // SQLite error would defeat the idempotence guarantee outright.
-        let completed = generation_queue::find_completed_job_ids(db, &candidates)
-            .map_err(|error| format!("{error:#}"))?;
-        for id in &completed {
-            tracing::info!(job = %id, "a retained generation already produced its print");
-            self.discard_id(id);
-        }
-        Ok(completed.len())
-    }
-
-    /// Rows to replay, oldest first, after reconcile and the idempotence gate.
-    pub fn replayable(&self) -> Vec<GenerationQueueRow> {
-        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
-            return Vec::new();
-        };
-        generation_queue::list_replayable(db, owner).unwrap_or_else(|error| {
-            tracing::warn!(
-                error = %format!("{error:#}"),
-                "could not read the durable generation queue"
-            );
-            Vec::new()
-        })
-    }
-
-    /// Charge this boot against a row. `Err` carries the reason it was held.
-    pub fn charge_replay(&self, id: &str) -> Result<(), String> {
-        let Some(db) = self.db() else {
-            return Ok(());
-        };
-        let now = now_ms();
-        match generation_queue::bump_replay_seen(db, id, now) {
-            Ok(Some(seen)) if seen > self.max_replay_seen => {
-                let cap = self.max_replay_seen;
-                let reason = format!("replayed by {seen} boots without ever running (limit {cap})");
-                let _ = generation_queue::hold(db, id, &reason, now);
-                Err(reason)
-            }
-            Ok(_) => Ok(()),
-            Err(error) => {
-                tracing::warn!(
-                    job = %id,
-                    error = %format!("{error:#}"),
-                    "could not charge a replay against a durable queue row"
-                );
-                Ok(())
-            }
-        }
     }
 
     /// Mirror an authoritative queue mutation into the durable row.
@@ -1654,18 +1626,20 @@ impl QueueJournal {
         Ok(generation_queue::get(db, id)?.is_some_and(|row| row.owner_uuid == owner))
     }
 
-    /// Park a row by id, for a caller that has no ticket.
-    pub fn hold_id(&self, id: &str, reason: &str) {
-        let Some(db) = self.db() else {
-            return;
+    /// Project ONE owned durable row exactly as the paged listing projects it.
+    ///
+    /// The payload-carrying `GenerationQueueRow` has no `retryable` column and
+    /// no batch identity, so a single-job read that derived either from it
+    /// could only guess. This is the same query the page runs, narrowed to one
+    /// id, so the two can never disagree.
+    pub fn row_projection(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<generation_queue::GenerationQueueProjection>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
         };
-        if let Err(error) = generation_queue::hold(db, id, reason, now_ms()) {
-            tracing::warn!(
-                job = %id,
-                error = %format!("{error:#}"),
-                "could not hold a durable queue row"
-            );
-        }
+        generation_queue::projection_for(db, owner, id)
     }
 
     /// Rows this server owns, oldest first. Backs the `held` listing.
@@ -1680,6 +1654,43 @@ impl QueueJournal {
             );
             Vec::new()
         })
+    }
+
+    /// Return one explicitly retryable held row to the feeder backlog.
+    pub fn retry_held(
+        &self,
+        serving_instance_id: &str,
+        authority: &mold_core::GenerationRetryRequest,
+    ) -> anyhow::Result<generation_batches::OwnedRetry> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_batches::OwnedRetry::NotOwned);
+        };
+        let outcome = generation_batches::retry_held_owned(
+            db,
+            owner,
+            serving_instance_id,
+            authority,
+            now_ms(),
+        )?;
+        if outcome == generation_batches::OwnedRetry::Retried {
+            self.publish_state_committed(&authority.job_id);
+            self.wake_feeder();
+        }
+        Ok(outcome)
+    }
+
+    /// Read ONE durable row in full, payload included.
+    ///
+    /// The queue projection is deliberately payload-free — its SQL never
+    /// selects `request_json`, because a listing must not read a request body
+    /// per row. A caller asking about ONE job is the opposite case: it wants
+    /// exactly that body, to answer what settings the job carries. Synchronous
+    /// for the same reason as [`Self::projection_page`].
+    pub fn row(&self, id: &str) -> anyhow::Result<Option<GenerationQueueRow>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        Ok(generation_queue::get(db, id)?.filter(|row| row.owner_uuid == owner))
     }
 
     /// Read one payload-free durable page. This method is synchronous because
@@ -1816,209 +1827,46 @@ impl QueueJournal {
     }
 }
 
-/// What `startup_reconcile` did, for one startup log line.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ReconcileReport {
-    pub requeued: usize,
-    pub repointed: usize,
-    /// Galleries that were simply absent and could be made again.
-    pub recreated: usize,
-    pub held: usize,
+/// RAII scope for feeder work that has durable authority but has not reached
+/// the runtime registry. Dropping it cannot remove a newer attempt's token.
+pub(crate) struct PreparationCancellation {
+    journal: Arc<QueueJournal>,
+    id: String,
+    token: Arc<tokio_util::sync::CancellationToken>,
 }
 
-/// What one boot's replay admitted, for one startup log line.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ReplayReport {
-    pub resumed: usize,
-    pub already_completed: usize,
-    pub held: usize,
-    /// Rows left untouched because the idempotence gate could not be checked.
-    /// They keep their full replay budget for the next boot.
-    pub skipped_unverified: usize,
+impl PreparationCancellation {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        self.token.cancelled().await;
+    }
 }
 
-/// Resubmit every retained generation through the ordinary admission path.
-///
-/// **Sequential on purpose.** `submit_when_available` serializes on one global
-/// `capacity_waiter` mutex, so parallel replay tasks would arrive in arbitrary
-/// order and destroy the ordering the journal exists to preserve. A journal
-/// deeper than `queue_capacity` therefore blocks here in order rather than
-/// racing, which is why this runs before the router starts serving.
-///
-/// Replay reuses the original job id, which also emits `ServerEvent::JobQueued`
-/// for free, so `/api/events` subscribers see resumed jobs with no new event
-/// type. Everything downstream — validation, admission, frozen plans,
-/// placement, auto-pull — applies unchanged: a model uninstalled between boots
-/// is blocked as `model_not_installed`, not silently rerouted.
-pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) -> ReplayReport {
-    let journal = state.queue_journal.clone();
-    let mut report = ReplayReport::default();
-    if !journal.is_enabled() {
-        return report;
-    }
-    // A maintenance boot has no dispatch owner, so there is nothing to replay
-    // INTO — `run_server` has already dropped the queue receiver. Attempting
-    // it anyway would fail every send, and a failed send used to drop the
-    // ticket with this boot's fence still down, deleting the whole queue on a
-    // routine `MOLD_GPUS=none` restart. Skipped before anything is charged, so
-    // the rows keep their full replay budget for a boot that can run them.
-    if !dispatch_available {
-        let retained = journal.replayable().len();
-        if retained > 0 {
-            tracing::info!(
-                retained,
-                "generation is unavailable on this boot; retained jobs stay queued for the next one"
-            );
-        }
-        return report;
-    }
-
-    let current_output_dir = {
-        let config = state.config.read().await;
-        if state.is_output_disabled(&config) {
-            None
-        } else {
-            Some(config.effective_output_dir())
-        }
-    };
-    let reconcile = journal.startup_reconcile(current_output_dir.as_deref());
-    report.held += reconcile.held;
-    match journal.drop_already_completed() {
-        Ok(dropped) => report.already_completed = dropped,
-        Err(error) => {
-            // Skip the whole boot's replay rather than replay blind. The rows
-            // are untouched and unspent, so the next boot tries again; running
-            // them now could duplicate prints that already exist, and a
-            // duplicate is unmergeable because output filenames are wall-clock.
-            tracing::error!(
-                %error,
-                "could not check the durable queue against saved prints; \
-                 skipping replay this boot so nothing is rendered twice"
-            );
-            report.skipped_unverified = journal.replayable().len();
-            return report;
-        }
-    }
-
-    let cancellation = tokio_util::sync::CancellationToken::new();
-    for row in journal.replayable() {
-        if let Err(reason) = journal.charge_replay(&row.id) {
-            tracing::warn!(job = %row.id, %reason, "holding a durable queue row");
-            report.held += 1;
-            continue;
-        }
-        let mut request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json)
+impl Drop for PreparationCancellation {
+    fn drop(&mut self) {
+        let mut preparing = self
+            .journal
+            .preparing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if preparing
+            .get(&self.id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.token))
         {
-            Ok(request) => request,
-            Err(error) => {
-                // Fail closed: a request this build cannot read must not be
-                // guessed at, and must not be silently discarded either.
-                tracing::warn!(
-                    job = %row.id,
-                    %error,
-                    "holding a durable queue row whose request this build cannot read"
-                );
-                journal.hold_id(&row.id, "the recorded request could not be deserialized");
-                report.held += 1;
-                continue;
-            }
-        };
-
-        let target_gpu = resolve_replay_affinity(
-            &mut request,
-            row.target_gpu,
-            row.target_device_id.as_deref(),
-            |device_id| resolve_pinned_ordinal(state, device_id),
-        );
-        if row.target_gpu.is_some() && target_gpu.is_none() {
-            tracing::warn!(
-                job = %row.id,
-                device = ?row.target_device_id,
-                "durable GPU identity is absent or unavailable; resuming on Auto"
-            );
-        }
-        let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
-            &request,
-            request.seed.unwrap_or(0),
-            request.scheduler,
-            mold_core::build_info::version_string(),
-        ));
-        let cancel = state.job_registry.register_job(
-            &row.id,
-            &row.model,
-            target_gpu,
-            Some(row.seed_pinned),
-            Some(metadata),
-        );
-        // The supervisor is what keeps `result_tx` open for a job with no
-        // client at all — without it every `is_closed()` gate would skip a
-        // replayed job on sight.
-        let crate::job_supervisor::SupervisedJob {
-            result_tx,
-            outcome_rx,
-        } = crate::job_supervisor::supervise_job(row.id.clone(), cancel);
-        let replayed_id = row.id.clone();
-        tokio::spawn(async move {
-            match outcome_rx.await {
-                Ok(crate::job_supervisor::SupervisedOutcome::Finished(outcome)) => match *outcome {
-                    Ok(_) => tracing::info!(job = %replayed_id, "resumed generation finished"),
-                    Err(error) => {
-                        tracing::warn!(job = %replayed_id, %error, "resumed generation failed")
-                    }
-                },
-                Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
-                    tracing::info!(job = %replayed_id, "resumed generation cancelled")
-                }
-                Err(_) => {}
-            }
-        });
-
-        let job = crate::state::GenerationJob {
-            id: row.id.clone(),
-            request,
-            deferred_media: None,
-            resolved_references: None,
-            completion_payload: completion_payload_from_str(&row.completion_payload),
-            // No client to stream to. The output still lands in the gallery,
-            // which is the whole reason the row was durable.
-            progress_tx: None,
-            result_tx,
-            output_dir: Some(row.output_dir.clone()),
-            batch_child: None,
-            journal: Some(journal.attach(&row.id)),
-            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-            h3_private_ingress_grant: None,
-        };
-
-        let mut pending = Some(job);
-        match state
-            .queue
-            .submit_when_available(&mut pending, state.queue_capacity, &cancellation)
-            .await
-        {
-            Ok(_) => report.resumed += 1,
-            Err(error) => {
-                tracing::warn!(
-                    job = %row.id,
-                    ?error,
-                    "could not resubmit a retained generation; it stays in the journal"
-                );
-                // Settle the ticket explicitly. Dropping it would delete a row
-                // for work that never reached a worker — the opposite of what
-                // the log line above promises.
-                if let Some(ticket) = pending.take().and_then(|job| job.journal) {
-                    ticket.retain();
-                }
-                state.job_registry.remove(&row.id);
-            }
+            preparing.remove(&self.id);
         }
     }
-    report
 }
 
 /// Map a stable device id to this boot's ordinal, or `None` when the device is
-/// no longer present.
-fn resolve_pinned_ordinal(state: &crate::state::AppState, device_id: &str) -> Option<usize> {
+/// no longer present. The feeder's resolver for `resolve_replay_affinity`.
+pub(crate) fn resolve_pinned_ordinal(
+    state: &crate::state::AppState,
+    device_id: &str,
+) -> Option<usize> {
     state
         .gpu_pool
         .workers
@@ -2138,6 +1986,9 @@ pub enum DispatchClaim {
     Untracked,
     /// A feeder token no longer owns the row. The stale runtime must not run.
     Fenced,
+    /// Cancellation won while an exhausted attempt was being parked. The
+    /// runtime must report cancellation, not manufacture a stale-claim error.
+    Cancelled,
 }
 
 /// Result of returning one token-owned row to the feeder backlog.
@@ -2148,6 +1999,9 @@ pub enum DispatchClaim {
 #[derive(Debug)]
 pub enum RetainOutcome {
     Released,
+    /// Durable cancellation won the exact transition race. Observer delivery
+    /// must report cancellation rather than the requested success or failure.
+    Cancelled,
     Stale,
     Retry {
         ticket: QueueTicket,
@@ -2172,6 +2026,10 @@ pub struct QueueTicket {
 impl QueueTicket {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub(crate) fn retention_requested(&self) -> bool {
+        self.journal.is_retaining()
     }
 
     /// The job produced its output. Delete the row unconditionally — a
@@ -2199,6 +2057,81 @@ impl QueueTicket {
         self.journal
             .set_batch_child_state(&self.id, "complete", None);
         self.journal.discard_id(&self.id);
+    }
+
+    /// Persist completion while preserving the exact token-owned ticket when
+    /// SQLite cannot commit. Observer-bearing execution paths retry this
+    /// operation before reporting success; a returned retry ticket has inert
+    /// drop semantics and is therefore safe to retain for restart.
+    pub(crate) fn complete_exact_with_result(mut self, result_json: Option<&str>) -> RetainOutcome {
+        let Some(token) = self.claim_token.as_deref() else {
+            self.complete_with_result(result_json);
+            return RetainOutcome::Released;
+        };
+        #[cfg(test)]
+        if self
+            .journal
+            .fail_completion_transition
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            self.settled = true;
+            return RetainOutcome::Retry {
+                ticket: self,
+                error: anyhow::anyhow!("injected completion transition failure"),
+            };
+        }
+        let terminal = mold_db::generation_batches::GenerationBatchTerminal {
+            state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+            error: None,
+            terminal_error_json: None,
+            result_json,
+            completed_at_ms: now_ms(),
+        };
+        let Some(db) = self.journal.db() else {
+            self.settled = true;
+            return RetainOutcome::Retry {
+                ticket: self,
+                error: anyhow::anyhow!("durable generation database is unavailable"),
+            };
+        };
+        let candidate = self.journal.media_candidate(&self.id);
+        match generation_batches::finish_claimed(
+            db,
+            &self.id,
+            token,
+            QueueRowState::Running,
+            terminal,
+        ) {
+            Ok(commit) if commit.queue_deleted => {
+                self.journal.cleanup_media_candidate(candidate);
+                if commit.batch_child_updated {
+                    self.journal.publish_state_committed(&self.id);
+                }
+                self.settled = true;
+                if commit.cancelled {
+                    RetainOutcome::Cancelled
+                } else {
+                    RetainOutcome::Released
+                }
+            }
+            Ok(commit) => {
+                if commit.batch_child_updated {
+                    self.journal.publish_state_committed(&self.id);
+                }
+                self.settled = true;
+                RetainOutcome::Stale
+            }
+            Err(error) => {
+                self.settled = true;
+                RetainOutcome::Retry {
+                    ticket: self,
+                    error,
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -2352,10 +2285,10 @@ impl QueueTicket {
                 let cap = self.journal.max_dispatch_attempts;
                 let reason =
                     format!("dispatch attempts exhausted ({attempts} > {cap}); held for review");
-                match self.hold_owned(&reason, now) {
+                match self.hold_owned(&reason, None, false, now) {
                     Ok(generation_batches::OwnedHold::Held) => {}
                     Ok(generation_batches::OwnedHold::Cancelled) => {
-                        return DispatchClaim::Fenced;
+                        return DispatchClaim::Cancelled;
                     }
                     Ok(generation_batches::OwnedHold::Fenced) => {
                         return if self.claim_token.is_some() {
@@ -2395,18 +2328,143 @@ impl QueueTicket {
     }
 
     /// Park the row: listed, never auto-run, and no longer owned by a ticket.
-    pub fn hold(mut self, reason: &str) {
-        self.settled = true;
-        if let Err(error) = self.hold_owned(reason, now_ms()) {
-            tracing::warn!(
-                job = %self.id,
-                error = %format!("{error:#}"),
-                "could not hold a durable queue row"
-            );
+    pub fn hold(mut self, reason: &str) -> RetainOutcome {
+        match self.hold_owned(reason, None, false, now_ms()) {
+            Ok(generation_batches::OwnedHold::Held) => {
+                self.settled = true;
+                RetainOutcome::Released
+            }
+            Ok(generation_batches::OwnedHold::Cancelled) => {
+                self.settled = true;
+                RetainOutcome::Cancelled
+            }
+            Ok(generation_batches::OwnedHold::Fenced) => {
+                self.settled = true;
+                RetainOutcome::Stale
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job = %self.id,
+                    error = %format!("{error:#}"),
+                    "could not hold a durable queue row; returning it to the replay backlog"
+                );
+                self.retain()
+            }
         }
     }
 
-    fn hold_owned(&self, reason: &str, now: i64) -> anyhow::Result<generation_batches::OwnedHold> {
+    /// Park a deferred-preparation failure with its typed cause. The code is
+    /// what a client acts on (a `MODEL_NOT_FOUND` hold gets the pull offer);
+    /// the sentence is what it shows. `retryable` decides whether the retry
+    /// route may return the row to the queue.
+    pub fn hold_with_code(
+        mut self,
+        reason: &str,
+        code: Option<&str>,
+        retryable: bool,
+    ) -> RetainOutcome {
+        match self.hold_owned(reason, code, retryable, now_ms()) {
+            Ok(generation_batches::OwnedHold::Held) => {
+                self.settled = true;
+                RetainOutcome::Released
+            }
+            Ok(generation_batches::OwnedHold::Cancelled) => {
+                self.settled = true;
+                RetainOutcome::Cancelled
+            }
+            Ok(generation_batches::OwnedHold::Fenced) => {
+                self.settled = true;
+                RetainOutcome::Stale
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job = %self.id,
+                    error = %format!("{error:#}"),
+                    "could not hold a durable queue row; returning it to the replay backlog"
+                );
+                self.retain()
+            }
+        }
+    }
+
+    /// Park a deferred-preparation failure without discarding its durable
+    /// request or media. Only these explicitly recoverable holds may be
+    /// returned to the queue through the retry API.
+    pub fn hold_retryable(mut self, reason: &str) -> RetainOutcome {
+        match self.hold_owned(reason, None, true, now_ms()) {
+            Ok(generation_batches::OwnedHold::Held) => {
+                self.settled = true;
+                RetainOutcome::Released
+            }
+            Ok(generation_batches::OwnedHold::Cancelled) => {
+                self.settled = true;
+                RetainOutcome::Cancelled
+            }
+            Ok(generation_batches::OwnedHold::Fenced) => {
+                self.settled = true;
+                RetainOutcome::Stale
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job = %self.id,
+                    error = %format!("{error:#}"),
+                    "could not hold a retryable durable queue row; returning it to the replay backlog"
+                );
+                self.retain()
+            }
+        }
+    }
+
+    /// Attempt the exact requested hold without silently converting a failed
+    /// persistence transition into a queued replay. Execution observers use
+    /// this seam so they cannot be told a job failed while its row still says
+    /// `running`. A retry ticket keeps the exact claim token and has inert
+    /// drop semantics until the caller retries this same transition.
+    pub(crate) fn hold_exact(mut self, reason: &str, retryable: bool) -> RetainOutcome {
+        match self.hold_owned(reason, None, retryable, now_ms()) {
+            Ok(generation_batches::OwnedHold::Held) => {
+                self.settled = true;
+                RetainOutcome::Released
+            }
+            Ok(generation_batches::OwnedHold::Cancelled) => {
+                self.settled = true;
+                RetainOutcome::Cancelled
+            }
+            Ok(generation_batches::OwnedHold::Fenced) => {
+                self.settled = true;
+                RetainOutcome::Stale
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job = %self.id,
+                    error = %format!("{error:#}"),
+                    retryable,
+                    "could not persist the requested durable hold"
+                );
+                self.settled = true;
+                RetainOutcome::Retry {
+                    ticket: self,
+                    error,
+                }
+            }
+        }
+    }
+
+    fn hold_owned(
+        &self,
+        reason: &str,
+        code: Option<&str>,
+        retryable: bool,
+        now: i64,
+    ) -> anyhow::Result<generation_batches::OwnedHold> {
+        #[cfg(test)]
+        if self
+            .journal
+            .fail_hold_transition
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(anyhow::anyhow!("injected hold transition failure"));
+        }
         let (Some(db), Some(owner)) = (self.journal.db(), self.journal.owner_uuid.as_deref())
         else {
             return Ok(generation_batches::OwnedHold::Fenced);
@@ -2418,6 +2476,8 @@ impl QueueTicket {
             &self.id,
             self.claim_token.as_deref(),
             reason,
+            code,
+            retryable,
             now,
         )?;
         if outcome == generation_batches::OwnedHold::Cancelled {
@@ -2538,12 +2598,17 @@ mod tests {
             events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_batch_lookup: AtomicUsize::new(0),
             fail_claim_release: AtomicBool::new(false),
+            fail_hold_transition: AtomicBool::new(false),
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -2579,7 +2644,6 @@ mod tests {
             target_device_id: None,
             completion_payload: SseCompletionPayload::Full,
             batch_child: false,
-            carries_reference_authority: false,
         }
     }
 
@@ -2601,6 +2665,7 @@ mod tests {
                 model: "flux-dev:q4".to_string(),
                 request_json: "{}".to_string(),
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: std::path::PathBuf::from("/gallery"),
                 target_gpu: None,
                 target_device_id: None,
@@ -2792,7 +2857,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .expect("an ordinary gallery-bound generation is durable");
         assert_eq!(rows(&journal), vec!["job-1"]);
 
@@ -2805,7 +2870,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("live-direct", &request, Path::new("/gallery")))
+            .record_for_test(admission("live-direct", &request, Path::new("/gallery")))
             .expect("an ordinary gallery-bound generation is durable");
 
         assert!(
@@ -2834,7 +2899,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
         journal.retain_all();
@@ -2848,7 +2913,7 @@ mod tests {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
         journal.retain_all();
@@ -2922,7 +2987,10 @@ mod tests {
         let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
 
         assert!(journal.cancel_id("racing-hold-child").unwrap());
-        ticket.hold("server gallery output is disabled");
+        assert!(matches!(
+            ticket.hold("server gallery output is disabled"),
+            RetainOutcome::Cancelled
+        ));
 
         assert!(journal.list_all().is_empty());
         let child = &journal
@@ -2933,11 +3001,121 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_cannot_be_erased_by_a_late_retryable_feeder_hold() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "racing-retryable-hold-batch",
+                client_batch_id: "racing-retryable-hold-client",
+                request_sha256: "racing-retryable-hold-sha",
+                children: &[admission(
+                    "racing-retryable-hold-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+
+        assert!(journal.cancel_id("racing-retryable-hold-child").unwrap());
+        assert!(matches!(
+            ticket.hold_retryable("dependency unavailable"),
+            RetainOutcome::Cancelled
+        ));
+
+        assert!(journal.list_all().is_empty());
+        let child = &journal
+            .generation_batch("racing-retryable-hold-batch")
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+    }
+
+    #[test]
+    fn exact_failure_settlement_reports_when_cancellation_won() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "exact-cancel-batch",
+                client_batch_id: "exact-cancel-client",
+                request_sha256: "exact-cancel-sha",
+                children: &[admission(
+                    "exact-cancel-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+
+        assert!(journal.cancel_id("exact-cancel-child").unwrap());
+        let mut ticket = Some(ticket);
+        let outcome = crate::durable_generation_settlement::settle_blocking(
+            &mut ticket,
+            crate::durable_disposition::DurableDisposition::Hold { retryable: true },
+            "inference failed",
+        );
+
+        assert_eq!(
+            outcome,
+            crate::durable_generation_settlement::SettlementOutcome::Cancelled
+        );
+        assert!(journal.list_all().is_empty());
+        let child = &journal
+            .generation_batch("exact-cancel-batch")
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+        assert_eq!(child.error.as_deref(), Some("Cancelled"));
+    }
+
+    #[test]
+    fn failed_hold_transition_returns_the_exact_claim_to_replay() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "failed-hold-batch",
+                client_batch_id: "failed-hold-client",
+                request_sha256: "failed-hold-sha",
+                children: &[admission(
+                    "failed-hold-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        journal.fail_hold_transition_for_tests();
+
+        assert!(matches!(
+            ticket.hold_retryable("temporary preparation failure"),
+            RetainOutcome::Released
+        ));
+
+        let replay = journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("a failed hold must not strand or delete accepted work");
+        assert_eq!(replay.row.id, "failed-hold-child");
+        assert_eq!(replay.row.state, QueueRowState::Queued);
+        journal
+            .attach_claimed(&replay.row.id, replay.claim_token)
+            .discard();
+    }
+
+    #[test]
     fn completion_removes_the_row_even_behind_the_fence() {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
         journal.retain_all();
@@ -3022,31 +3200,10 @@ mod tests {
             .durable_generation_batch("bulk-event-batch")
             .unwrap()
             .unwrap();
-        assert_eq!(detail.children[0].state, "cancelling");
+        assert_eq!(detail.children[0].state, "cancelled");
         assert_eq!(detail.children[1].state, "cancelled");
 
         ticket.discard();
-    }
-
-    #[test]
-    fn record_refuses_everything_that_must_not_be_journaled() {
-        let journal = journal_with_db();
-        let request = request();
-
-        let mut no_output = admission("no-output", &request, Path::new("/gallery"));
-        no_output.output_dir = None;
-        assert!(journal.record(no_output).is_none());
-
-        let mut child = admission("batch-child", &request, Path::new("/gallery"));
-        child.batch_child = true;
-        assert!(journal.record(child).is_none());
-
-        let mut referenced = admission("with-references", &request, Path::new("/gallery"));
-        referenced.carries_reference_authority = true;
-        assert!(journal.record(referenced).is_none());
-
-        assert!(rows(&journal).is_empty());
-        assert!(QueueJournal::disabled().is_enabled().eq(&false));
     }
 
     #[test]
@@ -3055,7 +3212,7 @@ mod tests {
         let request = request_for_model(mold_core::minimax_h3::FL2VA_COMFY);
 
         assert!(journal
-            .record(admission("private-fl2va", &request, Path::new("/gallery")))
+            .record_for_test(admission("private-fl2va", &request, Path::new("/gallery")))
             .is_none());
         assert!(rows(&journal).is_empty());
     }
@@ -3109,7 +3266,7 @@ mod tests {
         );
 
         let ticket = journal
-            .record(admission("public-non-h3", &request, Path::new("/gallery")))
+            .record_for_test(admission("public-non-h3", &request, Path::new("/gallery")))
             .expect("ordinary public generation remains durable");
         assert_eq!(rows(&journal), vec!["public-non-h3"]);
         ticket.discard();
@@ -3129,19 +3286,24 @@ mod tests {
             events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_batch_lookup: AtomicUsize::new(0),
             fail_claim_release: AtomicBool::new(false),
+            fail_hold_transition: AtomicBool::new(false),
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: 64,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         });
         let mut request = request();
         request.prompt = "x".repeat(4096);
 
         assert!(journal
-            .record(admission("huge", &request, Path::new("/gallery")))
+            .record_for_test(admission("huge", &request, Path::new("/gallery")))
             .is_none());
         assert!(rows(&journal).is_empty());
     }
@@ -3160,17 +3322,22 @@ mod tests {
             events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_batch_lookup: AtomicUsize::new(0),
             fail_claim_release: AtomicBool::new(false),
+            fail_hold_transition: AtomicBool::new(false),
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: 2,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         });
         let request = request();
         let first = journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
         assert_eq!(first.claim_dispatch(), DispatchClaim::Granted);
@@ -3200,11 +3367,49 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_wins_when_an_exhausted_dispatch_is_being_parked() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "dispatch-cancel-batch",
+                client_batch_id: "dispatch-cancel-client",
+                request_sha256: "dispatch-cancel-sha",
+                children: &[admission(
+                    "dispatch-cancel-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+
+        for _ in 0..journal.max_dispatch_attempts() {
+            let claim = journal.claim_next_feeder().unwrap().unwrap();
+            let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+            assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+            assert!(matches!(ticket.retain(), RetainOutcome::Released));
+        }
+
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert!(journal.cancel_id("dispatch-cancel-child").unwrap());
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Fenced);
+
+        assert!(journal.list_all().is_empty());
+        let child = &journal
+            .generation_batch("dispatch-cancel-batch")
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+        assert_eq!(child.error.as_deref(), Some("Cancelled"));
+    }
+
+    #[test]
     fn transient_retain_failure_returns_the_same_token_for_an_in_process_retry() {
         let journal = journal_with_db();
         let request = request();
         let ticket = journal
-            .record(admission("retry-release", &request, Path::new("/gallery")))
+            .record_for_test(admission("retry-release", &request, Path::new("/gallery")))
             .unwrap();
         journal
             .fail_claim_release
@@ -3237,7 +3442,7 @@ mod tests {
         for id in ["a", "b", "c"] {
             tickets.push(
                 journal
-                    .record(admission(id, &request, Path::new("/gallery")))
+                    .record_for_test(admission(id, &request, Path::new("/gallery")))
                     .unwrap(),
             );
         }
@@ -3292,9 +3497,8 @@ mod tests {
             target_device_id: Some("cuda:stable-direct"),
             completion_payload: SseCompletionPayload::Full,
             batch_child: false,
-            carries_reference_authority: false,
         };
-        let direct_ticket = journal.record(direct).expect("direct durable row");
+        let direct_ticket = journal.record_for_test(direct).expect("direct durable row");
 
         let batch_child = JournalAdmission {
             id: "batch-stable",
@@ -3304,7 +3508,6 @@ mod tests {
             target_device_id: Some("cuda:stable-batch"),
             completion_payload: SseCompletionPayload::MetadataOnly,
             batch_child: false,
-            carries_reference_authority: false,
         };
         let (_, inserted) = journal
             .record_batch(BatchJournalAdmission {
@@ -3497,7 +3700,7 @@ mod tests {
         .expect("filed generate request");
 
         let ticket = journal
-            .record(admission("job-filed", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-filed", &request, Path::new("/gallery")))
             .expect("the row is durable");
 
         let rows = journal.list_all();
@@ -3525,41 +3728,12 @@ mod tests {
         let journal = Arc::new(QueueJournal::disabled());
         let request = request();
         assert!(journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .is_none());
         assert_eq!(
             journal.attach("job-1").claim_dispatch(),
             DispatchClaim::Untracked
         );
-    }
-
-    /// Reference-upload handles are bearer secrets. The rule is that they are
-    /// excluded at admission, not redacted, so nothing resembling one can ever
-    /// reach `mold.db`.
-    #[test]
-    fn a_reference_bearing_request_leaves_no_trace_in_the_database() {
-        let journal = journal_with_db();
-        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
-            "prompt": "a cat",
-            "model": "minimax-h3-ref2va",
-            "width": 512,
-            "height": 512,
-            "steps": 4,
-            "guidance": 3.5,
-            "references": [{
-                "kind": "image",
-                "media": { "authority": "upload", "handle": "super-secret-handle" },
-                "mime_type": "image/png",
-                "width": 512,
-                "height": 512,
-            }],
-        }))
-        .expect("reference-bearing generate request");
-
-        let mut carrying = admission("job-1", &request, Path::new("/gallery"));
-        carrying.carries_reference_authority = true;
-        assert!(journal.record(carrying).is_none());
-        assert!(rows(&journal).is_empty());
     }
 
     /// A reference photograph is biometric data about a real person, handed
@@ -3577,7 +3751,7 @@ mod tests {
         request.id_weight = Some(1.0);
 
         assert!(journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .is_none());
         assert!(rows(&journal).is_empty());
 
@@ -3586,7 +3760,7 @@ mod tests {
         let mut without_photo = request.clone();
         without_photo.id_image = None;
         let ticket = journal
-            .record(admission("job-2", &without_photo, Path::new("/gallery")))
+            .record_for_test(admission("job-2", &without_photo, Path::new("/gallery")))
             .expect("a request carrying no photograph is ordinary durable work");
         let persisted = journal.list_all();
         assert_eq!(persisted.len(), 1);
@@ -3613,7 +3787,7 @@ mod tests {
         request.id_image_names = Some(vec!["one.png".to_string(), "two.png".to_string()]);
 
         assert!(journal
-            .record(admission("job-1", &request, Path::new("/gallery")))
+            .record_for_test(admission("job-1", &request, Path::new("/gallery")))
             .is_none());
         assert!(rows(&journal).is_empty());
     }

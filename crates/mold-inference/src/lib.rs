@@ -73,12 +73,12 @@ pub use minimax_h3::private_server::{
     authenticate_h3_private_presentation, authenticate_h3_private_runtime_qualification,
     prepare_h3_private_fl2va_admission, prepare_h3_private_fl2va_attempt,
     reviewed_h3_private_runtime_available, reviewed_h3_private_runtime_available_for_task,
-    H3PrivateAllocationCommit, H3PrivateFl2VaAdmissionEvidence, H3PrivateFl2VaAdmissionInput,
-    H3PrivateFl2VaAttemptFacts, H3PrivateFl2VaMediaContract, H3PrivateFl2VaOwnerFenceFacts,
-    H3PrivateFl2VaPrepareError, H3PrivateFl2VaPrepareInput, H3PrivateFl2VaPreparedAttempt,
-    H3PrivateFl2VaRunContext, H3PrivateFl2VaRunOutput, H3PrivateFl2VaRuntimeBounds,
-    H3PrivateFl2VaTerminalIdentityEcho, H3PrivateFl2VaUatPaths, H3PrivateHostHeadroomShortfall,
-    H3PrivatePresentationAuthority, H3PrivatePresentationRoute,
+    H3PrivateAllocationCommit, H3PrivateDeviceHeadroomShortfall, H3PrivateFl2VaAdmissionEvidence,
+    H3PrivateFl2VaAdmissionInput, H3PrivateFl2VaAttemptFacts, H3PrivateFl2VaMediaContract,
+    H3PrivateFl2VaOwnerFenceFacts, H3PrivateFl2VaPrepareError, H3PrivateFl2VaPrepareInput,
+    H3PrivateFl2VaPreparedAttempt, H3PrivateFl2VaRunContext, H3PrivateFl2VaRunOutput,
+    H3PrivateFl2VaRuntimeBounds, H3PrivateFl2VaTerminalIdentityEcho, H3PrivateFl2VaUatPaths,
+    H3PrivateHostHeadroomShortfall, H3PrivatePresentationAuthority, H3PrivatePresentationRoute,
     H3PrivateRuntimeQualificationAuthority, H3PrivateSchedulerLedgerIdentity,
 };
 pub mod model_registry;
@@ -86,6 +86,8 @@ pub(crate) mod nvfp4;
 pub mod progress;
 #[cfg(test)]
 pub(crate) mod pulid_fixtures;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub(crate) mod quantized_dmmv;
 pub mod qwen_image;

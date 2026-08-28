@@ -171,7 +171,22 @@ export interface ChainJobStageDetail {
   error?: string | null;
 }
 
+/** Mirrors `mold_core::chain_job::FinalizeRecord`. */
+export interface ChainJobFinalizeRecord {
+  /** Job-relative MP4 artifact amend/retake decode; never fetchable. */
+  output: string;
+  /** Gallery filename in the requested format; absent without gallery output. */
+  gallery_filename?: string | null;
+  at_unix_ms?: number;
+  take?: number;
+}
+
 export interface ChainJobDetail extends ChainJobSummary {
+  /**
+   * Every finalize record the job has published, oldest first. The last
+   * one names the gallery file a client attaching after settlement fetches.
+   */
+  finalizes?: ChainJobFinalizeRecord[];
   stages: ChainJobStageDetail[];
   /** Effective script with retakes/amends applied — the composer's edit source. */
   script?: ChainScript | null;
@@ -223,7 +238,12 @@ export type ChainJobEvent =
     }
   | { type: "yielded" }
   | { type: "finalizing"; total_frames?: number }
-  | { type: "finalized"; output?: string; take?: number }
+  | {
+      type: "finalized";
+      output?: string;
+      take?: number;
+      gallery_filename?: string | null;
+    }
   | { type: "state_changed"; state: ChainJobState; error?: string | null };
 
 export interface ChainLimits {

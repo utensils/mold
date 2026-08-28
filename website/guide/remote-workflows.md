@@ -117,13 +117,21 @@ an entry like this:
 ```
 
 The MCP server exposes synchronous `generate_image`, timeout-friendly
-`generate_image_async` / `generation_status`, gallery tools
+`generate_image_async` / `generation_status` / `generation_retry`, gallery tools
 `list_gallery` / `get_gallery_image`, `list_models`, `list_loras`, and
 `server_status`. Generation tools accept a `loras` array using ids or paths
 returned by `list_loras`; object entries can omit `scale` to use `1.0`. Use the
 async generation flow for cold model loads or slow generations so LM Studio does
 not need to keep one tool call open until the image is finished. Set
 `MOLD_API_KEY` in the MCP process environment when the mold server requires one.
+
+Poll `generation_status` until the durable child settles. A held child advertises
+whether it is retryable; after correcting the reported cause, call
+`generation_retry` with that MCP job id exactly once, then resume status polling.
+Status polling reconciles the exact durable batch and job authority, including a
+retry whose HTTP response was interrupted. Both a single-job poll and the bounded
+job-list poll advance that reconciliation; do not submit a second retry while its
+outcome is still being confirmed.
 
 ## Remote Pulls vs Local Pulls
 

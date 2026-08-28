@@ -201,6 +201,49 @@ pub fn hydrate_scheduler_from_db(
     Ok(applied)
 }
 
+/// Persist the queue slice (`queue.held_retention_days`) into `settings`.
+/// Mirrors [`save_gallery_to_db`]; the bound is shared with gallery trash
+/// retention because both are "days a durable thing survives".
+pub fn save_queue_to_db(db: &MetadataDb, queue: mold_core::config::QueueSettings) -> Result<()> {
+    anyhow::ensure!(
+        queue.held_retention_days <= mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS,
+        "{} must be between 0 and {}",
+        keys::QUEUE_HELD_RETENTION_DAYS,
+        mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS
+    );
+    Settings::new(db).set_int(
+        keys::QUEUE_HELD_RETENTION_DAYS,
+        i64::from(queue.held_retention_days),
+    )
+}
+
+/// Overlay the stored queue slice onto `queue`. An out-of-range row (a
+/// hand-edited DB) is ignored with a warning rather than poisoning every
+/// config load. Returns true if a row applied.
+pub fn hydrate_queue_from_db(
+    db: &MetadataDb,
+    queue: &mut mold_core::config::QueueSettings,
+) -> Result<bool> {
+    let s = Settings::new(db);
+    let Some(value) = s.get_int(keys::QUEUE_HELD_RETENTION_DAYS)? else {
+        return Ok(false);
+    };
+    match u32::try_from(value) {
+        Ok(days) if days <= mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS => {
+            queue.held_retention_days = days;
+            Ok(true)
+        }
+        _ => {
+            tracing::warn!(
+                "ignoring out-of-range {} = {value} in settings DB (expected 0..={})",
+                keys::QUEUE_HELD_RETENTION_DAYS,
+                mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS
+            );
+            Ok(false)
+        }
+    }
+}
+
 /// Persist the gallery slice (`gallery.trash_retention_days`) into
 /// `settings`. Out-of-range values are rejected here too so a direct caller
 /// cannot store what `mold_core::config_keys::set_value` would refuse.
@@ -354,6 +397,12 @@ pub fn migrate_config_toml_to_db(db: &MetadataDb, cfg: &Config) -> Result<bool> 
     if cfg.generate != GenerateSettings::default() {
         save_generate_settings_to_db(db, cfg.generate)?;
     }
+    // And again for `[queue]`. Without this the migration rewrites
+    // `config.toml` as bootstrap-only and the hand-written retention is
+    // silently reset to the compiled default on the next load.
+    if cfg.queue != mold_core::config::QueueSettings::default() {
+        save_queue_to_db(db, cfg.queue)?;
+    }
 
     // Per-model user prefs. Skip rows that carry nothing but paths — we
     // want a ModelPrefs row only when the user has set at least one
@@ -487,6 +536,7 @@ pub fn hydrate_config_from_db(db: &MetadataDb, cfg: &mut Config) -> Result<()> {
     hydrate_generate_globals_from_db(db, cfg)?;
     hydrate_scheduler_from_db(db, &mut cfg.scheduler)?;
     hydrate_gallery_from_db(db, &mut cfg.gallery)?;
+    hydrate_queue_from_db(db, &mut cfg.queue)?;
     hydrate_generate_settings_from_db(db, &mut cfg.generate)?;
 
     // Pass 1: overlay prefs for each model already in cfg.models. Keyed
@@ -616,6 +666,10 @@ pub fn persist_config_key(db: &MetadataDb, config: &Config, key: &str) -> Result
     }
     if key.starts_with("gallery.") {
         save_gallery_to_db(db, config.gallery)?;
+        return Ok(());
+    }
+    if key.starts_with("queue.") {
+        save_queue_to_db(db, config.queue)?;
         return Ok(());
     }
     // The `[generate]` preference slice is addressed by its own `generate.*`
@@ -957,6 +1011,51 @@ mod tests {
     }
 
     #[test]
+    fn persist_and_reset_route_queue_key_through_settings() {
+        let db = db();
+        let mut cfg = Config::default();
+        mold_core::config_keys::set_value(
+            &mut cfg,
+            mold_core::config_keys::QUEUE_HELD_RETENTION_DAYS_KEY,
+            "7",
+        )
+        .unwrap();
+        persist_config_key(
+            &db,
+            &cfg,
+            mold_core::config_keys::QUEUE_HELD_RETENTION_DAYS_KEY,
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::QUEUE_HELD_RETENTION_DAYS)
+                .unwrap(),
+            Some(7)
+        );
+
+        let mut hydrated = Config::default();
+        hydrate_config_from_db(&db, &mut hydrated).unwrap();
+        assert_eq!(hydrated.queue.held_retention_days, 7);
+        // A queue key must not reach the gallery writer.
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::GALLERY_TRASH_RETENTION_DAYS)
+                .unwrap(),
+            None
+        );
+
+        reset_global_key(
+            &db,
+            keys::DEFAULT_PROFILE,
+            mold_core::config_keys::QUEUE_HELD_RETENTION_DAYS_KEY,
+        )
+        .unwrap();
+        let mut reset = Config::default();
+        hydrate_config_from_db(&db, &mut reset).unwrap();
+        assert_eq!(reset.queue.held_retention_days, 30);
+    }
+
+    #[test]
     fn migration_imports_hand_written_gallery_section_only_when_set() {
         let db = db();
         let cfg = Config::default();
@@ -979,6 +1078,38 @@ mod tests {
                 .unwrap(),
             Some(7)
         );
+    }
+
+    #[test]
+    fn migration_imports_hand_written_queue_section_only_when_set() {
+        // The migration rewrites `config.toml` as bootstrap-only, so a
+        // hand-written `[queue]` section that is not imported here is not
+        // "left in the file" — it is lost, and the next load silently
+        // resets to the compiled default.
+        let db = db();
+        let cfg = Config::default();
+        assert!(migrate_config_toml_to_db(&db, &cfg).unwrap());
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::QUEUE_HELD_RETENTION_DAYS)
+                .unwrap(),
+            None,
+            "default queue settings must not be pinned into the DB"
+        );
+
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut cfg = Config::default();
+        cfg.queue.held_retention_days = 7;
+        assert!(migrate_config_toml_to_db(&db, &cfg).unwrap());
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::QUEUE_HELD_RETENTION_DAYS)
+                .unwrap(),
+            Some(7)
+        );
+        let mut hydrated = Config::default();
+        hydrate_config_from_db(&db, &mut hydrated).unwrap();
+        assert_eq!(hydrated.queue.held_retention_days, 7);
     }
 
     #[test]

@@ -1,19 +1,34 @@
 /**
- * DOM-backed {@link SourceFitCanvasOps} — the real canvas implementation the
- * Tauri webview uses (full HTML canvas support). Kept apart from the policy
- * logic in `sourceFitPreprocess.ts` so tests can inject a fake and stay off
- * happy-dom's stub canvas.
+ * DOM-backed {@link SourceFitCanvasOps} — the one real canvas implementation
+ * every browser surface (web SPA, Tauri desktop, iPhone webview) uses for
+ * source fitting and reference cropping. Kept apart from the policy logic so
+ * tests can inject a fake and stay off happy-dom's stub canvas.
  */
-import type { Rect, Size, SourceFitTransform } from "@studio/lib/sourceFit";
-import type { SourceFitCanvasOps } from "./sourceFitPreprocess";
-import { base64ToDataUrl } from "./image";
+import type { Rect, Size, SourceFitTransform } from "./sourceFit";
+
+/** Canvas operations the preprocessors need — injectable for tests. */
+export interface SourceFitCanvasOps {
+  /** Decode a base64 image (no data-URI prefix) and report its pixel size. */
+  imageSize(base64: string): Promise<Size>;
+  /** Draw the image through `transform` onto a black target-sized canvas → base64 PNG. */
+  fitImage(base64: string, transform: SourceFitTransform): Promise<string>;
+  /**
+   * Build the fitted mask: black canvas, the existing mask (if any) drawn
+   * through `transform`, then `padRects` filled white (repaint). → base64 PNG.
+   */
+  buildMask(
+    existingMask: string | null,
+    transform: SourceFitTransform,
+    padRects: Rect[],
+  ): Promise<string>;
+}
 
 function loadImage(base64: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error("failed to decode the source image"));
-    img.src = base64ToDataUrl(base64);
+    img.src = `data:image/png;base64,${base64}`;
   });
 }
 
@@ -44,7 +59,10 @@ export const domCanvasOps: SourceFitCanvasOps = {
     return { width: img.naturalWidth, height: img.naturalHeight };
   },
 
-  async fitImage(base64: string, transform: SourceFitTransform): Promise<string> {
+  async fitImage(
+    base64: string,
+    transform: SourceFitTransform,
+  ): Promise<string> {
     const img = await loadImage(base64);
     const { canvas, ctx } = makeCanvas(transform);
     ctx.drawImage(

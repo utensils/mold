@@ -37,12 +37,18 @@ describe("generation settings selection", () => {
     expect(metadata.seed).toBe(42);
   });
 
-  it("publishes selected-job previews and stops polling", async () => {
+  it("publishes selected-job progress and stops polling", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(
       async () =>
         new Response(
-          JSON.stringify({ image: "UFJFVklFVw==", step: 4, total: 20 }),
+          JSON.stringify({
+            preview_image: "UFJFVklFVw==",
+            step: 4,
+            total: 20,
+            stage: "Denoising",
+            updated_at_ms: 1,
+          }),
           {
             status: 200,
             headers: { "content-type": "application/json" },
@@ -63,14 +69,75 @@ describe("generation settings selection", () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(onPreview).toHaveBeenCalledWith({
-      image: "UFJFVklFVw==",
+      preview_image: "UFJFVklFVw==",
       step: 4,
       total: 20,
+      stage: "Denoising",
+      queue_position: null,
     });
     stop();
     const calls = fetchMock.mock.calls.length;
     await vi.advanceTimersByTimeAsync(1_000);
     expect(fetchMock).toHaveBeenCalledTimes(calls);
+  });
+
+  it("publishes a step counter from a host rendering without previews", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              step: 6,
+              total: 20,
+              stage: "Denoising",
+              updated_at_ms: 1,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+    const onPreview = vi.fn();
+    const stop = watchSelectedQueuePreview(
+      { baseUrl: "https://gpu.example", apiKey: null },
+      "job-1",
+      onPreview,
+      500,
+    );
+    await vi.runOnlyPendingTimersAsync();
+    expect(onPreview).toHaveBeenCalledWith({
+      preview_image: null,
+      step: 6,
+      total: 20,
+      stage: "Denoising",
+      queue_position: null,
+    });
+    stop();
+  });
+
+  it("reports nothing while the live row has produced no progress", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(null), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const onPreview = vi.fn();
+    const stop = watchSelectedQueuePreview(
+      { baseUrl: "https://gpu.example", apiKey: null },
+      "job-1",
+      onPreview,
+      500,
+    );
+    await vi.runOnlyPendingTimersAsync();
+    expect(onPreview).not.toHaveBeenCalled();
+    stop();
   });
 
   it("releases the selected canvas when the live queue row disappears", async () => {

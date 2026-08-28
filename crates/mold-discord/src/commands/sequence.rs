@@ -196,6 +196,7 @@ fn build_sequence_request(params: SequenceParams<'_>) -> Result<ChainRequest, St
         clip_frames: None,
         source_image: None,
         enable_audio: params.audio,
+        ephemeral: false,
     })
 }
 

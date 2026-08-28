@@ -164,12 +164,11 @@ chains, utilities, telemetry, placement, and clients.
 - Sibling seeds use `base_seed.wrapping_add(index)`.
 - `batch_id`, one-based `batch_index`, and `batch_count` already flow through
   request and output metadata.
-- Inference pipelines still return one result per engine call. The live F1
-  server route implements raw `batch_size > 1` by scheduling ordered singleton
-  children rather than pretending the engines have native tensor batching.
-- Server-owned parent children stage privately and publish through one gallery
-  barrier plus metadata transaction. Existing client-owned sibling requests
-  retain their independent per-output publication contract.
+- Inference pipelines still return one result per engine call. Direct
+  generation is singleton-only; Batch N is admitted as ordered singleton
+  siblings through `/api/generation-batches`, which is also what the direct
+  routes admit through. There is no server-owned multi-output parent: sibling
+  requests publish independently, per output.
 
 ### 3.3 Client facts
 
@@ -1410,9 +1409,14 @@ The scheduler recognizes sibling metadata for display and locality but each
 sibling remains independently cancellable and independently publishable.
 There is no parent atomicity retrofit in these phases.
 
-The live F1 route now accepts raw server `batch_size > 1` only when Scheduler
-V2 is authoritative and gallery output is enabled. It fans the parent into
-singleton engine calls; no engine is falsely treated as returning N outputs.
+The public live route has since been simplified: `/api/generate` and
+`/api/generate/stream` accept exactly one output and are the same durable
+admission as `/api/generation-batches` with an attached raw/SSE observer. That
+contract commits 1–64 independently cancellable singleton children before
+preparation. The raw-parent machinery described below was DELETED: nothing
+creates a parent, and one left on disk by an older server is rolled back by
+the ordinary gallery transaction sweep rather than resumed. The sections below
+are retained as a record of the design that was removed.
 
 ### 12.2 Phase F0 — cancellation and transaction substrate
 
@@ -1450,21 +1454,17 @@ attempt generation; `prepared`, `committing`, and `committed` transitions use
 atomic manifest replacement plus file/directory fsync. Crash recovery
 reconstructs this state from the journal before any gallery route is served.
 
-The internal F1 durability bridge upgrades this authority to parent protocol
-v2 without routing the public raw-batch API yet. Protocol v2 appends one typed,
+The internal F1 durability bridge upgrades this legacy recovery authority to
+parent protocol v2. Protocol v2 appends one typed,
 constant-size reducer delta per grant/completion/cancel/retry/commit mutation
 and writes compact checkpoints only at attempt barriers. The reducer stores a
 settled-success prefix plus at most 1,024 materialized child states; callers
 page pending indices through a bounded cursor window. That window is a
 durability/memory bound, not a planner cardinality or GPU-count limit. The
 planner continues to represent arbitrary positive `u32` cardinalities
-compactly. Live atomic HTTP execution is a different materialization surface:
-its transaction manifest, filenames, result slots, and ordered completion
-payload remain O(N), so current servers admit at most 64 outputs per raw
-parent. Clients discover that delivery limit through
-`queue.server_batch_max_outputs`; larger parents fail before request
-preparation or filesystem reservation with
-`BATCH_OUTPUT_LIMIT_EXCEEDED`. Recovery still
+compactly. Current canonical admission commits at most 64 independently
+tracked singleton children per operation, and clients chunk larger batches.
+Recovery still
 replays v1 full-snapshot journals, including the v1 replace-before-append crash
 window where the atomic snapshot is exactly one legal transition ahead. A
 mixed journal is legal only as `v1* → v2*`; a v1 record after any v2 record,
@@ -1564,9 +1564,8 @@ The F1 planning foundation implements this boundary without routing a parent:
   and lazy random access use logarithmic completion-threshold searches.
 - The output carries exact contiguous child coverage and the existing
   `PlannedBatchPartition` projection needed by future `BatchChild` work.
-  The live F1 integration consumes this projection for raw parent requests.
-  `server_batch` remains false outside authoritative V2 or when atomic gallery
-  output is disabled.
+  Canonical generation-batch admission consumes singleton requests; the
+  projection remains useful for scheduler planning and legacy recovery.
 
 ### 12.4 Determinism
 
@@ -2400,22 +2399,14 @@ F1 then delivers:
 - logical atomic commit/recovery;
 - fenced retry and cancellation.
 
-The live F1 integration connects the static registry, adaptive partition
-planner, bounded parent reducer, and atomic gallery transaction to raw API
-admission and authoritative scheduler dispatch. Blocking parents return typed
-ordered JSON; SSE parents announce one cancellable parent ID and emit exactly
-one `batch_complete` after durable commit. Cancellation and terminal failure
-close sibling authority immediately, while late successes drain without a
-receipt. Raw live parents are admitted up to the advertised 64-output atomic
-delivery/materialization limit; larger requests return the stable typed
-`BATCH_OUTPUT_LIMIT_EXCEEDED` error before preparation, parent registration, or
-filesystem reservation, while the planner retains compact arbitrary-N
-support. Startup reconciliation reconstructs unfinished children from the
-versioned normalized request, freshly resolves prepared inputs, and resumes
-only when the exact persisted execution-equivalence fingerprint still
-matches. Missing recovery authority, artifact/config drift, or unavailable
-exact execution durably cancels and rolls back the private attempt; an
-all-staged crash converges commit before serving.
+The former live raw-parent integration was removed entirely. Every client
+admits ordered singleton children through `/api/generation-batches` (directly,
+or through the `/api/generate[/stream]` facades); each child has its own
+durable state, result filename, cancellation, and retry boundary. A parent
+left on disk by an older server is not reconstructed or resumed — its
+unpublished staged children are rolled back by
+`batch_transaction::recover_transactions` at startup, exactly like any other
+interrupted publication.
 
 Gates:
 

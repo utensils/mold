@@ -556,14 +556,14 @@ describe("SettingsPage", () => {
                     estimate_confidence: "low",
                   },
                   {
-                    work_id: "web-legacy-device",
-                    parent_id: "legacy-parent",
+                    work_id: "web-typed-device",
+                    parent_id: "typed-parent",
                     work_kind: "generation",
                     priority_class: "user",
                     queue_rank: 1,
                     bypass_count: 0,
                     planned_device_id: device.id,
-                    planned_lane_kind: null,
+                    planned_lane_kind: "device",
                     lane_order: 1,
                     estimate_confidence: "low",
                   },
@@ -595,13 +595,13 @@ describe("SettingsPage", () => {
       "web-future-collision",
     );
     expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
-      "web-legacy-device",
+      "web-typed-device",
     );
     expect(wrapper.get('[data-test="device-lane"]').text()).not.toContain(
       "web-future-collision",
     );
     expect(wrapper.text().match(/web-future-collision/g)).toHaveLength(1);
-    expect(wrapper.text().match(/web-legacy-device/g)).toHaveLength(1);
+    expect(wrapper.text().match(/web-typed-device/g)).toHaveLength(1);
   });
 
   it("clears a stale queue plan when a device-panel refresh fails", async () => {

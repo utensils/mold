@@ -151,6 +151,15 @@ const placementRequest = {
   batch_size: 1,
 } as GenerateRequest;
 
+/** A print is admitted durably and never previewed; a SEQUENCE is planned
+ * before it is created, so the placement machinery below rides one. */
+const sequenceRequest = {
+  ...placementRequest,
+  total_frames: 241,
+  clip_frames: 97,
+  motion_tail_frames: 17,
+} as unknown as GenerateRequest;
+
 function settings(overrides: Record<string, unknown> = {}) {
   return {
     mode: "local",
@@ -447,12 +456,14 @@ describe("hosts store", () => {
     hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
     hosts.capabilities[hal.id] = {
       gallery: { can_delete: true },
+      queue: {
+        heterogeneous_batch_max_outputs: 64,
+      },
       durable_media: {
-        protocol_version: 1,
+        protocol_version: 2,
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: false,
         private_h3: false,
       },
     };
@@ -460,6 +471,135 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute(hal.id)?.durableMedia).toEqual(
       hosts.capabilities[hal.id]?.durable_media,
     );
+    expect(hosts.resolveRoute(hal.id)?.heterogeneousBatchMaxOutputs).toBe(64);
+  });
+
+  it("projects the pinned target and the placement route through one mapping", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
+    hosts.capabilities[hal.id] = {
+      gallery: { can_delete: true },
+      queue: { heterogeneous_batch_max_outputs: 64 },
+      durable_media: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        private_h3: true,
+      },
+    } as ServerCapabilities;
+
+    // The pinned-target path and the placement path used to build this route
+    // twice; one mapping is what keeps them from disagreeing about what a
+    // machine can carry.
+    const pinned = hosts.resolveRoute(hal.id);
+    const placed = await hosts.resolveFeasibleRoute(hal.id, placementRequest);
+    expect(placed).toEqual(pinned);
+  });
+
+  it("keeps a machine that read-refuses the durable contract out of Auto", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    // This device is emptier but answered /api/capabilities with no durable
+    // queue: it would refuse at submit, so Auto must rank hal instead.
+    hosts.telemetry.local = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
+    hosts.telemetry[hal.id] = { queueDepth: 5, queueCapacity: 8, version: "0.25.0" };
+    hosts.capabilities.local = { gallery: { can_delete: true } };
+    hosts.capabilities[hal.id] = {
+      gallery: { can_delete: true },
+      queue: { heterogeneous_batch_max_outputs: 64 },
+    };
+
+    await expect(hosts.resolveFeasible(null, placementRequest)).resolves.toMatchObject({
+      kind: "route",
+      route: { hostId: hal.id },
+      preview: null,
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
+  it("skips placement preview for canonical v2 pinned and automatic routing", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    hosts.telemetry.local = { queueDepth: 4, queueCapacity: 8, version: "0.25.0" };
+    hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
+    const canonical: ServerCapabilities = {
+      gallery: { can_delete: true },
+      queue: {
+        heterogeneous_batch_max_outputs: 64,
+      },
+    };
+    hosts.capabilities.local = canonical;
+    hosts.capabilities[hal.id] = canonical;
+
+    await expect(hosts.resolveFeasible("local", placementRequest)).resolves.toMatchObject({
+      kind: "route",
+      route: { hostId: "local" },
+      preview: null,
+    });
+    await expect(hosts.resolveFeasible(null, placementRequest)).resolves.toMatchObject({
+      kind: "route",
+      route: { hostId: hal.id },
+      preview: null,
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
+  it("returns a missing-model recovery for a canonical pinned host with a known absence", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
+    hosts.capabilities[hal.id] = {
+      gallery: { can_delete: true },
+      queue: {
+        heterogeneous_batch_max_outputs: 64,
+      },
+    };
+    useHostModelsStore().byHost[hal.id] = { entries: [], fetchedAt: Date.now(), error: null };
+
+    await expect(hosts.resolveFeasible(hal.id, placementRequest)).resolves.toMatchObject({
+      kind: "infeasible",
+      perHost: [
+        {
+          hostId: hal.id,
+          missingModel: { model: placementRequest.model },
+        },
+      ],
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
   });
 
   it("allows Auto across differing profiles on the same Mold major version", () => {
@@ -600,18 +740,18 @@ describe("hosts store", () => {
       generateTargetHost: "local",
     }) as unknown as AppSettings;
     const gate = deferred<ReturnType<typeof plannedPlacement>>();
-    previewGenerationPlacement.mockReturnValueOnce(gate.promise);
+    previewChainPlacement.mockReturnValueOnce(gate.promise);
     const hosts = useHostsStore();
 
-    const pending = hosts.resolveFeasibleRoute("local", placementRequest);
-    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+    const pending = hosts.resolveFeasibleRoute("local", sequenceRequest);
+    await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(1));
     prefs.settings = settings({
       generateTargetHost: "hal9000-7680",
     }) as unknown as AppSettings;
     gate.resolve(plannedPlacement());
 
     await expect(pending).resolves.toBeNull();
-    expect(previewGenerationPlacement).toHaveBeenCalledTimes(1);
+    expect(previewChainPlacement).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -652,15 +792,15 @@ describe("hosts store", () => {
       };
       hosts.extras.push(extra);
       const gate = deferred<ReturnType<typeof plannedPlacement>>();
-      previewGenerationPlacement.mockReturnValueOnce(gate.promise);
+      previewChainPlacement.mockReturnValueOnce(gate.promise);
 
-      const pending = hosts.resolveFeasibleRoute(hal.id, placementRequest);
-      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+      const pending = hosts.resolveFeasibleRoute(hal.id, sequenceRequest);
+      await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(1));
       mutate(hosts.extras.find((host) => host.id === hal.id)!);
       gate.resolve(plannedPlacement());
 
       await expect(pending).resolves.toBeNull();
-      expect(previewGenerationPlacement).toHaveBeenCalledTimes(1);
+      expect(previewChainPlacement).toHaveBeenCalledTimes(1);
     },
   );
 
@@ -668,15 +808,13 @@ describe("hosts store", () => {
     const hosts = useHostsStore();
     const first = deferred<ReturnType<typeof plannedPlacement>>();
     const second = deferred<ReturnType<typeof plannedPlacement>>();
-    previewGenerationPlacement
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
+    previewChainPlacement.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 
-    const pending = hosts.resolveFeasible("local", placementRequest);
-    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+    const pending = hosts.resolveFeasible("local", sequenceRequest);
+    await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(1));
     useConnectionStore().status = "starting";
     first.resolve(plannedPlacement());
-    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(2));
     useConnectionStore().status = "ready";
     second.resolve(plannedPlacement());
 
@@ -706,16 +844,16 @@ describe("hosts store", () => {
       error: null,
       instanceId: "instance-a",
     });
-    previewGenerationPlacement.mockResolvedValueOnce({
+    previewChainPlacement.mockResolvedValueOnce({
       ...plannedPlacement(),
       outcome: "infeasible",
       reason: "insufficient_vram",
       candidate: null,
     });
 
-    await expect(hosts.resolveFeasibleRoute(hal.id, placementRequest)).resolves.toBeNull();
-    expect(previewGenerationPlacement).toHaveBeenCalledTimes(1);
-    expect(previewGenerationPlacement.mock.calls[0]?.[0]).toEqual({
+    await expect(hosts.resolveFeasibleRoute(hal.id, sequenceRequest)).resolves.toBeNull();
+    expect(previewChainPlacement).toHaveBeenCalledTimes(1);
+    expect(previewChainPlacement.mock.calls[0]?.[0]).toEqual({
       baseUrl: hal.url,
       apiKey: "host-key",
     });
@@ -723,7 +861,7 @@ describe("hosts store", () => {
 
   it("retains authoritative reasons and structured repair components per host", async () => {
     const hosts = useHostsStore();
-    previewGenerationPlacement.mockResolvedValueOnce({
+    previewChainPlacement.mockResolvedValueOnce({
       ...plannedPlacement(),
       outcome: "infeasible",
       reason: "model 'flux-dev:q4' is missing a component",
@@ -738,7 +876,7 @@ describe("hosts store", () => {
       ],
     });
 
-    await expect(hosts.resolveFeasible("local", placementRequest)).resolves.toEqual({
+    await expect(hosts.resolveFeasible("local", sequenceRequest)).resolves.toEqual({
       kind: "infeasible",
       perHost: [
         expect.objectContaining({
@@ -760,14 +898,14 @@ describe("hosts store", () => {
 
   it("distinguishes temporary scheduler failure from a malformed response", async () => {
     const hosts = useHostsStore();
-    previewGenerationPlacement.mockResolvedValueOnce({
+    previewChainPlacement.mockResolvedValueOnce({
       ...plannedPlacement(),
       authoritative: false,
       outcome: "temporarily_unavailable",
       reason: "scheduler snapshot changed",
       candidate: null,
     });
-    await expect(hosts.resolveFeasible("local", placementRequest)).resolves.toEqual({
+    await expect(hosts.resolveFeasible("local", sequenceRequest)).resolves.toEqual({
       kind: "transient",
       perHost: [
         expect.objectContaining({
@@ -777,8 +915,8 @@ describe("hosts store", () => {
       ],
     });
 
-    previewGenerationPlacement.mockResolvedValueOnce({});
-    await expect(hosts.resolveFeasible("local", placementRequest)).resolves.toEqual({
+    previewChainPlacement.mockResolvedValueOnce({});
+    await expect(hosts.resolveFeasible("local", sequenceRequest)).resolves.toEqual({
       kind: "unreachable",
       perHost: [
         expect.objectContaining({
@@ -791,7 +929,7 @@ describe("hosts store", () => {
 
   it("treats malformed infeasible recovery metadata as an invalid response", async () => {
     const hosts = useHostsStore();
-    previewGenerationPlacement.mockResolvedValueOnce({
+    previewChainPlacement.mockResolvedValueOnce({
       ...plannedPlacement(),
       outcome: "infeasible",
       reason: "missing a component",
@@ -806,7 +944,7 @@ describe("hosts store", () => {
       ],
     });
 
-    await expect(hosts.resolveFeasible("local", placementRequest)).resolves.toEqual({
+    await expect(hosts.resolveFeasible("local", sequenceRequest)).resolves.toEqual({
       kind: "unreachable",
       perHost: [
         expect.objectContaining({
@@ -840,7 +978,7 @@ describe("hosts store", () => {
         instanceId: "studio-instance",
       },
     );
-    previewGenerationPlacement
+    previewChainPlacement
       .mockResolvedValueOnce({
         ...plannedPlacement(),
         outcome: "infeasible",
@@ -858,7 +996,7 @@ describe("hosts store", () => {
         new ApiError("placement failed", 401, { error: "API key was rejected" }),
       );
 
-    await expect(hosts.resolveFeasible(null, placementRequest)).resolves.toEqual({
+    await expect(hosts.resolveFeasible(null, sequenceRequest)).resolves.toEqual({
       kind: "mixed",
       perHost: [
         expect.objectContaining({
@@ -891,7 +1029,7 @@ describe("hosts store", () => {
       error: null,
       instanceId: "hal-instance",
     });
-    previewGenerationPlacement
+    previewChainPlacement
       .mockResolvedValueOnce({
         ...plannedPlacement("cuda:local"),
         candidate: {
@@ -915,7 +1053,7 @@ describe("hosts store", () => {
         },
       });
 
-    await expect(hosts.resolveFeasible(null, placementRequest)).resolves.toMatchObject({
+    await expect(hosts.resolveFeasible(null, sequenceRequest)).resolves.toMatchObject({
       kind: "route",
       route: {
         hostId: hal.id,
@@ -938,7 +1076,7 @@ describe("hosts store", () => {
         instanceId: "hal-instance",
       });
       let remoteSignal: AbortSignal | undefined;
-      previewGenerationPlacement.mockImplementation(
+      previewChainPlacement.mockImplementation(
         (
           target: { baseUrl: string },
           _request: unknown,
@@ -951,8 +1089,8 @@ describe("hosts store", () => {
         },
       );
 
-      const pending = hosts.resolveFeasible(null, placementRequest);
-      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(2));
+      const pending = hosts.resolveFeasible(null, sequenceRequest);
+      await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(2));
       await vi.advanceTimersByTimeAsync(250);
 
       await expect(pending).resolves.toMatchObject({
@@ -969,7 +1107,7 @@ describe("hosts store", () => {
     vi.useFakeTimers();
     try {
       let requestSignal: AbortSignal | undefined;
-      previewGenerationPlacement.mockImplementation(
+      previewChainPlacement.mockImplementation(
         (
           _target: unknown,
           _request: unknown,
@@ -982,8 +1120,8 @@ describe("hosts store", () => {
       );
       const hosts = useHostsStore();
 
-      const pending = hosts.resolveFeasible(null, placementRequest);
-      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+      const pending = hosts.resolveFeasible(null, sequenceRequest);
+      await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(1));
       // Nothing can route yet, so the first deadline extends once instead of
       // reporting a machine that is still checking as one that did not answer.
       await vi.advanceTimersByTimeAsync(5_000);
@@ -1022,7 +1160,7 @@ describe("hosts store", () => {
         instanceId: "hal-instance",
       });
       const slow = deferred<ReturnType<typeof plannedPlacement>>();
-      previewGenerationPlacement.mockImplementation((target: { baseUrl: string }) =>
+      previewChainPlacement.mockImplementation((target: { baseUrl: string }) =>
         target.baseUrl.includes("hal9000")
           ? slow.promise
           : Promise.resolve({
@@ -1041,8 +1179,8 @@ describe("hosts store", () => {
             }),
       );
 
-      const pending = hosts.resolveFeasible(null, placementRequest);
-      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(2));
+      const pending = hosts.resolveFeasible(null, sequenceRequest);
+      await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(2));
       await vi.advanceTimersByTimeAsync(5_000);
       let settled = false;
       void pending.then(() => (settled = true));
@@ -1070,7 +1208,7 @@ describe("hosts store", () => {
       error: null,
       instanceId: "hal-instance",
     });
-    previewGenerationPlacement
+    previewChainPlacement
       .mockResolvedValueOnce({
         ...plannedPlacement(),
         outcome: "infeasible",
@@ -1092,7 +1230,7 @@ describe("hosts store", () => {
         reason: "no device can host this generation: needs 48.0 GB",
       });
 
-    const result = await hosts.resolveFeasible(null, placementRequest);
+    const result = await hosts.resolveFeasible(null, sequenceRequest);
     expect(result).toMatchObject({ kind: "infeasible" });
     const perHost = (result as { perHost: Array<Record<string, unknown>> }).perHost;
     expect(perHost[0]).toMatchObject({
@@ -1116,7 +1254,7 @@ describe("hosts store", () => {
         instanceId: "hal-instance",
       });
       const stronger = deferred<ReturnType<typeof plannedPlacement>>();
-      previewGenerationPlacement.mockImplementation((target: { baseUrl: string }) =>
+      previewChainPlacement.mockImplementation((target: { baseUrl: string }) =>
         target.baseUrl.includes("hal9000")
           ? stronger.promise
           : Promise.resolve({
@@ -1128,8 +1266,8 @@ describe("hosts store", () => {
             }),
       );
 
-      const pending = hosts.resolveFeasible("capable", placementRequest);
-      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(2));
+      const pending = hosts.resolveFeasible("capable", sequenceRequest);
+      await vi.waitFor(() => expect(previewChainPlacement).toHaveBeenCalledTimes(2));
       await vi.advanceTimersByTimeAsync(5_000);
       let settled = false;
       void pending.then(() => (settled = true));
@@ -1153,11 +1291,11 @@ describe("hosts store", () => {
   });
 
   it("retains the placement probe HTTP status and message", async () => {
-    previewGenerationPlacement.mockRejectedValueOnce(
+    previewChainPlacement.mockRejectedValueOnce(
       new ApiError("placement failed", 401, { error: "API key was rejected" }),
     );
     const hosts = useHostsStore();
-    await expect(hosts.resolveFeasible("local", placementRequest)).resolves.toEqual({
+    await expect(hosts.resolveFeasible("local", sequenceRequest)).resolves.toEqual({
       kind: "unreachable",
       perHost: [
         expect.objectContaining({
@@ -1168,80 +1306,14 @@ describe("hosts store", () => {
     });
   });
 
-  it.each([401, 403, 426, 500])("does not legacy-fallback placement HTTP %s", async (status) => {
-    previewGenerationPlacement.mockRejectedValueOnce(new ApiError("placement failed", status));
+  it.each([401, 403, 426, 500])("reports placement HTTP %s as unreachable", async (status) => {
+    previewChainPlacement.mockRejectedValueOnce(new ApiError("placement failed", status));
     const hosts = useHostsStore();
-    await expect(hosts.resolveFeasibleRoute("local", placementRequest)).resolves.toBeNull();
+    await expect(hosts.resolveFeasibleRoute("local", sequenceRequest)).resolves.toBeNull();
   });
 
-  it.each([404, 405])(
-    "keeps the exact selected legacy host for placement HTTP %s",
-    async (status) => {
-      const prefs = useAppPrefsStore();
-      prefs.settings = settings({
-        generateTargetHost: hal.id,
-      }) as unknown as AppSettings;
-      const hosts = useHostsStore();
-      hosts.extras.push({
-        id: hal.id,
-        label: "hal9000",
-        url: hal.url,
-        apiKey: "host-key",
-        status: "ready",
-        error: null,
-        instanceId: "instance-a",
-      });
-      previewGenerationPlacement.mockRejectedValueOnce(new ApiError("unsupported", status));
-
-      await expect(hosts.resolveFeasibleRoute(hal.id, placementRequest)).resolves.toMatchObject({
-        hostId: hal.id,
-        instanceId: "instance-a",
-        target: { baseUrl: hal.url, apiKey: "host-key" },
-      });
-    },
-  );
-
-  it.each([404, 405])(
-    "routes staged H3 references to host admission when placement HTTP %s is unsupported",
-    async (status) => {
-      previewGenerationPlacement.mockRejectedValueOnce(new ApiError("unsupported", status));
-      const hosts = useHostsStore();
-      const request = {
-        ...placementRequest,
-        model: "minimax-h3-ref2va:comfy-pruned-int8",
-        references: [],
-      } as GenerateRequest;
-
-      await expect(hosts.resolveFeasible("local", request)).resolves.toMatchObject({
-        kind: "route",
-        route: { hostId: "local" },
-        preview: null,
-      });
-    },
-  );
-
-  it("routes staged H3 references to host admission after an explicit unsupported preview", async () => {
-    previewGenerationPlacement.mockResolvedValueOnce({
-      ...plannedPlacement(),
-      authoritative: false,
-      outcome: "unsupported",
-      candidate: null,
-    });
-    const hosts = useHostsStore();
-    const request = {
-      ...placementRequest,
-      model: "minimax-h3-ref2va:comfy-pruned-int8",
-      references: [],
-    } as GenerateRequest;
-
-    await expect(hosts.resolveFeasible("local", request)).resolves.toMatchObject({
-      kind: "route",
-      route: { hostId: "local" },
-      preview: null,
-    });
-  });
-
-  it("keeps the connecting local origin eligible for a legacy placement fallback", async () => {
+  it("never refuses a pinned origin whose capabilities are not yet read", async () => {
+    // Unread is "unknown", never "missing": admission asks the host itself.
     useConnectionStore().status = "starting";
     previewGenerationPlacement.mockRejectedValueOnce(new ApiError("unsupported", 404));
     const hosts = useHostsStore();
@@ -1321,13 +1393,13 @@ describe("hosts store", () => {
 
   it("previews prepared Batch N as N one-image siblings without mutating the request", async () => {
     const hosts = useHostsStore();
-    const request = { ...placementRequest, batch_size: 4 };
+    const request = { ...sequenceRequest, batch_size: 4 };
 
     await expect(hosts.resolveFeasibleRoute("local", request, 4)).resolves.toMatchObject({
       hostId: "local",
     });
 
-    expect(previewGenerationPlacement).toHaveBeenCalledWith(
+    expect(previewChainPlacement).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ batch_size: 1 }),
       4,

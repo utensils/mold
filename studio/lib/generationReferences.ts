@@ -12,6 +12,23 @@ export interface GenerationReferenceProvenance {
   name?: string | null;
   /** Exact content digest; required for upload and server-path authorities. */
   sha256?: string | null;
+  /** The user crop applied client-side to an IMAGE reference before it was
+   * digested and uploaded; the server validates the rect and keeps it as
+   * provenance (it already received the cropped bytes). */
+  crop?: GenerationReferenceCrop | null;
+}
+
+/** A client-side crop in SOURCE pixels of the original photograph. `width` /
+ * `height` are the cropped reference's own dimensions; the `source_*` facts
+ * let Reuse settings re-apply the crop to a reattached original exactly. */
+export interface GenerationReferenceCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  source_width: number;
+  source_height: number;
+  source_sha256: string;
 }
 
 interface GenerationReferenceBase {
@@ -71,6 +88,8 @@ export interface GenerationReferenceMetadata {
   channels?: number | null;
   sample_count?: number | null;
   prepared_shape?: GenerationReferencePreparedShape | null;
+  /** The crop an image reference carried; absent for every other reference. */
+  crop?: GenerationReferenceCrop | null;
 }
 
 /** Exact checked output of the versioned reference preprocessing policy. */

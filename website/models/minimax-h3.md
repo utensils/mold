@@ -297,6 +297,18 @@ conditioning side is the set:
   frozen plan carries a reference fingerprint over that order — so the same
   files in a different order are a different render, not the same one.
 
+An image reference can be **cropped** before it is sent: the reference row's
+**Crop** action on web, desktop, and iPhone opens a drag rectangle with Free,
+1:1, 4:3, 3:2, and 16:9 presets, a 64 px minimum per axis, and a live
+vision-pad cost hint (a 1:1 crop of a 16:9 photograph is 4,096 pads instead of
+7,296). The crop is applied at the photograph's original resolution before the
+reference is digested and uploaded, so the server only ever sees the cropped
+image; it is recorded in the print's metadata as `references[].crop` and Reuse
+settings restores it when you reattach the same original. This is a choice of
+_which part of the photograph is the reference_, never a fit to the output
+canvas — Mold still normalizes the cropped image onto its own 2048-short-edge
+canvas, and the generated print's size is unchanged.
+
 There is no reviewed list of reference sets. The runtime qualification is
 minted per request from the set's own preprocessing shapes: the conditioner
 sequence, the conditioning latents, and every memory bound scale with what you

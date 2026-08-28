@@ -1418,8 +1418,10 @@ mod tests {
         assert_eq!(artifact_verification_count(), before + 1);
         // Same content, new inode: exactly the rename the private-copy
         // contract exists to survive.
+        let proven_ctime = crate::test_support::ctime_of(&path);
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"the derived bytes").unwrap();
+        crate::test_support::wait_until_ctime_moves(&path, proven_ctime);
         open_authenticated(&path, pin).unwrap();
         assert_eq!(
             artifact_verification_count(),
@@ -1501,10 +1503,12 @@ mod tests {
 
         // In place, same length, same name, same inode. Only `mtime`/`ctime`
         // move, which is precisely what the memo key notices.
+        let proven_ctime = crate::test_support::ctime_of(&path);
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         file.write_all(b"the FORGED bytes!").unwrap();
         file.sync_all().unwrap();
         drop(file);
+        crate::test_support::wait_until_ctime_moves(&path, proven_ctime);
 
         let error = open_authenticated(&path, pin).unwrap_err();
         assert!(format!("{error:#}").contains("hashes to"), "{error:#}");

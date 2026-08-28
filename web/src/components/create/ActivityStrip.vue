@@ -50,6 +50,7 @@ const props = withDefaults(
  * iPhone describe the same waiting row the same way; a server that lists
  * nothing degrades to the plain "Queued" pill. */
 function queueLabel(job: Job): string {
+  if (job.holdError) return job.progress.stage;
   if (job.detached && job.durableBatch && !job.serverId) {
     return "Confirming durable admission";
   }
@@ -73,6 +74,7 @@ function hostBadge(job: Job): string | null {
 
 const emit = defineEmits<{
   cancel: [id: string];
+  retry: [id: string];
   dismiss: [id: string];
   open: [job: Job];
   "sequence-action": [action: ActivityAction, vm: ActivityJobVM];
@@ -166,13 +168,9 @@ function sequenceStageLabel(vm: ActivityJobVM): string | null {
 
 function percentFor(job: Job): number | null {
   const p = job.progress;
-  if (p.step !== null && p.totalSteps) {
-    return Math.round((p.step / p.totalSteps) * 100);
-  }
-  if (p.weightBytesLoaded !== null && p.weightBytesTotal) {
-    return Math.round((p.weightBytesLoaded / p.weightBytesTotal) * 100);
-  }
-  return null;
+  return p.step !== null && p.totalSteps
+    ? Math.round((p.step / p.totalSteps) * 100)
+    : null;
 }
 
 function isFinalizing(job: Job): boolean {
@@ -212,6 +210,11 @@ const queued = computed(() =>
  * rest. Cancellation reveals the following row, so every job remains
  * reachable without producing one interactive DOM subtree per backlog item. */
 const nextQueued = computed(() => {
+  // A held print has no queue position and needs a human: it is always the
+  // row that is shown, so its reason and Retry are never folded into
+  // "N more queued".
+  const held = queued.value.find((job) => job.holdError && !job.cancelling);
+  if (held) return held;
   let best: Job | null = null;
   let bestPosition: number | null = null;
   const actionable = queued.value.filter((job) => !job.cancelling);
@@ -420,7 +423,20 @@ const active = computed(
             >{{ queueLabel(nextQueued) }}</span
           >
           {{ promptFor(nextQueued) }}
+          <span v-if="nextQueued.holdError" class="activity__hold-error">
+            · {{ nextQueued.holdError }}
+          </span>
         </span>
+        <button
+          v-if="nextQueued.retryable"
+          type="button"
+          class="activity__seq-action"
+          :disabled="nextQueued.retrying"
+          :data-test="`activity-retry-${nextQueued.id}`"
+          @click.stop="emit('retry', nextQueued.id)"
+        >
+          {{ nextQueued.retrying ? "Retrying…" : "Retry" }}
+        </button>
         <button
           type="button"
           class="activity__cancel"

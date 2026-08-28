@@ -48,10 +48,13 @@ export interface GenerationLifecycleJob {
   clientBatchId: string;
   childIndex: number;
   phase: GenerationLifecyclePhase;
+  retryable: boolean | null;
   createdAtMs: number;
   completedAtMs: number | null;
   version: GenerationLifecycleVersion;
   error: string | null;
+  /** Typed cause of a held child; `null` when the machine gave none. */
+  errorCode: string | null;
   terminalError: unknown;
   result: { filename?: string; originalFilename?: string } | null;
 }
@@ -108,9 +111,10 @@ const FORWARD_PHASE_RANK: Record<GenerationLifecyclePhase, number> = {
   queued: 1,
   held: 2,
   running: 3,
-  complete: 4,
-  failed: 4,
-  cancelled: 4,
+  cancelling: 4,
+  complete: 5,
+  failed: 5,
+  cancelled: 5,
 };
 
 export function isTerminalGenerationPhase(
@@ -181,6 +185,20 @@ function equivalentJob(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+/**
+ * A child's own revision, or `null` when it has no revision authority.
+ *
+ * `0` is deliberately not a revision: rows admitted before the server grew
+ * the column sit at `0` until their next transition, so reading it as one
+ * would let a pre-migration snapshot outrank nothing and be outranked by
+ * nothing. Both absence and `0` fall back to the timestamp comparison.
+ */
+function childRevision(child: GenerationBatchChild): number | null {
+  const revision = child.revision;
+  if (typeof revision !== "number" || !Number.isFinite(revision)) return null;
+  return revision > 0 ? revision : null;
+}
+
 function lifecycleJob(
   state: GenerationBatchTracker,
   instanceId: string,
@@ -200,10 +218,15 @@ function lifecycleJob(
     clientBatchId: state.clientBatchId,
     childIndex: child.index,
     phase: child.state,
+    retryable: child.retryable ?? null,
     createdAtMs: child.created_at_ms,
     completedAtMs: child.completed_at_ms ?? null,
-    version: { updatedAtMs: child.updated_at_ms, revision },
+    version: {
+      updatedAtMs: child.updated_at_ms,
+      revision: revision ?? childRevision(child),
+    },
     error: child.error ?? null,
+    errorCode: child.error_code ?? null,
     terminalError: child.terminal_error ?? null,
     result: child.result
       ? {
@@ -374,7 +397,8 @@ export interface BulkGenerationMergeResult {
 /**
  * Build the one bulk reconciliation request for a host. Known batches use
  * their server IDs; ambiguous admissions use the client idempotency IDs.
- * Input order is retained and no client-side cap is introduced.
+ * Input order is retained. Callers split trackers with
+ * `chunkGenerationBatchTrackers` before sending each bounded request.
  */
 export function buildGenerationBatchStatusRequest(
   trackers: readonly GenerationBatchTracker[],
@@ -400,6 +424,26 @@ export function buildGenerationBatchStatusRequest(
     client_batch_ids: clientBatchIds,
     ...(batchIds.length === 0 ? {} : { batch_ids: batchIds }),
   };
+}
+
+/** Server status reconciliation is deliberately bounded so one client cannot
+ * monopolize queue persistence. Surfaces process every chunk in order. */
+export const GENERATION_BATCH_STATUS_IDENTITY_LIMIT = 256;
+
+export function chunkGenerationBatchTrackers(
+  trackers: readonly GenerationBatchTracker[],
+  hostId: string,
+  limit = GENERATION_BATCH_STATUS_IDENTITY_LIMIT,
+): GenerationBatchTracker[][] {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error("generation batch status limit must be a positive integer");
+  }
+  const matching = trackers.filter((tracker) => tracker.hostId === hostId);
+  const chunks: GenerationBatchTracker[][] = [];
+  for (let offset = 0; offset < matching.length; offset += limit) {
+    chunks.push(matching.slice(offset, offset + limit));
+  }
+  return chunks;
 }
 
 /**

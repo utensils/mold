@@ -11,8 +11,6 @@ import {
   deleteModel,
   fetchQueue,
   gcChainJobs,
-  generateStream,
-  generateChainStream,
   fetchChainLimits,
   getChainJob,
   listChainJobs,
@@ -21,19 +19,9 @@ import {
   upscaleStream,
   updateQueueJobTargetGpu,
   validateChain,
-  type ChainStreamHandlers,
-  type GenerateStreamHandlers,
   type UpscaleStreamHandlers,
 } from "./api";
-import type {
-  ChainProgressEvent,
-  ChainRequestWire,
-  GenerateRequestWire,
-  SseChainCompleteEvent,
-  SseCompleteEvent,
-  SseProgressEvent,
-  UpscaleRequestWire,
-} from "./types";
+import type { ChainRequestWire, UpscaleRequestWire } from "./types";
 import type { SseEvent, StreamSseOptions } from "./lib/sse";
 
 // streamSse is the I/O surface; mocking it lets us drive the SSE lifecycle
@@ -46,51 +34,12 @@ vi.mock("./lib/sse", () => ({
 
 import { streamSse } from "./lib/sse";
 
-// `vi.fn<T>()` types the resulting Mock against the target signature,
-// which lets both `generateStream(req, h)` (handlers must satisfy the
-// union types) and `h.onError.mock.calls` (assertions need Mock's
-// `.mock`) compile cleanly without `as unknown as` gymnastics.
-function singleHandlers() {
-  return {
-    onProgress: vi.fn<GenerateStreamHandlers["onProgress"]>(),
-    onComplete: vi.fn<GenerateStreamHandlers["onComplete"]>(),
-    onError: vi.fn<GenerateStreamHandlers["onError"]>(),
-    onRequestWarnings:
-      vi.fn<NonNullable<GenerateStreamHandlers["onRequestWarnings"]>>(),
-  };
-}
-
-function chainHandlers() {
-  return {
-    onProgress: vi.fn<ChainStreamHandlers["onProgress"]>(),
-    onComplete: vi.fn<ChainStreamHandlers["onComplete"]>(),
-    onError: vi.fn<ChainStreamHandlers["onError"]>(),
-    onRequestWarnings:
-      vi.fn<NonNullable<ChainStreamHandlers["onRequestWarnings"]>>(),
-  };
-}
-
 function upscaleHandlers() {
   return {
     onProgress: vi.fn<UpscaleStreamHandlers["onProgress"]>(),
     onComplete: vi.fn<UpscaleStreamHandlers["onComplete"]>(),
     onError: vi.fn<UpscaleStreamHandlers["onError"]>(),
   };
-}
-
-function singleRequest(): GenerateRequestWire {
-  return {
-    prompt: "a cat",
-    model: "flux-dev:fp16",
-    width: 512,
-    height: 512,
-    steps: 8,
-    guidance: 3.0,
-    strength: 1.0,
-    fps: 24,
-    output_format: "png",
-    frames: 1,
-  } as GenerateRequestWire;
 }
 
 function chainRequest(): ChainRequestWire {
@@ -335,186 +284,6 @@ describe("chain validation api", () => {
       "motion_tail_frames must be less than clip 2 frames",
     );
     expect((error as Error).message).not.toContain("VALIDATION_ERROR");
-  });
-});
-
-describe("generateStream", () => {
-  it("surfaces an accepted request warning without splitting semicolons", async () => {
-    vi.mocked(streamSse).mockImplementationOnce(async (opts) => {
-      opts.onOpen?.(
-        new Response("", {
-          headers: {
-            "x-mold-request-warning": "retimed clip; output still rendered",
-          },
-        }),
-      );
-      opts.onEvent({
-        event: "complete",
-        data: JSON.stringify({ image: "AAAA" }),
-      });
-      return new Response("");
-    });
-    const h = singleHandlers();
-
-    await generateStream(singleRequest(), h);
-
-    expect(h.onRequestWarnings).toHaveBeenCalledWith([
-      "retimed clip; output still rendered",
-    ]);
-  });
-  it("flips a job to network error when the stream resolves without complete/error", async () => {
-    // Server-side scenario: the worker crashed mid-job, or a proxy /
-    // network blip closed the SSE pipe after a few progress events.
-    // The reader exits cleanly with no `complete` or `error` event.
-    // The browser used to see this as "still running" forever because
-    // streamSse just resolves; this test locks in the new behavior.
-    installDriver((onEvent) => {
-      onEvent({
-        event: null,
-        data: JSON.stringify({
-          type: "denoise_step",
-          step: 3,
-          total: 30,
-          elapsed_ms: 100,
-        } as SseProgressEvent),
-      });
-      // No terminal event — driver returns and streamSse resolves.
-    });
-
-    const h = singleHandlers();
-    await generateStream(singleRequest(), h);
-
-    expect(h.onProgress).toHaveBeenCalledOnce();
-    expect(h.onComplete).not.toHaveBeenCalled();
-    expect(h.onError).toHaveBeenCalledOnce();
-    const err = h.onError.mock.calls[0][0];
-    if (err.kind !== "network") throw new Error("expected network error");
-    expect(String(err.message).toLowerCase()).toMatch(
-      /close|disconnect|complet/,
-    );
-  });
-
-  it("does NOT synthesize a network error when complete fires", async () => {
-    // Happy path — the stream closes after a complete event. This must
-    // not flip the job back into error.
-    const completeEvt: SseCompleteEvent = {
-      image: "AAAA",
-      format: "png",
-      width: 512,
-      height: 512,
-      seed_used: 42,
-      generation_time_ms: 1234,
-      model: "flux-dev:fp16",
-    } as SseCompleteEvent;
-
-    installDriver((onEvent) => {
-      onEvent({ event: "complete", data: JSON.stringify(completeEvt) });
-    });
-
-    const h = singleHandlers();
-    await generateStream(singleRequest(), h);
-
-    expect(h.onComplete).toHaveBeenCalledOnce();
-    expect(h.onError).not.toHaveBeenCalled();
-  });
-
-  it("does NOT synthesize a network error when an error event fires", async () => {
-    // Server emitted an error event before closing — the explicit error
-    // is the terminal signal; the stream-close that follows is expected.
-    installDriver((onEvent) => {
-      onEvent({
-        event: "error",
-        data: JSON.stringify({ message: "OOM" }),
-      });
-    });
-
-    const h = singleHandlers();
-    await generateStream(singleRequest(), h);
-
-    expect(h.onError).toHaveBeenCalledOnce();
-    // Single call only — the silent-close path must not double-fire.
-  });
-
-  it("does NOT synthesize a network error when the signal aborts", async () => {
-    // User clicked Cancel — the AbortController fires and streamSse
-    // throws an AbortError, which the wrapper swallows. We must not
-    // turn that into a network error (the UI already shows "canceled").
-    const controller = new AbortController();
-    vi.mocked(streamSse).mockImplementationOnce(async () => {
-      controller.abort();
-      const err = new Error("aborted");
-      err.name = "AbortError";
-      throw err;
-    });
-
-    const h = singleHandlers();
-    await generateStream(singleRequest(), h, controller.signal);
-    expect(h.onError).not.toHaveBeenCalled();
-  });
-
-  it("fires a single error on HTTP 503 (queue full) and skips the silent-close synthesis", async () => {
-    installDriver((_onEvent, onHttpError) => {
-      const res = new Response("queue full", {
-        status: 503,
-        headers: { "Retry-After": "2" },
-      });
-      onHttpError?.(res);
-    });
-
-    const h = singleHandlers();
-    await generateStream(singleRequest(), h);
-
-    // onHttpError schedules a .then(); flush microtasks.
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(h.onError).toHaveBeenCalledOnce();
-    const err = h.onError.mock.calls[0][0];
-    if (err.kind !== "http") throw new Error("expected http error");
-    expect(err.status).toBe(503);
-  });
-});
-
-describe("generateChainStream", () => {
-  it("flips a chain job to network error on silent close", async () => {
-    installDriver((onEvent) => {
-      onEvent({
-        event: null,
-        data: JSON.stringify({
-          type: "denoise_step",
-          stage_idx: 0,
-          step: 1,
-          total: 8,
-        } as ChainProgressEvent),
-      });
-    });
-
-    const h = chainHandlers();
-    await generateChainStream(chainRequest(), h);
-
-    expect(h.onError).toHaveBeenCalledOnce();
-    expect(h.onError.mock.calls[0][0].kind).toBe("network");
-  });
-
-  it("does not synthesize a network error after a chain complete", async () => {
-    const evt: SseChainCompleteEvent = {
-      video: "AAAA",
-      format: "mp4",
-      width: 1216,
-      height: 704,
-      frames: 97,
-      fps: 24,
-      generation_time_ms: 8000,
-    } as SseChainCompleteEvent;
-
-    installDriver((onEvent) => {
-      onEvent({ event: "complete", data: JSON.stringify(evt) });
-    });
-
-    const h = chainHandlers();
-    await generateChainStream(chainRequest(), h);
-    expect(h.onComplete).toHaveBeenCalledOnce();
-    expect(h.onError).not.toHaveBeenCalled();
   });
 });
 

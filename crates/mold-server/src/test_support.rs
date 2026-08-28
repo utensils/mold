@@ -5,10 +5,22 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+/// Take the one process-wide environment lock.
+///
+/// Every test that reads or writes a `MOLD_*`-style env var goes through
+/// this guard — readers too, because `Config::resolved_models_dir` and
+/// friends let the env var beat the struct field. One domain means one
+/// panicking holder poisons the lock for every other test in the binary,
+/// so the guard is poison-tolerant here, once: the env table is exactly as
+/// consistent after a panic as before it (each holder restores what it set
+/// on drop), and cascading a single flake into every env test is what the
+/// per-caller `unwrap()` did.
 #[cfg(test)]
-pub fn env_lock() -> &'static std::sync::Mutex<()> {
+pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    &ENV_LOCK
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub struct TestResponse {

@@ -1,10 +1,10 @@
 import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import {
+  cancelChainJob,
   cancelQueueJob,
-  fetchQueue,
-  generateChainStream,
-  generateStream,
+  chainJobEventsUrl,
+  createChainJob,
   listGalleryFrom,
   type StreamTarget,
 } from "../api";
@@ -13,20 +13,12 @@ import type {
   ChainRequestWire,
   GalleryImage,
   GenerateRequestWire,
-  SseChainCompleteEvent,
   SseCompleteEvent,
-  SseProgressEvent,
 } from "../types";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type { HostRoute } from "../lib/hostRouting";
 import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
 import { createUuid } from "@studio/lib/id";
-import {
-  prepareReferenceUploads,
-  requestNeedsReferenceUpload,
-  requestShouldUseReferenceUploads,
-  type ReferenceUploadLease,
-} from "@studio/api/referenceUploads";
 import { redactGenerationMediaForPersistence } from "@studio/lib/generationMedia";
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { toast } from "../lib/toasts";
@@ -36,25 +28,52 @@ import {
 } from "../lib/galleryMedia";
 import { blobToBase64 } from "../lib/base64";
 import { inferFormatFromName, type OutputFormat } from "../types";
-import { ApiError, apiHeaders, type ApiTarget } from "@studio/api/client";
-import { mergeQueueEntries } from "@studio/api/queuePlan";
+import { apiHeaders, type ApiTarget } from "@studio/api/client";
+import {
+  prepareReferenceUploadBatch,
+  referenceUploadBatchLimit,
+  requestShouldUseReferenceUploads,
+} from "@studio/api/referenceUploads";
+import {
+  OwnPrintPreviewWatchers,
+  previewDataUrl,
+} from "@studio/api/ownPrintPreview";
+import {
+  mutateQueueJobOnExpectedInstance,
+  retryQueueJobRecoveringAmbiguity,
+} from "@studio/api/queuePlan";
 import {
   admitGenerationBatch,
+  canonicalGenerationBatchLimit,
+  chunkGenerationBatchRequests,
+  isDefiniteGenerationAdmissionRejection,
   lookupGenerationBatchByClientId,
   reconcileGenerationBatches,
-  supportsDurableRequest,
-  supportsDurableGenerationLifecycle,
   type GenerationBatchStatus,
 } from "@studio/api/generationAdmission";
 import {
   buildGenerationBatchStatusRequest,
+  chunkGenerationBatchTrackers,
   createGenerationBatchTracker,
   mergeBulkGenerationBatchResponse,
   reduceGenerationLifecycle,
   type GenerationBatchTracker,
   type GenerationLifecycleJob,
 } from "@studio/lib/generationLifecycle";
-import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Identity";
+import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
+import {
+  emptyChainJobLive,
+  reduceChainJobFrame,
+} from "@studio/lib/chainJobProgress";
+import {
+  generationTrackerSettled,
+  presentGenerationChild,
+  presentationIsSettled,
+  reconciliationPresentation,
+  type GenerationChildPresentation,
+} from "@studio/lib/generationPresentation";
+import { applyDurablePresentation } from "../lib/durableGenerationPresentation";
+import type { ChainJobEvent } from "@studio/lib/api/chainTypes";
 
 function surfaceRequestWarnings(warnings: string[]): void {
   for (const warning of warnings) toast("warning", warning);
@@ -64,8 +83,6 @@ export interface JobProgress {
   stage: string;
   step: number | null;
   totalSteps: number | null;
-  weightBytesLoaded: number | null;
-  weightBytesTotal: number | null;
   queuePosition: number | null;
   gpu: number | null;
   elapsedMs: number | null;
@@ -89,6 +106,13 @@ export interface Job {
    * terminal outcome wins. This survives ambiguous admission, where the
    * client UUID is known before the server job UUID is. */
   cancelRequested?: boolean;
+  /** Durable hold details remain visible without turning the live job into a
+   * terminal canvas error. Retry is offered only when the host owns it. */
+  holdError?: string | null;
+  /** Typed cause of the hold (`MODEL_NOT_FOUND`, …); what the pull offer reads. */
+  holdCode?: string | null;
+  retryable?: boolean;
+  retrying?: boolean;
   /** Wall clock when the job stopped moving; `null` while it is running.
    * The Create activity strip expires settled-but-failed rows against this
    * (shared @studio partition rule) instead of keeping them forever. */
@@ -213,6 +237,10 @@ export interface ChainJobMeta {
   stageCount: number;
   currentStage: number;
   estimatedTotalFrames: number | null;
+  /** The durable chain job this sequence is, once created. Cancel routes on
+   * this rather than on `serverId`: a chain is cancelled through
+   * `DELETE /api/chain-jobs/:id`, never the generation queue. */
+  jobId?: string | null;
 }
 
 function emptyProgress(): JobProgress {
@@ -220,8 +248,6 @@ function emptyProgress(): JobProgress {
     stage: "Starting",
     step: null,
     totalSteps: null,
-    weightBytesLoaded: null,
-    weightBytesTotal: null,
     queuePosition: null,
     gpu: null,
     elapsedMs: null,
@@ -247,170 +273,9 @@ function serverErrorMessage(body: string | undefined): string | null {
   return body.trim() || null;
 }
 
-/**
- * Whether a terminal SSE error frame says the host KEPT this generation.
- * A durable-queue host ends the stream of a job it retained across a restart
- * with `{ retained: true, code: "server_restarting" }`; the work is still
- * queued there and will land in that host's gallery. Older servers never send
- * the field, so an absent or malformed body stays a hard failure.
- */
-function terminalErrorRetained(body: string | undefined): boolean {
-  if (!body) return false;
-  try {
-    const parsed = JSON.parse(body) as { retained?: unknown };
-    return parsed.retained === true;
-  } catch {
-    return false;
-  }
-}
-
-/** How long the post-close durability lookup may take before the job settles
- *  as an ordinary failure. The socket just died, so the host may well be gone;
- *  the row must not sit in `running` waiting on a request that never answers. */
-const RETENTION_LOOKUP_TIMEOUT_MS = 4_000;
-
-/**
- * Per-job durability, captured when the `queued` event arrives — while the row
- * demonstrably exists — and read later if the stream dies.
- *
- * Asking AFTER the close is a race the job can lose by succeeding: if the
- * transport drops once rendering has finished, the server has already removed
- * the row, and the absent row reads as "not durable" for output that is
- * sitting in the Library. Keyed by client job id, outside Pinia state (it is
- * plumbing, and the value is a promise).
- */
-const durabilityByJob = new Map<string, Promise<boolean>>();
-
-/** Take the host's answer while the row is still there to be asked about. */
-function captureJobDurability(
-  job: Job,
-  target: StreamTarget | undefined,
-): void {
-  if (!job.serverId || durabilityByJob.has(job.id)) return;
-  const answer = hostJournalledJob(job.serverId, target);
-  durabilityByJob.set(job.id, answer);
-  // Mirror it onto the job so consumers that never see this map — queue
-  // reconciliation above all — can tell "the host kept it" from "it vanished".
-  void answer.then((durable) => {
-    if (durable) job.durable = true;
-  });
-}
-
-/**
- * Whether the host's queue still holds `serverId` AND journalled it.
- *
- * Deliberately per-job rather than `capabilities.queue.durable_queue`: a host
- * that can promise durability still reports `durable: false` for a job it
- * excluded at admission — no gallery target, reference-upload media, or a
- * request over the journal's payload ceiling, which a large inline base64
- * source image can reach. Any failure resolves `false`, so an unreachable
- * host, a vanished row, or an older server all keep the hard failure.
- */
-async function hostJournalledJob(
-  serverId: string,
-  target: StreamTarget | undefined,
-): Promise<boolean> {
-  try {
-    const signal = AbortSignal.timeout(RETENTION_LOOKUP_TIMEOUT_MS);
-    let listing = await fetchQueue(target, signal);
-    const seenCursors = new Set<string>();
-    for (;;) {
-      const entry = mergeQueueEntries(
-        listing.entries,
-        listing.live_only_entries ?? [],
-      ).find((candidate) => candidate.id === serverId);
-      if (entry) return entry.durable === true;
-      const cursor = listing.page?.next_cursor;
-      const limit = listing.page?.limit;
-      if (!cursor || !limit) return false;
-      if (seenCursors.has(cursor)) return false;
-      seenCursors.add(cursor);
-      listing = await fetchQueue(target, signal, { limit, cursor });
-    }
-  } catch {
-    return false;
-  }
-}
-
 function markWorkStarted(job: Job) {
   job.workStarted = true;
   job.progress.queuePosition = null;
-}
-
-function applyProgress(job: Job, evt: SseProgressEvent) {
-  job.lastProgressAt = Date.now();
-  const p = job.progress;
-  switch (evt.type) {
-    case "dependency_wait":
-      p.stage = `Waiting for ${evt.dependency}`;
-      break;
-    case "download_progress": {
-      const percent =
-        evt.bytes_total > 0
-          ? Math.round((evt.bytes_downloaded / evt.bytes_total) * 100)
-          : 0;
-      p.stage = `Downloading ${evt.filename} (${percent}%)`;
-      break;
-    }
-    case "download_done":
-      p.stage = `Dependency ready: ${evt.filename}`;
-      break;
-    case "pull_complete":
-      p.stage = `Dependency ready: ${evt.model}`;
-      break;
-    case "stage_start":
-      markWorkStarted(job);
-      p.stage = evt.name;
-      break;
-    case "stage_done":
-      markWorkStarted(job);
-      p.stage = `${evt.name} (done)`;
-      p.elapsedMs = evt.elapsed_ms;
-      break;
-    case "stage_progress":
-      markWorkStarted(job);
-      p.stage = `${evt.name} ${evt.current}/${evt.total}`;
-      break;
-    case "info":
-      // Dimension warnings are emitted before the server queues the job, so
-      // an info event only proves real work has started if the job has
-      // already passed through a queued event.
-      if (p.queuePosition !== null || job.workStarted) markWorkStarted(job);
-      p.stage = evt.message;
-      break;
-    case "denoise_step":
-      markWorkStarted(job);
-      p.stage = "Denoising";
-      p.step = evt.step;
-      p.totalSteps = evt.total;
-      p.elapsedMs = evt.elapsed_ms;
-      break;
-    case "preview":
-      // A latent preview only exists once denoising is underway.
-      markWorkStarted(job);
-      p.stage = "Denoising";
-      p.step = evt.step;
-      p.totalSteps = evt.total;
-      job.previewUrl = `data:image/png;base64,${evt.image}`;
-      break;
-    case "queued":
-      p.stage = `Queued (position ${evt.position})`;
-      p.queuePosition = evt.position;
-      if (!job.serverId) {
-        job.serverId = evt.id;
-      }
-      break;
-    case "weight_load":
-      markWorkStarted(job);
-      p.stage = `Loading ${evt.component}`;
-      p.weightBytesLoaded = evt.bytes_loaded;
-      p.weightBytesTotal = evt.bytes_total;
-      break;
-    case "cache_hit":
-      markWorkStarted(job);
-      p.stage = `Cache hit: ${evt.resource}`;
-      break;
-  }
 }
 
 /** Chain progress events come from a separate SSE stream shape than the
@@ -490,30 +355,6 @@ function chainStageLabel(
  * unchanged. `seed_used` falls back to the request seed (or 0) — the
  * gallery match will miss but the refresh-on-complete still surfaces the
  * new item. */
-function chainCompleteToSingle(
-  req: GenerateRequestWire | ChainRequestWire,
-  evt: SseChainCompleteEvent,
-): SseCompleteEvent {
-  return {
-    image: evt.video,
-    format: evt.format,
-    width: evt.width,
-    height: evt.height,
-    seed_used: req.seed ?? 0,
-    generation_time_ms: evt.generation_time_ms ?? 0,
-    model: req.model,
-    video_frames: evt.frames,
-    video_fps: evt.fps,
-    video_thumbnail: evt.thumbnail ?? null,
-    video_gif_preview: evt.gif_preview ?? null,
-    video_has_audio: evt.has_audio ?? false,
-    video_duration_ms: evt.duration_ms ?? null,
-    video_audio_sample_rate: evt.audio_sample_rate ?? null,
-    video_audio_channels: evt.audio_channels ?? null,
-    gpu: evt.gpu ?? null,
-  };
-}
-
 /** Translate a single-clip `GenerateRequestWire` + chain routing decision
  * into the auto-expand `ChainRequestWire` the server expects. */
 function buildChainRequest(
@@ -590,14 +431,15 @@ export interface UseGenerateStream {
     decision?: ChainRoutingDecision,
     route?: HostRoute | null,
   ) => string;
-  /** Admit sibling requests in one durable parent when the frozen host
-   * supports it; otherwise preserve the legacy per-job stream behavior. */
+  /** Admit every sibling request in one durable parent on the frozen host,
+   * or refuse the whole batch by name with nothing queued. */
   submitBatch: (
     requests: readonly GenerateRequestWire[],
     decision?: ChainRoutingDecision,
     route?: HostRoute | null,
   ) => string[];
   cancel: (id: string) => Promise<void>;
+  retry: (id: string) => Promise<void>;
   /** Settle a still-running job as failed. Used by external liveness
    * authorities such as queue reconciliation so every failure updates the
    * canvas owner and terminal metadata through the same path. */
@@ -617,7 +459,7 @@ const STORAGE_KEY = "mold.generate.jobs";
 
 /// Maximum number of *settled* (done/error/canceled) jobs we keep in the
 /// ordinary localStorage rail. Actionable durable batches use independently
-/// projected recovery records; legacy running jobs remain in this rail.
+/// projected recovery records; running sequences remain in this rail.
 /// Past this cap, oldest settled jobs are forgotten on the next persist
 /// cycle. Completed media itself lives in the gallery DB.
 const SETTLED_HISTORY_CAP = 10;
@@ -1009,6 +851,20 @@ watch(
 
 type CompleteListener = (job: Job) => void;
 const completeListeners = new Set<CompleteListener>();
+/** Fired the first time a child is parked by its machine, with the machine's
+ * own reason. A print is admitted BEFORE its model is resolved, so this is
+ * where "nobody has this model" now arrives. */
+const heldListeners = new Set<CompleteListener>();
+
+function fireHeld(job: Job) {
+  for (const cb of heldListeners) {
+    try {
+      cb(job);
+    } catch (e) {
+      console.error("generate onHeld listener threw", e);
+    }
+  }
+}
 
 function fireComplete(job: Job) {
   for (const cb of completeListeners) {
@@ -1021,13 +877,11 @@ function fireComplete(job: Job) {
 }
 
 function recordSuccessfulSettlement(job: Job) {
-  durabilityByJob.delete(job.id);
   job.settledAt = Date.now();
   canvasErrorJobId.value = null;
 }
 
 function recordFailedSettlement(job: Job) {
-  durabilityByJob.delete(job.id);
   job.state = "error";
   job.settledAt = Date.now();
   job.previewUrl = null;
@@ -1046,7 +900,6 @@ function failRunningJob(id: string, error: string) {
 function settleDetachedJob(id: string, note: string) {
   const job = jobs.value.find((candidate) => candidate.id === id);
   if (!job || job.state !== "running") return;
-  durabilityByJob.delete(id);
   job.error = note;
   job.state = "error";
   job.settledAt = Date.now();
@@ -1107,7 +960,7 @@ export const __testing__ = {
   initializePersistedState,
   persistJobs,
   STORAGE_KEY,
-  durableRequestIneligibility,
+  generationRefusal,
   durablePersistenceSafeRequest,
   reconcileDurableHost,
   handleDurableEvent,
@@ -1132,6 +985,10 @@ function createJobRecord(
     state: "running",
     cancelling: false,
     cancelRequested: false,
+    holdError: null,
+    holdCode: null,
+    retryable: false,
+    retrying: false,
     settledAt: null,
     chain:
       decision.kind === "chain"
@@ -1158,6 +1015,10 @@ function createJobRecord(
 const durableTrackers = new Map<string, GenerationBatchTracker>();
 const durableJobsByBatch = new Map<string, Job[]>();
 const durableRoutes = new Map<string, HostRoute>();
+/** Denoise preview + step progress for our own running prints: the durable
+ * child carries neither, so each running job polls its host's
+ * `GET /api/queue/{id}/preview` exactly as an inspected queue row does. */
+const ownPreviews = new OwnPrintPreviewWatchers();
 const durableEffectKeys = new Set<string>();
 const durableEventSessions = new Map<
   string,
@@ -1165,8 +1026,6 @@ const durableEventSessions = new Map<
 >();
 const durableReconciliations = new Map<string, Promise<void>>();
 const durableReconciliationPending = new Map<string, Set<string> | null>();
-/** Server instance signatures that proved they emit post-commit lifecycle hints. */
-const durablePostCommitSignatures = new Map<string, string>();
 const durableHydrations = new Map<string, Promise<void>>();
 const durableCancellations = new Map<string, Promise<void>>();
 const durableGallerySnapshots = new Map<string, Promise<GalleryImage[]>>();
@@ -1183,32 +1042,33 @@ function routeSignature(route: HostRoute): string {
   ]);
 }
 
-function durableRequestIneligibility(
-  request: GenerateRequestWire | ChainRequestWire,
-  decision: ChainRoutingDecision,
-  route: HostRoute | null,
-): string | null {
-  if (decision.kind === "chain" || isPrebuiltChainRequest(request)) {
-    return "sequences use their dedicated durable lifecycle";
+/**
+ * The named reason this print cannot be queued, or `null` when it can. Every
+ * generation is admitted through `POST /api/generation-batches`; there is no
+ * second submission path, so a reason here is a refusal the caller shows the
+ * user rather than a signal to route the request somewhere else.
+ *
+ * It is host-level on purpose. The durable protocol carries source media,
+ * LoRAs, `hdr_exr_dir`, identity photos, and H3's ordered references, so the
+ * server's own typed admission refusal is the only authority for a request it
+ * cannot take.
+ */
+function generationRefusal(route: HostRoute | null): string | null {
+  if (!route) return "no machine is selected for this print.";
+  if (!route.instanceId) {
+    return `${route.label} has not reported its server instance yet.`;
   }
-  if (!route || !supportsDurableGenerationLifecycle(route.durableGeneration)) {
-    return "the host does not advertise durable generation outcomes";
-  }
-  if (!route.instanceId) return "the host instance is unknown";
-  const generation = request as GenerateRequestWire;
-  if (isMinimaxH3Identity(route.modelFamily, generation.model)) {
-    return "MiniMax H3 replay authority is intentionally private";
-  }
-  if (
-    !supportsDurableRequest(
-      route.durableGeneration,
-      route.durableMedia,
-      generation,
-    )
-  ) {
-    return "the host does not advertise encrypted durable support for this request";
-  }
-  return null;
+  const policy = generationHostSubmissionPolicy(
+    { kind: "pinned", hostId: route.hostId },
+    {
+      hostId: route.hostId,
+      queue: route.durableGeneration,
+      durableMedia: route.durableMedia,
+    },
+  );
+  return policy.admission === "canonical_durable"
+    ? null
+    : `${route.label} cannot queue this print: ${policy.refusal}.`;
 }
 
 function routeApiTarget(route: HostRoute): ApiTarget {
@@ -1334,12 +1194,14 @@ async function wavFacts(blob: Blob): Promise<WavFacts | null> {
 
 async function durableCompletionResult(
   job: Job,
-  lifecycle: GenerationLifecycleJob,
+  saved: {
+    filename: string;
+    originalFilename?: string | null;
+    /** How long the machine actually spent. */
+    generationTimeMs: number;
+  },
 ): Promise<SseCompleteEvent> {
-  const filename = lifecycle.result?.filename;
-  if (!filename) {
-    throw new Error("the host completed this print without an output filename");
-  }
+  const filename = saved.filename;
   const target = routeForDetachedJob(job);
   const print = await galleryRowForCompletion(job, filename);
   const host = getHost(job.hostId ?? ORIGIN_HOST_ID) ?? {
@@ -1363,9 +1225,9 @@ async function durableCompletionResult(
       .catch(() => null);
   }
   let originalImage: string | null = null;
-  if (lifecycle.result?.originalFilename) {
+  if (saved.originalFilename) {
     originalImage = await blobToBase64(
-      await fetchGalleryBlob(host, lifecycle.result.originalFilename),
+      await fetchGalleryBlob(host, saved.originalFilename),
     );
   }
   const request = job.request as GenerateRequestWire;
@@ -1379,11 +1241,7 @@ async function durableCompletionResult(
     width: metadata.width,
     height: metadata.height,
     seed_used: metadata.seed,
-    generation_time_ms: Math.max(
-      0,
-      (lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs) -
-        lifecycle.createdAtMs,
-    ),
+    generation_time_ms: saved.generationTimeMs,
     model: metadata.model,
     ...(originalImage ? { original_image: originalImage } : {}),
     ...(kind === "video"
@@ -1406,32 +1264,16 @@ async function durableCompletionResult(
   };
 }
 
-function settleDurableTerminal(
+/** The `complete` arm is the one presentation the composable maps itself:
+ * hydrating the print's media is web-specific and asynchronous. */
+function hydrateDurableCompletion(
   job: Job,
   lifecycle: GenerationLifecycleJob,
+  p: Extract<GenerationChildPresentation, { kind: "complete" }>,
 ): void {
   if (durableEffectKeys.has(lifecycle.key)) return;
-  const isReloadedCompletion =
-    lifecycle.phase === "complete" && job.state === "done" && !job.result;
+  const isReloadedCompletion = job.state === "done" && !job.result;
   if (job.state !== "running" && !isReloadedCompletion) return;
-  if (lifecycle.phase === "cancelled") {
-    durableEffectKeys.add(lifecycle.key);
-    job.state = "canceled";
-    job.cancelling = false;
-    job.cancelRequested = false;
-    job.settledAt = lifecycle.completedAtMs ?? Date.now();
-    job.previewUrl = null;
-    return;
-  }
-  if (lifecycle.phase === "failed") {
-    durableEffectKeys.add(lifecycle.key);
-    job.cancelling = false;
-    job.cancelRequested = false;
-    job.error = lifecycle.error ?? errorText(lifecycle.terminalError);
-    recordFailedSettlement(job);
-    return;
-  }
-  if (lifecycle.phase !== "complete") return;
 
   // Claim the terminal transition before fetching media. A concurrent cancel
   // sees `done` and cannot replace a success the host already made durable.
@@ -1452,19 +1294,14 @@ function settleDurableTerminal(
     .then(async (release) => {
       if (!release) return;
       try {
-        const result = await durableCompletionResult(job, lifecycle);
+        const result = await durableCompletionResult(job, p);
         if (job.state !== "done") return;
         job.result = result;
         job.mediaHydrationError = null;
         job.error = null;
-        if (lifecycle.result?.filename) {
-          durableGalleryRows.delete(
-            durableGalleryRowKey(
-              durableHostKey(job),
-              lifecycle.result.filename,
-            ),
-          );
-        }
+        durableGalleryRows.delete(
+          durableGalleryRowKey(durableHostKey(job), p.filename),
+        );
         durableEffectKeys.add(lifecycle.key);
         fireComplete(job);
         scheduleAutoRemoveOnDone(job.id);
@@ -1493,61 +1330,88 @@ function settleDurableTerminal(
   durableHydrations.set(lifecycle.key, hydration);
 }
 
+/** Nothing on this authority can repair a fenced batch, and the instance now
+ * answering is not the one that published its files. */
+function authorityLost(tracker: GenerationBatchTracker): boolean {
+  return (
+    reconciliationPresentation(tracker.reconciliation, null).kind === "unknown"
+  );
+}
+
 function applyDurableTracker(tracker: GenerationBatchTracker): void {
-  const ownedJobs = jobsForClientBatch(tracker.clientBatchId);
-  if (tracker.reconciliation.reason === "instance_mismatch") {
-    for (const job of ownedJobs) {
-      settleDetachedJob(
-        job.id,
-        "This machine was replaced. The previous server instance still owns this print's outcome.",
+  const now = Date.now();
+  const previewRoute = durableRoutes.get(tracker.hostId) ?? null;
+  const lost = authorityLost(tracker);
+  for (const job of jobsForClientBatch(tracker.clientBatchId)) {
+    const childIndex = job.durableBatch?.childIndex;
+    if (childIndex === undefined) continue;
+    const lifecycle =
+      Object.values(tracker.jobs).find(
+        (candidate) => candidate.childIndex === childIndex,
+      ) ?? null;
+    if (lifecycle) {
+      job.serverId = lifecycle.authority.jobId;
+      job.durableBatch!.serverBatchId = lifecycle.authority.batchId;
+      job.lastProgressAt = Math.max(
+        job.lastProgressAt,
+        lifecycle.version.updatedAtMs,
       );
     }
-    return;
-  }
-  if (
-    tracker.reconciliation.reason === "missing" ||
-    tracker.reconciliation.reason === "batch_mismatch"
-  ) {
-    for (const job of ownedJobs) {
-      settleDetachedJob(
-        job.id,
-        "The durable generation record could not be reconciled on its original machine.",
-      );
-    }
-    return;
-  }
-  for (const lifecycle of Object.values(tracker.jobs)) {
-    const job = ownedJobs.find(
-      (candidate) =>
-        candidate.durableBatch?.childIndex === lifecycle.childIndex,
-    );
-    if (!job) continue;
-    job.serverId = lifecycle.authority.jobId;
-    if (job.durableBatch) {
-      job.durableBatch.serverBatchId = lifecycle.authority.batchId;
-    }
-    job.lastProgressAt = Math.max(
-      job.lastProgressAt,
-      lifecycle.version.updatedAtMs,
-    );
-    if (lifecycle.phase === "running") {
-      markWorkStarted(job);
-      job.progress.stage = "Developing";
-    } else if (lifecycle.phase === "held") {
-      job.progress.stage = "Queued · waiting for an available lane";
-      job.workStarted = false;
-    } else if (lifecycle.phase === "accepted" || lifecycle.phase === "queued") {
-      job.progress.stage = "Queued";
-      job.workStarted = false;
+    const p = presentGenerationChild({
+      tracker,
+      childIndex,
+      hostLabel: job.hostLabel,
+      now,
+    });
+    if (p.kind === "complete" && lifecycle) {
+      // A frozen completion keeps its outcome, but a media read that already
+      // failed is not retried against a replacement instance.
+      if (lost && job.state === "done" && !job.result) {
+        job.progress.stage = "Completed · media unavailable";
+      } else {
+        hydrateDurableCompletion(job, lifecycle, p);
+      }
+    } else if (presentationIsSettled(p)) {
+      // A terminal transition is an effect boundary, claimed once per
+      // authority key so no replayed snapshot settles it a second time.
+      if (
+        job.state === "running" &&
+        !durableEffectKeys.has(lifecycle?.key ?? "")
+      ) {
+        applyDurablePresentation(job, p, now);
+        if (lifecycle) durableEffectKeys.add(lifecycle.key);
+        if (p.kind !== "cancelled" && p.kind !== "unknown") {
+          canvasErrorJobId.value = job.id;
+        }
+      }
     } else {
-      settleDurableTerminal(job, lifecycle);
+      const wasHeld = job.holdError != null;
+      applyDurablePresentation(job, p, now);
+      if (p.kind === "held" && !wasHeld) fireHeld(job);
+    }
+    if (p.kind === "running" && previewRoute && lifecycle) {
+      ownPreviews.ensure(
+        job.id,
+        routeApiTarget(previewRoute),
+        lifecycle.authority.jobId,
+        (progress) => {
+          if (job.state !== "running") return;
+          const url = previewDataUrl(progress);
+          if (url) job.previewUrl = url;
+          if (progress.step !== null) job.progress.step = progress.step;
+          if (progress.total !== null) job.progress.totalSteps = progress.total;
+          if (progress.stage) job.progress.stage = progress.stage;
+          job.lastProgressAt = Date.now();
+        },
+      );
+    } else {
+      ownPreviews.stop(job.id);
     }
     if (
       job.cancelRequested &&
-      (lifecycle.phase === "accepted" ||
-        lifecycle.phase === "queued" ||
-        lifecycle.phase === "held" ||
-        lifecycle.phase === "running")
+      (p.kind === "held" ||
+        p.kind === "running" ||
+        (p.kind === "waiting" && p.reason === "queued"))
     ) {
       void confirmDurableCancellation(job).catch(() => undefined);
     }
@@ -1560,13 +1424,16 @@ function pruneDurableTrackerIfSettled(clientBatchId: string): void {
   const tracker = durableTrackers.get(clientBatchId);
   if (!tracker) return;
   const owned = jobsForClientBatch(clientBatchId);
+  if (!generationTrackerSettled(tracker, owned.length)) return;
+  // A completion whose media is still hydrating keeps its tracker so the
+  // next reconciliation can retry the exact read — unless no reconciliation
+  // on this authority can ever answer again.
   if (
-    owned.length === 0 ||
-    owned.some(
-      (job) => job.state === "running" || (job.state === "done" && !job.result),
-    )
-  )
+    !authorityLost(tracker) &&
+    owned.some((job) => job.state === "done" && !job.result)
+  ) {
     return;
+  }
   durableTrackers.delete(clientBatchId);
   durableJobsByBatch.delete(clientBatchId);
   for (const lifecycle of Object.values(tracker.jobs)) {
@@ -1602,9 +1469,23 @@ function applyDurableBatchStatus(
   applyDurableTracker(next);
 }
 
+/** The host refused (or never received) the batch: fail every job with the
+ * server's own sentence and mark the tracker rejected so nothing waits. */
+function rejectDurableAdmission(clientBatchId: string, error: string): void {
+  const tracker = durableTrackers.get(clientBatchId);
+  if (!tracker) return;
+  const next = reduceGenerationLifecycle(tracker, {
+    type: "admission_rejected",
+    error,
+  });
+  durableTrackers.set(clientBatchId, next);
+  applyDurableTracker(next);
+}
+
 async function recoverAmbiguousAdmission(
   route: HostRoute,
   clientBatchId: string,
+  releaseLeases: () => Promise<void> = async () => {},
 ): Promise<void> {
   try {
     const lookup = await lookupGenerationBatchByClientId(
@@ -1615,22 +1496,25 @@ async function recoverAmbiguousAdmission(
       applyDurableBatchStatus(clientBatchId, lookup.batch);
       return;
     }
+    // The host answered and has no such batch: the POST never committed,
+    // so the chunk's upload leases were never consumed and go back before
+    // the refusal — otherwise they sit on the host until their TTL and lock
+    // this identity out of its next reference print.
+    await releaseLeases();
+    // Waiting longer would only hide the error the host gave for it.
     const tracker = durableTrackers.get(clientBatchId);
-    if (tracker) {
-      durableTrackers.set(
-        clientBatchId,
-        reduceGenerationLifecycle(tracker, { type: "lookup_missing" }),
-      );
-    }
-    for (const job of jobsForClientBatch(clientBatchId)) {
-      if (job.state === "running") {
-        job.detached = true;
-        job.progress.stage = "Confirming durable admission";
-      }
-    }
+    rejectDurableAdmission(
+      clientBatchId,
+      tracker?.admission.error ??
+        "The host did not accept this print; try again.",
+    );
   } catch {
-    // The redacted client UUID remains persisted; reconnect/wake reconciliation
-    // retries against that same authority and never submits a second job.
+    // The host is unreachable: the redacted client UUID remains persisted and
+    // reconnect/wake reconciliation retries against that same authority. It
+    // never submits a second job.
+    for (const job of jobsForClientBatch(clientBatchId)) {
+      if (job.state === "running") job.detached = true;
+    }
   }
 }
 
@@ -1639,88 +1523,131 @@ async function admitDurableBatch(
   clientBatchId: string,
   requests: readonly GenerateRequestWire[],
 ): Promise<void> {
+  let transport = requests;
+  // A lease is consumed only by an admitted POST; a definite refusal of the
+  // chunk hands its sessions back so a retry is not locked out.
+  let releaseLeases = async (): Promise<void> => {};
+  // MiniMax H3 references are staged on the frozen host right before the
+  // POST — one lease per sibling, on a keyed host; an authless host keeps the
+  // validated inline references. Nothing has been POSTed yet, so a failure
+  // here is a definite refusal of the chunk. A chunk with no upload work
+  // POSTs synchronously, exactly as before.
+  if (
+    requests.some((request) =>
+      requestShouldUseReferenceUploads(
+        request,
+        route.target,
+        route.referenceUploads,
+      ),
+    )
+  ) {
+    try {
+      const staged = await prepareReferenceUploadBatch({
+        target: routeApiTarget(route),
+        expectedInstanceId: route.instanceId ?? "",
+        capabilities: route.referenceUploads,
+        requests,
+      });
+      transport = staged.requests;
+      releaseLeases = staged.release;
+    } catch (error) {
+      rejectDurableAdmission(clientBatchId, errorText(error));
+      return;
+    }
+  }
   try {
     const batch = await admitGenerationBatch(routeApiTarget(route), {
       client_batch_id: clientBatchId,
-      requests: requests.map((request) => ({ ...request, batch_size: 1 })),
+      requests: transport.map((request) => ({ ...request, batch_size: 1 })),
     });
     applyDurableBatchStatus(clientBatchId, batch);
   } catch (error) {
     const tracker = durableTrackers.get(clientBatchId);
+    if (isDefiniteGenerationAdmissionRejection(error)) {
+      await releaseLeases();
+      rejectDurableAdmission(clientBatchId, errorText(error));
+      return;
+    }
     if (tracker) {
-      durableTrackers.set(
-        clientBatchId,
-        reduceGenerationLifecycle(tracker, {
-          type: "admission_uncertain",
-          error: errorText(error),
-        }),
-      );
+      const next = reduceGenerationLifecycle(tracker, {
+        type: "admission_uncertain",
+        error: errorText(error),
+      });
+      durableTrackers.set(clientBatchId, next);
+      applyDurableTracker(next);
     }
-    const lookup = await lookupGenerationBatchByClientId(
-      routeApiTarget(route),
-      clientBatchId,
-    ).catch(() => null);
-    if (lookup?.kind === "found") {
-      applyDurableBatchStatus(clientBatchId, lookup.batch);
-      return;
-    }
-    if (error instanceof ApiError && lookup?.kind === "missing") {
-      const current = durableTrackers.get(clientBatchId);
-      if (current) {
-        durableTrackers.set(
-          clientBatchId,
-          reduceGenerationLifecycle(current, {
-            type: "admission_rejected",
-            error: error.message,
-          }),
-        );
-      }
-      for (const job of jobsForClientBatch(clientBatchId)) {
-        if (job.state !== "running") continue;
-        job.error = error.message;
-        recordFailedSettlement(job);
-      }
-      return;
-    }
-    await recoverAmbiguousAdmission(route, clientBatchId);
+    await recoverAmbiguousAdmission(route, clientBatchId, releaseLeases);
   }
 }
 
+/**
+ * Admit every print through the one durable route. A request this machine
+ * cannot carry is refused by name and NOTHING is queued.
+ */
 function submitDurableJobs(
   requests: readonly GenerateRequestWire[],
   decision: ChainRoutingDecision,
-  route: HostRoute,
+  route: HostRoute | null,
 ): string[] {
+  if (requests.length === 0) return [];
+  const refusal = generationRefusal(route);
+  if (refusal !== null) throw new Error(refusal);
+  const host = route!;
+  // A reference-bearing batch is chunked no wider than the host lets one
+  // identity hold upload sessions, because every sibling's lease is open
+  // until the chunk's POST consumes it.
+  const limit = referenceUploadBatchLimit(
+    requests,
+    host.target,
+    host.referenceUploads,
+    canonicalGenerationBatchLimit(host.durableGeneration)!,
+  );
+  // Every sibling's lease stays open until its chunk's POST consumes it, so
+  // reference-bearing chunks are admitted one after another; ordinary chunks
+  // keep leaving in parallel.
+  const uploadWork = requests.some((request) =>
+    requestShouldUseReferenceUploads(
+      request,
+      host.target,
+      host.referenceUploads,
+    ),
+  );
+  let previousChunk: Promise<void> = Promise.resolve();
   selectedJobId.value = null;
   canvasErrorJobId.value = null;
-  const clientBatchId = createUuid();
-  const tracker = createGenerationBatchTracker({
-    hostId: route.hostId,
-    expectedInstanceId: route.instanceId!,
-    clientBatchId,
-    submittedAtMs: Date.now(),
-  });
-  const admitted = requests.map((request, offset) =>
-    createJobRecord(request, decision, route, {
+  const admitted: Job[] = [];
+  for (const requestChunk of chunkGenerationBatchRequests(requests, limit)) {
+    const clientBatchId = createUuid();
+    const tracker = createGenerationBatchTracker({
+      hostId: host.hostId,
+      expectedInstanceId: host.instanceId!,
       clientBatchId,
-      expectedInstanceId: route.instanceId!,
-      serverBatchId: null,
-      childIndex: offset + 1,
-    }),
-  );
+      submittedAtMs: Date.now(),
+    });
+    const chunkJobs = requestChunk.map((request, offset) =>
+      createJobRecord(request, decision, host, {
+        clientBatchId,
+        expectedInstanceId: host.instanceId!,
+        serverBatchId: null,
+        childIndex: offset + 1,
+      }),
+    );
+    admitted.push(...chunkJobs);
+    durableJobsByBatch.set(clientBatchId, chunkJobs);
+    durableTrackers.set(clientBatchId, tracker);
+    // Journal each independently idempotent chunk before its POST leaves.
+    applyDurableTracker(tracker);
+    if (uploadWork) {
+      previousChunk = previousChunk.then(() =>
+        admitDurableBatch(host, clientBatchId, requestChunk),
+      );
+    } else {
+      void admitDurableBatch(host, clientBatchId, requestChunk);
+    }
+  }
   jobs.value = [...admitted, ...jobs.value];
-  durableJobsByBatch.set(clientBatchId, admitted);
-  // Journal only THIS batch before dispatch. The ordinary rail's debounced
-  // presentation write is deliberately outside admission, so submitting job
-  // N never projects or serializes jobs 1..N-1.
-  persistDurableRecoveryBatch(clientBatchId);
-  durableTrackers.set(clientBatchId, tracker);
-  durableRoutes.set(route.hostId, {
-    ...route,
-    target: { ...route.target },
-  });
-  ensureDurableEventSession(route);
-  void admitDurableBatch(route, clientBatchId, requests);
+  durableRoutes.set(host.hostId, { ...host, target: { ...host.target } });
+  ensureDurableEventSession(host);
   return admitted.map((job) => job.id);
 }
 
@@ -1730,7 +1657,7 @@ async function runDurableReconciliation(
 ): Promise<void> {
   const route = durableRoutes.get(hostId);
   if (!route) return;
-  // One authoritative gallery snapshot is shared by every legacy completion
+  // One authoritative gallery snapshot is shared by every completion settled
   // in this REST reconciliation wave. The next wave invalidates it.
   durableGallerySnapshots.delete(hostId);
   const current = [...durableTrackers.values()].filter(
@@ -1738,17 +1665,23 @@ async function runDurableReconciliation(
       tracker.hostId === hostId &&
       (!clientBatchIds || clientBatchIds.has(tracker.clientBatchId)),
   );
-  const request = buildGenerationBatchStatusRequest(current, hostId);
-  if (request.client_batch_ids.length === 0 && !request.batch_ids?.length)
-    return;
-  const response = await reconcileGenerationBatches(
-    routeApiTarget(route),
-    request,
-  );
-  const merged = mergeBulkGenerationBatchResponse(current, hostId, response);
-  for (const tracker of merged.trackers) {
-    durableTrackers.set(tracker.clientBatchId, tracker);
-    if (tracker.hostId === hostId) applyDurableTracker(tracker);
+  for (const trackerChunk of chunkGenerationBatchTrackers(current, hostId)) {
+    const request = buildGenerationBatchStatusRequest(trackerChunk, hostId);
+    if (request.client_batch_ids.length === 0 && !request.batch_ids?.length)
+      continue;
+    const response = await reconcileGenerationBatches(
+      routeApiTarget(route),
+      request,
+    );
+    const merged = mergeBulkGenerationBatchResponse(
+      trackerChunk,
+      hostId,
+      response,
+    );
+    for (const tracker of merged.trackers) {
+      durableTrackers.set(tracker.clientBatchId, tracker);
+      applyDurableTracker(tracker);
+    }
   }
 }
 
@@ -1835,16 +1768,33 @@ function handleDurableEvent(
     // Normal settlements reconcile only their owning batch. Admission and
     // execution are concurrent, so an event whose id is not mapped yet must
     // still fall back to the coalesced host-wide authority read.
-    durablePostCommitSignatures.set(hostId, routeSignature(route));
     void reconcileDurableHost(hostId, exactJob?.durableBatch?.clientBatchId);
     return;
   }
   if (data.type === "generation_states_committed") {
     // Bulk cancellation deliberately emits one host-wide post-commit hint.
-    durablePostCommitSignatures.set(hostId, routeSignature(route));
     void reconcileDurableHost(hostId);
     return;
   }
+  if (data.type === "gallery_added" && typeof data.filename === "string") {
+    // The row is cached for the read the commit hint drives; the hint
+    // always follows the gallery publish, so reading here would duplicate
+    // every completion read.
+    const row = galleryRowFromUnknown(data.image, data.filename);
+    const owner =
+      row?.metadata.job_id &&
+      jobs.value.find(
+        (candidate) =>
+          candidate.hostId === hostId &&
+          candidate.serverId === row.metadata.job_id,
+      );
+    if (row && owner) {
+      durableGalleryRows.set(durableGalleryRowKey(hostId, data.filename), row);
+    }
+    return;
+  }
+  // The running transition emits no commit hint, so queue/start hints read
+  // their owning batch; `job_ended` precedes the row write and never does.
   if (data.type === "job_started" && typeof data.id === "string") {
     if (exactJob?.state === "running") {
       markWorkStarted(exactJob);
@@ -1853,31 +1803,8 @@ function handleDurableEvent(
     }
   } else if (data.type === "job_queued" && typeof data.id === "string") {
     if (exactJob?.state === "running") exactJob.progress.stage = "Queued";
-  } else if (
-    data.type === "gallery_added" &&
-    typeof data.filename === "string"
-  ) {
-    const row = galleryRowFromUnknown(data.image, data.filename);
-    if (row) {
-      const jobId = row.metadata.job_id;
-      if (jobId) {
-        exactJob = jobs.value.find(
-          (candidate) =>
-            candidate.hostId === hostId && candidate.serverId === jobId,
-        );
-      }
-      if (exactJob) {
-        durableGalleryRows.set(
-          durableGalleryRowKey(hostId, data.filename),
-          row,
-        );
-      }
-    }
-    // Older servers need gallery invalidation as their last completion hint.
-    // Once this exact server instance proves it emits the ordered commit hint,
-    // reconciling here would duplicate every completion read.
-    if (durablePostCommitSignatures.get(hostId) === routeSignature(route))
-      return;
+  } else {
+    return;
   }
   if (exactJob?.durableBatch) {
     void reconcileDurableHost(hostId, exactJob.durableBatch.clientBatchId);
@@ -1975,10 +1902,7 @@ function recoverDurableLifecycle(): void {
               typeof window === "undefined" ? "" : window.location.origin,
           },
       instanceId: durable.expectedInstanceId,
-      durableGeneration: {
-        heterogeneous_batch: true,
-        durable_batch_outcomes: true,
-      },
+      durableGeneration: { heterogeneous_batch_max_outputs: 1 },
       eventsAvailable: true,
     };
     durableRoutes.set(hostId, route);
@@ -2011,7 +1935,6 @@ function resetDurableLifecycleForTests(): void {
   durableEffectKeys.clear();
   durableReconciliations.clear();
   durableReconciliationPending.clear();
-  durablePostCommitSignatures.clear();
   durableHydrations.clear();
   durableCancellations.clear();
   durableGallerySnapshots.clear();
@@ -2024,30 +1947,129 @@ function submitJobs(
   decision: ChainRoutingDecision = { kind: "single" },
   route: HostRoute | null = null,
 ): string[] {
-  if (
-    requests.length > 0 &&
-    requests.every(
-      (request) =>
-        durableRequestIneligibility(request, decision, route) === null,
-    )
-  ) {
-    return submitDurableJobs(requests, decision, route!);
+  return submitDurableJobs(requests, decision, route);
+}
+
+/**
+ * Sequences only. Every generation is admitted through
+ * `POST /api/generation-batches`; there is no attached generation stream left
+ * to fall back to, so a request this machine cannot carry durably is refused
+ * by `submitDurableJobs` rather than re-routed here.
+ */
+/**
+ * Create an auto-chained sequence as a durable chain job and follow its own
+ * event stream.
+ *
+ * `ephemeral: true` is what keeps it out of Library ▸ History ▸ Sequences and
+ * out of the print's saved provenance — the user asked for one shot, not a
+ * sequence. The subscription is deliberately PER JOB: `useChainJobs.watch` is
+ * a singleton driving the sequence rail, and an auto-chain row must not take
+ * it over.
+ */
+async function followAutoChainJob(
+  job: Job,
+  request: ChainRequestWire,
+  route: HostRoute | null,
+  controller: AbortController,
+  onError: (err: { kind: "http" | "network"; message?: string }) => void,
+): Promise<void> {
+  let jobId: string;
+  try {
+    ({ job_id: jobId } = await createChainJob(
+      request,
+      route?.target,
+      createUuid(),
+      surfaceRequestWarnings,
+    ));
+  } catch (error) {
+    onError({ kind: "network", message: errorText(error) });
+    return;
   }
-  return requests.map((request) => submitJob(request, decision, route, false));
+  if (job.chain) job.chain.jobId = jobId;
+  let live = emptyChainJobLive();
+  let settled = false;
+  const settle = (run: () => void) => {
+    if (settled) return;
+    settled = true;
+    run();
+    controller.abort();
+  };
+  await fetchEventSource(chainJobEventsUrl(jobId, route?.target), {
+    signal: controller.signal,
+    openWhenHidden: true,
+    headers: route?.target?.apiKey ? { "x-api-key": route.target.apiKey } : {},
+    onmessage: (message) => {
+      if (message.event !== "chain_job") return;
+      let event: ChainJobEvent;
+      try {
+        event = JSON.parse(message.data) as ChainJobEvent;
+      } catch {
+        // A malformed frame carries no authority; the terminal frame settles.
+        return;
+      }
+      const reduced = reduceChainJobFrame(live, event);
+      live = reduced.live;
+      for (const frame of reduced.progress) applyChainProgress(job, frame);
+      const output = reduced.finalized?.output;
+      if (output) {
+        settle(() => void completeAutoChainJob(job, output));
+        return;
+      }
+      const terminal = reduced.terminal;
+      if (!terminal || terminal.state === "completed") return;
+      settle(() => {
+        if (terminal.state === "cancelled") {
+          markCancellationConfirmed(job);
+          return;
+        }
+        job.error = terminal.error ?? "The sequence failed.";
+        recordFailedSettlement(job);
+      });
+    },
+    onclose: () => {
+      if (!controller.signal.aborted && !settled) {
+        throw new Error("Sequence event stream closed.");
+      }
+    },
+    onerror: (error) => {
+      if (controller.signal.aborted || settled) return;
+      throw error;
+    },
+  }).catch((error) => {
+    if (settled || controller.signal.aborted || job.state !== "running") return;
+    onError({ kind: "network", message: errorText(error) });
+  });
+}
+
+/** A finished sequence is one saved print: hydrate it from the machine's
+ * gallery exactly as a durable print's completion does. */
+async function completeAutoChainJob(job: Job, filename: string): Promise<void> {
+  try {
+    const result = await durableCompletionResult(job, {
+      filename,
+      generationTimeMs: Date.now() - job.startedAt,
+    });
+    if (job.state !== "running") return;
+    job.result = result;
+    job.state = "done";
+    recordSuccessfulSettlement(job);
+    job.previewUrl = null;
+    fireComplete(job);
+    scheduleAutoRemoveOnDone(job.id);
+  } catch (error) {
+    if (job.state !== "running") return;
+    job.error = errorText(error);
+    recordFailedSettlement(job);
+  }
 }
 
 function submitJob(
   req: GenerateRequestWire | ChainRequestWire,
   decision: ChainRoutingDecision = { kind: "single" },
   route: HostRoute | null = null,
-  allowDurable = true,
 ): string {
-  if (
-    allowDurable &&
-    !isPrebuiltChainRequest(req) &&
-    durableRequestIneligibility(req, decision, route) === null
-  ) {
-    return submitDurableJobs([req], decision, route!)[0]!;
+  if (decision.kind !== "chain" && !isPrebuiltChainRequest(req)) {
+    return submitDurableJobs([req as GenerateRequestWire], decision, route)[0]!;
   }
   selectedJobId.value = null;
   canvasErrorJobId.value = null;
@@ -2074,85 +2096,22 @@ function submitJob(
           : err.status === 0
             ? (message ?? "generation failed")
             : `HTTP ${err.status}${message ? `: ${message}` : ""}`;
-      // A terminal frame is self-describing and per-job by construction: the
-      // host sends `retained` only for a job it actually kept.
-      if (err.status === 0 && terminalErrorRetained(err.body)) {
-        settleDetachedJob(job.id, job.error ?? "");
-        return;
-      }
       recordFailedSettlement(job);
       return;
     }
     job.error = err.message ?? "network error";
-    // The socket died with no terminal frame, so the host never got to say
-    // whether it kept this job. Ask it — per job, because a host that can
-    // promise durability still excludes some jobs at admission and a false
-    // "it will finish" is worse than a failure the user can simply retry.
-    void settleFramelessClose(job, job.error, req);
-  };
-
-  /** Resolve a frameless close against the answer captured at `queued` time.
-   *  Anything short of a `durable: true` row — an unreachable host, a vanished
-   *  row, an unadmitted job, a host that never promised durability — keeps the
-   *  hard failure that has always been the behaviour here.
-   *
-   *  Deliberately NOT gated on the route's advertised `durable_queue`: a
-   *  single-host page submits with no route at all (`normalizeSubmitRoute`
-   *  collapses the origin to `null`), which is the common deployment, and
-   *  requiring one would leave the default path permanently unreachable. The
-   *  row's own `durable` flag is the stronger per-job answer anyway — only a
-   *  host with the durable queue ever reports it — so asking for it directly
-   *  is both correct for the origin and correct for a routed host whose
-   *  capabilities were never read. */
-  const settleFramelessClose = async (
-    job: Job,
-    note: string,
-    request: GenerateRequestWire | ChainRequestWire,
-  ) => {
-    const durable =
-      !!job.serverId &&
-      !requestNeedsReferenceUpload(request as GenerateRequestWire) &&
-      // Captured at `queued`, never asked now: by this point a job that
-      // SUCCEEDED has already had its row removed, and asking would read that
-      // absence as "not durable" for a print already in the Library.
-      (await (durabilityByJob.get(job.id) ?? Promise.resolve(false)));
-    // The lookup is asynchronous: a cancellation can be confirmed, or a late
-    // completion can land, while it is in flight. Re-check before EITHER
-    // settlement — replacing a confirmed cancellation with an error is as
-    // wrong as replacing it with a detached note.
-    if (job.state !== "running") return;
-    if (durable) {
-      // Soft settle: the row stops moving and keeps its note, but the canvas
-      // never claims a print failed that the host is still going to render.
-      settleDetachedJob(job.id, note);
-      return;
-    }
     recordFailedSettlement(job);
   };
 
   const startStream = async () => {
     if (decision.kind === "chain") {
-      const chainReq = resolveChainRequest(req, decision);
       job.streamStarted = true;
-      await generateChainStream(
-        chainReq,
-        {
-          onProgress: (evt) => applyChainProgress(job, evt),
-          onComplete: (evt) => {
-            job.result = chainCompleteToSingle(req, evt);
-            job.state = "done";
-            recordSuccessfulSettlement(job);
-            job.previewUrl = null;
-            if (evt.gpu !== null && evt.gpu !== undefined)
-              job.progress.gpu = evt.gpu;
-            fireComplete(job);
-            scheduleAutoRemoveOnDone(id);
-          },
-          onError: onErrorCommon,
-          onRequestWarnings: surfaceRequestWarnings,
-        },
-        controller.signal,
-        route?.target,
+      await followAutoChainJob(
+        job,
+        { ...resolveChainRequest(req, decision), ephemeral: true },
+        route,
+        controller,
+        onErrorCommon,
       );
     } else if (isPrebuiltChainRequest(req)) {
       // Caller bug: a stages-based ChainRequestWire was submitted with a
@@ -2162,70 +2121,6 @@ function submitJob(
       job.error =
         "internal: ChainRequestWire submitted with non-chain routing decision";
       recordFailedSettlement(job);
-    } else {
-      let lease: ReferenceUploadLease<GenerateRequestWire> | null = null;
-      try {
-        let transportRequest = req;
-        const uploadRoute =
-          route &&
-          requestShouldUseReferenceUploads(
-            req,
-            route.target,
-            route.referenceUploads,
-          )
-            ? route
-            : null;
-        if (uploadRoute) {
-          const prepared = await prepareReferenceUploads({
-            target: {
-              baseUrl: uploadRoute.target.baseUrl,
-              apiKey: uploadRoute.target.apiKey ?? null,
-            },
-            expectedInstanceId: uploadRoute.instanceId ?? "",
-            capabilities: uploadRoute.referenceUploads,
-            request: req,
-            signal: controller.signal,
-          });
-          lease = prepared;
-          transportRequest = prepared.request;
-        }
-        job.streamStarted = true;
-        await generateStream(
-          transportRequest,
-          {
-            onProgress: (evt) => {
-              applyProgress(job, evt);
-              // `queued` is the first event the server emits per request, and
-              // the one moment the durable row is guaranteed to be listable.
-              if (evt.type === "queued")
-                captureJobDurability(job, route?.target);
-            },
-            onComplete: (evt) => {
-              job.result = evt;
-              job.state = "done";
-              recordSuccessfulSettlement(job);
-              job.previewUrl = null;
-              if (evt.gpu !== null && evt.gpu !== undefined)
-                job.progress.gpu = evt.gpu;
-              fireComplete(job);
-              scheduleAutoRemoveOnDone(id);
-            },
-            onError: onErrorCommon,
-            onRequestWarnings: surfaceRequestWarnings,
-          },
-          controller.signal,
-          route?.target,
-        );
-      } catch (error) {
-        if (!controller.signal.aborted && job.state === "running") {
-          onErrorCommon({
-            kind: "network",
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
-      } finally {
-        if (lease) void lease.cancel().catch(() => undefined);
-      }
     }
   };
 
@@ -2254,7 +2149,6 @@ function routeForDetachedJob(job: Job): StreamTarget | undefined {
 
 function markCancellationConfirmed(job: Job): void {
   if (job.state !== "running") return;
-  durabilityByJob.delete(job.id);
   job.controller.abort();
   job.state = "canceled";
   job.cancelling = false;
@@ -2269,15 +2163,31 @@ function markCancellationConfirmed(job: Job): void {
 }
 
 async function confirmDurableCancellation(job: Job): Promise<void> {
-  if (job.state !== "running" || !job.serverId) return;
+  const durable = job.durableBatch;
+  if (job.state !== "running" || !job.serverId || !durable?.serverBatchId)
+    return;
   const active = durableCancellations.get(job.id);
   if (active) return active;
   job.cancelRequested = true;
   job.cancelling = true;
-  if (job.durableBatch) {
-    persistDurableRecoveryBatch(job.durableBatch.clientBatchId);
+  persistDurableRecoveryBatch(durable.clientBatchId);
+  const route = durableRoutes.get(job.hostId ?? "");
+  const target = job.target ?? route?.target ?? null;
+  if (!target) {
+    job.cancelling = false;
+    persistDurableRecoveryBatch(durable.clientBatchId);
+    throw new Error("The original machine is not connected.");
   }
-  const task = cancelQueueJob(job.serverId, routeForDetachedJob(job))
+  const task = mutateQueueJobOnExpectedInstance(
+    { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
+    {
+      instanceId: durable.expectedInstanceId,
+      batchId: durable.serverBatchId,
+      clientBatchId: durable.clientBatchId,
+      jobId: job.serverId,
+    },
+    "cancel",
+  )
     .then(() => {
       // Complete/failed/cancelled authority may have arrived during DELETE.
       if (job.state === "running") markCancellationConfirmed(job);
@@ -2318,6 +2228,20 @@ async function cancelJob(id: string): Promise<void> {
   }
   if (job.cancelling) return;
   job.cancelling = true;
+  // A sequence IS a chain job: it is cancelled on its own route, never on the
+  // generation queue, which has no row for it.
+  const chainJobId = job.chain?.jobId;
+  if (chainJobId) {
+    try {
+      await cancelChainJob(chainJobId, routeForDetachedJob(job));
+    } catch (error) {
+      if (job.state !== "running") return;
+      job.cancelling = false;
+      throw error;
+    }
+    markCancellationConfirmed(job);
+    return;
+  }
   if (job.serverId) {
     try {
       await cancelQueueJob(job.serverId, routeForDetachedJob(job));
@@ -2342,13 +2266,58 @@ async function cancelJob(id: string): Promise<void> {
   markCancellationConfirmed(job);
 }
 
+async function retryJob(id: string): Promise<void> {
+  const job = jobs.value.find((candidate) => candidate.id === id);
+  if (
+    !job?.durableBatch?.serverBatchId ||
+    !job.serverId ||
+    !job.retryable ||
+    job.retrying
+  ) {
+    throw new Error("This held generation is not retryable yet.");
+  }
+  const route = durableRoutes.get(job.hostId ?? "");
+  const target = job.target ?? route?.target ?? null;
+  if (!target) throw new Error("The original machine is not connected.");
+  job.retrying = true;
+  job.retryable = false;
+  try {
+    const outcome = await retryQueueJobRecoveringAmbiguity(
+      { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
+      {
+        instanceId: job.durableBatch.expectedInstanceId,
+        batchId: job.durableBatch.serverBatchId,
+        clientBatchId: job.durableBatch.clientBatchId,
+        jobId: job.serverId,
+      },
+    );
+    if (outcome.kind === "reconciled") {
+      applyDurableBatchStatus(job.durableBatch.clientBatchId, outcome.batch);
+      return;
+    }
+    if (outcome.kind === "uncertain") {
+      job.holdError = outcome.error;
+      void reconcileDurableHost(job.hostId ?? route?.hostId ?? "");
+      throw new Error(outcome.error);
+    }
+    job.holdError = null;
+    job.holdCode = null;
+    job.progress.stage = "Queued";
+    void reconcileDurableHost(job.hostId ?? route?.hostId ?? "");
+  } catch (error) {
+    void reconcileDurableHost(job.hostId ?? route?.hostId ?? "");
+    throw error;
+  } finally {
+    job.retrying = false;
+  }
+}
+
 function clearDoneJobs() {
   jobs.value = jobs.value.filter((j) => j.state === "running");
   canvasErrorJobId.value = null;
 }
 
 function removeJob(id: string) {
-  durabilityByJob.delete(id);
   const removed = jobs.value.find((job) => job.id === id);
   if (removed?.durableBatch) {
     const clientBatchId = removed.durableBatch.clientBatchId;
@@ -2370,6 +2339,7 @@ function selectJob(id: string | null) {
 
 export function useGenerateStream(
   onComplete?: (job: Job) => void,
+  onHeld?: (job: Job) => void,
 ): UseGenerateStream {
   recoverDurableLifecycle();
   installDurableWakeListeners();
@@ -2380,8 +2350,15 @@ export function useGenerateStream(
   // direct test invocations harmless.
   if (onComplete) {
     completeListeners.add(onComplete);
+    onUnmounted(() => ownPreviews.stopAll());
     onUnmounted(() => {
       completeListeners.delete(onComplete);
+    });
+  }
+  if (onHeld) {
+    heldListeners.add(onHeld);
+    onUnmounted(() => {
+      heldListeners.delete(onHeld);
     });
   }
 
@@ -2392,6 +2369,7 @@ export function useGenerateStream(
     submit: submitJob,
     submitBatch: submitJobs,
     cancel: cancelJob,
+    retry: retryJob,
     failRunning: failRunningJob,
     settleDetached: settleDetachedJob,
     clearDone: clearDoneJobs,

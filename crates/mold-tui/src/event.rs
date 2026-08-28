@@ -61,25 +61,32 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
     }
 }
 
-fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
-    use crate::app::GenerateFocus;
-
-    // Ctrl shortcuts (work from any focus)
+/// The Create view's Ctrl shortcuts, which work from every focus.
+fn control_shortcut(key: &KeyEvent) -> Option<Action> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('e' | 'E'), modifiers)
             if modifiers.contains(KeyModifiers::CONTROL)
                 && modifiers.contains(KeyModifiers::SHIFT) =>
         {
-            return Action::RemixPrompt
+            Some(Action::RemixPrompt)
         }
-        (KeyCode::Char('e'), KeyModifiers::CONTROL) => return Action::ExpandPrompt,
-        (KeyCode::Char('m'), KeyModifiers::CONTROL) => return Action::OpenModelSelector,
-        (KeyCode::Char('r'), KeyModifiers::CONTROL) => return Action::RandomizeSeed,
-        (KeyCode::Char('s'), KeyModifiers::CONTROL) => return Action::SaveImage,
-        (KeyCode::Char('g'), KeyModifiers::CONTROL) => return Action::Generate,
-        (KeyCode::Char('p'), KeyModifiers::CONTROL) => return Action::HistoryPrev,
-        (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Action::HistoryNext,
-        _ => {}
+        (KeyCode::Char('e'), KeyModifiers::CONTROL) => Some(Action::ExpandPrompt),
+        (KeyCode::Char('m'), KeyModifiers::CONTROL) => Some(Action::OpenModelSelector),
+        (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Action::RandomizeSeed),
+        (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(Action::RetryHeldPrints),
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Action::SaveImage),
+        (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some(Action::Generate),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => Some(Action::HistoryPrev),
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Action::HistoryNext),
+        _ => None,
+    }
+}
+
+fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
+    use crate::app::GenerateFocus;
+
+    if let Some(action) = control_shortcut(key) {
+        return action;
     }
 
     // Focus navigation
@@ -669,6 +676,31 @@ mod tests {
         assert_eq!(map_settings_key(&key(KeyCode::Char('6'))), Action::None);
         assert_eq!(map_models_key(&key(KeyCode::Char('6'))), Action::None);
         assert_eq!(map_machines_key(&key(KeyCode::Char('6'))), Action::None);
+    }
+
+    /// The Create view's Ctrl shortcuts, which work from every focus. A held
+    /// batch child names `^T` in its own log line, so the binding and the
+    /// message have to stay in step.
+    #[test]
+    fn create_control_shortcut_contract() {
+        fn ctrl(code: KeyCode) -> KeyEvent {
+            KeyEvent::new(code, KeyModifiers::CONTROL)
+        }
+        for (code, action) in [
+            (KeyCode::Char('e'), Action::ExpandPrompt),
+            (KeyCode::Char('m'), Action::OpenModelSelector),
+            (KeyCode::Char('r'), Action::RandomizeSeed),
+            (KeyCode::Char('t'), Action::RetryHeldPrints),
+            (KeyCode::Char('s'), Action::SaveImage),
+            (KeyCode::Char('g'), Action::Generate),
+            (KeyCode::Char('p'), Action::HistoryPrev),
+            (KeyCode::Char('n'), Action::HistoryNext),
+        ] {
+            assert_eq!(control_shortcut(&ctrl(code)), Some(action), "{code:?}");
+        }
+        assert_eq!(control_shortcut(&ctrl(KeyCode::Char('z'))), None);
+        // Without the modifier these are ordinary text.
+        assert_eq!(control_shortcut(&key(KeyCode::Char('t'))), None);
     }
 
     #[test]

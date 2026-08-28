@@ -429,12 +429,12 @@ pub struct GpuJob {
     /// to remove it when the job finishes), and surfaced to clients via
     /// `GET /api/queue` for zombie-card reconciliation.
     pub id: String,
+    pub durable_queue_rank: Option<u64>,
     pub model: String,
     pub request: mold_core::GenerateRequest,
     /// Opaque durable-media authority transferred without hydration by the
     /// scheduler. Only the leased worker may consume it.
     pub deferred_media: Option<crate::queue_media_runtime::DeferredQueueMedia>,
-    pub resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     pub completion_payload: crate::state::SseCompletionPayload,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
     pub result_tx: tokio::sync::oneshot::Sender<Result<crate::state::GenerationJobResult, String>>,
@@ -469,9 +469,17 @@ pub struct GpuJob {
     /// scheduler after the worker published the matching Ready generation.
     /// `None` exists only for legacy unit tests and the single-GPU adapter.
     pub lease: Option<crate::scheduler::LeaseFence>,
-    pub batch_child: Option<crate::state::BatchChildExecution>,
     /// Durable-queue row ownership, moved across from the `GenerationJob`.
     pub journal: Option<crate::queue_journal::QueueTicket>,
+}
+
+impl GpuJob {
+    pub(crate) fn should_cancel_for_observer_disconnect(&self) -> bool {
+        crate::state::should_cancel_for_observer_disconnect(
+            self.result_tx.is_closed(),
+            self.journal.is_some(),
+        )
+    }
 }
 
 pub struct PromptExpansionJob {
@@ -697,12 +705,12 @@ impl OwnerWork {
 
     pub(crate) fn is_cancelled(&self) -> bool {
         match self {
-            Self::Generation(job) => job.result_tx.is_closed(),
+            Self::Generation(job) => job.should_cancel_for_observer_disconnect(),
             Self::ChainStage(job) => {
                 job.result_tx.as_ref().is_none_or(|tx| tx.is_closed()) || (job.cancelled)()
             }
             Self::PromptExpansion(job) => job.result_tx.is_closed(),
-            Self::PostUpscale(job) => job.generation.result_tx.is_closed(),
+            Self::PostUpscale(job) => job.generation.should_cancel_for_observer_disconnect(),
             Self::StandaloneUpscale(job) => job.result_tx.is_closed(),
             Self::AdminModelLoad(job) => job.result_tx.is_closed(),
             Self::AdminModelUnload(job) => job.result_tx.is_closed(),
@@ -1697,6 +1705,16 @@ impl GpuWorker {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = fingerprint.map(str::to_string);
     }
 
+    /// Whether the engine this worker holds is exactly the plan `fingerprint`
+    /// names — the one residency fact warm-hit host accounting reads.
+    pub(crate) fn holds_execution_fingerprint(&self, fingerprint: &str) -> bool {
+        self.resident_execution_fingerprint
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            == Some(fingerprint)
+    }
+
     /// Check if this worker is in a degraded state (3+ consecutive failures, within cooldown).
     ///
     /// When the cooldown has expired we clear the failure counter and the
@@ -2062,6 +2080,28 @@ impl GpuPool {
     /// Number of GPU workers in the pool.
     pub fn worker_count(&self) -> usize {
         self.workers.len()
+    }
+}
+
+impl crate::durable_generation_settlement::IntoSettlementChannels for GpuJob {
+    fn into_settlement_channels(self) -> crate::durable_generation_settlement::SettlementChannels {
+        crate::durable_generation_settlement::SettlementChannels {
+            journal: self.journal,
+            progress_tx: self.progress_tx,
+            result_tx: Some(self.result_tx),
+        }
+    }
+}
+
+impl crate::durable_generation_settlement::IntoSettlementChannels for Box<GpuJob> {
+    fn into_settlement_channels(self) -> crate::durable_generation_settlement::SettlementChannels {
+        (*self).into_settlement_channels()
+    }
+}
+
+impl crate::durable_generation_settlement::IntoSettlementChannels for PostGenerationUpscaleJob {
+    fn into_settlement_channels(self) -> crate::durable_generation_settlement::SettlementChannels {
+        self.generation.into_settlement_channels()
     }
 }
 

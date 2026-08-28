@@ -188,9 +188,11 @@ included), metadata panels, and download / copy-prompt / delete actions.
 :::
 
 ::: warning Proxy Timeout
-RunPod's Cloudflare proxy has a **100-second timeout**. Use the SSE streaming
-endpoint (`/api/generate/stream`) for long generations — mold's client does this
-automatically.
+RunPod's Cloudflare proxy has a **100-second timeout**. `mold runpod generate`
+avoids holding that proxy request open: it durably admits work through
+`/api/generation-batches`, then polls and downloads the finished gallery
+output. `/api/generate/stream` holds the request open and is subject to the
+timeout — use it only for short renders.
 :::
 
 ### Teardown

@@ -1330,6 +1330,82 @@ fn portable_path(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
 
+    fn artifact_fixture(path: &Path, bytes: &[u8]) -> (ModelFile, String) {
+        fs::write(path, bytes).unwrap();
+        let digest = sha256_path(path);
+        let file = ModelFile {
+            hf_repo: "Comfy-Org/private-h3-fixture".to_string(),
+            hf_filename: "fixture.bin".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: bytes.len() as u64,
+            gated: false,
+            sha256: Some(Box::leak(digest.clone().into_boxed_str())),
+        };
+        (file, digest)
+    }
+
+    /// Count the bounded reads one qualification pass performs.
+    ///
+    /// `hash_exact_file` delegates to `mold_core::download`'s pinned digest,
+    /// which memoizes on the retained descriptor's own identity. A memo hit
+    /// returns before the read loop and therefore emits NO progress at all, so
+    /// the callback count is an exact, race-free read counter — unlike the
+    /// process-global hash counter, which other tests move concurrently.
+    fn hash_with_read_count(artifact: &ResolvedArtifact<'_>, expected: &str) -> Result<usize> {
+        let mut reads = 0_usize;
+        let total = artifact.file.size_bytes;
+        hash_exact_file(artifact, expected, 0, total, &mut |_| {
+            reads += 1;
+            Ok(())
+        })?;
+        Ok(reads)
+    }
+
+    /// The ~37 GB private artifact set must be hashed at most once per
+    /// unchanged identity, not once per admitted request. On a spinning-disk
+    /// model store that pass is minutes long, and paying it per job is what
+    /// left an idle GPU with a job stuck in `dependency_wait`.
+    #[test]
+    fn an_unchanged_artifact_is_hashed_once_and_a_rewrite_is_re_read() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fixture.bin");
+        let (file, digest) = artifact_fixture(&path, &vec![7_u8; 4096]);
+        let artifact = ResolvedArtifact {
+            file: &file,
+            relative_path: PathBuf::from("fixture.bin"),
+            canonical_path: path.canonicalize().unwrap(),
+        };
+
+        assert!(
+            hash_with_read_count(&artifact, &digest).unwrap() > 0,
+            "the first pass over an artifact must actually read it"
+        );
+        assert_eq!(
+            hash_with_read_count(&artifact, &digest).unwrap(),
+            0,
+            "an unchanged artifact must be served from the process memo"
+        );
+
+        // Same length, different bytes: the identity moves on ctime, which no
+        // userspace call can hold still, so the memo must miss and the pinned
+        // check must catch the replacement rather than vouch for it.
+        let mut reads = 0_usize;
+        fs::write(&path, vec![9_u8; 4096]).unwrap();
+        let error = hash_exact_file(&artifact, &digest, 0, file.size_bytes, &mut |_| {
+            reads += 1;
+            Ok(())
+        })
+        .expect_err("replaced bytes must never be served from the memo");
+        assert!(reads > 0, "a replaced artifact must be re-read");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to hash private H3 artifact")
+                || format!("{error:#}").contains("SHA-256 mismatch"),
+            "unexpected refusal: {error:#}"
+        );
+    }
+
     #[test]
     fn only_exact_comfy_manifest_names_are_qualifiable() {
         for model in [contract::FL2VA_COMFY, contract::REF2VA_COMFY] {

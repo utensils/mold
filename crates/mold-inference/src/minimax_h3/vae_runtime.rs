@@ -3586,6 +3586,7 @@ mod tests {
             unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) },
             0
         );
+        crate::test_support::wait_until_ctime_moves(visual, (before.ctime(), before.ctime_nsec()));
         std::fs::set_permissions(visual, std::fs::Permissions::from_mode(0o440)).unwrap();
 
         let error = staged.validate("after in-place mutation").unwrap_err();

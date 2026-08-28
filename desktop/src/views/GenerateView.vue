@@ -23,10 +23,13 @@ import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
 import DownloadTargetDialog from "../components/models/DownloadTargetDialog.vue";
 import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import { licenseRequirements } from "@studio/lib/licenseAcceptance";
-import type { GenerationPlacementPreview } from "@studio/api/generationPlacement";
+import {
+  classifyMissingModelHold,
+  type GenerationPlacementPreview,
+} from "@studio/api/generationPlacement";
 import {
   watchSelectedQueuePreview,
-  type QueueJobPreview,
+  type QueueJobProgress,
   type SelectedQueuePreviewSource,
 } from "@studio/api/generationSelection";
 import CreateHeader from "../components/create/CreateHeader.vue";
@@ -63,6 +66,7 @@ import {
 import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequirement";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
+  applyMinimaxH3ReferenceCrops,
   emptyMinimaxH3AuthoringState,
   minimaxH3AuthoringError,
   setMinimaxH3PickedImageBoundary,
@@ -154,7 +158,7 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
-import { domCanvasOps } from "../lib/sourceFitCanvas";
+import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";
 import { remixPrompt } from "../lib/api/remix";
@@ -316,6 +320,9 @@ const missingModel = ref<{
   /** False when the frozen request still has to be finalized against the
    *  chosen machine — download only, never a resume promise. */
   resumeAfterPull?: boolean;
+  /** Set when the machine is already HOLDING this work: resume retries that
+   *  exact child instead of queueing a second print. */
+  retryClientId?: number | null;
 } | null>(null);
 
 const missingModelHostLabel = computed(
@@ -350,6 +357,9 @@ interface MissingModelSubmission {
    * generate is not, because resuming would use different conditioning.
    */
   resumeAfterPull?: boolean;
+  /** Set when the machine is already HOLDING this work: resume retries that
+   *  exact child instead of queueing a second print. */
+  retryClientId?: number | null;
 }
 
 function freezeModelFamily(route: HostRoute | null, modelFamily: string): HostRoute | null {
@@ -460,6 +470,64 @@ function presentMissingModelPull(
 }
 
 /**
+ * A print is admitted BEFORE the machine resolves its model, so "nobody has
+ * this model" now arrives as a HELD child carrying the machine's own reason
+ * rather than as an infeasible placement preview. Same offer, same policy —
+ * only the machine that parked the work is a pull target, and the resume
+ * retries that exact child instead of queueing a second print.
+ */
+const offeredMissingModelHolds = new Set<number>();
+function offerHeldMissingModelPull(job: Job): void {
+  const request = job.request;
+  if (!request) return;
+  const missing = classifyMissingModelHold(job.holdCode, job.model);
+  if (!missing) {
+    // The hold ended (or was never about the model): a later hold on the
+    // same print is a new offer.
+    offeredMissingModelHolds.delete(job.clientId);
+    return;
+  }
+  if (offeredMissingModelHolds.has(job.clientId)) return;
+  offeredMissingModelHolds.add(job.clientId);
+  // Only the machine that parked the job is a pull target; a job with no
+  // known host has nobody to pull on.
+  const hostId = job.hostId ?? null;
+  const host = hostId ? hosts.all.find((entry) => entry.id === hostId) : null;
+  const targets = planModelInstall(host ? [host] : [], hostModels.hostsFor(missing.model), {
+    // The machine's own hold IS the positive knowledge that it lacks the
+    // model — stronger evidence than an inventory poll that may be stale.
+    inventoryKnown: () => true,
+  }).targets;
+  presentMissingModelPull(
+    targets,
+    {
+      model: missing.model,
+      modelFamily: form.family,
+      // Nothing is resubmitted on this path; the child is already queued.
+      request,
+      batch: 1,
+      chainRouting: null,
+      requestOptions: {},
+      retryClientId: job.clientId,
+    },
+    (candidateId) => hosts.resolveRoute(candidateId),
+  );
+}
+
+watch(
+  () =>
+    generation.jobs
+      .filter((job) => job.holdError)
+      .map((job) => `${job.clientId}:${job.holdCode ?? ""}:${job.holdError}`)
+      .join("|"),
+  () => {
+    for (const job of generation.jobs) {
+      if (job.holdError) offerHeldMissingModelPull(job);
+    }
+  },
+);
+
+/**
  * The Create picker's "Not installed" row. There is no placement evidence
  * here, so the machines come from the shared install-target policy: every
  * reachable machine whose inventory has been read and does not have it.
@@ -531,6 +599,7 @@ async function pullMissingModel() {
     route,
     chainRouting: info.chainRouting,
     requestOptions: info.requestOptions,
+    retryClientId: info.retryClientId ?? null,
   };
   // The resume watcher is fed by this stream — a dead stream means the
   // promise "generation starts when it's ready" could never be kept, so
@@ -790,7 +859,7 @@ const selectedQueueRender = ref<{
   width: number;
   height: number;
   model: string;
-  preview: QueueJobPreview | null;
+  preview: QueueJobProgress | null;
 } | null>(null);
 let stopSelectedQueuePreview: (() => void) | null = null;
 
@@ -2114,12 +2183,28 @@ const previewFrameStyle = computed(() => ({
   width: `min(100cqw, ${(100 * previewWidth.value) / previewHeight.value}cqh)`,
 }));
 
+/** Fraction of the selected print's denoise the host has reported, or null
+ * before it reports a step counter. */
+const selectedQueuePreviewFraction = computed(() => {
+  const preview = selectedQueueRender.value?.preview;
+  return preview && preview.step !== null && preview.total !== null
+    ? preview.step / preview.total
+    : null;
+});
+const selectedQueuePreviewSrc = computed(() =>
+  selectedQueueRender.value?.preview?.preview_image
+    ? `data:image/png;base64,${selectedQueueRender.value.preview.preview_image}`
+    : null,
+);
+
 const liveGenerationStatus = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
-    return selected.preview
-      ? `Developing ${selected.preview.step}/${selected.preview.total}`
-      : "Preparing selected print…";
+    const preview = selected.preview;
+    if (preview && preview.step !== null && preview.total !== null) {
+      return `Developing ${preview.step}/${preview.total}`;
+    }
+    return preview?.stage ? `${preview.stage}…` : "Preparing selected print…";
   }
   const j = job.value;
   if (!j || j.status === "complete" || j.status === "error") return "";
@@ -2133,9 +2218,11 @@ const edgeCode = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
     const name = modelDisplayNameForId(selected.model, installedModels.value);
-    const progress = selected.preview
-      ? `${selected.preview.step}/${selected.preview.total}`
-      : "waiting for preview";
+    const preview = selected.preview;
+    const progress =
+      preview && preview.step !== null && preview.total !== null
+        ? `${preview.step}/${preview.total}`
+        : (preview?.stage ?? "waiting for progress");
     return `${name} · ${progress}`;
   }
   const j = job.value;
@@ -2180,7 +2267,7 @@ async function loadTemplate(template: GenerationTemplate) {
 
 function siblingDot(s: Job): string {
   if (s.status === "complete") return "text-ink"; // ◉ developed
-  if (s.status === "error") return "text-stop";
+  if (s.status === "error") return s.outcomeUnknown ? "text-ink-2" : "text-stop";
   return "text-ink-3"; // ◎ pending
 }
 
@@ -3077,6 +3164,19 @@ async function preprocessSourceFit(
       preprocessingStatus.value = null;
     }
   }
+  // Ref2VA: pending image crops are applied at the original resolution on the
+  // frozen draft, before the placement preview and any upload conversion.
+  if (draftCaps.sourceImageMode === "ordered-references" && draft.h3Authoring) {
+    try {
+      draft.h3Authoring = await applyMinimaxH3ReferenceCrops(draft.h3Authoring, domCanvasOps);
+      return true;
+    } catch (error) {
+      if (signal?.aborted) return false;
+      const message = error instanceof Error ? error.message : String(error);
+      toasts.push(`Reference preprocessing failed: ${message}`, "error");
+      return false;
+    }
+  }
   if (draftCaps.sourceImageMode === "qwen-edit" && draft.imageAttachments[0]) {
     try {
       const target = resolveSourceConditioningTarget(
@@ -3567,7 +3667,16 @@ async function generate() {
     }
     // Submitting while another print develops queues server-side; each job
     // snapshots its own model + params, so tweaking the form afterwards is safe.
-    const { settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions);
+    // A machine that cannot carry this print refuses it by name and queues
+    // nothing; there is no second submission path to fall through to.
+    let settled: ReturnType<typeof generation.submitBatch>["settled"];
+    try {
+      ({ settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions));
+    } catch (error) {
+      toasts.push(error instanceof Error ? error.message : String(error), "error");
+      preparedSubmitting.value = false;
+      return;
+    }
     const acceptedSubmissionId = ++latestAcceptedSubmissionId;
     missingModel.value = null;
     if (preparedSubmission) {
@@ -3603,8 +3712,9 @@ async function generate() {
         toasts.push(warning, "warning");
       }
       const ok = done.filter((s) => s.status === "complete").length;
-      const failedCount = done.filter((s) => s.status === "error").length;
-      const failed = done.find((s) => s.status === "error");
+      // An unknown outcome is advisory, never counted as a failure.
+      const failedCount = done.filter((s) => s.status === "error" && !s.outcomeUnknown).length;
+      const failed = done.find((s) => s.status === "error" && !s.outcomeUnknown);
       if (ok > 0) {
         if (failedCount > 0) {
           toasts.push(
@@ -4231,19 +4341,14 @@ onBeforeUnmount(() => {
                      over it, so the print literally develops on the canvas. -->
                 <img
                   v-if="
-                    selectedQueueRender?.preview ||
-                    (job && job.status !== 'complete' && job.previewUrl)
+                    selectedQueuePreviewSrc || (job && job.status !== 'complete' && job.previewUrl)
                   "
                   data-test="develop-preview"
-                  :src="
-                    selectedQueueRender?.preview
-                      ? `data:image/png;base64,${selectedQueueRender.preview.image}`
-                      : (job?.previewUrl ?? '')
-                  "
+                  :src="selectedQueuePreviewSrc ?? job?.previewUrl ?? ''"
                   alt=""
                   class="absolute inset-0 h-full w-full object-contain"
                   :style="{
-                    filter: `blur(${Math.max(2, 14 - 12 * (selectedQueueRender?.preview ? selectedQueueRender.preview.step / selectedQueueRender.preview.total : job ? jobProgress(job) : 0))}px)`,
+                    filter: `blur(${Math.max(2, 14 - 12 * (selectedQueuePreviewFraction ?? (job ? jobProgress(job) : 0)))}px)`,
                   }"
                 />
                 <!-- The grain canvas paints edge-to-edge (temperature wash), so
@@ -4252,28 +4357,17 @@ onBeforeUnmount(() => {
                 <DevelopCanvas
                   v-if="selectedQueueRender || (job && job.status !== 'complete')"
                   :seed="job?.visualSeed ?? 'selected-queue-render'"
-                  :progress="
-                    selectedQueueRender?.preview
-                      ? selectedQueueRender.preview.step / selectedQueueRender.preview.total
-                      : job
-                        ? jobProgress(job)
-                        : 0
-                  "
+                  :progress="selectedQueuePreviewFraction ?? (job ? jobProgress(job) : 0)"
                   :phase="job ? jobPhase(job) : 'developing'"
                   class="absolute inset-0"
                   :style="{
                     opacity:
-                      selectedQueueRender?.preview || job?.previewUrl
+                      selectedQueuePreviewSrc || job?.previewUrl
                         ? String(
                             Math.max(
                               0.18,
                               1 -
-                                (selectedQueueRender?.preview
-                                  ? selectedQueueRender.preview.step /
-                                    selectedQueueRender.preview.total
-                                  : job
-                                    ? jobProgress(job)
-                                    : 0) *
+                                (selectedQueuePreviewFraction ?? (job ? jobProgress(job) : 0)) *
                                   0.9,
                             ),
                           )
@@ -4286,7 +4380,7 @@ onBeforeUnmount(() => {
                      where the grain cannot obscure it. -->
                 <div
                   v-if="
-                    (selectedQueueRender && !selectedQueueRender.preview) ||
+                    (selectedQueueRender && !selectedQueuePreviewSrc) ||
                     (job && job.status !== 'complete' && !job.previewUrl)
                   "
                   data-test="develop-progress"
@@ -4294,9 +4388,8 @@ onBeforeUnmount(() => {
                 >
                   <ProgressRing
                     :value="
-                      selectedQueueRender?.preview
-                        ? (selectedQueueRender.preview.step / selectedQueueRender.preview.total) *
-                          100
+                      selectedQueuePreviewFraction !== null
+                        ? selectedQueuePreviewFraction * 100
                         : job
                           ? jobProgress(job) * 100
                           : 0

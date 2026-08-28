@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
+#[cfg(test)]
+use mold_core::ServerCapabilities;
 use mold_core::{
     classify_generate_error, download::DownloadProgressEvent, ChainRequest, GenerateRequest,
-    GenerateResponse, GenerateServerAction, LoraWeight, MoldClient, PromptExpander,
-    PromptTransformOperation, RemixRequest, RemixResponse, RemixVariant, SseProgressEvent,
+    GenerateResponse, GenerateServerAction, GenerationBatchChildState, LoraWeight, MoldClient,
+    PromptExpander, PromptTransformOperation, RemixRequest, RemixResponse, RemixVariant,
+    SseProgressEvent,
 };
 use tokio::sync::mpsc;
 
 use crate::app::{
-    BackgroundEvent, GenerateParams, GenerationMetadataSnapshot, InferenceMode,
-    PromptTransformSnapshot,
+    BackgroundEvent, DurableGenerationChildOutcome, GenerateParams, GenerationMetadataSnapshot,
+    InferenceMode, PromptTransformSnapshot,
 };
 
 /// Prepare reviewable Expand/Remix alternatives without queueing generation.
@@ -198,6 +201,46 @@ pub async fn run_generation(
         prepared_prompts.len() as u32
     };
     let base_seed = params.seed;
+
+    // Batch N goes through `POST /api/generation-batches`, matching the CLI.
+    // A singleton keeps the `/api/generate/stream` facade. Both feed the same
+    // `SseProgressEvent::Preview` frames into the centered fixed-protocol
+    // preview sink CLAUDE.md protects by name: the batch path polls each
+    // running child's progress snapshot and unfolds it into those events.
+    // Both are the same durable admission underneath.
+    if batch > 1 && params.inference_mode != InferenceMode::Local {
+        let effective_url = params.host.clone().or_else(|| server_url.clone());
+        if let Some(url) = effective_url {
+            let client = crate::hosts::client_for(&url, api_key.as_deref());
+            match try_canonical_remote_batch(CanonicalBatchInput {
+                client: &client,
+                host: crate::app::HeldHost {
+                    url: url.clone(),
+                    api_key: api_key.clone(),
+                },
+                params: &params,
+                prompt: &prompt,
+                negative_prompt: &negative_prompt,
+                prepared_prompts: &prepared_prompts,
+                prepared_transforms: &prepared_transforms,
+                batch,
+                base_seed,
+                tx: &tx,
+            })
+            .await
+            {
+                CanonicalBatchResult::Done => return,
+                CanonicalBatchResult::Error(error) => {
+                    let _ = tx.send(BackgroundEvent::Error(error));
+                    return;
+                }
+                // Fall through to the per-item loop below, which is the
+                // singleton path and owns the local fallback.
+                CanonicalBatchResult::FallbackLocal => {}
+            }
+        }
+    }
+
     let prepared_batch_id =
         (!prepared_prompts.is_empty()).then(|| format!("remix-{:032x}", rand::random::<u128>()));
 
@@ -385,19 +428,38 @@ pub async fn run_chain_generation(
         }
     });
 
-    match client.generate_chain_stream(&req, progress_tx).await {
-        Ok(Some(response)) => {
-            let _ = tx.send(BackgroundEvent::ChainComplete {
-                response: Box::new(response),
-            });
-        }
-        Ok(None) => {
-            let _ = tx.send(BackgroundEvent::ChainError(
-                "server does not support chain generation (404)".into(),
-            ));
+    // A sequence is a durable chain job: create it, then follow its event
+    // stream. The compatibility endpoint that ran one as a hidden ephemeral
+    // job is gone, so a TUI that loses its connection leaves a job the host
+    // finishes rather than a render nobody owns.
+    let stage_count = req.stages.len() as u32;
+    match client.create_chain_job(&req).await {
+        Ok(created) => {
+            match client
+                .stream_chain_job_events(&created.job_id, progress_tx)
+                .await
+            {
+                Ok(outcome) if outcome.state == mold_core::chain_job::ChainJobState::Completed => {
+                    let _ = tx.send(BackgroundEvent::ChainComplete {
+                        stage_count,
+                        // The host's advisories about the request it accepted
+                        // — a filing it could not apply — surface on the
+                        // sequence exactly as they do on a one-shot.
+                        request_warnings: created.request_warnings,
+                    });
+                }
+                Ok(outcome) => {
+                    let _ = tx.send(BackgroundEvent::ChainError(outcome.error.unwrap_or_else(
+                        || format!("sequence job ended as {:?}", outcome.state),
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(BackgroundEvent::ChainError(format!("{e:#}")));
+                }
+            }
         }
         Err(e) => {
-            let _ = tx.send(BackgroundEvent::ChainError(format!("{e}")));
+            let _ = tx.send(BackgroundEvent::ChainError(format!("{e:#}")));
         }
     }
 
@@ -575,6 +637,398 @@ enum ServerResult {
     Done,
     FallbackLocal,
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CanonicalBatchResult {
+    Done,
+    Error(String),
+    /// The host could not be reached at all. The singleton path answers this
+    /// by rendering locally, and a batch must not be the one submission that
+    /// fails outright on an unreachable server.
+    FallbackLocal,
+}
+
+fn new_client_batch_id() -> String {
+    let mut bytes: [u8; 16] = rand::random();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+fn build_batch_requests(
+    params: &GenerateParams,
+    prompt: &str,
+    negative_prompt: &Option<String>,
+    prepared_prompts: &[String],
+    prepared_transforms: &[mold_core::PromptTransformProvenance],
+    batch: u32,
+    base_seed: Option<u64>,
+) -> Result<Vec<GenerateRequest>, String> {
+    // Admission ids belong to transport chunks; this id belongs to the user's
+    // logical Batch N and must remain stable when a host advertises a smaller
+    // canonical admission limit. A restored singleton keeps its exact saved
+    // provenance, while an ordinary or prepared multi-output submission gets
+    // one fresh identity and global positions rather than inheriting a source
+    // print's older batch group.
+    let preserve_exact_provenance = batch == 1
+        && params.batch_id.is_some()
+        && params.batch_index.is_some()
+        && params.batch_count.is_some();
+    let logical_batch_id = if preserve_exact_provenance {
+        params
+            .batch_id
+            .clone()
+            .expect("complete provenance has an id")
+    } else {
+        new_client_batch_id()
+    };
+    let mut requests = Vec::with_capacity(batch as usize);
+    for index in 0..batch {
+        let mut child = params.clone();
+        child.batch = 1;
+        child.prepared_prompts.clear();
+        child.prepared_prompt_transforms.clear();
+        child.seed = base_seed.map(|seed| seed.wrapping_add(index as u64));
+        let child_prompt = prepared_prompts
+            .get(index as usize)
+            .map(String::as_str)
+            .unwrap_or(prompt);
+        if let Some(transform) = prepared_transforms.get(index as usize) {
+            child.prompt_transform = Some(transform.clone());
+        }
+        let mut request = build_request(&child, child_prompt, negative_prompt)?;
+        request.batch_size = 1;
+        request.batch_id = Some(logical_batch_id.clone());
+        if !preserve_exact_provenance {
+            request.batch_index = Some(index + 1);
+            request.batch_count = Some(batch);
+        }
+        requests.push(request);
+    }
+    Ok(requests)
+}
+
+fn batch_child_state_label(state: &GenerationBatchChildState) -> &'static str {
+    match state {
+        GenerationBatchChildState::Accepted => "accepted",
+        GenerationBatchChildState::Cancelling => "cancelling",
+        GenerationBatchChildState::Running => "running",
+        GenerationBatchChildState::Complete => "complete",
+        GenerationBatchChildState::Failed => "failed",
+        GenerationBatchChildState::Cancelled => "cancelled",
+        GenerationBatchChildState::Held => "held",
+    }
+}
+
+struct CanonicalBatchInput<'a> {
+    client: &'a MoldClient,
+    /// The route `client` was built from, kept beside it so a held child can
+    /// be retried on the host that admitted it.
+    host: crate::app::HeldHost,
+    params: &'a GenerateParams,
+    prompt: &'a str,
+    negative_prompt: &'a Option<String>,
+    prepared_prompts: &'a [String],
+    prepared_transforms: &'a [mold_core::PromptTransformProvenance],
+    batch: u32,
+    base_seed: Option<u64>,
+    tx: &'a mpsc::UnboundedSender<BackgroundEvent>,
+}
+
+async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> CanonicalBatchResult {
+    let requests = match build_batch_requests(
+        input.params,
+        input.prompt,
+        input.negative_prompt,
+        input.prepared_prompts,
+        input.prepared_transforms,
+        input.batch,
+        input.base_seed,
+    ) {
+        Ok(requests) => requests,
+        Err(error) => return CanonicalBatchResult::Error(error),
+    };
+
+    let observed = std::sync::Mutex::new(std::collections::HashMap::<
+        String,
+        GenerationBatchChildState,
+    >::new());
+    // Unfolds each polled progress snapshot back into the same
+    // `SseProgressEvent`s the singleton stream delivers, so the protected
+    // centered denoise preview and the step counter work for a batch too.
+    let progress = std::sync::Mutex::new(mold_core::queue_progress::ProgressEventStream::new());
+    let observer = |event: mold_core::durable_generation::CanonicalGenerationEvent| match event {
+        mold_core::durable_generation::CanonicalGenerationEvent::Progress {
+            job_id,
+            progress: snapshot,
+            ..
+        } => {
+            let events = progress
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .events(&job_id, &snapshot);
+            for event in events {
+                let _ = input.tx.send(BackgroundEvent::Progress(event));
+            }
+        }
+        mold_core::durable_generation::CanonicalGenerationEvent::Admitted {
+            status,
+            request_offset,
+            ..
+        } => {
+            let first = request_offset + 1;
+            let last = request_offset + status.children.len() as u32;
+            let _ = input
+                .tx
+                .send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                    message: format!("Durably accepted batch {first}-{last}"),
+                }));
+        }
+        mold_core::durable_generation::CanonicalGenerationEvent::Snapshot {
+            status,
+            request_offset,
+            ..
+        } => {
+            let mut observed = observed.lock().unwrap_or_else(|poison| poison.into_inner());
+            for child in status.children {
+                if observed.get(&child.job_id) != Some(&child.state) {
+                    observed.insert(child.job_id, child.state.clone());
+                    let _ = input
+                        .tx
+                        .send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                            message: format!(
+                                "Batch {} {}",
+                                request_offset + child.index,
+                                batch_child_state_label(&child.state)
+                            ),
+                        }));
+                }
+            }
+        }
+        mold_core::durable_generation::CanonicalGenerationEvent::ReconcileDelayed {
+            error, ..
+        } => {
+            let _ = input
+                .tx
+                .send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                    message: format!("Durable queue reconciliation delayed: {error}"),
+                }));
+        }
+    };
+
+    let report = match mold_core::durable_generation::canonical_generation_observed(
+        input.client,
+        &requests,
+        Some(&observer),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) if mold_core::MoldClient::is_connection_error(&error) => {
+            return CanonicalBatchResult::FallbackLocal
+        }
+        Err(error) => return CanonicalBatchResult::Error(format!("{error:#}")),
+    };
+
+    finish_canonical_batch(
+        report,
+        input.client,
+        input.host.clone(),
+        BatchSubmission {
+            prompt: input.prompt,
+            negative_prompt: input.negative_prompt.as_deref(),
+            model: &input.params.model,
+        },
+        input.tx,
+    )
+    .await
+}
+
+/// Retry every held child this client still holds authority for, then wait
+/// for their batches to settle again.
+///
+/// `POST /api/queue/{id}/retry` fences on the whole admission authority, so
+/// this is the only place a TUI retry can come from: the Machines queue lanes
+/// list rows with no batch identity at all.
+pub async fn retry_held_prints(
+    held: crate::app::HeldBatch,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let crate::app::HeldBatch {
+        host,
+        submission,
+        retries: held,
+    } = held;
+    let client = crate::hosts::client_for(&host.url, host.api_key.as_deref());
+    let mut authorities: Vec<mold_core::GenerationBatchAuthority> = Vec::new();
+    let mut failures = Vec::new();
+    for entry in &held {
+        let _ = tx.send(BackgroundEvent::Progress(SseProgressEvent::Info {
+            message: format!("Retrying batch {}", entry.index),
+        }));
+        match mold_core::durable_generation::retry_canonical_child(
+            &client,
+            &entry.authority,
+            &entry.job_id,
+            0,
+        )
+        .await
+        {
+            Ok(_) => {
+                if !authorities
+                    .iter()
+                    .any(|known| known.batch_id == entry.authority.batch_id)
+                {
+                    authorities.push(entry.authority.clone());
+                }
+            }
+            Err(error) => failures.push(format!("Batch {}: {error:#}", entry.index)),
+        }
+    }
+    if authorities.is_empty() {
+        let _ = tx.send(BackgroundEvent::Error(if failures.is_empty() {
+            "No held prints to retry".to_string()
+        } else {
+            failures.join("; ")
+        }));
+        return;
+    }
+    let mut outcomes = Vec::new();
+    for authority in &authorities {
+        match mold_core::durable_generation::wait_for_settled_batch(&client, authority).await {
+            Ok(status) => {
+                for child in status.children {
+                    let Some(entry) = held.iter().find(|entry| entry.job_id == child.job_id) else {
+                        continue;
+                    };
+                    outcomes.push(child_outcome(entry.index, authority.clone(), child));
+                }
+            }
+            Err(error) => failures.push(format!("{error:#}")),
+        }
+    }
+    outcomes.sort_by_key(|outcome| outcome.index);
+    hydrate_last_completed(&client, &mut outcomes).await;
+    let _ = tx.send(BackgroundEvent::DurableGenerationBatchComplete {
+        outcomes,
+        prompt: submission.prompt,
+        negative_prompt: submission.negative_prompt,
+        model: submission.model,
+        host,
+    });
+    if !failures.is_empty() {
+        let _ = tx.send(BackgroundEvent::Error(failures.join("; ")));
+    }
+}
+
+/// [`BatchSubmission`] with owned strings, for the retry task that outlives
+/// the form it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedBatchSubmission {
+    pub prompt: String,
+    pub negative_prompt: Option<String>,
+    pub model: String,
+}
+
+/// Project one settled child onto the pane's outcome row.
+fn child_outcome(
+    index: u32,
+    authority: mold_core::GenerationBatchAuthority,
+    child: mold_core::GenerationBatchChild,
+) -> DurableGenerationChildOutcome {
+    let result = child.result.unwrap_or_default();
+    let error =
+        match child.state {
+            GenerationBatchChildState::Complete
+                if result.filename.is_none() && result.original_filename.is_none() =>
+            {
+                Some("completed without a durable gallery filename".to_string())
+            }
+            GenerationBatchChildState::Complete => None,
+            _ => Some(child.error.unwrap_or_else(|| {
+                format!("generation {}", batch_child_state_label(&child.state))
+            })),
+        };
+    DurableGenerationChildOutcome {
+        index,
+        job_id: child.job_id,
+        authority,
+        filename: result.filename,
+        original_filename: result.original_filename,
+        error,
+        retryable: child.retryable.unwrap_or(false),
+        seed: result.seed,
+        generation_time_ms: result.generation_time_ms,
+        preview_bytes: None,
+    }
+}
+
+/// The pane shows one print, so only the last completed sibling's bytes are
+/// worth a round trip.
+async fn hydrate_last_completed(
+    client: &MoldClient,
+    outcomes: &mut [DurableGenerationChildOutcome],
+) {
+    let Some(last) = outcomes
+        .iter_mut()
+        .rev()
+        .find(|outcome| outcome.error.is_none())
+    else {
+        return;
+    };
+    let Some(filename) = last
+        .filename
+        .as_deref()
+        .or(last.original_filename.as_deref())
+    else {
+        return;
+    };
+    last.preview_bytes = client.get_gallery_image(filename).await.ok();
+}
+
+/// What the batch was submitted with. The Create form may have moved on
+/// while it rendered, and prompt history records what was developed.
+struct BatchSubmission<'a> {
+    prompt: &'a str,
+    negative_prompt: Option<&'a str>,
+    model: &'a str,
+}
+
+async fn finish_canonical_batch(
+    report: mold_core::durable_generation::CanonicalGenerationReport,
+    client: &MoldClient,
+    host: crate::app::HeldHost,
+    submission: BatchSubmission<'_>,
+    tx: &mpsc::UnboundedSender<BackgroundEvent>,
+) -> CanonicalBatchResult {
+    let mut outcomes = report
+        .outcomes
+        .into_iter()
+        .map(|outcome| {
+            let index = outcome.request_offset + outcome.child.index;
+            child_outcome(index, outcome.authority, outcome.child)
+        })
+        .collect::<Vec<_>>();
+    outcomes.sort_by_key(|outcome| outcome.index);
+    hydrate_last_completed(client, &mut outcomes).await;
+    let _ = tx.send(BackgroundEvent::DurableGenerationBatchComplete {
+        outcomes,
+        prompt: submission.prompt.to_string(),
+        negative_prompt: submission.negative_prompt.map(str::to_string),
+        model: submission.model.to_string(),
+        host,
+    });
+
+    if report.orchestration_failures.is_empty() {
+        CanonicalBatchResult::Done
+    } else {
+        CanonicalBatchResult::Error(report.orchestration_failures.join("; "))
+    }
 }
 
 fn requires_secure_generation_stream(req: &GenerateRequest) -> bool {
@@ -907,25 +1361,13 @@ async fn prepare_local_licensed_dependencies(
     Ok(())
 }
 
-/// Single attempt to generate via server (SSE with blocking fallback).
+/// Single attempt to generate via the durable `/api/generate/stream` facade.
 async fn try_server_generate_once(
     client: &MoldClient,
     req: &GenerateRequest,
     progress_tx: mpsc::UnboundedSender<SseProgressEvent>,
 ) -> Result<GenerateResponse, anyhow::Error> {
-    match client.generate_stream(req, progress_tx).await {
-        Ok(Some(response)) => Ok(response),
-        Ok(None) if requires_secure_generation_stream(req) => {
-            anyhow::bail!(
-                "server lacks secure streaming generation required for one-use MiniMax H3 references; update the server"
-            )
-        }
-        Ok(None) => {
-            // Server doesn't support SSE — try blocking API
-            client.generate(req.clone()).await
-        }
-        Err(e) => Err(e),
-    }
+    client.generate_stream(req, progress_tx).await
 }
 
 async fn run_local_generation(
@@ -1378,6 +1820,330 @@ pub fn remove_model(model_name: String, tx: mpsc::UnboundedSender<BackgroundEven
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn canonical_batch_capabilities(limit: u32) -> ServerCapabilities {
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.queue.heterogeneous_batch_max_outputs = Some(limit);
+        capabilities.durable_media = Some(mold_core::DurableMediaCapabilities::v2(false));
+        capabilities
+    }
+
+    fn ordinary_request() -> GenerateRequest {
+        let config = mold_core::Config::default();
+        build_request(&GenerateParams::from_config(&config), "print", &None).unwrap()
+    }
+
+    /// A host that advertises no batch limit advertises no generation at all,
+    /// and the refusal must say so rather than degrade to a second path.
+    #[test]
+    fn a_host_with_no_advertised_limit_refuses_generation_by_name() {
+        let request = ordinary_request();
+        let mut capabilities = canonical_batch_capabilities(17);
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
+            Ok(17)
+        );
+
+        capabilities.queue.heterogeneous_batch_max_outputs = None;
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[request]),
+            Err(mold_core::CanonicalRefusal::GenerationUnavailable)
+        );
+    }
+
+    #[test]
+    fn canonical_request_builder_covers_a_remote_singleton() {
+        let config = mold_core::Config::default();
+        let params = GenerateParams::from_config(&config);
+        let requests = build_batch_requests(&params, "one print", &None, &[], &[], 1, Some(42))
+            .expect("singleton request");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].batch_size, 1);
+        assert_eq!(requests[0].seed, Some(42));
+        assert_eq!(
+            canonical_batch_capabilities(64).canonical_generation_batch_limit(&requests),
+            Ok(64)
+        );
+    }
+
+    /// The singleton path renders locally when the server cannot be reached.
+    /// A batch must not be the one submission that fails outright instead.
+    #[tokio::test]
+    async fn an_unreachable_host_hands_the_batch_to_the_local_path() {
+        let config = mold_core::Config::default();
+        let params = GenerateParams::from_config(&config);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Port 1 is not listening: the capability read fails to connect.
+        let client = MoldClient::new("http://127.0.0.1:1");
+        let result = try_canonical_remote_batch(CanonicalBatchInput {
+            host: crate::app::HeldHost {
+                url: "http://127.0.0.1:1".into(),
+                api_key: None,
+            },
+            client: &client,
+            params: &params,
+            prompt: "two prints",
+            negative_prompt: &None,
+            prepared_prompts: &[],
+            prepared_transforms: &[],
+            batch: 2,
+            base_seed: Some(1),
+            tx: &tx,
+        })
+        .await;
+        assert_eq!(result, CanonicalBatchResult::FallbackLocal);
+    }
+
+    #[tokio::test]
+    async fn held_child_emits_one_structured_completion_without_global_error() {
+        let authority = mold_core::GenerationBatchAuthority {
+            instance_id: "instance-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+        };
+        let report = mold_core::durable_generation::CanonicalGenerationReport {
+            authorities: vec![authority.clone()],
+            admitted_client_ids: vec!["client-1".into()],
+            outcomes: vec![mold_core::durable_generation::CanonicalGenerationOutcome {
+                authority,
+                client_batch_id: "client-1".into(),
+                request_offset: 0,
+                request: ordinary_request(),
+                child: mold_core::GenerationBatchChild {
+                    index: 1,
+                    job_id: "job-1".into(),
+                    state: GenerationBatchChildState::Held,
+                    error: Some("dependency unavailable".into()),
+                    error_code: None,
+                    retryable: Some(true),
+                    created_at_ms: 0,
+                    updated_at_ms: 0,
+                    revision: 1,
+                    completed_at_ms: None,
+                    terminal_error: None,
+                    result: None,
+                },
+            }],
+            orchestration_failures: Vec::new(),
+            failures: vec!["terminal held child".into()],
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        assert_eq!(
+            finish_canonical_batch(
+                report,
+                &MoldClient::new("http://127.0.0.1:1"),
+                crate::app::HeldHost {
+                    url: "http://127.0.0.1:1".into(),
+                    api_key: None,
+                },
+                BatchSubmission {
+                    prompt: "a held print",
+                    negative_prompt: None,
+                    model: "flux-dev:q8",
+                },
+                &tx,
+            )
+            .await,
+            CanonicalBatchResult::Done
+        );
+        match rx.try_recv().unwrap() {
+            BackgroundEvent::DurableGenerationBatchComplete {
+                outcomes,
+                prompt,
+                model,
+                ..
+            } => {
+                assert_eq!(outcomes.len(), 1);
+                assert_eq!(outcomes[0].error.as_deref(), Some("dependency unavailable"));
+                assert!(outcomes[0].retryable);
+                // A held child produced nothing, so there is nothing to
+                // hydrate and no terminal facts to report.
+                assert_eq!(outcomes[0].seed, None);
+                assert_eq!(outcomes[0].generation_time_ms, None);
+                assert!(outcomes[0].preview_bytes.is_none());
+                assert_eq!(prompt, "a held print");
+                assert_eq!(model, "flux-dev:q8");
+            }
+            _ => panic!("unexpected non-completion event"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A completed child carries the seed and elapsed time its settlement
+    /// recorded, which is what the pane restores.
+    #[tokio::test]
+    async fn a_completed_child_reports_the_terminal_facts_it_settled_with() {
+        let authority = mold_core::GenerationBatchAuthority {
+            instance_id: "instance-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+        };
+        let report = mold_core::durable_generation::CanonicalGenerationReport {
+            authorities: vec![authority.clone()],
+            admitted_client_ids: vec!["client-1".into()],
+            outcomes: vec![mold_core::durable_generation::CanonicalGenerationOutcome {
+                authority,
+                client_batch_id: "client-1".into(),
+                request_offset: 0,
+                request: ordinary_request(),
+                child: mold_core::GenerationBatchChild {
+                    index: 1,
+                    job_id: "job-1".into(),
+                    state: GenerationBatchChildState::Complete,
+                    error: None,
+                    error_code: None,
+                    retryable: None,
+                    created_at_ms: 0,
+                    updated_at_ms: 0,
+                    revision: 2,
+                    completed_at_ms: Some(9),
+                    terminal_error: None,
+                    result: Some(mold_core::GenerationBatchResult {
+                        filename: Some("print.png".into()),
+                        original_filename: None,
+                        seed: Some(4242),
+                        generation_time_ms: Some(7_500),
+                        gpu: Some(0),
+                    }),
+                },
+            }],
+            orchestration_failures: Vec::new(),
+            failures: Vec::new(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        assert_eq!(
+            finish_canonical_batch(
+                report,
+                // Unreachable on purpose: hydration is best effort and must
+                // never turn a completed print into a failure.
+                &MoldClient::new("http://127.0.0.1:1"),
+                crate::app::HeldHost {
+                    url: "http://127.0.0.1:1".into(),
+                    api_key: None,
+                },
+                BatchSubmission {
+                    prompt: "a finished print",
+                    negative_prompt: Some("blurry"),
+                    model: "flux-dev:q8",
+                },
+                &tx,
+            )
+            .await,
+            CanonicalBatchResult::Done
+        );
+        match rx.try_recv().unwrap() {
+            BackgroundEvent::DurableGenerationBatchComplete {
+                outcomes,
+                negative_prompt,
+                ..
+            } => {
+                assert_eq!(outcomes[0].seed, Some(4242));
+                assert_eq!(outcomes[0].generation_time_ms, Some(7_500));
+                assert_eq!(outcomes[0].error, None);
+                assert_eq!(negative_prompt.as_deref(), Some("blurry"));
+            }
+            _ => panic!("unexpected non-completion event"),
+        }
+    }
+
+    /// The client gates on the MACHINE alone: a host that advertises the
+    /// durable queue admits every request shape — media, a LoRA beside it,
+    /// identity — and the server's typed refusal answers for anything it
+    /// cannot take. A host with no durable queue is refused by name.
+    #[test]
+    fn the_client_gate_reads_only_the_machines_durable_queue() {
+        let capabilities = canonical_batch_capabilities(64);
+        let mut source = ordinary_request();
+        source.source_image = Some(vec![1, 2, 3]);
+        source.lora = Some(LoraWeight {
+            path: "adapter.safetensors".into(),
+            scale: 1.0,
+            expert: None,
+        });
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&source)),
+            Ok(64)
+        );
+        let mut no_media = capabilities.clone();
+        no_media.durable_media = None;
+        assert_eq!(
+            no_media.canonical_generation_batch_limit(&[source.clone()]),
+            Ok(64),
+            "durable media is the server's per-request refusal, not a client fence"
+        );
+        let mut no_queue = capabilities;
+        no_queue.queue.heterogeneous_batch_max_outputs = None;
+        assert_eq!(
+            no_queue.canonical_generation_batch_limit(&[source]),
+            Err(mold_core::CanonicalRefusal::GenerationUnavailable)
+        );
+    }
+
+    #[test]
+    fn batch_request_builder_freezes_order_prompts_and_singleton_seeds() {
+        let config = mold_core::Config::default();
+        let mut params = GenerateParams::from_config(&config);
+        params.batch = 3;
+        params.seed = Some(u64::MAX - 1);
+        let prompts = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+
+        let requests =
+            build_batch_requests(&params, "unused", &None, &prompts, &[], 3, params.seed).unwrap();
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second", "third"]
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.seed)
+                .collect::<Vec<_>>(),
+            vec![Some(u64::MAX - 1), Some(u64::MAX), Some(0)]
+        );
+        assert!(requests.iter().all(|request| request.batch_size == 1));
+        assert!(requests
+            .iter()
+            .all(|request| request.batch_id == requests[0].batch_id));
+        assert_eq!(requests[0].batch_index, Some(1));
+        assert_eq!(requests[2].batch_index, Some(3));
+        assert!(requests
+            .iter()
+            .all(|request| request.batch_count == Some(3)));
+        let chunks = requests.chunks(2).collect::<Vec<_>>();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0][0].batch_id, chunks[1][0].batch_id);
+        assert_eq!(chunks[1][0].batch_index, Some(3));
+    }
+
+    #[test]
+    fn client_batch_ids_are_uuid_v4_shaped_and_unique() {
+        let first = new_client_batch_id();
+        let second = new_client_batch_id();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 36);
+        assert_eq!(&first[14..15], "4");
+        assert!(matches!(&first[19..20], "8" | "9" | "a" | "b"));
+        assert_eq!(
+            first
+                .chars()
+                .enumerate()
+                .filter(|(_, ch)| *ch == '-')
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>(),
+            vec![8, 13, 18, 23]
+        );
+    }
 
     #[test]
     fn license_requirements_group_future_terms_by_install_bundle() {

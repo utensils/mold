@@ -26,6 +26,7 @@ use zeroize::{Zeroize, Zeroizing};
 const STORE_DIR: &str = "queue-media";
 const STORE_VERSION_DIR: &str = "v1";
 const KEY_FILE: &str = "master.key";
+const GENERATION_ADMISSION_KEY_FILE: &str = "generation-admission.key";
 const MAGIC: &[u8; 8] = b"MOLDQMS1";
 const FORMAT_VERSION: u16 = 1;
 const V2_MAGIC: &[u8; 8] = b"MOLDQMS2";
@@ -38,6 +39,8 @@ const PROJECTION_HEADER_BYTES: usize =
     V2_MAGIC.len() + PROJECTION_NONCE_BYTES + PROJECTION_CIPHERTEXT_BYTES;
 const OPERATION_RECEIPT_VERSION: u16 = 1;
 const OPERATION_RECEIPT_PLAINTEXT_BYTES: usize = 2 + 2 + 64;
+const ADMISSION_AUTHORITY_VERSION: u16 = 1;
+const MAX_ADMISSION_AUTHORITY_PLAINTEXT_BYTES: usize = 1024;
 const NONCE_PREFIX_BYTES: usize = 19;
 const KEY_BYTES: usize = 32;
 const CHUNK_BYTES: usize = 1024 * 1024;
@@ -153,6 +156,8 @@ pub enum QueueMediaError {
     MissingKeyWithExistingStore,
     #[error("queue-media master key does not exist")]
     MissingKey,
+    #[error("durable-generation admission key is missing while authenticated receipts exist")]
+    MissingAdmissionKeyWithReceipts,
     #[error("queue-media set already exists for owner {owner_id} job {job_id}")]
     JobAlreadySealed { owner_id: String, job_id: String },
     #[error("queue-media set was not found")]
@@ -442,9 +447,13 @@ impl fmt::Debug for QueueMediaOperationFingerprint {
 
 impl QueueMediaOperationFingerprint {
     pub fn sha256_v1(canonical_operation: &[u8]) -> Self {
+        Self::from_sha256_v1_digest(Sha256::digest(canonical_operation).into())
+    }
+
+    pub(crate) fn from_sha256_v1_digest(digest: [u8; 32]) -> Self {
         Self {
             version: OPERATION_FINGERPRINT_VERSION_SHA256_V1,
-            sha256_hex: hex_encode(&Sha256::digest(canonical_operation)),
+            sha256_hex: hex_encode(&digest),
         }
     }
 
@@ -495,6 +504,43 @@ impl QueueMediaOperationReceipt {
             return Err(QueueMediaError::Authentication);
         }
         Ok(Self(encoded))
+    }
+}
+
+/// Randomized authenticated ciphertext binding a model-family admission
+/// envelope to one queue owner and job. The plaintext is interpreted only by
+/// the model-family boundary; the media store supplies confidentiality,
+/// integrity, and cross-row swap protection.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct QueueMediaAdmissionAuthority(String);
+
+impl QueueMediaAdmissionAuthority {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn parse(encoded: impl Into<String>) -> Result<Self, QueueMediaError> {
+        let encoded = encoded.into();
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded.as_bytes())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        if bytes.len() < PROJECTION_NONCE_BYTES + 2 + AEAD_TAG_BYTES
+            || bytes.len()
+                > PROJECTION_NONCE_BYTES
+                    + 2
+                    + MAX_ADMISSION_AUTHORITY_PLAINTEXT_BYTES
+                    + AEAD_TAG_BYTES
+        {
+            return Err(QueueMediaError::Authentication);
+        }
+        Ok(Self(encoded))
+    }
+}
+
+impl fmt::Debug for QueueMediaAdmissionAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("QueueMediaAdmissionAuthority(<redacted>)")
     }
 }
 
@@ -992,6 +1038,27 @@ impl StoredState {
 }
 
 impl QueueMediaStore {
+    /// Load or atomically initialize the durable-generation receipt key.
+    /// This key deliberately shares neither readiness nor bytes with encrypted
+    /// request media, so media-free admission survives a damaged media key.
+    pub(crate) fn generation_admission_key(
+        mold_home: impl AsRef<Path>,
+        receipt_evidence_exists: bool,
+    ) -> Result<Zeroizing<[u8; KEY_BYTES]>, QueueMediaError> {
+        let mold_home = mold_home.as_ref();
+        ensure_existing_directory(mold_home)?;
+        let container = mold_home.join(STORE_DIR);
+        ensure_private_dir(&container)?;
+        let key_path = container.join(GENERATION_ADMISSION_KEY_FILE);
+        if symlink_metadata_optional(&key_path)?.is_some() {
+            load_master_key(&key_path)
+        } else if receipt_evidence_exists {
+            Err(QueueMediaError::MissingAdmissionKeyWithReceipts)
+        } else {
+            initialize_master_key(&key_path).map(|(key, _)| key)
+        }
+    }
+
     /// Opens the store, initializing a key only when no stored payload exists.
     pub fn open(mold_home: impl AsRef<Path>) -> Result<OpenedQueueMediaStore, QueueMediaError> {
         Self::open_or_initialize(mold_home, true)
@@ -1213,6 +1280,87 @@ impl QueueMediaStore {
             sha256_hex,
         })
         .map_err(|_| QueueMediaError::Authentication)
+    }
+
+    pub fn seal_admission_authority_v1(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+        payload: &[u8],
+    ) -> Result<QueueMediaAdmissionAuthority, QueueMediaError> {
+        validate_identity("owner", owner_id)?;
+        validate_identity("job", job_id)?;
+        if payload.is_empty() || payload.len() > MAX_ADMISSION_AUTHORITY_PLAINTEXT_BYTES {
+            return Err(QueueMediaError::Authentication);
+        }
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(2 + payload.len()));
+        plaintext.extend_from_slice(&ADMISSION_AUTHORITY_VERSION.to_be_bytes());
+        plaintext.extend_from_slice(payload);
+        let mut nonce = [0_u8; PROJECTION_NONCE_BYTES];
+        random_fill(&mut nonce)?;
+        let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let nonce_ref = XNonce::try_from(nonce.as_slice()).expect("fixed-size nonce");
+        let ciphertext = cipher
+            .encrypt(
+                &nonce_ref,
+                Payload {
+                    msg: plaintext.as_slice(),
+                    aad: &admission_authority_aad(owner_id, job_id),
+                },
+            )
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let mut sealed = Vec::with_capacity(nonce.len() + ciphertext.len());
+        sealed.extend_from_slice(&nonce);
+        sealed.extend_from_slice(&ciphertext);
+        Ok(QueueMediaAdmissionAuthority(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sealed),
+        ))
+    }
+
+    pub fn open_admission_authority_v1(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+        authority: &QueueMediaAdmissionAuthority,
+    ) -> Result<Zeroizing<Vec<u8>>, QueueMediaError> {
+        validate_identity("owner", owner_id)?;
+        validate_identity("job", job_id)?;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(authority.0.as_bytes())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        if encoded.len() < PROJECTION_NONCE_BYTES + 2 + AEAD_TAG_BYTES
+            || encoded.len()
+                > PROJECTION_NONCE_BYTES
+                    + 2
+                    + MAX_ADMISSION_AUTHORITY_PLAINTEXT_BYTES
+                    + AEAD_TAG_BYTES
+        {
+            return Err(QueueMediaError::Authentication);
+        }
+        let (nonce, ciphertext) = encoded.split_at(PROJECTION_NONCE_BYTES);
+        let nonce = XNonce::try_from(nonce).expect("validated nonce length");
+        let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let mut plaintext = Zeroizing::new(
+            cipher
+                .decrypt(
+                    &nonce,
+                    Payload {
+                        msg: ciphertext,
+                        aad: &admission_authority_aad(owner_id, job_id),
+                    },
+                )
+                .map_err(|_| QueueMediaError::Authentication)?,
+        );
+        if plaintext.len() < 3
+            || u16::from_be_bytes(plaintext[..2].try_into().expect("sized"))
+                != ADMISSION_AUTHORITY_VERSION
+        {
+            return Err(QueueMediaError::Authentication);
+        }
+        plaintext.drain(..2);
+        Ok(plaintext)
     }
 
     fn seal_inner(
@@ -3144,6 +3292,16 @@ fn operation_receipt_aad(owner_id: &str, operation_id: &str) -> Vec<u8> {
     aad
 }
 
+fn admission_authority_aad(owner_id: &str, job_id: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(64 + owner_id.len() + job_id.len());
+    aad.extend_from_slice(b"mold.queue-media.admission-authority.v1");
+    aad.extend_from_slice(&(owner_id.len() as u64).to_be_bytes());
+    aad.extend_from_slice(owner_id.as_bytes());
+    aad.extend_from_slice(&(job_id.len() as u64).to_be_bytes());
+    aad.extend_from_slice(job_id.as_bytes());
+    aad
+}
+
 fn encode_projection(
     projection: &QueueMediaProjection,
 ) -> Result<[u8; PROJECTION_PLAINTEXT_BYTES], QueueMediaError> {
@@ -3431,8 +3589,12 @@ fn ensure_private_dir(path: &Path) -> Result<(), QueueMediaError> {
             if fs::symlink_metadata(parent).is_err() {
                 ensure_private_dir(parent)?;
             }
-            create_directory_owner_only(path)?;
-            crate::dir_sync::sync_directory(parent)?;
+            match create_directory_owner_only(path) {
+                Ok(()) => crate::dir_sync::sync_directory(parent)?,
+                Err(QueueMediaError::Io(error))
+                    if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
             let metadata = fs::symlink_metadata(path)?;
             verify_private_directory_metadata(path, &metadata)
         }
@@ -3997,6 +4159,43 @@ mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom};
 
+    #[test]
+    fn admission_key_is_created_only_without_receipt_evidence() {
+        let home = tempfile::tempdir().unwrap();
+        let first = QueueMediaStore::generation_admission_key(home.path(), false).unwrap();
+        let loaded = QueueMediaStore::generation_admission_key(home.path(), true).unwrap();
+        assert_eq!(first.as_ref(), loaded.as_ref());
+
+        std::fs::remove_file(
+            home.path()
+                .join(STORE_DIR)
+                .join(GENERATION_ADMISSION_KEY_FILE),
+        )
+        .unwrap();
+        assert!(matches!(
+            QueueMediaStore::generation_admission_key(home.path(), true),
+            Err(QueueMediaError::MissingAdmissionKeyWithReceipts)
+        ));
+        assert!(!home
+            .path()
+            .join(STORE_DIR)
+            .join(GENERATION_ADMISSION_KEY_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn corrupt_admission_key_is_never_regenerated() {
+        let home = tempfile::tempdir().unwrap();
+        QueueMediaStore::generation_admission_key(home.path(), false).unwrap();
+        let key_path = home
+            .path()
+            .join(STORE_DIR)
+            .join(GENERATION_ADMISSION_KEY_FILE);
+        std::fs::write(&key_path, [9_u8; 7]).unwrap();
+        assert!(QueueMediaStore::generation_admission_key(home.path(), true).is_err());
+        assert_eq!(std::fs::read(key_path).unwrap(), [9_u8; 7]);
+    }
+
     struct CountingReader<R> {
         inner: R,
         bytes_read: usize,
@@ -4533,6 +4732,51 @@ mod tests {
         .unwrap();
         assert!(store
             .open_operation_receipt_v1("owner-a", "operation-a", &tampered)
+            .is_err());
+    }
+
+    #[test]
+    fn admission_authority_is_encrypted_and_bound_to_owner_job_and_store() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let payload = br#"{"version":1,"authenticated_identity_sha256":"identity-sentinel"}"#;
+        let first = store
+            .seal_admission_authority_v1("owner-a", "job-a", payload)
+            .unwrap();
+        let second = store
+            .seal_admission_authority_v1("owner-a", "job-a", payload)
+            .unwrap();
+
+        assert_ne!(first, second);
+        assert!(!first.as_str().contains("identity-sentinel"));
+        assert_eq!(
+            store
+                .open_admission_authority_v1("owner-a", "job-a", &first)
+                .unwrap()
+                .as_slice(),
+            payload
+        );
+        assert!(store
+            .open_admission_authority_v1("owner-b", "job-a", &first)
+            .is_err());
+        assert!(store
+            .open_admission_authority_v1("owner-a", "job-b", &first)
+            .is_err());
+        let other_home = tempfile::tempdir().unwrap();
+        assert!(open_store(other_home.path())
+            .open_admission_authority_v1("owner-a", "job-a", &first)
+            .is_err());
+
+        let mut tampered = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(first.as_str())
+            .unwrap();
+        *tampered.last_mut().unwrap() ^= 1;
+        let tampered = QueueMediaAdmissionAuthority::parse(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tampered),
+        )
+        .unwrap();
+        assert!(store
+            .open_admission_authority_v1("owner-a", "job-a", &tampered)
             .is_err());
     }
 

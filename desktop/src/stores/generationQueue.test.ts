@@ -36,11 +36,30 @@ vi.mock("../lib/api/sse", () => ({
 }));
 vi.mock("../lib/api/client", () => ({
   apiFetch: vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))),
-  apiFetchTo: vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))),
+  // A sequence is CREATED through `POST /api/chain-jobs` before its event
+  // stream opens; every other call keeps the plain 204.
+  apiFetchTo: vi.fn((_target: unknown, path: string) =>
+    Promise.resolve(
+      path === "/api/chain-jobs"
+        ? new Response(JSON.stringify({ job_id: "chain-job-1" }))
+        : new Response(null, { status: 204 }),
+    ),
+  ),
   // Reconciliation asks the host what really happened to a dead stream: an
   // empty queue and an empty gallery mean the print is genuinely gone.
   apiJsonTo: vi.fn((_target: unknown, path: string) =>
-    Promise.resolve(path === "/api/queue" ? { entries: [] } : []),
+    Promise.resolve(
+      path === "/api/queue"
+        ? { entries: [] }
+        : // Sequence recovery asks for the ephemeral chain record; an empty
+          // listing is what proves the submission never landed, and a detail
+          // that finalized nothing is what proves it produced no print.
+          path.startsWith("/api/chain-jobs?")
+          ? { jobs: [] }
+          : path.startsWith("/api/chain-jobs/")
+            ? { state: "complete", finalizes: [] }
+            : [],
+    ),
   ),
   currentTarget: () => ({ baseUrl: "http://primary:7680", apiKey: null }),
   ApiError: class ApiError extends Error {
@@ -59,13 +78,34 @@ vi.mock("../lib/notify", () => ({
 
 import { useGenerationStore } from "./generation";
 
+// A print is admitted through the durable queue and never opens a held
+// stream, so every stream-lifecycle case below rides an auto-chained SEQUENCE
+// — the one submission shape `streamJob` still serves.
 const req = {
   prompt: "a lighthouse",
-  model: "flux2-klein:q4",
+  model: "ltx-2-19b-distilled:fp8",
   width: 1024,
   height: 1024,
   steps: 4,
+  frames: 241,
 };
+
+const chainDecision = {
+  kind: "chain" as const,
+  clipFrames: 97,
+  motionTail: 17,
+  stageCount: 3,
+};
+
+/** A chain completion carries the stitched clip, not a still. */
+/** A sequence finishes with a saved FILENAME on `finalized` — never bytes. */
+function chainComplete(overrides: { seed?: number; video?: string; format?: string } = {}): string {
+  return JSON.stringify({
+    type: "finalized",
+    output: "final/output-1.mp4",
+    gallery_filename: `sequence-${overrides.seed ?? 1}.${overrides.format ?? "mp4"}`,
+  });
+}
 
 describe("generation queueing", () => {
   beforeEach(() => {
@@ -85,30 +125,37 @@ describe("generation queueing", () => {
 
   it("submitting while a job runs queues a second concurrent job", async () => {
     const store = useGenerationStore();
-    store.submitBatch({ ...req }, 1);
+    store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
     // First job starts denoising…
     openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "denoise_step", step: 1, total: 4 }),
+      "chain_job",
+      JSON.stringify({ type: "denoise_step", stage_idx: 0, step: 1, total: 4 }),
     );
     // …and a second submission with a DIFFERENT model queues behind it.
-    store.submitBatch({ ...req, model: "z-image:q8" }, 1);
+    store.submitBatch({ ...req, model: "z-image:q8" }, 1, null, chainDecision);
     await flushPromises();
-    openStreams[1]!.onEvent("progress", JSON.stringify({ type: "queued", position: 1, id: "b" }));
 
     expect(store.jobs).toHaveLength(2);
     expect(store.pending).toHaveLength(2);
     // Each job snapshots its own request.
-    expect(store.jobs[0]!.model).toBe("flux2-klein:q4");
+    expect(store.jobs[0]!.model).toBe(req.model);
     expect(store.jobs[1]!.model).toBe("z-image:q8");
     // The canvas tracks the developing job, not the queued one.
     expect(store.active!.clientId).toBe(store.jobs[0]!.clientId);
-    expect(store.jobs[1]!.queuePosition).toBe(1);
+    // A sequence's server identity is the chain job the create minted.
+    expect(store.jobs[1]!.id).toBe("chain-job-1");
   });
 
-  it("reports admission only after the generation response opens", async () => {
-    const batch = useGenerationStore().submitBatch({ ...req }, 1);
+  it("reports admission only after the machine accepts the sequence", async () => {
+    // A sequence is accepted by `POST /api/chain-jobs`, not by a stream
+    // opening: that POST is the moment the machine owns the work.
+    const { apiFetchTo } = await import("../lib/api/client");
+    let releaseCreate!: (value: Response) => void;
+    vi.mocked(apiFetchTo).mockImplementationOnce(
+      () => new Promise<Response>((resolve) => (releaseCreate = resolve)),
+    );
+    const batch = useGenerationStore().submitBatch({ ...req }, 1, null, chainDecision);
     let admitted = false;
     void batch.admitted!.then(() => {
       admitted = true;
@@ -116,7 +163,7 @@ describe("generation queueing", () => {
     await flushPromises();
 
     expect(admitted).toBe(false);
-    openStreams[0]!.onOpen?.(new Response(null, { status: 200 }));
+    releaseCreate(new Response(JSON.stringify({ job_id: "chain-job-1" })));
     await flushPromises();
 
     expect(admitted).toBe(true);
@@ -140,7 +187,7 @@ describe("generation queueing", () => {
     const store = useGenerationStore();
     const inspected = store.startJob({ ...req, prompt: "inspected" });
     store.select(inspected.clientId);
-    const { jobs } = store.submitBatch({ ...req, prompt: "new work" }, 1);
+    const { jobs } = store.submitBatch({ ...req, prompt: "new work" }, 1, null, chainDecision);
     await flushPromises();
 
     expect(store.selectedClientId).toBeNull();
@@ -149,7 +196,7 @@ describe("generation queueing", () => {
 
   it("creates every batch sibling and opens enough streams to fill a four-GPU host", async () => {
     const store = useGenerationStore();
-    const { jobs } = store.submitBatch({ ...req, seed: 100 }, 5);
+    const { jobs } = store.submitBatch({ ...req, seed: 100 }, 5, null, chainDecision);
     await flushPromises();
     expect(jobs).toHaveLength(5);
     expect(openStreams).toHaveLength(4);
@@ -160,30 +207,55 @@ describe("generation queueing", () => {
 
   it("cancel marks the job cancelled and asks the server to drop it", async () => {
     const store = useGenerationStore();
-    store.submitBatch({ ...req }, 1);
+    store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
-    openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-1" }),
-    );
     await store.cancel(store.jobs[0]!.clientId);
     const { apiFetchTo } = await import("../lib/api/client");
+    // The id comes from the create response, not from a progress frame.
     expect(vi.mocked(apiFetchTo)).toHaveBeenCalledWith(
       { baseUrl: "http://primary:7680", apiKey: null },
-      "/api/queue/job-1",
-      { method: "DELETE" },
+      "/api/chain-jobs/chain-job-1/cancel",
+      { method: "POST" },
     );
     expect(store.jobs[0]!.status).toBe("error");
     expect(store.jobs[0]!.error).toBe("Cancelled");
   });
 
+  it("removes exactly one settled row and refuses live or interrupted work", () => {
+    const store = useGenerationStore();
+    const cancelled = store.startJob({ ...req, prompt: "cancelled" });
+    const live = store.startJob({ ...req, prompt: "live" });
+    cancelled.status = "error";
+    cancelled.error = "Cancelled";
+    store.select(cancelled.clientId);
+
+    expect(store.removeSettled(live.clientId)).toBe(false);
+    cancelled.interrupted = true;
+    expect(store.removeSettled(cancelled.clientId)).toBe(false);
+    cancelled.interrupted = false;
+    expect(store.removeSettled(cancelled.clientId)).toBe(true);
+    expect(store.jobs.map((job) => job.clientId)).toEqual([live.clientId]);
+    expect(store.selectedClientId).toBeNull();
+  });
+
   it("repaints as cancelling before a running Wan request is acknowledged", async () => {
     const store = useGenerationStore();
-    const { jobs } = store.submitBatch({ ...req, model: "wan22-i2v-a14b:q4" }, 1);
+    const { jobs } = store.submitBatch(
+      { ...req, model: "wan22-i2v-a14b:q4" },
+      1,
+      null,
+      chainDecision,
+    );
     await flushPromises();
     openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "denoise_step", step: 1, total: 28, id: "wan-running" }),
+      "chain_job",
+      JSON.stringify({
+        type: "denoise_step",
+        stage_idx: 0,
+        step: 1,
+        total: 28,
+        job_id: "wan-running",
+      }),
     );
     jobs[0]!.id = "wan-running";
     const { apiFetchTo } = await import("../lib/api/client");
@@ -206,11 +278,17 @@ describe("generation queueing", () => {
 
   it("keeps a running job and its stream alive when the server refuses cancellation", async () => {
     const store = useGenerationStore();
-    const { jobs } = store.submitBatch({ ...req }, 1);
+    const { jobs } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
     openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "denoise_step", step: 1, total: 4, id: "running-job" }),
+      "chain_job",
+      JSON.stringify({
+        type: "denoise_step",
+        stage_idx: 0,
+        step: 1,
+        total: 4,
+        job_id: "running-job",
+      }),
     );
     jobs[0]!.id = "running-job";
     const { apiFetchTo, ApiError } = await import("../lib/api/client");
@@ -226,15 +304,18 @@ describe("generation queueing", () => {
 
   it("keeps a server cancellation frame classified as cancellation during DELETE", async () => {
     const store = useGenerationStore();
-    const { settled } = store.submitBatch({ ...req }, 1);
+    const { settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
     openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-race" }),
+      "chain_job",
+      JSON.stringify({ type: "chain_start", stage_count: 3, job_id: "job-race" }),
     );
     const { apiFetchTo } = await import("../lib/api/client");
     vi.mocked(apiFetchTo).mockImplementationOnce(async () => {
-      openStreams[0]!.onEvent("error", JSON.stringify({ message: "cancelled" }));
+      openStreams[0]!.onEvent(
+        "chain_job",
+        JSON.stringify({ type: "state_changed", state: "cancelled" }),
+      );
       return new Response(null, { status: 204 });
     });
 
@@ -249,31 +330,20 @@ describe("generation queueing", () => {
 
   it("ignores buffered progress and completion frames after local cancellation", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
     openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-buffered" }),
+      "chain_job",
+      JSON.stringify({ type: "chain_start", stage_count: 3, job_id: "job-buffered" }),
     );
 
     await store.cancel(jobs[0]!.clientId);
     expect(openStreams[0]!.signal.aborted).toBe(true);
     openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "denoise_step", step: 4, total: 4 }),
+      "chain_job",
+      JSON.stringify({ type: "denoise_step", stage_idx: 0, step: 4, total: 4 }),
     );
-    openStreams[0]!.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "aGVsbG8=",
-        format: "png",
-        width: 1024,
-        height: 1024,
-        seed_used: 5,
-        generation_time_ms: 100,
-        model: req.model,
-      }),
-    );
+    openStreams[0]!.onEvent("chain_job", chainComplete({ seed: 5 }));
     openStreams[0]!.resolve();
     await settled;
 
@@ -283,23 +353,12 @@ describe("generation queueing", () => {
 
   it("ignores buffered completion frames after the store resets", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
 
     store.resetJobs();
     expect(openStreams[0]!.signal.aborted).toBe(true);
-    openStreams[0]!.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "aGVsbG8=",
-        format: "png",
-        width: 1024,
-        height: 1024,
-        seed_used: 6,
-        generation_time_ms: 100,
-        model: req.model,
-      }),
-    );
+    openStreams[0]!.onEvent("chain_job", chainComplete({ seed: 6 }));
     openStreams[0]!.resolve();
     await settled;
 
@@ -309,42 +368,31 @@ describe("generation queueing", () => {
 
   it("preserves a valid completion when DELETE subsequently fails", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
-    openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-complete-race" }),
-    );
     const { apiFetchTo } = await import("../lib/api/client");
     vi.mocked(apiFetchTo).mockImplementationOnce(async () => {
-      openStreams[0]!.onEvent(
-        "complete",
-        JSON.stringify({
-          image: "aGVsbG8=",
-          format: "png",
-          width: 1024,
-          height: 1024,
-          seed_used: 12,
-          generation_time_ms: 100,
-          model: req.model,
-        }),
-      );
+      openStreams[0]!.onEvent("chain_job", chainComplete({ seed: 12 }));
       openStreams[0]!.resolve();
       throw new Error("DELETE connection reset");
     });
 
     await expect(store.cancel(jobs[0]!.clientId)).resolves.toBe(false);
     await settled;
-    expect(jobs[0]).toMatchObject({ status: "complete", error: null, result: { seed_used: 12 } });
+    expect(jobs[0]).toMatchObject({
+      status: "complete",
+      error: null,
+      result: { filename: "sequence-12.mp4" },
+    });
   });
 
   it("keeps the local stream when remote cancellation cannot be confirmed", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
     openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-offline" }),
+      "chain_job",
+      JSON.stringify({ type: "chain_start", stage_count: 3, job_id: "job-offline" }),
     );
     const { apiFetchTo } = await import("../lib/api/client");
     vi.mocked(apiFetchTo).mockRejectedValueOnce(new Error("host went offline"));
@@ -356,38 +404,19 @@ describe("generation queueing", () => {
     await settled;
   });
 
-  it("reports an unconfirmed remote cancellation when the stream has no queue ID yet", async () => {
-    const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
-    await flushPromises();
-
-    expect(jobs[0]).toMatchObject({ streamStarted: true, id: "" });
-    await expect(store.cancel(jobs[0]!.clientId)).rejects.toThrow(
-      "Remote cancellation was not confirmed before the queue ID arrived.",
-    );
-
-    const { apiFetchTo } = await import("../lib/api/client");
-    expect(vi.mocked(apiFetchTo)).not.toHaveBeenCalled();
-    expect(openStreams[0]!.signal.aborted).toBe(false);
-    expect(jobs[0]).toMatchObject({ status: "queued", error: null });
-
-    openStreams[0]!.resolve();
-    await settled;
-  });
-
   it("preserves a terminal server failure that races the cancellation request", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
-    openStreams[0]!.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-failed-race" }),
-    );
     const { apiFetchTo } = await import("../lib/api/client");
     vi.mocked(apiFetchTo).mockImplementationOnce(async () => {
       openStreams[0]!.onEvent(
-        "error",
-        JSON.stringify({ message: "GPU ran out of memory while loading the model" }),
+        "chain_job",
+        JSON.stringify({
+          type: "state_changed",
+          state: "failed",
+          error: "GPU ran out of memory while loading the model",
+        }),
       );
       return new Response(null, { status: 204 });
     });
@@ -403,38 +432,32 @@ describe("generation queueing", () => {
     expect(jobs[0]!.error).not.toBe("Cancelled");
   });
 
-  it("fails a malformed generation frame instead of leaving the job pending", async () => {
+  it("ignores a malformed frame and settles on the stream's own close", async () => {
+    // A malformed frame carries no authority — the chain-job stream retries
+    // and its terminal frame settles. A frame that never parses must not be
+    // read as a failure of the render itself.
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
 
-    openStreams[0]!.onEvent("progress", "{not-json");
+    openStreams[0]!.onEvent("chain_job", "{not-json");
+    expect(jobs[0]!.status).not.toBe("error");
     openStreams[0]!.resolve();
     await settled;
 
-    expect(jobs[0]).toMatchObject({
-      status: "error",
-      error: "The host returned an invalid generation update.",
-    });
+    // It ends unfinished rather than claiming a result it never received.
+    expect(jobs[0]!.status).toBe("error");
+    expect(jobs[0]!.result).toBeNull();
   });
 
-  it("does not retain a malformed complete result when payload decoding fails", async () => {
+  it("never completes a sequence the machine finalized without a saved file", async () => {
+    // `finalized` carries the filename the print was saved under. Without one
+    // there is nothing to show, so the row must not read as complete.
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
 
-    openStreams[0]!.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "%%%not-base64%%%",
-        format: "png",
-        width: 1024,
-        height: 1024,
-        seed_used: 123,
-        generation_time_ms: 100,
-        model: req.model,
-      }),
-    );
+    openStreams[0]!.onEvent("chain_job", JSON.stringify({ type: "finalized" }));
     openStreams[0]!.resolve();
     await settled;
 
@@ -444,7 +467,7 @@ describe("generation queueing", () => {
 
   it("fails a clean stream close that arrives without a terminal event", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
 
     openStreams[0]!.resolve();
@@ -464,7 +487,7 @@ describe("generation queueing", () => {
 
   it("does not classify an HTTP rejection as a resumable transport interruption", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();
     openStreams[0]!.onClose?.(new Error("SSE request failed with HTTP 401"));
     openStreams[0]!.resolve();
@@ -479,9 +502,9 @@ describe("generation queueing", () => {
 
   it("prune drops the oldest finished jobs and keeps live ones", () => {
     const store = useGenerationStore();
-    store.submitBatch({ ...req }, 1);
-    store.submitBatch({ ...req }, 1);
-    store.submitBatch({ ...req }, 1);
+    store.submitBatch({ ...req }, 1, null, chainDecision);
+    store.submitBatch({ ...req }, 1, null, chainDecision);
+    store.submitBatch({ ...req }, 1, null, chainDecision);
     store.jobs[0]!.status = "complete";
     store.jobs[1]!.status = "error";
     store.prune(1);
@@ -545,24 +568,18 @@ describe("generation queueing", () => {
 
   it("defers automatic pruning until consumers see a slow older completion", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...req, prompt: "slow oldest" }, 1);
+    const { jobs, settled } = store.submitBatch(
+      { ...req, prompt: "slow oldest" },
+      1,
+      null,
+      chainDecision,
+    );
     await flushPromises();
     for (let index = 0; index < 50; index += 1) {
       const newer = store.startJob({ ...req, prompt: `newer ${index}` });
       newer.status = "complete";
     }
-    openStreams[0]!.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "aGVsbG8=",
-        format: "png",
-        width: 1024,
-        height: 1024,
-        seed_used: 99,
-        generation_time_ms: 100,
-        model: req.model,
-      }),
-    );
+    openStreams[0]!.onEvent("chain_job", chainComplete({ seed: 99 }));
     openStreams[0]!.resolve();
 
     const returned = await settled;
@@ -575,9 +592,19 @@ describe("generation queueing", () => {
 
   it("does not auto-prune a terminal job from another batch whose consumer is pending", async () => {
     const store = useGenerationStore();
-    const pendingBatch = store.submitBatch({ ...req, prompt: "pending consumer" }, 1);
+    const pendingBatch = store.submitBatch(
+      { ...req, prompt: "pending consumer" },
+      1,
+      null,
+      chainDecision,
+    );
     await flushPromises();
-    const finishingBatch = store.submitBatch({ ...req, prompt: "finishing consumer" }, 1);
+    const finishingBatch = store.submitBatch(
+      { ...req, prompt: "finishing consumer" },
+      1,
+      null,
+      chainDecision,
+    );
     await flushPromises();
 
     let pendingConsumerObserved = false;
@@ -587,30 +614,8 @@ describe("generation queueing", () => {
 
     // The first job has a terminal result, but its held-open transport keeps
     // that batch's settled consumer pending while the other batch completes.
-    openStreams[0]!.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "aGVsbG8=",
-        format: "png",
-        width: 1024,
-        height: 1024,
-        seed_used: 201,
-        generation_time_ms: 100,
-        model: req.model,
-      }),
-    );
-    openStreams[1]!.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "aGVsbG8=",
-        format: "png",
-        width: 1024,
-        height: 1024,
-        seed_used: 202,
-        generation_time_ms: 100,
-        model: req.model,
-      }),
-    );
+    openStreams[0]!.onEvent("chain_job", chainComplete({ seed: 201 }));
+    openStreams[1]!.onEvent("chain_job", chainComplete({ seed: 202 }));
     openStreams[1]!.resolve();
 
     // Force the finishing batch's automatic housekeeping over the retention

@@ -10,92 +10,108 @@ import {
 } from "./useGenerateStream";
 import type {
   ChainRequestWire,
+  GalleryImage,
   GenerateRequestWire,
-  SseCompleteEvent,
 } from "../types";
-import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type {
-  ChainStreamHandlers,
-  GenerateStreamHandlers,
-  StreamTarget,
-} from "../api";
-import { cancelQueueJob, fetchQueue } from "../api";
+  GenerationBatchStatus,
+  GenerationBatchStatusResponse,
+} from "@studio/api/generationAdmission";
+import type { ChainRoutingDecision } from "../lib/chainRouting";
+import type { StreamTarget } from "../api";
+import { cancelQueueJob } from "../api";
 import type { HostRoute } from "../lib/hostRouting";
+import { ApiError } from "@studio/api/client";
 
 function persistedPayload(jobs: unknown[]): string {
   return JSON.stringify({ version: 1, jobs });
 }
 
-// Capture the most recent handlers passed into `generateStream` /
-// `generateChainStream` so each test can drive the SSE lifecycle (complete /
-// error) deterministically without spinning up a real EventSource. The mocks
-// resolve immediately — no network.
-let lastSingleHandlers: GenerateStreamHandlers | null = null;
-let lastChainHandlers: ChainStreamHandlers | null = null;
-// The dispatch target the singleton threaded through — `undefined` means the
-// submission was never routed and lands on the serving origin.
-let lastSingleTarget: StreamTarget | undefined;
+// A SEQUENCE is a durable chain job: it is created through
+// `POST /api/chain-jobs` and followed on its OWN `/api/chain-jobs/:id/events`
+// subscription. Every PRINT is admitted through `POST /api/generation-batches`
+// and settles through the durable authority.
 let lastChainTarget: StreamTarget | undefined;
-const prepareReferenceUploads = vi.hoisted(() =>
-  vi.fn(({ request }: { request: GenerateRequestWire }) =>
-    Promise.resolve({
-      request,
-      expiresAtMs: Date.now() + 60_000,
-      requestScopeSha256: "a".repeat(64),
-      cancel: () => Promise.resolve(),
-    }),
-  ),
+let lastChainRequest: ChainRequestWire | null = null;
+/** Drive the per-job chain event stream the way the SSE handlers used to be.
+ *  The MOST RECENT subscription is the one under test — the mock is shared
+ *  across the file, so an earlier test's stream is still in `mock.calls`. */
+function emitChainJobEvent(event: unknown): void {
+  const call = [...(fetchEventSource.mock.calls as unknown[][])]
+    .reverse()
+    .find((entry) => String(entry[0]).includes("/api/chain-jobs/"));
+  const options = call?.[1] as
+    | { onmessage?: (message: { event: string; data: string }) => void }
+    | undefined;
+  options?.onmessage?.({ event: "chain_job", data: JSON.stringify(event) });
+}
+
+const admitGenerationBatch = vi.hoisted(() => vi.fn());
+const lookupGenerationBatchByClientId = vi.hoisted(() => vi.fn());
+const reconcileGenerationBatches = vi.hoisted(() => vi.fn());
+const fetchEventSource = vi.hoisted(() => vi.fn(() => new Promise(() => {})));
+const mutateQueueJobOnExpectedInstance = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
 );
+const listGalleryFrom = vi.hoisted(() => vi.fn().mockResolvedValue([]));
+const prepareReferenceUploadBatch = vi.hoisted(() => vi.fn());
+
+vi.mock("@studio/api/referenceUploads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/referenceUploads")>()),
+  prepareReferenceUploadBatch,
+}));
+const fetchGalleryBlob = vi.hoisted(() => vi.fn());
+const fetchGalleryThumbnailBlob = vi.hoisted(() => vi.fn());
+
+vi.mock("@studio/api/generationAdmission", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/generationAdmission")>()),
+  admitGenerationBatch,
+  lookupGenerationBatchByClientId,
+  reconcileGenerationBatches,
+}));
+
+vi.mock("@microsoft/fetch-event-source", () => ({ fetchEventSource }));
+
+vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/queuePlan")>()),
+  mutateQueueJobOnExpectedInstance,
+}));
+
+vi.mock("../lib/galleryMedia", () => ({
+  fetchGalleryBlob,
+  fetchGalleryThumbnailBlob,
+}));
 
 vi.mock("../api", () => ({
   cancelQueueJob: vi.fn().mockResolvedValue(undefined),
   fetchQueue: vi.fn().mockResolvedValue({ entries: [] }),
-  generateStream: vi.fn(
-    (
-      _req: GenerateRequestWire,
-      handlers: GenerateStreamHandlers,
-      _signal?: AbortSignal,
-      target?: StreamTarget,
-    ) => {
-      lastSingleHandlers = handlers;
-      lastSingleTarget = target;
-      return Promise.resolve();
-    },
-  ),
-  generateChainStream: vi.fn(
-    (
-      _req: ChainRequestWire,
-      handlers: ChainStreamHandlers,
-      _signal?: AbortSignal,
-      target?: StreamTarget,
-    ) => {
-      lastChainHandlers = handlers;
-      lastChainTarget = target;
-      return Promise.resolve();
-    },
-  ),
+  listGalleryFrom,
+  cancelChainJob: vi.fn().mockResolvedValue(undefined),
+  chainJobEventsUrl: (id: string) => `/api/chain-jobs/${id}/events`,
+  createChainJob: vi.fn((req: ChainRequestWire, target?: StreamTarget) => {
+    lastChainRequest = req;
+    lastChainTarget = target;
+    return Promise.resolve({ job_id: "chain-job-1" });
+  }),
 }));
 
-vi.mock("@studio/api/referenceUploads", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@studio/api/referenceUploads")>()),
-  // Keep the real `requestNeedsReferenceUpload` predicate; only the network
-  // side of the lease is stubbed so a submission can reach the stream.
-  prepareReferenceUploads,
-}));
-
-function fakeCompleteEvent(
-  overrides: Partial<SseCompleteEvent> = {},
-): SseCompleteEvent {
+function chainJobDetail(): Record<string, unknown> {
   return {
-    image: "AAAA",
-    format: "png",
-    width: 512,
-    height: 512,
-    seed_used: 42,
-    generation_time_ms: 1234,
-    model: "flux-dev:fp16",
-    ...overrides,
-  } as SseCompleteEvent;
+    id: "chain-job-1",
+    state: "running",
+    model: "ltx-2-19b-distilled:fp8",
+    stage_count: 3,
+    current_stage: 0,
+    created_at_unix_ms: 1,
+    updated_at_unix_ms: 2,
+    error: null,
+    ephemeral: true,
+    stages: [0, 1, 2].map((idx) => ({ idx, state: "pending" })),
+    script: {
+      chain: { model: "ltx-2-19b-distilled:fp8" },
+      stages: [{ frames: 97 }, { frames: 97 }, { frames: 97 }],
+    },
+  };
 }
 
 function chainDecision(
@@ -126,6 +142,149 @@ function singleGen(
     frames: 241,
     ...overrides,
   };
+}
+
+// ── Durable-print harness ───────────────────────────────────────────────────
+//
+// A print has no attached stream any more: it is admitted through
+// `POST /api/generation-batches` and settles from the host's own authority.
+// These helpers are the print equivalent of `lastChainHandlers`.
+
+const durableRoute: HostRoute = {
+  hostId: "render-box",
+  label: "Render box",
+  target: { baseUrl: "http://render-box:7680", apiKey: "secret" },
+  instanceId: "instance-1",
+  durableGeneration: { heterogeneous_batch_max_outputs: 64 },
+  durableMedia: {
+    protocol_version: 2,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    private_h3: true,
+  },
+  eventsAvailable: true,
+};
+
+function durableBatch(
+  clientBatchId: string,
+  states: Array<
+    | "accepted"
+    | "queued"
+    | "running"
+    | "held"
+    | "complete"
+    | "failed"
+    | "cancelled"
+  > = ["queued"],
+  childOverrides: Record<string, unknown> = {},
+): GenerationBatchStatus {
+  return {
+    id: `server-${clientBatchId}`,
+    client_batch_id: clientBatchId,
+    instance_id: "instance-1",
+    durable: true,
+    children: states.map((state, offset) => ({
+      index: offset + 1,
+      job_id: `job-${clientBatchId}-${offset + 1}`,
+      state,
+      created_at_ms: 10,
+      updated_at_ms: 20 + offset,
+      ...(state === "complete"
+        ? {
+            completed_at_ms: 30,
+            result: { filename: `print-${offset + 1}.png` },
+          }
+        : {}),
+      ...childOverrides,
+    })),
+  };
+}
+
+function durableStatusResponse(
+  batches: GenerationBatchStatus[],
+): GenerationBatchStatusResponse {
+  return {
+    instance_id: "instance-1",
+    batches,
+    missing: { client_batch_ids: [], batch_ids: [] },
+  };
+}
+
+/** Drop every row from the module-scoped singleton between tests. */
+function clearJobs(): void {
+  const stream = useGenerateStream();
+  for (const job of [...stream.jobs.value]) stream.remove(job.id);
+  stream.canvasErrorJobId.value = null;
+}
+
+/** Drain the durable admission/hydration microtasks without moving the clock,
+ * so a test holding fake timers keeps the auto-remove window to itself. */
+async function flushDurable(): Promise<void> {
+  for (let tick = 0; tick < 40; tick += 1) await Promise.resolve();
+}
+
+/** Admit one print durably and wait for its server identity to land. */
+async function submitDurable(
+  stream: ReturnType<typeof useGenerateStream>,
+  request: GenerateRequestWire,
+  route: HostRoute = durableRoute,
+): Promise<string> {
+  serveDurableArtifacts();
+  admitGenerationBatch.mockImplementation(
+    (_target: unknown, body: { client_batch_id: string }) =>
+      Promise.resolve(durableBatch(body.client_batch_id)),
+  );
+  const id = stream.submit(request, { kind: "single" }, route);
+  await flushDurable();
+  expect(stream.jobs.value.find((job) => job.id === id)?.serverId).toBeTruthy();
+  return id;
+}
+
+function galleryRow(filename: string): GalleryImage {
+  return {
+    filename,
+    timestamp: 1,
+    format: "png",
+    metadata: {
+      prompt: "a cat walking through autumn leaves",
+      model: "ltx-2-19b-distilled:fp8",
+      seed: 42,
+      steps: 8,
+      guidance: 3,
+      width: 1216,
+      height: 704,
+      version: "test",
+    },
+  };
+}
+
+/** Serve the artifact a completed durable print hydrates its result from. */
+function serveDurableArtifacts(): void {
+  listGalleryFrom.mockResolvedValue([galleryRow("print-1.png")]);
+  fetchGalleryBlob.mockResolvedValue(new Blob(["media"]));
+  fetchGalleryThumbnailBlob.mockResolvedValue(new Blob(["thumbnail"]));
+}
+
+/** Move one admitted print to a terminal state through the host authority. */
+async function settleDurable(
+  stream: ReturnType<typeof useGenerateStream>,
+  id: string,
+  state: "complete" | "failed" | "cancelled" | "running",
+  childOverrides: Record<string, unknown> = {},
+  route: HostRoute = durableRoute,
+): Promise<void> {
+  const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+  reconcileGenerationBatches.mockResolvedValue(
+    durableStatusResponse([
+      durableBatch(job.durableBatch!.clientBatchId, [state], childOverrides),
+    ]),
+  );
+  await __testing__.reconcileDurableHost(route.hostId);
+  await flushDurable();
+  if (state === "complete") {
+    expect(stream.jobs.value.find((c) => c.id === id)?.result).toBeTruthy();
+  }
 }
 
 function scriptChain(
@@ -168,8 +327,6 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
         stage: "Denoising",
         step: 5,
         totalSteps: 30,
-        weightBytesLoaded: null,
-        weightBytesTotal: null,
         queuePosition: null,
         gpu: null,
         elapsedMs: 1000,
@@ -413,8 +570,11 @@ describe("resolveChainRequest", () => {
 // display text.
 describe("workStarted tracking", () => {
   beforeEach(() => {
-    lastSingleHandlers = null;
-    lastChainHandlers = null;
+    __testing__.resetDurableLifecycleForTests();
+    admitGenerationBatch.mockReset();
+    reconcileGenerationBatches.mockReset();
+    lookupGenerationBatchByClientId.mockReset();
+    lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
     try {
       localStorage.removeItem("mold.generate.jobs");
     } catch {
@@ -431,95 +591,62 @@ describe("workStarted tracking", () => {
     stream.clearDone();
   });
 
-  it("stays false while the job is queued, then flips on real progress", () => {
-    const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    const job = stream.jobs.value.find((j) => j.id === id)!;
-
-    expect(job.workStarted).toBe(false);
-    expect(lastSingleHandlers).not.toBeNull();
-    lastSingleHandlers!.onProgress({
-      type: "queued",
-      position: 3,
-      id: "server-job",
-    });
-    expect(job.workStarted).toBe(false);
-    expect(job.progress.queuePosition).toBe(3);
-    expect(job.serverId).toBe("server-job");
-
-    lastSingleHandlers!.onProgress({ type: "stage_start", name: "Loading" });
-    expect(job.workStarted).toBe(true);
-    expect(job.progress.queuePosition).toBeNull();
-
-    lastSingleHandlers!.onProgress({
-      type: "stage_progress",
-      name: "Encoding prompt (Gemma, conditional)",
-      current: 8,
-      total: 48,
-    });
-    expect(job.progress.stage).toBe(
-      "Encoding prompt (Gemma, conditional) 8/48",
-    );
-  });
-
-  it("keeps a chain queued until a stage starts and between durable stages", () => {
+  it("keeps a chain queued until a stage starts and between durable stages", async () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 241 }), chainDecision());
+    // The create POST resolves before the subscription opens.
+    await vi.waitFor(() =>
+      expect(
+        (fetchEventSource.mock.calls as unknown[][]).some((entry) =>
+          String(entry[0]).includes("/api/chain-jobs/"),
+        ),
+      ).toBe(true),
+    );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    expect(lastChainHandlers).not.toBeNull();
+    expect(lastChainRequest?.ephemeral).toBe(true);
 
-    lastChainHandlers!.onProgress({
-      type: "chain_start",
-      stage_count: 3,
-      estimated_total_frames: 241,
-    });
+    emitChainJobEvent({ type: "snapshot", job: chainJobDetail() });
     expect(job.workStarted).toBe(false);
-    expect(job.progress.stage).toBe("Queued · 3 clips · ~241 frames");
+    expect(job.progress.stage).toBe("Queued · 3 clips · ~291 frames");
 
-    lastChainHandlers!.onProgress({ type: "stage_start", stage_idx: 0 });
+    emitChainJobEvent({ type: "stage_start", stage_idx: 0 });
     expect(job.workStarted).toBe(true);
     expect(job.progress.stage).toBe("Preparing clip 1/3");
 
-    lastChainHandlers!.onProgress({
-      type: "stage_done",
-      stage_idx: 0,
-      frames_emitted: 97,
-    });
+    emitChainJobEvent({ type: "stage_done", stage_idx: 0 });
     expect(job.workStarted).toBe(false);
     expect(job.progress.stage).toBe("Clip 1/3 done · next clip queued");
 
-    lastChainHandlers!.onProgress({
-      type: "stage_done",
-      stage_idx: 2,
-      frames_emitted: 97,
-    });
+    emitChainJobEvent({ type: "stage_done", stage_idx: 2 });
     expect(job.workStarted).toBe(true);
     expect(job.progress.stage).toBe("Clip 3/3 done · preparing final output");
 
-    lastChainHandlers!.onProgress({ type: "stitching", total_frames: 241 });
+    emitChainJobEvent({ type: "finalizing", total_frames: 241 });
     expect(job.workStarted).toBe(true);
     expect(job.progress.stage).toBe("Stitching 241 frames…");
   });
 
-  it("returns to automatic canvas selection when new work is submitted", () => {
+  it("returns to automatic canvas selection when new work is submitted", async () => {
     const stream = useGenerateStream();
-    const inspected = stream.submit(singleGen({ prompt: "inspected" }), {
-      kind: "single",
-    });
+    const inspected = await submitDurable(
+      stream,
+      singleGen({ prompt: "inspected" }),
+    );
     stream.select(inspected);
     stream.canvasErrorJobId.value = "historical-failure";
     expect(stream.selectedJob.value?.id).toBe(inspected);
 
-    stream.submit(singleGen({ prompt: "new work" }), { kind: "single" });
+    await submitDurable(stream, singleGen({ prompt: "new work" }));
     expect(stream.selectedJob.value).toBeNull();
     expect(stream.canvasErrorJobId.value).toBeNull();
   });
 
-  it("settles a reconciled missing job through the canvas error authority", () => {
+  it("settles a reconciled missing job through the canvas error authority", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ prompt: "lost stream" }), {
-      kind: "single",
-    });
+    const id = await submitDurable(
+      stream,
+      singleGen({ prompt: "lost stream" }),
+    );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
     job.previewUrl = "data:image/png;base64,preview";
 
@@ -532,11 +659,12 @@ describe("workStarted tracking", () => {
     expect(stream.canvasErrorJobId.value).toBe(id);
   });
 
-  it("does not let a late reconciliation response overwrite terminal state", () => {
+  it("does not let a late reconciliation response overwrite terminal state", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ prompt: "already complete" }), {
-      kind: "single",
-    });
+    const id = await submitDurable(
+      stream,
+      singleGen({ prompt: "already complete" }),
+    );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
     job.state = "done";
     job.settledAt = Date.now();
@@ -548,43 +676,12 @@ describe("workStarted tracking", () => {
     expect(stream.canvasErrorJobId.value).toBeNull();
   });
 
-  it("settles a retained terminal frame softly instead of as a hard failure", () => {
+  it("marks a reconciler-detached settle the same way", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ prompt: "kept in the queue" }), {
-      kind: "single",
-    });
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    job.previewUrl = "data:image/png;base64,preview";
-
-    lastSingleHandlers!.onError({
-      kind: "http",
-      status: 0,
-      body: JSON.stringify({
-        message: "mold is restarting; this generation was kept in the queue",
-        retained: true,
-        code: "server_restarting",
-      }),
-    });
-
-    expect(job.state).toBe("error");
-    expect(job.error).toBe(
-      "mold is restarting; this generation was kept in the queue",
+    const id = await submitDurable(
+      stream,
+      singleGen({ prompt: "away while it ran" }),
     );
-    expect(job.settledAt).not.toBeNull();
-    expect(job.previewUrl).toBeNull();
-    // The host kept the work: it may well finish. The canvas must not claim
-    // this print failed.
-    expect(stream.canvasErrorJobId.value).toBeNull();
-    // ...and the strip must not either, once the job leaves the host's active
-    // work by FINISHING. `detached` is what retires the row.
-    expect(job.detached).toBe(true);
-  });
-
-  it("marks a reconciler-detached settle the same way", () => {
-    const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ prompt: "away while it ran" }), {
-      kind: "single",
-    });
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
 
     stream.settleDetached(id, "check the Library for the result");
@@ -593,51 +690,34 @@ describe("workStarted tracking", () => {
     expect(job.detached).toBe(true);
   });
 
-  it("keeps a non-retained terminal frame the canvas failure authority", () => {
+  it("gives a durable failure the canvas failure authority", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ prompt: "really failed" }), {
-      kind: "single",
-    });
+    const id = await submitDurable(
+      stream,
+      singleGen({ prompt: "really failed" }),
+    );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
 
-    lastSingleHandlers!.onError({
-      kind: "http",
-      status: 0,
-      body: JSON.stringify({ message: "host ran out of memory" }),
+    await settleDurable(stream, id, "failed", {
+      error: "host ran out of memory",
     });
 
-    expect(job.error).toBe("host ran out of memory");
+    // The machine's sentence runs through the shared describer.
+    expect(job.error).toBe(
+      "Render box ran out of memory. Try a smaller model, image size, or batch.",
+    );
     expect(stream.canvasErrorJobId.value).toBe(id);
     expect(job.detached).not.toBe(true);
-  });
-
-  it("does not treat pre-queue info as work, but does treat post-queue info as work", () => {
-    const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    const job = stream.jobs.value.find((j) => j.id === id)!;
-    expect(lastSingleHandlers).not.toBeNull();
-
-    lastSingleHandlers!.onProgress({
-      type: "info",
-      message: "dimension warning",
-    });
-    expect(job.workStarted).toBe(false);
-
-    lastSingleHandlers!.onProgress({
-      type: "queued",
-      position: 1,
-      id: "server-job",
-    });
-    lastSingleHandlers!.onProgress({
-      type: "info",
-      message: "Downloading weights",
-    });
-    expect(job.workStarted).toBe(true);
-    expect(job.progress.queuePosition).toBeNull();
   });
 });
 
 describe("insecure-context compatibility", () => {
+  beforeEach(() => {
+    __testing__.resetDurableLifecycleForTests();
+    clearJobs();
+    admitGenerationBatch.mockReset();
+  });
+
   it("submits when crypto.randomUUID is unavailable", () => {
     vi.stubGlobal("crypto", {
       getRandomValues(bytes: Uint8Array) {
@@ -646,11 +726,16 @@ describe("insecure-context compatibility", () => {
       },
     });
     try {
-      const id = useGenerateStream().submit(singleGen(), { kind: "single" });
+      admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
+      const id = useGenerateStream().submit(
+        singleGen(),
+        { kind: "single" },
+        durableRoute,
+      );
       expect(id).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
       );
-      expect(lastSingleHandlers).not.toBeNull();
+      expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -672,8 +757,11 @@ describe("insecure-context compatibility", () => {
 describe("auto-remove completed jobs", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    lastSingleHandlers = null;
-    lastChainHandlers = null;
+    __testing__.resetDurableLifecycleForTests();
+    admitGenerationBatch.mockReset();
+    reconcileGenerationBatches.mockReset();
+    lookupGenerationBatchByClientId.mockReset();
+    lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
     // Reset module-level singleton state between tests. We can't import
     // the underlying ref directly, so the cleanest path is wiping the
     // persisted snapshot and clearing whatever jobs the previous test
@@ -699,15 +787,13 @@ describe("auto-remove completed jobs", () => {
     vi.useRealTimers();
   });
 
-  it("auto-removes a job ~1500ms after it transitions to done", () => {
+  it("auto-removes a job ~1500ms after it transitions to done", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const id = await submitDurable(stream, singleGen({ frames: 1 }));
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("running");
     stream.canvasErrorJobId.value = "prior-failure";
 
-    // Fire the SSE complete callback the singleton registered.
-    expect(lastSingleHandlers).not.toBeNull();
-    lastSingleHandlers!.onComplete(fakeCompleteEvent({ seed_used: 7 }));
+    await settleDurable(stream, id, "complete");
 
     // Job is "done" but still on screen during the grace period.
     const job = stream.jobs.value.find((j) => j.id === id);
@@ -723,24 +809,23 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });
 
-  it("does not restore an older failure after a later success auto-removes", () => {
+  it("does not restore an older failure after a later success auto-removes", async () => {
     const stream = useGenerateStream();
-    const failedId = stream.submit(singleGen({ prompt: "first attempt" }), {
-      kind: "single",
-    });
-    lastSingleHandlers!.onError({
-      kind: "http",
-      status: 500,
-      body: "owner thread lost",
+    const failedId = await submitDurable(
+      stream,
+      singleGen({ prompt: "first attempt" }),
+    );
+    await settleDurable(stream, failedId, "failed", {
+      error: "owner thread lost",
     });
     const failed = stream.jobs.value.find((job) => job.id === failedId)!;
     expect(stream.canvasErrorJobId.value).toBe(failedId);
 
-    const successfulId = stream.submit(
+    const successfulId = await submitDurable(
+      stream,
       singleGen({ prompt: "second attempt" }),
-      { kind: "single" },
     );
-    lastSingleHandlers!.onComplete(fakeCompleteEvent());
+    await settleDurable(stream, successfulId, "complete");
     expect(stream.canvasErrorJobId.value).toBeNull();
 
     vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 1);
@@ -754,15 +839,10 @@ describe("auto-remove completed jobs", () => {
     ).toBeUndefined();
   });
 
-  it("does NOT auto-remove a job that errors out", () => {
+  it("does NOT auto-remove a job that errors out", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    expect(lastSingleHandlers).not.toBeNull();
-    lastSingleHandlers!.onError({
-      kind: "http",
-      status: 500,
-      body: "boom",
-    });
+    const id = await submitDurable(stream, singleGen({ frames: 1 }));
+    await settleDurable(stream, id, "failed", { error: "boom" });
     const job = stream.jobs.value.find((j) => j.id === id);
     expect(job?.state).toBe("error");
     expect(stream.canvasErrorJobId.value).toBe(id);
@@ -774,16 +854,12 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("error");
   });
 
-  it("shows the server's JSON error message without transport noise", () => {
+  it("shows the host's failure message without transport noise", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 25 }), { kind: "single" });
-    lastSingleHandlers!.onError({
-      kind: "http",
-      status: 0,
-      body: JSON.stringify({
-        message:
-          "generation error: LTX-2 audio output is unavailable. Set enable_audio=false and retry.",
-      }),
+    const id = await submitDurable(stream, singleGen({ frames: 25 }));
+    await settleDurable(stream, id, "failed", {
+      error:
+        "generation error: LTX-2 audio output is unavailable. Set enable_audio=false and retry.",
     });
 
     expect(stream.jobs.value.find((j) => j.id === id)?.error).toBe(
@@ -793,12 +869,11 @@ describe("auto-remove completed jobs", () => {
 
   it("does NOT auto-remove a locally waiting canceled job", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const id = await submitDurable(stream, singleGen({ frames: 1 }));
     stream.select(id);
     expect(stream.selectedJob.value?.id).toBe(id);
-    const submitted = stream.jobs.value.find((j) => j.id === id)!;
-    submitted.streamStarted = false;
     await stream.cancel(id);
+    await settleDurable(stream, id, "cancelled");
     const job = stream.jobs.value.find((j) => j.id === id);
     expect(job?.state).toBe("canceled");
     expect(stream.selectedJob.value).toBeNull();
@@ -808,11 +883,10 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
   });
 
-  it("manual remove() before the auto-remove timer is harmless", () => {
+  it("manual remove() before the auto-remove timer is harmless", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    expect(lastSingleHandlers).not.toBeNull();
-    lastSingleHandlers!.onComplete(fakeCompleteEvent());
+    const id = await submitDurable(stream, singleGen({ frames: 1 }));
+    await settleDurable(stream, id, "complete");
 
     // User dismisses early.
     stream.remove(id);
@@ -827,11 +901,10 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });
 
-  it("keeps a completed result authoritative if cancel is clicked during its grace period", () => {
+  it("keeps a completed result authoritative if cancel is clicked during its grace period", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    expect(lastSingleHandlers).not.toBeNull();
-    lastSingleHandlers!.onComplete(fakeCompleteEvent());
+    const id = await submitDurable(stream, singleGen({ frames: 1 }));
+    await settleDurable(stream, id, "complete");
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
 
     // A late Cancel cannot rewrite the server's completed terminal result.
@@ -844,47 +917,57 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });
 
-  it("auto-removes a chain job ~1500ms after chain complete", () => {
+  it("auto-removes a chain job ~1500ms after its stitched print lands", async () => {
+    // A sequence finishes with `finalized { output }` — a saved FILENAME — so
+    // the stitched print is hydrated from the machine's gallery exactly as a
+    // durable print is, with no inline bytes on the wire.
+    // The per-host gallery snapshot is cached for the process; drop a
+    // previous test's so this print's own filename is looked up freshly.
+    __testing__.resetDurableLifecycleForTests();
+    listGalleryFrom.mockResolvedValue([galleryRow("stitched.mp4")]);
+    fetchGalleryBlob.mockResolvedValue(new Blob(["media"]));
+    fetchGalleryThumbnailBlob.mockResolvedValue(new Blob(["thumbnail"]));
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 241 }), chainDecision());
+    await flushDurable();
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("running");
-    expect(lastChainHandlers).not.toBeNull();
 
-    // Chain complete events carry a `video` field instead of `image`.
-    lastChainHandlers!.onComplete({
-      video: "AAAA",
-      format: "mp4",
-      width: 1216,
-      height: 704,
-      frames: 241,
-      fps: 24,
-      generation_time_ms: 9876,
-      // The fields below are optional on the wire but the singleton
-      // shape-shifts them into a SseCompleteEvent with sensible defaults.
-      thumbnail: null,
-      gif_preview: null,
-      has_audio: false,
-      duration_ms: null,
-      audio_sample_rate: null,
-      audio_channels: null,
-      gpu: 0,
-    } as Parameters<ChainStreamHandlers["onComplete"]>[0]);
+    expect(
+      (fetchEventSource.mock.calls as unknown[][]).some((entry) =>
+        String(entry[0]).includes("/api/chain-jobs/"),
+      ),
+    ).toBe(true);
+    emitChainJobEvent({ type: "snapshot", job: chainJobDetail() });
+    emitChainJobEvent({
+      type: "finalized",
+      output: "final/output-1.mp4",
+      gallery_filename: "stitched.mp4",
+    });
+    await flushDurable();
+    await flushDurable();
 
-    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
+    const settled = stream.jobs.value.find((j) => j.id === id);
+    expect(settled?.error ?? null).toBeNull();
+    expect(settled?.state).toBe("done");
     vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 1);
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });
 });
 
-// ── Live latent preview ─────────────────────────────────────────────────────
+// ── Seed visuals and persistence redaction ──────────────────────────────────
 //
-// The server emits `preview` progress events (small base64 PNG at latent
-// resolution) during denoising. The reducer folds them into the job as a
-// data URI — deliberately NOT a blob URL, so the persisted module-singleton
-// job list needs no revoke lifecycle — and drops them once the job settles.
-describe("live latent preview", () => {
+// The live latent preview a print used to receive over its own SSE stream is
+// gone with that stream; `previewUrl` now only ever arrives from the queue
+// preview endpoint, which this composable does not own. What remains here is
+// the persistence contract: a preview is never written to localStorage, and
+// neither is media authority or biometric metadata.
+describe("seed visuals and persistence redaction", () => {
   beforeEach(() => {
-    lastSingleHandlers = null;
+    __testing__.resetDurableLifecycleForTests();
+    admitGenerationBatch.mockReset();
+    reconcileGenerationBatches.mockReset();
+    lookupGenerationBatchByClientId.mockReset();
+    lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
     try {
       localStorage.removeItem("mold.generate.jobs");
     } catch {
@@ -900,115 +983,49 @@ describe("live latent preview", () => {
     stream.clearDone();
   });
 
-  it("reduces a preview event into a data-URI preview with step/total", () => {
+  it("derives seedVisual from an explicit seed", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    const job = stream.jobs.value.find((j) => j.id === id)!;
-    expect(job.previewUrl).toBeNull();
-
-    expect(lastSingleHandlers).not.toBeNull();
-    lastSingleHandlers!.onProgress({
-      type: "preview",
-      image: "UFJFVklFVw==",
-      step: 3,
-      total: 8,
-    });
-
-    expect(job.previewUrl).toBe("data:image/png;base64,UFJFVklFVw==");
-    expect(job.progress.step).toBe(3);
-    expect(job.progress.totalSteps).toBe(8);
-    // A preview only exists once denoising is underway — it proves work.
-    expect(job.workStarted).toBe(true);
-  });
-
-  it("clears the preview when the job completes", () => {
-    const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    const job = stream.jobs.value.find((j) => j.id === id)!;
-    lastSingleHandlers!.onProgress({
-      type: "preview",
-      image: "AAAA",
-      step: 1,
-      total: 4,
-    });
-    expect(job.previewUrl).not.toBeNull();
-
-    lastSingleHandlers!.onComplete(fakeCompleteEvent());
-    expect(job.state).toBe("done");
-    expect(job.previewUrl).toBeNull();
-  });
-
-  it("clears the preview when the job errors", () => {
-    const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    const job = stream.jobs.value.find((j) => j.id === id)!;
-    lastSingleHandlers!.onProgress({
-      type: "preview",
-      image: "AAAA",
-      step: 1,
-      total: 4,
-    });
-    expect(job.previewUrl).not.toBeNull();
-
-    lastSingleHandlers!.onError({ kind: "http", status: 500, body: "boom" });
-    expect(job.state).toBe("error");
-    expect(job.previewUrl).toBeNull();
-  });
-
-  it("derives seedVisual from an explicit seed", () => {
-    const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1, seed: 42 }), {
-      kind: "single",
-    });
+    const id = await submitDurable(stream, singleGen({ frames: 1, seed: 42 }));
     const job = stream.jobs.value.find((j) => j.id === id)!;
     expect(job.seedVisual).toBe("42");
   });
 
-  it("derives a stable model·prompt seedVisual when the seed is random", () => {
+  it("derives a stable model·prompt seedVisual when the seed is random", async () => {
     const stream = useGenerateStream();
     const req = singleGen({ frames: 1 });
-    const id = stream.submit(req, { kind: "single" });
+    const id = await submitDurable(stream, req);
     const job = stream.jobs.value.find((j) => j.id === id)!;
     expect(job.seedVisual).toBe(`${req.model}·${req.prompt}`);
   });
 
   it("omits previewUrl from persistence and rehydrates it as null", async () => {
-    vi.useFakeTimers();
-    try {
-      const stream = useGenerateStream();
-      const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-      lastSingleHandlers!.onProgress({
-        type: "preview",
-        image: "UFJFVklFVw==",
-        step: 3,
-        total: 8,
-      });
-      expect(stream.jobs.value.find((j) => j.id === id)?.previewUrl).not.toBe(
-        null,
-      );
+    const stream = useGenerateStream();
+    const id = await submitDurable(stream, singleGen({ frames: 1 }));
+    // A RUNNING durable row lives in its own recovery record, never the
+    // shared rail, so settle it first — this is the presentation history.
+    await settleDurable(stream, id, "complete");
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    job.previewUrl = "data:image/png;base64,UFJFVklFVw==";
 
-      // Let the deep watcher flush, then the 200 ms persist debounce fire.
-      await vi.advanceTimersByTimeAsync(300);
-      const raw = localStorage.getItem(__testing__.STORAGE_KEY);
-      expect(raw).not.toBeNull();
-      expect(raw!).not.toContain("previewUrl");
-      expect(raw!).not.toContain("UFJFVklFVw==");
+    __testing__.persistJobs([job]);
+    const raw = localStorage.getItem(__testing__.STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    expect(raw!).not.toContain("previewUrl");
+    expect(raw!).not.toContain("UFJFVklFVw==");
 
-      const restored = __testing__.loadPersistedJobs(raw);
-      const back = restored.find((j) => j.id === id)!;
-      expect(back.previewUrl).toBeNull();
-      // seedVisual is recomputed from the persisted request.
-      expect(back.seedVisual).toBe(
-        `${back.request.model}·${(back.request as GenerateRequestWire).prompt}`,
-      );
-    } finally {
-      vi.useRealTimers();
-    }
+    const restored = __testing__.loadPersistedJobs(raw);
+    const back = restored.find((j) => j.id === id)!;
+    expect(back.previewUrl).toBeNull();
+    // seedVisual is recomputed from the persisted request.
+    expect(back.seedVisual).toBe(
+      `${back.request.model}·${(back.request as GenerateRequestWire).prompt}`,
+    );
   });
 
-  it("keeps media authority and biometric metadata out of localStorage", () => {
+  it("keeps media authority and biometric metadata out of localStorage", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const id = await submitDurable(stream, singleGen({ frames: 1 }));
+    await settleDurable(stream, id, "complete");
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
     job.request = singleGen({
       model: "minimax-h3-ref2va",
@@ -1081,8 +1098,6 @@ describe("activeCanvasJob", () => {
         stage: "Starting",
         step: null,
         totalSteps: null,
-        weightBytesLoaded: null,
-        weightBytesTotal: null,
         queuePosition: null,
         gpu: null,
         elapsedMs: null,
@@ -1144,8 +1159,6 @@ describe("latestUnresolvedError", () => {
         stage: "Failed",
         step: null,
         totalSteps: null,
-        weightBytesLoaded: null,
-        weightBytesTotal: null,
         queuePosition: null,
         gpu: null,
         elapsedMs: null,
@@ -1198,107 +1211,287 @@ describe("latestUnresolvedError", () => {
 describe("useGenerateStream host routing", () => {
   beforeEach(() => {
     localStorage.clear();
-    lastSingleTarget = undefined;
     lastChainTarget = undefined;
-    prepareReferenceUploads.mockClear();
+    __testing__.resetDurableLifecycleForTests();
+    clearJobs();
+    admitGenerationBatch.mockReset();
+    reconcileGenerationBatches.mockReset();
+    lookupGenerationBatchByClientId.mockReset();
+    lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
+    vi.mocked(cancelQueueJob).mockReset();
+    vi.mocked(cancelQueueJob).mockResolvedValue(undefined);
+    mutateQueueJobOnExpectedInstance.mockReset();
+    mutateQueueJobOnExpectedInstance.mockResolvedValue(undefined);
   });
 
+  /** A machine that advertises nothing: the chain path still routes to it,
+   *  and a print is refused against it by name. */
   const studioRoute: HostRoute = {
     hostId: "studio",
     label: "Studio",
     target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
   };
 
-  it("dispatches a single-clip submission to the routed host with its key", () => {
+  const studioDurableRoute: HostRoute = {
+    ...studioRoute,
+    instanceId: "instance-1",
+    durableGeneration: { heterogeneous_batch_max_outputs: 64 },
+    durableMedia: {
+      protocol_version: 2,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      private_h3: true,
+    },
+    eventsAvailable: true,
+  };
+
+  it("admits a print on the routed host with its key", async () => {
     const stream = useGenerateStream();
-    stream.submit(singleGen({ frames: 1 }), { kind: "single" }, studioRoute);
-    expect(lastSingleTarget).toEqual({
+    await submitDurable(stream, singleGen({ frames: 1 }), studioDurableRoute);
+    expect(admitGenerationBatch.mock.calls[0]![0]).toEqual({
       baseUrl: "http://studio:7680",
       apiKey: "sk-studio",
     });
   });
 
-  it("submits Ref2VA inline when auth is disabled despite a stale saved key", async () => {
-    const authlessRoute: HostRoute = {
-      ...studioRoute,
-      referenceUploads: {
-        available: false,
-        authless_inline: true,
-        protocol_version: 2,
-        requires_api_key: true,
-        session_path: "/api/generate/reference-upload-sessions",
-        upload_path: "/api/generate/reference-upload",
-        session_handle_header: "x-mold-reference-session",
-        upload_handle_header: "x-mold-reference-upload",
-        max_file_bytes: 1_000_000,
-        max_session_bytes: 2_000_000,
-        session_ttl_ms: 60_000,
-      },
+  const REFERENCE_UPLOADS = {
+    available: true,
+    protocol_version: 2,
+    requires_api_key: true,
+    session_path: "/api/generate/reference-upload-sessions",
+    upload_path: "/api/generate/reference-upload",
+    session_handle_header: "x-mold-reference-upload-session",
+    upload_handle_header: "x-mold-reference-upload",
+    max_file_bytes: 1024,
+    max_session_bytes: 4096,
+    max_active_sessions: 4,
+    session_ttl_ms: 30_000,
+  };
+
+  function ref2vaInline(seed: number): GenerateRequestWire {
+    return {
+      ...singleGen({ frames: 124, seed }),
+      model: "minimax-h3-ref2va:comfy-pruned-int8",
+      references: [
+        {
+          kind: "image",
+          media: { authority: "inline", data: "aW5saW5l" },
+          provenance: { name: "anchor.png", sha256: "11".repeat(32) },
+          mime_type: "image/png",
+          width: 1,
+          height: 1,
+        },
+      ],
+    } as GenerateRequestWire;
+  }
+
+  /** Stage every sibling as the real helper would: one upload handle each. */
+  function stageReferenceUploads(release = vi.fn(async () => {})) {
+    prepareReferenceUploadBatch.mockImplementation(
+      async ({ requests }: { requests: GenerateRequestWire[] }) => ({
+        requests: requests.map((request) => ({
+          ...request,
+          references: [
+            {
+              ...request.references![0]!,
+              media: { authority: "upload", handle: `handle-${request.seed}` },
+            },
+          ],
+        })),
+        release,
+      }),
+    );
+    return release;
+  }
+
+  it("stages the chunk's reference-upload leases on the keyed host before the batch POST", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    const release = stageReferenceUploads();
+    serveDurableArtifacts();
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(
+          durableBatch(body.client_batch_id, ["queued", "queued"]),
+        ),
+    );
+    const stream = useGenerateStream();
+    const route: HostRoute = {
+      ...studioDurableRoute,
+      referenceUploads: REFERENCE_UPLOADS,
     };
+    stream.submitBatch(
+      [ref2vaInline(1), ref2vaInline(2)],
+      { kind: "single" },
+      route,
+    );
+    await flushDurable();
+
+    expect(prepareReferenceUploadBatch).toHaveBeenCalledTimes(1);
+    expect(prepareReferenceUploadBatch.mock.calls[0]![0]).toMatchObject({
+      target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
+      expectedInstanceId: "instance-1",
+      capabilities: REFERENCE_UPLOADS,
+    });
+    expect(
+      (prepareReferenceUploadBatch.mock.calls[0]![0] as { requests: unknown[] })
+        .requests,
+    ).toHaveLength(2);
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
+    const body = admitGenerationBatch.mock.calls[0]![1] as {
+      requests: Array<{
+        references: Array<{ media: Record<string, unknown> }>;
+      }>;
+    };
+    expect(
+      body.requests.map((request) => request.references[0]!.media),
+    ).toEqual([
+      { authority: "upload", handle: "handle-1" },
+      { authority: "upload", handle: "handle-2" },
+    ]);
+    expect(
+      prepareReferenceUploadBatch.mock.invocationCallOrder[0],
+    ).toBeLessThan(admitGenerationBatch.mock.invocationCallOrder[0]!);
+    // An admitted POST consumed the leases; nothing is released.
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("chunks a reference-bearing batch at the host's session cap and admits the chunks in turn", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    stageReferenceUploads();
+    serveDurableArtifacts();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    admitGenerationBatch.mockImplementation(
+      async (
+        _target: unknown,
+        body: { client_batch_id: string; requests: unknown[] },
+      ) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await Promise.resolve();
+        inFlight -= 1;
+        return durableBatch(
+          body.client_batch_id,
+          body.requests.map(() => "queued" as const),
+        );
+      },
+    );
+    const stream = useGenerateStream();
+    stream.submitBatch(
+      [1, 2, 3, 4, 5].map((seed) => ref2vaInline(seed)),
+      { kind: "single" },
+      {
+        ...studioDurableRoute,
+        referenceUploads: { ...REFERENCE_UPLOADS, max_active_sessions: 2 },
+      },
+    );
+    await flushDurable();
+
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(3);
+    expect(
+      admitGenerationBatch.mock.calls.map(
+        (call) => (call[1] as { requests: unknown[] }).requests.length,
+      ),
+    ).toEqual([2, 2, 1]);
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("releases the chunk's leases when the host definitely refuses the POST", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    const release = stageReferenceUploads();
+    admitGenerationBatch.mockRejectedValue(
+      new ApiError("requests[1]: strength must be 1.0", 422, {
+        code: "VALIDATION_ERROR",
+      }),
+    );
     const stream = useGenerateStream();
     const id = stream.submit(
-      singleGen({
-        model: "minimax-h3-ref2va",
-        frames: 124,
-        references: [
-          {
-            kind: "image",
-            media: {
-              authority: "inline",
-              data: "cHJpdmF0ZS1pbWFnZS1ieXRlcw==",
-            },
-            provenance: {
-              name: "identity.png",
-              sha256:
-                "b86a89c0eda0e9381e785564df9dc33f88d96e04aae6fa6185c9c94de2652520",
-            },
-            mime_type: "image/png",
-            width: 32,
-            height: 24,
-          },
-        ],
-      }),
+      ref2vaInline(6),
       { kind: "single" },
-      authlessRoute,
+      {
+        ...studioDurableRoute,
+        referenceUploads: REFERENCE_UPLOADS,
+      },
     );
+    await flushDurable();
 
-    await vi.waitFor(() =>
-      expect(
-        stream.jobs.value.find((job) => job.id === id)?.streamStarted,
-      ).toBe(true),
-    );
-    expect(prepareReferenceUploads).not.toHaveBeenCalled();
-    expect(lastSingleTarget).toEqual(authlessRoute.target);
-    expect(stream.jobs.value.find((job) => job.id === id)?.error).toBeNull();
+    expect(release).toHaveBeenCalledTimes(1);
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.state).toBe("error");
+  });
 
-    stream.submit(
-      singleGen({
-        model: "minimax-h3-ref2va",
-        frames: 124,
-        references: [
-          {
-            kind: "image",
-            media: {
-              authority: "inline",
-              data: "cHJpdmF0ZS1pbWFnZS1ieXRlcw==",
-            },
-            provenance: {
-              name: "identity.png",
-              sha256:
-                "b86a89c0eda0e9381e785564df9dc33f88d96e04aae6fa6185c9c94de2652520",
-            },
-            mime_type: "image/png",
-            width: 32,
-            height: 24,
-          },
-        ],
-      }),
+  it("releases the chunk's leases when the host confirms nothing was admitted", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    const release = stageReferenceUploads();
+    // An ambiguous transport failure, then the host's own answer: no batch.
+    admitGenerationBatch.mockRejectedValue(new Error("socket hang up"));
+    lookupGenerationBatchByClientId.mockReset();
+    lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      ref2vaInline(8),
       { kind: "single" },
-      { ...authlessRoute, referenceUploads: null },
+      {
+        ...studioDurableRoute,
+        referenceUploads: REFERENCE_UPLOADS,
+      },
     );
-    await vi.waitFor(() =>
-      expect(prepareReferenceUploads).toHaveBeenCalledTimes(1),
+    await flushDurable();
+
+    expect(release).toHaveBeenCalledTimes(1);
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.state).toBe("error");
+  });
+
+  it("sends validated inline references on a host without the upload protocol", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    serveDurableArtifacts();
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(durableBatch(body.client_batch_id)),
     );
+    const stream = useGenerateStream();
+    const authless: HostRoute = {
+      ...studioDurableRoute,
+      target: { baseUrl: "http://studio:7680" },
+      referenceUploads: { ...REFERENCE_UPLOADS, available: false },
+    };
+    stream.submit(ref2vaInline(3), { kind: "single" }, authless);
+    await flushDurable();
+
+    expect(prepareReferenceUploadBatch).not.toHaveBeenCalled();
+    const body = admitGenerationBatch.mock.calls[0]![1] as {
+      requests: Array<{
+        references: Array<{ media: Record<string, unknown> }>;
+      }>;
+    };
+    expect(body.requests[0]!.references[0]!.media).toEqual({
+      authority: "inline",
+      data: "aW5saW5l",
+    });
+  });
+
+  it("refuses the chunk by name when a reference lease cannot be taken", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    prepareReferenceUploadBatch.mockRejectedValue(
+      new Error("reference upload session refused: REFERENCE_UPLOAD_QUOTA"),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      ref2vaInline(4),
+      { kind: "single" },
+      {
+        ...studioDurableRoute,
+        referenceUploads: REFERENCE_UPLOADS,
+      },
+    );
+    await flushDurable();
+
+    expect(admitGenerationBatch).not.toHaveBeenCalled();
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.state).toBe("error");
+    expect(job.error).toContain("REFERENCE_UPLOAD_QUOTA");
   });
 
   it("dispatches an auto-promoted chain submission to the routed host", () => {
@@ -1310,467 +1503,97 @@ describe("useGenerateStream host routing", () => {
     });
   });
 
-  it("leaves the target undefined when no route is supplied (origin)", () => {
+  it("refuses a print with no machine selected and queues nothing", () => {
     const stream = useGenerateStream();
-    stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    expect(lastSingleTarget).toBeUndefined();
+    expect(() =>
+      stream.submit(singleGen({ frames: 1 }), { kind: "single" }),
+    ).toThrow("no machine is selected for this print.");
+    expect(admitGenerationBatch).not.toHaveBeenCalled();
+    expect(stream.jobs.value).toHaveLength(0);
   });
 
-  /** Submit to a routed host, latch a server id, then kill the socket with no
-   *  terminal frame — the frameless close this gate exists for. */
-  async function networkCloseWithServerId(serverId = "srv-net") {
+  it("refuses a print on a machine that has not reported its instance", () => {
     const stream = useGenerateStream();
-    const id = stream.submit(
-      singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
-    );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    lastSingleHandlers!.onProgress({
-      type: "queued",
-      position: 1,
-      id: serverId,
-    });
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-    await vi.waitFor(() => expect(job.state).not.toBe("running"));
-    return { stream, id, job };
-  }
-
-  it("softly detaches a frameless close on the ORIGIN host, the default path", async () => {
-    // Single-host web submits with NO route: `normalizeSubmitRoute` collapses
-    // the origin to `null`. This is the common deployment — someone opening
-    // mold's own web UI — so the lookup must not require an explicit route.
-    vi.mocked(fetchQueue).mockResolvedValue({
-      entries: [
+    expect(() =>
+      stream.submit(
+        singleGen({ frames: 1 }),
+        { kind: "single" },
         {
-          id: "srv-origin",
-          model: "m",
-          state: "queued",
-          started_at_unix_ms: 0,
-          position: 0,
-          durable: true,
-        },
-      ],
-    } as never);
-
-    const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    lastSingleHandlers!.onProgress({
-      type: "queued",
-      position: 1,
-      id: "srv-origin",
-    });
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-    await vi.waitFor(() => expect(job.state).not.toBe("running"));
-
-    // Undefined target === the serving origin's relative URL.
-    expect(fetchQueue).toHaveBeenCalled();
-    expect(vi.mocked(fetchQueue).mock.lastCall?.[0]).toBeUndefined();
-    expect(stream.canvasErrorJobId.value).toBeNull();
-  });
-
-  it("keeps an origin frameless close hard when the origin did not journal it", async () => {
-    vi.mocked(fetchQueue).mockResolvedValue({
-      entries: [
-        {
-          id: "srv-origin",
-          model: "m",
-          state: "queued",
-          started_at_unix_ms: 0,
-          position: 0,
-          durable: false,
-        },
-      ],
-    } as never);
-
-    const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    lastSingleHandlers!.onProgress({
-      type: "queued",
-      position: 1,
-      id: "srv-origin",
-    });
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-    await vi.waitFor(() => expect(job.state).not.toBe("running"));
-
-    expect(stream.canvasErrorJobId.value).toBe(id);
-  });
-
-  it("softly detaches a frameless close when the host journalled THIS job", async () => {
-    vi.mocked(fetchQueue).mockResolvedValue({
-      entries: [
-        {
-          id: "srv-net",
-          model: "m",
-          state: "queued",
-          started_at_unix_ms: 0,
-          position: 0,
-          durable: true,
-        },
-      ],
-    } as never);
-
-    const { stream, job } = await networkCloseWithServerId();
-
-    expect(vi.mocked(fetchQueue).mock.lastCall?.[0]).toEqual({
-      baseUrl: "http://studio:7680",
-      apiKey: "sk-studio",
-    });
-    expect(job.state).toBe("error");
-    expect(stream.canvasErrorJobId.value).toBeNull();
-  });
-
-  it("keeps a frameless close hard when the host did not journal this job", async () => {
-    // Reachable on web: a large inline base64 source image can exceed the
-    // journal's payload ceiling, so the host admits the job but keeps no row.
-    vi.mocked(fetchQueue).mockResolvedValue({
-      entries: [
-        {
-          id: "srv-net",
-          model: "m",
-          state: "queued",
-          started_at_unix_ms: 0,
-          position: 0,
-          durable: false,
-        },
-      ],
-    } as never);
-
-    const { stream, id, job } = await networkCloseWithServerId();
-
-    expect(stream.canvasErrorJobId.value).toBe(id);
-    expect(job.error).toBe("connection lost");
-  });
-
-  it("keeps a frameless close hard when the row is gone or the lookup fails", async () => {
-    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] } as never);
-    const gone = await networkCloseWithServerId();
-    expect(gone.stream.canvasErrorJobId.value).toBe(gone.id);
-
-    vi.mocked(fetchQueue).mockRejectedValue(new Error("host unreachable"));
-    const failed = await networkCloseWithServerId("srv-net-2");
-    expect(failed.stream.canvasErrorJobId.value).toBe(failed.id);
-    expect(failed.job.error).toBe("connection lost");
-  });
-
-  it("captures durability at queued time, so a finished job is not called failed", async () => {
-    // The race: rendering finishes, the server removes the row, and only THEN
-    // does the transport drop before the complete frame lands. Asking after
-    // the close reads the absent row as "not durable" and reports a failed
-    // generation for output already sitting in the Library.
-    vi.mocked(fetchQueue).mockResolvedValue({
-      entries: [
-        {
-          id: "srv-finished",
-          model: "m",
-          state: "running",
-          started_at_unix_ms: 0,
-          position: 0,
-          durable: true,
-        },
-      ],
-    } as never);
-
-    const stream = useGenerateStream();
-    const id = stream.submit(
-      singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
-    );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    lastSingleHandlers!.onProgress({
-      type: "queued",
-      position: 1,
-      id: "srv-finished",
-    });
-    // The durability answer is taken while the row demonstrably exists.
-    await vi.waitFor(() => expect(vi.mocked(fetchQueue)).toHaveBeenCalled());
-
-    // By the time the socket dies the job has finished and the row is gone.
-    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] } as never);
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-    await vi.waitFor(() => expect(job.state).not.toBe("running"));
-
-    expect(stream.canvasErrorJobId.value).toBeNull();
-  });
-
-  it("asks once at queued time, not again after the close", async () => {
-    // The singleton's job list spans this file, so count only THIS job's asks.
-    vi.mocked(fetchQueue).mockClear();
-    vi.mocked(fetchQueue).mockResolvedValue({
-      entries: [
-        {
-          id: "srv-once",
-          model: "m",
-          state: "queued",
-          started_at_unix_ms: 0,
-          position: 0,
-          durable: true,
-        },
-      ],
-    } as never);
-
-    const stream = useGenerateStream();
-    const id = stream.submit(
-      singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
-    );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    lastSingleHandlers!.onProgress({
-      type: "queued",
-      position: 1,
-      id: "srv-once",
-    });
-    await vi.waitFor(() =>
-      expect(vi.mocked(fetchQueue)).toHaveBeenCalledTimes(1),
-    );
-
-    vi.mocked(fetchQueue).mockClear();
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-    await vi.waitFor(() => expect(job.state).not.toBe("running"));
-
-    // Nothing is asked after the close — that question can no longer be
-    // answered honestly, because a job that SUCCEEDED has no row left.
-    expect(vi.mocked(fetchQueue)).not.toHaveBeenCalled();
-  });
-
-  it("never overwrites a cancellation that lands while the lookup is in flight", async () => {
-    // The lookup is asynchronous, so a cancel can be confirmed between the
-    // close and the answer. Cancellation is terminal: neither settlement may
-    // replace it, and neither may hand it canvas failure authority.
-    let releaseLookup: (value: unknown) => void = () => {};
-    vi.mocked(fetchQueue).mockReturnValue(
-      new Promise((resolve) => {
-        releaseLookup = resolve;
-      }) as never,
-    );
-
-    const stream = useGenerateStream();
-    const id = stream.submit(
-      singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
-    );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    lastSingleHandlers!.onProgress({
-      type: "queued",
-      position: 1,
-      id: "srv-cancel",
-    });
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-
-    await stream.cancel(id);
-    expect(job.state).toBe("canceled");
-
-    // The host answers after the cancel: not journalled, i.e. the hard path.
-    releaseLookup({ entries: [] });
-    await vi.waitFor(() => expect(vi.mocked(fetchQueue)).toHaveBeenCalled());
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(job.state).toBe("canceled");
-    expect(stream.canvasErrorJobId.value).toBeNull();
-  });
-
-  it("never overwrites a cancellation with the soft detached settle either", async () => {
-    let releaseLookup: (value: unknown) => void = () => {};
-    vi.mocked(fetchQueue).mockReturnValue(
-      new Promise((resolve) => {
-        releaseLookup = resolve;
-      }) as never,
-    );
-
-    const stream = useGenerateStream();
-    const id = stream.submit(
-      singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
-    );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    lastSingleHandlers!.onProgress({
-      type: "queued",
-      position: 1,
-      id: "srv-cancel-2",
-    });
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-
-    await stream.cancel(id);
-    const cancelledAt = job.settledAt;
-
-    // ...and the durable answer must not resurrect it either.
-    releaseLookup({
-      entries: [
-        {
-          id: "srv-cancel-2",
-          model: "m",
-          state: "queued",
-          started_at_unix_ms: 0,
-          position: 0,
-          durable: true,
-        },
-      ],
-    });
-    await Promise.resolve();
-    await Promise.resolve();
-
-    // Still cancelled, and never re-settled: a detached settle would have
-    // stamped a new `settledAt` and reopened the row's story. (The note itself
-    // was written by the still-running row before the cancel landed; the state
-    // is what the UI reads, and Cancelled wins.)
-    expect(job.state).toBe("canceled");
-    expect(job.settledAt).toBe(cancelledAt);
-  });
-
-  it("keeps a frameless close hard when no server id was ever assigned", async () => {
-    const stream = useGenerateStream();
-    const id = stream.submit(
-      singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
-    );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    vi.mocked(fetchQueue).mockClear();
-
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-
-    // Nothing to look up, and an unadmitted job was never journalled.
-    expect(fetchQueue).not.toHaveBeenCalled();
-    expect(job.state).toBe("error");
-    expect(stream.canvasErrorJobId.value).toBe(id);
-  });
-
-  it("keeps a reference-upload network close a hard failure even on a durable host", async () => {
-    // Reference-upload media is excluded from the journal at admission, so
-    // this job reports `durable: false` on a host that advertises the durable
-    // queue. Promising it will finish would be a lie.
-    const stream = useGenerateStream();
-    const id = stream.submit(
-      singleGen({
-        model: "minimax-h3-ref2va",
-        frames: 124,
-        references: [
-          {
-            kind: "image",
-            media: { authority: "inline", data: "PRIVATE-IMAGE-BYTES" },
-            provenance: { name: "identity.png", sha256: "a".repeat(64) },
-            mime_type: "image/png",
-            width: 32,
-            height: 24,
+          ...studioRoute,
+          durableGeneration: { heterogeneous_batch_max_outputs: 64 },
+          durableMedia: {
+            protocol_version: 2,
+            encrypted_at_rest: true,
+            generate_request_media: true,
+            identity: true,
+            private_h3: true,
           },
-        ],
-      } as Partial<GenerateRequestWire>),
-      { kind: "single" },
-      studioRoute,
-    );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    // The lease is awaited before the stream opens.
-    await vi.waitFor(() => expect(job.streamStarted).toBe(true));
-
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-
-    expect(stream.canvasErrorJobId.value).toBe(id);
-    expect(job.error).toBe("connection lost");
+        },
+      ),
+    ).toThrow("Studio has not reported its server instance yet.");
+    expect(admitGenerationBatch).not.toHaveBeenCalled();
+    expect(stream.jobs.value).toHaveLength(0);
   });
 
-  it("keeps a network close a hard failure against a host without a durable queue", () => {
+  it("refuses a print on a machine with no durable queue, by name", () => {
     const stream = useGenerateStream();
-    const id = stream.submit(
-      singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
+    expect(() =>
+      stream.submit(
+        singleGen({ frames: 1 }),
+        { kind: "single" },
+        { ...studioRoute, instanceId: "instance-studio" },
+      ),
+    ).toThrow(
+      "Studio cannot queue this print: this machine does not advertise the durable generation queue.",
     );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-
-    lastSingleHandlers!.onError({
-      kind: "network",
-      message: "connection lost",
-    });
-
-    expect(job.error).toBe("connection lost");
-    expect(stream.canvasErrorJobId.value).toBe(id);
+    expect(admitGenerationBatch).not.toHaveBeenCalled();
+    expect(stream.jobs.value).toHaveLength(0);
   });
 
-  it("attributes the job to the host it was routed to", () => {
+  it("attributes the job to the host it was routed to", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(
+    const id = await submitDurable(
+      stream,
       singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
+      studioDurableRoute,
     );
     const job = stream.jobs.value.find((j) => j.id === id);
     expect(job?.hostId).toBe("studio");
     expect(job?.hostLabel).toBe("Studio");
   });
 
-  it("cancels the server job on the exact routed host", async () => {
+  it("cancels a print on the exact machine that admitted it", async () => {
     const stream = useGenerateStream();
-    const id = stream.submit(
+    const id = await submitDurable(
+      stream,
       singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
+      studioDurableRoute,
     );
-    lastSingleHandlers?.onProgress({
-      type: "queued",
-      id: "server-job-7",
-      position: 0,
-    });
 
     await stream.cancel(id);
 
-    expect(cancelQueueJob).toHaveBeenCalledWith(
-      "server-job-7",
-      studioRoute.target,
+    expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
+      { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
+      expect.objectContaining({ instanceId: "instance-1" }),
+      "cancel",
     );
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
   });
 
   it("repaints as cancelling before the host acknowledges a running job", async () => {
     let acknowledge!: () => void;
-    vi.mocked(cancelQueueJob).mockImplementationOnce(
+    mutateQueueJobOnExpectedInstance.mockImplementationOnce(
       () =>
         new Promise<void>((resolve) => {
           acknowledge = resolve;
         }),
     );
     const stream = useGenerateStream();
-    const id = stream.submit(
+    const id = await submitDurable(
+      stream,
       singleGen({ model: "wan22-i2v-a14b:q4", frames: 81 }),
+      studioDurableRoute,
     );
-    lastSingleHandlers?.onProgress({
-      type: "queued",
-      id: "wan-running",
-      position: 0,
-    });
 
     const cancellation = stream.cancel(id);
     expect(stream.jobs.value.find((job) => job.id === id)?.cancelling).toBe(
@@ -1786,20 +1609,15 @@ describe("useGenerateStream host routing", () => {
   });
 
   it("keeps a server-owned job running when cancellation is refused", async () => {
-    vi.mocked(cancelQueueJob).mockRejectedValueOnce(
+    mutateQueueJobOnExpectedInstance.mockRejectedValueOnce(
       new Error("already running"),
     );
     const stream = useGenerateStream();
-    const id = stream.submit(
+    const id = await submitDurable(
+      stream,
       singleGen({ frames: 1 }),
-      { kind: "single" },
-      studioRoute,
+      studioDurableRoute,
     );
-    lastSingleHandlers?.onProgress({
-      type: "queued",
-      id: "server-job-running",
-      position: 0,
-    });
 
     await expect(stream.cancel(id)).rejects.toThrow("already running");
 
@@ -1812,8 +1630,8 @@ describe("useGenerateStream host routing", () => {
   it("keeps an opened stream live until its queue id can be cancelled", async () => {
     const stream = useGenerateStream();
     const id = stream.submit(
-      singleGen({ frames: 1 }),
-      { kind: "single" },
+      singleGen({ frames: 241 }),
+      chainDecision(),
       studioRoute,
     );
 
@@ -1826,9 +1644,9 @@ describe("useGenerateStream host routing", () => {
     expect(job?.controller.signal.aborted).toBe(false);
   });
 
-  it("leaves an unrouted job unattributed rather than guessing", () => {
+  it("leaves an unrouted sequence unattributed rather than guessing", () => {
     const stream = useGenerateStream();
-    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const id = stream.submit(singleGen({ frames: 241 }), chainDecision());
     const job = stream.jobs.value.find((j) => j.id === id);
     expect(job?.hostId).toBeNull();
     expect(job?.hostLabel).toBeNull();

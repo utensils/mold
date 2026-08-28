@@ -93,6 +93,7 @@ import {
 } from "@studio/lib/galleryMutationOutbox";
 import {
   defaultClipFrames,
+  modelSupportsSequence,
   modelsForOutput,
   sequenceMotionTailFrames,
   type OutputMode,
@@ -108,7 +109,9 @@ import {
   setMinimaxH3PickedImageBoundary,
 } from "@studio/lib/minimaxH3Authoring";
 import { h3BoundariesNeedingMedia } from "@studio/lib/h3BoundaryRestore";
+import { modelPresenceOnHost } from "@studio/lib/modelInstallTargets";
 import {
+  classifyMissingModel,
   classifyPlacementPreview,
   previewChainPlacement,
   previewRequestForSiblingFanout,
@@ -160,16 +163,25 @@ import {
   type FleetActiveWork,
 } from "@studio/api/activity";
 import {
+  findQueueEntryById,
   listQueue,
   mergeQueueEntries,
   queuePageRequestForCapacity,
+  retryQueueJobRecoveringAmbiguity,
   type QueueListing,
 } from "@studio/api/queuePlan";
-import { admitGenerationBatch, reconcileGenerationBatches } from "@studio/api/generationAdmission";
+import {
+  admitGenerationBatch,
+  canonicalGenerationBatchLimit,
+  chunkGenerationBatchRequests,
+  isDefiniteGenerationAdmissionRejection,
+  lookupGenerationBatchByClientId,
+  reconcileGenerationBatches,
+} from "@studio/api/generationAdmission";
 import {
   selectedQueueGeneration,
   watchSelectedQueuePreview,
-  type QueueJobPreview,
+  type QueueJobProgress,
 } from "@studio/api/generationSelection";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
@@ -289,7 +301,7 @@ import {
 import { sequenceParams } from "../lib/sequenceParams";
 import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
-import { domCanvasOps } from "../lib/sourceFitCanvas";
+import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
@@ -311,6 +323,7 @@ import {
   resolveMobileIdentityRestore,
   showMobileIdentityWell,
 } from "./identity";
+import { planHeldMissingModelPull } from "./missingModelHold";
 import {
   isCancelledError,
   jobPhase,
@@ -323,7 +336,7 @@ import {
   useGenerationStore,
   type Job,
 } from "../stores/generation";
-import { markJobSettled, newJob } from "../lib/generationJob";
+import { newJob } from "../lib/generationJob";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import {
   mobileHostHealthLabel,
@@ -412,6 +425,9 @@ import MobileSharedParams from "./MobileSharedParams.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
+import SwipeActionRow from "@studio/components/SwipeActionRow.vue";
+import { OwnPrintPreviewWatchers, previewDataUrl } from "@studio/api/ownPrintPreview";
+import type { SwipeRowAction } from "@studio/lib/swipeAction";
 import { mobileFileUnderAvailable, mobileFileUnderCollections } from "./fileUnder";
 import {
   emptyFileUnderState,
@@ -419,6 +435,12 @@ import {
   matchCollection,
   type FileUnderCollectionLike,
 } from "@studio/lib/fileUnder";
+import { reconciliationPresentation } from "@studio/lib/generationPresentation";
+import {
+  applyMobileDurablePresentation,
+  presentMobileDurableChild,
+} from "./generationPresentation";
+import { chunkGenerationBatchTrackers } from "@studio/lib/generationLifecycle";
 import {
   loadMobileSettings,
   updateMobileSettings as persistMobileSettings,
@@ -426,6 +448,13 @@ import {
 } from "./settings";
 import { useMobileDownloadsStore } from "./mobileDownloads";
 import { isNativeAndroidRuntime, isNativeIOSRuntime } from "./platform";
+import {
+  accountForConfirmedInventory,
+  confirmedModelHostIds,
+  confirmModelInstall,
+  retireConfirmedModelAuthority,
+  type ConfirmedModelInstalls,
+} from "./confirmedModelInstalls";
 import {
   createMobileExpansionRecovery,
   mobileExpansionRecoveryStaleReason,
@@ -447,13 +476,14 @@ import {
   reduceMobileDurableGenerationRecovery,
   resolveMobileDurableHost,
   saveMobileDurableGenerationRecoveries,
-  useMobileDurableGenerationLifecycle,
+  mobileDurableGenerationRefusal,
   type MobileDurableGenerationPresentation,
   type MobileDurableGenerationRecovery,
 } from "./mobileGenerationRecovery";
 import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mobileGenerationWatch";
 import { beginMobileBackgroundTask } from "./backgroundTask";
 import {
+  mobileGenerationSubmissionPolicy,
   mobilePlacementFailure,
   previewPinnedMobileGeneration,
   routeAutomaticMobileGeneration,
@@ -468,6 +498,7 @@ import {
 import {
   mobileCompletionSummary as completionSummary,
   summarizeMobileGenerationOutcome,
+  preparedVariationFailure,
 } from "./mobileGenerationOutcome";
 import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
@@ -530,9 +561,8 @@ type LibrarySheet =
   | { kind: "rename-collection"; slug: string; name: string }
   | { kind: "more-tags" };
 
-interface MobileExpansionPullAttempt {
+interface MobileExactPullAttempt {
   id: number;
-  recoveryId: number;
   phase: Exclude<ExpansionPullPhase, "missing">;
   jobId: string | null;
   observedJobId: string | null;
@@ -540,6 +570,27 @@ interface MobileExpansionPullAttempt {
   allowExistingInFlight: boolean;
   requestError: string | null;
   terminalJob: DownloadJob | null;
+}
+
+interface MobileExpansionPullAttempt extends MobileExactPullAttempt {
+  recoveryId: number;
+}
+
+type MobileMissingGenerationPullAttempt = MobileExactPullAttempt;
+
+function newMobileExactPullAttempt(id: number, bucket: DownloadsState): MobileExactPullAttempt {
+  return {
+    id,
+    phase: "connecting",
+    jobId: null,
+    observedJobId: null,
+    baselineJobIds: [...bucket.activeJobs, ...bucket.queued, ...bucket.history].map(
+      (job) => job.id,
+    ),
+    allowExistingInFlight: false,
+    requestError: null,
+    terminalJob: null,
+  };
 }
 
 interface MobileRemixReviewState {
@@ -888,6 +939,23 @@ const NON_KEYBOARD_INPUT_TYPES = new Set([
   "submit",
 ]);
 const downloadConsumerId = `mobile-generate-${createUuid()}`;
+const missingModelConsumerId = `mobile-missing-model-${createUuid()}`;
+const missingGenerationModel = ref<{
+  model: string;
+  host: MobileHost;
+  route: HostRoute;
+  /** Set when the machine is already HOLDING this work: a print is admitted
+   *  before its model is resolved, so a missing model parks the child. The
+   *  completed pull then retries that exact child — pressing Develop would
+   *  queue a second print and leave the held one parked forever. */
+  heldJobId?: string | null;
+} | null>(null);
+const missingGenerationModelBusy = ref(false);
+const missingGenerationModelError = ref("");
+const missingGenerationPullAttempt = ref<MobileMissingGenerationPullAttempt | null>(null);
+const confirmedInstalledModels = ref<ConfirmedModelInstalls>({});
+let missingGenerationPullRequestId = 0;
+let missingGenerationModelLeaseId: string | null = null;
 const progress = ref("Ready");
 /** Whether the status line under Develop currently shows a failure. Set with
  * `setGenerationStatus` so error styling never depends on string sniffing. */
@@ -990,6 +1058,7 @@ let pendingGallery: PendingGalleryPrint[] = [];
 /** Every concrete device copy behind the deduplicated Library tiles. */
 let galleryCopies: PendingGalleryPrint[] = [];
 let modelLoadEpoch = 0;
+let routingModelsEpoch = 0;
 let reusePrintEpoch = 0;
 let reusePrintController: AbortController | null = null;
 let sourceUseEpoch = 0;
@@ -1031,11 +1100,11 @@ const hostProbes = new Map<
 const knownHostReachability = new Set<string>();
 const generation = useGenerationStore();
 /**
- * Ordinary media-free prints admitted through the durable batch endpoint.
- * The Pinia generation store remains the legacy POST-SSE implementation used
- * by old hosts, chains, identity and every request carrying media. Keeping the
- * durable runtime local to MobileApp prevents the desktop shell from silently
- * inheriting phone recovery or native-credential policy.
+ * Every print is admitted through the durable batch endpoint. The Pinia
+ * generation store now serves only auto-chained SEQUENCES, which keep their
+ * own held chain stream. Keeping the durable runtime local to MobileApp
+ * prevents the desktop shell from silently inheriting phone recovery or
+ * native-credential policy.
  */
 const durableGenerationRecoveries = ref<MobileDurableGenerationRecovery[]>(
   loadMobileDurableGenerationRecoveries(localStorage),
@@ -1052,6 +1121,8 @@ const durableGenerationReconciles = new Map<string, Promise<void>>();
 /** Missing = no follow-up; null = host-wide; Set = selected client batches. */
 const durableGenerationReconcilePending = new Map<string, Set<string> | null>();
 const durableGenerationCancelAttempts = new Map<string, Promise<boolean>>();
+const durableGenerationRetryAttempts = reactive(new Set<string>());
+const durableGenerationRetryConfirmations = new Set<string>();
 let nextDurableGenerationClientId = -1;
 let selectedDurableGenerationClientId: number | null = null;
 const mobileDownloads = useMobileDownloadsStore();
@@ -1522,11 +1593,18 @@ const generationModels = computed(() => {
 });
 /** Which reachable machines hold a model, for the picker's availability tag. */
 function modelHostIds(name: string): string[] {
-  return hostIdsForModel(
-    modelsByHost.value,
-    name,
-    routingHosts.value.map((host) => host.id),
-  );
+  const reachable = new Set(routingHosts.value.map((host) => host.id));
+  return [
+    ...new Set([
+      ...hostIdsForModel(modelsByHost.value, name, [...reachable]),
+      ...confirmedModelHostIds(
+        confirmedInstalledModels.value,
+        name,
+        routingHosts.value.filter((host) => reachable.has(host.id)),
+        sameFrozenHost,
+      ),
+    ]),
+  ];
 }
 function modelAvailabilityTag(name: string): string | null {
   if (!automaticRouting.value) return null;
@@ -1534,6 +1612,9 @@ function modelAvailabilityTag(name: string): string | null {
 }
 const isSequence = computed(() => draft.output === "sequence");
 const sequenceModels = computed(() => modelsForOutput(generationModels.value, "sequence"));
+const selectedModelCanSequence = computed(() =>
+  modelSupportsSequence(selectedGenerationModel.value ?? { name: form.model, family: form.family }),
+);
 /** Sequence output narrows the picker to chain-capable video models. */
 const pickerModels = computed(() => modelsForOutput(generationModels.value, draft.output));
 const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedGenerationModel.value));
@@ -1582,7 +1663,7 @@ const sourceSectionSummary = computed(() => {
 const outputFormats = computed(
   () => caps.value.outputFormats as ReturnType<typeof outputFormatsForFamily>,
 );
-const selectedModelAvailable = computed(
+const selectedModelInstalled = computed(
   () =>
     (automaticRouting.value || modelsHostId.value === selectedHostId.value) &&
     generationModels.value.some((model) => model.name === form.model),
@@ -1859,7 +1940,7 @@ const developBlockerReason = computed<string | null>(() => {
   // An empty prompt is self-evident beside the composer and does not warrant
   // a persistent banner. Everything outside the visible composer names the
   // exact correction beside the pinned action.
-  if (!selectedModelAvailable.value) return "Choose an installed model before generating.";
+  if (!form.model.trim()) return "Choose a model before generating.";
   if (quickExpansionSnapshot.value && quickStaleReasons.value.length > 0) {
     return "The prepared rewrite no longer matches these settings. Use a recovery action above.";
   }
@@ -1897,6 +1978,64 @@ function durableRecoveryForJob(job: Job): {
     (candidate) => candidate.tracker.clientBatchId === identity.clientBatchId,
   );
   return recovery ? { recovery, childIndex: identity.childIndex } : null;
+}
+
+/** Live preview + step progress for our own running prints (see web). */
+const ownPreviews = new OwnPrintPreviewWatchers();
+
+/** The hold a queue row is parked on. Read off the job the adapter mapped,
+ * not a fresh presentation: a resync overlay deliberately keeps the hold
+ * fields, and re-presenting would hide Retry and re-offer the model pull. */
+function durableHold(
+  job: Job,
+): { error: string | null; code: string | null; retryable: boolean } | null {
+  if (!durableGenerationJobIdentity.has(job.clientId)) return null;
+  if (job.holdError === null && job.holdCode === null) return null;
+  return { error: job.holdError, code: job.holdCode, retryable: job.retryable };
+}
+
+function durableHeldIsRetrying(job: Job): boolean {
+  return durableGenerationRetryAttempts.has(job.id);
+}
+
+/** Recovered prints whose `request` is still the byte-free presentation stub. */
+const presentationStubClientIds = new Set<number>();
+
+/**
+ * The host's own record of a recovered print: the queue row while it is in
+ * flight, the gallery row once it has published. `null` when the host cannot
+ * answer, in which case the stub stays and nothing is overwritten with it.
+ */
+async function hydrateRecoveredPrintMetadata(
+  job: Job,
+  recovery: MobileDurableGenerationRecovery,
+): Promise<OutputMetadata | null> {
+  const host = resolveMobileDurableHost(recovery, connectedHosts.value);
+  if (!host) return null;
+  const target = mobileHostTarget(host);
+  try {
+    const filename = job.result?.filename;
+    if (job.status === "complete" && filename) {
+      const rows = await apiJsonTo<GalleryImage[]>(
+        target,
+        `/api/gallery?filename=${encodeURIComponent(filename)}`,
+      );
+      const row = Array.isArray(rows) ? rows.find((entry) => entry.filename === filename) : null;
+      if (row?.metadata) {
+        if (job.result) job.result.metadata = row.metadata;
+        job.prompt = row.metadata.prompt ?? job.prompt;
+        return row.metadata;
+      }
+      return null;
+    }
+    if (!job.id) return null;
+    const entry = await findQueueEntryById(target, job.id);
+    const metadata = (entry?.metadata ?? null) as OutputMetadata | null;
+    if (metadata) job.prompt = metadata.prompt ?? job.prompt;
+    return metadata;
+  } catch {
+    return null;
+  }
 }
 
 function presentationRequest(
@@ -1966,6 +2105,7 @@ function persistDurableGenerationRecoveries(): boolean {
 }
 
 function syncDurableGenerationJobs(): void {
+  const now = Date.now();
   for (const recovery of durableGenerationRecoveries.value) {
     const host = hosts.value.find((candidate) => candidate.id === recovery.tracker.hostId);
     const lifecycleByIndex = new Map(
@@ -1978,6 +2118,10 @@ function syncDurableGenerationJobs(): void {
         const liveRequest = durableGenerationRequests.get(key);
         job = reactive(newJob(liveRequest ?? presentationRequest(presentation)));
         job.clientId = nextDurableGenerationClientId--;
+        // A print recovered after a relaunch carries only the byte-free
+        // presentation stub; its real settings are hydrated from the host
+        // the first time it is selected.
+        if (!liveRequest) presentationStubClientIds.add(job.clientId);
         job.batchId = job.clientId;
         job.hostId = recovery.tracker.hostId;
         job.hostLabel = host?.name ?? "Saved machine";
@@ -1994,57 +2138,76 @@ function syncDurableGenerationJobs(): void {
       }
       if (host) job.hostLabel = host.name;
       const lifecycle = lifecycleByIndex.get(presentation.index);
-      if (!lifecycle) {
-        if (recovery.tracker.admission.phase === "rejected") {
-          job.status = "error";
-          job.error = recovery.tracker.admission.error ?? "Generation was not accepted";
-          markJobSettled(job);
-          continue;
+      if (lifecycle) job.id = lifecycle.authority.jobId;
+      const p = presentMobileDurableChild(recovery, presentation.index, job.hostLabel, now);
+      if (p.kind === "running" && lifecycle) {
+        // The durable child carries no progress frames of its own; poll the
+        // host for our own running print as a tapped queue row does.
+        const previewHost = resolveMobileDurableHost(recovery, connectedHosts.value);
+        if (previewHost) {
+          ownPreviews.ensure(
+            String(job.clientId),
+            mobileHostTarget(previewHost),
+            lifecycle.authority.jobId,
+            (progress) => {
+              if (job.status !== "loading") return;
+              const url = previewDataUrl(progress);
+              if (url) job.previewUrl = url;
+              if (progress.step !== null) job.step = progress.step;
+              if (progress.total !== null) job.total = progress.total;
+            },
+          );
         }
-        job.status = "queued";
-        job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
-        job.stage =
-          recovery.tracker.admission.phase === "uncertain"
-            ? "Waiting for host confirmation"
-            : "Accepted";
-        continue;
+      } else {
+        ownPreviews.stop(String(job.clientId));
       }
-      job.id = lifecycle.authority.jobId;
-      switch (lifecycle.phase) {
-        case "accepted":
-        case "queued":
-        case "held":
-          job.status = "queued";
-          job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
-          job.stage = lifecycle.phase === "held" ? "Held by host — action required" : null;
-          break;
-        case "running":
-          job.status = "loading";
-          job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
-          job.stage = "Rendering";
-          break;
-        case "complete":
-          job.status = "complete";
-          job.cancelling = false;
-          job.error = null;
-          job.result ??= durableCompleteEvent(presentation, lifecycle, job);
-          job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
-          break;
-        case "failed":
-          job.status = "error";
-          job.cancelling = false;
-          job.error = lifecycle.error ?? "Generation failed";
-          job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
-          break;
-        case "cancelled":
-          job.status = "error";
-          job.cancelling = false;
-          job.error = "Cancelled";
-          job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
-          break;
+      if (p.kind === "complete" && lifecycle) {
+        job.status = "complete";
+        job.cancelling = false;
+        job.error = null;
+        job.result ??= durableCompleteEvent(presentation, lifecycle, job);
+        job.settledAtMs ??= p.settledAtMs;
+      } else {
+        applyMobileDurablePresentation(job, p, {
+          cancelRequested: recovery.cancelRequestedChildIndexes.includes(presentation.index),
+        });
       }
     }
   }
+}
+
+/**
+ * A batch whose outcome this authority can no longer report is retired: its
+ * rows are already settled as "Outcome unknown" by the sync above, and nothing
+ * further can arrive for it, so keeping the recovery would only poll a host
+ * that has disowned it.
+ */
+function retireUnknownDurableRecoveries(hostId: string): void {
+  const retired = durableGenerationRecoveries.value.filter(
+    (recovery) =>
+      recovery.tracker.hostId === hostId &&
+      reconciliationPresentation(recovery.tracker.reconciliation, null).kind === "unknown",
+  );
+  if (retired.length === 0) return;
+  for (const recovery of retired) {
+    for (const presentation of recovery.presentations) {
+      durableGenerationRequests.delete(
+        durableGenerationKey(recovery.tracker.clientBatchId, presentation.index),
+      );
+    }
+  }
+  const retiredIds = new Set(retired.map((recovery) => recovery.tracker.clientBatchId));
+  durableGenerationRecoveries.value = durableGenerationRecoveries.value.filter(
+    (recovery) => !retiredIds.has(recovery.tracker.clientBatchId),
+  );
+  setGenerationStatus(
+    retired.some((recovery) => recovery.tracker.reconciliation.reason === "instance_mismatch")
+      ? "The original server instance changed. Its queued work is no longer shown here because this replacement cannot authoritatively report the outcome."
+      : "The host no longer has an authoritative record of this queued work; its outcome is unknown.",
+    true,
+  );
+  generationAnnouncement.value =
+    "Generation tracking stopped because the host can no longer report this work's outcome.";
 }
 
 const allGenerationJobs = computed(() => [...generation.jobs, ...durableGenerationJobs.values()]);
@@ -2172,7 +2335,7 @@ const selectedQueueRender = ref<{
   jobId: string;
   width: number;
   height: number;
-  preview: QueueJobPreview | null;
+  preview: QueueJobProgress | null;
 } | null>(null);
 let stopSelectedQueuePreview: (() => void) | null = null;
 
@@ -2198,7 +2361,18 @@ async function selectMobilePrint(job: Job): Promise<void> {
   }
   if (epoch !== mobilePrintSelectionEpoch) return;
   const request = job.request;
-  if (request) {
+  if (presentationStubClientIds.has(job.clientId) && durable) {
+    // Queue-selection reuse restores the print's COMPLETE saved metadata,
+    // never the recovery stub: ask the host for its queue row (in flight)
+    // or its gallery row (finished) and apply that through the same mapper
+    // Library ▸ Use as prompt uses.
+    const hydrated = await hydrateRecoveredPrintMetadata(job, durable.recovery);
+    if (epoch !== mobilePrintSelectionEpoch) return;
+    if (hydrated) {
+      presentationStubClientIds.delete(job.clientId);
+      applyMobileGalleryMetadata(form, hydrated, generationModels.value);
+    }
+  } else if (request) {
     if (request.source_image || request.edit_images?.length) {
       preserveRestoredSourceCanvas(request.edit_images?.[0] ?? request.source_image ?? "");
     }
@@ -2537,6 +2711,30 @@ const expansionPullBucket = computed<DownloadsState>(() => {
       })
     : { activeJobs: [], queued: [], history: [] };
 });
+
+function mobileExactPullStatus(
+  model: string,
+  hostId: string,
+  attempt: MobileExactPullAttempt,
+  bucket: DownloadsState,
+): ExpansionPullView {
+  const pending = mobileDownloads.pendingPulls.get(`${hostId}:${model}`);
+  return resolveExpansionPullStatus({
+    model,
+    phase: pending?.phase ?? attempt.phase,
+    jobId: attempt.jobId,
+    observedJobId: attempt.observedJobId,
+    baselineJobIds: attempt.baselineJobIds,
+    allowExistingInFlight: attempt.allowExistingInFlight,
+    activeJobs: bucket.activeJobs,
+    queued: bucket.queued,
+    history: attempt.terminalJob
+      ? [attempt.terminalJob, ...bucket.history.filter((job) => job.id !== attempt.terminalJob?.id)]
+      : bucket.history,
+    requestError: attempt.requestError,
+  });
+}
+
 const expansionPullStatus = computed<ExpansionPullView | null>(() => {
   const missing = expansionMissingModel.value;
   if (!missing) return null;
@@ -2545,24 +2743,12 @@ const expansionPullStatus = computed<ExpansionPullView | null>(() => {
   if (!attempt || !recovery || attempt.recoveryId !== recovery.id) {
     return { kind: "missing", job: null };
   }
-  const pending = mobileDownloads.pendingPulls.get(`${recovery.route.hostId}:${recovery.model}`);
-  return resolveExpansionPullStatus({
-    model: recovery.model,
-    phase: pending?.phase ?? attempt.phase,
-    jobId: attempt.jobId,
-    observedJobId: attempt.observedJobId,
-    baselineJobIds: attempt.baselineJobIds,
-    allowExistingInFlight: attempt.allowExistingInFlight,
-    activeJobs: expansionPullBucket.value.activeJobs,
-    queued: expansionPullBucket.value.queued,
-    history: attempt.terminalJob
-      ? [
-          attempt.terminalJob,
-          ...expansionPullBucket.value.history.filter((job) => job.id !== attempt.terminalJob?.id),
-        ]
-      : expansionPullBucket.value.history,
-    requestError: attempt.requestError,
-  });
+  return mobileExactPullStatus(
+    recovery.model,
+    recovery.route.hostId,
+    attempt,
+    expansionPullBucket.value,
+  );
 });
 const expansionPullEtaSeconds = computed(() => {
   const attempt = expansionPullAttempt.value;
@@ -2570,12 +2756,54 @@ const expansionPullEtaSeconds = computed(() => {
   const job = expansionPullStatus.value?.job;
   return attempt && recovery && job ? mobileDownloads.etaFor(recovery.route.hostId, job.id) : null;
 });
+const missingGenerationPullBucket = computed<DownloadsState>(() => {
+  const pending = missingGenerationModel.value;
+  return pending
+    ? (mobileDownloads.downloadsByHost[pending.route.hostId] ?? {
+        activeJobs: [],
+        queued: [],
+        history: [],
+      })
+    : { activeJobs: [], queued: [], history: [] };
+});
+const missingGenerationPullStatus = computed<ExpansionPullView>(() => {
+  const pending = missingGenerationModel.value;
+  const attempt = missingGenerationPullAttempt.value;
+  if (!pending || !attempt) return { kind: "missing", job: null };
+  return mobileExactPullStatus(
+    pending.model,
+    pending.route.hostId,
+    attempt,
+    missingGenerationPullBucket.value,
+  );
+});
+const missingGenerationPullEtaSeconds = computed(() => {
+  const pending = missingGenerationModel.value;
+  const job = missingGenerationPullStatus.value.job;
+  return pending && job ? mobileDownloads.etaFor(pending.route.hostId, job.id) : null;
+});
 const queueAnnouncement = computed(() => activityAnnouncement(activityCounts.value));
+/** Fraction of the selected print's denoise the host has reported, or null
+ * before it reports a step counter. */
+const selectedQueuePreviewFraction = computed(() => {
+  const preview = selectedQueueRender.value?.preview;
+  return preview && preview.step !== null && preview.total !== null
+    ? preview.step / preview.total
+    : null;
+});
+const selectedQueuePreviewSrc = computed(() =>
+  selectedQueueRender.value?.preview?.preview_image
+    ? `data:image/png;base64,${selectedQueueRender.value.preview.preview_image}`
+    : null,
+);
 const generationStatus = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
     const preview = selected.preview;
-    return preview ? `Developing ${preview.step} / ${preview.total}` : progress.value;
+    if (preview && preview.step !== null && preview.total !== null) {
+      return `Developing ${preview.step} / ${preview.total}`;
+    }
+    return preview?.stage ?? progress.value;
   }
   const active = activeGeneration.value;
   if (!active) return progress.value;
@@ -2590,6 +2818,7 @@ const generationStatus = computed(() => {
       );
       return queueWaitLabel(
         resolveQueueWait({
+          state: live?.state,
           position: live?.position ?? active.queuePosition,
           blockedReason: live?.blockedReason,
         }),
@@ -2649,9 +2878,7 @@ function routeForMobileHost(host: MobileHost): HostRoute {
     ...(serverCapabilities[host.id]?.durable_media
       ? { durableMedia: serverCapabilities[host.id]!.durable_media! }
       : {}),
-    heterogeneousBatch: queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: queue?.heterogeneous_batch_max_outputs ?? null,
-    durableBatchOutcomes: queue?.durable_batch_outcomes === true,
   };
 }
 
@@ -2671,39 +2898,12 @@ function markDurableHostGap(hostId: string, instanceId: string): void {
       : recovery,
   );
   syncDurableGenerationJobs();
-  const mismatched = durableGenerationRecoveries.value.filter(
-    (recovery) =>
-      recovery.tracker.hostId === hostId &&
-      recovery.tracker.reconciliation.reason === "instance_mismatch",
-  );
-  if (mismatched.length > 0) {
-    const retired = new Set(mismatched.map((recovery) => recovery.tracker.clientBatchId));
-    for (const recovery of mismatched) {
-      for (const presentation of recovery.presentations) {
-        const key = durableGenerationKey(recovery.tracker.clientBatchId, presentation.index);
-        const job = durableGenerationJobs.get(key);
-        if (job && job.status !== "complete" && job.status !== "error") {
-          job.status = "error";
-          job.stage = "Original machine identity changed";
-          job.error =
-            "The original server instance is no longer at this machine address; its outcome is unknown.";
-          job.cancelling = false;
-          markJobSettled(job);
-        }
-        durableGenerationRequests.delete(key);
-      }
-    }
-    durableGenerationRecoveries.value = durableGenerationRecoveries.value.filter(
-      (recovery) => !retired.has(recovery.tracker.clientBatchId),
-    );
-    setGenerationStatus(
-      "The original server instance changed. Its queued work is no longer shown here because this replacement cannot authoritatively report the outcome.",
-      true,
-    );
-    generationAnnouncement.value =
-      "Generation tracking stopped because the server identity changed.";
-  }
-  persistDurableGenerationRecoveries();
+  // A completion frozen before the gap keeps its effects; only then is the
+  // unknown remainder retired.
+  void processDurableGenerationTerminalEffects().finally(() => {
+    retireUnknownDurableRecoveries(hostId);
+    persistDurableGenerationRecoveries();
+  });
 }
 
 function clearMobileDurableCancelIntent(clientBatchId: string, childIndex: number): void {
@@ -2780,6 +2980,9 @@ function scheduleMobileDurableCancelIntents(): void {
 
 async function processDurableGenerationTerminalEffects(): Promise<void> {
   const effects: Array<() => Promise<unknown> | void> = [];
+  // A failure has the last word: within one pass a sibling's completion must
+  // not overwrite the sentence naming which variation failed.
+  const failureAnnouncements: Array<() => void> = [];
   let changed = false;
   for (const original of durableGenerationRecoveries.value) {
     let recovery = original;
@@ -2807,22 +3010,24 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
       }
     }
     for (const lifecycle of mobileDurableJobs(recovery)) {
-      if (
-        lifecycle.phase !== "complete" &&
-        lifecycle.phase !== "failed" &&
-        lifecycle.phase !== "cancelled"
-      ) {
-        continue;
-      }
       const key = durableGenerationKey(recovery.tracker.clientBatchId, lifecycle.childIndex);
       const job = durableGenerationJobs.get(key);
       if (!job) continue;
+      const p = presentMobileDurableChild(recovery, lifecycle.childIndex, job.hostLabel);
+      if (
+        p.kind !== "complete" &&
+        p.kind !== "complete_without_file" &&
+        p.kind !== "failed" &&
+        p.kind !== "cancelled"
+      ) {
+        continue;
+      }
 
       const viewer = claimMobileDurableTerminalEffect(recovery, lifecycle.key, "viewer");
       recovery = viewer.recovery;
       changed ||= viewer.claimed;
       if (viewer.claimed) {
-        if (lifecycle.phase === "complete" && job.result) {
+        if (p.kind === "complete" && job.result) {
           effects.push(async () => {
             latestResultClientId.value = job.clientId;
             setGenerationStatus(completionSummary(job.result!));
@@ -2832,21 +3037,30 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
                 "Generation completed, but its preview is unavailable from the exact host.";
             });
           });
-        } else if (lifecycle.phase === "cancelled") {
+        } else if (p.kind === "cancelled") {
           effects.push(() => {
-            setGenerationStatus("Cancelled");
+            setGenerationStatus(p.label);
             generationAnnouncement.value = "Generation cancelled.";
           });
         } else {
-          const detail = lifecycle.error ?? "Generation failed";
-          effects.push(() => {
-            setGenerationStatus(detail, true);
-            generationAnnouncement.value = `Generation failed. ${detail}`;
+          ownPreviews.stop(String(job.clientId));
+          const detail = p.kind === "complete" ? "Generation failed" : p.message;
+          // A batch's partial failure must say WHICH sibling failed and the
+          // prompt it was reviewed with; a bare "Generation failed" leaves a
+          // reviewed set unidentifiable.
+          const siblings = mobileDurableJobs(recovery).length;
+          const summary =
+            siblings > 1
+              ? preparedVariationFailure(lifecycle.childIndex, job.prompt, detail)
+              : detail;
+          failureAnnouncements.push(() => {
+            setGenerationStatus(summary, true);
+            generationAnnouncement.value = `Generation failed. ${summary}`;
           });
         }
       }
 
-      if (lifecycle.phase === "complete" && job.result) {
+      if (p.kind === "complete" && job.result) {
         const photos = claimMobileDurableTerminalEffect(recovery, lifecycle.key, "photos");
         recovery = photos.recovery;
         changed ||= photos.claimed;
@@ -2865,6 +3079,7 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
   // claimed state, never replay an effect.
   if (changed) persistDurableGenerationRecoveries();
   await Promise.allSettled(effects.map(async (run) => await run()));
+  for (const announce of failureAnnouncements) announce();
   pruneDurableTerminalRuntime();
 }
 
@@ -2981,27 +3196,43 @@ async function reconcileMobileDurableHost(
     if (records.length === 0) return;
     const host = resolveMobileDurableHost(records[0]!, connectedHosts.value);
     if (!host) return;
-    const request = buildMobileDurableHostStatusRequest(records, hostId);
-    if (request.client_batch_ids.length === 0 && (request.batch_ids?.length ?? 0) === 0) return;
     try {
-      const response = await reconcileGenerationBatches(mobileHostTarget(host), request);
-      const requestedClients = new Set(records.map((recovery) => recovery.tracker.clientBatchId));
-      const latestRequested = durableGenerationRecoveries.value.filter((recovery) =>
-        requestedClients.has(recovery.tracker.clientBatchId),
-      );
-      const merged = new Map(
-        mergeMobileDurableHostStatus(latestRequested, hostId, response).map((recovery) => [
-          recovery.tracker.clientBatchId,
-          recovery,
-        ]),
-      );
-      durableGenerationRecoveries.value = durableGenerationRecoveries.value.map(
-        (recovery) => merged.get(recovery.tracker.clientBatchId) ?? recovery,
-      );
-      persistDurableGenerationRecoveries();
+      for (const trackerChunk of chunkGenerationBatchTrackers(
+        records.map((recovery) => recovery.tracker),
+        hostId,
+      )) {
+        const requestedClients = new Set(trackerChunk.map((tracker) => tracker.clientBatchId));
+        const latestRequested = durableGenerationRecoveries.value.filter((recovery) =>
+          requestedClients.has(recovery.tracker.clientBatchId),
+        );
+        const request = buildMobileDurableHostStatusRequest(latestRequested, hostId);
+        if (request.client_batch_ids.length === 0 && (request.batch_ids?.length ?? 0) === 0) {
+          continue;
+        }
+        const response = await reconcileGenerationBatches(mobileHostTarget(host), request);
+        const merged = new Map(
+          mergeMobileDurableHostStatus(latestRequested, hostId, response).map((recovery) => [
+            recovery.tracker.clientBatchId,
+            recovery,
+          ]),
+        );
+        durableGenerationRecoveries.value = durableGenerationRecoveries.value.map(
+          (recovery) => merged.get(recovery.tracker.clientBatchId) ?? recovery,
+        );
+        for (const batch of response.batches) {
+          for (const child of batch.children) {
+            if (child.state !== "held" || !durableGenerationRetryConfirmations.has(child.job_id)) {
+              durableGenerationRetryAttempts.delete(child.job_id);
+            }
+          }
+        }
+      }
       syncDurableGenerationJobs();
+      persistDurableGenerationRecoveries();
       scheduleMobileDurableCancelIntents();
       await processDurableGenerationTerminalEffects();
+      retireUnknownDurableRecoveries(hostId);
+      persistDurableGenerationRecoveries();
     } catch {
       // A transport failure is not a lifecycle outcome. The retained
       // recovery identity stays queued and the host stream/wake path retries
@@ -3020,7 +3251,7 @@ async function reconcileMobileDurableHost(
   return task;
 }
 
-async function submitMobileDurableGeneration(input: {
+async function submitMobileDurableGenerationChunk(input: {
   route: HostRoute;
   requests: GenerateRequest[];
 }): Promise<void> {
@@ -3064,8 +3295,7 @@ async function submitMobileDurableGeneration(input: {
       batch: admitted,
     });
   } catch (error) {
-    const authoritativeRejection =
-      error instanceof ApiError && error.status >= 400 && error.status < 500;
+    const authoritativeRejection = isDefiniteGenerationAdmissionRejection(error);
     const latest =
       durableGenerationRecoveries.value.find(
         (candidate) => candidate.tracker.clientBatchId === clientBatchId,
@@ -3073,12 +3303,34 @@ async function submitMobileDurableGeneration(input: {
     recovery = reduceMobileDurableGenerationRecovery(
       latest,
       authoritativeRejection
-        ? { type: "admission_rejected", error: error.message }
+        ? {
+            type: "admission_rejected",
+            error: error instanceof Error ? error.message : String(error),
+          }
         : {
             type: "admission_uncertain",
             error: error instanceof Error ? error.message : String(error),
           },
     );
+    if (!authoritativeRejection) {
+      const lookup = await lookupGenerationBatchByClientId(input.route.target, clientBatchId).catch(
+        () => null,
+      );
+      if (lookup?.kind === "found") {
+        recovery = reduceMobileDurableGenerationRecovery(recovery, {
+          type: "batch_snapshot",
+          batch: lookup.batch,
+        });
+      } else if (lookup?.kind === "missing") {
+        // The host answered and has no such batch: the POST never committed,
+        // so the print is rejected with the host's own sentence rather than
+        // left "waiting for host confirmation" forever.
+        recovery = reduceMobileDurableGenerationRecovery(recovery, {
+          type: "admission_rejected",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
   replaceDurableRecovery(recovery);
   persistDurableGenerationRecoveries();
@@ -3093,6 +3345,23 @@ async function submitMobileDurableGeneration(input: {
   } else if (recovery.tracker.admission.phase === "rejected") {
     setGenerationStatus(recovery.tracker.admission.error ?? "Generation was not accepted", true);
   }
+}
+
+async function submitMobileDurableGeneration(input: {
+  route: HostRoute;
+  requests: GenerateRequest[];
+}): Promise<void> {
+  const limit = canonicalGenerationBatchLimit({
+    heterogeneous_batch_max_outputs: input.route.heterogeneousBatchMaxOutputs ?? null,
+  });
+  if (limit === null) {
+    throw new Error(`${input.route.label} does not advertise the durable generation queue.`);
+  }
+  await Promise.all(
+    chunkGenerationBatchRequests(input.requests, limit).map((requests) =>
+      submitMobileDurableGenerationChunk({ route: input.route, requests }),
+    ),
+  );
 }
 
 function loadHosts(): MobileHost[] {
@@ -3340,6 +3609,10 @@ function retireMobileHostAuthority(id: string): void {
   delete hostTelemetry[id];
   delete expandCapabilities[id];
   delete serverCapabilities[id];
+  confirmedInstalledModels.value = retireConfirmedModelAuthority(
+    confirmedInstalledModels.value,
+    id,
+  );
   const nextModels = { ...modelsByHost.value };
   delete nextModels[id];
   modelsByHost.value = nextModels;
@@ -3639,6 +3912,11 @@ async function refreshModels(): Promise<boolean> {
     models.value = filterRestrictedModels(entries, capabilities);
     modelsHostId.value = hostId;
     modelsByHost.value = { ...modelsByHost.value, [hostId]: models.value };
+    confirmedInstalledModels.value = accountForConfirmedInventory(
+      confirmedInstalledModels.value,
+      hostId,
+      models.value,
+    );
     modelSnapshotIdentities.value = {
       ...modelSnapshotIdentities.value,
       [hostId]: {
@@ -3655,7 +3933,7 @@ async function refreshModels(): Promise<boolean> {
       models: models.value,
       capabilities,
     });
-    const selectedEntry = generationModels.value.find((model) => model.name === form.model);
+    const selectedEntry = selectedGenerationModel.value;
     if (selectedEntry) {
       reconcileModelCapabilities(form, selectedEntry);
     } else if (generationModels.value[0]) {
@@ -3687,6 +3965,7 @@ async function refreshModels(): Promise<boolean> {
  * dropping out of routing on one bad poll; a forgotten machine is pruned.
  */
 async function refreshRoutingModels(): Promise<void> {
+  const epoch = ++routingModelsEpoch;
   const peers = routingHosts.value.filter((host) => host.id !== selectedHostId.value);
   const snapshots = await Promise.all(
     peers.map(async (host) => {
@@ -3722,7 +4001,7 @@ async function refreshRoutingModels(): Promise<void> {
       }
     }),
   );
-  if (unmounted) return;
+  if (unmounted || epoch !== routingModelsEpoch) return;
   const next: Record<string, ModelEntry[]> = {};
   const nextIdentities: Record<string, ModelSnapshotIdentity> = {};
   for (const [id, entries] of Object.entries(modelsByHost.value)) {
@@ -3737,6 +4016,11 @@ async function refreshRoutingModels(): Promise<void> {
     if (snapshot) {
       next[snapshot[0]] = snapshot[2];
       nextIdentities[snapshot[0]] = snapshot[1];
+      confirmedInstalledModels.value = accountForConfirmedInventory(
+        confirmedInstalledModels.value,
+        snapshot[0],
+        snapshot[2],
+      );
     }
   }
   modelsByHost.value = next;
@@ -3979,13 +4263,14 @@ function provisionalAutomaticHost(
 }
 
 /**
- * Ask every candidate machine for a placement plan and choose one.
+ * Freeze one automatic destination using the shared submission policy.
  *
- * Auto takes the soonest predicted completion (round trip included); Most
- * capable takes the strongest GPU among the machines that answered `planned`,
- * using each machine's own `gpu_info.backend`. The winner is returned as a
- * complete route so the caller can freeze it — host id, URL, Keychain key, and
- * instance id — exactly as the pinned path does.
+ * Canonical protocol-v2 requests use cached model/queue/GPU telemetry and do
+ * not wait for a placement preview. Legacy requests retain authoritative
+ * preview fan-out: Auto compares predicted completion (round trip included),
+ * while Most capable compares the GPUs that answered `planned`. Either path
+ * returns the same complete route — host id, URL, Keychain key, and instance
+ * id — that the pinned path freezes.
  */
 async function routeAutomaticGeneration(options: {
   request: Record<string, unknown>;
@@ -4005,11 +4290,218 @@ async function routeAutomaticGeneration(options: {
   if (error) return { kind: "error", message: error };
   return routeAutomaticMobileGeneration({
     ...routingOptions,
+    model,
+    modelOwnerIds: modelHostIds(model),
+    inventoryKnown: (hostId) => Object.prototype.hasOwnProperty.call(modelsByHost.value, hostId),
     candidates: candidates.map((host) => ({ host, view: routingHostView(host) })),
     routeForHost: routeForMobileHost,
     policy: generateTarget.value,
     isCurrent: () => !unmounted && isCurrent(),
   });
+}
+
+function promptForMissingGenerationModel(
+  model: string,
+  host: MobileHost,
+  route: HostRoute,
+  heldJobId: string | null = null,
+): void {
+  missingGenerationPullRequestId += 1;
+  missingGenerationPullAttempt.value = null;
+  missingGenerationModelError.value = "";
+  missingGenerationModel.value = { model, host: { ...host }, route, heldJobId };
+}
+
+/**
+ * A print is admitted BEFORE the machine resolves its model, so "nobody has
+ * this model" now arrives as a HELD child carrying the machine's own reason
+ * rather than as an infeasible placement preview. Same offer, same frozen
+ * machine; the completed pull retries the child that machine is holding.
+ */
+const offeredMissingModelHolds = new Set<string>();
+function offerHeldMissingModelPull(job: Job): void {
+  const heldCode = durableHold(job)?.code ?? null;
+  if (heldCode === null && job.id) {
+    // The hold ended: a later hold on the same print is a new offer.
+    offeredMissingModelHolds.delete(job.id);
+    return;
+  }
+  const planned = planHeldMissingModelPull({
+    jobId: job.id,
+    model: job.model,
+    heldCode,
+    alreadyOffered: offeredMissingModelHolds,
+  });
+  if (!planned) return;
+  const durable = durableRecoveryForJob(job);
+  if (!durable) return;
+  const host = resolveMobileDurableHost(durable.recovery, connectedHosts.value);
+  if (!host) return;
+  offeredMissingModelHolds.add(planned.jobId);
+  promptForMissingGenerationModel(planned.model, host, routeForMobileHost(host), planned.jobId);
+}
+
+watch(
+  () =>
+    allGenerationJobs.value
+      .map(
+        (job) =>
+          `${job.id ?? job.clientId}:${durableHold(job)?.code ?? ""}:${durableHold(job)?.error ?? ""}`,
+      )
+      .join("|"),
+  () => {
+    for (const job of allGenerationJobs.value) offerHeldMissingModelPull(job);
+  },
+);
+
+function closeMissingGenerationModel(): void {
+  if (
+    missingGenerationModelBusy.value ||
+    ["connecting", "starting", "queued", "pulling"].includes(missingGenerationPullStatus.value.kind)
+  )
+    return;
+  missingGenerationModel.value = null;
+  missingGenerationPullAttempt.value = null;
+  missingGenerationModelError.value = "";
+}
+
+async function pullMissingGenerationModel(): Promise<void> {
+  const pending = missingGenerationModel.value;
+  if (!pending || missingGenerationModelBusy.value) return;
+  missingGenerationModelBusy.value = true;
+  missingGenerationModelError.value = "";
+  const bucket = missingGenerationPullBucket.value;
+  const attempt: MobileMissingGenerationPullAttempt = {
+    ...newMobileExactPullAttempt(++missingGenerationPullRequestId, bucket),
+  };
+  missingGenerationPullAttempt.value = attempt;
+  const leaseId = `${missingModelConsumerId}:${pending.route.hostId}:${pending.model}`;
+  missingGenerationModelLeaseId = leaseId;
+  const release = () => {
+    mobileDownloads.releaseFrozenPull(leaseId);
+    if (missingGenerationModelLeaseId === leaseId) missingGenerationModelLeaseId = null;
+    mobileDownloads.unregisterConsumer(missingModelConsumerId);
+  };
+  const finish = (job: DownloadJob) => {
+    if (missingGenerationPullAttempt.value?.id !== attempt.id) return;
+    if (job.status === "completed") {
+      attempt.terminalJob = job;
+      confirmedInstalledModels.value = confirmModelInstall(
+        confirmedInstalledModels.value,
+        pending.route,
+        pending.model,
+      );
+      catalogModelsChanged(pending.route.hostId);
+      const heldJob = pending.heldJobId
+        ? allGenerationJobs.value.find((candidate) => candidate.id === pending.heldJobId)
+        : null;
+      if (heldJob) {
+        setGenerationStatus(
+          `${pending.model} is ready on ${pending.route.label} — retrying the held print.`,
+        );
+        generationAnnouncement.value = `${pending.model} is ready. Retrying the held print.`;
+        void retryHeldGeneration(heldJob);
+      } else {
+        setGenerationStatus(`${pending.model} is ready on ${pending.route.label}.`);
+        generationAnnouncement.value = `${pending.model} is ready. Press Develop to continue.`;
+      }
+    } else {
+      attempt.terminalJob = job;
+      const message =
+        job.status === "cancelled"
+          ? `Download cancelled on ${pending.route.label}.`
+          : (job.error ?? `Download failed on ${pending.route.label}.`);
+      missingGenerationModelError.value = message;
+      setGenerationStatus(message, true);
+      generationAnnouncement.value = message;
+    }
+    release();
+  };
+  mobileDownloads.registerConsumer(missingModelConsumerId, [{ ...pending.host }], {
+    onEvent: ({ event }) => {
+      const current = missingGenerationPullAttempt.value;
+      if (
+        event.type === "enqueued" &&
+        current?.id === attempt.id &&
+        !current.jobId &&
+        !current.observedJobId
+      ) {
+        const queued = mobileDownloads.downloadsByHost[pending.route.hostId]?.queued.find(
+          (job) => job.id === event.id,
+        );
+        if (
+          queued &&
+          expansionPullJobMatchesModel(queued, pending.model) &&
+          !current.baselineJobIds.includes(queued.id)
+        ) {
+          current.observedJobId = queued.id;
+        }
+      }
+      if (
+        event.type !== "job_done" &&
+        event.type !== "job_failed" &&
+        event.type !== "job_cancelled"
+      )
+        return;
+      if (
+        current?.id !== attempt.id ||
+        (current.jobId !== event.id && current.observedJobId !== event.id)
+      )
+        return;
+      const terminal = mobileDownloads.downloadsByHost[pending.route.hostId]?.history.find(
+        (job) => job.id === event.id,
+      );
+      if (terminal) finish(terminal);
+    },
+    onStreamError: (_host, error) => {
+      if (missingGenerationPullAttempt.value?.id !== attempt.id) return;
+      attempt.requestError = describeTransportError(error, pending.route.label);
+      missingGenerationModelError.value = attempt.requestError;
+      release();
+    },
+  });
+  try {
+    const result = await mobileDownloads.startPullFrozen(
+      { id: pending.model, name: pending.model },
+      { ...pending.host },
+      leaseId,
+    );
+    if (missingGenerationPullAttempt.value?.id !== attempt.id) return;
+    if (result.kind === "started" || result.kind === "conflict") {
+      attempt.jobId = result.jobId;
+    } else {
+      attempt.allowExistingInFlight = true;
+      const state = mobileDownloads.downloadsByHost[pending.route.hostId];
+      attempt.observedJobId =
+        [...(state?.activeJobs ?? []), ...(state?.queued ?? [])].find((job) =>
+          expansionPullJobMatchesModel(job, pending.model),
+        )?.id ?? null;
+    }
+    attempt.phase = "starting";
+    const terminalId = attempt.jobId ?? attempt.observedJobId;
+    const terminal = terminalId
+      ? mobileDownloads.terminalJobFor(
+          { id: pending.model, name: pending.model },
+          pending.route.hostId,
+          terminalId,
+        )
+      : null;
+    if (terminal) {
+      finish(terminal);
+      return;
+    }
+    setGenerationStatus(
+      `Downloading ${pending.model} on ${pending.route.label}. Press Develop again once it is ready.`,
+    );
+    generationAnnouncement.value = `Download queued on ${pending.route.label}.`;
+  } catch (error) {
+    if (missingGenerationPullAttempt.value?.id !== attempt.id) return;
+    attempt.requestError = describeTransportError(error, pending.route.label);
+    missingGenerationModelError.value = attempt.requestError;
+    release();
+  } finally {
+    missingGenerationModelBusy.value = false;
+  }
 }
 
 async function submitMobileSequence(): Promise<void> {
@@ -4020,9 +4512,10 @@ async function submitMobileSequence(): Promise<void> {
   clearSelectedQueueRender();
   fileUnderDropNotice.value = "";
   const automatic = automaticRouting.value;
-  // Under an automatic policy the machine is provisional until the placement
-  // fan-out answers; source fitting only ever uses it for an optional upscale,
-  // so the built request stays machine-independent.
+  // Under an automatic policy the machine is provisional until shared routing
+  // freezes either the canonical telemetry choice or the legacy preview winner;
+  // source fitting only ever uses it for an optional upscale, so the built
+  // request stays machine-independent.
   const initialHost = automatic
     ? provisionalAutomaticHost(form.model, form.family)
     : selectedHost.value;
@@ -4039,7 +4532,18 @@ async function submitMobileSequence(): Promise<void> {
     return;
   }
   const entry = selectedGenerationModel.value;
-  if (!initialHost || !entry) return;
+  if (!initialHost || !form.model.trim()) return;
+  if (
+    !automatic &&
+    modelPresenceOnHost(
+      initialHost.id,
+      modelHostIds(form.model),
+      Object.prototype.hasOwnProperty.call(modelsByHost.value, initialHost.id),
+    ) === "missing"
+  ) {
+    promptForMissingGenerationModel(form.model, initialHost, routeForMobileHost(initialHost));
+    return;
+  }
   // Same contract as the one-shot path: a title the server would reject is an
   // inline refusal, never a silently dropped name.
   const titleCheck = requestTitle(printTitle.value);
@@ -4057,15 +4561,15 @@ async function submitMobileSequence(): Promise<void> {
     instanceId: host.instanceId ?? null,
   };
   // Freeze all request-affecting values at the tap boundary. Source fitting
-  // and placement preview are asynchronous; edits during either await belong
-  // to the next submission.
+  // and routing are asynchronous; edits during either await belong to the next
+  // submission.
   const requestForm = applyFileUnderPolicy(cloneGenerateForm(form));
   const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
   // The opening image obeys the checkpoint's own source-image contract: a
   // checkpoint that reads none shows no well, so a retained image is parked
   // out of the request rather than shipped as conditioning admission refuses.
   const openingImageSupported =
-    parseSourceImageCapability(entry.source_image ?? form.sourceImageCapability) !== "unsupported";
+    parseSourceImageCapability(entry?.source_image ?? form.sourceImageCapability) !== "unsupported";
   const openingSnapshot =
     openingImageSupported && draft.openingImage ? { ...draft.openingImage } : null;
   const enableAudio = draft.enableAudio;
@@ -4079,7 +4583,9 @@ async function submitMobileSequence(): Promise<void> {
   const backgroundTask = await beginMobileBackgroundTask("Preparing remote sequence");
   try {
     // Stale limits would mis-gate audio and frame caps for the routed host.
-    if (!chainLimits.value || chainLimits.value.model !== entry.name) await loadChainLimits();
+    if (entry && (!chainLimits.value || chainLimits.value.model !== requestForm.model)) {
+      await loadChainLimits();
+    }
     if (!isCurrent()) return;
     requestForm.sourceImage = openingSnapshot?.base64 ?? null;
     requestForm.maskImage = null;
@@ -4118,13 +4624,12 @@ async function submitMobileSequence(): Promise<void> {
       ...chainFilingFields(requestForm),
     };
     let preview: GenerationPlacementPreview | null = null;
-    let legacyUnsupported = false;
     if (automatic) {
       const routed = await routeAutomaticGeneration({
         request: request as unknown as Record<string, unknown>,
         chain: true,
         copies: 1,
-        model: entry.name,
+        model: requestForm.model,
         family: form.family,
         subject: "sequence",
         requireAuthoritative: false,
@@ -4133,32 +4638,32 @@ async function submitMobileSequence(): Promise<void> {
       });
       if (routed.kind === "abandoned") return;
       if (routed.kind === "error") throw new Error(routed.message);
+      if (routed.kind === "missing_model") {
+        promptForMissingGenerationModel(routed.model, routed.host, routed.route);
+        return;
+      }
       // Freeze the machine the fan-out chose: this exact route is what the
       // durable sequence is recovered against.
       host = routed.host;
       target = { ...mobileHostTarget(host) };
       frozenRoute = routed.route;
       preview = routed.placement;
-      legacyUnsupported = routed.legacyUnsupported;
     } else {
-      try {
-        preview = await previewChainPlacement(
-          target,
-          request as unknown as Record<string, unknown>,
-          1,
-          { signal },
-        );
-      } catch (error) {
-        if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
-          legacyUnsupported = true;
-        } else {
-          throw error;
-        }
-      }
+      preview = await previewChainPlacement(
+        target,
+        request as unknown as Record<string, unknown>,
+        1,
+        { signal },
+      );
     }
     const classification: string = classifyPlacementPreview(preview);
     if (!isCurrent()) return;
-    if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
+    const missingModel = classifyMissingModel(preview, requestForm.model);
+    if (missingModel) {
+      promptForMissingGenerationModel(missingModel.model, host, frozenRoute);
+      return;
+    }
+    if (classification !== "unsupported" && classification !== "planned") {
       throw new Error(mobilePlacementFailure(preview, host.name, "sequence"));
     }
     const fenceHost = automatic
@@ -4197,7 +4702,7 @@ async function submitMobileSequence(): Promise<void> {
     }
     persistSequenceRecovery(host, response.job_id);
     watchSequenceJob(host.id, target, response.job_id, {
-      model: entry.name,
+      model: requestForm.model,
       stageCount: clips.length,
     });
   } catch (error) {
@@ -5249,17 +5754,8 @@ async function pullExpansionModel(): Promise<void> {
     history: [],
   };
   const attempt: MobileExpansionPullAttempt = {
-    id: ++expansionPullRequestId,
+    ...newMobileExactPullAttempt(++expansionPullRequestId, bucket),
     recoveryId: recovery.id,
-    phase: "connecting",
-    jobId: null,
-    observedJobId: null,
-    baselineJobIds: [...bucket.activeJobs, ...bucket.queued, ...bucket.history].map(
-      (job) => job.id,
-    ),
-    allowExistingInFlight: false,
-    requestError: null,
-    terminalJob: null,
   };
   expansionPullAttempt.value = attempt;
   syncExpansionDownloadConsumer(recovery);
@@ -5589,7 +6085,7 @@ async function generate(): Promise<void> {
     !initialRoute ||
     !target ||
     promptMissing.value ||
-    !selectedModelAvailable.value ||
+    !form.model.trim() ||
     !seedValid.value ||
     !parameterValid.value ||
     // Refused at the tap, beside every other inline error, rather than thrown
@@ -5785,15 +6281,18 @@ async function generate(): Promise<void> {
   const requireAuthoritativePlacement = requiresAuthoritativePlacement(
     request as unknown as Record<string, unknown>,
   );
-  const skipPinnedH3Placement =
-    !automaticOrdinary &&
-    !requireAuthoritativePlacement &&
-    isMinimaxH3Identity(draft.family, request.model);
-  if (!unmounted && uiId === submissionUiId && !skipPinnedH3Placement) {
+  const pinnedSubmissionPolicy = automaticOrdinary
+    ? null
+    : mobileGenerationSubmissionPolicy({
+        route,
+        request: request as unknown as Record<string, unknown>,
+        chain: chainRouting.kind === "chain",
+        target: { kind: "pinned", hostId: route.hostId },
+      });
+  if (!unmounted && uiId === submissionUiId && pinnedSubmissionPolicy?.routing !== "none") {
     generationSubmissionPhase.value = "placement";
   }
   let placement: GenerationPlacementPreview | null = null;
-  let legacyUnsupported = false;
   const previewRequest =
     chainRouting.kind === "chain"
       ? previewRequestForSiblingFanout(
@@ -5823,11 +6322,15 @@ async function generate(): Promise<void> {
       releasePreparedSubmission();
       return;
     }
+    if (routed.kind === "missing_model") {
+      promptForMissingGenerationModel(routed.model, routed.host, routed.route);
+      releasePreparedSubmission();
+      return;
+    }
     // The chosen machine is frozen here: every later step — submission,
     // recovery, and the connection fence — reads this exact route.
     route = routed.route;
     placement = routed.placement;
-    legacyUnsupported = routed.legacyUnsupported;
   } else {
     const preview = await previewPinnedMobileGeneration({
       route,
@@ -5838,6 +6341,9 @@ async function generate(): Promise<void> {
       requireAuthoritative: requireAuthoritativePlacement,
       isCurrent: () => submissionAttempt.isCurrent(),
       signal: submitSignal,
+      model: request.model,
+      modelOwnerIds: modelHostIds(request.model),
+      inventoryKnown: Object.prototype.hasOwnProperty.call(modelsByHost.value, route.hostId),
     });
     if (preview.kind === "abandoned") {
       releasePreparedSubmission();
@@ -5848,8 +6354,13 @@ async function generate(): Promise<void> {
       releasePreparedSubmission();
       return;
     }
+    if (preview.kind === "missing_model") {
+      const pullHost = hosts.value.find((candidate) => candidate.id === route.hostId);
+      if (pullHost) promptForMissingGenerationModel(preview.model, pullHost, route);
+      releasePreparedSubmission();
+      return;
+    }
     placement = preview.placement;
-    legacyUnsupported = preview.legacyUnsupported;
   }
   if (!submissionAttempt.isCurrent()) {
     releasePreparedSubmission();
@@ -5868,13 +6379,11 @@ async function generate(): Promise<void> {
   // The last word on identity, applied to the machine that was actually
   // frozen — a pinned one, or the fan-out's winner. `form.identitySupported`
   // came from one deduplicated picker row and cannot answer for this machine,
-  // and a legacy placement fallback would ignore the fields outright. Either
-  // way the print would come back as someone else, so nothing is queued.
+  // so the print would come back as someone else; nothing is queued.
   const identityRefusal = mobileIdentityRouteRefusal({
     carriesIdentity: Boolean(request.id_image),
     hostLabel: route.label,
     hostAdvertisesIdentity: hostAdvertisesIdentity(route.hostId, request.model),
-    legacyPlacement: legacyUnsupported,
   });
   if (identityRefusal) {
     setGenerationStatus(identityRefusal, true);
@@ -5914,19 +6423,22 @@ async function generate(): Promise<void> {
     resolveBaseSeed(request.seed),
     requestOptions,
   );
-  const durableLifecycle =
-    Boolean(route.instanceId?.trim()) &&
-    useMobileDurableGenerationLifecycle({
-      queue: {
-        heterogeneous_batch: route.heterogeneousBatch === true,
-        durable_batch_outcomes: route.durableBatchOutcomes === true,
-      },
+  if (chainRouting.kind !== "chain") {
+    // Every print is admitted through the durable queue. A machine that cannot
+    // carry it is refused BY NAME with nothing queued — there is no attached
+    // stream left to fall back to.
+    const refusal = mobileDurableGenerationRefusal({
+      queue: { heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null },
       durableMedia: route.durableMedia,
-      requests: durablePlans,
-      chain: chainRouting.kind === "chain",
-      modelFamily: form.family,
+      hostLabel: route.label,
+      instanceId: route.instanceId,
     });
-  if (durableLifecycle) {
+    if (refusal !== null) {
+      setGenerationStatus(refusal, true);
+      generationAnnouncement.value = refusal;
+      releasePreparedSubmission();
+      return;
+    }
     const admission = submitMobileDurableGeneration({ route, requests: durablePlans });
     const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
     void admission.finally(() => admissionBackgroundTask.release());
@@ -5957,7 +6469,6 @@ async function generate(): Promise<void> {
         target: { ...route.target },
         instanceId: route.instanceId ?? null,
         referenceUploads: route.referenceUploads ?? null,
-        heterogeneousBatch: route.heterogeneousBatch ?? false,
         heterogeneousBatchMaxOutputs: route.heterogeneousBatchMaxOutputs ?? null,
         mirrorRemoteOutput: false,
         retainEncodedResult: false,
@@ -6062,6 +6573,68 @@ async function cancelGeneration(job: Job): Promise<void> {
   } catch (error) {
     setGenerationStatus(describeTransportError(error, job.hostLabel), true);
     generationAnnouncement.value = `Cancellation failed. ${progress.value}`;
+  }
+}
+
+async function retryHeldGeneration(job: Job): Promise<void> {
+  const durable = durableRecoveryForJob(job);
+  if (
+    !durable ||
+    !job.id ||
+    durableHold(job)?.retryable !== true ||
+    durableGenerationRetryAttempts.has(job.id)
+  ) {
+    return;
+  }
+  const host = resolveMobileDurableHost(durable.recovery, connectedHosts.value);
+  if (!host?.online) {
+    setGenerationStatus(`Reconnect ${job.hostLabel} before retrying this print.`, true);
+    return;
+  }
+  if (!durable.recovery.tracker.serverBatchId) {
+    setGenerationStatus(
+      `This print no longer has enough admission identity to retry safely.`,
+      true,
+    );
+    return;
+  }
+  durableGenerationRetryAttempts.add(job.id);
+  durableGenerationRetryConfirmations.add(job.id);
+  let retryStillUncertain = false;
+  try {
+    const outcome = await retryQueueJobRecoveringAmbiguity(mobileHostTarget(host), {
+      instanceId: durable.recovery.tracker.expectedInstanceId,
+      batchId: durable.recovery.tracker.serverBatchId,
+      clientBatchId: durable.recovery.tracker.clientBatchId,
+      jobId: job.id,
+    });
+    if (outcome.kind === "reconciled") {
+      replaceDurableRecovery(
+        reduceMobileDurableGenerationRecovery(durable.recovery, {
+          type: "batch_snapshot",
+          batch: outcome.batch,
+        }),
+      );
+      persistDurableGenerationRecoveries();
+      syncDurableGenerationJobs();
+      return;
+    }
+    if (outcome.kind === "uncertain") {
+      retryStillUncertain = true;
+      void reconcileMobileDurableHost(durable.recovery.tracker.hostId);
+      setGenerationStatus(`Retry confirmation is delayed. ${outcome.error}`, true);
+      return;
+    }
+    await reconcileMobileDurableHost(durable.recovery.tracker.hostId);
+    setGenerationStatus(`Retry queued on ${job.hostLabel}.`);
+  } catch (error) {
+    setGenerationStatus(
+      `Could not retry this print on ${job.hostLabel}. ${describeTransportError(error, job.hostLabel)}`,
+      true,
+    );
+  } finally {
+    durableGenerationRetryConfirmations.delete(job.id);
+    if (!retryStillUncertain) durableGenerationRetryAttempts.delete(job.id);
   }
 }
 
@@ -9389,6 +9962,11 @@ onBeforeUnmount(() => {
   recoveryRetryId += 1;
   expansionPullRequestId += 1;
   clearExpansionRecovery();
+  if (missingGenerationModelLeaseId) {
+    mobileDownloads.releaseFrozenPull(missingGenerationModelLeaseId);
+    missingGenerationModelLeaseId = null;
+  }
+  mobileDownloads.unregisterConsumer(missingModelConsumerId);
   document.removeEventListener("visibilitychange", handleForegroundResume);
   document.removeEventListener("focusin", handleKeyboardFocusIn, true);
   document.removeEventListener("focusout", handleKeyboardFocusOut, true);
@@ -9442,6 +10020,49 @@ onBeforeUnmount(() => {
   generation.resetJobs();
   for (const url of objectUrls) URL.revokeObjectURL(url);
 });
+type MobileActivityRow = (typeof activityRows.value)[number];
+
+/**
+ * Trailing swipe actions for one Create queue row. Cancel is the only
+ * destructive one and the only one a full swipe commits; the tray's reveal is
+ * step one, so the row keeps its two deliberate moves without inline buttons.
+ * Retry appears only for a durable hold the host itself fenced.
+ */
+function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
+  const actions: SwipeRowAction[] = [];
+  if (row.print) {
+    if (durableHold(row.print)?.retryable && !durableHeldIsRetrying(row.print)) {
+      actions.push({ id: "retry", label: "Retry" });
+    }
+    if (!row.print.cancelling) {
+      actions.push({ id: "cancel", label: "Cancel", tone: "danger", commitOnFullSwipe: true });
+    }
+    return actions;
+  }
+  if (!row.sequence) return actions;
+  if (row.sequence.actions.includes("resume")) {
+    actions.push({ id: "resume", label: "Resume" });
+  }
+  if (row.sequence.actions.includes("delete")) {
+    actions.push({ id: "dismiss", label: "Dismiss" });
+  }
+  if (row.sequence.actions.includes("cancel")) {
+    actions.push({ id: "cancel", label: "Cancel", tone: "danger", commitOnFullSwipe: true });
+  }
+  return actions;
+}
+
+function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
+  if (row.print) {
+    if (action === "retry") void retryHeldGeneration(row.print);
+    if (action === "cancel") void cancelGeneration(row.print);
+    return;
+  }
+  if (!row.sequence) return;
+  if (action === "cancel") void cancelMobileSequence();
+  if (action === "resume") void resumeMobileSequence();
+  if (action === "dismiss") void dismissMobileSequence();
+}
 </script>
 
 <template>
@@ -9615,7 +10236,7 @@ onBeforeUnmount(() => {
               <option v-if="!form.model" value="" disabled>
                 {{ loadingModels ? "Loading models…" : "No generation models available" }}
               </option>
-              <option v-if="form.model && !selectedModelAvailable" :value="form.model" disabled>
+              <option v-if="form.model && !selectedModelInstalled" :value="form.model" disabled>
                 {{ modelLabel(form.model) }} · not installed
               </option>
               <option v-for="model in pickerModels" :key="model.name" :value="model.name">
@@ -9725,7 +10346,7 @@ onBeforeUnmount(() => {
 
           <template v-if="isSequence">
             <div
-              v-if="sequenceModels.length === 0"
+              v-if="sequenceModels.length === 0 && !selectedModelCanSequence"
               class="mobile-sequence-empty"
               data-test="mobile-sequence-empty"
             >
@@ -10156,24 +10777,17 @@ onBeforeUnmount(() => {
               <img
                 class="mobile-develop-preview"
                 data-test="mobile-develop-preview"
-                :src="
-                  selectedQueueRender?.preview
-                    ? `data:image/png;base64,${selectedQueueRender.preview.image}`
-                    : (activeGeneration?.previewUrl ?? '')
-                "
+                :src="selectedQueuePreviewSrc ?? activeGeneration?.previewUrl ?? ''"
                 alt=""
                 :style="{
-                  filter: `blur(${Math.max(2, 14 - 12 * (selectedQueueRender?.preview ? selectedQueueRender.preview.step / selectedQueueRender.preview.total : activeGeneration ? jobProgress(activeGeneration) : 0))}px)`,
+                  filter: `blur(${Math.max(2, 14 - 12 * (selectedQueuePreviewFraction ?? (activeGeneration ? jobProgress(activeGeneration) : 0)))}px)`,
                 }"
               />
               <DevelopCanvas
                 :seed="activeGeneration?.visualSeed ?? 0"
                 :progress="
-                  selectedQueueRender?.preview
-                    ? selectedQueueRender.preview.step / selectedQueueRender.preview.total
-                    : activeGeneration
-                      ? jobProgress(activeGeneration)
-                      : 0
+                  selectedQueuePreviewFraction ??
+                  (activeGeneration ? jobProgress(activeGeneration) : 0)
                 "
                 :phase="activeGeneration ? jobPhase(activeGeneration) : 'developing'"
                 class="mobile-develop-grain"
@@ -10182,11 +10796,8 @@ onBeforeUnmount(() => {
                     Math.max(
                       0.18,
                       1 -
-                        (selectedQueueRender?.preview
-                          ? selectedQueueRender.preview.step / selectedQueueRender.preview.total
-                          : activeGeneration
-                            ? jobProgress(activeGeneration)
-                            : 0) *
+                        (selectedQueuePreviewFraction ??
+                          (activeGeneration ? jobProgress(activeGeneration) : 0)) *
                           0.9,
                     ),
                   ),
@@ -10256,104 +10867,86 @@ onBeforeUnmount(() => {
               <span data-test="mobile-queue-count">{{ activityCountLabel(activityCounts) }}</span>
             </div>
             <ol>
-              <li
-                v-for="row in activityRows"
-                :key="row.key"
-                class="mobile-generation-job"
-                :data-test="row.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
-                role="button"
-                tabindex="0"
-                @click="row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()"
-                @keydown.enter.prevent="
-                  row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()
-                "
-              >
-                <template v-if="row.print">
-                  <div class="mobile-generation-job-copy">
-                    <p>{{ row.print.prompt }}</p>
-                    <span>{{ modelLabel(row.print.model) }} · {{ row.print.hostLabel }}</span>
+              <li v-for="row in activityRows" :key="row.key" class="mobile-generation-row">
+                <SwipeActionRow
+                  :actions="mobileQueueRowActions(row)"
+                  :label="row.print ? row.print.prompt : modelLabel(row.sequence?.model ?? '')"
+                  :disabled="row.print?.cancelling === true"
+                  :data-test="row.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
+                  @act="onMobileQueueRowAction(row, $event)"
+                >
+                  <div
+                    class="mobile-generation-job"
+                    role="button"
+                    tabindex="0"
+                    @click="
+                      row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()
+                    "
+                    @keydown.enter.prevent="
+                      row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()
+                    "
+                  >
+                    <template v-if="row.print">
+                      <div class="mobile-generation-job-copy">
+                        <p>{{ row.print.prompt }}</p>
+                        <span>{{ modelLabel(row.print.model) }} · {{ row.print.hostLabel }}</span>
+                        <p
+                          v-if="durableHold(row.print)?.error"
+                          class="mobile-generation-held-error"
+                          data-test="mobile-generation-held-error"
+                        >
+                          {{ durableHold(row.print)?.error }}
+                        </p>
+                      </div>
+                      <div class="mobile-generation-job-action">
+                        <span data-test="mobile-generation-status">{{
+                          activityRowStatus(row)
+                        }}</span>
+                        <span v-if="row.print.cancelling" data-test="mobile-generation-cancelling">
+                          Cancelling…
+                        </span>
+                      </div>
+                    </template>
+                    <template v-else-if="row.sequence">
+                      <div class="mobile-generation-job-copy">
+                        <p>
+                          {{ modelLabel(row.sequence.model) || "Sequence" }} ·
+                          {{ row.sequence.stageCount }} clips
+                        </p>
+                        <span>
+                          {{ row.sequence.phase ?? row.sequence.state }} · clip
+                          {{ Math.min(row.sequence.currentStage + 1, row.sequence.stageCount) }}/{{
+                            row.sequence.stageCount
+                          }}
+                          <template v-if="sequenceRowProgress !== null">
+                            · {{ sequenceRowProgress }}%
+                          </template>
+                        </span>
+                        <button
+                          v-if="row.sequence.error"
+                          type="button"
+                          class="mobile-sequence-row-error"
+                          :class="{
+                            'mobile-sequence-row-error--expanded': expandedQueueFailures.has(
+                              row.key,
+                            ),
+                          }"
+                          data-test="mobile-sequence-error-disclosure"
+                          :aria-expanded="expandedQueueFailures.has(row.key)"
+                          @click.stop="toggleQueueFailure(row.key)"
+                        >
+                          <span>{{ row.sequence.error }}</span>
+                          <span aria-hidden="true">
+                            {{ expandedQueueFailures.has(row.key) ? "Less" : "Details" }}
+                          </span>
+                        </button>
+                      </div>
+                      <div class="mobile-generation-job-action">
+                        <span data-test="mobile-sequence-status">{{ row.sequence.hostLabel }}</span>
+                      </div>
+                    </template>
                   </div>
-                  <div class="mobile-generation-job-action">
-                    <span data-test="mobile-generation-status">{{ activityRowStatus(row) }}</span>
-                    <button
-                      class="mobile-generation-cancel"
-                      type="button"
-                      :aria-label="
-                        row.print.cancelling
-                          ? `Cancelling ${row.print.prompt}`
-                          : `Cancel ${row.print.prompt}`
-                      "
-                      data-test="mobile-generation-cancel"
-                      :disabled="row.print.cancelling"
-                      @click.stop="cancelGeneration(row.print)"
-                    >
-                      {{ row.print.cancelling ? "Cancelling…" : "Cancel" }}
-                    </button>
-                  </div>
-                </template>
-                <template v-else-if="row.sequence">
-                  <div class="mobile-generation-job-copy">
-                    <p>
-                      {{ modelLabel(row.sequence.model) || "Sequence" }} ·
-                      {{ row.sequence.stageCount }} clips
-                    </p>
-                    <span>
-                      {{ row.sequence.phase ?? row.sequence.state }} · clip
-                      {{ Math.min(row.sequence.currentStage + 1, row.sequence.stageCount) }}/{{
-                        row.sequence.stageCount
-                      }}
-                      <template v-if="sequenceRowProgress !== null">
-                        · {{ sequenceRowProgress }}%
-                      </template>
-                    </span>
-                    <button
-                      v-if="row.sequence.error"
-                      type="button"
-                      class="mobile-sequence-row-error"
-                      :class="{
-                        'mobile-sequence-row-error--expanded': expandedQueueFailures.has(row.key),
-                      }"
-                      data-test="mobile-sequence-error-disclosure"
-                      :aria-expanded="expandedQueueFailures.has(row.key)"
-                      @click.stop="toggleQueueFailure(row.key)"
-                    >
-                      <span>{{ row.sequence.error }}</span>
-                      <span aria-hidden="true">
-                        {{ expandedQueueFailures.has(row.key) ? "Less" : "Details" }}
-                      </span>
-                    </button>
-                  </div>
-                  <div class="mobile-generation-job-action">
-                    <span data-test="mobile-sequence-status">{{ row.sequence.hostLabel }}</span>
-                    <button
-                      v-if="row.sequence.actions.includes('cancel')"
-                      class="mobile-generation-cancel"
-                      type="button"
-                      data-test="mobile-sequence-cancel"
-                      @click.stop="cancelMobileSequence"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      v-else-if="row.sequence.actions.includes('resume')"
-                      class="mobile-generation-cancel mobile-sequence-resume"
-                      type="button"
-                      data-test="mobile-sequence-resume"
-                      @click.stop="resumeMobileSequence"
-                    >
-                      Resume
-                    </button>
-                    <button
-                      v-if="row.sequence.actions.includes('delete')"
-                      class="mobile-generation-cancel mobile-sequence-dismiss"
-                      type="button"
-                      data-test="mobile-sequence-dismiss"
-                      @click.stop="dismissMobileSequence"
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </template>
+                </SwipeActionRow>
               </li>
             </ol>
             <LiveActivityList
@@ -11389,6 +11982,42 @@ onBeforeUnmount(() => {
       @close="generatedViewerOpen = false"
       @reuse="generatedViewerOpen = false"
     />
+
+    <MobileLibrarySheet
+      :open="missingGenerationModel !== null"
+      title="Model not on machine"
+      :done-label="
+        ['connecting', 'starting', 'queued', 'pulling'].includes(missingGenerationPullStatus.kind)
+          ? 'Downloading…'
+          : missingGenerationPullStatus.kind === 'missing'
+            ? 'Cancel'
+            : 'Done'
+      "
+      :focus-first-control="false"
+      test-id="mobile-missing-model-sheet"
+      @close="closeMissingGenerationModel"
+    >
+      <template v-if="missingGenerationModel">
+        <p class="section-note">
+          <span class="data-mono">{{ missingGenerationModel.model }}</span> isn't installed on
+          {{ missingGenerationModel.route.label }}. Download it there before developing?
+        </p>
+        <MobileExpansionPullStatus
+          :model="missingGenerationModel.model"
+          :host-label="missingGenerationModel.route.label"
+          :error="missingGenerationModelError"
+          :status="missingGenerationPullStatus"
+          :eta-seconds="missingGenerationPullEtaSeconds"
+          :models="models"
+          pull-label="Download model"
+          ready-label="Done"
+          retry-label="Retry download"
+          data-test="mobile-missing-model-progress"
+          @pull="pullMissingGenerationModel"
+          @retry-expansion="closeMissingGenerationModel"
+        />
+      </template>
+    </MobileLibrarySheet>
 
     <LicenseAcceptanceDialog :open-external="openExternal" />
 

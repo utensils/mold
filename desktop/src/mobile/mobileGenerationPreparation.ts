@@ -5,7 +5,10 @@ import {
 } from "@studio/lib/generationProfile";
 import { resolveSourceConditioningTarget } from "@studio/lib/sourceResolution";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
-import { emptyMinimaxH3AuthoringState } from "@studio/lib/minimaxH3Authoring";
+import {
+  applyMinimaxH3ReferenceCrops,
+  emptyMinimaxH3AuthoringState,
+} from "@studio/lib/minimaxH3Authoring";
 import type { ApiTarget } from "../lib/api/client";
 import type { GenerateRequest, ModelEntry } from "../lib/api/types";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
@@ -84,6 +87,11 @@ export async function prepareMobileGenerationRequest(
         { width: draft.width, height: draft.height },
         preprocessing,
       )) ?? emptyMinimaxH3AuthoringState();
+  } else if (capabilities.sourceImageMode === "ordered-references" && draft.h3Authoring) {
+    // Ref2VA: a pending image crop is applied at the original resolution
+    // before the request is built, so upload conversion, placement preview,
+    // and the frozen route all see the cropped reference.
+    draft.h3Authoring = await applyMinimaxH3ReferenceCrops(draft.h3Authoring, services.ops);
   } else if (capabilities.sourceImageMode === "qwen-edit" && draft.imageAttachments[0]) {
     const target = resolveSourceConditioningTarget(
       { width: draft.width, height: draft.height },

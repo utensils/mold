@@ -5,11 +5,18 @@ import {
   cancelQueueJob,
   listQueue,
   mergeQueueEntries,
+  moveQueueJobToBack,
   queuePageRequestForCapacity,
   setQueueDevicePin,
   type QueuePlan,
 } from "@studio/api/queuePlan";
+import { watchSelectedQueuePreview, type QueueJobProgress } from "@studio/api/generationSelection";
 import DevicePanel from "@studio/components/DevicePanel.vue";
+import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
+import SwipeActionRow from "@studio/components/SwipeActionRow.vue";
+import MobileLibrarySheet from "./MobileLibrarySheet.vue";
+import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
+import type { SwipeRowAction } from "@studio/lib/swipeAction";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
@@ -92,7 +99,6 @@ const renaming = ref(false);
 const renameValue = ref("");
 const forgetPending = ref(false);
 const unloading = ref<Set<string>>(new Set());
-const cancelConfirmId = ref<string | null>(null);
 const cancellingQueueIds = ref(new Set<string>());
 // ── Library card (per-host trash retention, #4 iPhone V3) ───────────────────
 const retentionEntry = ref<HostConfigEntry | null>(null);
@@ -568,7 +574,6 @@ async function loadHost(): Promise<void> {
   renameValue.value = props.host.name;
   renaming.value = false;
   forgetPending.value = false;
-  cancelConfirmId.value = null;
   cancellingQueueIds.value = new Set();
   retentionEntry.value = null;
   retentionValue.value = null;
@@ -640,18 +645,22 @@ async function unpinWork(workId: string): Promise<void> {
   }
 }
 
-async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
-  const cancellable =
+function queueEntryCancellable(entry: QueueEntry): boolean {
+  return (
     entry.state === "queued" ||
     (entry.state === "running" &&
-      deviceCapabilities.value?.queue?.cooperative_cancellation === true);
-  if (!cancellable || cancellingQueueIds.value.has(entry.id)) return;
-  if (cancelConfirmId.value !== entry.id) {
-    cancelConfirmId.value = entry.id;
-    return;
-  }
+      deviceCapabilities.value?.queue?.cooperative_cancellation === true)
+  );
+}
 
-  cancelConfirmId.value = null;
+/**
+ * Cancel with no confirmation of its own. The caller owns step two — the
+ * swipe row's reveal, or the detail sheet's armed button — so a destructive
+ * action is still never one tap.
+ */
+async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
+  if (!queueEntryCancellable(entry) || cancellingQueueIds.value.has(entry.id)) return;
+
   const epoch = loadEpoch;
   const requestTarget = target.value;
   error.value = "";
@@ -682,9 +691,114 @@ async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
   }
 }
 
-function clearCancelConfirmation(id: string): void {
-  if (cancelConfirmId.value === id) cancelConfirmId.value = null;
+// ── Queue row swipe actions and detail sheet ─────────────────────────────
+const inspectedQueueId = ref<string | null>(null);
+const queueRowError = ref<string | null>(null);
+const reorderingQueueIds = ref(new Set<string>());
+const queuePreview = ref<QueueJobProgress | null>(null);
+const queueDetailNowMs = ref(Date.now());
+let stopQueuePreview: (() => void) | null = null;
+let queueDetailTimer: ReturnType<typeof setInterval> | null = null;
+
+const canReorderQueue = computed(() => deviceCapabilities.value?.queue?.can_reorder === true);
+
+const inspectedQueueEntry = computed(
+  () => queue.value.find((entry) => entry.id === inspectedQueueId.value) ?? null,
+);
+
+const inspectedQueueModel = computed(() => {
+  const entry = inspectedQueueEntry.value;
+  if (!entry) return null;
+  return queueEntryDetailModel({
+    entry,
+    hostLabel: props.host.name,
+    modelLabel: modelLabel(entry.model),
+    nowMs: queueDetailNowMs.value,
+    plan: queuePlan.value,
+    metadata: (entry.metadata as QueueDetailMetadata | null | undefined) ?? null,
+    mine: false,
+    canCancelRunning: deviceCapabilities.value?.queue?.cooperative_cancellation === true,
+  });
+});
+
+/** Trailing actions for one row. Cancel is the only destructive one and the
+ *  only one a full swipe commits; a reorder-capable host also offers the
+ *  non-destructive Move to back. */
+function queueRowActions(entry: QueueEntry): SwipeRowAction[] {
+  const actions: SwipeRowAction[] = [];
+  if (canReorderQueue.value && entry.state === "queued") {
+    actions.push({ id: "back", label: "To back" });
+  }
+  if (queueEntryCancellable(entry)) {
+    actions.push({
+      id: "cancel",
+      label: "Cancel",
+      tone: "danger",
+      commitOnFullSwipe: true,
+    });
+  }
+  return actions;
 }
+
+function queueRowBusy(entry: QueueEntry): boolean {
+  return cancellingQueueIds.value.has(entry.id) || reorderingQueueIds.value.has(entry.id);
+}
+
+async function onQueueRowAction(entry: QueueEntry, action: string) {
+  queueRowError.value = null;
+  if (action === "cancel") {
+    await cancelQueuedJob(entry);
+    if (inspectedQueueId.value === entry.id) inspectedQueueId.value = null;
+    return;
+  }
+  if (action !== "back") return;
+  const epoch = loadEpoch;
+  const requestTarget = target.value;
+  reorderingQueueIds.value = new Set(reorderingQueueIds.value).add(entry.id);
+  try {
+    await moveQueueJobToBack(requestTarget, entry.id);
+    if (
+      epoch === loadEpoch &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    ) {
+      await requestQueueRefresh(epoch);
+    }
+  } catch (caught) {
+    if (epoch === loadEpoch) {
+      queueRowError.value = describeTransportError(caught, props.host.name);
+    }
+  } finally {
+    if (epoch === loadEpoch) {
+      const next = new Set(reorderingQueueIds.value);
+      next.delete(entry.id);
+      reorderingQueueIds.value = next;
+    }
+  }
+}
+
+// Elapsed and estimate lines are wall-clock; the queue poll is far too coarse.
+watch(inspectedQueueId, (id) => {
+  queueRowError.value = null;
+  queuePreview.value = null;
+  stopQueuePreview?.();
+  stopQueuePreview = null;
+  if (queueDetailTimer !== null) clearInterval(queueDetailTimer);
+  queueDetailTimer = null;
+  if (id === null) return;
+  queueDetailNowMs.value = Date.now();
+  queueDetailTimer = setInterval(() => (queueDetailNowMs.value = Date.now()), 1_000);
+
+  const row = queue.value.find((candidate) => candidate.id === id);
+  if (row?.state !== "running") return;
+  stopQueuePreview = watchSelectedQueuePreview(
+    target.value,
+    id,
+    (preview) => (queuePreview.value = preview),
+    750,
+    () => (queuePreview.value = null),
+  );
+});
 
 function saveRename(): void {
   const name = renameValue.value.trim();
@@ -727,8 +841,9 @@ async function unload(name: string): Promise<void> {
 function queueCode(entry: QueueEntry): string {
   if (entry.state === "running")
     return entry.gpu == null ? "RUNNING" : `RUNNING · GPU ${entry.gpu}`;
-  // Same waiting vocabulary as the Create queue, resolved once in studio.
-  return queueWaitCode(resolveQueueWait({ position: entry.position }));
+  // Same waiting vocabulary as the Create queue, resolved once in studio —
+  // a held row reads HELD, never a place in line.
+  return queueWaitCode(resolveQueueWait({ state: entry.state, position: entry.position }));
 }
 
 function downloadPercent(done: number, total: number): number {
@@ -745,6 +860,8 @@ watch(
 onBeforeUnmount(() => {
   loadEpoch += 1;
   stopLiveServices();
+  stopQueuePreview?.();
+  if (queueDetailTimer !== null) clearInterval(queueDetailTimer);
 });
 </script>
 
@@ -964,41 +1081,35 @@ onBeforeUnmount(() => {
           </p>
         </div>
         <ul v-if="queue.length" class="mobile-data-list" data-test="host-detail-queue">
-          <li v-for="entry in queue" :key="entry.id">
-            <div>
-              <strong>{{ modelLabel(entry.model) }}</strong>
-              <span>{{ queueCode(entry) }}</span>
-            </div>
-            <button
-              v-if="
-                entry.state === 'queued' ||
-                (entry.state === 'running' &&
-                  deviceCapabilities?.queue?.cooperative_cancellation === true)
-              "
-              type="button"
-              class="mobile-inline-danger mobile-host-queue-cancel"
-              :data-test="`host-detail-queue-cancel-${entry.id}`"
-              :disabled="cancellingQueueIds.has(entry.id)"
-              :aria-label="
-                cancellingQueueIds.has(entry.id)
-                  ? `Cancelling ${entry.state} ${modelLabel(entry.model)} job`
-                  : cancelConfirmId === entry.id
-                    ? `Confirm cancellation of ${entry.state} ${modelLabel(entry.model)} job`
-                    : `Cancel ${entry.state} ${modelLabel(entry.model)} job`
-              "
-              @click="cancelQueuedJob(entry)"
-              @blur="clearCancelConfirmation(entry.id)"
+          <li v-for="entry in queue" :key="entry.id" class="mobile-queue-item">
+            <SwipeActionRow
+              :actions="queueRowActions(entry)"
+              :label="`${modelLabel(entry.model)} job`"
+              :disabled="queueRowBusy(entry)"
+              :data-test="`host-detail-queue-row-${entry.id}`"
+              @act="onQueueRowAction(entry, $event)"
             >
-              {{
-                cancellingQueueIds.has(entry.id)
-                  ? "Cancelling…"
-                  : cancelConfirmId === entry.id
-                    ? "Cancel?"
-                    : "Cancel"
-              }}
-            </button>
+              <button
+                type="button"
+                class="mobile-queue-open"
+                :data-test="`host-detail-queue-open-${entry.id}`"
+                :aria-label="`Job details for ${modelLabel(entry.model)}`"
+                @click="inspectedQueueId = entry.id"
+              >
+                <strong>{{ modelLabel(entry.model) }}</strong>
+                <span>{{ queueRowBusy(entry) ? "WORKING…" : queueCode(entry) }}</span>
+              </button>
+            </SwipeActionRow>
           </li>
         </ul>
+        <p
+          v-if="queueRowError"
+          class="status-line error-text"
+          role="alert"
+          data-test="host-detail-queue-row-error"
+        >
+          {{ queueRowError }}
+        </p>
         <p v-else class="mobile-empty-note">
           {{ durableBacklog === 0 ? "Queue is empty." : "No queue rows are loaded." }}
         </p>
@@ -1172,5 +1283,25 @@ onBeforeUnmount(() => {
       </button>
       <p>Forgetting removes this address and its API key from this phone.</p>
     </section>
+
+    <MobileLibrarySheet
+      :open="inspectedQueueModel !== null"
+      title="Job details"
+      :focus-first-control="false"
+      test-id="host-detail-queue-sheet"
+      @close="inspectedQueueId = null"
+    >
+      <QueueEntryDetail
+        v-if="inspectedQueueModel"
+        :model="inspectedQueueModel"
+        :preview="queuePreview"
+        :cancelling="inspectedQueueEntry ? cancellingQueueIds.has(inspectedQueueEntry.id) : false"
+        :error="queueRowError"
+        confirm="inline"
+        compact
+        @close="inspectedQueueId = null"
+        @cancel="inspectedQueueEntry && onQueueRowAction(inspectedQueueEntry, 'cancel')"
+      />
+    </MobileLibrarySheet>
   </div>
 </template>

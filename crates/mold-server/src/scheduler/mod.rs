@@ -616,12 +616,122 @@ struct PendingGeneration {
     /// Place in line this job's client was last told about, so a drained queue
     /// re-announces exactly once per actual move. `None` until first observed.
     announced_position: Option<usize>,
+    /// The memory park this job is held by, retained ACROSS its own
+    /// re-preparation.
+    ///
+    /// `prepared_inputs` is dropped every time the job is re-prepared, so a
+    /// park kept only there is forgotten once a second on an idle machine —
+    /// and the idle grace that bounds the wait can never accrue. Cleared by
+    /// the first preparation that admits.
+    capacity_park: Option<crate::execution_plan::CapacityPark>,
+    /// The planner parked this job on host RAM (`insufficient_host_ram` or
+    /// `aggregate_host_ram_reserved`), as last published.
+    memory_block: Option<MemoryBlock>,
+    /// When this job's dependency preparation started, so the queue can say
+    /// how long it has been running. `None` unless one is in flight.
+    preparation_started_ms: Option<u64>,
+    /// What that preparation is working through, published by the preparer.
+    preparation_progress: crate::variant_dependencies::PreparationProgressSink,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PreparationRefreshObservation {
     signature: Vec<(String, i8)>,
     first_observed_ms: u64,
+}
+
+/// A job the planner parked on memory — host RAM, or the VRAM of every
+/// device that could run it — recorded from the published plan, the one
+/// place the block is observed, so the idle reclaim and the idle bound act on
+/// a typed fact instead of re-deriving one, and the WARN that names the
+/// numbers is logged once per block rather than once per replan.
+///
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MemoryBlockKind {
+    Host,
+    Device {
+        device_id: String,
+        ordinal: usize,
+        backend: mold_core::GpuBackend,
+    },
+}
+
+impl MemoryBlockKind {
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Host => "host memory",
+            Self::Device { .. } => "device memory",
+        }
+    }
+}
+
+/// The device kind exists because an idle device is planned against
+/// `free + the cache's recorded footprint`, and what the driver attributes to
+/// mold can exceed that record by the gigabytes a plan is short by (hal9000,
+/// 2026-08-27: a PuLID `flux-dev:q8` print at 22.2 GB sat unplanned for five
+/// minutes beside an idle `flux2-klein:q8`, then dispatched the moment
+/// another print had evicted it). Nothing running means nothing will ever
+/// give that memory back, so mold releases it itself, exactly as for host RAM.
+#[derive(Clone, Debug)]
+struct MemoryBlock {
+    kind: MemoryBlockKind,
+    /// The cheapest eligible candidate's demand, what the planner compared.
+    required_bytes: u64,
+    /// The headroom that demand was compared against.
+    headroom_bytes: u64,
+    reclaim: ReclaimAttempt,
+}
+
+/// Whether mold has yet asked its own idle model cache for the missing bytes.
+///
+/// #1289's rule, now for every family: a host shortfall on an idle scheduler
+/// is answered by releasing least-recently-used idle engines before it is
+/// allowed to become a refusal. `Done` carries what that release gave back so
+/// the refusal a user finally reads names it (`host_shortfall_message`).
+#[derive(Clone, Debug)]
+enum ReclaimAttempt {
+    NotStarted,
+    InFlight,
+    Done(crate::host_reclaim::HostReclaimOutcome),
+}
+
+/// What the run loop hands to `host_reclaim::reclaim_host_headroom`, off the
+/// coordinator's own turn: an eviction is awaited owner work. The kind picks
+/// the sampler the reclaim re-asks between evictions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReclaimRequest {
+    job_id: String,
+    model: String,
+    required_bytes: u64,
+    kind: MemoryBlockKind,
+}
+
+/// Free device memory as the driver reports it right now, for the reclaim's
+/// re-sample between evictions — the same reading the worker's own post-drop
+/// gate trusts, not the registry's last one-second sample.
+fn device_headroom_from_driver(ordinal: usize, backend: mold_core::GpuBackend) -> Option<u64> {
+    match backend {
+        mold_core::GpuBackend::Cuda => {
+            match mold_inference::device::usable_free_vram_bytes_result(ordinal) {
+                Ok(free) => Some(free),
+                Err(error) => {
+                    tracing::warn!(ordinal, %error, "device memory sample failed during reclaim");
+                    None
+                }
+            }
+        }
+        mold_core::GpuBackend::Metal => mold_inference::device::available_system_memory_bytes(),
+    }
+}
+
+/// The ledger's headroom rule on a fresh OS sample, for the reclaim's
+/// re-sample between evictions: `MemAvailable` minus the safety floor, with
+/// no reservations because reclaim runs only while nothing holds one.
+fn host_headroom_from_system() -> u64 {
+    let reading = SystemHostMemorySampler.sample();
+    reading
+        .available_bytes
+        .saturating_sub(host_safety_floor_bytes(reading.total_bytes))
 }
 
 fn capacity_refresh_direction(
@@ -663,6 +773,21 @@ fn observe_preparation_refresh(
     }
 }
 
+/// One signature value for every capacity park, because the park itself is
+/// the change being observed — unlike a capacity refresh, whose signature is
+/// the per-device direction the sample moved.
+const CAPACITY_PARK_REFRESH_SIGNATURE: &str = "capacity-park";
+
+/// How long a preparation refresh must observe the same signal before it
+/// re-runs. One ladder for both refresh kinds — a capacity park and a moved
+/// capacity sample — because they are the same question asked of different
+/// evidence, and two copies would drift.
+fn preparation_refresh_delay_ms(attempts: u8) -> u64 {
+    PREPARATION_RETRY_BASE_MS
+        .saturating_mul(1_u64 << u32::from(attempts.min(4)))
+        .clamp(PREPARATION_REFRESH_STABILITY_MS, PREPARATION_RETRY_MAX_MS)
+}
+
 fn dispatch_retry_delay_ms(round: u8) -> u64 {
     DISPATCH_RETRY_BASE_MS
         .saturating_mul(1_u64 << u32::from(round.saturating_sub(1).min(6)))
@@ -671,15 +796,42 @@ fn dispatch_retry_delay_ms(round: u8) -> u64 {
 
 #[derive(Debug)]
 enum GenerationPlanFailure {
-    Transient(String),
+    Transient(TransientPlanFailure),
     StalePreparation(String),
     Terminal(crate::execution_plan::ExecutionPlanError),
+}
+
+/// A plan the resolver could not produce right now but may next turn. When
+/// the cause is device memory, the numbers ride along so an idle scheduler
+/// can record the block and release its own cache: the resolver refuses a
+/// device BEFORE the planner sees it, so `BlockedReason::InsufficientVram`
+/// never appears for this case and the job would otherwise wait unnamed and
+/// unbounded (hal9000, 2026-08-27).
+#[derive(Debug, Clone)]
+struct TransientPlanFailure {
+    message: String,
+    vram_shortfall: Option<VramShortfall>,
+}
+
+#[derive(Debug, Clone)]
+struct VramShortfall {
+    required_peak_bytes: u64,
+    eligible_device_ids: Vec<String>,
+}
+
+impl From<String> for TransientPlanFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            vram_shortfall: None,
+        }
+    }
 }
 
 impl std::fmt::Display for GenerationPlanFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Transient(error) => formatter.write_str(error),
+            Self::Transient(failure) => formatter.write_str(&failure.message),
             Self::StalePreparation(error) => formatter.write_str(error),
             Self::Terminal(error) => error.fmt(formatter),
         }
@@ -808,7 +960,7 @@ trait DependencyPreparer: Send + Sync {
         &self,
         state: AppState,
         work_id: String,
-        request: mold_core::GenerateRequest,
+        request: crate::queue_media_runtime::ZeroizingGenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
         context: crate::variant_dependencies::DependencyPreparationContext,
     ) -> PreparationFuture;
@@ -821,7 +973,7 @@ impl DependencyPreparer for PostUpscalePreparer {
         &self,
         state: AppState,
         work_id: String,
-        request: mold_core::GenerateRequest,
+        request: crate::queue_media_runtime::ZeroizingGenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
         context: crate::variant_dependencies::DependencyPreparationContext,
     ) -> PreparationFuture {
@@ -1012,6 +1164,11 @@ impl HostMemorySampler for SystemHostMemorySampler {
     }
 }
 
+/// The host RAM the ledger never spends: 15% of the machine, at least 8 GiB.
+fn host_safety_floor_bytes(total_bytes: u64) -> u64 {
+    (total_bytes.saturating_mul(15) / 100).max(8 << 30)
+}
+
 #[derive(Clone)]
 struct HostMemoryLedger {
     sampler: Arc<dyn HostMemorySampler>,
@@ -1114,7 +1271,7 @@ impl HostMemoryLedger {
 
     fn safety_floor_bytes(&self) -> u64 {
         self.sample
-            .map(|sample| (sample.total_bytes.saturating_mul(15) / 100).max(8 << 30))
+            .map(|sample| host_safety_floor_bytes(sample.total_bytes))
             .unwrap_or(u64::MAX)
     }
 
@@ -1332,6 +1489,9 @@ fn queue_plan_semantically_equal(
         // equality would publish a plan event every second forever.
         plan.host_memory = None;
         for work in &mut plan.work_items {
+            // Another live clock reading. The progress BYTES stay, because a
+            // preparation that has moved is a real change worth publishing.
+            work.preparation_elapsed_ms = None;
             let duration = work
                 .estimated_start_unix_ms
                 .zip(work.estimated_finish_unix_ms)
@@ -1614,8 +1774,11 @@ impl Coordinator {
         if job.id.is_empty() {
             job.id = format!("runtime-generation-{}", self.synthetic_id);
         }
-        let queue_rank = self.synthetic_id;
-        self.synthetic_id = self.synthetic_id.saturating_add(1);
+        let queue_rank = job.durable_queue_rank.unwrap_or(self.synthetic_id);
+        self.synthetic_id = self
+            .synthetic_id
+            .saturating_add(1)
+            .max(queue_rank.saturating_add(1));
         let id = job.id.clone();
         let shape_bucket = crate::gpu_pool::oom_shape_bucket_with_projection(
             &job.request,
@@ -1643,10 +1806,6 @@ impl Coordinator {
             );
             return;
         }
-        let prepared_inputs = job
-            .batch_child
-            .as_ref()
-            .map(|child| child.prepared_inputs.clone());
         self.pending.insert(
             id,
             PendingGeneration {
@@ -1656,13 +1815,17 @@ impl Coordinator {
                 bypass_count: 0,
                 warm_wait_started_ms: None,
                 preparation: PreparationState::Needed,
-                prepared_inputs,
+                prepared_inputs: None,
                 retry_not_before_ms: None,
                 preparation_retry_attempts: 0,
                 preparation_refresh_observation: None,
                 unschedulable_since_ms: None,
                 unschedulable_reason: None,
                 announced_position: None,
+                capacity_park: None,
+                memory_block: None,
+                preparation_started_ms: None,
+                preparation_progress: Default::default(),
             },
         );
         self.mutate(immediate);
@@ -1800,6 +1963,40 @@ impl Coordinator {
         }
     }
 
+    /// Every job whose dependency preparation is in flight right now.
+    fn preparing_views(&self) -> BTreeMap<String, PreparingView> {
+        let now_ms = monotonic_ms();
+        self.pending
+            .iter()
+            .filter(|(_, pending)| pending.preparation == PreparationState::Preparing)
+            .map(|(id, pending)| {
+                (
+                    id.clone(),
+                    PreparingView {
+                        elapsed_ms: pending
+                            .preparation_started_ms
+                            .map(|started| now_ms.saturating_sub(started))
+                            .unwrap_or_default(),
+                        // The sink holds a phase clock the wire does not; the
+                        // wire gets the phase's own age, which is what a queue
+                        // row can act on.
+                        progress: pending
+                            .preparation_progress
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .as_ref()
+                            .map(|state| mold_core::QueuePreparationProgress {
+                                component: state.component.clone(),
+                                bytes_done: state.bytes_done,
+                                bytes_total: state.bytes_total,
+                                phase_elapsed_ms: Some(now_ms.saturating_sub(state.started_ms)),
+                            }),
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn start_needed_preparations(&mut self) {
         let ids = self
             .pending
@@ -1812,8 +2009,21 @@ impl Coordinator {
                 continue;
             };
             pending.preparation = PreparationState::Preparing;
+            pending.preparation_started_ms = Some(monotonic_ms());
+            *pending
+                .preparation_progress
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            let preparation_progress = pending.preparation_progress.clone();
+            tracing::info!(
+                job_id = %id,
+                model = %pending.job.request.model,
+                "preparing generation dependencies"
+            );
             let state = self.state.clone();
             let request = pending.job.request.clone();
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            let deferred_media = pending.job.deferred_media.clone();
             let queue_media_projection = pending
                 .job
                 .deferred_media
@@ -1825,13 +2035,9 @@ impl Coordinator {
                 h3_private_ingress_grant: pending.job.h3_private_ingress_grant.clone(),
                 // Ref2VA admission derives its prepared shapes from the staged
                 // media, so it needs the files before the frozen plan exists.
-                // The view is payload-free and the job keeps owning the set,
-                // its quota, and its staging directory across preparation.
-                h3_resolved_references: pending
-                    .job
-                    .resolved_references
-                    .as_ref()
-                    .map(crate::reference_uploads::ResolvedReferenceSet::admission_view),
+                // The view is minted inside the preparation task from that
+                // task's own hydration lease; nothing on the job carries it.
+                h3_resolved_references: None,
                 // The parent's frozen identity is grafted on immediately
                 // below. Default the remaining context so additive optional
                 // preparation inputs cannot leave this H3-only literal
@@ -1858,12 +2064,14 @@ impl Coordinator {
                 frozen_identity,
                 frozen_identity_warning,
                 queue_media_projection,
+                preparation_progress: Some(preparation_progress),
             };
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 frozen_identity,
                 frozen_identity_warning,
                 queue_media_projection,
+                preparation_progress: Some(preparation_progress),
                 ..context
             };
             let preparer = self.preparer.clone();
@@ -1874,6 +2082,47 @@ impl Coordinator {
                 // waits here rather than in `Needed`, where the scheduler
                 // would keep re-spawning it.
                 let _slot = slots.acquire_owned().await;
+                let request =
+                    crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request);
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                let mut request = request;
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                let mut context = context;
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                let h3_hydration = if context.h3_private_ingress_grant.is_some() {
+                    match deferred_media.as_ref() {
+                        Some(media) => {
+                            let hydrated =
+                                media.hydrate_into(&id, &mut request).and_then(|lease| {
+                                    // Ref2VA admission binds the staged
+                                    // references from THIS hydration; the
+                                    // view shares the lease's hold so the
+                                    // per-device tasks outlive the drop below.
+                                    let view = lease
+                                        .references(&request)?
+                                        .map(|references| references.admission_view());
+                                    Ok((lease, view))
+                                });
+                            match hydrated {
+                                Ok((lease, view)) => {
+                                    context.h3_resolved_references = view;
+                                    Some(lease)
+                                }
+                                Err(error) => {
+                                    let event = PreparationEvent::Failed {
+                                        work_id: id.clone(),
+                                        error: error.to_string(),
+                                    };
+                                    let _ = tx.send(event);
+                                    return;
+                                }
+                            }
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 let event = match preparer
                     .prepare(state, id.clone(), request, progress, context)
                     .await
@@ -1884,6 +2133,8 @@ impl Coordinator {
                     },
                     Err(error) => PreparationEvent::Failed { work_id: id, error },
                 };
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                drop(h3_hydration);
                 let _ = tx.send(event);
             });
         }
@@ -1898,21 +2149,36 @@ impl Coordinator {
                 if pending.preparation != PreparationState::Preparing {
                     return;
                 }
+                tracing::info!(
+                    job_id = %work_id,
+                    model = %pending.job.request.model,
+                    elapsed_ms = pending
+                        .preparation_started_ms
+                        .map(|started| monotonic_ms().saturating_sub(started))
+                        .unwrap_or_default(),
+                    "generation dependencies prepared"
+                );
+                pending.preparation_started_ms = None;
                 compose_prepared_generation(pending, *prepared);
                 pending.preparation = PreparationState::Ready;
                 pending.preparation_refresh_observation = None;
-                if pending
+                pending.capacity_park = pending
                     .prepared_inputs
                     .as_ref()
-                    .is_none_or(|inputs| inputs.retryable_device_failures.is_empty())
-                {
+                    .and_then(|inputs| inputs.capacity_park.clone());
+                // A park is not an admission. Resetting the attempt ladder on
+                // one would leave a machine that can never hold the job
+                // re-preparing it at the memory ticker's own 1 Hz forever.
+                if pending.prepared_inputs.as_ref().is_none_or(|inputs| {
+                    inputs.retryable_device_failures.is_empty() && inputs.capacity_park.is_none()
+                }) {
                     pending.preparation_retry_attempts = 0;
                 }
                 self.mutate(immediate);
             }
             PreparationEvent::Failed { work_id, error } => {
                 if let Some(pending) = self.pending.remove(&work_id) {
-                    reject_generation(&self.state, pending.job, error);
+                    hold_preparation_failure(&self.state, pending.job, error);
                     self.mutate(immediate);
                 }
             }
@@ -2231,7 +2497,7 @@ impl Coordinator {
                             generation_and_prepared_from_gpu_job(*job);
                         if matches!(&reason, LeaseRejection::FatalCuda) {
                             self.plan_invalidations.remove(&generation_job.id);
-                            reject_generation(
+                            retain_generation(
                                 &self.state,
                                 generation_job,
                                 "CUDA context is fatally poisoned; server restart required"
@@ -2280,6 +2546,10 @@ impl Coordinator {
                                         unschedulable_since_ms: None,
                                         unschedulable_reason: None,
                                         announced_position: None,
+                                        capacity_park: None,
+                                        memory_block: None,
+                                        preparation_started_ms: None,
+                                        preparation_progress: Default::default(),
                                     },
                                 );
                             }
@@ -2305,6 +2575,10 @@ impl Coordinator {
                                     unschedulable_since_ms: None,
                                     unschedulable_reason: None,
                                     announced_position: None,
+                                    capacity_park: None,
+                                    memory_block: None,
+                                    preparation_started_ms: None,
+                                    preparation_progress: Default::default(),
                                 },
                             );
                         }
@@ -2659,7 +2933,7 @@ impl Coordinator {
             .pending
             .iter()
             .filter(|(id, pending)| {
-                pending.job.result_tx.is_closed()
+                pending.job.should_cancel_for_observer_disconnect()
                     || (!id.starts_with("runtime-generation-")
                         && self.state.job_registry.scheduler_lifecycle(id).is_none())
             })
@@ -2878,18 +3152,18 @@ impl Coordinator {
         pending: &PendingGeneration,
         device_facts: &[crate::execution_plan::DeviceFact],
     ) -> Result<Vec<crate::execution_plan::ResolvedExecutionPlan>, GenerationPlanFailure> {
-        if pending
+        if let Some(park) = pending
             .prepared_inputs
             .as_ref()
-            .is_some_and(|prepared| !prepared.host_memory_retry_after_devices.is_empty())
+            .and_then(|prepared| prepared.capacity_park.as_ref())
         {
-            return Err(GenerationPlanFailure::Transient(
-                "waiting for active GPU work to release host memory".to_string(),
-            ));
+            return Err(GenerationPlanFailure::Transient(park.reason.clone().into()));
         }
         let config = self.state.config.try_read().map_err(|_| {
             GenerationPlanFailure::Transient(
-                "configuration changed while resolving execution plan".to_string(),
+                "configuration changed while resolving execution plan"
+                    .to_string()
+                    .into(),
             )
         })?;
         let offload_requested = matches!(
@@ -2913,20 +3187,6 @@ impl Coordinator {
                     .as_ref()
                     .map(|media| media.projection()),
             );
-        let resolved = resolved.map(|plans| {
-            let Some(expected) = pending
-                .job
-                .batch_child
-                .as_ref()
-                .map(|child| child.execution_equivalence_fingerprint.as_str())
-            else {
-                return plans;
-            };
-            plans
-                .into_iter()
-                .filter(|plan| plan.execution_equivalence_fingerprint.as_str() == expected)
-                .collect()
-        });
         #[cfg(test)]
         if matches!(
             resolved,
@@ -3034,6 +3294,7 @@ impl Coordinator {
                         admitted_available_vram_bytes: device.available_vram_bytes,
                         learned_vram_envelope_bytes: 0,
                         predicted_host_increment_bytes: MIN_TRANSIENT_HOST_RAM,
+                        predicted_warm_host_increment_bytes: MIN_TRANSIENT_HOST_RAM,
                         determinism_class,
                         execution_environment: environment,
                         execution_equivalence_fingerprint: equivalence,
@@ -3121,12 +3382,29 @@ impl Coordinator {
                 pending.preparation_refresh_observation = None;
                 continue;
             };
-            if !prepared.host_memory_retry_after_devices.is_empty() {
-                pending.preparation_refresh_observation = None;
-                if prepared
-                    .host_memory_retry_after_devices
-                    .is_disjoint(&busy_worker_devices)
-                {
+            if let Some(park) = prepared.capacity_park.as_ref() {
+                if !park.retry_after_devices.is_disjoint(&busy_worker_devices) {
+                    pending.preparation_refresh_observation = None;
+                    continue;
+                }
+                // The busy -> idle edge is the whole point of the park, so the
+                // first retry after it is immediate. Every retry after that
+                // pays the ordinary refresh backoff: a park now turns on the
+                // resource question rather than on a busy set, so a machine
+                // that can never hold this job would otherwise re-run the
+                // whole admission at the memory ticker's 1 Hz forever, and
+                // `settle_unschedulable_generations` could never bound it.
+                if pending.preparation_retry_attempts == 0 {
+                    pending.preparation_refresh_observation = None;
+                    refresh.insert(id.clone());
+                    continue;
+                }
+                if observe_preparation_refresh(
+                    &mut pending.preparation_refresh_observation,
+                    vec![(CAPACITY_PARK_REFRESH_SIGNATURE.to_string(), 1)],
+                    now_ms,
+                    preparation_refresh_delay_ms(pending.preparation_retry_attempts),
+                ) {
                     refresh.insert(id.clone());
                 }
                 continue;
@@ -3136,9 +3414,7 @@ impl Coordinator {
                 pending.preparation_refresh_observation = None;
                 continue;
             }
-            let delay = PREPARATION_RETRY_BASE_MS
-                .saturating_mul(1_u64 << u32::from(pending.preparation_retry_attempts.min(4)))
-                .clamp(PREPARATION_REFRESH_STABILITY_MS, PREPARATION_RETRY_MAX_MS);
+            let delay = preparation_refresh_delay_ms(pending.preparation_retry_attempts);
             if observe_preparation_refresh(
                 &mut pending.preparation_refresh_observation,
                 signature,
@@ -3346,42 +3622,335 @@ impl Coordinator {
     /// unclassified empty result once the wait has been idle for
     /// `UNSCHEDULABLE_IDLE_GRACE_MS`. This deliberately does NOT bound a job
     /// queued behind running work — that job is waiting for something real.
-    fn settle_unschedulable_generations(&mut self) -> bool {
-        // "Idle" has to mean every way mold itself can be holding the resource,
-        // not just the lease table: a preparation can be staging weights, and a
-        // legacy chain claims a worker without taking a coordinator lease.
-        // The job registry spans coordinator/worker hand-offs and is the
-        // authoritative final check for an accepted running generation.
-        // Over-counting busy only makes the job wait longer, which is the safe
-        // direction.
-        let idle = self.leases.is_empty()
+    /// "Idle" has to mean every way mold itself can be holding the resource,
+    /// not just the lease table: a preparation can be staging weights, and a
+    /// legacy chain claims a worker without taking a coordinator lease. The
+    /// job registry spans coordinator/worker hand-offs and is the
+    /// authoritative final check for an accepted running generation.
+    /// Over-counting busy only makes the job wait longer, which is the safe
+    /// direction. Both the idle bound and the idle host reclaim read this one
+    /// predicate.
+    fn scheduler_is_idle(&self) -> bool {
+        self.leases.is_empty()
             && !self.state.job_registry.has_running()
-            && !self
-                .pending
-                .values()
-                .any(|pending| pending.preparation != PreparationState::Ready)
+            && !self.pending.values().any(|pending| {
+                // A PARKED job's own re-preparation is the wait being bounded,
+                // and it holds no device and no allocation. Counting it busy
+                // would reset the grace every time the park retried, which is
+                // exactly how a job waits forever on an idle machine.
+                pending.preparation != PreparationState::Ready && pending.capacity_park.is_none()
+            })
             && !self.state.gpu_pool.workers.iter().any(|worker| {
                 worker.in_flight.load(Ordering::SeqCst) > 0
                     || worker.legacy_pending.load(Ordering::SeqCst) > 0
-            });
+            })
+    }
+
+    /// Record which pending generations the plan just published parked on
+    /// host RAM, with the numbers the planner compared.
+    fn record_memory_blocks(&mut self, snapshot: &PlannerSnapshot, plan: &Plan) {
+        let headroom_bytes = snapshot.host_memory.headroom_bytes;
+        let required_by_work = snapshot
+            .work
+            .iter()
+            .map(|work| {
+                let required = work
+                    .candidate_placements
+                    .iter()
+                    .map(|candidate| candidate.incremental_host_ram_bytes)
+                    .min()
+                    .unwrap_or(0);
+                (work.id.as_str().to_string(), required)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let host_blocked = plan
+            .blocked
+            .iter()
+            .filter(|blocked| {
+                matches!(
+                    blocked.reason,
+                    BlockedReason::InsufficientHostRam | BlockedReason::AggregateHostRamReserved
+                )
+            })
+            .map(|blocked| blocked.work_id.as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        // A VRAM block is recorded against the cheapest candidate on a
+        // schedulable device and that device's planned capacity — the two
+        // numbers the planner compared — so the reclaim knows which device
+        // to re-sample and the refusal names what it was short of.
+        let workers = self.state.gpu_pool.worker_snapshot();
+        let vram_blocked = plan
+            .blocked
+            .iter()
+            .filter(|blocked| blocked.reason == BlockedReason::InsufficientVram)
+            .filter_map(|blocked| {
+                let work = snapshot
+                    .work
+                    .iter()
+                    .find(|work| work.id == blocked.work_id)?;
+                let (candidate, device) = work
+                    .candidate_placements
+                    .iter()
+                    .filter_map(|candidate| {
+                        snapshot
+                            .devices
+                            .iter()
+                            .find(|device| {
+                                device.id == candidate.device_id && device.is_schedulable()
+                            })
+                            .map(|device| (candidate, device))
+                    })
+                    .min_by_key(|(candidate, _)| candidate.predicted_vram_bytes)?;
+                let ordinal = workers
+                    .iter()
+                    .find(|worker| worker_device_id(worker) == device.id.as_str())
+                    .map(|worker| worker.gpu.ordinal)?;
+                let backend = match device.backend {
+                    Backend::Cuda => mold_core::GpuBackend::Cuda,
+                    Backend::Metal => mold_core::GpuBackend::Metal,
+                    // The utility lane holds no VRAM to reclaim.
+                    Backend::Cpu => return None,
+                };
+                Some((
+                    blocked.work_id.as_str().to_string(),
+                    (
+                        candidate.predicted_vram_bytes,
+                        device.available_vram_bytes,
+                        MemoryBlockKind::Device {
+                            device_id: device.id.as_str().to_string(),
+                            ordinal,
+                            backend,
+                        },
+                    ),
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (id, pending) in &mut self.pending {
+            let (kind, required_bytes, headroom_bytes) = if host_blocked.contains(id) {
+                (
+                    MemoryBlockKind::Host,
+                    required_by_work.get(id).copied().unwrap_or(0),
+                    headroom_bytes,
+                )
+            } else if let Some((required, available, kind)) = vram_blocked.get(id) {
+                (kind.clone(), *required, *available)
+            } else {
+                // A job the plan placed or left unblocked has no block; one
+                // the resolver kept out of the plan altogether keeps the block
+                // the resolver recorded for it.
+                if snapshot.work.iter().any(|work| work.id.as_str() == id) {
+                    pending.memory_block = None;
+                }
+                continue;
+            };
+            match pending.memory_block.as_mut() {
+                Some(block) if block.kind == kind => {
+                    block.required_bytes = required_bytes;
+                    block.headroom_bytes = headroom_bytes;
+                }
+                _ => {
+                    tracing::warn!(
+                        job_id = %id,
+                        model = %pending.job.request.model,
+                        memory = kind.noun(),
+                        required_bytes,
+                        headroom_bytes,
+                        "queued generation is blocked on memory"
+                    );
+                    pending.memory_block = Some(MemoryBlock {
+                        kind,
+                        required_bytes,
+                        headroom_bytes,
+                        reclaim: ReclaimAttempt::NotStarted,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Record a device block the RESOLVER raised — the plan never reached the
+    /// planner, so `record_memory_blocks` cannot see it — against the eligible
+    /// device with the most room, which is the one an eviction would free.
+    fn record_resolver_vram_block(
+        &mut self,
+        job_id: &str,
+        shortfall: &VramShortfall,
+        device_facts: &[crate::execution_plan::DeviceFact],
+    ) {
+        let Some(device) = device_facts
+            .iter()
+            .filter(|fact| shortfall.eligible_device_ids.contains(&fact.id))
+            .max_by_key(|fact| fact.available_vram_bytes)
+        else {
+            return;
+        };
+        let Some(pending) = self.pending.get_mut(job_id) else {
+            return;
+        };
+        let kind = MemoryBlockKind::Device {
+            device_id: device.id.clone(),
+            ordinal: device.ordinal,
+            backend: device.backend,
+        };
+        match pending.memory_block.as_mut() {
+            Some(block) if block.kind == kind => {
+                block.required_bytes = shortfall.required_peak_bytes;
+                block.headroom_bytes = device.available_vram_bytes;
+            }
+            _ => {
+                tracing::warn!(
+                    job_id,
+                    model = %pending.job.request.model,
+                    memory = kind.noun(),
+                    required_bytes = shortfall.required_peak_bytes,
+                    headroom_bytes = device.available_vram_bytes,
+                    "queued generation is blocked on memory"
+                );
+                pending.memory_block = Some(MemoryBlock {
+                    kind,
+                    required_bytes: shortfall.required_peak_bytes,
+                    headroom_bytes: device.available_vram_bytes,
+                    reclaim: ReclaimAttempt::NotStarted,
+                });
+            }
+        }
+    }
+
+    /// The next host reclaim to run, if the scheduler is idle and one is due.
+    ///
+    /// One at a time, oldest queued job first: an eviction is awaited owner
+    /// work, and two reclaims for two jobs would race each other for the same
+    /// idle engines. A busy scheduler never reclaims — running work is about
+    /// to give its memory back, and evicting under it would only park the
+    /// unload behind that render.
+    fn next_memory_reclaim(&mut self) -> Option<ReclaimRequest> {
+        if !self.scheduler_is_idle() {
+            return None;
+        }
+        if self.pending.values().any(|pending| {
+            matches!(
+                pending.memory_block.as_ref().map(|block| &block.reclaim),
+                Some(ReclaimAttempt::InFlight)
+            )
+        }) {
+            return None;
+        }
+        let (id, pending) = self
+            .pending
+            .iter_mut()
+            .filter(|(_, pending)| {
+                // A reclaim whose sampler failed proved nothing and evicted
+                // on nothing; it is asked again rather than counted.
+                matches!(
+                    pending.memory_block.as_ref().map(|block| &block.reclaim),
+                    Some(ReclaimAttempt::NotStarted)
+                        | Some(ReclaimAttempt::Done(
+                            crate::host_reclaim::HostReclaimOutcome {
+                                sample_failed: true,
+                                ..
+                            }
+                        ))
+                )
+            })
+            .min_by_key(|(_, pending)| pending.queue_rank)?;
+        let block = pending.memory_block.as_mut()?;
+        block.reclaim = ReclaimAttempt::InFlight;
+        tracing::info!(
+            job_id = %id,
+            model = %pending.job.request.model,
+            memory = block.kind.noun(),
+            required_bytes = block.required_bytes,
+            headroom_bytes = block.headroom_bytes,
+            "memory is short on an idle scheduler; releasing idle models before bounding the wait"
+        );
+        Some(ReclaimRequest {
+            job_id: id.clone(),
+            model: pending.job.request.model.clone(),
+            required_bytes: block.required_bytes,
+            kind: block.kind.clone(),
+        })
+    }
+
+    /// Whether the reclaim running for `job_id` still has a job to serve.
+    ///
+    /// A cancelled or dispatched job leaves `pending` (or loses its block),
+    /// and a reclaim that kept evicting for it would flush every idle engine
+    /// on the machine for a print nobody is waiting on; the run loop aborts
+    /// the task the moment this answers false.
+    fn memory_reclaim_still_wanted(&self, job_id: &str) -> bool {
+        self.pending.get(job_id).is_some_and(|pending| {
+            matches!(
+                pending.memory_block.as_ref().map(|block| &block.reclaim),
+                Some(ReclaimAttempt::InFlight)
+            )
+        })
+    }
+
+    /// A reclaim finished: keep what it gave back beside the block so a
+    /// surviving shortfall is refused with the post-eviction numbers, then
+    /// re-sample and replan.
+    fn finish_memory_reclaim(
+        &mut self,
+        job_id: &str,
+        outcome: crate::host_reclaim::HostReclaimOutcome,
+        immediate: &mut bool,
+    ) {
+        tracing::info!(
+            job_id,
+            released_bytes = outcome.released_bytes,
+            evicted = ?outcome.evicted,
+            "host reclaim finished"
+        );
+        if let Some(block) = self
+            .pending
+            .get_mut(job_id)
+            .and_then(|pending| pending.memory_block.as_mut())
+        {
+            block.reclaim = ReclaimAttempt::Done(outcome);
+        }
+        self.collect_host_memory();
+        self.mutate(immediate);
+    }
+
+    fn settle_unschedulable_generations(&mut self) -> bool {
+        let idle = self.scheduler_is_idle();
         let now_ms = monotonic_ms();
         let device_facts = self.device_facts();
+        let mut vram_shortfalls: Vec<(String, VramShortfall)> = Vec::new();
         let observations = self
             .pending
             .iter()
             .map(|(id, pending)| {
+                // A retained park is already a typed answer about this
+                // machine's ceiling, so it is reported whatever preparation
+                // state the job is currently in — including its own retry.
+                if let Some(park) = pending.capacity_park.as_ref() {
+                    return (id.clone(), Some(park.reason.clone()));
+                }
                 if pending.preparation != PreparationState::Ready {
                     return (id.clone(), None);
                 }
                 let failure = match self.generation_plans_with_device_facts(pending, &device_facts)
                 {
                     // A plan resolved: this job is schedulable and any earlier
-                    // idle wait is void.
-                    Ok(plans) if !plans.is_empty() => None,
+                    // idle wait is void — unless the planner parked it on host
+                    // RAM and mold has already released everything it could.
+                    Ok(plans) if !plans.is_empty() => memory_shortfall_reason(pending),
                     Ok(_) => Some(String::new()),
                     // Terminal failures are rejected by their own pass, which
                     // already names the error.
                     Err(GenerationPlanFailure::Terminal(_)) => None,
+                    // A device the resolver refused for VRAM is the planner's
+                    // host block in another memory: recorded below, reclaimed
+                    // while idle, and bounded only once mold has released
+                    // everything it could.
+                    Err(GenerationPlanFailure::Transient(TransientPlanFailure {
+                        vram_shortfall: Some(shortfall),
+                        ..
+                    })) => {
+                        vram_shortfalls.push((id.clone(), shortfall));
+                        memory_shortfall_reason(pending)
+                    }
                     // Resource pressure and preparation refreshes are retry
                     // states, not evidence that durable work became invalid.
                     // Their duration cannot turn them into terminal failures.
@@ -3391,6 +3960,9 @@ impl Coordinator {
                 (id.clone(), failure)
             })
             .collect::<Vec<_>>();
+        for (id, shortfall) in vram_shortfalls {
+            self.record_resolver_vram_block(&id, &shortfall, &device_facts);
+        }
         let grace_ms = self.unschedulable_idle_grace_ms;
         let mut refusals = Vec::new();
         for (id, failure) in observations {
@@ -3434,6 +4006,27 @@ impl Coordinator {
                 continue;
             };
             self.plan_invalidations.remove(&id);
+            if let Some(shortfall) = memory_shortfall_reason(&pending) {
+                let kind = pending
+                    .memory_block
+                    .as_ref()
+                    .map(|block| block.kind.clone())
+                    .unwrap_or(MemoryBlockKind::Host);
+                let message = memory_shortfall_rejection_message(
+                    &pending.job.request.model,
+                    &kind,
+                    &shortfall,
+                );
+                tracing::warn!(
+                    job_id = %id,
+                    %message,
+                    "holding a queued generation whose memory shortfall survived an idle reclaim"
+                );
+                // Retryable on purpose: the operator can free host memory and
+                // retry the row unchanged, exactly as an H3 host hold is.
+                hold_preparation_failure(&self.state, pending.job, message);
+                continue;
+            }
             let message = unschedulable_rejection_message(
                 &pending.job.request.model,
                 pending.unschedulable_reason.as_deref(),
@@ -3685,14 +4278,16 @@ impl Coordinator {
                     .filter(|plan| !failed.contains(&plan.device_ordinal))
                     .cloned()
                     .map(|plan| {
-                        let key = self
-                            .state
-                            .gpu_pool
-                            .worker_by_ordinal(plan.device_ordinal)
+                        let worker = self.state.gpu_pool.worker_by_ordinal(plan.device_ordinal);
+                        let warm_resident = worker.as_ref().is_some_and(|worker| {
+                            worker.holds_execution_fingerprint(&plan.execution_fingerprint)
+                        });
+                        let key = worker
+                            .as_ref()
                             .map(|worker| {
                                 generation_estimate_key(
                                     &self.state,
-                                    &worker,
+                                    worker,
                                     &pending.job.request,
                                     pending
                                         .job
@@ -3730,10 +4325,12 @@ impl Coordinator {
                         let estimate = self.estimates.estimate(&key, static_estimate);
                         let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
                             timing_with_static_floors(estimate, static_estimate);
+                        let host_bytes =
+                            candidate_host_demand_bytes(warm_resident, &plan, &estimate);
                         let candidate = CandidatePlacement::new(
                             DeviceId::new(plan.device_id),
                             ExecutionFingerprint::new(plan.execution_fingerprint),
-                            estimate.host_bytes,
+                            host_bytes,
                         )
                         .with_execution_equivalence(plan.execution_equivalence_fingerprint)
                         .with_vram(estimate.vram_bytes)
@@ -3769,9 +4366,7 @@ impl Coordinator {
                             size: pending.job.request.batch_size,
                         }),
                 );
-                if pending.job.batch_child.is_some() {
-                    work.kind = mold_scheduler::WorkKind::BatchChild;
-                } else if pending
+                if pending
                     .job
                     .request
                     .batch_count
@@ -4226,6 +4821,7 @@ impl Coordinator {
                     return None;
                 }
                 let worker = self.state.gpu_pool.worker_by_ordinal(plan.device_ordinal)?;
+                let warm_resident = worker.holds_execution_fingerprint(&plan.execution_fingerprint);
                 let key = generation_estimate_key(
                     &self.state,
                     &worker,
@@ -4245,10 +4841,11 @@ impl Coordinator {
                     (plan.device_id.clone(), plan.execution_fingerprint.clone()),
                     wire_estimate_confidence(estimate.confidence),
                 );
+                let host_bytes = candidate_host_demand_bytes(warm_resident, &plan, &estimate);
                 let candidate = CandidatePlacement::new(
                     DeviceId::new(plan.device_id),
                     ExecutionFingerprint::new(plan.execution_fingerprint),
-                    estimate.host_bytes,
+                    host_bytes,
                 )
                 .with_execution_equivalence(plan.execution_equivalence_fingerprint)
                 .with_vram(estimate.vram_bytes)
@@ -4733,6 +5330,7 @@ impl Coordinator {
                     return None;
                 }
             };
+            self.record_memory_blocks(&snapshot, &plan);
             if let Err(error) = self.publish_plan(&snapshot, &plan, self.dirty.dirty_since) {
                 tracing::error!(
                     state_version = snapshot.state_version,
@@ -4817,7 +5415,7 @@ impl Coordinator {
                 let work_cancelled = if let Some(pending) = generation {
                     self.state.job_registry.scheduler_lifecycle(&work_id)
                         != Some(crate::job_registry::JobLifecycle::Queued)
-                        || pending.job.result_tx.is_closed()
+                        || pending.job.should_cancel_for_observer_disconnect()
                 } else {
                     utility.is_none_or(|pending| pending.work.is_cancelled())
                 };
@@ -5215,6 +5813,10 @@ impl Coordinator {
                                     unschedulable_since_ms: None,
                                     unschedulable_reason: None,
                                     announced_position: None,
+                                    capacity_park: None,
+                                    memory_block: None,
+                                    preparation_started_ms: None,
+                                    preparation_progress: Default::default(),
                                 },
                             );
                             self.unavailable.insert(device_id.clone());
@@ -5460,6 +6062,7 @@ impl Coordinator {
             .and_then(|dirty| dirty.dirty_since)
             .or(self.dirty.dirty_since);
         self.publish_plan(&snapshot, &plan, published_dirty_since)?;
+        self.record_memory_blocks(&snapshot, &plan);
         self.plan_version = plan.plan_version;
         Ok((prospective_state_version, prospective_dirty))
     }
@@ -5578,6 +6181,7 @@ impl Coordinator {
             &self.state.gpu_pool,
             &self.leases,
             &confidence,
+            &self.preparing_views(),
             dirty_since,
         );
         wire.host_memory = self.memory.wire_snapshot();
@@ -5670,14 +6274,14 @@ impl Coordinator {
     }
 
     fn reject_all_unstarted_for_fatal_cuda(&mut self) {
-        self.reject_all_unstarted("CUDA context is fatally poisoned; server restart required");
+        self.retain_all_unstarted("CUDA context is fatally poisoned; server restart required");
     }
 
-    fn reject_all_unstarted(&mut self, message: &str) {
+    fn retain_all_unstarted(&mut self, message: &str) {
         let pending = std::mem::take(&mut self.pending);
         self.plan_invalidations.clear();
         for (_, pending) in pending {
-            reject_generation(&self.state, pending.job, message.to_string());
+            retain_generation(&self.state, pending.job, message.to_string());
         }
         let pending_owner_work = std::mem::take(&mut self.pending_owner_work);
         for (_, pending) in pending_owner_work {
@@ -5719,14 +6323,33 @@ pub async fn run_scheduler_coordinator(
     let mut generation_ingress_open = true;
     let mut owner_ingress_open = true;
     let mut resource_stream_open = true;
+    // The job id rides beside the task so a reclaim whose job was cancelled
+    // or dispatched is aborted rather than left flushing the cache.
+    let mut host_reclaim: Option<(
+        String,
+        tokio::task::JoinHandle<(String, crate::host_reclaim::HostReclaimOutcome)>,
+    )> = None;
     loop {
         let mut immediate = false;
         tokio::select! {
+            finished = async { (&mut host_reclaim.as_mut().expect("guarded by the branch precondition").1).await }, if host_reclaim.is_some() => {
+                host_reclaim = None;
+                match finished {
+                    Ok((job_id, outcome)) => {
+                        coordinator.finish_memory_reclaim(&job_id, outcome, &mut immediate);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "host reclaim task did not complete");
+                        coordinator.collect_host_memory();
+                        coordinator.mutate(&mut immediate);
+                    }
+                }
+            }
             _ = shutdown.cancelled() => {
                 job_rx.close();
                 owner_work_rx.close();
                 while let Ok(job) = job_rx.try_recv() {
-                    reject_generation(
+                    retain_generation(
                         &coordinator.state,
                         job,
                         "generation scheduler is shutting down".to_string(),
@@ -5736,7 +6359,7 @@ pub async fn run_scheduler_coordinator(
                     work.work
                         .reject("generation scheduler is shutting down".to_string());
                 }
-                coordinator.reject_all_unstarted("generation scheduler is shutting down");
+                coordinator.retain_all_unstarted("generation scheduler is shutting down");
                 break;
             }
             job = job_rx.recv(), if generation_ingress_open => {
@@ -5843,6 +6466,53 @@ pub async fn run_scheduler_coordinator(
         }
         coordinator.start_needed_preparations();
         while coordinator.preparation_tasks.try_join_next().is_some() {}
+        if let Some((job_id, task)) = host_reclaim
+            .as_ref()
+            .filter(|(job_id, _)| !coordinator.memory_reclaim_still_wanted(job_id))
+        {
+            tracing::info!(
+                job_id,
+                "host reclaim abandoned; its job no longer waits on host memory"
+            );
+            task.abort();
+            host_reclaim = None;
+        }
+        if host_reclaim.is_none() {
+            if let Some(request) = coordinator.next_memory_reclaim() {
+                let state = coordinator.state.clone();
+                let job_id = request.job_id.clone();
+                host_reclaim = Some((
+                    job_id,
+                    tokio::spawn(async move {
+                        let outcome = match &request.kind {
+                            MemoryBlockKind::Host => {
+                                crate::host_reclaim::reclaim_host_headroom(
+                                    &state,
+                                    &request.model,
+                                    request.required_bytes,
+                                    &host_headroom_from_system,
+                                )
+                                .await
+                            }
+                            MemoryBlockKind::Device {
+                                ordinal, backend, ..
+                            } => {
+                                let (ordinal, backend) = (*ordinal, *backend);
+                                crate::host_reclaim::reclaim_device_headroom(
+                                    &state,
+                                    &request.model,
+                                    request.required_bytes,
+                                    ordinal,
+                                    &move || device_headroom_from_driver(ordinal, backend),
+                                )
+                                .await
+                            }
+                        };
+                        (request.job_id, outcome)
+                    }),
+                ));
+            }
+        }
         if coordinator
             .state
             .gpu_pool
@@ -5853,7 +6523,7 @@ pub async fn run_scheduler_coordinator(
             job_rx.close();
             owner_work_rx.close();
             while let Ok(job) = job_rx.try_recv() {
-                reject_generation(
+                retain_generation(
                     &coordinator.state,
                     job,
                     "CUDA context is fatally poisoned; server restart required".to_string(),
@@ -5911,10 +6581,10 @@ fn gpu_job_from_generation(
     }
     GpuJob {
         id: job.id,
+        durable_queue_rank: job.durable_queue_rank,
         model: job.request.model.clone(),
         request: job.request,
         deferred_media: job.deferred_media,
-        resolved_references: job.resolved_references,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
@@ -5930,7 +6600,6 @@ fn gpu_job_from_generation(
         #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
         h3_prepared_attempt: None,
         lease: Some(lease),
-        batch_child: job.batch_child,
         journal: job.journal,
     }
 }
@@ -5949,14 +6618,13 @@ fn generation_and_prepared_from_gpu_job(
     (
         GenerationJob {
             id: job.id,
+            durable_queue_rank: job.durable_queue_rank,
             request: job.request,
             deferred_media: job.deferred_media,
-            resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
             output_dir: job.output_dir,
-            batch_child: job.batch_child,
             journal: job.journal,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant,
@@ -5996,17 +6664,55 @@ fn exact_leased_execution_plan(
         .cloned()
 }
 
-fn reject_generation(state: &AppState, mut job: GenerationJob, error: String) {
-    if let Some(progress) = job.progress_tx {
-        let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
-            error.clone(),
-        )));
-    }
+/// Deterministic planning and validation refusals remain visible but cannot
+/// be retried unchanged.
+fn reject_generation(state: &AppState, job: GenerationJob, error: String) {
+    settle_refusal(
+        state,
+        job,
+        crate::durable_disposition::DurableDisposition::Hold { retryable: false },
+        error,
+    );
+}
+
+/// Deferred dependency failures happen after durable acknowledgement. Preserve
+/// that accepted request as an explicitly retryable hold instead of turning a
+/// transient download, probe, or preparation error into terminal data loss.
+/// Non-durable jobs retain their legacy terminal behavior.
+fn hold_preparation_failure(state: &AppState, job: GenerationJob, error: String) {
+    settle_refusal(
+        state,
+        job,
+        crate::durable_disposition::DurableDisposition::Hold { retryable: true },
+        error,
+    );
+}
+
+/// A process-level interruption is not a job failure. Release the durable
+/// claim so the next feeder pass or process boot replays it automatically.
+fn retain_generation(state: &AppState, job: GenerationJob, error: String) {
+    settle_refusal(
+        state,
+        job,
+        crate::durable_disposition::DurableDisposition::Retain,
+        error,
+    );
+}
+
+/// The coordinator's three refusals differ only in what the row becomes.
+///
+/// Settling before reporting is the module contract every worker path already
+/// keeps (`durable_generation_settlement`); these three used to send the SSE
+/// frame first, which both contradicted it and hard-coded `failed` over a
+/// cancellation that had already won the row.
+fn settle_refusal(
+    state: &AppState,
+    job: GenerationJob,
+    disposition: crate::durable_disposition::DurableDisposition,
+    error: String,
+) {
     let id = job.id.clone();
-    if let Some(ticket) = job.journal.take() {
-        ticket.fail(&error);
-    }
-    let _ = job.result_tx.send(Err(error));
+    crate::durable_generation_settlement::fail_blocking(job, disposition, error);
     state.queue.decrement();
     state.job_registry.remove(&id);
 }
@@ -6019,6 +6725,38 @@ fn reject_generation(state: &AppState, mut job: GenerationJob, error: String) {
 /// admission refusal gives. Only when the resolver produced no plans AND no
 /// error (the coordinator's own zero-candidate case) does the bare sentence
 /// stand alone — which is still an answer, and #1272 had none.
+/// The typed answer for a host block that outlived a reclaim, or `None` while
+/// the block is fresh, a reclaim is still running, or there is no block.
+fn memory_shortfall_reason(pending: &PendingGeneration) -> Option<String> {
+    let block = pending.memory_block.as_ref()?;
+    let ReclaimAttempt::Done(outcome) = &block.reclaim else {
+        return None;
+    };
+    if outcome.sample_failed {
+        return None;
+    }
+    Some(crate::host_reclaim::host_shortfall_message(
+        outcome,
+        block.required_bytes,
+        block.headroom_bytes,
+    ))
+}
+
+fn memory_shortfall_rejection_message(
+    model: &str,
+    kind: &MemoryBlockKind,
+    shortfall: &str,
+) -> String {
+    match kind {
+        MemoryBlockKind::Host => format!(
+            "'{model}' needs more host memory than this machine has free while the queue is idle: {shortfall}"
+        ),
+        MemoryBlockKind::Device { device_id, .. } => format!(
+            "'{model}' needs more device memory than {device_id} has free while the queue is idle: {shortfall}"
+        ),
+    }
+}
+
 fn unschedulable_rejection_message(model: &str, reason: Option<&str>) -> String {
     let base =
         format!("no device could produce an execution plan for '{model}' while the queue was idle");
@@ -6064,12 +6802,27 @@ fn queue_blocked_reason(reason: BlockedReason) -> mold_core::QueueBlockedReason 
     }
 }
 
+/// What the coordinator knows about a job whose preparation is in flight.
+///
+/// `Preparing` is deliberately its own wire reason. Every other not-ready
+/// state answers "something else has to happen first"; this one answers "this
+/// job's own work is running", and on a spinning-disk model store an H3
+/// artifact pass makes that difference minutes long (#1272's rule: a queued
+/// generation is schedulable, running, or ANSWERED — `Preparing` is the state
+/// that rule never named).
+#[derive(Clone, Debug, Default)]
+struct PreparingView {
+    elapsed_ms: u64,
+    progress: Option<mold_core::QueuePreparationProgress>,
+}
+
 fn queue_plan_projection(
     snapshot: &PlannerSnapshot,
     plan: &Plan,
     pool: &crate::gpu_pool::GpuPool,
     leases: &BTreeMap<String, ActiveLease>,
     confidence_by_work: &BTreeMap<String, mold_core::QueueEstimateConfidence>,
+    preparing: &BTreeMap<String, PreparingView>,
     dirty_since: Option<Instant>,
 ) -> mold_core::QueuePlan {
     let unix_now = std::time::SystemTime::now()
@@ -6084,17 +6837,20 @@ fn queue_plan_projection(
         pool,
         leases,
         confidence_by_work,
+        preparing,
         dirty_since,
         unix_now,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn queue_plan_projection_at_unix(
     snapshot: &PlannerSnapshot,
     plan: &Plan,
     pool: &crate::gpu_pool::GpuPool,
     leases: &BTreeMap<String, ActiveLease>,
     confidence_by_work: &BTreeMap<String, mold_core::QueueEstimateConfidence>,
+    preparing: &BTreeMap<String, PreparingView>,
     dirty_since: Option<Instant>,
     unix_now: u64,
 ) -> mold_core::QueuePlan {
@@ -6162,6 +6918,8 @@ fn queue_plan_projection_at_unix(
                 blocked_reason: None,
                 assignment_reason: Some(snake_debug(lease.assignment_reason)),
                 warm_wait_deadline_unix_ms: None,
+                preparation_elapsed_ms: None,
+                preparation_progress: None,
                 activity_phase: if lease.accepted && host_utility {
                     mold_core::QueueActivityPhase::Cpu
                 } else if lease.accepted {
@@ -6204,8 +6962,19 @@ fn queue_plan_projection_at_unix(
                     .iter()
                     .find(|blocked| blocked.work_id == work.id);
                 let warm_wait = plan.warm_waits.iter().find(|wait| wait.work_id == work.id);
-                let legacy_reason = blocked
-                    .map(|blocked| snake_debug(blocked.reason))
+                // The planner reports every not-ready job as `NotReady`; only
+                // the coordinator knows which of them is not-ready because its
+                // own preparation is running right now.
+                let preparing = blocked
+                    .filter(|blocked| blocked.reason == BlockedReason::NotReady)
+                    .and_then(|_| preparing.get(work.id.as_str()));
+                let legacy_reason = preparing
+                    .map(|_| {
+                        mold_core::QueueBlockedReason::Preparing
+                            .as_str()
+                            .to_string()
+                    })
+                    .or_else(|| blocked.map(|blocked| snake_debug(blocked.reason)))
                     .or_else(|| warm_wait.map(|_| "warm_wait".to_string()))
                     .or_else(|| {
                         plan.immediate_leases
@@ -6272,13 +7041,18 @@ fn queue_plan_projection_at_unix(
                         .cloned()
                         .unwrap_or_default(),
                     reason: legacy_reason,
-                    blocked_reason: blocked.map(|blocked| queue_blocked_reason(blocked.reason)),
+                    blocked_reason: match preparing {
+                        Some(_) => Some(mold_core::QueueBlockedReason::Preparing),
+                        None => blocked.map(|blocked| queue_blocked_reason(blocked.reason)),
+                    },
                     assignment_reason: plan
                         .immediate_leases
                         .iter()
                         .find(|lease| lease.work_id == work.id)
                         .map(|lease| snake_debug(lease.reason)),
                     warm_wait_deadline_unix_ms: warm_wait.map(|wait| to_unix(wait.deadline_ms)),
+                    preparation_elapsed_ms: preparing.map(|view| view.elapsed_ms),
+                    preparation_progress: preparing.and_then(|view| view.progress.clone()),
                     activity_phase: if warm_wait.is_some() {
                         mold_core::QueueActivityPhase::WarmWait
                     } else if blocked.is_some() {
@@ -6619,7 +7393,13 @@ fn classify_generation_plan_failure(
             ) {
                 GenerationPlanFailure::Terminal(error)
             } else {
-                GenerationPlanFailure::Transient(error.to_string())
+                GenerationPlanFailure::Transient(TransientPlanFailure {
+                    message: error.to_string(),
+                    vram_shortfall: Some(VramShortfall {
+                        required_peak_bytes: *required_peak_bytes,
+                        eligible_device_ids: eligible_device_ids.clone(),
+                    }),
+                })
             }
         }
         crate::execution_plan::ExecutionPlanError::PreparedInputsStale(_) => {
@@ -6756,6 +7536,27 @@ fn static_generation_time_ms_with_projection(
         ))
         / 1_000;
     1_000u64.saturating_add(denoise_ms)
+}
+
+/// The host bytes a candidate charges against the ledger.
+///
+/// A cold placement charges the plan's full increment, raised by the learned
+/// envelope exactly as the estimate store resolves it. A warm hit — the device
+/// already holds this plan's engine — charges only what a request allocates on
+/// top of that resident engine (`predicted_warm_host_increment_bytes`), and it
+/// deliberately takes no learned envelope: the envelope is sampled across a
+/// whole lease, so a cold load's high-water mark would re-create the very
+/// double charge this exists to remove.
+fn candidate_host_demand_bytes(
+    warm_resident: bool,
+    plan: &crate::execution_plan::ResolvedExecutionPlan,
+    estimate: &ResolvedEstimate,
+) -> u64 {
+    if warm_resident {
+        plan.admission_warm_host_demand_bytes()
+    } else {
+        estimate.host_bytes
+    }
 }
 
 /// `host_bytes` must be the plan's `admission_host_demand_bytes`, never its raw
@@ -7413,7 +8214,7 @@ mod tests {
             &self,
             _state: AppState,
             _work_id: String,
-            _request: mold_core::GenerateRequest,
+            _request: crate::queue_media_runtime::ZeroizingGenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
             _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {
@@ -7827,20 +8628,225 @@ mod tests {
         (
             GenerationJob {
                 id: id.to_string(),
+                durable_queue_rank: None,
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
                 output_dir: None,
-                batch_child: None,
                 journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
             },
             result_rx,
         )
+    }
+
+    #[tokio::test]
+    async fn deferred_preparation_failure_parks_durable_work_for_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(tx);
+        let mut state = AppState::for_tests();
+        state.queue = queue.clone();
+        state.queue_capacity = 1;
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db,
+            Some(root.path()),
+            "preparation-hold-test",
+        ));
+
+        let (mut job, mut result) = fake_generation("preparation-failed");
+        job.output_dir = Some(output.clone());
+        job.journal =
+            state
+                .queue_journal
+                .clone()
+                .record_for_test(crate::queue_journal::JournalAdmission {
+                    id: &job.id,
+                    request: &job.request,
+                    output_dir: Some(&output),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    batch_child: false,
+                });
+        state
+            .job_registry
+            .register(&job.id, job.request.model.clone());
+        queue.submit(job, 1).await.unwrap();
+        let job = rx.recv().await.unwrap();
+
+        hold_preparation_failure(&state, job, "dependency unavailable".to_string());
+
+        let outcome = result.try_recv().unwrap();
+        assert!(matches!(outcome, Err(ref error) if error == "dependency unavailable"));
+        assert_eq!(queue.pending(), 0);
+        assert!(state.job_registry.entry("preparation-failed").is_none());
+        let page = state.queue_journal.projection_page(None, 1).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(
+            page.rows[0].state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        assert_eq!(
+            page.rows[0].held_reason.as_deref(),
+            Some("dependency unavailable")
+        );
+        assert!(page.rows[0].retryable);
+    }
+
+    #[test]
+    fn scheduler_settlement_retries_a_token_owning_persistence_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db,
+            Some(root.path()),
+            "scheduler-settlement-test",
+        ));
+        let (job, _result) = fake_generation("settlement-retry");
+        let admission = journal
+            .clone()
+            .record_for_test(crate::queue_journal::JournalAdmission {
+                id: &job.id,
+                request: &job.request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            admission.retain(),
+            crate::queue_journal::RetainOutcome::Released
+        ));
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        journal.fail_claim_release_for_tests();
+        let mut ticket = Some(ticket);
+        let outcome = crate::durable_generation_settlement::settle_blocking(
+            &mut ticket,
+            crate::durable_disposition::DurableDisposition::Retain,
+            "settlement-retry",
+        );
+        assert!(outcome.is_retained());
+        assert!(ticket.is_none());
+
+        let reclaimed = journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("the live scheduler retry releases the exact claim");
+        assert_eq!(reclaimed.row.id, "settlement-retry");
+        journal
+            .attach_claimed(&reclaimed.row.id, reclaimed.claim_token)
+            .discard();
+    }
+
+    #[test]
+    fn completion_settlement_retries_before_reporting_success() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            Some(root.path()),
+            "scheduler-completion-test",
+        ));
+        let (job, _result) = fake_generation("completion-retry");
+        let admission = journal
+            .clone()
+            .record_for_test(crate::queue_journal::JournalAdmission {
+                id: &job.id,
+                request: &job.request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            admission.retain(),
+            crate::queue_journal::RetainOutcome::Released
+        ));
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(
+            ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
+        journal.fail_completion_transition_for_tests(2);
+        let mut ticket = Some(ticket);
+        let outcome = crate::durable_generation_settlement::settle_completion_blocking(
+            &mut ticket,
+            r#"{"filename":"done.png"}"#,
+        );
+        assert_eq!(
+            outcome,
+            crate::durable_generation_settlement::SettlementOutcome::Settled
+        );
+        assert!(journal.list_all().is_empty());
+    }
+
+    #[test]
+    fn persistent_completion_failure_retains_without_pinning_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            Some(root.path()),
+            "scheduler-persistent-completion-test",
+        ));
+        let (job, _result) = fake_generation("completion-retained");
+        let admission = journal
+            .clone()
+            .record_for_test(crate::queue_journal::JournalAdmission {
+                id: &job.id,
+                request: &job.request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            admission.retain(),
+            crate::queue_journal::RetainOutcome::Released
+        ));
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(
+            ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
+        journal.fail_completion_transition_for_tests(usize::MAX);
+        let mut ticket = Some(ticket);
+        let outcome = crate::durable_generation_settlement::settle_completion_blocking(
+            &mut ticket,
+            r#"{"filename":"done.png"}"#,
+        );
+        assert_eq!(
+            outcome,
+            crate::durable_generation_settlement::SettlementOutcome::Retained
+        );
+        assert!(ticket.is_none());
+        let row = journal.list_all().into_iter().next().unwrap();
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Running);
+        assert!(
+            journal.claim_next_feeder().unwrap().is_none(),
+            "the exact claim remains owned until startup recovery"
+        );
     }
 
     #[test]
@@ -8653,6 +9659,544 @@ mod tests {
         (coordinator, worker_rxs, result_rx)
     }
 
+    const HAL9000_TOTAL_BYTES: u64 = 67_149_967_360;
+    const HAL9000_AVAILABLE_BYTES: u64 = 19_925_626_880;
+    const HAL9000_T5_FP16_BYTES: u64 = 9_787_000_000;
+
+    struct NamedStubEngine(String);
+
+    impl mold_inference::InferenceEngine for NamedStubEngine {
+        fn generate(
+            &mut self,
+            _req: &mold_core::GenerateRequest,
+        ) -> anyhow::Result<mold_core::GenerateResponse> {
+            unreachable!("a reclaim target never generates")
+        }
+        fn model_name(&self) -> &str {
+            &self.0
+        }
+        fn is_loaded(&self) -> bool {
+            false
+        }
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn unload(&mut self) {}
+    }
+
+    /// hal9000's exact host shape on 2026-08-27 — `MemAvailable` 19.9 GB of
+    /// 67.1 GB, so 9.85 GB of headroom over the 10.07 GB floor — with a
+    /// `test:q4` plan whose CPU-parked 9.79 GB T5 puts its cold host demand
+    /// just past that headroom. The job is queued, prepared, and the one
+    /// worker is ready; nothing has been planned yet.
+    async fn hal9000_host_blocked_coordinator() -> (
+        Coordinator,
+        Arc<GpuWorker>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+        tokio::sync::oneshot::Receiver<Result<crate::state::GenerationJobResult, String>>,
+        crate::execution_plan::ResolvedExecutionPlan,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let t5 = root.path().join("t5.safetensors");
+        std::fs::File::create(&t5)
+            .unwrap()
+            .set_len(HAL9000_T5_FP16_BYTES)
+            .unwrap();
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "test:q4".into(),
+            mold_core::ModelConfig {
+                transformer: Some(
+                    root.path()
+                        .join("transformer-q4.gguf")
+                        .display()
+                        .to_string(),
+                ),
+                vae: Some(root.path().join("vae.safetensors").display().to_string()),
+                t5_encoder: Some(t5.display().to_string()),
+                family: Some("flux2".into()),
+                placement: Some(mold_core::DevicePlacement {
+                    text_encoders: mold_core::DeviceRef::Cpu,
+                    advanced: None,
+                }),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let (worker, worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(config, queue.clone(), pool, 1);
+        state.job_registry.register("print", "test:q4");
+        let (mut job, result_rx) = fake_generation("print");
+        job.request.model = "test:q4".to_string();
+        queue.submit(job, 1).await.unwrap();
+        publish_free_vram(&state, 24 << 30);
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            sampled_memory(HAL9000_TOTAL_BYTES, HAL9000_AVAILABLE_BYTES),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("print")
+            .expect("queued")
+            .preparation = PreparationState::Ready;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id,
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        let plan = coordinator
+            .generation_plans(&coordinator.pending["print"])
+            .expect("the plan resolves on 24 GiB of VRAM")
+            .remove(0);
+        let headroom = coordinator.memory.headroom_bytes();
+        assert_eq!(
+            headroom, 9_853_131_776,
+            "the fixture reproduces hal9000's headroom"
+        );
+        assert!(
+            plan.admission_host_demand_bytes() > headroom,
+            "the fixture must reproduce the shortfall ({} > {headroom})",
+            plan.admission_host_demand_bytes()
+        );
+        assert!(plan.admission_warm_host_demand_bytes() <= headroom);
+        (coordinator, worker, worker_rx, result_rx, plan, root)
+    }
+
+    fn granted(worker_rx: &std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>) -> bool {
+        matches!(
+            worker_rx.try_recv(),
+            Ok(crate::gpu_pool::GpuWorkerCommand::Grant(_))
+        )
+    }
+
+    /// hal9000, 2026-08-27: `flux-dev:q8` was resident with its 9.79 GB T5
+    /// parked in host RAM, and the two queued prints of that same model sat on
+    /// `insufficient_host_ram` — 9.85 GB of headroom against the plan's cold
+    /// 10.5 GB — until the model was unloaded by hand, after which each was
+    /// admitted against 30 GB and paid the cold reload. A device that already
+    /// holds the plan's engine is charged the warm increment instead.
+    #[tokio::test]
+    async fn a_resident_engine_never_blocks_its_own_model_on_host_ram() {
+        for (label, resident) in [("cold", false), ("warm", true)] {
+            let (mut coordinator, worker, worker_rx, mut result_rx, plan, _root) =
+                hal9000_host_blocked_coordinator().await;
+            if resident {
+                worker.set_resident_execution_fingerprint(Some(&plan.execution_fingerprint));
+            }
+
+            let _ = coordinator.dispatch_ready().await;
+
+            assert_eq!(
+                granted(&worker_rx),
+                resident,
+                "{label}: only the device already holding the engine is charged the warm increment"
+            );
+            assert_eq!(
+                coordinator.pending.contains_key("print"),
+                !resident,
+                "{label}"
+            );
+            assert!(
+                result_rx.try_recv().is_err(),
+                "{label}: a queued or granted print is never answered here"
+            );
+        }
+    }
+
+    /// The other way the same machine deadlocks: another model's idle engine
+    /// holds the RAM. Nothing is running, so nothing will ever give it back —
+    /// unless mold releases its own cache. The block is recorded with the
+    /// numbers the planner compared, one reclaim runs for the oldest blocked
+    /// job, and the job dispatches on the first plan after the release.
+    #[tokio::test]
+    async fn a_host_blocked_generation_reclaims_an_idle_engine_and_dispatches() {
+        let (mut coordinator, _worker, worker_rx, mut result_rx, plan, _root) =
+            hal9000_host_blocked_coordinator().await;
+        {
+            let mut cache = coordinator.state.model_cache.lock().await;
+            cache.insert(Box::new(NamedStubEngine("other-model".into())), 0);
+        }
+
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!granted(&worker_rx), "the cold demand does not fit");
+        let block = coordinator.pending["print"]
+            .memory_block
+            .clone()
+            .expect("the published block is recorded on the job");
+        assert_eq!(block.required_bytes, plan.admission_host_demand_bytes());
+        assert_eq!(block.headroom_bytes, 9_853_131_776);
+        assert!(matches!(block.reclaim, ReclaimAttempt::NotStarted));
+
+        let request = coordinator
+            .next_memory_reclaim()
+            .expect("an idle scheduler reclaims for a host-blocked job");
+        assert_eq!(
+            request,
+            ReclaimRequest {
+                job_id: "print".into(),
+                model: "test:q4".into(),
+                required_bytes: plan.admission_host_demand_bytes(),
+                kind: MemoryBlockKind::Host,
+            }
+        );
+        assert!(
+            coordinator.next_memory_reclaim().is_none(),
+            "one reclaim at a time"
+        );
+
+        // The eviction itself, as the run loop awaits it: the shared cache's
+        // idle engine goes, and the re-sample then clears the shortfall.
+        let samples = std::sync::atomic::AtomicUsize::new(0);
+        let headroom = || {
+            [9_853_131_776u64, 45 << 30][samples
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .min(1)]
+        };
+        let outcome = crate::host_reclaim::reclaim_host_headroom(
+            &coordinator.state,
+            &request.model,
+            request.required_bytes,
+            &headroom,
+        )
+        .await;
+        assert_eq!(outcome.evicted, vec!["other-model".to_string()]);
+        assert!(coordinator
+            .state
+            .model_cache
+            .lock()
+            .await
+            .reclaimable()
+            .is_empty());
+
+        coordinator.memory = sampled_memory(HAL9000_TOTAL_BYTES, 45 << 30);
+        let mut immediate = false;
+        coordinator.finish_memory_reclaim(&request.job_id, outcome, &mut immediate);
+        assert!(immediate, "a finished reclaim wakes planning");
+        assert!(matches!(
+            coordinator.pending["print"]
+                .memory_block
+                .as_ref()
+                .map(|block| &block.reclaim),
+            Some(ReclaimAttempt::Done(_))
+        ));
+
+        let _ = coordinator.dispatch_ready().await;
+        assert!(
+            granted(&worker_rx),
+            "the released headroom admits the print"
+        );
+        assert!(!coordinator.pending.contains_key("print"));
+        assert!(result_rx.try_recv().is_err());
+    }
+
+    /// The same machine, the other memory: an idle device whose resident
+    /// engine leaves the planner short of VRAM for a print that would fit
+    /// once that engine is gone. hal9000, 2026-08-27: a PuLID `flux-dev:q8`
+    /// print (22.2 GB) sat unplanned for five minutes beside an idle
+    /// `flux2-klein:q8` — no block reason, no bound, nothing running — and
+    /// dispatched the moment an unrelated print had evicted it.
+    async fn hal9000_vram_blocked_coordinator() -> (
+        Coordinator,
+        Arc<GpuWorker>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+        tokio::sync::oneshot::Receiver<Result<crate::state::GenerationJobResult, String>>,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "test:q4".into(),
+            mold_core::ModelConfig {
+                transformer: Some(
+                    root.path()
+                        .join("transformer-q4.gguf")
+                        .display()
+                        .to_string(),
+                ),
+                vae: Some(root.path().join("vae.safetensors").display().to_string()),
+                family: Some("flux2".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let (worker, worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(config, queue.clone(), pool, 1);
+        state.job_registry.register("print", "test:q4");
+        let (mut job, result_rx) = fake_generation("print");
+        job.request.model = "test:q4".to_string();
+        queue.submit(job, 1).await.unwrap();
+        // One gigabyte free beside an idle engine whose recorded footprint
+        // credits nothing back: the plan cannot be placed until it is gone.
+        publish_free_vram(&state, 1 << 30);
+        {
+            let mut cache = state.model_cache.lock().await;
+            cache.insert(Box::new(NamedStubEngine("other-model".into())), 0);
+        }
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            sampled_memory(HAL9000_TOTAL_BYTES, 60 << 30),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("print")
+            .expect("queued")
+            .preparation = PreparationState::Ready;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id,
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        (coordinator, worker, worker_rx, result_rx, root)
+    }
+
+    #[tokio::test]
+    async fn a_vram_blocked_generation_reclaims_an_idle_engine_and_dispatches() {
+        let (mut coordinator, worker, worker_rx, mut result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+        let device_id = worker_device_id(&worker);
+
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!granted(&worker_rx), "one gigabyte does not place the plan");
+        assert!(
+            !coordinator.settle_unschedulable_generations(),
+            "a fresh block is recorded, never refused"
+        );
+        let block = coordinator.pending["print"]
+            .memory_block
+            .clone()
+            .expect("the VRAM block is recorded on the job");
+        assert_eq!(
+            block.kind,
+            MemoryBlockKind::Device {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+            }
+        );
+        assert!(block.required_bytes > block.headroom_bytes, "{block:?}");
+        assert!(matches!(block.reclaim, ReclaimAttempt::NotStarted));
+
+        let request = coordinator
+            .next_memory_reclaim()
+            .expect("an idle scheduler reclaims for a VRAM-blocked job");
+        assert_eq!(request.kind, block.kind);
+        assert_eq!(request.required_bytes, block.required_bytes);
+
+        // The eviction as the run loop awaits it, re-sampled by the device's
+        // own driver reading: the idle engine goes and the shortfall clears.
+        let samples = std::sync::atomic::AtomicUsize::new(0);
+        let free = || {
+            Some(
+                [1u64 << 30, 24 << 30][samples
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    .min(1)],
+            )
+        };
+        let outcome = crate::host_reclaim::reclaim_device_headroom(
+            &coordinator.state,
+            &request.model,
+            request.required_bytes,
+            0,
+            &free,
+        )
+        .await;
+        assert_eq!(outcome.evicted, vec!["other-model".to_string()]);
+        assert!(!outcome.sample_failed);
+
+        publish_free_vram(&coordinator.state, 24 << 30);
+        let mut immediate = false;
+        coordinator.finish_memory_reclaim(&request.job_id, outcome, &mut immediate);
+        assert!(immediate, "a finished reclaim wakes planning");
+
+        let _ = coordinator.dispatch_ready().await;
+        assert!(granted(&worker_rx), "the released VRAM admits the print");
+        assert!(!coordinator.pending.contains_key("print"));
+        assert!(result_rx.try_recv().is_err());
+    }
+
+    /// A device the driver cannot read is not evidence of anything: the
+    /// reclaim evicts nothing, the block is asked again on the next idle turn,
+    /// and the wait is never bounded on the missing reading.
+    #[tokio::test]
+    async fn an_unreadable_device_reclaims_nothing_and_is_never_held_on_it() {
+        let (mut coordinator, _worker, worker_rx, mut result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!coordinator.settle_unschedulable_generations());
+        let request = coordinator.next_memory_reclaim().expect("blocked and idle");
+        let outcome = crate::host_reclaim::reclaim_device_headroom(
+            &coordinator.state,
+            &request.model,
+            request.required_bytes,
+            0,
+            &|| None,
+        )
+        .await;
+        assert!(outcome.sample_failed);
+        assert!(
+            outcome.evicted.is_empty(),
+            "nothing is released on a missing reading"
+        );
+        assert!(coordinator
+            .state
+            .model_cache
+            .lock()
+            .await
+            .contains("other-model"));
+        let mut immediate = false;
+        coordinator.finish_memory_reclaim(&request.job_id, outcome, &mut immediate);
+        coordinator.unschedulable_idle_grace_ms = 0;
+        assert!(
+            !coordinator.settle_unschedulable_generations(),
+            "a failed sample never bounds the wait"
+        );
+        assert!(coordinator.pending.contains_key("print"));
+        assert!(
+            coordinator.next_memory_reclaim().is_some(),
+            "the reclaim is asked again once the sampler can answer"
+        );
+        assert!(!granted(&worker_rx));
+        assert!(result_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_vram_shortfall_that_survives_reclaim_is_held_naming_the_device() {
+        let (mut coordinator, worker, worker_rx, mut result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+        let device_id = worker_device_id(&worker);
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!coordinator.settle_unschedulable_generations());
+        let request = coordinator.next_memory_reclaim().expect("blocked and idle");
+        let mut immediate = false;
+        coordinator.finish_memory_reclaim(
+            &request.job_id,
+            crate::host_reclaim::HostReclaimOutcome::default(),
+            &mut immediate,
+        );
+        coordinator.unschedulable_idle_grace_ms = 0;
+        assert!(
+            coordinator.settle_unschedulable_generations(),
+            "a surviving shortfall on an idle scheduler is bounded"
+        );
+        assert!(!coordinator.pending.contains_key("print"));
+        assert!(!granted(&worker_rx));
+        let error = match result_rx.try_recv().expect("a bounded wait is answered") {
+            Ok(_) => panic!("a held print is not a result"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("device memory") && error.contains(&device_id),
+            "the refusal names the memory and the device: {error}"
+        );
+        assert!(error.contains("still"), "{error}");
+    }
+
+    /// When the reclaim finds nothing to release, the wait is bounded like
+    /// every other idle wait — but as a RETRYABLE hold that names the
+    /// post-reclaim numbers, because freeing host memory and retrying the row
+    /// unchanged is exactly the recovery.
+    #[tokio::test]
+    async fn a_host_shortfall_that_survives_reclaim_is_held_with_its_numbers() {
+        let (mut coordinator, _worker, worker_rx, mut result_rx, _plan, _root) =
+            hal9000_host_blocked_coordinator().await;
+        let _ = coordinator.dispatch_ready().await;
+        let request = coordinator.next_memory_reclaim().expect("blocked and idle");
+        let mut immediate = false;
+        coordinator.finish_memory_reclaim(
+            &request.job_id,
+            crate::host_reclaim::HostReclaimOutcome::default(),
+            &mut immediate,
+        );
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!granted(&worker_rx));
+        assert!(
+            coordinator.next_memory_reclaim().is_none(),
+            "a finished reclaim is not repeated for the same block"
+        );
+
+        coordinator.unschedulable_idle_grace_ms = 0;
+        assert!(coordinator.settle_unschedulable_generations());
+        assert!(!coordinator.pending.contains_key("print"));
+        let error = match result_rx.try_recv().expect("a bounded wait is answered") {
+            Ok(_) => panic!("a shortfall must not settle as a completed print"),
+            Err(error) => error,
+        };
+        assert!(error.contains("test:q4"), "{error}");
+        assert!(error.contains("host memory"), "{error}");
+        assert!(error.contains("9.85 GB available"), "{error}");
+        assert!(error.contains("requires 10."), "{error}");
+        assert!(
+            !error.contains("unloading"),
+            "nothing was released: {error}"
+        );
+    }
+
+    /// A cancelled job must not leave its reclaim flushing every idle engine
+    /// on the machine: the run loop asks this before every turn and aborts.
+    #[tokio::test]
+    async fn a_reclaim_is_no_longer_wanted_once_its_job_leaves_the_queue() {
+        let (mut coordinator, _worker, _worker_rx, _result_rx, _plan, _root) =
+            hal9000_host_blocked_coordinator().await;
+        let _ = coordinator.dispatch_ready().await;
+        let request = coordinator.next_memory_reclaim().expect("blocked and idle");
+        assert!(coordinator.memory_reclaim_still_wanted(&request.job_id));
+
+        let cancelled = coordinator
+            .pending
+            .remove(&request.job_id)
+            .expect("the blocked job is pending");
+        assert!(!coordinator.memory_reclaim_still_wanted(&request.job_id));
+
+        // Finishing after the job left is harmless bookkeeping, not a panic.
+        let mut immediate = false;
+        coordinator.finish_memory_reclaim(
+            &request.job_id,
+            crate::host_reclaim::HostReclaimOutcome::default(),
+            &mut immediate,
+        );
+        drop(cancelled);
+    }
+
+    /// Running work is about to give its memory back; evicting under it would
+    /// only park the unload behind that render.
+    #[tokio::test]
+    async fn host_reclaim_never_starts_on_a_busy_scheduler() {
+        let (mut coordinator, worker, _worker_rx, _result_rx, _plan, _root) =
+            hal9000_host_blocked_coordinator().await;
+        let _ = coordinator.dispatch_ready().await;
+        assert!(coordinator.pending["print"].memory_block.is_some());
+
+        worker.in_flight.store(1, Ordering::SeqCst);
+        assert!(coordinator.next_memory_reclaim().is_none());
+        worker.in_flight.store(0, Ordering::SeqCst);
+        assert!(coordinator.next_memory_reclaim().is_some());
+    }
+
     /// The recovery half of #1272: a shortage that clears must not need a
     /// resubmission. The scheduler re-resolves plans on every planning turn, so
     /// the job dispatches on the first turn after capacity returns — nothing
@@ -9226,6 +10770,7 @@ mod tests {
                 "active-a".to_string(),
                 mold_core::QueueEstimateConfidence::Medium,
             )]),
+            &BTreeMap::new(),
             None,
         );
 
@@ -9314,6 +10859,7 @@ mod tests {
             &pool,
             &leases,
             &BTreeMap::new(),
+            &BTreeMap::new(),
             None,
         );
         assert_eq!(active.work_items.len(), 1);
@@ -9370,6 +10916,7 @@ mod tests {
             &queued_snapshot,
             &queued_plan,
             &pool,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             None,
@@ -10153,6 +11700,7 @@ mod tests {
                 model: "flux-dev:q4".to_string(),
                 request_json: r#"{"prompt":"patch target","model":"flux-dev:q4"}"#.to_string(),
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: root.path().join("gallery"),
                 target_gpu: Some(0),
                 target_device_id: None,
@@ -13831,6 +15379,102 @@ mod tests {
         );
     }
 
+    /// A minutes-long preparation must be visible AS a preparation.
+    ///
+    /// The planner reports every not-ready job as `NotReady`, which the wire
+    /// renamed `dependency_wait` — the same reason a job waiting on a
+    /// download gets. An H3 artifact pass on a spinning-disk model store is
+    /// minutes of that, with an idle GPU and nothing in the log, which is
+    /// exactly the "answered by nothing" state #1272 set out to close.
+    #[test]
+    fn a_preparing_generation_reports_its_own_reason_elapsed_time_and_progress() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = GpuPool {
+            workers: vec![worker].into(),
+        };
+        let mut work = WorkSnapshot::new(
+            "preparing-h3",
+            0,
+            vec![CandidatePlacement::new("cuda:0", "h3-plan", 1)],
+        )
+        .with_ready(false);
+        work.kind = WorkKind::Generation;
+        let snapshot = PlannerSnapshot::new(
+            3,
+            3,
+            monotonic_ms(),
+            64 << 30,
+            vec![DeviceSnapshot::idle("cuda:0", 24 << 30)],
+            vec![work],
+        );
+        let plan = Planner::default().plan(&snapshot).unwrap();
+
+        let unprepared = queue_plan_projection_at_unix(
+            &snapshot,
+            &plan,
+            &pool,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            1_000_000,
+        );
+        assert_eq!(
+            unprepared.work_items[0].blocked_reason,
+            Some(mold_core::QueueBlockedReason::DependencyWait),
+            "not-ready for any other reason keeps the established wire reason"
+        );
+        assert_eq!(unprepared.work_items[0].preparation_elapsed_ms, None);
+
+        let preparing = queue_plan_projection_at_unix(
+            &snapshot,
+            &plan,
+            &pool,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                "preparing-h3".to_string(),
+                PreparingView {
+                    elapsed_ms: 214_000,
+                    progress: Some(mold_core::QueuePreparationProgress {
+                        component: "Verifying MiniMax H3 artifacts".to_string(),
+                        bytes_done: 15_000_000_000,
+                        bytes_total: 37_000_000_000,
+                        phase_elapsed_ms: Some(96_000),
+                    }),
+                },
+            )]),
+            None,
+            1_000_000,
+        );
+        let item = &preparing.work_items[0];
+        assert_eq!(
+            item.blocked_reason,
+            Some(mold_core::QueueBlockedReason::Preparing)
+        );
+        assert_eq!(item.reason.as_deref(), Some("preparing"));
+        assert_eq!(item.preparation_elapsed_ms, Some(214_000));
+        let progress = item
+            .preparation_progress
+            .as_ref()
+            .expect("a reporting preparation must name what it is working through");
+        assert_eq!(progress.component, "Verifying MiniMax H3 artifacts");
+        assert_eq!(progress.bytes_done, 15_000_000_000);
+        assert_eq!(
+            progress.phase_elapsed_ms,
+            Some(96_000),
+            "a phase age is not the whole preparation's age"
+        );
+
+        let wire = serde_json::to_value(item).unwrap();
+        assert_eq!(wire["blocked_reason"], "preparing");
+        assert_eq!(wire["preparation_elapsed_ms"], 214_000);
+        assert_eq!(
+            wire["preparation_progress"]["bytes_total"],
+            37_000_000_000_u64
+        );
+    }
+
     struct SelectiveBlockingPreparer {
         release_blocked: Arc<tokio::sync::Notify>,
     }
@@ -13868,10 +15512,13 @@ mod tests {
             .unwrap()
             .preparation = PreparationState::Preparing;
         worker.in_flight.store(1, Ordering::SeqCst);
-        let mut deferred = crate::execution_plan::PreparedExecutionInputs::default();
-        deferred
-            .host_memory_retry_after_devices
-            .insert(device_id.clone());
+        let deferred = crate::execution_plan::PreparedExecutionInputs {
+            capacity_park: Some(crate::execution_plan::CapacityPark {
+                reason: "private H3 admission needs at least 1 host byte".to_string(),
+                retry_after_devices: [device_id.clone()].into_iter().collect(),
+            }),
+            ..Default::default()
+        };
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
                 work_id: "waiting-h3".to_string(),
@@ -13912,12 +15559,135 @@ mod tests {
         coordinator.stop_preparations().await;
     }
 
+    /// Park a synthetic generation exactly as H3 admission does, and hand back
+    /// the coordinator plus the client's result channel.
+    async fn parked_h3_coordinator(
+        reason: &str,
+    ) -> (
+        Coordinator,
+        Arc<GpuWorker>,
+        tokio::sync::oneshot::Receiver<Result<crate::state::GenerationJobResult, String>>,
+    ) {
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(2);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 2);
+        state.job_registry.register("parked-h3", "minimax-h3-fl2va");
+        let (job, result) = fake_generation("parked-h3");
+        queue.submit(job, 2).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("parked-h3")
+            .unwrap()
+            .preparation = PreparationState::Preparing;
+        let parked = crate::execution_plan::PreparedExecutionInputs {
+            capacity_park: Some(crate::execution_plan::CapacityPark {
+                reason: reason.to_string(),
+                retry_after_devices: [device_id].into_iter().collect(),
+            }),
+            ..Default::default()
+        };
+        coordinator.handle_preparation_event(
+            PreparationEvent::Ready {
+                work_id: "parked-h3".to_string(),
+                prepared: Box::new(PreparedGeneration {
+                    execution_inputs: Some(parked),
+                    ..Default::default()
+                }),
+            },
+            &mut immediate,
+        );
+        (coordinator, worker, result)
+    }
+
+    /// #1272's rule reaches the park: a job mold is holding is either
+    /// schedulable, running, or ANSWERED. A park is a retry while the fleet
+    /// can still change the answer, and once nothing is running it has to
+    /// become a refusal that names the numbers it was parked on — not an
+    /// indefinite `dependency_wait` on an idle GPU.
+    #[tokio::test]
+    async fn a_park_that_survives_an_idle_grace_is_refused_with_its_shortfall_numbers() {
+        let reason = "private H3 canonical target needs at least 6780000000 device bytes, \
+                      exceeding the 5450000000 byte device admission sample";
+        let (mut coordinator, worker, mut result) = parked_h3_coordinator(reason).await;
+        coordinator.unschedulable_idle_grace_ms = 0;
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+
+        assert!(coordinator.settle_unschedulable_generations());
+        assert!(!coordinator.pending.contains_key("parked-h3"));
+        let error = match result.try_recv().expect("a bounded park must be answered") {
+            Ok(_) => panic!("a park must not settle as a completed print"),
+            Err(error) => error,
+        };
+        assert!(error.contains("6780000000"), "{error}");
+        assert!(error.contains("5450000000"), "{error}");
+        coordinator.stop_preparations().await;
+    }
+
+    /// The other half of the same rule: a job waiting behind running work is
+    /// waiting for something real, and bounding it would refuse a print the
+    /// machine is about to be able to render.
+    #[tokio::test]
+    async fn a_park_is_never_settled_while_a_device_is_busy() {
+        let (mut coordinator, worker, mut result) =
+            parked_h3_coordinator("private H3 admission needs at least 1 host byte").await;
+        coordinator.unschedulable_idle_grace_ms = 0;
+        worker.in_flight.store(1, Ordering::SeqCst);
+
+        assert!(!coordinator.settle_unschedulable_generations());
+        assert!(coordinator.pending.contains_key("parked-h3"));
+        assert!(
+            result.try_recv().is_err(),
+            "a busy host must answer nothing"
+        );
+        coordinator.stop_preparations().await;
+    }
+
+    /// A park survives its OWN re-preparation. `prepared_inputs` is dropped on
+    /// every retry, so a park kept only there is forgotten once a second and
+    /// the idle grace never accrues — which is exactly how a job waits forever
+    /// on an idle machine.
+    #[tokio::test]
+    async fn a_park_is_retained_across_its_own_repreparation() {
+        let (mut coordinator, _worker, _result) =
+            parked_h3_coordinator("private H3 admission needs at least 1 host byte").await;
+        coordinator.unschedulable_idle_grace_ms = 60_000;
+
+        assert!(coordinator.reset_stale_preparations());
+        let pending = &coordinator.pending["parked-h3"];
+        assert_eq!(pending.preparation, PreparationState::Preparing);
+        assert!(pending.prepared_inputs.is_none());
+        assert!(
+            pending.capacity_park.is_some(),
+            "a re-preparing park must still be a retained answer"
+        );
+        // Its own retry must not read as the machine being busy, or the grace
+        // this park is bounded by could never start.
+        assert!(!coordinator.settle_unschedulable_generations());
+        assert!(coordinator.pending["parked-h3"]
+            .unschedulable_since_ms
+            .is_some());
+        coordinator.stop_preparations().await;
+    }
+
     impl DependencyPreparer for SelectiveBlockingPreparer {
         fn prepare(
             &self,
             _state: AppState,
             _work_id: String,
-            request: mold_core::GenerateRequest,
+            request: crate::queue_media_runtime::ZeroizingGenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
             _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {
@@ -13989,6 +15759,175 @@ mod tests {
         coordinator.stop_preparations().await;
     }
 
+    /// Records what a Ref2VA preparation was handed and proves the staged
+    /// files were readable and digest-verifiable while it ran.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    struct ReferenceRecordingPreparer {
+        observed_references: Arc<AtomicUsize>,
+        verified_bindings: Arc<AtomicUsize>,
+    }
+
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    impl DependencyPreparer for ReferenceRecordingPreparer {
+        fn prepare(
+            &self,
+            _state: AppState,
+            _work_id: String,
+            request: crate::queue_media_runtime::ZeroizingGenerateRequest,
+            _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+            context: crate::variant_dependencies::DependencyPreparationContext,
+        ) -> PreparationFuture {
+            let observed = self.observed_references.clone();
+            let verified = self.verified_bindings.clone();
+            Box::pin(async move {
+                let view = context
+                    .h3_resolved_references
+                    .ok_or_else(|| "Ref2VA preparation was handed no reference view".to_string())?;
+                observed.store(view.len(), std::sync::atomic::Ordering::SeqCst);
+                let bindings = view
+                    .inference_bindings(&request, None)
+                    .map_err(|error| format!("{error:#}"))?;
+                verified.store(bindings.len(), std::sync::atomic::Ordering::SeqCst);
+                Ok(PreparedGeneration::default())
+            })
+        }
+    }
+
+    /// Ref2VA dependency preparation reads the staged references from its
+    /// OWN hydration of the durable media set — nothing on the job carries a
+    /// reference set — and the view it is handed binds every file by digest.
+    #[cfg(all(unix, any(feature = "h3", feature = "h3-private-uat")))]
+    #[tokio::test]
+    async fn ref2va_preparation_binds_references_from_its_own_hydration() {
+        use sha2::{Digest as _, Sha256};
+
+        let home = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let files: [&[u8]; 2] = [b"subject-reference-bytes", b"style-reference-bytes"];
+        let paths = files
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                let path = staging.path().join(format!("reference-{index}.media"));
+                std::fs::write(&path, bytes).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let references = files
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                serde_json::json!({
+                    "kind": "image",
+                    "media": { "authority": "descriptor" },
+                    "provenance": {
+                        "name": format!("reference-{}.png", index + 1),
+                        "sha256": format!("{:x}", Sha256::digest(bytes))
+                    },
+                    "mime_type": "image/png",
+                    "width": 1024,
+                    "height": 768
+                })
+            })
+            .collect::<Vec<_>>();
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "ordered references",
+            "model": mold_core::minimax_h3::REF2VA_COMFY,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": 4,
+            "guidance": 0.0,
+            "strength": 1.0,
+            "seed": 7,
+            "batch_size": 1,
+            "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+            "fps": mold_core::minimax_h3::FIXED_FPS,
+            "output_format": "mp4",
+            "references": references
+        }))
+        .unwrap();
+        let grant = crate::h3_private_bridge::capture_durable_h3_private_ingress(
+            &request,
+            None,
+            "scheduler-test-instance",
+        )
+        .expect("Ref2VA descriptor request is a reviewed partition")
+        .expect("the private boundary claims Ref2VA");
+        let staged =
+            crate::reference_uploads::StagedReferences::from_files_for_test(&request, paths);
+        let (deferred, request_json) = crate::queue_media_runtime::seal_request_for_test(
+            home.path(),
+            "ref2va",
+            request,
+            Some(&staged),
+        );
+        drop(staged);
+        drop(staging);
+
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 4);
+        state
+            .job_registry
+            .register("ref2va", mold_core::minimax_h3::REF2VA_COMFY);
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        queue
+            .submit(
+                GenerationJob {
+                    id: "ref2va".to_string(),
+                    durable_queue_rank: None,
+                    request: serde_json::from_str(&request_json).unwrap(),
+                    deferred_media: Some(deferred),
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: None,
+                    journal: None,
+                    h3_private_ingress_grant: Some(grant),
+                },
+                4,
+            )
+            .await
+            .unwrap();
+
+        let observed_references = Arc::new(AtomicUsize::new(0));
+        let verified_bindings = Arc::new(AtomicUsize::new(0));
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ReferenceRecordingPreparer {
+                observed_references: observed_references.clone(),
+                verified_bindings: verified_bindings.clone(),
+            }),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator.start_needed_preparations();
+        let event = tokio::time::timeout(Duration::from_secs(5), coordinator.preparation_rx.recv())
+            .await
+            .expect("Ref2VA preparation must complete")
+            .expect("preparation event");
+        match &event {
+            PreparationEvent::Ready { work_id, .. } => assert_eq!(work_id, "ref2va"),
+            PreparationEvent::Failed { error, .. } => {
+                panic!("Ref2VA preparation failed: {error}")
+            }
+        }
+        assert_eq!(
+            observed_references.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            verified_bindings.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        coordinator.stop_preparations().await;
+    }
+
     struct ConcurrencyProbePreparer {
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
@@ -14000,7 +15939,7 @@ mod tests {
             &self,
             _state: AppState,
             _work_id: String,
-            _request: mold_core::GenerateRequest,
+            _request: crate::queue_media_runtime::ZeroizingGenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
             _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {
@@ -14194,9 +16133,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn cold_catalog_overlay_survives_full_coordinator_preview_and_config_refresh() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let install_dir = root.path().join("cv-2937936");
         let primary = install_dir.join("flux2/catalog/model.safetensors");
@@ -14366,7 +16303,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn placement_preview_reports_only_the_selected_devices_pending_downloads() {
+        let _env = crate::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let transformer = root.path().join("transformer.safetensors");
         let vae = root.path().join("vae.safetensors");
@@ -14493,7 +16432,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn exact_placement_preview_is_stable_device_specific_and_read_only() {
+        let _env = crate::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         for name in [
             "transformer.safetensors",
@@ -15786,7 +17727,6 @@ mod tests {
             mold_scheduler::WorkKind::StandaloneUpscale,
             mold_scheduler::WorkKind::PromptExpansion,
             mold_scheduler::WorkKind::AdminModelLoad,
-            mold_scheduler::WorkKind::BatchChild,
         ] {
             assert_eq!(
                 planned_memory_bytes(kind, 20 << 30, 4 << 30),

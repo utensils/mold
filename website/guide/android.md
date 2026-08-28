@@ -56,9 +56,8 @@ its badge, and clear with Advanced Reset while the photo remains attached.
 
 Identity requests cannot combine with a LoRA or img2img source. Every refusal
 is shown inline and queues nothing. Under **Auto** or **Most capable**, Mold
-considers only machines whose own model row advertises identity support and
-does not use the legacy placement fallback. Prepared Batch siblings inherit the
-same photo and controls.
+considers only machines whose own model row advertises identity support.
+Prepared Batch siblings inherit the same photo and controls.
 
 Library **Info** shows the photo name, short SHA-256, effective strength, and
 start step. **Use as prompt** restores the controls and re-attaches the exact

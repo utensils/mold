@@ -16,6 +16,7 @@ vi.mock("../../lib/ipc", () => ({ inTauri: () => false, ipc: {} }));
 import HostQueuePanel from "./HostQueuePanel.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
+import { useGenerationStore } from "../../stores/generation";
 import { useJobsStore, type QueueEntry } from "../../stores/jobs";
 import type { QueuePlan } from "@studio/api/queuePlan";
 
@@ -43,6 +44,7 @@ async function mountPanel(
     routes: [
       { path: "/", component: stub },
       { path: "/generate", component: stub },
+      { path: "/create", component: stub },
     ],
   });
   router.push("/");
@@ -102,6 +104,46 @@ describe("HostQueuePanel", () => {
     await wrapper.get("[data-test='queue-row']").trigger("click");
     await flushPromises();
     expect(wrapper.find("[data-test='queue-entry-drawer']").exists()).toBe(true);
+  });
+
+  it("shows this app's own submitted request when the durable listing has none", async () => {
+    const { wrapper } = await mountPanel([], [queued("srv-0", 1, 0)]);
+    const generation = useGenerationStore();
+    generation.jobs.push({
+      clientId: 7,
+      id: "srv-0",
+      request: {
+        prompt: "a red bicycle",
+        model: "flux2-klein",
+        width: 1024,
+        height: 1024,
+      },
+    } as never);
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-row']").trigger("click");
+    await flushPromises();
+    const drawer = wrapper.get("[data-test='queue-entry-drawer']");
+    expect(drawer.get("[data-test='queue-detail-prompt']").text()).toBe("a red bicycle");
+    expect(drawer.find("[data-test='queue-detail-settings-notice']").exists()).toBe(false);
+    expect(drawer.get("[data-test='queue-detail-reuse']").attributes("disabled")).toBeUndefined();
+  });
+
+  it("confirms a cancellation from the drawer before touching the host", async () => {
+    const { wrapper, jobs } = await mountPanel([], [queued("srv-0", 1, 0)]);
+    const cancel = vi.spyOn(jobs, "cancelJob").mockResolvedValue(undefined as never);
+    await wrapper.get("[data-test='queue-row']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-detail-cancel']").trigger("click");
+    await flushPromises();
+    expect(cancel).not.toHaveBeenCalled();
+
+    // ConfirmDialog teleports to the body, so it is not inside the wrapper.
+    const accept = document.querySelector<HTMLButtonElement>("[data-test='confirm-accept']");
+    accept?.click();
+    await flushPromises();
+    expect(cancel).toHaveBeenCalledWith("local", "srv-0");
   });
 
   it("shows the configurable empty line for a host with nothing queued", async () => {

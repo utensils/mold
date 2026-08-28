@@ -2,9 +2,15 @@ import {
   IncompatibleHostError,
   apiFetchTo,
   apiJsonTo,
+  parseCurrentServerStatus,
   type ApiTarget,
 } from "./client";
 import { parseHostMemory, type HostMemorySnapshot } from "../lib/hostMemory";
+import {
+  getGenerationBatch,
+  isDefiniteGenerationAdmissionRejection,
+  type GenerationBatchStatus,
+} from "./generationAdmission";
 
 export type EstimateConfidence = "low" | "medium" | "high" | (string & {});
 export type QueueLaneKind = "device" | "host_utility" | (string & {});
@@ -22,7 +28,17 @@ export interface QueueEntry {
   metadata?: unknown;
   seed_pinned?: boolean | null;
   durable?: boolean | null;
+  /** Whether this row was resumed from the journal rather than submitted by a
+   * live client (additive; absent on older servers). */
+  replayed?: boolean | null;
+  /** How many times a worker has claimed this row for execution. Diagnoses a
+   * held row (additive; absent on older servers). */
+  dispatch_attempts?: number | null;
   held_reason?: string | null;
+  /** Durable preparation error. Present on held protocol-v2 rows. */
+  error?: string | null;
+  /** Exact opt-in fence for POST /api/queue/{id}/retry. */
+  retryable?: boolean | null;
 }
 
 export interface QueueWorkItem {
@@ -50,6 +66,16 @@ export interface QueueWorkItem {
   reason?: string | null;
   blocked_reason?: string | null;
   assignment_reason?: string | null;
+  /** Milliseconds this job's preparation has been running (additive). */
+  preparation_elapsed_ms?: number | null;
+  /** What the preparation is working through, when the preparer reports it. */
+  preparation_progress?: {
+    component: string;
+    bytes_done: number;
+    bytes_total: number;
+    /** Age of the current phase alone, reset when the phase changes. */
+    phase_elapsed_ms?: number | null;
+  } | null;
   warm_wait_deadline_unix_ms?: number | null;
   activity_phase?:
     | "queued"
@@ -324,6 +350,179 @@ export async function cancelQueueJob(
   await apiFetchTo(target, `/api/queue/${encodeURIComponent(workId)}`, {
     method: "DELETE",
   });
+}
+
+export interface QueueJobAuthority {
+  instanceId: string;
+  batchId: string;
+  clientBatchId: string;
+  jobId: string;
+}
+
+/** Resume one explicitly retryable durable hold on the exact host. The body
+ * repeats the complete captured authority so the server can fence the
+ * mutation transaction rather than trusting a preceding status read. */
+export async function retryQueueJob(
+  target: ApiTarget,
+  authority: QueueJobAuthority,
+): Promise<void> {
+  await apiFetchTo(
+    target,
+    `/api/queue/${encodeURIComponent(authority.jobId)}/retry`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        instance_id: authority.instanceId,
+        batch_id: authority.batchId,
+        client_batch_id: authority.clientBatchId,
+        job_id: authority.jobId,
+      }),
+    },
+  );
+}
+
+export type RetryQueueJobOutcome =
+  | { kind: "accepted" }
+  | { kind: "reconciled"; batch: GenerationBatchStatus }
+  | { kind: "uncertain"; error: string };
+
+const AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS = 5;
+const AMBIGUOUS_RETRY_CONFIRM_DELAY_MS = 1_000;
+
+function validatedRetryChild(
+  batch: GenerationBatchStatus,
+  authority: QueueJobAuthority,
+) {
+  const child = batch.children.find(
+    (candidate) => candidate.job_id === authority.jobId,
+  );
+  if (
+    batch.instance_id !== authority.instanceId ||
+    batch.id !== authority.batchId ||
+    batch.client_batch_id !== authority.clientBatchId ||
+    !child
+  ) {
+    throw new Error(
+      "The retry reconciliation response did not match its captured authority.",
+    );
+  }
+  return child;
+}
+
+function retryConfirmationDelay(): Promise<void> {
+  return new Promise((resolve) =>
+    setTimeout(resolve, AMBIGUOUS_RETRY_CONFIRM_DELAY_MS),
+  );
+}
+
+/** Retry once, then recover a lost/invalid response only through the captured
+ * batch authority. An uncertain mutation is never permission to send a second
+ * retry POST. */
+export async function retryQueueJobRecoveringAmbiguity(
+  target: ApiTarget,
+  authority: QueueJobAuthority,
+): Promise<RetryQueueJobOutcome> {
+  try {
+    await retryQueueJob(target, authority);
+    return { kind: "accepted" };
+  } catch (error) {
+    if (isDefiniteGenerationAdmissionRejection(error)) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    let pendingDetail = detail;
+    for (
+      let attempt = 0;
+      attempt < AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS;
+      attempt += 1
+    ) {
+      let lookup;
+      try {
+        lookup = await getGenerationBatch(target, authority.batchId);
+      } catch (lookupError) {
+        const lookupDetail =
+          lookupError instanceof Error
+            ? lookupError.message
+            : String(lookupError);
+        pendingDetail = `${detail}; exact retry reconciliation failed: ${lookupDetail}`;
+        if (
+          isDefiniteGenerationAdmissionRejection(lookupError) ||
+          attempt + 1 === AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+        ) {
+          return { kind: "uncertain", error: pendingDetail };
+        }
+        await retryConfirmationDelay();
+        continue;
+      }
+      if (lookup.kind === "missing") {
+        pendingDetail = `${detail}; the durable batch lookup is still missing`;
+        if (attempt + 1 === AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS) {
+          return { kind: "uncertain", error: pendingDetail };
+        }
+        await retryConfirmationDelay();
+        continue;
+      }
+      const batch = lookup.batch;
+      const child = validatedRetryChild(batch, authority);
+      if (
+        child.state !== "held" ||
+        attempt + 1 === AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+      ) {
+        return { kind: "reconciled", batch };
+      }
+      await retryConfirmationDelay();
+    }
+    return { kind: "uncertain", error: pendingDetail };
+  }
+}
+
+export type QueueJobMutation = "cancel" | "retry";
+
+/** Mutate durable work only after the target proves it is still the server
+ * instance that admitted the job. URLs and credentials can outlive a server
+ * replacement, so neither is sufficient authority for a recovered job. */
+export async function mutateQueueJobOnExpectedInstance(
+  target: ApiTarget,
+  authority: QueueJobAuthority,
+  mutation: QueueJobMutation,
+): Promise<void> {
+  if (!authority.instanceId.trim()) {
+    throw new TypeError("queue mutation requires an expected server instance");
+  }
+  const status = parseCurrentServerStatus(
+    await apiJsonTo<unknown>(target, "/api/status"),
+  );
+  if (status.instance_id !== authority.instanceId) {
+    throw new Error(
+      "The original machine identity changed; this queue action is unavailable.",
+    );
+  }
+  if (mutation === "cancel") {
+    await cancelQueueJob(target, authority.jobId);
+  } else {
+    await retryQueueJob(target, authority);
+  }
+}
+
+/**
+ * Send one queued job to the back of the line.
+ *
+ * `PATCH /api/queue/:id {position}` clamps a large index to the tail, so this
+ * needs no read of the current depth — which matters on a phone, where the
+ * listing it would read is a bounded page rather than the whole queue.
+ */
+export async function moveQueueJobToBack(
+  target: ApiTarget,
+  workId: string,
+): Promise<QueueEntry> {
+  return apiJsonTo<QueueEntry>(
+    target,
+    `/api/queue/${encodeURIComponent(workId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ position: Number.MAX_SAFE_INTEGER }),
+    },
+  );
 }
 
 /** Set or clear a durable stable-device pin for queued work. */

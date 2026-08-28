@@ -4,18 +4,20 @@ import type {
   DurableMediaCapabilities,
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
-import { supportsDurableRequest } from "@studio/api/generationAdmission";
+import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
+import {
+  generationTrackerSettled,
+  reconciliationPresentation,
+} from "@studio/lib/generationPresentation";
 import {
   buildGenerationBatchStatusRequest,
   createGenerationBatchTracker,
-  isTerminalGenerationPhase,
   mergeBulkGenerationBatchResponse,
   reduceGenerationLifecycle,
   type GenerationBatchTracker,
   type GenerationLifecycleAction,
   type GenerationLifecycleJob,
 } from "@studio/lib/generationLifecycle";
-import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 
 export const MOBILE_DURABLE_GENERATIONS_KEY = "mold.mobile.durable-generations.v1";
 
@@ -219,24 +221,32 @@ export function saveMobileDurableGenerationRecoveries(
   }
 }
 
-/** Decide against the exact frozen host capability. Unsupported media stays
- * on the authenticated legacy stream; automatic chains keep their existing
- * durable sequence protocol. */
-export function useMobileDurableGenerationLifecycle(input: {
+/**
+ * The named reason this machine cannot be queued to, or `null` when it can.
+ * Host-level by construction: the durable protocol carries every request
+ * trait, so the server's typed admission refusal is the only authority for
+ * what it cannot take.
+ */
+export function mobileDurableGenerationRefusal(input: {
   queue: DurableGenerationQueueCapabilities | null | undefined;
   durableMedia?: DurableMediaCapabilities | null | undefined;
-  requests: readonly GenerateRequest[];
-  chain: boolean;
-  modelFamily?: string | null;
-}): boolean {
-  return (
-    !input.chain &&
-    input.requests.length > 0 &&
-    !input.requests.some((request) => isMinimaxH3Identity(input.modelFamily, request.model)) &&
-    input.requests.every((request) =>
-      supportsDurableRequest(input.queue, input.durableMedia, request),
-    )
+  hostLabel: string;
+  instanceId?: string | null | undefined;
+}): string | null {
+  if (!input.instanceId?.trim()) {
+    return `${input.hostLabel} has not reported its server instance yet. Nothing was queued.`;
+  }
+  const policy = generationHostSubmissionPolicy(
+    { kind: "pinned", hostId: "frozen" },
+    {
+      hostId: "frozen",
+      queue: input.queue ?? null,
+      durableMedia: input.durableMedia ?? null,
+    },
   );
+  return policy.admission === "canonical_durable"
+    ? null
+    : `${input.hostLabel} cannot queue this print: ${policy.refusal}. Nothing was queued.`;
 }
 
 export function mobileDurablePresentations(
@@ -321,13 +331,7 @@ export function mobileDurableJobs(
 export function mobileDurableRecoveryIsTerminal(
   recovery: MobileDurableGenerationRecovery,
 ): boolean {
-  const jobs = mobileDurableJobs(recovery);
-  return (
-    recovery.tracker.admission.phase === "rejected" ||
-    (jobs.length === recovery.presentations.length &&
-      jobs.length > 0 &&
-      jobs.every((job) => isTerminalGenerationPhase(job.phase)))
-  );
+  return generationTrackerSettled(recovery.tracker, recovery.presentations.length);
 }
 
 export function mobileDurableAdmissionEffectKey(recovery: MobileDurableGenerationRecovery): string {
@@ -341,14 +345,23 @@ export function mobileDurableTerminalEffectsClaimed(
   recovery: MobileDurableGenerationRecovery,
 ): boolean {
   if (!mobileDurableRecoveryIsTerminal(recovery)) return false;
+  // A batch whose authority was lost is retired by the app, which owes the
+  // user its "Outcome unknown" rows first; it never reads as fully claimed,
+  // least of all when no child ever arrived and the job list is empty.
+  if (reconciliationPresentation(recovery.tracker.reconciliation, null).kind === "unknown") {
+    return false;
+  }
   if (recovery.tracker.admission.phase === "rejected") {
     return recovery.claimedEffects[mobileDurableAdmissionEffectKey(recovery)]?.viewer === true;
   }
   return mobileDurableJobs(recovery).every((job) => {
     const effects = recovery.claimedEffects[job.key];
+    // Only a completion that PUBLISHED a file owes Photos and Library
+    // effects; one that named no file settled as a failure.
+    const published = job.phase === "complete" && !!job.result?.filename;
     return (
       effects?.viewer === true &&
-      (job.phase !== "complete" || (effects.photos === true && effects.gallery === true))
+      (!published || (effects.photos === true && effects.gallery === true))
     );
   });
 }

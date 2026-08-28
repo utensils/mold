@@ -355,26 +355,6 @@ export async function fetchGenerationEstimate(
   );
 }
 
-export async function generateStream(
-  req: GenerateRequestWire,
-  handlers: GenerateStreamHandlers,
-  signal?: AbortSignal,
-  target?: StreamTarget,
-): Promise<void> {
-  await postSseJsonStream<
-    GenerateRequestWire,
-    SseProgressEvent,
-    SseCompleteEvent
-  >({
-    url: `${targetBase(target)}/api/generate/stream`,
-    body: req,
-    signal,
-    headers: targetHeaders(target),
-    handlers,
-    silentCloseMessage: "stream closed before completion",
-  });
-}
-
 export interface UpscaleStreamHandlers {
   onProgress: (evt: SseProgressEvent) => void;
   onComplete: (evt: SseUpscaleCompleteEvent) => void;
@@ -411,26 +391,6 @@ export interface ChainStreamHandlers {
 /** POST /api/generate/chain/stream — SSE stream for chained video
  * generation. Same SSE framing as `/api/generate/stream` but with a
  * `ChainRequest` body and chain-shaped progress/complete events. */
-export async function generateChainStream(
-  req: ChainRequestWire,
-  handlers: ChainStreamHandlers,
-  signal?: AbortSignal,
-  target?: StreamTarget,
-): Promise<void> {
-  await postSseJsonStream<
-    ChainRequestWire,
-    ChainProgressEvent,
-    SseChainCompleteEvent
-  >({
-    url: `${targetBase(target)}/api/generate/chain/stream`,
-    body: req,
-    signal,
-    headers: targetHeaders(target),
-    handlers,
-    silentCloseMessage: "stream closed before completion",
-  });
-}
-
 /** HTTP failure that keeps the status reachable — amend conflict handling
  * (409 → create-as-new fallback) branches on it. */
 export class ApiHttpError extends Error {

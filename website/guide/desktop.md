@@ -97,8 +97,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   with a compact first-eight review and bounded Review all pages. Mold shows
   and freezes the resolved host for expansion and every sibling. One reviewed
   set may contain up to 10,000 variations as a memory-safety boundary; the
-  number of sets you can queue is not limited. Once the host
-  accepts a batch, the composer is immediately available to queue another
+  number of sets you can queue is not limited. Every print — Batch 1, Batch N,
+  and each prepared variation — is admitted through one durable
+  `/api/generation-batches` operation, chunked at the machine's advertised
+  limit; held children remain visible and retryable. A machine that cannot
+  carry a request refuses it by name and queues nothing. Once the host accepts a batch, the composer is immediately available to queue another
   while the earlier work continues in Activity. When a Batch 1 rewrite becomes stale, Create immediately
   offers to re-expand the original for the current model and generate, generate
   the visible rewrite anyway, or restore the original; generation errors use
@@ -485,6 +488,15 @@ wire types as the CLI and web UI:
   Reorder, Pause, and Cancel all are feature-detected via `/api/capabilities`
   (`queue.can_reorder` gates reorder), so older servers simply hide the
   controls. The same queue mirrors as an activity strip on Create.
+  Click a job to open its detail panel: the prompt, the settings it was
+  submitted with, where it sits in line, when it was submitted, whether it
+  survives a restart, and — for a job the machine has parked — the full reason
+  and error with a **Copy details** button. A running job shows its live
+  denoise preview there too. From the panel you can **Reuse settings** (which
+  opens Create with everything restored), **Cancel** the job, or **Retry** one
+  this app submitted that the machine parked. A job that has only just been
+  accepted may not show its settings yet — the machine lists it before it loads
+  the request — and the panel says so rather than pretending they are missing.
 - **History (in Library)** — three lenses: **Runs** (every finished generation
   with its thumbnail, model, size, seed, and step count — click to reuse the
   full settings including the seed), **Prompts** (the raw prompt log,

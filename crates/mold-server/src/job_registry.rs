@@ -16,9 +16,11 @@
 //! actively running on some worker.
 
 use crate::events::EventBroadcaster;
+use mold_core::queue_progress::QueueJobProgress;
+use mold_core::types::SseProgressEvent;
 use mold_core::ServerEvent;
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,6 +41,24 @@ pub enum JobLifecycle {
     /// its recorded request could not be reconciled. Listed so an operator can
     /// see it, never auto-run.
     Held,
+}
+
+/// Number a listing's rows in dispatch order, skipping held ones.
+///
+/// `position` answers "how many jobs are ahead of me", and a held row is
+/// ahead of nobody: it is parked until an operator retries it. Counting it
+/// put a parked job at 0 (rendered "Next up") and everything queued behind
+/// it one place further back than the host would actually run it. A held row
+/// keeps the position of the next schedulable row so the field stays a
+/// `usize`; every renderer reads `state` first and never shows it.
+pub(crate) fn assign_positions(entries: &mut [JobEntry], offset: usize) {
+    let mut next = offset;
+    for entry in entries.iter_mut() {
+        entry.position = next;
+        if entry.state != JobLifecycle::Held {
+            next += 1;
+        }
+    }
 }
 
 /// One row in the `GET /api/queue` response.
@@ -91,6 +111,26 @@ pub struct JobEntry {
     /// Why a held job is parked. Present only for `state: held`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_reason: Option<String>,
+    /// Durable preparation error for a held job. Additive alias with clearer
+    /// lifecycle semantics than the legacy `held_reason` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Whether `POST /api/queue/{id}/retry` may safely resume this held job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// Durable batch this row is a child of. Retry demands the whole
+    /// authority (instance + batch + client batch + job) and only the
+    /// instance belongs to the server, so a listing that withheld this left
+    /// every client guessing which batch a held job belonged to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// The client-minted idempotency id of [`Self::batch_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_batch_id: Option<String>,
+    /// One-based position of this child within its batch, as
+    /// `GenerationBatchChild::index` reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u32>,
 }
 
 /// Whole-queue listing returned by `GET /api/queue`. Wrapped in a struct so
@@ -128,9 +168,9 @@ struct EntryInternal {
     target_gpu: Option<usize>,
     seed_pinned: Option<bool>,
     metadata: Option<Box<mold_core::OutputMetadata>>,
-    /// Latest denoise preview for this live row. It is served separately so
+    /// Latest folded progress for this live row. It is served separately so
     /// `/api/queue` polling never carries image payloads.
-    preview: Option<QueueJobPreview>,
+    progress: Option<QueueJobProgress>,
     /// Cancellation signal for `DELETE /api/queue/:id`. The submitting
     /// handler holds the clone returned by `register*()` and selects on
     /// `notified()` alongside the job's result channel; `cancel_queued`
@@ -142,6 +182,10 @@ struct EntryInternal {
     /// hand-off race and cancels the token as soon as it appears.
     running_cancel: Option<mold_inference::InferenceCancellationToken>,
     cancel_requested: bool,
+    /// Terminal publication has won the lifecycle race. Keep the row visible
+    /// until SQLite is settled so DELETE cannot fall through to the durable
+    /// row and revoke authority after bytes have started publishing.
+    completion_claimed: bool,
     /// Exact route-owned token that temporarily excludes this queued row from
     /// scheduler planning/grant while its durable PATCH is in flight.
     queue_patch_token: Option<u64>,
@@ -158,6 +202,7 @@ pub enum TargetGpuUpdateError {
 pub enum QueuedJobCancelError {
     NotFound,
     AlreadyRunning,
+    CompletionClaimed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,7 +238,6 @@ pub(crate) enum DispatchAttemptError<T> {
 /// state rather than propagating the panic into the dispatcher hot path.
 pub struct JobRegistry {
     inner: RwLock<Vec<EntryInternal>>,
-    batch_parents: RwLock<HashMap<String, BatchParentEntry>>,
     mutation_sequence: AtomicU64,
     queue_patch_sequence: AtomicU64,
     mutation_notify: Arc<Notify>,
@@ -204,27 +248,44 @@ pub struct JobRegistry {
     events: Option<Arc<EventBroadcaster>>,
 }
 
-#[derive(Clone)]
-struct BatchParentEntry {
-    children: BTreeSet<String>,
-    cancel: tokio_util::sync::CancellationToken,
-}
-
 /// Cheap-cloneable handle. Workers and routes pass this around by value.
 pub type SharedJobRegistry = Arc<JobRegistry>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
-pub struct QueueJobPreview {
-    pub image: String,
-    pub step: usize,
-    pub total: usize,
+/// Every fed job's progress channel.
+///
+/// A durable child has no attached observer of its own — the snapshot
+/// `GET /api/queue/{id}/preview` serves is the ONE channel every surface
+/// reads — so the channel a worker sends progress on is a relay that folds
+/// every `Progress` frame into that snapshot and forwards every message to
+/// the attached SSE observer when there is one. Producers keep sending to
+/// `progress_tx` exactly as they always did, from the denoise loop to the
+/// model pull, the dependency wait, the queue position and the H3 phases;
+/// none of them knows the registry, and none can bypass it.
+pub fn progress_relay(
+    registry: &SharedJobRegistry,
+    job_id: &str,
+    observer: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
+) -> tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let registry = Arc::clone(registry);
+    let job_id = job_id.to_string();
+    tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
+            if let crate::state::SseMessage::Progress(event) = &message {
+                registry.record_progress(&job_id, event);
+            }
+            if let Some(observer) = observer.as_ref() {
+                let _ = observer.send(message);
+            }
+        }
+    });
+    tx
 }
 
 impl JobRegistry {
     pub fn new() -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
-            batch_parents: RwLock::new(HashMap::new()),
             mutation_sequence: AtomicU64::new(0),
             queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
@@ -237,7 +298,6 @@ impl JobRegistry {
     pub fn with_events(events: Arc<EventBroadcaster>) -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
-            batch_parents: RwLock::new(HashMap::new()),
             mutation_sequence: AtomicU64::new(0),
             queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
@@ -340,10 +400,11 @@ impl JobRegistry {
                     target_gpu,
                     seed_pinned,
                     metadata,
-                    preview: None,
+                    progress: None,
                     cancel: cancel.clone(),
                     running_cancel: None,
                     cancel_requested: false,
+                    completion_claimed: false,
                     queue_patch_token: None,
                 },
             );
@@ -351,80 +412,6 @@ impl JobRegistry {
         self.mark_mutated();
         self.emit(ServerEvent::JobQueued { id, model });
         cancel
-    }
-
-    /// Create the one public cancellation authority for a server-owned batch.
-    pub fn register_batch_parent(
-        &self,
-        parent_id: impl Into<String>,
-    ) -> tokio_util::sync::CancellationToken {
-        let parent_id = parent_id.into();
-        let token = tokio_util::sync::CancellationToken::new();
-        self.batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(
-                parent_id,
-                BatchParentEntry {
-                    children: BTreeSet::new(),
-                    cancel: token.clone(),
-                },
-            );
-        token
-    }
-
-    pub fn register_batch_child(&self, parent_id: &str, child_id: &str) -> bool {
-        let mut parents = self
-            .batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
-        let Some(parent) = parents.get_mut(parent_id) else {
-            return false;
-        };
-        if parent.cancel.is_cancelled() {
-            return false;
-        }
-        parent.children.insert(child_id.to_string());
-        true
-    }
-
-    pub fn unregister_batch_child(&self, parent_id: &str, child_id: &str) {
-        if let Some(parent) = self
-            .batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .get_mut(parent_id)
-        {
-            parent.children.remove(child_id);
-        }
-    }
-
-    #[cfg(test)]
-    fn batch_child_count(&self, parent_id: &str) -> Option<usize> {
-        self.batch_parents
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(parent_id)
-            .map(|parent| parent.children.len())
-    }
-
-    /// Close cancellation admission immediately before durable commit. The
-    /// write lock orders this against `cancel_queued`: either cancellation
-    /// wins and this returns false, or commit wins and later DELETE observes
-    /// no cancellable parent.
-    pub fn begin_batch_commit(&self, parent_id: &str) -> bool {
-        self.batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(parent_id)
-            .is_some_and(|parent| !parent.cancel.is_cancelled())
-    }
-
-    pub fn remove_batch_parent(&self, parent_id: &str) {
-        self.batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(parent_id);
     }
 
     /// Cancel a queued or running job. Queued work is removed immediately;
@@ -437,52 +424,14 @@ impl JobRegistry {
     /// promoted. (A worker that already dequeued the job before the cancel
     /// landed will observe the closed result channel and skip it.)
     pub fn cancel_queued(&self, id: &str) -> Result<(), QueuedJobCancelError> {
-        let batch_children = {
-            let parents = self
-                .batch_parents
-                .read()
-                .unwrap_or_else(|error| error.into_inner());
-            parents.get(id).map(|parent| {
-                // Cancel while retaining the read lock. `begin_batch_commit`
-                // takes the write side, so it cannot remove a not-yet-signaled
-                // authority between lookup and signal.
-                parent.cancel.cancel();
-                parent.children.clone()
-            })
-        };
-        if let Some(children) = batch_children {
-            let removed = {
-                let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-                let mut removed = Vec::new();
-                entries.retain_mut(|entry| {
-                    if children.contains(&entry.id) {
-                        entry.cancel_requested = true;
-                        if let Some(token) = &entry.running_cancel {
-                            token.cancel();
-                        }
-                        if entry.state == JobLifecycle::Queued && entry.running_cancel.is_none() {
-                            entry.cancel.notify_one();
-                            removed.push(entry.id.clone());
-                            return false;
-                        }
-                    }
-                    true
-                });
-                removed
-            };
-            for child_id in &removed {
-                self.emit(ServerEvent::JobEnded {
-                    id: child_id.clone(),
-                });
-            }
-            self.mark_mutated();
-            return Ok(());
-        }
         {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
             let Some(pos) = entries.iter().position(|e| e.id == id) else {
                 return Err(QueuedJobCancelError::NotFound);
             };
+            if entries[pos].completion_claimed {
+                return Err(QueuedJobCancelError::CompletionClaimed);
+            }
             if entries[pos].state == JobLifecycle::Running || entries[pos].running_cancel.is_some()
             {
                 entries[pos].cancel_requested = true;
@@ -502,46 +451,20 @@ impl JobRegistry {
         Ok(())
     }
 
-    /// Cancel every still-queued job in one pass, backing `DELETE /api/queue`,
-    /// and close every open server-batch parent authority. Ordinary running
-    /// jobs remain untouched; running batch children drain without publication.
-    /// After dropping the entry lock this emits one `JobEnded` per removed
-    /// queued row. The public wrapper returns the established queued-row
-    /// count; the route uses the exact ids to avoid double-counting durable
-    /// rows in the same cancellation.
+    /// Cancel every still-queued job in one pass, backing `DELETE /api/queue`.
+    /// Running jobs remain untouched. After dropping the entry lock this emits
+    /// one `JobEnded` per removed queued row. The public wrapper returns the
+    /// established queued-row count; the route uses the exact ids to avoid
+    /// double-counting durable rows in the same cancellation.
     pub fn cancel_all_queued(&self) -> usize {
         self.cancel_all_queued_ids().len()
     }
 
     pub(crate) fn cancel_all_queued_ids(&self) -> Vec<String> {
-        let batch_children = {
-            // Hold the write side while closing every still-open parent
-            // authority. This orders bulk cancellation against
-            // `begin_batch_commit` exactly like the single-parent path:
-            // either commit already removed the authority, or cancellation
-            // becomes visible before commit can cross its fence.
-            let parents = self
-                .batch_parents
-                .write()
-                .unwrap_or_else(|error| error.into_inner());
-            for parent in parents.values() {
-                parent.cancel.cancel();
-            }
-            parents
-                .values()
-                .flat_map(|parent| parent.children.iter().cloned())
-                .collect::<BTreeSet<_>>()
-        };
         let cancelled_ids = {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
             let mut ids = Vec::new();
             entries.retain_mut(|e| {
-                if batch_children.contains(&e.id) {
-                    e.cancel_requested = true;
-                    if let Some(token) = &e.running_cancel {
-                        token.cancel();
-                    }
-                }
                 if e.state == JobLifecycle::Queued && e.running_cancel.is_none() {
                     e.cancel.notify_one();
                     ids.push(e.id.clone());
@@ -604,8 +527,10 @@ impl JobRegistry {
     }
 
     /// Claim the right to publish a terminal result. DELETE takes the same
-    /// write lock, so once this removes the row a later cancel returns 404;
-    /// if cancellation won, publication is refused.
+    /// write lock, so once this marks the row a later cancel is refused; if
+    /// cancellation won first, publication is refused. The row remains until
+    /// [`Self::finish_completion`] so the durable fallback cannot cancel it
+    /// during gallery publication.
     pub(crate) fn claim_completion(&self, id: &str) -> CompletionClaim {
         let claim = {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
@@ -623,15 +548,37 @@ impl JobRegistry {
             {
                 CompletionClaim::AttemptCancelled
             } else {
-                entries.remove(pos);
+                entries[pos].completion_claimed = true;
                 CompletionClaim::Claimed
             }
         };
-        if claim == CompletionClaim::Claimed {
+        claim
+    }
+
+    /// Remove a row after its durable terminal disposition is settled and
+    /// gallery publication is no longer cancellable.
+    pub(crate) fn finish_completion(&self, id: &str) {
+        let removed = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            entries
+                .iter()
+                .position(|entry| entry.id == id && entry.completion_claimed)
+                .map(|pos| entries.remove(pos))
+                .is_some()
+        };
+        if removed {
             self.mark_mutated();
             self.emit(ServerEvent::JobEnded { id: id.to_string() });
         }
-        claim
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completion_claimed_for_tests(&self, id: &str) -> bool {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .any(|entry| entry.id == id && entry.completion_claimed)
     }
 
     pub(crate) fn cancel_requested(&self, id: &str) -> bool {
@@ -863,14 +810,24 @@ impl JobRegistry {
                 replayed: None,
                 dispatch_attempts: None,
                 held_reason: None,
+                error: None,
+                retryable: None,
+                // Batch membership is durable state, projected by the route
+                // from the journal for the same reason `durable` is.
+                batch_id: None,
+                client_batch_id: None,
+                batch_index: None,
             })
         })
     }
 
-    /// Replace the selected job's ephemeral preview. A late callback cannot
-    /// resurrect terminal work because only a currently-live registry row is
-    /// allowed to publish.
-    pub fn record_preview(&self, id: &str, image: String, step: usize, total: usize) {
+    /// Fold one progress event into the selected job's live snapshot. A late
+    /// callback cannot resurrect terminal work because only a currently-live
+    /// registry row is allowed to publish.
+    ///
+    /// This is fed from the same `progress_tx` fan-out the attached observer
+    /// reads, so a durable child and an attached stream describe one render.
+    pub fn record_progress(&self, id: &str, event: &SseProgressEvent) {
         let mut entries = self
             .inner
             .write()
@@ -878,18 +835,21 @@ impl JobRegistry {
         let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
             return;
         };
-        entry.preview = Some(QueueJobPreview { image, step, total });
+        entry
+            .progress
+            .get_or_insert_with(QueueJobProgress::default)
+            .apply(event, mold_core::time::now_epoch_ms_u64());
     }
 
     /// The outer option is live-row existence; the inner option is whether
-    /// that live row has emitted a denoise preview yet.
-    pub fn preview_snapshot(&self, id: &str) -> Option<Option<QueueJobPreview>> {
+    /// that live row has reported any progress yet.
+    pub fn progress_snapshot(&self, id: &str) -> Option<Option<QueueJobProgress>> {
         self.inner
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .iter()
             .find(|entry| entry.id == id)
-            .map(|entry| entry.preview.clone())
+            .map(|entry| entry.progress.clone())
     }
 
     /// Drop the entry — call once on every terminal path (success, error,
@@ -982,6 +942,13 @@ impl JobRegistry {
                 replayed: None,
                 dispatch_attempts: None,
                 held_reason: None,
+                error: None,
+                retryable: None,
+                // Batch membership is durable state, projected by the route
+                // from the journal for the same reason `durable` is.
+                batch_id: None,
+                client_batch_id: None,
+                batch_index: None,
             })
             .collect();
         QueueListing {
@@ -1079,6 +1046,114 @@ impl JobRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The relay is what makes the snapshot complete: a frame sent on the
+    /// job's `progress_tx` lands in the registry whether or not anyone is
+    /// attached, and an attached observer still sees every message.
+    #[tokio::test]
+    async fn a_progress_relay_folds_every_frame_and_forwards_to_the_observer() {
+        let registry: SharedJobRegistry = JobRegistry::new();
+        registry.register("relayed", "flux-dev:q8");
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress_tx = progress_relay(&registry, "relayed", Some(observer_tx));
+
+        progress_tx
+            .send(crate::state::SseMessage::Progress(
+                SseProgressEvent::DenoiseStep {
+                    step: 3,
+                    total: 20,
+                    elapsed_ms: 0,
+                },
+            ))
+            .unwrap();
+        let forwarded = tokio::time::timeout(std::time::Duration::from_secs(2), observer_rx.recv())
+            .await
+            .expect("the observer sees the frame")
+            .expect("channel open");
+        assert!(matches!(
+            forwarded,
+            crate::state::SseMessage::Progress(SseProgressEvent::DenoiseStep {
+                step: 3,
+                total: 20,
+                ..
+            })
+        ));
+        let snapshot = registry
+            .progress_snapshot("relayed")
+            .flatten()
+            .expect("the frame folded into the snapshot");
+        assert_eq!((snapshot.step, snapshot.total), (Some(3), Some(20)));
+
+        // No observer: the snapshot is still fed.
+        registry.register("quiet", "flux-dev:q8");
+        let quiet_tx = progress_relay(&registry, "quiet", None);
+        quiet_tx
+            .send(crate::state::SseMessage::Progress(
+                SseProgressEvent::DenoiseStep {
+                    step: 1,
+                    total: 4,
+                    elapsed_ms: 0,
+                },
+            ))
+            .unwrap();
+        for _ in 0..50 {
+            if registry.progress_snapshot("quiet").flatten().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(registry.progress_snapshot("quiet").flatten().is_some());
+    }
+
+    #[test]
+    fn held_rows_take_no_place_in_line() {
+        let mut entries = ["held-a", "queued-b", "held-c", "queued-d"]
+            .into_iter()
+            .map(|id| JobEntry {
+                id: id.to_string(),
+                model: "m".to_string(),
+                state: if id.starts_with("held") {
+                    JobLifecycle::Held
+                } else {
+                    JobLifecycle::Queued
+                },
+                started_at_unix_ms: 0,
+                position: 99,
+                gpu: None,
+                target_gpu: None,
+                seed_pinned: None,
+                metadata: None,
+                durable: None,
+                replayed: None,
+                dispatch_attempts: None,
+                held_reason: None,
+                error: None,
+                retryable: None,
+                batch_id: None,
+                client_batch_id: None,
+                batch_index: None,
+            })
+            .collect::<Vec<_>>();
+        assign_positions(&mut entries, 0);
+        let positions = entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.position))
+            .collect::<Vec<_>>();
+        // The first queued row is next up even though a held row is listed
+        // ahead of it; the second is #1, not #3.
+        assert_eq!(
+            positions,
+            vec![
+                ("held-a", 0),
+                ("queued-b", 0),
+                ("held-c", 1),
+                ("queued-d", 1)
+            ]
+        );
+        let mut paged = entries.split_off(2);
+        assign_positions(&mut paged, 5);
+        assert_eq!(paged[1].position, 5);
+    }
 
     #[test]
     fn register_appends_in_fifo_order_with_queued_state() {
@@ -1322,22 +1397,64 @@ mod tests {
     }
 
     #[test]
-    fn preview_exists_only_for_the_live_job() {
+    fn progress_exists_only_for_the_live_job() {
         let reg = JobRegistry::new();
         reg.register("a", "flux-dev:fp16");
-        reg.record_preview("a", "UFJFVklFVw==".into(), 3, 20);
-        assert_eq!(
-            reg.preview_snapshot("a"),
-            Some(Some(QueueJobPreview {
+        reg.record_progress(
+            "a",
+            &SseProgressEvent::Preview {
                 image: "UFJFVklFVw==".into(),
                 step: 3,
                 total: 20,
-            }))
+            },
         );
+        let progress = reg
+            .progress_snapshot("a")
+            .expect("live row")
+            .expect("progress recorded");
+        assert_eq!(progress.preview_image.as_deref(), Some("UFJFVklFVw=="));
+        assert_eq!(progress.step, Some(3));
+        assert_eq!(progress.total, Some(20));
         reg.remove("a");
-        assert_eq!(reg.preview_snapshot("a"), None);
-        reg.record_preview("a", "TEFURQ==".into(), 20, 20);
-        assert_eq!(reg.preview_snapshot("a"), None);
+        assert_eq!(reg.progress_snapshot("a"), None);
+        reg.record_progress(
+            "a",
+            &SseProgressEvent::Preview {
+                image: "TEFURQ==".into(),
+                step: 20,
+                total: 20,
+            },
+        );
+        assert_eq!(reg.progress_snapshot("a"), None);
+    }
+
+    #[test]
+    fn a_step_counter_is_recorded_with_previews_disabled() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.record_progress(
+            "a",
+            &SseProgressEvent::StageStart {
+                name: "Denoising".into(),
+            },
+        );
+        reg.record_progress(
+            "a",
+            &SseProgressEvent::DenoiseStep {
+                step: 4,
+                total: 8,
+                elapsed_ms: 90,
+            },
+        );
+        let progress = reg
+            .progress_snapshot("a")
+            .expect("live row")
+            .expect("progress recorded");
+        assert_eq!(progress.step, Some(4));
+        assert_eq!(progress.total, Some(8));
+        assert_eq!(progress.stage.as_deref(), Some("Denoising"));
+        assert_eq!(progress.preview_image, None);
+        assert!(progress.updated_at_ms > 0);
     }
 
     #[test]
@@ -1435,7 +1552,13 @@ mod tests {
             mold_inference::InferenceCancellationToken::default(),
         );
         assert_eq!(reg.claim_completion("a"), CompletionClaim::Claimed);
-        assert_eq!(reg.cancel_queued("a"), Err(QueuedJobCancelError::NotFound));
+        assert_eq!(
+            reg.cancel_queued("a"),
+            Err(QueuedJobCancelError::CompletionClaimed)
+        );
+        assert_eq!(reg.len(), 1);
+        reg.finish_completion("a");
+        assert!(reg.is_empty());
     }
 
     #[test]
@@ -1483,92 +1606,6 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), cancel_b.notified())
             .await
             .expect("cancel signal for b must resolve");
-    }
-
-    #[tokio::test]
-    async fn cancel_all_queued_cancels_mixed_batch_parent_authority() {
-        let reg = JobRegistry::new();
-        let parent_cancel = reg.register_batch_parent("parent");
-        let running_cancel = reg.register("parent", "flux-dev:fp16");
-        let queued_cancel = reg.register("sibling", "flux-dev:fp16");
-        assert!(reg.register_batch_child("parent", "parent"));
-        assert!(reg.register_batch_child("parent", "sibling"));
-        reg.mark_running("parent", Some(0));
-
-        assert_eq!(
-            reg.cancel_all_queued(),
-            1,
-            "the public bulk-delete count remains the number of queued rows removed"
-        );
-        assert!(
-            parent_cancel.is_cancelled(),
-            "bulk delete must close the parent authority even with a running child"
-        );
-        assert!(
-            !reg.begin_batch_commit("parent"),
-            "a cancelled parent must never cross the commit fence"
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(1), queued_cancel.notified())
-            .await
-            .expect("the queued sibling must receive its existing cancellation signal");
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(10),
-                running_cancel.notified()
-            )
-            .await
-            .is_err(),
-            "running children remain owned by their worker and drain through parent cancellation"
-        );
-        let snapshot = reg.snapshot();
-        assert_eq!(snapshot.entries.len(), 1);
-        assert_eq!(snapshot.entries[0].id, "parent");
-        assert_eq!(snapshot.entries[0].state, JobLifecycle::Running);
-    }
-
-    #[test]
-    fn running_later_batch_child_uses_its_installed_attempt_token() {
-        let reg = JobRegistry::new();
-        let parent_cancel = reg.register_batch_parent("parent");
-        let child_id = "parent:child:2:try:0";
-        reg.register(child_id, "flux-dev:fp16");
-        assert!(reg.register_batch_child("parent", child_id));
-        reg.mark_running(child_id, Some(0));
-        let child_cancel = mold_inference::InferenceCancellationToken::default();
-        reg.install_running_cancellation(child_id, child_cancel.clone());
-
-        assert_eq!(
-            reg.cancel_queued(child_id),
-            Err(QueuedJobCancelError::AlreadyRunning)
-        );
-        assert!(child_cancel.is_cancelled());
-        assert!(!parent_cancel.is_cancelled());
-        assert_eq!(
-            reg.claim_completion(child_id),
-            CompletionClaim::UserCancelled
-        );
-    }
-
-    #[test]
-    fn cancelled_parent_rejects_late_child_registration() {
-        let reg = JobRegistry::new();
-        let cancel = reg.register_batch_parent("parent");
-        cancel.cancel();
-        assert!(!reg.register_batch_child("parent", "late"));
-        assert_eq!(reg.batch_child_count("parent"), Some(0));
-    }
-
-    #[test]
-    fn completed_batch_children_are_pruned_from_parent_authority() {
-        let reg = JobRegistry::new();
-        reg.register_batch_parent("parent");
-        for index in 0..10_000 {
-            let child = format!("child-{index}");
-            assert!(reg.register_batch_child("parent", &child));
-            assert_eq!(reg.batch_child_count("parent"), Some(1));
-            reg.unregister_batch_child("parent", &child);
-        }
-        assert_eq!(reg.batch_child_count("parent"), Some(0));
     }
 
     #[tokio::test]
@@ -1653,7 +1690,14 @@ mod tests {
             Some(true),
             Some(metadata),
         );
-        reg.record_preview("queued", "preview".repeat(8 * 1024), 3, 20);
+        reg.record_progress(
+            "queued",
+            &SseProgressEvent::Preview {
+                image: "preview".repeat(8 * 1024),
+                step: 3,
+                total: 20,
+            },
+        );
         reg.register("running", "sdxl:q8");
         reg.mark_running("running", Some(1));
 
@@ -1707,7 +1751,7 @@ mod tests {
         );
         assert_eq!(reg.scheduler_lifecycle("missing"), None);
         assert!(full.entries[0].metadata.is_some());
-        assert!(reg.preview_snapshot("queued").flatten().is_some());
+        assert!(reg.progress_snapshot("queued").flatten().is_some());
     }
 
     #[test]
@@ -1734,7 +1778,14 @@ mod tests {
                     Some(index % 2 == 0),
                     Some(metadata),
                 );
-                reg.record_preview(&id, "p".repeat(payload_bytes), 1, 2);
+                reg.record_progress(
+                    &id,
+                    &SseProgressEvent::Preview {
+                        image: "p".repeat(payload_bytes),
+                        step: 1,
+                        total: 2,
+                    },
+                );
                 if index % 5 == 0 {
                     reg.mark_running(&id, Some(index % 3));
                 }

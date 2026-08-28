@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::Notify;
 
+use crate::durable_disposition::DurableDisposition;
+use crate::durable_generation_settlement;
 use crate::gpu_pool::GpuJob;
 use crate::model_manager;
 use crate::state::{
@@ -27,18 +29,15 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
     event.into()
 }
 
+/// Forward an engine progress event to the job's channel. The channel is
+/// the registry relay (`job_registry::progress_relay`), so the fold into the
+/// `/api/queue/{id}/preview` snapshot happens there for every producer alike.
 fn forward_generation_progress(
-    registry: &crate::job_registry::SharedJobRegistry,
-    job_id: &str,
     tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     event: mold_inference::ProgressEvent,
 ) {
-    let event = progress_to_sse(event);
-    if let SseProgressEvent::Preview { image, step, total } = &event {
-        registry.record_preview(job_id, image.clone(), *step, *total);
-    }
     if let Some(tx) = tx {
-        let _ = tx.send(SseMessage::Progress(event));
+        let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
     }
 }
 
@@ -348,12 +347,19 @@ pub(crate) struct SavedOutputNames {
 }
 
 impl SavedOutputNames {
-    pub(crate) fn terminal_json(&self) -> String {
-        serde_json::json!({
-            "filename": self.output,
-            "original_filename": self.original,
+    /// The one projection of a completed child's terminal result.
+    ///
+    /// The facts come from the same response the SSE complete event carries,
+    /// so an attached observer and a durable child describe one render.
+    pub(crate) fn terminal_json(&self, response: &mold_core::GenerateResponse) -> String {
+        serde_json::to_string(&mold_core::GenerationBatchResult {
+            filename: self.output.clone(),
+            original_filename: self.original.clone(),
+            seed: Some(response.seed_used),
+            generation_time_ms: Some(response.generation_time_ms),
+            gpu: response.gpu,
         })
-        .to_string()
+        .unwrap_or_default()
     }
 }
 
@@ -1049,6 +1055,20 @@ pub(crate) async fn ensure_post_upscale_model_downloaded(
         }));
     }
     Ok(())
+}
+
+async fn ensure_legacy_post_upscale_model_downloaded(
+    state: &AppState,
+    req: &mold_core::GenerateRequest,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    #[cfg(test)] hook: Option<&LegacyUpscalePreparationHook>,
+) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        hook.started.notify_one();
+        hook.resume.notified().await;
+    }
+    ensure_post_upscale_model_downloaded(state, req, progress_tx).await
 }
 
 pub(crate) fn apply_output_dimensions_to_metadata(metadata: &mut OutputMetadata, img: &ImageData) {
@@ -1773,7 +1793,7 @@ pub(crate) fn resolve_max_deferrals() -> usize {
 
 async fn process_job(state: &AppState, mut job: GenerationJob) {
     // Check if client already disconnected before doing any work
-    if job.result_tx.is_closed() {
+    if job.should_cancel_for_observer_disconnect() {
         tracing::debug!("skipping queued job — client disconnected");
         return;
     }
@@ -1794,29 +1814,23 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     if let Some(claim) = dispatch_claim {
         match claim {
             crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } => {
-                let err_msg = format!(
-                    "'{}' was started {attempts} times without finishing (limit {cap}); \
-                     it is held for review instead of being retried",
-                    job.request.model
-                );
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                }
                 drop(scheduler_mutation);
-                if let Some(ticket) = job.journal.take() {
-                    ticket.hold("dispatch attempts exhausted");
-                }
-                let _ = job.result_tx.send(Err(err_msg));
+                let model = job.request.model.clone();
+                durable_generation_settlement::refuse_exhausted_dispatch_async(
+                    job, &model, attempts, cap,
+                )
+                .await;
                 return;
             }
             crate::queue_journal::DispatchClaim::Fenced => {
-                let err_msg = "durable generation claim is stale; refusing dispatch".to_string();
-                tracing::warn!(job = %job.id, "single-worker path refused a stale durable feeder claim");
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                }
                 drop(scheduler_mutation);
-                let _ = job.result_tx.send(Err(err_msg));
+                let job_id = job.id.clone();
+                durable_generation_settlement::refuse_fenced_dispatch(job, &job_id);
+                return;
+            }
+            crate::queue_journal::DispatchClaim::Cancelled => {
+                drop(scheduler_mutation);
+                finish_single_worker_cancelled(job, true).await;
                 return;
             }
             crate::queue_journal::DispatchClaim::Granted
@@ -1841,7 +1855,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         // the durable row terminal; refuse to run or publish the stale payload.
         attempt_cancellation.cancel();
         drop(scheduler_mutation);
-        finish_single_worker_cancelled(job, true);
+        finish_single_worker_cancelled(job, true).await;
         return;
     }
 
@@ -1853,15 +1867,16 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
 
     if attempt_cancellation.is_cancelled() {
         let user_requested = state.job_registry.cancel_requested(&job.id);
-        finish_single_worker_cancelled(job, user_requested);
+        finish_single_worker_cancelled(job, user_requested).await;
         return;
     }
 
     // The single-worker loop is the execution-slot lease. Keep the durable
     // bundle opaque through all queueing and cancellation-before-start paths,
     // then hydrate off Tokio immediately before reference/model preparation.
+    let job_id = job.id.clone();
     let hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
-        let expected_job_id = job.id.clone();
+        let expected_job_id = job_id.clone();
         let mut request = job.request.clone();
         match tokio::task::spawn_blocking(move || {
             let result = deferred.hydrate_into(&expected_job_id, &mut request);
@@ -1874,19 +1889,34 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 Some(lease)
             }
             Ok((_request, Err(error))) => {
-                finish_single_worker_hydration_failure(job, error);
+                durable_generation_settlement::fail_hydration_async(job, &job_id, error).await;
                 return;
             }
             Err(_) => {
-                finish_single_worker_hydration_failure(
+                durable_generation_settlement::fail_hydration_async(
                     job,
+                    &job_id,
                     crate::queue_media_runtime::DeferredQueueMediaError::worker_failure(),
-                );
+                )
+                .await;
                 return;
             }
         }
     } else {
         None
+    };
+    // The ordered references are bound from THIS hydration, under this lease;
+    // no job field carries a reference set across admission or dispatch.
+    let references = match hydrated_media_lease
+        .as_ref()
+        .map(|lease| lease.references(&job.request))
+        .transpose()
+    {
+        Ok(references) => references.flatten(),
+        Err(error) => {
+            durable_generation_settlement::fail_hydration_async(job, &job_id, error).await;
+            return;
+        }
     };
     let request = match hydrated_media_lease {
         Some(lease) => {
@@ -1898,7 +1928,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     if attempt_cancellation.is_cancelled() {
         let user_requested = state.job_registry.cancel_requested(&job.id);
         drop(request);
-        finish_single_worker_cancelled(job, user_requested);
+        finish_single_worker_cancelled(job, user_requested).await;
         return;
     }
 
@@ -1913,49 +1943,46 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     }
 
     // Reference binding verifies up to one GiB of staged media. Keep that I/O
-    // off Tokio's async worker and return the staging owner alongside the
-    // opened handles so it remains alive for the whole generation attempt.
-    let reference_binding_result =
-        if request.references.is_none() && job.resolved_references.is_none() {
-            Ok(Vec::new())
-        } else {
-            let request = request.zeroizing_clone();
-            let resolved = job.resolved_references.take();
-            let cancellation = attempt_cancellation.clone();
-            match tokio::task::spawn_blocking(move || {
-                let result = crate::reference_uploads::inference_bindings_for_request(
-                    &request,
-                    resolved.as_ref(),
-                    Some(&cancellation),
-                );
-                (resolved, result)
-            })
-            .await
-            {
-                Ok((resolved, result)) => {
-                    job.resolved_references = resolved;
-                    result
-                }
-                Err(_) => Err(anyhow::anyhow!(
-                    "reference binding worker did not complete safely"
-                )),
-            }
-        };
+    // off Tokio's async worker. The opened handles outlive the set; the
+    // staging itself stays alive through the hydrated request guard.
+    let reference_binding_result = if request.references.is_none() && references.is_none() {
+        Ok(Vec::new())
+    } else {
+        let request = request.zeroizing_clone();
+        let cancellation = attempt_cancellation.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::reference_uploads::inference_bindings_for_request(
+                &request,
+                references.as_ref(),
+                Some(&cancellation),
+            )
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "reference binding worker did not complete safely"
+            )),
+        }
+    };
     let reference_bindings = match reference_binding_result {
         Ok(bindings) => bindings,
         Err(error) => {
             if mold_inference::is_inference_cancelled(&error) {
                 let user_requested = state.job_registry.cancel_requested(&job.id);
                 drop(request);
-                finish_single_worker_cancelled(job, user_requested);
+                finish_single_worker_cancelled(job, user_requested).await;
                 return;
             }
             let err_msg = request
                 .redact_staging_paths(format!("generation reference binding error: {error:#}"));
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
+            drop(request);
+            durable_generation_settlement::fail_async(
+                job,
+                DurableDisposition::Hold { retryable: true },
+                err_msg,
+            )
+            .await;
             return;
         }
     };
@@ -1980,17 +2007,20 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     .await
     {
         let err_msg = request.redact_staging_paths(api_err.error.clone());
-        if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-        }
-        let _ = job.result_tx.send(Err(err_msg));
+        drop(request);
+        durable_generation_settlement::fail_async(
+            job,
+            DurableDisposition::Hold { retryable: true },
+            err_msg,
+        )
+        .await;
         return;
     }
 
     if attempt_cancellation.is_cancelled() {
         let user_requested = state.job_registry.cancel_requested(&job.id);
         drop(request);
-        finish_single_worker_cancelled(job, user_requested);
+        finish_single_worker_cancelled(job, user_requested).await;
         return;
     }
 
@@ -2014,11 +2044,13 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         cache.take(&request.model)
     };
     let Some(mut cached_engine) = taken else {
-        let err_msg = "no engine available after model readiness check".to_string();
-        if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-        }
-        let _ = job.result_tx.send(Err(err_msg));
+        drop(request);
+        durable_generation_settlement::fail_async(
+            job,
+            DurableDisposition::Hold { retryable: true },
+            "no engine available after model readiness check",
+        )
+        .await;
         return;
     };
 
@@ -2032,10 +2064,8 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     // Install progress capture before crossing into spawn_blocking. The live
     // registry snapshot is useful even when the submitting SSE receiver is
     // gone, so queue selection can still follow the render from another client.
-    let registry = state.job_registry.clone();
-    let job_id = job.id.clone();
     cached_engine.engine.set_on_progress(Box::new(move |event| {
-        forward_generation_progress(&registry, &job_id, progress_tx.as_ref(), event);
+        forward_generation_progress(progress_tx.as_ref(), event);
     }));
 
     #[cfg(feature = "metrics")]
@@ -2112,12 +2142,13 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             crate::metrics::record_generation(&request.model, inference_duration);
 
             if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
-                let err_msg =
-                    "generation error: engine returned no images, video, or audio".to_string();
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                }
-                let _ = job.result_tx.send(Err(err_msg));
+                drop(request);
+                durable_generation_settlement::fail_async(
+                    job,
+                    DurableDisposition::Hold { retryable: true },
+                    "generation error: engine returned no images, video, or audio",
+                )
+                .await;
                 return;
             }
             // For video-only responses, synthesize an ImageData from the thumbnail
@@ -2178,12 +2209,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 crate::job_registry::CompletionClaim::Claimed => {}
                 crate::job_registry::CompletionClaim::UserCancelled => {
                     drop(request);
-                    finish_single_worker_cancelled(job, true);
+                    finish_single_worker_cancelled(job, true).await;
                     return;
                 }
                 crate::job_registry::CompletionClaim::AttemptCancelled => {
                     drop(request);
-                    finish_single_worker_cancelled(job, false);
+                    finish_single_worker_cancelled(job, false).await;
                     return;
                 }
             }
@@ -2289,39 +2320,44 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             // retention fence and replay into a duplicate print; and a failed
             // publication would delete the row, losing a replayed job outright
             // since the gallery file is its only delivery.
-            if let Some(ticket) = job.journal.take() {
-                if saved_names.output.is_some() {
-                    let result_json = saved_names.terminal_json();
-                    ticket.complete_with_result(Some(&result_json));
-                } else {
-                    tracing::error!(
-                        job = %job.id,
-                        dir = ?job.output_dir,
-                        "generation finished but its output could not be saved; \
-                         holding the queue row for review"
-                    );
-                    ticket.hold("the generated output could not be saved to the gallery");
-                }
+            drop(request);
+            let job_id = job.id.clone();
+            let output_dir = job.output_dir.clone();
+            let completion_payload = job.completion_payload;
+            let mut channels =
+                durable_generation_settlement::IntoSettlementChannels::into_settlement_channels(
+                    job,
+                );
+            if durable_generation_settlement::settle_publication_async(
+                &mut channels,
+                &job_id,
+                output_dir.as_deref(),
+                &state.job_registry,
+                &saved_names,
+                &response,
+            )
+            .await
+            .is_err()
+            {
+                return;
             }
-
-            // Send SSE complete event
-            if let Some(ref tx) = job.progress_tx {
-                let message = build_sse_completion_message(
+            let completion = channels.progress_tx.is_some().then(|| {
+                build_sse_completion_message(
                     &response,
                     &img,
                     original_img.as_ref(),
                     Some(&metadata),
                     &saved_names,
-                    job.completion_payload,
-                );
-                let _ = tx.send(message);
-            }
-
-            // Send result through oneshot
-            let _ = job.result_tx.send(Ok(GenerationJobResult {
-                image: img,
-                response,
-            }));
+                    completion_payload,
+                )
+            });
+            channels.complete(
+                completion,
+                GenerationJobResult {
+                    image: img,
+                    response,
+                },
+            );
         }
         Ok(Ok(Err(e))) => {
             #[cfg(feature = "metrics")]
@@ -2331,16 +2367,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             if mold_inference::is_inference_cancelled(&e) {
                 let user_requested = state.job_registry.cancel_requested(&job.id);
                 drop(request);
-                finish_single_worker_cancelled(job, user_requested);
+                finish_single_worker_cancelled(job, user_requested).await;
                 return;
             }
             let err_msg = request
                 .redact_staging_paths(format!("generation error: {}", clean_error_message(&e)));
             tracing::error!(%err_msg, "generation failed");
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
+            drop(request);
+            durable_generation_settlement::fail_async(
+                job,
+                DurableDisposition::Hold { retryable: true },
+                err_msg,
+            )
+            .await;
         }
         Ok(Err(panic_payload)) => {
             #[cfg(feature = "metrics")]
@@ -2354,10 +2393,18 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 .unwrap_or("unknown panic");
             let err_msg = request.redact_staging_paths(format!("inference panicked: {msg}"));
             tracing::error!(%err_msg, "inference panicked");
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
+            drop(request);
+            // A panic is never auto-replayed and never user-retryable
+            // unchanged — the same answer the GPU-owner path gives, where the
+            // quarantine fence then outranks the hold and retains the row for
+            // the restart. Here nothing restarts, so the hold stands: settled,
+            // visible, and fenced off from `POST /api/queue/:id/retry`.
+            durable_generation_settlement::fail_async(
+                job,
+                DurableDisposition::Hold { retryable: false },
+                err_msg,
+            )
+            .await;
         }
         Err(join_err) => {
             #[cfg(feature = "metrics")]
@@ -2365,11 +2412,13 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
 
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
             tracing::error!("inference task join error: {join_err:?}");
-            let err_msg = "inference task failed".to_string();
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
+            drop(request);
+            durable_generation_settlement::fail_async(
+                job,
+                DurableDisposition::Hold { retryable: true },
+                "inference task failed",
+            )
+            .await;
         }
     }
 }
@@ -2398,57 +2447,9 @@ impl Drop for SingleWorkerCancelGuard<'_> {
 /// Explicit user cancellation is terminal; shutdown/attempt cancellation is
 /// retained for feeder replay. Neither path can publish gallery bytes or mark
 /// a durable batch child complete.
-fn finish_single_worker_cancelled(mut job: GenerationJob, user_requested: bool) {
-    if let Some(ticket) = job.journal.take() {
-        if user_requested {
-            ticket.discard();
-        } else {
-            ticket.retain();
-        }
-    }
-    let message = if user_requested {
-        "Cancelled".to_string()
-    } else {
-        crate::gpu_worker::shutdown_retention_user_message(&job.request.model)
-    };
-    if let Some(ref tx) = job.progress_tx {
-        let event = if user_requested {
-            SseErrorEvent::failed(message.clone())
-        } else {
-            SseErrorEvent::retained(message.clone())
-        };
-        let _ = tx.send(SseMessage::Error(event));
-    }
-    let _ = job.result_tx.send(Err(message));
-}
-
-fn finish_single_worker_hydration_failure(
-    mut job: GenerationJob,
-    error: crate::queue_media_runtime::DeferredQueueMediaError,
-) {
-    use crate::queue_media_runtime::DeferredHydrationDisposition;
-
-    let disposition = error.disposition();
-    if let Some(ticket) = job.journal.take() {
-        match disposition {
-            DeferredHydrationDisposition::Hold => {
-                ticket.hold("durable queue-media validation failed")
-            }
-            DeferredHydrationDisposition::Retain => {
-                ticket.retain();
-            }
-        }
-    }
-    tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
-    let message = error.public_message().to_string();
-    if let Some(ref tx) = job.progress_tx {
-        let event = match disposition {
-            DeferredHydrationDisposition::Hold => SseErrorEvent::failed(message.clone()),
-            DeferredHydrationDisposition::Retain => SseErrorEvent::retained(message.clone()),
-        };
-        let _ = tx.send(SseMessage::Error(event));
-    }
-    let _ = job.result_tx.send(Err(message));
+async fn finish_single_worker_cancelled(job: GenerationJob, user_requested: bool) {
+    let model = job.request.model.clone();
+    durable_generation_settlement::finish_cancelled_async(job, &model, user_requested).await;
 }
 
 // ── Multi-GPU queue dispatcher ──────────────────────────────────────────────
@@ -2483,6 +2484,7 @@ pub async fn run_queue_dispatcher_until_cancelled(
 
 const LEGACY_UNAVAILABLE_INITIAL_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 const LEGACY_UNAVAILABLE_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const LEGACY_GENERATION_AUTHORITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 struct LegacyUnavailableBackoff {
     next_wait: std::time::Duration,
@@ -2520,6 +2522,23 @@ async fn wait_for_legacy_worker_retry(
     tokio::select! {
         biased;
         _ = shutdown.cancelled() => false,
+        _ = tokio::time::sleep(wait) => true,
+    }
+}
+
+async fn wait_for_legacy_generation_retry(
+    shutdown: &tokio_util::sync::CancellationToken,
+    registry_mutation: &tokio::sync::Notify,
+    wait: std::time::Duration,
+) -> bool {
+    // Notify is shared with the scheduler and dependency waiters. Bound the
+    // fallback so another legitimate subscriber consuming the permit cannot
+    // delay cancellation authority behind the worker backoff.
+    let wait = wait.min(LEGACY_GENERATION_AUTHORITY_POLL);
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => false,
+        _ = registry_mutation.notified() => true,
         _ = tokio::time::sleep(wait) => true,
     }
 }
@@ -2856,6 +2875,13 @@ async fn run_queue_dispatcher_with_tuning(
 pub(crate) struct LegacyGenerationDispatchHook {
     pub(crate) selected: Arc<tokio::sync::Notify>,
     pub(crate) resume: Arc<tokio::sync::Notify>,
+    pub(crate) upscale_preparation: Option<LegacyUpscalePreparationHook>,
+}
+
+#[cfg(test)]
+pub(crate) struct LegacyUpscalePreparationHook {
+    pub(crate) started: Arc<tokio::sync::Notify>,
+    pub(crate) resume: Arc<tokio::sync::Notify>,
 }
 
 async fn run_queue_dispatcher_with_tuning_inner(
@@ -2935,6 +2961,16 @@ async fn run_queue_dispatcher_with_tuning_inner(
         let job_id = job.id.clone();
         let model_name = job.request.model.clone();
         let estimated_vram = estimate_model_vram(&model_name);
+        let tracked = selected_target.is_some();
+        if !job_id.is_empty() && !tracked {
+            // Every real generation id is registry-authoritative. A buffered
+            // row missing from the snapshot was cancelled after entering the
+            // transport; treating it like an old id-less test job can execute
+            // work after DELETE already returned 204.
+            let _durable_transition = state.queue_journal.lock_durable_transition().await;
+            reject_cancelled_generation_job(&state, job).await;
+            continue;
+        }
 
         let shape_bucket = crate::gpu_pool::oom_shape_bucket_with_projection(
             &job.request,
@@ -2944,10 +2980,12 @@ async fn run_queue_dispatcher_with_tuning_inner(
             crate::gpu_pool::model_unschedulable_message(&model_name, Some(&shape_bucket))
         {
             tracing::warn!(model = %model_name, "{err_msg}");
-            if let Some(tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
+            durable_generation_settlement::fail_async(
+                job,
+                DurableDisposition::Hold { retryable: false },
+                err_msg,
+            )
+            .await;
             state.queue.decrement();
             state.job_registry.remove(&job_id);
             #[cfg(feature = "metrics")]
@@ -2963,10 +3001,12 @@ async fn run_queue_dispatcher_with_tuning_inner(
             Ok(ordinal) => ordinal,
             Err(err_msg) => {
                 tracing::warn!(model = %model_name, "{err_msg}");
-                if let Some(tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                }
-                let _ = job.result_tx.send(Err(err_msg));
+                durable_generation_settlement::fail_async(
+                    job,
+                    DurableDisposition::Hold { retryable: false },
+                    err_msg,
+                )
+                .await;
                 state.queue.decrement();
                 state.job_registry.remove(&job_id);
                 #[cfg(feature = "metrics")]
@@ -2974,7 +3014,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 continue;
             }
         };
-        if job.result_tx.is_closed() {
+        if job.should_cancel_for_observer_disconnect() {
             tracing::debug!(model = %model_name, "skipping queued multi-GPU job — client disconnected");
             state.queue.decrement();
             state.job_registry.remove(&job_id);
@@ -2987,19 +3027,78 @@ async fn run_queue_dispatcher_with_tuning_inner(
         // assets themselves. Resolve a first-use post-generation upscaler at
         // this async boundary, on the server/host that accepted the job,
         // before handing it to the selected GPU.
-        if let Err(err_msg) =
-            ensure_post_upscale_model_downloaded(&state, &job.request, job.progress_tx.as_ref())
-                .await
+        let registry_mutation = state.job_registry.mutation_notifier();
+        let mut upscale_download = Box::pin(ensure_legacy_post_upscale_model_downloaded(
+            &state,
+            &job.request,
+            job.progress_tx.as_ref(),
+            #[cfg(test)]
+            before_final_dispatch
+                .as_ref()
+                .and_then(|hook| hook.upscale_preparation.as_ref()),
+        ));
+        let upscale_result = loop {
+            let mutation = registry_mutation.notified();
+            tokio::pin!(mutation);
+            if tracked
+                && state.job_registry.scheduler_lifecycle(&job_id)
+                    != Some(crate::job_registry::JobLifecycle::Queued)
+            {
+                drop(upscale_download);
+                let _durable_transition = state.queue_journal.lock_durable_transition().await;
+                if state.job_registry.scheduler_lifecycle(&job_id)
+                    != Some(crate::job_registry::JobLifecycle::Queued)
+                {
+                    reject_cancelled_generation_job(&state, job).await;
+                    continue 'dispatcher;
+                }
+                upscale_download = Box::pin(ensure_legacy_post_upscale_model_downloaded(
+                    &state,
+                    &job.request,
+                    job.progress_tx.as_ref(),
+                    #[cfg(test)]
+                    before_final_dispatch
+                        .as_ref()
+                        .and_then(|hook| hook.upscale_preparation.as_ref()),
+                ));
+            }
+            tokio::select! {
+                biased;
+                result = &mut upscale_download => break result,
+                _ = shutdown.cancelled() => {
+                    drop(upscale_download);
+                    reject_generation_job(&state, job, legacy_dispatch_stop_message(&state)).await;
+                    break 'dispatcher;
+                }
+                _ = &mut mutation => {}
+                _ = tokio::time::sleep(LEGACY_GENERATION_AUTHORITY_POLL) => {}
+            }
+        };
+        drop(upscale_download);
+        if tracked
+            && state.job_registry.scheduler_lifecycle(&job_id)
+                != Some(crate::job_registry::JobLifecycle::Queued)
         {
+            let _durable_transition = state.queue_journal.lock_durable_transition().await;
+            if state.job_registry.scheduler_lifecycle(&job_id)
+                != Some(crate::job_registry::JobLifecycle::Queued)
+            {
+                reject_cancelled_generation_job(&state, job).await;
+                continue 'dispatcher;
+            }
+        }
+        if let Err(err_msg) = upscale_result {
             tracing::warn!(
                 model = %model_name,
                 upscaler = ?job.request.upscale_model,
                 "{err_msg}"
             );
-            if let Some(tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
+            durable_generation_settlement::fail_async(
+                job,
+                DurableDisposition::Hold { retryable: true },
+                err_msg,
+            )
+            .await;
             state.queue.decrement();
             state.job_registry.remove(&job_id);
             #[cfg(feature = "metrics")]
@@ -3010,10 +3109,10 @@ async fn run_queue_dispatcher_with_tuning_inner(
         // Build the GpuJob once; the retry loop moves it between attempts.
         let mut gpu_job = Some(GpuJob {
             id: job.id.clone(),
+            durable_queue_rank: job.durable_queue_rank,
             model: model_name.clone(),
             request: job.request,
             deferred_media: job.deferred_media,
-            resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -3029,7 +3128,6 @@ async fn run_queue_dispatcher_with_tuning_inner(
             #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: job.batch_child,
             journal: job.journal,
         });
 
@@ -3068,7 +3166,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
             }
             if gpu_job
                 .as_ref()
-                .is_some_and(|pending| pending.result_tx.is_closed())
+                .is_some_and(GpuJob::should_cancel_for_observer_disconnect)
             {
                 tracing::debug!(
                     model = %model_name,
@@ -3077,6 +3175,29 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 state.queue.decrement();
                 state.job_registry.remove(&job_id);
                 break;
+            }
+
+            if tracked
+                && state.job_registry.scheduler_lifecycle(&job_id)
+                    != Some(crate::job_registry::JobLifecycle::Queued)
+            {
+                // Cancellation removes the registry row before its durable
+                // transaction finishes. Wait for that transaction boundary,
+                // then release runtime capacity and settle the observer.
+                let _durable_transition = state.queue_journal.lock_durable_transition().await;
+                if state.job_registry.scheduler_lifecycle(&job_id)
+                    != Some(crate::job_registry::JobLifecycle::Queued)
+                {
+                    let pending = gpu_job
+                        .take()
+                        .expect("cancelled selected job remains pending");
+                    reject_cancelled_generation_job(
+                        &state,
+                        generation_from_legacy_gpu_job(pending),
+                    )
+                    .await;
+                    continue 'dispatcher;
+                }
             }
 
             let worker = if let Some(ordinal) = preferred_gpu {
@@ -3095,7 +3216,14 @@ async fn run_queue_dispatcher_with_tuning_inner(
                             "all GPU workers are temporarily unavailable; keeping job queued"
                         );
                     }
-                    if !wait_for_legacy_worker_retry(&shutdown, unavailable.take_wait()).await {
+                    let registry_mutation = state.job_registry.mutation_notifier();
+                    if !wait_for_legacy_generation_retry(
+                        &shutdown,
+                        &registry_mutation,
+                        unavailable.take_wait(),
+                    )
+                    .await
+                    {
                         if let Some(job) = gpu_job.take() {
                             crate::gpu_pool::OwnerWork::Generation(Box::new(job))
                                 .reject(legacy_dispatch_stop_message(&state));
@@ -3155,7 +3283,6 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 .iter()
                 .find(|entry| entry.id == job_id)
                 .map(|entry| entry.target_gpu);
-            let tracked = selected_target.is_some();
             if tracked
                 && (current_order != selected_order
                     || current_target != selected_target
@@ -3174,7 +3301,8 @@ async fn run_queue_dispatcher_with_tuning_inner(
                         &state,
                         generation_from_legacy_gpu_job(pending),
                         "Cancelled".to_string(),
-                    );
+                    )
+                    .await;
                 }
                 continue 'dispatcher;
             }
@@ -3197,7 +3325,8 @@ async fn run_queue_dispatcher_with_tuning_inner(
                                 .expect("invalid selected job remains pending"),
                         ),
                         error,
-                    );
+                    )
+                    .await;
                     continue 'dispatcher;
                 }
             };
@@ -3281,7 +3410,8 @@ async fn run_queue_dispatcher_with_tuning_inner(
                             &state,
                             generation_from_legacy_gpu_job(pending),
                             "Cancelled".to_string(),
-                        );
+                        )
+                        .await;
                     }
                     continue 'dispatcher;
                 }
@@ -3311,15 +3441,15 @@ async fn run_queue_dispatcher_with_tuning_inner(
                         skip.push(worker.gpu.ordinal);
                     } else {
                         let rejected = gpu_job.take().expect("gpu_job retained after disconnect");
-                        let err_msg = format!(
-                            "gpu:{} disconnected while dispatching model {model_name}",
-                            worker.gpu.ordinal
-                        );
-                        if let Some(tx) = rejected.progress_tx {
-                            let _ =
-                                tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                        }
-                        let _ = rejected.result_tx.send(Err(err_msg));
+                        durable_generation_settlement::fail_async(
+                            rejected,
+                            DurableDisposition::Hold { retryable: true },
+                            format!(
+                                "gpu:{} disconnected while dispatching model {model_name}",
+                                worker.gpu.ordinal
+                            ),
+                        )
+                        .await;
                         state.queue.decrement();
                         state.job_registry.remove(&job_id);
                         break;
@@ -3331,11 +3461,11 @@ async fn run_queue_dispatcher_with_tuning_inner(
         crate::metrics::record_queue_depth(state.queue.pending());
     }
     for buffered in buffer {
-        reject_generation_job(&state, buffered.job, legacy_dispatch_stop_message(&state));
+        reject_generation_job(&state, buffered.job, legacy_dispatch_stop_message(&state)).await;
     }
     job_rx.close();
     while let Some(job) = job_rx.recv().await {
-        reject_generation_job(&state, job, legacy_dispatch_stop_message(&state));
+        reject_generation_job(&state, job, legacy_dispatch_stop_message(&state)).await;
     }
     tracing::info!("multi-GPU queue dispatcher shutting down");
 }
@@ -3353,12 +3483,17 @@ pub(crate) fn legacy_generation_preferred_gpu(
         .or(placement_gpu))
 }
 
-fn reject_generation_job(state: &AppState, job: GenerationJob, message: String) {
-    if let Some(progress) = &job.progress_tx {
-        let _ = progress.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
-    }
+async fn reject_generation_job(state: &AppState, job: GenerationJob, message: String) {
     let job_id = job.id.clone();
-    let _ = job.result_tx.send(Err(message));
+    durable_generation_settlement::fail_async(job, DurableDisposition::Retain, message).await;
+    state.queue.decrement();
+    state.job_registry.remove(&job_id);
+}
+
+async fn reject_cancelled_generation_job(state: &AppState, job: GenerationJob) {
+    let job_id = job.id.clone();
+    let model = job.request.model.clone();
+    durable_generation_settlement::finish_cancelled_async(job, &model, true).await;
     state.queue.decrement();
     state.job_registry.remove(&job_id);
 }
@@ -3373,14 +3508,13 @@ fn generation_from_legacy_grant(grant: crate::gpu_pool::LeaseGrant) -> GpuJob {
 fn generation_from_legacy_gpu_job(job: GpuJob) -> GenerationJob {
     GenerationJob {
         id: job.id,
+        durable_queue_rank: job.durable_queue_rank,
         request: job.request,
         deferred_media: job.deferred_media,
-        resolved_references: job.resolved_references,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
         output_dir: job.output_dir,
-        batch_child: job.batch_child,
         journal: job.journal,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant: None,
@@ -3798,15 +3932,41 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn durable_terminal_result_carries_saved_gallery_names() {
+    fn durable_terminal_result_carries_saved_gallery_names_and_terminal_facts() {
+        let response = mold_core::GenerateResponse {
+            images: Vec::new(),
+            video: None,
+            audio: None,
+            generation_time_ms: 12_345,
+            model: "flux-dev:q8".to_string(),
+            seed_used: 99,
+            gpu: Some(1),
+            request_warnings: Vec::new(),
+        };
         let result = SavedOutputNames {
             output: Some("print.png".to_string()),
             original: Some("print_original.png".to_string()),
         }
-        .terminal_json();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["filename"], "print.png");
-        assert_eq!(parsed["original_filename"], "print_original.png");
+        .terminal_json(&response);
+        let parsed: mold_core::GenerationBatchResult = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.filename.as_deref(), Some("print.png"));
+        assert_eq!(
+            parsed.original_filename.as_deref(),
+            Some("print_original.png")
+        );
+        assert_eq!(parsed.seed, Some(99));
+        assert_eq!(parsed.generation_time_ms, Some(12_345));
+        assert_eq!(parsed.gpu, Some(1));
+    }
+
+    #[test]
+    fn a_result_settled_without_terminal_facts_still_reads_back() {
+        let parsed: mold_core::GenerationBatchResult =
+            serde_json::from_str(r#"{"filename":"done.png"}"#).unwrap();
+        assert_eq!(parsed.filename.as_deref(), Some("done.png"));
+        assert_eq!(parsed.seed, None);
+        assert_eq!(parsed.generation_time_ms, None);
+        assert_eq!(parsed.gpu, None);
     }
 
     fn claimed_single_worker_ticket(
@@ -3837,7 +3997,6 @@ mod tests {
                     target_device_id: None,
                     completion_payload: SseCompletionPayload::MetadataOnly,
                     batch_child: false,
-                    carries_reference_authority: false,
                 }],
             })
             .unwrap();
@@ -3845,6 +4004,74 @@ mod tests {
         assert_eq!(claim.row.id, id);
         let ticket = journal.attach_claimed(id, claim.claim_token);
         (journal, db, ticket)
+    }
+
+    /// One panic policy for both worker paths.
+    ///
+    /// A panic is never auto-replayed and never user-retryable unchanged. The
+    /// GPU owner adds a quarantine fence on top, which `settle_one` honours
+    /// over the hold; nothing here restarts, so the hold is what the row
+    /// keeps. The two arms used to disagree in the source, with a comment
+    /// explaining why — this asserts they no longer do.
+    #[tokio::test]
+    async fn a_single_worker_inference_panic_holds_the_row_non_retryably() {
+        let (journal, db, ticket) = claimed_single_worker_ticket("panicked");
+        assert_eq!(
+            claim_single_worker_dispatch(Some(&ticket)),
+            Some(crate::queue_journal::DispatchClaim::Granted)
+        );
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        durable_generation_settlement::fail_async(
+            durable_generation_settlement::SettlementChannels {
+                journal: Some(ticket),
+                progress_tx: Some(progress_tx),
+                result_tx: Some(result_tx),
+            },
+            DurableDisposition::Hold { retryable: false },
+            "inference panicked: boom".to_string(),
+        )
+        .await;
+
+        let row = mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "panicked")
+            .unwrap()
+            .expect("a panicked row is parked, never deleted");
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Held);
+        let child = mold_db::generation_batches::get_durable(
+            db.as_ref().as_ref().unwrap(),
+            journal.owner_uuid().unwrap(),
+            "batch",
+        )
+        .unwrap()
+        .unwrap()
+        .children
+        .remove(0);
+        assert!(
+            !child.retryable,
+            "`POST /api/queue/:id/retry` must not re-run a request that panicked"
+        );
+        match progress_rx.try_recv().expect("one terminal frame") {
+            SseMessage::Error(event) => {
+                assert!(!event.retained);
+                assert_eq!(event.code, None);
+            }
+            _ => panic!("expected a terminal error frame"),
+        }
+        assert!(result_rx.await.unwrap().is_err());
+
+        for (file, source) in [
+            ("queue.rs", include_str!("queue.rs")),
+            ("gpu_worker.rs", include_str!("gpu_worker.rs")),
+        ] {
+            let arm = source
+                .find("\"inference panicked")
+                .expect("both worker paths report an inference panic");
+            let tail = &source[arm..arm + 800];
+            assert!(
+                tail.contains("DurableDisposition::Hold { retryable: false }"),
+                "{file} must answer a panic with a non-retryable hold"
+            );
+        }
     }
 
     #[test]
@@ -3918,6 +4145,7 @@ mod tests {
                 model: request.model,
                 request_json,
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: root,
                 target_gpu: None,
                 target_device_id: None,
@@ -3943,6 +4171,134 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn single_worker_user_cancellation_emits_canonical_cancelled_observer() {
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let job = GenerationJob {
+            id: "single-worker-dispatch-cancelled".to_string(),
+            durable_queue_rank: None,
+            request: fake_request("mock-model"),
+            deferred_media: None,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: Some(progress_tx),
+            result_tx,
+            output_dir: None,
+            journal: None,
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            h3_private_ingress_grant: None,
+        };
+
+        finish_single_worker_cancelled(job, true).await;
+
+        let SseMessage::Error(error) = progress_rx.recv().await.unwrap() else {
+            panic!("user cancellation must emit a terminal SSE error frame");
+        };
+        assert_eq!(
+            error.code.as_deref(),
+            Some(mold_core::SSE_ERROR_CODE_QUEUED_CANCELLED)
+        );
+        assert!(matches!(
+            result_rx.await.unwrap(),
+            Err(ref message) if message == "Cancelled"
+        ));
+    }
+
+    /// The single worker hydrates its durable media under its own lease and
+    /// binds the ordered references from THAT hydration: a sealed file whose
+    /// bytes no longer match its descriptor's digest is refused before any
+    /// model is prepared, and the refusal names the binding, not a lost set.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn single_worker_binds_references_from_its_own_hydration() {
+        use sha2::{Digest as _, Sha256};
+
+        let home = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let verified = staging.path().join("verified.media");
+        let tampered = staging.path().join("tampered.media");
+        std::fs::write(&verified, b"verified-reference-bytes").unwrap();
+        std::fs::write(&tampered, b"bytes that were swapped after probing").unwrap();
+        let descriptor = |name: &str, digest_of: &[u8]| {
+            serde_json::json!({
+                "kind": "image",
+                "media": { "authority": "descriptor" },
+                "provenance": { "name": name, "sha256": format!("{:x}", Sha256::digest(digest_of)) },
+                "mime_type": "image/png",
+                "width": 1024,
+                "height": 768
+            })
+        };
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "single worker references",
+            "model": mold_core::minimax_h3::REF2VA_COMFY,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": 4,
+            "guidance": 0.0,
+            "seed": 7,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "references": [
+                descriptor("verified.png", b"verified-reference-bytes"),
+                descriptor("tampered.png", b"the bytes the descriptor was probed from"),
+            ]
+        }))
+        .unwrap();
+        let staged = crate::reference_uploads::StagedReferences::from_files_for_test(
+            &request,
+            vec![verified, tampered],
+        );
+        let (deferred, request_json) = crate::queue_media_runtime::seal_request_for_test(
+            home.path(),
+            "single-worker-references",
+            request,
+            Some(&staged),
+        );
+        drop(staged);
+
+        let state = crate::state::AppState::for_tests();
+        state.job_registry.register(
+            "single-worker-references",
+            mold_core::minimax_h3::REF2VA_COMFY,
+        );
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let job = GenerationJob {
+            id: "single-worker-references".to_string(),
+            durable_queue_rank: None,
+            request: serde_json::from_str(&request_json).unwrap(),
+            deferred_media: Some(deferred),
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: Some(progress_tx),
+            result_tx,
+            output_dir: None,
+            journal: None,
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            h3_private_ingress_grant: None,
+        };
+
+        process_job(&state, job).await;
+
+        let error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("a tampered reference must not render"),
+        };
+        assert!(
+            error.contains("generation reference binding error"),
+            "{error}"
+        );
+        assert!(error.contains("resolved reference 2"), "{error}");
+        assert!(!error.contains(home.path().to_string_lossy().as_ref()));
+        let mut saw_terminal_error = false;
+        while let Ok(message) = progress_rx.try_recv() {
+            if matches!(message, SseMessage::Error(_)) {
+                saw_terminal_error = true;
+            }
+        }
+        assert!(saw_terminal_error);
     }
 
     #[test]
@@ -4002,6 +4358,23 @@ mod tests {
         let shutdown = tokio_util::sync::CancellationToken::new();
         shutdown.cancel();
         assert!(!wait_for_legacy_worker_retry(&shutdown, std::time::Duration::from_secs(60)).await);
+    }
+
+    #[tokio::test]
+    async fn legacy_generation_unavailable_wait_wakes_for_registry_cancellation() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mutation = tokio::sync::Notify::new();
+        mutation.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            wait_for_legacy_generation_retry(
+                &shutdown,
+                &mutation,
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("registry cancellation must bypass worker backoff");
     }
 
     /// A `GenerateRequest` with the bare minimum fields populated — enough to
@@ -4668,10 +5041,10 @@ mod tests {
         let original = fake_image();
         let generation = crate::gpu_pool::GpuJob {
             id: "legacy-sibling-post-upscale".to_string(),
+            durable_queue_rank: None,
             model: request.model.clone(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -4687,7 +5060,6 @@ mod tests {
             #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: None,
         };
         let response = mold_core::GenerateResponse {
@@ -5709,6 +6081,7 @@ mod tests {
         let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
             name: Some(name.to_string()),
             sha256: Some(format!("{byte:02x}").repeat(32)),
+            crop: None,
         };
         let mut request = fake_request(mold_core::minimax_h3::REF2VA_COMFY);
         request.width = 1344;
@@ -6692,10 +7065,10 @@ mod tests {
         let (filler_result_tx, _filler_result_rx) = tokio::sync::oneshot::channel();
         let filler_job = crate::gpu_pool::GpuJob {
             id: String::new(),
+            durable_queue_rank: None,
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: filler_result_tx,
@@ -6711,7 +7084,6 @@ mod tests {
             #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: None,
         };
         worker.send_job(filler_job).unwrap();
@@ -6727,14 +7099,13 @@ mod tests {
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: String::new(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -6780,14 +7151,13 @@ mod tests {
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: String::new(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -6864,14 +7234,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         BufferedJob::new(crate::state::GenerationJob {
             id: String::new(),
+            durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -6882,14 +7251,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         BufferedJob::new(crate::state::GenerationJob {
             id: id.to_string(),
+            durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7143,14 +7511,13 @@ mod tests {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let job = crate::state::GenerationJob {
                 id: String::new(),
+                durable_queue_rank: None,
                 request: fake_request(model),
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
-                batch_child: None,
                 journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
@@ -7219,14 +7586,13 @@ mod tests {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let job = crate::state::GenerationJob {
                 id: id.to_string(),
+                durable_queue_rank: None,
                 request: fake_request(&format!("model-{id}")),
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
-                batch_child: None,
                 journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
@@ -7280,14 +7646,13 @@ mod tests {
             let (tx, _rx) = tokio::sync::oneshot::channel();
             let job = GenerationJob {
                 id: String::new(),
+                durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
-                batch_child: None,
                 journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
@@ -7388,14 +7753,13 @@ mod tests {
             held_rxs.push(rx);
             let job = crate::state::GenerationJob {
                 id: String::new(),
+                durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
-                batch_child: None,
                 journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
@@ -7414,11 +7778,8 @@ mod tests {
         );
     }
 
-    /// Serializes every test that mutates queue env vars (process-global).
-    static QUEUE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn with_queue_env<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _g = QUEUE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::test_support::env_lock();
         let prev = std::env::var(name).ok();
         match value {
             Some(v) => std::env::set_var(name, v),
@@ -7525,14 +7886,13 @@ mod tests {
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: String::new(),
+            durable_queue_rank: None,
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7569,14 +7929,13 @@ mod tests {
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: "auto-job".to_string(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7636,7 +7995,7 @@ mod tests {
             .register_with_target_gpu(&id, &request.model, Some(0));
         let ticket = state
             .queue_journal
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id: &id,
                 request: &request,
                 output_dir: Some(&output),
@@ -7644,7 +8003,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .expect("durable test job");
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
@@ -7652,14 +8010,13 @@ mod tests {
             .submit(
                 GenerationJob {
                     id: id.clone(),
+                    durable_queue_rank: None,
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
                     output_dir: Some(output),
-                    batch_child: None,
                     journal: Some(ticket),
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -7680,6 +8037,7 @@ mod tests {
             Some(LegacyGenerationDispatchHook {
                 selected: selected.clone(),
                 resume: resume.clone(),
+                upscale_preparation: None,
             }),
         ));
         selected.notified().await;
@@ -7820,14 +8178,13 @@ mod tests {
                 .submit(
                     GenerationJob {
                         id: id.to_string(),
+                        durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
-                        resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
                         output_dir: None,
-                        batch_child: None,
                         journal: None,
                         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
@@ -7849,6 +8206,7 @@ mod tests {
             Some(LegacyGenerationDispatchHook {
                 selected: selected.clone(),
                 resume: resume.clone(),
+                upscale_preparation: None,
             }),
         ));
         selected.notified().await;
@@ -7888,6 +8246,131 @@ mod tests {
         }
     }
 
+    async fn legacy_upscale_preparation_outcome(cancel: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let (worker, worker_rx) = test_worker(0, 1);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(job_tx.clone());
+        let mut state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker].into(),
+            }),
+            1,
+        );
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db,
+            Some(root.path()),
+            "legacy-upscale-preparation",
+        ));
+
+        let id = if cancel {
+            "cancel-upscale-preparation"
+        } else {
+            "shutdown-upscale-preparation"
+        };
+        let mut request = fake_request("flux-dev:q4");
+        request.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        state
+            .job_registry
+            .register_with_target_gpu(id, &request.model, Some(0));
+        let ticket = state
+            .queue_journal
+            .record_for_test(crate::queue_journal::JournalAdmission {
+                id,
+                request: &request,
+                output_dir: Some(&output),
+                target_gpu: Some(0),
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+            })
+            .expect("durable test job");
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        queue
+            .submit(
+                GenerationJob {
+                    id: id.to_string(),
+                    durable_queue_rank: None,
+                    request,
+                    deferred_media: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: Some(output),
+                    journal: Some(ticket),
+                    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                    h3_private_ingress_grant: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+
+        let upscale_started = Arc::new(tokio::sync::Notify::new());
+        let upscale_resume = Arc::new(tokio::sync::Notify::new());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning_inner(
+            job_rx,
+            state.clone(),
+            1,
+            DEFAULT_MAX_DEFERRALS,
+            shutdown.clone(),
+            Some(LegacyGenerationDispatchHook {
+                selected: Arc::new(tokio::sync::Notify::new()),
+                resume: Arc::new(tokio::sync::Notify::new()),
+                upscale_preparation: Some(LegacyUpscalePreparationHook {
+                    started: upscale_started.clone(),
+                    resume: upscale_resume,
+                }),
+            }),
+        ));
+        upscale_started.notified().await;
+
+        if cancel {
+            assert!(state.queue_journal.cancel_id(id).unwrap());
+            let _scheduler = state.scheduler_mutation_fence.lock().await;
+            assert!(state.job_registry.cancel_queued(id).is_ok());
+        } else {
+            shutdown.cancel();
+        }
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), result_rx)
+            .await
+            .expect("the blocked upscaler preparation settles promptly")
+            .unwrap();
+        shutdown.cancel();
+        dispatcher.await.unwrap();
+        assert!(worker_rx.try_recv().is_err());
+        if cancel {
+            assert!(matches!(result, Err(message) if message == "Cancelled"));
+            assert!(state
+                .queue_journal
+                .list_all()
+                .iter()
+                .all(|row| row.id != id));
+        } else {
+            assert!(matches!(result, Err(message) if message.contains("shutting down")));
+            assert!(state
+                .queue_journal
+                .list_all()
+                .iter()
+                .any(|row| row.id == id));
+        }
+        drop(job_tx);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_upscale_preparation_distinguishes_cancel_from_shutdown_retention() {
+        legacy_upscale_preparation_outcome(true).await;
+        legacy_upscale_preparation_outcome(false).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn paused_dispatcher_holds_new_jobs_until_resumed() {
         let (worker0, rx0) = test_worker(0, 1);
@@ -7906,17 +8389,17 @@ mod tests {
         assert!(state.queue_pause.pause());
         let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
 
+        state.job_registry.register("paused-job", "flux-dev:q4");
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: "paused-job".to_string(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7971,14 +8454,13 @@ mod tests {
                 .submit(
                     crate::state::GenerationJob {
                         id: id.to_string(),
+                        durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
-                        resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
                         output_dir: None,
-                        batch_child: None,
                         journal: None,
                         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
@@ -8032,17 +8514,17 @@ mod tests {
 
         // Pause lands while it is parked, then a job arrives.
         assert!(state.queue_pause.pause());
+        state.job_registry.register("parked-job", "flux-dev:q4");
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: "parked-job".to_string(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,

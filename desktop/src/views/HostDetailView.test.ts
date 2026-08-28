@@ -986,28 +986,28 @@ describe("HostDetailView queue drawer", () => {
     height: 1328,
   };
 
-  it("opens a queue row's info drawer and loads its settings into Generate", async () => {
+  it("opens a queue row's info drawer and reuses its settings in Create", async () => {
     installApi({}, [runningEntry(wireMetadata)]);
     const wrapper = await mountView();
     await wrapper.get("[data-test='host-queue-row']").trigger("click");
 
     const drawer = wrapper.get("[data-test='queue-entry-drawer']");
     expect(drawer.text()).toContain("qwen-image:bf16");
-    expect(drawer.get("[data-test='queue-prompt']").text()).toBe("a lighthouse at dusk");
+    expect(drawer.get("[data-test='queue-detail-prompt']").text()).toBe("a lighthouse at dusk");
     expect(drawer.text()).toContain("1328×1328");
     // Seed 0 on the wire = not pinned.
     expect(drawer.text()).toContain("Random");
-    expect(drawer.text()).toContain("Other client");
+    expect(drawer.text()).toContain("Another client");
 
-    await drawer.get("[data-test='queue-load-settings']").trigger("click");
+    await drawer.get("[data-test='queue-detail-reuse']").trigger("click");
     await flushPromises();
     const prefill = useComposerStore().prefill as { metadata: Record<string, unknown> };
     expect(prefill.metadata).toMatchObject({ prompt: "a lighthouse at dusk", seed: null });
     expect(useComposerStore().prefill).toMatchObject({
       queueSelection: { hostId: REMOTE_ID, jobId: "srv-1", running: true },
     });
-    expect(router.currentRoute.value.path).toBe("/generate");
-    // Loading settings closes the drawer.
+    expect(router.currentRoute.value.path).toBe("/create");
+    // Reusing settings closes the drawer.
     expect(wrapper.find("[data-test='queue-entry-drawer']").exists()).toBe(false);
   });
 
@@ -1018,18 +1018,27 @@ describe("HostDetailView queue drawer", () => {
     const drawer = wrapper.get("[data-test='queue-entry-drawer']");
     expect(drawer.text()).not.toContain("Random");
 
-    await drawer.get("[data-test='queue-load-settings']").trigger("click");
+    await drawer.get("[data-test='queue-detail-reuse']").trigger("click");
     await flushPromises();
     const prefill = useComposerStore().prefill as { metadata: Record<string, unknown> };
     expect(prefill.metadata).toMatchObject({ seed: 0 });
   });
 
-  it("disables Load settings for hosts that don't share them", async () => {
+  it("still reports the job when the durable listing has not loaded its request", async () => {
     installApi({}, [runningEntry()]);
     const wrapper = await mountView();
     await wrapper.get("[data-test='host-queue-row']").trigger("click");
-    const button = wrapper.get("[data-test='queue-load-settings']");
-    expect(button.attributes("disabled")).toBeDefined();
+
+    const drawer = wrapper.get("[data-test='queue-entry-drawer']");
+    // The gap is the wire's, not an old host's: never tell anyone to upgrade.
+    expect(drawer.text()).not.toMatch(/upgrade/i);
+    expect(drawer.get("[data-test='queue-detail-settings-notice']").text()).toMatch(
+      /once this machine loads the job/i,
+    );
+    // Everything the durable projection DOES carry is still rendered.
+    expect(drawer.text()).toContain("RUNNING · GPU 3");
+    expect(drawer.get("[data-test='queue-detail-facts']").text()).toContain("Elapsed");
+    expect(drawer.get("[data-test='queue-detail-reuse']").attributes("disabled")).toBeDefined();
   });
 });
 

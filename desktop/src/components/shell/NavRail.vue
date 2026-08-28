@@ -18,6 +18,7 @@ import {
 } from "@studio/lib/activity";
 import {
   GENERATION_HISTORY_LIMIT,
+  jobCanBeRemoved,
   useGenerationStore,
   jobStatusCode,
   railOrder,
@@ -190,6 +191,7 @@ function jobRunning(job: Job): boolean {
 
 /** Lowercase mono progress line for the developing strip. */
 function developingLabel(job: Job): string {
+  if (job.cancelling) return "cancelling";
   if (job.status === "denoising") return `developing ${job.step}/${job.total}`;
   return jobStatusCode(job).toLowerCase();
 }
@@ -197,20 +199,26 @@ function developingLabel(job: Job): string {
 function jobMenu(job: Job): MenuEntry[] {
   const live = job.status !== "complete" && job.status !== "error";
   return [
-    {
-      label: "Cancel",
-      danger: true,
-      disabled: !live,
-      action: () =>
-        void generation
-          .cancel(job.clientId)
-          .then((cancelled) => {
-            if (cancelled) toasts.push("Cancelled");
-          })
-          .catch((error) =>
-            toasts.push(error instanceof Error ? error.message : String(error), "error"),
-          ),
-    },
+    live
+      ? {
+          label: "Cancel",
+          danger: true,
+          disabled: job.cancelling === true,
+          action: () =>
+            void generation
+              .cancel(job.clientId)
+              .then((cancelled) => {
+                if (cancelled) toasts.push("Cancelled");
+              })
+              .catch((error) =>
+                toasts.push(error instanceof Error ? error.message : String(error), "error"),
+              ),
+        }
+      : {
+          label: "Remove from queue",
+          disabled: !jobCanBeRemoved(job),
+          action: () => generation.removeSettled(job.clientId),
+        },
     { separator: true },
     {
       label: "Use prompt",
@@ -449,7 +457,9 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
             </span>
             <span
               class="block font-utility text-[9.5px]"
-              :class="job.status === 'error' ? 'text-stop' : 'text-safelight'"
+              :class="
+                job.status === 'error' && !job.outcomeUnknown ? 'text-stop' : 'text-safelight'
+              "
             >
               {{ developingLabel(job) }}
             </span>

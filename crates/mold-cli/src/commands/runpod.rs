@@ -18,6 +18,73 @@ use mold_core::runpod::{
     NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
 };
 
+use crate::commands::durable_generation::{
+    canonical_singleton_artifact_observed, CanonicalGenerationArtifact, CanonicalGenerationEvent,
+};
+
+/// Render one print on a pod, keeping a spinner alive from the durable
+/// batch's own progress and state transitions.
+///
+/// A pod render takes minutes, and this path deliberately does not attach to
+/// `/api/generate/stream` because RunPod's proxy times out at 100 seconds.
+/// The durable observer polls each running child's progress snapshot instead,
+/// which restores the per-step and model-pull lines on top of one
+/// authoritative event per committed child transition.
+async fn generate_with_runpod_transport(
+    client: &mold_core::MoldClient,
+    request: &mold_core::GenerateRequest,
+) -> Result<CanonicalGenerationArtifact> {
+    let (events, mut rx) = tokio::sync::mpsc::unbounded_channel::<CanonicalGenerationEvent>();
+    let spinner = tokio::spawn(async move {
+        let mut pb: Option<indicatif::ProgressBar> = None;
+        let mut progress = mold_core::queue_progress::ProgressEventStream::new();
+        while let Some(event) = rx.recv().await {
+            let message = match event {
+                // Per-step progress, including the model-pull download bars
+                // this path exists for: RunPod's proxy times out at 100
+                // seconds, so a silent pull looks like a dead pod.
+                CanonicalGenerationEvent::Progress {
+                    job_id,
+                    progress: snapshot,
+                    ..
+                } => {
+                    let Some(last) = progress.events(&job_id, &snapshot).pop() else {
+                        continue;
+                    };
+                    format_progress_event(&last)
+                }
+                CanonicalGenerationEvent::Admitted { status, .. }
+                | CanonicalGenerationEvent::Snapshot { status, .. } => {
+                    let Some(child) = status.children.first() else {
+                        continue;
+                    };
+                    format!("{:?}", child.state).to_lowercase()
+                }
+                CanonicalGenerationEvent::ReconcileDelayed { .. } => continue,
+            };
+            let bar = pb.get_or_insert_with(|| {
+                let bar = indicatif::ProgressBar::new_spinner();
+                bar.set_style(
+                    indicatif::ProgressStyle::with_template(&format!(
+                        "{{spinner:.{}}} {{msg}}",
+                        theme::SPINNER_STYLE
+                    ))
+                    .unwrap(),
+                );
+                bar.enable_steady_tick(std::time::Duration::from_millis(80));
+                bar
+            });
+            bar.set_message(message);
+        }
+        if let Some(bar) = pb {
+            bar.finish_and_clear();
+        }
+    });
+    let artifact = canonical_singleton_artifact_observed(client, request, Some(&events)).await;
+    drop(events);
+    let _ = spinner.await;
+    artifact.with_context(|| "durable generation failed")
+}
 use crate::theme;
 use crate::AlreadyReported;
 
@@ -39,6 +106,61 @@ pub struct RunPodState {
     pub last_pod_gpu: Option<String>,
     /// Hourly cost of the warm pod.
     pub last_pod_cost_per_hr: Option<f64>,
+}
+
+/// One spinner line per progress event, matching what the attached
+/// `/api/generate/stream` path used to print on this transport.
+fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
+    use mold_core::types::SseProgressEvent as E;
+    match ev {
+        E::DependencyWait { dependency, reason } => {
+            format!("waiting for dependency {dependency}: {reason}")
+        }
+        E::Preview { step, total, .. } => format!("denoise preview {step}/{total}"),
+        E::StageStart { name } => format!("stage: {name}"),
+        E::StageProgress {
+            name,
+            current,
+            total,
+        } => format!("{name} {current}/{total}"),
+        E::StageDone { name, elapsed_ms } => format!("done: {name} ({elapsed_ms}ms)"),
+        E::Info { message } => message.clone(),
+        E::CacheHit { resource } => format!("cached: {resource}"),
+        E::DenoiseStep { step, total, .. } => format!("denoise {step}/{total}"),
+        E::DownloadProgress {
+            filename,
+            file_index,
+            total_files,
+            bytes_downloaded,
+            bytes_total,
+            ..
+        } => format!(
+            "pull [{file_index}/{total_files}] {filename} {}/{}",
+            human_bytes(*bytes_downloaded),
+            human_bytes(*bytes_total)
+        ),
+        E::DownloadDone {
+            filename,
+            file_index,
+            total_files,
+            ..
+        } => format!("\u{2713} [{file_index}/{total_files}] {filename}"),
+        E::PullComplete { model } => format!("pull complete: {model}"),
+        E::Queued { position, .. } => format!("queued (#{position})"),
+        E::WeightLoad {
+            component,
+            bytes_loaded,
+            bytes_total,
+        } => format!(
+            "loading {component} {}/{}",
+            human_bytes(*bytes_loaded),
+            human_bytes(*bytes_total)
+        ),
+    }
+}
+
+fn human_bytes(b: u64) -> String {
+    mold_core::format::human_bytes_compact(b)
 }
 
 fn runpod_state_dir() -> Result<std::path::PathBuf> {
@@ -1709,75 +1831,42 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         output_path.display().to_string().cyan()
     );
 
-    // Stream progress via SSE so RunPod's 100s Cloudflare proxy timeout
-    // doesn't kill the model-pull phase.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::types::SseProgressEvent>();
-    let progress_task = tokio::spawn(async move {
-        let pb = indicatif::ProgressBar::new_spinner();
-        pb.set_style(
-            indicatif::ProgressStyle::with_template(&format!(
-                "{{spinner:.{}}} {{msg}}",
-                theme::SPINNER_STYLE
-            ))
-            .unwrap(),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(80));
-        while let Some(ev) = rx.recv().await {
-            let line = format_progress_event(&ev);
-            pb.set_message(line);
-        }
-        pb.finish_and_clear();
-    });
-
-    let maybe_resp = http
-        .generate_stream(&req, tx)
-        .await
-        .with_context(|| "generation failed")?;
-    let _ = progress_task.await;
-
-    let resp = match maybe_resp {
-        Some(r) => r,
-        None => match http.generate(req).await {
-            Ok(r) => r,
-            Err(e) => {
-                // Translate common Cloudflare-proxy failures into actionable
-                // hints. A 404 on /api/generate when /api/status succeeded
-                // usually means the container's binary doesn't match the
-                // host GPU (e.g. :latest built for sm_89 running on H100).
-                let msg = e.to_string();
-                let gpu = pod.gpu_name().unwrap_or_default();
-                if msg.contains("404") {
-                    bail!(
-                        "generation failed: proxy returned 404 on /api/generate. \
-                         The mold binary in the container may not match the host \
-                         GPU ({gpu}). Try `--image-tag latest-sm80` for broad compat, \
-                         or check pod logs via `mold runpod logs {}`.",
-                        pod.id
-                    );
-                }
-                return Err(e).context("generation failed (non-stream fallback)");
+    let artifact = match generate_with_runpod_transport(&http, &req).await {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            let msg = format!("{error:#}");
+            let gpu = pod.gpu_name().unwrap_or_default();
+            if msg.contains("404") {
+                bail!(
+                    "generation failed: the pod does not serve \
+                     POST /api/generation-batches. The mold binary in the \
+                     container may not match the host GPU ({gpu}). Try \
+                     `--image-tag latest-sm80` for broad compat, or check pod \
+                     logs via `mold runpod logs {}`.",
+                    pod.id
+                );
             }
-        },
+            return Err(error);
+        }
     };
-
-    if let Some(video) = resp.video {
-        let vid_path = opts.output_dir.join(format!(
-            "runpod-{}-{}.{}",
-            pod.id,
-            short_timestamp(),
-            extension_for_video(video.format)
-        ));
-        std::fs::write(&vid_path, &video.data)?;
-        println!("{} saved {}", theme::icon_done(), vid_path.display());
-    } else if let Some(img) = resp.images.first() {
-        std::fs::write(&output_path, &img.data)?;
-        println!(
-            "{} saved {} ({:.1}s on seed {})",
+    std::fs::write(&output_path, &artifact.bytes)?;
+    match (
+        artifact.result.generation_time_ms,
+        artifact.result.seed.or(Some(artifact.metadata.seed)),
+    ) {
+        (Some(elapsed_ms), Some(seed)) => println!(
+            "{} saved {} ({:.1}s on seed {seed}, durable output {})",
             theme::icon_done(),
             output_path.display(),
-            resp.generation_time_ms as f64 / 1000.0,
-            resp.seed_used,
-        );
+            elapsed_ms as f64 / 1000.0,
+            artifact.filename
+        ),
+        _ => println!(
+            "{} saved {} (durable output {})",
+            theme::icon_done(),
+            output_path.display(),
+            artifact.filename
+        ),
     }
 
     // Update state + history.
@@ -1923,69 +2012,6 @@ pub async fn reap_idle_warm_pod_if_needed() -> bool {
             eprintln!("{} {error:#}", theme::icon_warn());
             false
         }
-    }
-}
-
-fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
-    use mold_core::types::SseProgressEvent as E;
-    match ev {
-        E::DependencyWait { dependency, reason } => {
-            format!("waiting for dependency {dependency}: {reason}")
-        }
-        E::Preview { step, total, .. } => format!("denoise preview {step}/{total}"),
-        E::StageStart { name } => format!("stage: {name}"),
-        E::StageProgress {
-            name,
-            current,
-            total,
-        } => format!("{name} {current}/{total}"),
-        E::StageDone { name, elapsed_ms } => format!("done: {name} ({elapsed_ms}ms)"),
-        E::Info { message } => message.clone(),
-        E::CacheHit { resource } => format!("cached: {resource}"),
-        E::DenoiseStep { step, total, .. } => format!("denoise {step}/{total}"),
-        E::DownloadProgress {
-            filename,
-            file_index,
-            total_files,
-            bytes_downloaded,
-            bytes_total,
-            ..
-        } => format!(
-            "pull [{file_index}/{total_files}] {filename} {}/{}",
-            human_bytes(*bytes_downloaded),
-            human_bytes(*bytes_total)
-        ),
-        E::DownloadDone {
-            filename,
-            file_index,
-            total_files,
-            ..
-        } => format!("✓ [{file_index}/{total_files}] {filename}"),
-        E::PullComplete { model } => format!("pull complete: {model}"),
-        E::Queued { position, .. } => format!("queued (#{position})"),
-        E::WeightLoad {
-            component,
-            bytes_loaded,
-            bytes_total,
-        } => format!(
-            "loading {component} {}/{}",
-            human_bytes(*bytes_loaded),
-            human_bytes(*bytes_total)
-        ),
-    }
-}
-
-fn human_bytes(b: u64) -> String {
-    mold_core::format::human_bytes_compact(b)
-}
-
-fn extension_for_video(fmt: mold_core::OutputFormat) -> &'static str {
-    match fmt {
-        mold_core::OutputFormat::Mp4 => "mp4",
-        mold_core::OutputFormat::Gif => "gif",
-        mold_core::OutputFormat::Apng => "apng",
-        mold_core::OutputFormat::Webp => "webp",
-        _ => "bin",
     }
 }
 
@@ -2451,7 +2477,160 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
-    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, Request, Respond, ResponseTemplate,
+    };
+
+    fn transport_request() -> mold_core::GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "runpod transport proof",
+            "model": "flux-dev:q4",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "guidance": 1.0
+        }))
+        .unwrap()
+    }
+
+    async fn mount_canonical_capabilities(server: &MockServer) {
+        let mut capabilities = mold_core::ServerCapabilities::default();
+        capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    struct HeldCanonicalAdmission;
+
+    impl Respond for HeldCanonicalAdmission {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": body["client_batch_id"],
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "durable-runpod-1",
+                    "state": "held",
+                    "error": "dependency is unavailable",
+                    "retryable": true
+                }]
+            }))
+        }
+    }
+
+    struct CompleteCanonicalAdmission;
+
+    impl Respond for CompleteCanonicalAdmission {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": body["client_batch_id"],
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "durable-runpod-1",
+                    "state": "complete",
+                    "result": {"filename": "durable.png"}
+                }]
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn runpod_transport_uses_canonical_admission_without_raw_or_sse() {
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(HeldCanonicalAdmission)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let Err(error) = generate_with_runpod_transport(
+            &mold_core::MoldClient::new(&server.uri()),
+            &transport_request(),
+        )
+        .await
+        else {
+            panic!("held canonical work is not a successful artifact");
+        };
+
+        assert!(error.to_string().contains("durable generation failed"));
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generation-batches"));
+        assert!(!requests.iter().any(|request| {
+            matches!(request.url.path(), "/api/generate" | "/api/generate/stream")
+        }));
+    }
+
+    #[tokio::test]
+    async fn runpod_canonical_success_hydrates_the_exact_durable_artifact() {
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(CompleteCanonicalAdmission)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/image/durable.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes([1_u8, 2, 3]))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "filename": "durable.png",
+                    "timestamp": 1,
+                    "metadata": {
+                        "prompt": "runpod transport proof",
+                        "job_id": "durable-runpod-1",
+                        "model": "flux-dev:q4",
+                        "seed": 7,
+                        "steps": 1,
+                        "guidance": 1.0,
+                        "width": 64,
+                        "height": 64,
+                        "version": "test"
+                    }
+                }])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let artifact = generate_with_runpod_transport(
+            &mold_core::MoldClient::new(&server.uri()),
+            &transport_request(),
+        )
+        .await
+        .expect("durable admission returns the artifact");
+        assert_eq!(artifact.filename, "durable.png");
+        assert_eq!(artifact.bytes, [1_u8, 2, 3]);
+        assert_eq!(
+            artifact.metadata.job_id.as_deref(),
+            Some("durable-runpod-1")
+        );
+        assert_eq!(artifact.request.prompt, "runpod transport proof");
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests.iter().any(|request| {
+            matches!(request.url.path(), "/api/generate" | "/api/generate/stream")
+        }));
+    }
 
     fn policy_create_options(model: Option<&str>) -> CreateOptions {
         CreateOptions {
@@ -3175,18 +3354,6 @@ mod tests {
     }
 
     #[test]
-    fn extension_for_video_covers_every_format() {
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Mp4), "mp4");
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Gif), "gif");
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Apng), "apng");
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Webp), "webp");
-        // Image formats fall through to the generic bin extension — the helper
-        // is only meaningful for video formats but must not panic on others.
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Png), "bin");
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Jpeg), "bin");
-    }
-
-    #[test]
     fn is_interesting_gpu_matches_the_curated_list() {
         for name in [
             "NVIDIA GeForce RTX 4090",
@@ -3291,105 +3458,6 @@ mod tests {
         assert_eq!(back.pod_id, "pod-old");
         assert!(back.model.is_none());
         assert!(back.prompt.is_none());
-    }
-
-    #[test]
-    fn format_progress_event_renders_every_sse_variant() {
-        use mold_core::types::SseProgressEvent as E;
-
-        assert_eq!(
-            format_progress_event(&E::StageStart {
-                name: "denoise".into()
-            }),
-            "stage: denoise"
-        );
-        assert_eq!(
-            format_progress_event(&E::StageProgress {
-                name: "denoise blocks".into(),
-                current: 7,
-                total: 48,
-            }),
-            "denoise blocks 7/48"
-        );
-        assert_eq!(
-            format_progress_event(&E::StageDone {
-                name: "vae".into(),
-                elapsed_ms: 42
-            }),
-            "done: vae (42ms)"
-        );
-        assert_eq!(
-            format_progress_event(&E::Info {
-                message: "hello".into()
-            }),
-            "hello"
-        );
-        assert_eq!(
-            format_progress_event(&E::CacheHit {
-                resource: "t5".into()
-            }),
-            "cached: t5"
-        );
-        assert_eq!(
-            format_progress_event(&E::DenoiseStep {
-                step: 5,
-                total: 20,
-                elapsed_ms: 100
-            }),
-            "denoise 5/20"
-        );
-        assert_eq!(
-            format_progress_event(&E::PullComplete {
-                model: "flux-dev:q8".into()
-            }),
-            "pull complete: flux-dev:q8"
-        );
-        assert_eq!(
-            format_progress_event(&E::Queued {
-                position: 3,
-                id: String::new(),
-            }),
-            "queued (#3)"
-        );
-
-        // Multi-field variants — assert key substrings rather than full
-        // strings so unrelated formatting tweaks (units, separators) don't
-        // break the test.
-        let dl = format_progress_event(&E::DownloadProgress {
-            filename: "model.safetensors".into(),
-            file_index: 1,
-            total_files: 3,
-            bytes_downloaded: 1024 * 1024,
-            bytes_total: 4 * 1024 * 1024,
-            batch_bytes_downloaded: 1024 * 1024,
-            batch_bytes_total: 4 * 1024 * 1024,
-            batch_elapsed_ms: 500,
-        });
-        assert!(dl.contains("[1/3]"), "got: {dl}");
-        assert!(dl.contains("model.safetensors"), "got: {dl}");
-        assert!(dl.contains("1.0M"), "got: {dl}");
-        assert!(dl.contains("4.0M"), "got: {dl}");
-
-        let done = format_progress_event(&E::DownloadDone {
-            filename: "tokenizer.json".into(),
-            file_index: 2,
-            total_files: 3,
-            batch_bytes_downloaded: 1024,
-            batch_bytes_total: 1024,
-            batch_elapsed_ms: 50,
-        });
-        assert!(done.contains("✓"), "got: {done}");
-        assert!(done.contains("[2/3]"), "got: {done}");
-        assert!(done.contains("tokenizer.json"), "got: {done}");
-
-        let load = format_progress_event(&E::WeightLoad {
-            component: "transformer".into(),
-            bytes_loaded: 512 * 1024 * 1024,
-            bytes_total: 4 * 1024 * 1024 * 1024,
-        });
-        assert!(load.contains("loading transformer"), "got: {load}");
-        assert!(load.contains("512.0M"), "got: {load}");
-        assert!(load.contains("4.0G"), "got: {load}");
     }
 
     #[test]

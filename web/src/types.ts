@@ -244,7 +244,6 @@ export interface ServerCapabilities {
    * separate model_access decision. */
   reference_uploads?: {
     available: boolean;
-    authless_inline?: boolean;
     protocol_version: number;
     requires_api_key: boolean;
     session_path: string;
@@ -253,6 +252,7 @@ export interface ServerCapabilities {
     upload_handle_header: string;
     max_file_bytes: number;
     max_session_bytes: number;
+    max_active_sessions: number;
     session_ttl_ms: number;
   };
   devices?: {
@@ -275,15 +275,9 @@ export interface ServerCapabilities {
     can_reorder?: boolean;
     /** Running singleton generations accept cooperative cancellation. */
     cooperative_cancellation?: boolean;
-    /** The host journals admitted generations, keeps them across a restart,
-     * and runs them whether or not a client is still attached. Absent on
-     * servers that predate the durable queue. */
-    durable_queue?: boolean;
-    /** Atomic heterogeneous admission, including singleton requests. */
-    heterogeneous_batch?: boolean;
+    /** The batch chunk limit for durable admission. Its presence IS the
+     * durable-generation contract; there is no separate version probe. */
     heterogeneous_batch_max_outputs?: number | null;
-    /** Enriched durable outcomes, by-client recovery and bulk reconciliation. */
-    durable_batch_outcomes?: boolean;
   };
   /** One server-wide, authenticated lifecycle stream. */
   events?: { available?: boolean };
@@ -605,6 +599,14 @@ export interface QueueEntry {
   target_gpu?: number | null;
   /** Why the host parked this job. Present only for `state: "held"`. */
   held_reason?: string | null;
+  /** Terminal error text for a held or failed job. */
+  error?: string | null;
+  /** The generation settings the job was admitted with (`OutputMetadata` shape). */
+  metadata?: unknown;
+  seed_pinned?: boolean | null;
+  /** Whether this row was resumed from the durable queue after a restart. */
+  replayed?: boolean | null;
+  dispatch_attempts?: number | null;
   /** Whether the host journalled THIS job and will run it across a restart.
    * Additive and deliberately per-job: a host that advertises
    * `queue.durable_queue` still reports `false` for a job it excluded at
@@ -728,6 +730,11 @@ export interface ChainStageWire {
 
 export interface ChainRequestWire {
   model: string;
+  /** An auto-chained one-shot: the machine renders and stitches it, records
+   * the print with stage seeds but no chain job id, and deletes the job's
+   * artifacts afterwards. Absent for an authored sequence, which is durable
+   * and belongs in History. */
+  ephemeral?: boolean;
   /** Title for the STITCHED print — a sequence renders one print, so this
    * titles that print and never an intermediate clip. Additive. */
   title?: string | null;

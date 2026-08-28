@@ -2,8 +2,10 @@
 //!
 //! Bearer handles are carried only in headers on stable URLs. The store keeps
 //! only salted handle digests, stages under the shared `MOLD_HOME` cache, and
-//! converts every public authority into a private [`ResolvedReferenceSet`]
-//! before a request may enter queue or recovery code.
+//! converts every public authority into a private [`StagedReferences`] set
+//! before a request is serialized anywhere. Admission seals those staged files
+//! into the encrypted queue-media store; every later consumer hydrates them
+//! under its own lease into a [`ResolvedReferenceSet`].
 
 use axum::{
     body::Body,
@@ -135,22 +137,165 @@ struct UploadSource {
     metadata: GenerationReferenceMetadata,
 }
 
-/// Private resolved media authority. Paths never enter JSON, queue metadata,
-/// logs, or durable recovery state; dropping the last owner removes staging.
+/// Who is submitting reference media, for the resolver's two questions: which
+/// upload sessions may be consumed, and whether inline bytes are acceptable
+/// without a key.
+///
+/// A keyed submission owns the sessions created under the same API-key
+/// identity. A host with API-key auth explicitly disabled has no key identity
+/// to bind an upload to, so it admits validated inline references only —
+/// upload handles and server paths still demand a key there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferenceIdentity {
+    ApiKey(String),
+    AuthDisabled { instance_id: String },
+}
+
+impl ReferenceIdentity {
+    /// Derive the submitting identity from the request's authentication
+    /// context. `None` means neither an API key nor an explicit auth-disabled
+    /// host: a request that carries references then has nothing to bind them
+    /// to and is refused at resolution.
+    pub(crate) fn resolve(
+        authenticated: Option<&ApiKeyAuthenticated>,
+        auth_state: Option<&crate::auth::AuthState>,
+        instance_id: &str,
+    ) -> Option<Self> {
+        if let Some(authenticated) = authenticated {
+            return Some(Self::ApiKey(authenticated.identity.clone()));
+        }
+        auth_state
+            .is_some_and(Option::is_none)
+            .then(|| Self::AuthDisabled {
+                instance_id: instance_id.to_string(),
+            })
+    }
+
+    fn identity_str(&self) -> String {
+        match self {
+            Self::ApiKey(identity) => identity.clone(),
+            Self::AuthDisabled { instance_id } => format!("auth-disabled-inline:{instance_id}"),
+        }
+    }
+
+    fn admits(&self, references: &[GenerationReference]) -> bool {
+        match self {
+            Self::ApiKey(_) => true,
+            Self::AuthDisabled { .. } => references.iter().all(|reference| {
+                matches!(
+                    reference.media(),
+                    GenerationReferenceAuthority::Inline { .. }
+                )
+            }),
+        }
+    }
+}
+
+fn reference_media_requires_api_key() -> ApiError {
+    ApiError::with_code(
+        "API key authentication is required for reference media",
+        "UNAUTHORIZED",
+        StatusCode::UNAUTHORIZED,
+    )
+}
+
+/// The resolver's output before durable acknowledgement: every public
+/// authority in `request.references` staged as a private file under the
+/// admission staging root, probed, and rewritten on the request as a
+/// descriptor. It lives only until the files are sealed into the encrypted
+/// queue-media set; dropping it releases the quota lease and unlinks the
+/// staging, so the sealed copy is the only one that survives.
+pub struct StagedReferences {
+    entries: Vec<ResolvedReference>,
+    fingerprint: String,
+    _hold: ResolvedReferenceHold,
+}
+
+impl std::fmt::Debug for StagedReferences {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StagedReferences")
+            .field("entries", &self.entries.len())
+            .field("fingerprint", &self.fingerprint)
+            .field("root", &"<redacted>")
+            .finish()
+    }
+}
+
+impl StagedReferences {
+    pub fn entries(&self) -> &[ResolvedReference] {
+        &self.entries
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// The staged files in descriptor order, for the seal.
+    pub(crate) fn paths(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    /// Stage already-written files as the request's references. The files are
+    /// adopted as-is (no probe, no quota); the descriptors on `request` are
+    /// the authority the fixture answers for.
+    #[cfg(test)]
+    pub(crate) fn from_files_for_test(
+        request: &mold_core::GenerateRequest,
+        paths: Vec<PathBuf>,
+    ) -> Self {
+        // Fewer paths than descriptors stages a deliberately short set, for
+        // the count checks downstream.
+        let entries = request
+            .references
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .zip(paths)
+            .map(|((index, reference), path)| ResolvedReference {
+                metadata: reference.redacted_metadata_lossless(index),
+                path,
+            })
+            .collect::<Vec<_>>();
+        let fingerprint = fingerprint_of(&entries);
+        let root = std::env::temp_dir().join(format!(
+            "mold-h3-staged-references-{}",
+            uuid::Uuid::new_v4()
+        ));
+        Self {
+            entries,
+            fingerprint,
+            _hold: ResolvedReferenceHold {
+                root: root.clone(),
+                _quota: ResolvedQuotaLease::new(Arc::new(AtomicU64::new(0))),
+                // A test/synthetic set owns no live staging root to claim.
+                _store_lifetime: Arc::new(StoreLifetime {
+                    claim: std::sync::OnceLock::new(),
+                    root,
+                }),
+            },
+        }
+    }
+}
+
+/// Private resolved media authority for one hydrated generation attempt.
+///
+/// Built from a consumer's own queue-media hydration lease — feeder, H3
+/// dependency preparation, worker, or claimed-H3 owner — never carried on a
+/// job. The entries pair each descriptor on the request with the private
+/// staged path the store decrypted it to; the hold keeps that staging alive
+/// until the last holder (this set or any admission view of it) drops.
 pub struct ResolvedReferenceSet {
     entries: Vec<ResolvedReference>,
     fingerprint: String,
-    hold: Arc<ResolvedReferenceHold>,
+    hold: Arc<crate::queue_media_store::DecryptedQueueMediaSet>,
 }
 
-/// The quota reservation and staging directory for one resolved set.
-///
-/// These were drop-scoped to the set itself, which raced admission: cancelling
-/// a queued job drops the set, releasing the quota and unlinking the staging
-/// while a spawned preparation task is still decoding from descriptors that
-/// survive the unlink. Holding both behind an `Arc` means the last holder
-/// releases them — the quota exactly once, and the directory only when no
-/// admission view can still be reading it.
+/// The quota reservation and staging directory for one staged set.
 struct ResolvedReferenceHold {
     root: PathBuf,
     _quota: ResolvedQuotaLease,
@@ -212,44 +357,62 @@ impl std::fmt::Debug for ResolvedReferenceSet {
     }
 }
 
+/// Pair each descriptor on the request with its staged file, in order.
+fn resolved_entries_for_descriptors(
+    request: &mold_core::GenerateRequest,
+    paths: Vec<PathBuf>,
+) -> Result<Vec<ResolvedReference>, String> {
+    let references = request.references.as_deref().unwrap_or_default();
+    if references.len() != paths.len() {
+        return Err(format!(
+            "{} reference descriptors do not match {} staged reference files",
+            references.len(),
+            paths.len()
+        ));
+    }
+    Ok(references
+        .iter()
+        .enumerate()
+        .zip(paths)
+        .map(|((index, reference), path)| ResolvedReference {
+            metadata: reference.redacted_metadata_lossless(index),
+            path,
+        })
+        .collect())
+}
+
+fn fingerprint_of(entries: &[ResolvedReference]) -> String {
+    let metadata = entries
+        .iter()
+        .map(|entry| entry.metadata.clone())
+        .collect::<Vec<_>>();
+    mold_core::generation_reference_fingerprint(&metadata)
+}
+
 impl ResolvedReferenceSet {
+    /// Bind a hydration lease's ordered staged paths to the request's
+    /// descriptors. Nothing is opened here; every use still opens and
+    /// re-verifies each file against its descriptor's digest.
+    pub(crate) fn from_hydrated(
+        request: &mold_core::GenerateRequest,
+        paths: Vec<PathBuf>,
+        hold: Arc<crate::queue_media_store::DecryptedQueueMediaSet>,
+    ) -> Result<Self, String> {
+        let entries = resolved_entries_for_descriptors(request, paths)?;
+        let fingerprint = fingerprint_of(&entries);
+        Ok(Self {
+            entries,
+            fingerprint,
+            hold,
+        })
+    }
+
     pub fn entries(&self) -> &[ResolvedReference] {
         &self.entries
     }
 
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
-    }
-
-    /// Payload-free authority fixture for owner/publication contract tests.
-    /// It deliberately contains no opened media and therefore must never be
-    /// passed to `inference_bindings`; production sets are built only by the
-    /// authenticated resolver above.
-    #[cfg(test)]
-    pub(crate) fn authority_only_for_test(request: &mold_core::GenerateRequest) -> Self {
-        let references = request.references.as_deref().unwrap_or_default();
-        let metadata = references
-            .iter()
-            .enumerate()
-            .map(|(index, reference)| reference.redacted_metadata_lossless(index))
-            .collect::<Vec<_>>();
-        let root = std::env::temp_dir().join(format!(
-            "mold-h3-reference-authority-{}",
-            uuid::Uuid::new_v4()
-        ));
-        Self {
-            entries: Vec::new(),
-            fingerprint: mold_core::generation_reference_fingerprint(&metadata),
-            hold: Arc::new(ResolvedReferenceHold {
-                root: root.clone(),
-                _quota: ResolvedQuotaLease::new(Arc::new(AtomicU64::new(0))),
-                // A test/synthetic set owns no live staging root to claim.
-                _store_lifetime: Arc::new(StoreLifetime {
-                    claim: std::sync::OnceLock::new(),
-                    root,
-                }),
-            }),
-        }
     }
 
     /// Bind the payload-free queued request back to the private staged files
@@ -264,22 +427,16 @@ impl ResolvedReferenceSet {
         mint_inference_bindings(&self.entries, &self.fingerprint, request, cancellation)
     }
 
-    /// A payload-free, quota-free projection of this set for H3 admission.
+    /// A payload-free projection of this set for H3 admission.
     ///
-    /// Admission runs on a spawned task, so it needs an owned `'static` value,
-    /// but `ResolvedReferenceSet` deliberately is not `Clone`: its quota lease
-    /// is a drop guard and cloning it would release the reservation twice, and
-    /// its `Drop` removes the staging directory. The view therefore carries
-    /// neither — the set on the job keeps owning the quota and the directory.
+    /// Admission runs on spawned per-device tasks, so it needs an owned
+    /// `'static` value. The view holds paths and probed metadata, never bytes,
+    /// and mints its bindings through the same verifier the runtime uses.
     ///
-    /// It holds paths and probed metadata, never bytes, and mints its bindings
-    /// through the same verifier the runtime uses.
-    ///
-    /// The view DOES keep the staged files and their quota reservation alive:
-    /// it shares the set's hold, so cancelling and dropping the owning job
-    /// mid-preparation cannot unlink the staging or release the reservation
-    /// out from under an in-flight decode. The quota is still released exactly
-    /// once, by whichever holder drops last.
+    /// The view DOES keep the private staging alive: it shares the set's hold,
+    /// so dropping the hydration lease mid-preparation cannot unlink the
+    /// staging out from under an in-flight decode. The staging is removed
+    /// exactly once, by whichever holder drops last.
     pub fn admission_view(&self) -> ResolvedReferenceAdmissionView {
         ResolvedReferenceAdmissionView {
             entries: self.entries.clone(),
@@ -294,10 +451,10 @@ impl ResolvedReferenceSet {
 pub struct ResolvedReferenceAdmissionView {
     entries: Vec<ResolvedReference>,
     fingerprint: String,
-    /// Keeps the staged files and their quota reservation alive for as long as
-    /// admission may still read them, even if the owning job is cancelled and
-    /// dropped mid-preparation.
-    _hold: Arc<ResolvedReferenceHold>,
+    /// Keeps the private staging alive for as long as admission may still
+    /// read it, even if the hydration lease that produced it is dropped
+    /// mid-preparation.
+    _hold: Arc<crate::queue_media_store::DecryptedQueueMediaSet>,
 }
 
 impl std::fmt::Debug for ResolvedReferenceAdmissionView {
@@ -614,6 +771,30 @@ impl ReferenceUploadStore {
     #[cfg(test)]
     pub(crate) fn staging_exists(&self) -> bool {
         self.root.exists()
+    }
+
+    /// Bytes currently reserved by staged sets that have not been sealed.
+    #[cfg(all(test, feature = "h3"))]
+    pub(crate) fn resolved_bytes_for_test(&self) -> u64 {
+        self.resolved_bytes.load(Ordering::Acquire)
+    }
+
+    /// Staged sets still on disk under the live runtime root.
+    #[cfg(all(test, feature = "h3"))]
+    pub(crate) fn staged_set_count_for_test(&self) -> usize {
+        std::fs::read_dir(self.root.as_path())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| name.starts_with("resolved-"))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     fn digest_handle(&self, domain: &[u8], handle: &str) -> String {
@@ -1188,20 +1369,28 @@ impl ReferenceUploadStore {
         }
     }
 
+    /// Convert every public authority in `request.references` into a private
+    /// staged file and rewrite the request to descriptors. This is the ONLY
+    /// place upload handles are consumed, and it runs before anything about
+    /// the request is serialized — a handle never reaches the durable JSON.
     pub async fn resolve_request(
         &self,
-        identity: &str,
+        identity: Option<&ReferenceIdentity>,
         request: &mut mold_core::GenerateRequest,
         media_roots: &[PathBuf],
         frozen_scope_sha256: Option<&str>,
-    ) -> Result<Option<ResolvedReferenceSet>, ApiError> {
+    ) -> Result<Option<StagedReferences>, ApiError> {
         self.purge_expired().await;
         let Some(references) = request.references.clone() else {
             return Ok(None);
         };
+        let identity = identity
+            .filter(|identity| identity.admits(&references))
+            .ok_or_else(reference_media_requires_api_key)?
+            .identity_str();
         minimax_h3::validate_references(&references).map_err(ApiError::reference)?;
         let (session_digest, upload_sources) = self
-            .upload_sources_for_request(identity, request, frozen_scope_sha256)
+            .upload_sources_for_request(&identity, request, frozen_scope_sha256)
             .await?;
         let mut quota = ResolvedQuotaLease::new(self.resolved_bytes.clone());
         self.ensure_roots().await?;
@@ -1239,20 +1428,16 @@ impl ReferenceUploadStore {
         };
         self.finish_consumed_session(session_digest.as_deref(), true, &mut quota)
             .await;
-        let metadata = entries
-            .iter()
-            .map(|entry| entry.metadata.clone())
-            .collect::<Vec<_>>();
-        let fingerprint = mold_core::generation_reference_fingerprint(&metadata);
+        let fingerprint = fingerprint_of(&entries);
         request.references = Some(descriptors);
-        Ok(Some(ResolvedReferenceSet {
+        Ok(Some(StagedReferences {
             entries,
             fingerprint,
-            hold: Arc::new(ResolvedReferenceHold {
+            _hold: ResolvedReferenceHold {
                 root: resolved_root,
                 _quota: quota,
                 _store_lifetime: self._lifetime.clone(),
-            }),
+            },
         }))
     }
 }
@@ -1465,6 +1650,7 @@ fn reference_from_metadata(metadata: &GenerationReferenceMetadata) -> Generation
     let provenance = GenerationReferenceProvenance {
         name: metadata.name.clone(),
         sha256: Some(metadata.sha256.clone()),
+        crop: metadata.crop.clone(),
     };
     match metadata.kind {
         mold_core::GenerationReferenceKind::Image => GenerationReference::Image {
@@ -1632,6 +1818,7 @@ fn probe_reference(
     let provenance = GenerationReferenceProvenance {
         name: expected.provenance().name.clone(),
         sha256: Some(digest.to_string()),
+        crop: expected.provenance().crop.clone(),
     };
     let canonical = match expected {
         GenerationReference::Image {
@@ -2132,7 +2319,7 @@ pub(crate) async fn create_reference_upload_session(
     minimax_h3::canonicalize_request_model(&mut payload.request);
     if payload.request.batch_size > 1 {
         return Err(ApiError::with_code(
-            "MiniMax H3 references do not support durable server batches yet",
+            "a reference upload session binds one request; submit batch siblings one session each",
             "MINIMAX_H3_REFERENCE_BATCH_UNSUPPORTED",
             StatusCode::UNPROCESSABLE_ENTITY,
         ));
@@ -2423,6 +2610,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("anchor.png".to_string()),
                 sha256,
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 2,
@@ -2470,6 +2658,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("timing.wav".to_string()),
                 sha256: Some(sha256),
+                crop: None,
             },
             mime_type: "audio/wav".to_string(),
             duration_ms,
@@ -2512,6 +2701,87 @@ mod tests {
             | GenerationReference::Audio { media, .. } => *media = authority,
         }
         reference
+    }
+
+    fn keyed() -> ReferenceIdentity {
+        ReferenceIdentity::ApiKey("auth-a".to_string())
+    }
+
+    /// Create a session, stream one PNG into it, and resolve the final request
+    /// exactly as admission does: the staged set plus the descriptor request.
+    async fn upload_and_resolve(
+        store: &ReferenceUploadStore,
+    ) -> (
+        StagedReferences,
+        mold_core::GenerateRequest,
+        ReferenceUploadCompleteResponse,
+        String,
+        Vec<u8>,
+    ) {
+        let bytes = png_bytes();
+        let byte_count = bytes.len() as u64;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let descriptor = png_reference(GenerationReferenceAuthority::Descriptor, Some(digest));
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: request(descriptor.clone()),
+                    upload_references: vec![1],
+                },
+            )
+            .await
+            .unwrap();
+        let handle = session.uploads[0].handle.clone();
+        let complete = store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &handle,
+                "image/png",
+                byte_count,
+                Body::from(bytes.clone()),
+            )
+            .await
+            .unwrap();
+        let mut final_request = request(png_reference(
+            GenerationReferenceAuthority::Upload {
+                handle: handle.clone(),
+            },
+            Some(complete.metadata.sha256.clone()),
+        ));
+        let staged = store
+            .resolve_request(Some(&keyed()), &mut final_request, &[], None)
+            .await
+            .unwrap()
+            .unwrap();
+        (staged, final_request, complete, handle, bytes)
+    }
+
+    /// Seal the staged set as admission does, then hydrate it as a consumer
+    /// does — under its own lease, from the encrypted store alone.
+    #[cfg(unix)]
+    fn hydrate_staged(
+        home: &Path,
+        request: &mold_core::GenerateRequest,
+        staged: &StagedReferences,
+    ) -> (
+        ResolvedReferenceSet,
+        crate::queue_media_runtime::HydratedQueueMediaLease,
+    ) {
+        let (deferred, _request_json) = crate::queue_media_runtime::seal_request_for_test(
+            home,
+            "job-references",
+            request.clone(),
+            Some(staged),
+        );
+        let mut hydrated = request.clone();
+        let lease = deferred
+            .hydrate_into("job-references", &mut hydrated)
+            .unwrap();
+        let set = lease.references(&hydrated).unwrap().unwrap();
+        (set, lease)
     }
 
     #[cfg(feature = "mp4")]
@@ -2604,6 +2874,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("motion.mp4".to_string()),
                 sha256: Some(sha256),
+                crop: None,
             },
             mime_type: "video/mp4".to_string(),
             width: 32,
@@ -2660,59 +2931,44 @@ mod tests {
         );
     }
 
-    /// The admission view is what lets Ref2VA admission reach the staged media
-    /// before a frozen plan exists, so it must bind exactly like the runtime
-    /// path while carrying none of the owning set's authority.
+    /// A staged set is what admission seals; a resolved set is what every
+    /// consumer hydrates. The two must agree on order, metadata, and
+    /// fingerprint, the resolved set must bind exactly like the runtime path,
+    /// and the staged copy's quota must be released as soon as it is dropped —
+    /// the encrypted copy is the only one that survives acknowledgement.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn admission_view_binds_like_the_runtime_and_holds_no_owning_authority() {
+    async fn hydrated_set_matches_the_staged_set_and_binds_like_admission() {
         let dir = tempfile::tempdir().unwrap();
         let store = ReferenceUploadStore::at(dir.path().join("cache"));
-        let bytes = png_bytes();
+        let (staged, final_request, complete, _handle, bytes) = upload_and_resolve(&store).await;
         let byte_count = bytes.len() as u64;
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        let descriptor = png_reference(GenerationReferenceAuthority::Descriptor, Some(digest));
-        let session = store
-            .create_session(
-                "auth-a",
-                "instance-a",
-                ReferenceUploadSessionRequest {
-                    request: request(descriptor.clone()),
-                    upload_references: vec![1],
-                },
-            )
-            .await
-            .unwrap();
-        let handle = session.uploads[0].handle.clone();
-        let complete = store
-            .upload(
-                "auth-a",
-                "instance-a",
-                &handle,
-                "image/png",
-                byte_count,
-                Body::from(bytes),
-            )
-            .await
-            .unwrap();
-        let mut final_request = request(png_reference(
-            GenerationReferenceAuthority::Upload {
-                handle: handle.clone(),
-            },
-            Some(complete.metadata.sha256.clone()),
-        ));
-        let resolved = store
-            .resolve_request("auth-a", &mut final_request, &[], None)
-            .await
-            .unwrap()
-            .unwrap();
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
 
-        let view = resolved.admission_view();
-        assert_eq!(view.len(), resolved.entries().len());
-        assert!(!view.is_empty());
-        assert_eq!(view.fingerprint(), resolved.fingerprint());
+        let (resolved, lease) = hydrate_staged(&dir.path().join("home"), &final_request, &staged);
+        assert_eq!(resolved.entries().len(), staged.entries().len());
+        assert_eq!(resolved.fingerprint(), staged.fingerprint());
+        assert_eq!(
+            resolved.entries()[0].metadata,
+            final_request.references.as_ref().unwrap()[0].redacted_metadata_lossless(0)
+        );
+        assert_eq!(resolved.entries()[0].metadata, complete.metadata);
+        assert_ne!(resolved.entries()[0].path, staged.entries()[0].path);
+        assert!(resolved.entries()[0].path.is_file());
+
+        // The staged copy released its quota and staging on drop; the
+        // hydrated copy is untouched.
+        let staged_path = staged.entries()[0].path.clone();
+        drop(staged);
+        assert!(!staged_path.exists());
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
+        assert!(resolved.entries()[0].path.is_file());
 
         // Same verifier, same result: the view must not become a second
         // contract that could admit media the runtime would reject.
+        let view = resolved.admission_view();
+        assert_eq!(view.len(), resolved.entries().len());
+        assert_eq!(view.fingerprint(), resolved.fingerprint());
         let runtime_bindings = resolved.inference_bindings(&final_request, None).unwrap();
         let admission_bindings = view.inference_bindings(&final_request, None).unwrap();
         assert_eq!(admission_bindings.len(), runtime_bindings.len());
@@ -2720,28 +2976,6 @@ mod tests {
             admission_bindings[0].metadata(),
             runtime_bindings[0].metadata()
         );
-        // Independent descriptors, so releasing admission's cannot disturb the
-        // runtime's later binding.
-        drop(admission_bindings);
-        drop(runtime_bindings);
-        assert_eq!(
-            resolved
-                .inference_bindings(&final_request, None)
-                .unwrap()
-                .len(),
-            1
-        );
-
-        // It renders neither staged paths nor the upload handle.
-        let rendered = format!("{view:?}");
-        assert!(!rendered.contains(dir.path().to_string_lossy().as_ref()));
-        assert!(!rendered.contains(&handle));
-
-        // It carries no quota lease, so cloning and dropping it must not
-        // release the owning set's reservation.
-        let cloned = view.clone();
-        drop(cloned);
-        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
 
         // A drifted request is refused here exactly as on the runtime path.
         let mut drifted = final_request.clone();
@@ -2756,140 +2990,135 @@ mod tests {
             .unwrap_err();
         assert!(mold_inference::is_inference_cancelled(&cancelled));
 
-        drop(view);
+        // The private staging outlives the lease while a view still reads it,
+        // and is removed once by whichever holder drops last.
+        let private_path = resolved.entries()[0].path.clone();
+        drop(lease);
         drop(resolved);
-        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
-    }
-
-    /// Cancelling a queued job drops the resolved set while an admission
-    /// decode may still be running against it. The staging and its quota must
-    /// outlive that decode, and the quota must still be released exactly once.
-    #[tokio::test]
-    async fn dropping_the_owning_set_mid_admission_keeps_staging_and_releases_quota_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ReferenceUploadStore::at(dir.path().join("cache"));
-        let bytes = png_bytes();
-        let byte_count = bytes.len() as u64;
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        let descriptor = png_reference(GenerationReferenceAuthority::Descriptor, Some(digest));
-        let session = store
-            .create_session(
-                "auth-a",
-                "instance-a",
-                ReferenceUploadSessionRequest {
-                    request: request(descriptor.clone()),
-                    upload_references: vec![1],
-                },
-            )
-            .await
-            .unwrap();
-        let handle = session.uploads[0].handle.clone();
-        let complete = store
-            .upload(
-                "auth-a",
-                "instance-a",
-                &handle,
-                "image/png",
-                byte_count,
-                Body::from(bytes),
-            )
-            .await
-            .unwrap();
-        let mut final_request = request(png_reference(
-            GenerationReferenceAuthority::Upload {
-                handle: handle.clone(),
-            },
-            Some(complete.metadata.sha256.clone()),
-        ));
-        let resolved = store
-            .resolve_request("auth-a", &mut final_request, &[], None)
-            .await
-            .unwrap()
-            .unwrap();
-
-        let staged = resolved.entries()[0].path.clone();
-        assert!(staged.is_file());
-        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
-
-        // Admission is in flight, holding only the view.
-        let view = resolved.admission_view();
-
-        // The job is cancelled and its set dropped out from under admission.
-        drop(resolved);
-
-        // Staging survives and the reservation is still charged, so the decode
-        // is not reading unlinked files on released quota.
         assert!(
-            staged.is_file(),
-            "staging must outlive the owning set while an admission view holds it"
+            private_path.is_file(),
+            "staging must outlive the lease while an admission view holds it"
         );
-        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
-        // And it can still bind, which is the whole point of holding it.
         assert_eq!(
             view.inference_bindings(&final_request, None).unwrap().len(),
             1
         );
-
-        // When admission finishes, the last holder releases both — once.
         drop(view);
-        assert!(!staged.exists());
-        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
+        assert!(!private_path.exists());
     }
 
-    /// A cancelled preparation must stop decoding rather than run to
-    /// completion on media whose job is already gone.
+    /// Hydration hands out paths, never trust: a staged file replaced after
+    /// the seal is refused when it is bound, exactly as a tampered admission
+    /// staging was.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn a_cancelled_admission_stops_binding_cooperatively() {
+    async fn a_tampered_hydrated_file_is_refused_at_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let (staged, final_request, _complete, _handle, _bytes) = upload_and_resolve(&store).await;
+        let (resolved, _lease) = hydrate_staged(&dir.path().join("home"), &final_request, &staged);
+        std::fs::write(&resolved.entries()[0].path, b"different replacement bytes").unwrap();
+        assert!(resolved.inference_bindings(&final_request, None).is_err());
+
+        // A descriptor list that does not line up with the hydrated files is
+        // refused before anything is bound, never truncated to fit.
+        let mut extra = final_request.clone();
+        extra
+            .references
+            .as_mut()
+            .unwrap()
+            .push(final_request.references.as_ref().unwrap()[0].clone());
+        assert!(ResolvedReferenceSet::from_hydrated(
+            &extra,
+            vec![resolved.entries()[0].path.clone()],
+            Arc::clone(&resolved.hold),
+        )
+        .is_err());
+    }
+
+    /// A host with API-key auth explicitly disabled admits validated inline
+    /// references and nothing else; a request with no identity at all admits
+    /// none. The refusal is the same 401 on every path.
+    #[tokio::test]
+    async fn auth_disabled_identity_admits_only_inline_references() {
         let dir = tempfile::tempdir().unwrap();
         let store = ReferenceUploadStore::at(dir.path().join("cache"));
         let bytes = png_bytes();
-        let byte_count = bytes.len() as u64;
         let digest = format!("{:x}", Sha256::digest(&bytes));
-        let descriptor = png_reference(GenerationReferenceAuthority::Descriptor, Some(digest));
-        let session = store
-            .create_session(
-                "auth-a",
-                "instance-a",
-                ReferenceUploadSessionRequest {
-                    request: request(descriptor.clone()),
-                    upload_references: vec![1],
-                },
-            )
-            .await
-            .unwrap();
-        let handle = session.uploads[0].handle.clone();
-        let complete = store
-            .upload(
-                "auth-a",
-                "instance-a",
-                &handle,
-                "image/png",
-                byte_count,
-                Body::from(bytes),
-            )
-            .await
-            .unwrap();
-        let mut final_request = request(png_reference(
+        let disabled = ReferenceIdentity::AuthDisabled {
+            instance_id: "instance-a".to_string(),
+        };
+        assert_eq!(disabled.identity_str(), "auth-disabled-inline:instance-a");
+
+        let mut upload = request(png_reference(
             GenerationReferenceAuthority::Upload {
-                handle: handle.clone(),
+                handle: "authless-upload-must-not-resolve".to_string(),
             },
-            Some(complete.metadata.sha256.clone()),
+            Some(digest.clone()),
         ));
-        let resolved = store
-            .resolve_request("auth-a", &mut final_request, &[], None)
+        let error = store
+            .resolve_request(Some(&disabled), &mut upload, &[], None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "UNAUTHORIZED");
+        assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+
+        let media_root = dir.path().join("media");
+        std::fs::create_dir(&media_root).unwrap();
+        std::fs::write(media_root.join("anchor.png"), &bytes).unwrap();
+        let mut server_path = request(png_reference(
+            GenerationReferenceAuthority::ServerPath {
+                path: "anchor.png".to_string(),
+            },
+            Some(digest.clone()),
+        ));
+        let error = store
+            .resolve_request(Some(&disabled), &mut server_path, &[media_root], None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "UNAUTHORIZED");
+
+        let mut unidentified = request(png_reference(
+            GenerationReferenceAuthority::Inline {
+                data: bytes.clone(),
+            },
+            Some(digest.clone()),
+        ));
+        let error = store
+            .resolve_request(None, &mut unidentified, &[], None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "UNAUTHORIZED");
+
+        let mut inline = request(png_reference(
+            GenerationReferenceAuthority::Inline { data: bytes },
+            Some(digest),
+        ));
+        let staged = store
+            .resolve_request(Some(&disabled), &mut inline, &[], None)
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(staged.entries().len(), 1);
+        assert!(matches!(
+            inline.references.as_ref().unwrap()[0].media(),
+            GenerationReferenceAuthority::Descriptor
+        ));
 
-        let view = resolved.admission_view();
-        let cancellation = mold_inference::InferenceCancellationToken::default();
-        cancellation.cancel();
-        let error = view
-            .inference_bindings(&final_request, Some(&cancellation))
-            .unwrap_err();
-        assert!(mold_inference::is_inference_cancelled(&error));
+        // A request without references never asks for an identity.
+        let mut plain = request(png_reference(
+            GenerationReferenceAuthority::Descriptor,
+            None,
+        ));
+        plain.references = None;
+        assert!(store
+            .resolve_request(None, &mut plain, &[], None)
+            .await
+            .unwrap()
+            .is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn upload_session_streams_and_resolves_to_private_descriptor() {
         let dir = tempfile::tempdir().unwrap();
@@ -2932,18 +3161,20 @@ mod tests {
             },
             Some(complete.metadata.sha256.clone()),
         ));
-        let resolved = store
-            .resolve_request("auth-a", &mut final_request, &[], None)
+        let staged = store
+            .resolve_request(Some(&keyed()), &mut final_request, &[], None)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(resolved.entries().len(), 1);
-        assert!(resolved.entries()[0].path.is_file());
+        assert_eq!(staged.entries().len(), 1);
+        assert!(staged.entries()[0].path.is_file());
         assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
         assert!(matches!(
             final_request.references.as_ref().unwrap()[0].media(),
             GenerationReferenceAuthority::Descriptor
         ));
+        assert!(!format!("{staged:?}").contains(dir.path().to_string_lossy().as_ref()));
+        let (resolved, _lease) = hydrate_staged(&dir.path().join("home"), &final_request, &staged);
         let (task, prepared) =
             crate::h3_admission::H3PreparedRequestShape::from_resolved_prepared_request(
                 &final_request,
@@ -2970,10 +3201,10 @@ mod tests {
         // Binding hashes and retains the exact no-follow handle. Replacing the
         // staged pathname after dispatch cannot alter the bytes decoded under
         // the frozen digest, and a later bind fails closed on the replacement.
-        let staged = resolved.entries()[0].path.clone();
-        let displaced = staged.with_extension("displaced");
-        std::fs::rename(&staged, &displaced).unwrap();
-        std::fs::write(&staged, b"different replacement bytes").unwrap();
+        let staged_file = resolved.entries()[0].path.clone();
+        let displaced = staged_file.with_extension("displaced");
+        std::fs::rename(&staged_file, &displaced).unwrap();
+        std::fs::write(&staged_file, b"different replacement bytes").unwrap();
         let mut bound = bindings[0].file();
         bound.seek(SeekFrom::Start(0)).unwrap();
         let mut observed = Vec::new();
@@ -2988,8 +3219,8 @@ mod tests {
 
         // Even the lower-level safe-open error includes the private path.
         // A non-regular replacement must remain client-safe at this boundary.
-        std::fs::remove_file(&staged).unwrap();
-        std::fs::create_dir(&staged).unwrap();
+        std::fs::remove_file(&staged_file).unwrap();
+        std::fs::create_dir(&staged_file).unwrap();
         let open_error = resolved
             .inference_bindings(&final_request, None)
             .unwrap_err();
@@ -3006,6 +3237,8 @@ mod tests {
         assert!(resolved.inference_bindings(&changed, None).is_err());
         drop(bindings);
         drop(resolved);
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), byte_count);
+        drop(staged);
         assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
     }
 
@@ -3255,7 +3488,7 @@ mod tests {
             },
         ));
         assert!(store
-            .resolve_request("auth-a", &mut stale, &[], Some(&initial_scope))
+            .resolve_request(Some(&keyed()), &mut stale, &[], Some(&initial_scope))
             .await
             .is_err());
 
@@ -3268,7 +3501,7 @@ mod tests {
             },
         ));
         assert!(store
-            .resolve_request("auth-a", &mut inline, &[], None)
+            .resolve_request(Some(&keyed()), &mut inline, &[], None)
             .await
             .is_err());
         let media_root = dir.path().join("media");
@@ -3281,13 +3514,13 @@ mod tests {
             },
         ));
         assert!(store
-            .resolve_request("auth-a", &mut server_path, &[media_root], None)
+            .resolve_request(Some(&keyed()), &mut server_path, &[media_root], None)
             .await
             .is_err());
 
         let resolved = store
             .resolve_request(
-                "auth-a",
+                Some(&keyed()),
                 &mut final_request,
                 &[],
                 Some(&complete.request_scope_sha256),

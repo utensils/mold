@@ -281,6 +281,11 @@ pub struct AmendRecord {
 pub struct FinalizeRecord {
     /// Relative path under `final/`, e.g. `final/output-1.mp4`.
     pub output: String,
+    /// Gallery filename this take published, in the requested output format.
+    /// `None` on a host without gallery output or a record written before
+    /// the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gallery_filename: Option<String>,
     pub at_unix_ms: u64,
     /// Per-stage effective seeds that produced this take (spec §8.3:
     /// every take attributable and reproducible).
@@ -680,6 +685,14 @@ pub struct ChainJobListing {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateChainJobResponse {
     pub job_id: String,
+    /// Advisories about the accepted request — today, a filing the host could
+    /// not apply. The same set rides `x-mold-request-warning`; a client that
+    /// polls the job rather than reading the creation response's headers
+    /// would otherwise never see them, exactly as
+    /// [`ChainResponse::request_warnings`](crate::chain::ChainResponse::request_warnings)
+    /// exists for the attached path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -788,8 +801,15 @@ pub enum ChainJobEvent {
         total_frames: u32,
     },
     Finalized {
+        /// Job-relative artifact path (`final/output-{take}.mp4`) — the MP4
+        /// amend and retake decode; never a name a client can fetch.
         output: String,
         take: u32,
+        /// The stitched print's gallery filename, in the requested output
+        /// format — what every client fetches. `None` when the host has no
+        /// gallery output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gallery_filename: Option<String>,
     },
     StateChanged {
         state: ChainJobState,
@@ -880,6 +900,7 @@ mod tests {
             clip_frames: None,
             source_image: None,
             enable_audio: Some(true),
+            ephemeral: false,
         }
     }
 
@@ -956,6 +977,7 @@ mod tests {
         manifest.stage_status[1].audio = Some("stages/001/audio.pcm".into());
         manifest.finalizes.push(FinalizeRecord {
             output: "final/output-1.mp4".into(),
+            gallery_filename: None,
             at_unix_ms: 1_783_200_000_500,
             stage_seeds: vec![u64::MAX - 3, u64::MAX - 2],
         });
@@ -988,6 +1010,7 @@ mod tests {
         manifest.needs_finalize = Some(false);
         manifest.finalizes.push(FinalizeRecord {
             output: "final/output-1.mp4".into(),
+            gallery_filename: None,
             at_unix_ms: 1_783_200_000_500,
             stage_seeds: manifest
                 .stage_status
@@ -1238,6 +1261,7 @@ request_json = "{}"
             ChainJobManifest::new("01JBR55TEST".into(), 1_783_200_000_000, &request).unwrap();
         manifest.finalizes.push(FinalizeRecord {
             output: "final/../output.mp4".into(),
+            gallery_filename: None,
             at_unix_ms: 1_783_200_000_500,
             stage_seeds: vec![42],
         });
@@ -1258,6 +1282,7 @@ request_json = "{}"
         manifest.stage_status[0].audio = Some("stages/000/audio.pcm".into());
         manifest.finalizes.push(FinalizeRecord {
             output: "final/output-1.mp4".into(),
+            gallery_filename: None,
             at_unix_ms: 1_783_200_000_500,
             stage_seeds: vec![42],
         });
@@ -1395,6 +1420,7 @@ request_json = "{}"
             clip_frames: None,
             source_image: None,
             enable_audio: None,
+            ephemeral: false,
         };
         ChainJobDetail {
             summary: ChainJobSummary {
@@ -1473,8 +1499,9 @@ request_json = "{}"
                 ChainJobEvent::Finalized {
                     output: "final/output-1.mp4".into(),
                     take: 1,
+                    gallery_filename: Some("mold-chain-abc-take-1.mp4".into()),
                 },
-                serde_json::json!({"type":"finalized","output":"final/output-1.mp4","take":1}),
+                serde_json::json!({"type":"finalized","output":"final/output-1.mp4","take":1,"gallery_filename":"mold-chain-abc-take-1.mp4"}),
             ),
             (
                 ChainJobEvent::StateChanged {

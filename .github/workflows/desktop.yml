@@ -229,8 +229,10 @@ jobs:
   desktop-windows:
     name: Windows (clippy, test; main NSIS installer)
     needs: changes
-    if: >-
-      github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    # Native PR feedback comes from the macOS job. Run the Windows-specific
+    # toolchain, signing contracts, and installer only after merge or when the
+    # workflow is dispatched manually.
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     defaults:
       run:

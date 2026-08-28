@@ -23,13 +23,10 @@ export interface MobileGenerationHostWatch {
   stop(): void;
 }
 
-const INVALIDATION_EVENT_TYPES = new Set([
-  "job_queued",
-  "job_started",
-  "job_ended",
-  "job_state_committed",
-  "gallery_added",
-]);
+/** The running transition emits no commit hint, so queue/start hints read;
+ * `job_ended` and `gallery_added` precede the commit hint that follows every
+ * settlement and are deliberately not here. */
+const INVALIDATION_EVENT_TYPES = new Set(["job_queued", "job_started", "job_state_committed"]);
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -48,7 +45,6 @@ export function watchMobileGenerationHost(
   let reconcileQueued = false;
   let queuedReason: MobileGenerationReconcileReason = "event";
   let queuedJobIds: Set<string> | null = new Set();
-  let postCommitEventsAvailable = false;
 
   function reconcile(reason: MobileGenerationReconcileReason, jobId?: string): void {
     if (stopped) return;
@@ -118,14 +114,8 @@ export function watchMobileGenerationHost(
         reconcile("malformed");
         return;
       }
-      if (payload.type === "job_state_committed" && typeof payload.id === "string") {
-        postCommitEventsAvailable = true;
-        reconcile("event", payload.id);
-      } else if (payload.type === "generation_states_committed") {
-        postCommitEventsAvailable = true;
+      if (payload.type === "generation_states_committed") {
         reconcile("event");
-      } else if (payload.type === "gallery_added" && postCommitEventsAvailable) {
-        // This exact stream proved that a correctly ordered commit hint follows.
       } else if (INVALIDATION_EVENT_TYPES.has(payload.type)) {
         reconcile("event", typeof payload.id === "string" ? payload.id : undefined);
       }

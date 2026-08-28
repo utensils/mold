@@ -1417,14 +1417,12 @@ impl H3FactoryPreparedAttemptAuthority {
             || self.target_budget.qwen_device_parameter_bytes
                 != projection.qwen_device_parameter_bytes
             || self.target_budget.qwen_host_parameter_bytes != projection.qwen_host_parameter_bytes
-            // The loader holds the largest tensor twice while reading it: the
-            // `Vec` and its `from_raw_buffer` copy. Bound to the opened loader
-            // fact, never a caller-chosen number.
+            // ONE tensor above the resident set: while tensor k is staged
+            // twice, only params[0..k) are resident, so the load peak is
+            // bounded by `total + size(k)` and never `total + 2 * max`. Bound
+            // to the opened loader fact, never a caller-chosen number.
             || self.target_budget.qwen_host_load_staging_bytes
-                != projection
-                    .qwen_maximum_tensor_staging_bytes
-                    .checked_mul(2)
-                    .ok_or_else(|| anyhow!("H3 Qwen host load staging overflow"))?
+                != projection.qwen_maximum_tensor_staging_bytes
             || self.target_budget.qwen_retained_header_host_bytes
                 != projection.qwen_retained_raw_header_bytes
             || match projection.conditioner_placement {
@@ -2350,16 +2348,15 @@ fn validate_target_budget(
         ],
         "H3 VAE load host phase",
     )?;
-    let qwen_encode_host = checked_u64_sum(
-        [
-            attempt_host,
-            qwen_alive_metadata_host,
-            memory.qwen_host_workspace_bytes,
-            memory.qwen_host_load_staging_bytes,
-            memory.text_modality_tags_host_bytes,
-        ],
-        "H3 Qwen encode host phase",
-    )?;
+    let qwen_encode_host = qwen_encode_phase_host_bytes(H3QwenEncodeHostTerms {
+        attempt_host_bytes: attempt_host,
+        qwen_alive_metadata_host_bytes: qwen_alive_metadata_host,
+        qwen_host_parameter_bytes: memory.qwen_host_parameter_bytes,
+        text_modality_tags_host_bytes: memory.text_modality_tags_host_bytes,
+        qwen_host_load_staging_bytes: memory.qwen_host_load_staging_bytes,
+        qwen_host_activation_bytes: memory.qwen_host_activation_bytes,
+        qwen_host_output_state_bytes: memory.qwen_host_output_state_bytes,
+    })?;
     let qwen_transfer_host = checked_u64_sum(
         [
             attempt_host,
@@ -3557,6 +3554,62 @@ pub(crate) fn transformer_load_phase_host_bytes(terms: H3TransformerLoadHostTerm
             turbo_adapter_host_staging_bytes,
         ],
         "H3 transformer load host phase",
+    )
+}
+
+/// Host-byte terms live during the Qwen conditioner's encode phase.
+///
+/// The conditioner is LOADED and then RUN. Its staging buffers are freed
+/// before the first forward allocates an activation, so the two transients
+/// cannot coexist: the phase peak carries the LARGER of them above the
+/// resident parameters, never their sum. The parameters are the one term
+/// live across both halves and are charged exactly once.
+///
+/// Shared with the opened-evidence builder so the budget a device is granted
+/// and the budget `validate_target_budget` re-derives cannot state two
+/// different policies. They did: the builder took the peak while this module
+/// still summed, which held every H3 render with an "internally
+/// inconsistent" budget nobody could act on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct H3QwenEncodeHostTerms {
+    pub(crate) attempt_host_bytes: u64,
+    pub(crate) qwen_alive_metadata_host_bytes: u64,
+    pub(crate) qwen_host_parameter_bytes: u64,
+    pub(crate) text_modality_tags_host_bytes: u64,
+    pub(crate) qwen_host_load_staging_bytes: u64,
+    pub(crate) qwen_host_activation_bytes: u64,
+    pub(crate) qwen_host_output_state_bytes: u64,
+}
+
+pub(crate) fn qwen_encode_phase_host_bytes(terms: H3QwenEncodeHostTerms) -> Result<u64> {
+    let H3QwenEncodeHostTerms {
+        attempt_host_bytes,
+        qwen_alive_metadata_host_bytes,
+        qwen_host_parameter_bytes,
+        text_modality_tags_host_bytes,
+        qwen_host_load_staging_bytes,
+        qwen_host_activation_bytes,
+        qwen_host_output_state_bytes,
+    } = terms;
+    let resident = checked_u64_sum(
+        [
+            attempt_host_bytes,
+            qwen_alive_metadata_host_bytes,
+            qwen_host_parameter_bytes,
+            text_modality_tags_host_bytes,
+        ],
+        "H3 Qwen encode resident host demand",
+    )?;
+    let forward_transient = checked_u64_sum(
+        [qwen_host_activation_bytes, qwen_host_output_state_bytes],
+        "H3 Qwen encode forward transient",
+    )?;
+    checked_u64_sum(
+        [
+            resident,
+            qwen_host_load_staging_bytes.max(forward_transient),
+        ],
+        "H3 Qwen encode host phase",
     )
 }
 
@@ -5333,6 +5386,55 @@ mod tests {
         )
     }
 
+    /// The conditioner's phase is ONE policy, and both authorities state it.
+    ///
+    /// The opened-evidence builder charges the encode phase as the resident
+    /// parameters plus the LARGER of the load staging and the forward
+    /// activation, staging ONE tensor above the resident set. This module
+    /// still summed the two transients and its freeze-time projection still
+    /// demanded `2 x` the largest tensor, so every H3 render was held with
+    /// `MiniMax H3 target budget is internally inconsistent:
+    /// qwen_encode_phase_host_bytes is ..., expected ...` — 777,912,320 B
+    /// apart on the released compact stack, and nothing a caller could act on.
+    #[test]
+    fn the_conditioner_phase_is_one_policy_across_both_authorities() {
+        let request = prepared_request();
+        let checkpoint = raw_checkpoint();
+        let budget = target_budget(&request, &checkpoint);
+
+        check_budget(&budget, &request, &checkpoint)
+            .expect("the re-derivation must accept the builder's own conditioner peak");
+
+        // The load staging and the forward activation belong to disjoint
+        // moments, so summing them is a rejected budget rather than a
+        // conservative one.
+        let forward = budget.qwen_host_activation_bytes + budget.qwen_host_output_state_bytes;
+        let doubly_charged = budget.qwen_host_load_staging_bytes.min(forward);
+        assert!(
+            doubly_charged > 0,
+            "the fixture must exercise both transients"
+        );
+        let mut summed = budget.clone();
+        summed.qwen_encode_phase_host_bytes += doubly_charged;
+        summed.identity_sha256 = expected_h3_factory_target_budget_identity(&summed);
+        let error = check_budget(&summed, &request, &checkpoint)
+            .expect_err("summing two disjoint transients must stay a rejected budget")
+            .to_string();
+        assert!(
+            error.contains("qwen_encode_phase_host_bytes"),
+            "the refusal must name the field that disagrees: {error}"
+        );
+
+        // ONE staged tensor above the resident set, and the freeze-time
+        // projection reads that same fact rather than doubling it.
+        assert_eq!(
+            budget.qwen_host_load_staging_bytes,
+            FIXTURE_QWEN_MAX_TENSOR_STAGING_BYTES
+        );
+        FrozenH3FactoryAuthority::new_contract_only(exact_input())
+            .expect("the freeze-time projection must accept one staged tensor");
+    }
+
     #[test]
     fn ref2va_budget_charges_four_reference_phases_and_drops_condition_encode() {
         let request = ref2va_prepared_request();
@@ -5714,12 +5816,19 @@ mod tests {
     /// If either digest changes, an FL2VA frozen plan changed. That is either
     /// a deliberate FL2VA change — update the literal and say so — or a
     /// Ref2VA change that leaked, which is a bug.
+    ///
+    /// Re-pinned 2026-08-27 (dc56e0a5… → 663903cd…): the conditioner's encode
+    /// phase became one peak rather than a sum of two disjoint transients, and
+    /// its load staging one tensor rather than two, so the fixture budget this
+    /// digest hashes carries different — and now correct — numbers. Deliberate
+    /// and FL2VA-wide; the backend-plan digest is untouched because none of it
+    /// reaches that domain.
     #[test]
     fn fl2va_frozen_plan_identity_is_pinned() {
         let attempt = prepared_attempt();
         assert_eq!(
             expected_h3_factory_prepared_attempt_identity(&attempt),
-            "dc56e0a589b99d03fcb5d8415094690bcd7a85c6572afe15cb729e75a8456fd3"
+            "663903cd23e888ccada69086d5156b8dc42bce3c13cccd2828f1abae0eca1209"
         );
 
         // Through the production builder: the frozen authority must preserve
@@ -5998,7 +6107,9 @@ mod tests {
         let fixed_transformer_load_host_staging_bytes = 2 * checkpoint
             .fixed_transformer_max_host_read_staging_bytes
             + checkpoint.fixed_transformer_max_device_weight_staging_bytes;
-        let qwen_host_load_staging_bytes = 2 * FIXTURE_QWEN_MAX_TENSOR_STAGING_BYTES;
+        // ONE tensor above the resident set, exactly as the opened-evidence
+        // builder charges it.
+        let qwen_host_load_staging_bytes = FIXTURE_QWEN_MAX_TENSOR_STAGING_BYTES;
         let qwen_retained_header_host_bytes = FIXTURE_QWEN_RETAINED_HEADER_BYTES;
         let transformer_retained_header_host_bytes = checkpoint.retained_header_host_bytes;
         let vae_retained_config_host_bytes = FIXTURE_VAE_RETAINED_CONFIG_BYTES;
@@ -6020,13 +6131,18 @@ mod tests {
         ]);
         let vae_load_phase_host_bytes =
             attempt_host_bytes + transformer_alive_metadata_host_bytes + 1_000;
-        let qwen_encode_phase_host_bytes = sum(&[
+        // Through the shared authority, so this fixture cannot become a third
+        // statement of the conditioner's phase policy.
+        let qwen_encode_phase_host_bytes = qwen_encode_phase_host_bytes(H3QwenEncodeHostTerms {
             attempt_host_bytes,
             qwen_alive_metadata_host_bytes,
-            qwen_host_workspace_bytes,
-            qwen_host_load_staging_bytes,
+            qwen_host_parameter_bytes,
             text_modality_tags_host_bytes,
-        ]);
+            qwen_host_load_staging_bytes,
+            qwen_host_activation_bytes,
+            qwen_host_output_state_bytes,
+        })
+        .unwrap();
         let qwen_transfer_phase_host_bytes = sum(&[
             attempt_host_bytes,
             qwen_alive_metadata_host_bytes,
@@ -7857,13 +7973,19 @@ mod tests {
             + budget.vae_retained_config_host_bytes;
         let transformer_alive_metadata =
             budget.transformer_retained_header_host_bytes + budget.vae_retained_config_host_bytes;
+        // The conditioner's two transients belong to disjoint moments — the
+        // load's staging buffers are freed before the first forward allocates
+        // — so the phase carries the LARGER of them above the resident
+        // parameters, never their sum.
         assert_eq!(
             budget.qwen_encode_phase_host_bytes,
             attempt_host
                 + qwen_alive_metadata
-                + budget.qwen_host_workspace_bytes
-                + budget.qwen_host_load_staging_bytes
+                + budget.qwen_host_parameter_bytes
                 + budget.text_modality_tags_host_bytes
+                + budget
+                    .qwen_host_load_staging_bytes
+                    .max(budget.qwen_host_activation_bytes + budget.qwen_host_output_state_bytes)
         );
         // The Qwen header goes when the conditioner does; the VAE configs
         // outlive the transformer because the reload authority still holds one

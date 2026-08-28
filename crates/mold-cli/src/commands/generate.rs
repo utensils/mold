@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 #[cfg(any(feature = "preview", test))]
 use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(test)]
+use mold_core::ServerCapabilities;
 use mold_core::{
     classify_generate_error, fit_to_model_dimensions_aligned, fit_to_target_area, manifest, Config,
     DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction, GenerationReference,
@@ -14,8 +15,12 @@ use rand::Rng;
 #[cfg(feature = "preview")]
 use std::io::IsTerminal;
 use std::io::Write;
+#[cfg(any(feature = "preview", test))]
 use std::time::Duration;
 
+#[cfg(test)]
+use crate::commands::durable_generation::admit_for_test;
+use crate::commands::durable_generation::canonical_generation_observed;
 use crate::commands::h3::ReferenceUpload;
 use crate::control::{stream_server_pull, CliContext};
 use crate::errors::RemoteInferenceError;
@@ -373,6 +378,378 @@ fn validate_batch_stdout(batch: u32, piped: bool, output: &Option<String>) -> Re
     Ok(())
 }
 
+fn new_client_batch_id() -> String {
+    let bytes = rand::random::<u128>().to_be_bytes();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6] & 0x0f,
+        bytes[7],
+        (bytes[8] & 0x3f) | 0x80,
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn remote_batch_requests(
+    base: &GenerateRequest,
+    batch: u32,
+    base_seed: u64,
+    prompts: Option<&[String]>,
+) -> Vec<GenerateRequest> {
+    let batch_id = new_client_batch_id();
+    (0..batch)
+        .map(|index| {
+            let mut request = base.clone();
+            request.seed = Some(base_seed.wrapping_add(u64::from(index)));
+            request.batch_size = 1;
+            request.batch_id = Some(batch_id.clone());
+            request.batch_index = Some(index + 1);
+            request.batch_count = Some(batch);
+            if let Some(prompt) = prompts.and_then(|values| values.get(index as usize)) {
+                request.prompt = prompt.clone();
+            }
+            request
+        })
+        .collect()
+}
+
+fn durable_batch_download_destination(
+    server_filename: &str,
+    request: &GenerateRequest,
+    output: &Option<String>,
+    batch: u32,
+    index: u32,
+    original_sibling: bool,
+) -> Result<String> {
+    if output.is_none() {
+        return std::path::Path::new(server_filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("server returned an invalid gallery filename"));
+    }
+    let format = request.resolved_output_format();
+    let destination = batch_media_filename(
+        output,
+        &request.model,
+        format.extension(),
+        batch,
+        index,
+        request
+            .title
+            .as_deref()
+            .and_then(mold_core::title_slug)
+            .as_deref(),
+    );
+    if !original_sibling {
+        return Ok(destination);
+    }
+    let path = std::path::Path::new(&destination);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("output");
+    let extension = path.extension().and_then(|value| value.to_str());
+    let leaf = match extension {
+        Some(extension) if !extension.is_empty() => format!("{stem}-original.{extension}"),
+        _ => format!("{stem}-original"),
+    };
+    Ok(path
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .map(|directory| directory.join(&leaf))
+        .unwrap_or_else(|| std::path::PathBuf::from(&leaf))
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn save_durable_batch_download(
+    bytes: &[u8],
+    destination: &str,
+    format: OutputFormat,
+    preview: bool,
+    persist: Option<PersistArgs<'_>>,
+) -> Result<()> {
+    if std::path::Path::new(destination).exists() {
+        status!("{} Overwriting: {}", theme::icon_alert(), destination);
+    }
+    std::fs::write(destination, bytes)?;
+    status!("{} Saved: {}", theme::icon_done(), destination.bold());
+    // The local copy is a print like any other: record it so `mold` and the
+    // TUI Library see a `--batch N` sibling exactly as they see a singleton.
+    if let Some(persist) = persist {
+        crate::metadata_db::record_local_save(
+            std::path::Path::new(destination),
+            persist.request,
+            persist.seed_used,
+            persist.generation_time_ms,
+            format,
+            None,
+            None,
+        );
+    }
+    if preview && !format.is_video() && !format.is_audio() {
+        preview_image(bytes);
+    }
+    Ok(())
+}
+
+async fn run_canonical_remote_batch(
+    client: &MoldClient,
+    config: &Config,
+    requests: &[GenerateRequest],
+    output: &Option<String>,
+    piped: bool,
+    preview: bool,
+) -> Result<()> {
+    let total = u32::try_from(requests.len()).context("batch is too large")?;
+    // Batch children carry no progress frames of their own; the durable
+    // observer polls each running child's snapshot and unfolds it into the
+    // exact events `render_progress` already draws for a singleton, so a
+    // `--batch N` run shows the same bars instead of nothing for minutes.
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let render = tokio::spawn(render_progress(progress_rx));
+    let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let forward = tokio::spawn(async move {
+        let mut stream = mold_core::queue_progress::ProgressEventStream::new();
+        while let Some(event) = event_rx.recv().await {
+            let mold_core::durable_generation::CanonicalGenerationEvent::Progress {
+                job_id,
+                progress,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            for event in stream.events(&job_id, &progress) {
+                let _ = progress_tx.send(event);
+            }
+        }
+    });
+    let report = canonical_generation_observed(client, requests, Some(&events)).await;
+    drop(events);
+    let _ = forward.await;
+    let _ = render.await;
+    let report = report?;
+    let admitted_client_ids = report.admitted_client_ids;
+    let mut failures = report.orchestration_failures.clone();
+    let mut outcomes = report.outcomes;
+
+    // A child the host parked for a MISSING MODEL is the one hold this
+    // client can repair: pull the model on that host, retry each such child,
+    // and wait for its batch to settle again — the same auto-pull the
+    // singleton stream path performs, so `--batch 4` on a fresh host renders
+    // instead of leaving four held rows.
+    let held: Vec<usize> = outcomes
+        .iter()
+        .enumerate()
+        .filter(|(_, outcome)| mold_core::durable_generation::is_missing_model_hold(&outcome.child))
+        .map(|(index, _)| index)
+        .collect();
+    if !held.is_empty() {
+        let mut pulled: Vec<String> = Vec::new();
+        for &index in &held {
+            let model = outcomes[index].request.model.clone();
+            if pulled.contains(&model) {
+                continue;
+            }
+            require_remote_auto_pull_acquisition(&outcomes[index].request, config)?;
+            print_server_pull_missing_model(&model);
+            stream_server_pull(client, &model, &[]).await?;
+            pulled.push(model);
+        }
+        status!("{} Resuming held prints...", theme::icon_info());
+        let mut affected: Vec<mold_core::GenerationBatchAuthority> = Vec::new();
+        for &index in &held {
+            let outcome = &outcomes[index];
+            let authority = report
+                .authorities
+                .iter()
+                .find(|authority| authority.client_batch_id == outcome.client_batch_id)
+                .context("held child has no admitted batch authority")?;
+            crate::commands::durable_generation::retry_canonical_child(
+                client,
+                authority,
+                &outcome.child.job_id,
+                outcome.child.revision,
+            )
+            .await
+            .with_context(|| format!("could not resume held job {}", outcome.child.job_id))?;
+            if !affected
+                .iter()
+                .any(|known| known.batch_id == authority.batch_id)
+            {
+                affected.push(authority.clone());
+            }
+        }
+        for authority in &affected {
+            let settled =
+                mold_core::durable_generation::wait_for_settled_batch(client, authority).await?;
+            for outcome in outcomes
+                .iter_mut()
+                .filter(|outcome| outcome.client_batch_id == authority.client_batch_id)
+            {
+                if let Some(child) = settled
+                    .children
+                    .iter()
+                    .find(|child| child.job_id == outcome.child.job_id)
+                {
+                    outcome.child = child.clone();
+                }
+            }
+        }
+    }
+    for outcome in &outcomes {
+        if let Some(failure) =
+            mold_core::durable_generation::child_failure(&outcome.client_batch_id, &outcome.child)
+        {
+            failures.push(failure);
+        }
+    }
+
+    for outcome in outcomes {
+        if outcome.child.state == mold_core::GenerationBatchChildState::Complete {
+            let request = &outcome.request;
+            let child = &outcome.child;
+            let Some(result) = child.result.as_ref() else {
+                failures.push(format!(
+                    "completed child {} for client id {} has no gallery result",
+                    child.index, outcome.client_batch_id
+                ));
+                continue;
+            };
+            let filename = result.filename.as_deref();
+            let original_filename = result
+                .original_filename
+                .as_deref()
+                .filter(|original| Some(*original) != filename);
+            if filename.is_none() && original_filename.is_none() {
+                failures.push(format!(
+                    "completed child {} for client id {} has no gallery filename",
+                    child.index, outcome.client_batch_id
+                ));
+                continue;
+            }
+            let global_index = request.batch_index.unwrap_or(child.index).saturating_sub(1);
+            // The seed the host actually rendered with, which for a
+            // server-chosen seed is the only place it exists.
+            let persist = result.seed.or(request.seed).map(|seed_used| PersistArgs {
+                request,
+                seed_used,
+                generation_time_ms: result.generation_time_ms.unwrap_or_default(),
+            });
+            let stdout_output = (piped && output.is_none()) || output.as_deref() == Some("-");
+            if stdout_output {
+                // A byte stream can carry one artifact only. Match the attached
+                // contract by preferring the final/upscaled result and falling
+                // back to the original only when it is the sole durable output.
+                let stdout_filename = filename.or(original_filename).expect("checked above");
+                let bytes = match client.get_gallery_image(stdout_filename).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        failures.push(format!(
+                            "could not download {stdout_filename} for accepted client id {}: {error}",
+                            outcome.client_batch_id
+                        ));
+                        continue;
+                    }
+                };
+                let mut stdout = std::io::stdout().lock();
+                stdout.write_all(&bytes)?;
+                stdout.flush()?;
+                continue;
+            }
+            if let Some(original_filename) = original_filename {
+                let downloaded = client.get_gallery_image(original_filename).await;
+                let destination = durable_batch_download_destination(
+                    original_filename,
+                    request,
+                    output,
+                    total,
+                    global_index,
+                    filename.is_some(),
+                );
+                match (downloaded, destination) {
+                    (Ok(bytes), Ok(destination)) => {
+                        if let Err(error) = save_durable_batch_download(
+                            &bytes,
+                            &destination,
+                            request.resolved_output_format(),
+                            preview && filename.is_none(),
+                            // The pre-upscale original is only the print's
+                            // own row when no upscaled sibling replaces it.
+                            filename.is_none().then_some(persist).flatten(),
+                        ) {
+                            failures.push(format!(
+                                "could not save {original_filename} for accepted client id {}: {error}",
+                                outcome.client_batch_id
+                            ));
+                        }
+                    }
+                    (Err(error), _) | (_, Err(error)) => failures.push(format!(
+                        "could not hydrate {original_filename} for accepted client id {}: {error}",
+                        outcome.client_batch_id
+                    )),
+                }
+            }
+            if let Some(filename) = filename {
+                let downloaded = client.get_gallery_image(filename).await;
+                let destination = durable_batch_download_destination(
+                    filename,
+                    request,
+                    output,
+                    total,
+                    global_index,
+                    false,
+                );
+                match (downloaded, destination) {
+                    (Ok(bytes), Ok(destination)) => {
+                        if let Err(error) = save_durable_batch_download(
+                            &bytes,
+                            &destination,
+                            request.resolved_output_format(),
+                            preview,
+                            persist,
+                        ) {
+                            failures.push(format!(
+                                "could not save {filename} for accepted client id {}: {error}",
+                                outcome.client_batch_id
+                            ));
+                        }
+                    }
+                    (Err(error), _) | (_, Err(error)) => failures.push(format!(
+                        "could not hydrate {filename} for accepted client id {}: {error}",
+                        outcome.client_batch_id
+                    )),
+                }
+            }
+        }
+    }
+    if !failures.is_empty() {
+        if !admitted_client_ids.is_empty() {
+            failures.push(format!(
+                "accepted client ids: {}",
+                admitted_client_ids.join(", ")
+            ));
+        }
+        anyhow::bail!(failures.join("; "));
+    }
+    Ok(())
+}
+
 /// Re-derive request defaults after an auto-pull refreshed the model
 /// config. `cli_*` carry the user's explicit flags — `None` means the
 /// field was defaulted at request-build time and must now track the
@@ -633,7 +1010,7 @@ pub async fn run(
         .is_some_and(mold_core::minimax_h3::is_family);
     if is_h3 && !reference_uploads.is_empty() && batch != 1 {
         anyhow::bail!(
-            "MiniMax H3 ordered references require batch 1 because upload handles are one-use and request-bound"
+            "MiniMax H3 uploaded references require batch 1: an upload session binds one request, so Batch N needs one session per sibling"
         );
     }
     if is_h3
@@ -1350,19 +1727,26 @@ pub async fn run(
         };
         let mut collected = BatchOutputs::new(batch, base_seed);
 
-        for i in 0..batch {
-            let mut iter_req = req.clone();
-            if reference_session.is_none() {
-                iter_req.seed = Some(base_seed.wrapping_add(i as u64));
-                iter_req.batch_size = 1;
-
-                // Use per-batch expanded prompt if available
-                if let Some(ref prompts) = batch_prompts {
-                    if let Some(p) = prompts.get(i as usize) {
-                        iter_req.prompt = p.clone();
-                    }
-                }
+        // Batch N is one `POST /api/generation-batches` operation. A singleton
+        // keeps `/api/generate/stream`, which is the same durable admission
+        // with an attached observer, and is the one that carries live step
+        // progress, the denoise preview, and
+        // `GenerateServerAction::PullModelAndRetry` for a model the remote
+        // host does not have yet.
+        if batch > 1 {
+            let requests = remote_batch_requests(&req, batch, base_seed, batch_prompts.as_deref());
+            run_canonical_remote_batch(ctx.client(), &config, &requests, &output, piped, preview)
+                .await
+                .map_err(|error| tag_remote(ctx.client(), error))?;
+            if let Some(lease) = reference_session.as_mut() {
+                lease.mark_consumed();
             }
+            return Ok(());
+        }
+
+        for (i, iter_req) in std::iter::once(req.clone()).enumerate() {
+            let i = i as u32;
+            debug_assert_eq!(iter_req.batch_size, 1);
 
             if batch > 1 {
                 status!(
@@ -1379,10 +1763,6 @@ pub async fn run(
                 &iter_req,
                 &config,
                 model,
-                piped,
-                effective_width,
-                effective_height,
-                effective_steps,
                 gpus.clone(),
                 t5_variant.clone(),
                 qwen3_variant.clone(),
@@ -1956,10 +2336,6 @@ async fn generate_remote(
     req: &GenerateRequest,
     config: &Config,
     model: &str,
-    piped: bool,
-    effective_width: u32,
-    effective_height: u32,
-    effective_steps: u32,
     gpus: Option<String>,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
@@ -1972,18 +2348,14 @@ async fn generate_remote(
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
 ) -> Result<GenerateResponse> {
-    // One reporting point for every remote path — SSE, the blocking
-    // fallback, and the pull-and-retry — so a new branch inside cannot
-    // silently skip the advisory.
+    // One reporting point for every remote path — the stream and the
+    // pull-and-retry — so a new branch inside cannot silently skip the
+    // advisory.
     let response = generate_remote_inner(
         client,
         req,
         config,
         model,
-        piped,
-        effective_width,
-        effective_height,
-        effective_steps,
         gpus,
         t5_variant,
         qwen3_variant,
@@ -2007,10 +2379,6 @@ async fn generate_remote_inner(
     req: &GenerateRequest,
     config: &Config,
     model: &str,
-    piped: bool,
-    effective_width: u32,
-    effective_height: u32,
-    effective_steps: u32,
     gpus: Option<String>,
     t5_variant: Option<String>,
     qwen3_variant: Option<String>,
@@ -2029,44 +2397,9 @@ async fn generate_remote_inner(
     let one_use_references = has_remote_reference_handles(req);
 
     match client.generate_stream(req, tx).await {
-        Ok(Some(response)) => {
+        Ok(response) => {
             let _ = render.await;
             Ok(response)
-        }
-        Ok(None) if one_use_references => {
-            let _ = render.await;
-            Err(tag_remote(
-                client,
-                anyhow::anyhow!(
-                    "server lacks secure streaming generation required for one-use MiniMax H3 references; create a fresh upload attempt after updating the server"
-                ),
-            ))
-        }
-        Ok(None) => {
-            // Server doesn't support SSE — fall back to blocking API with spinner
-            let _ = render.await;
-            generate_remote_blocking(
-                client,
-                req,
-                config,
-                model,
-                piped,
-                effective_width,
-                effective_height,
-                effective_steps,
-                gpus,
-                t5_variant,
-                qwen3_variant,
-                qwen2_variant,
-                qwen2_text_encoder_mode,
-                eager,
-                offload,
-                cli_width,
-                cli_height,
-                cli_steps,
-                cli_guidance,
-            )
-            .await
         }
         Err(e) => {
             let _ = render.await;
@@ -2091,125 +2424,9 @@ async fn generate_remote_inner(
 
                     let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
                     let render2 = tokio::spawn(render_progress(rx2));
-                    match client.generate_stream(req, tx2).await {
-                        Ok(Some(response)) => {
-                            let _ = render2.await;
-                            Ok(response)
-                        }
-                        // Either the server has no SSE endpoint (Ok(None)) or
-                        // the SSE stream failed (Err) — some proxies/servers
-                        // close the stream before the final `complete` event
-                        // even though the blocking `/api/generate` path still
-                        // works. Fall back to the blocking endpoint before
-                        // giving up.
-                        _ => {
-                            let _ = render2.await;
-                            client
-                                .generate(req.clone())
-                                .await
-                                .map_err(|e| tag_remote(client, e))
-                        }
-                    }
-                }
-                GenerateServerAction::FallbackLocal => {
-                    if has_remote_reference_handles(req) {
-                        return Err(tag_remote(
-                            client,
-                            anyhow::anyhow!(
-                                "server connection failed after H3 references were bound; secure upload handles cannot fall back to local inference"
-                            ),
-                        ));
-                    }
-                    print_using_local_inference();
-                    let mut local_request = req.clone();
-                    materialize_local_builtin_control(&mut local_request, config).await?;
-                    materialize_local_builtin_camera_controls(&mut local_request, config).await?;
-                    generate_local(
-                        &local_request,
-                        config,
-                        gpus,
-                        t5_variant,
-                        qwen3_variant,
-                        qwen2_variant,
-                        qwen2_text_encoder_mode,
-                        eager,
-                        offload,
-                        cli_width,
-                        cli_height,
-                        cli_steps,
-                        cli_guidance,
-                    )
-                    .await
-                }
-                GenerateServerAction::SurfaceError => Err(tag_remote(client, e)),
-            }
-        }
-    }
-}
-
-/// Blocking remote generation with a simple spinner (fallback for servers without SSE).
-#[allow(clippy::too_many_arguments)]
-async fn generate_remote_blocking(
-    client: &MoldClient,
-    req: &GenerateRequest,
-    config: &Config,
-    model: &str,
-    piped: bool,
-    effective_width: u32,
-    effective_height: u32,
-    effective_steps: u32,
-    gpus: Option<String>,
-    t5_variant: Option<String>,
-    qwen3_variant: Option<String>,
-    qwen2_variant: Option<String>,
-    qwen2_text_encoder_mode: Option<String>,
-    eager: bool,
-    offload: bool,
-    cli_width: Option<u32>,
-    cli_height: Option<u32>,
-    cli_steps: Option<u32>,
-    cli_guidance: Option<f64>,
-) -> Result<GenerateResponse> {
-    if has_remote_reference_handles(req) {
-        anyhow::bail!(
-            "one-use MiniMax H3 reference handles require streaming generation and cannot use the blocking fallback"
-        );
-    }
-    let pb = ProgressBar::new_spinner();
-    if piped {
-        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-    }
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template(&format!("{{spinner:.{}}} {{msg}}", theme::SPINNER_STYLE))
-            .unwrap(),
-    );
-    pb.set_message(format!(
-        "Generating on server ({}x{}, {} steps)...",
-        effective_width, effective_height, effective_steps
-    ));
-    pb.enable_steady_tick(Duration::from_millis(100));
-
-    match client.generate(req.clone()).await {
-        Ok(response) => {
-            pb.finish_and_clear();
-            Ok(response)
-        }
-        Err(e) => {
-            pb.finish_and_clear();
-            match classify_generate_error(&e) {
-                GenerateServerAction::PullModelAndRetry => {
-                    require_remote_auto_pull_acquisition(req, config)
-                        .map_err(|error| tag_remote(client, error))?;
-                    print_server_pull_missing_model(model);
-                    stream_server_pull(client, model, &[])
-                        .await
-                        .map_err(|e| tag_remote(client, e))?;
-                    status!("{} Generating...", theme::icon_info());
-                    client
-                        .generate(req.clone())
-                        .await
-                        .map_err(|e| tag_remote(client, e))
+                    let response = client.generate_stream(req, tx2).await;
+                    let _ = render2.await;
+                    response.map_err(|e| tag_remote(client, e))
                 }
                 GenerateServerAction::FallbackLocal => {
                     if has_remote_reference_handles(req) {
@@ -4005,6 +4222,7 @@ mod tests {
             provenance: mold_core::GenerationReferenceProvenance {
                 name: Some(name.to_string()),
                 sha256: Some(sha256.to_string()),
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 32,
@@ -4021,10 +4239,6 @@ mod tests {
             request,
             &Config::default(),
             &request.model,
-            false,
-            request.width,
-            request.height,
-            request.steps,
             None,
             None,
             None,
@@ -4162,7 +4376,6 @@ mod tests {
         let capabilities = mold_core::ServerCapabilities {
             reference_uploads: mold_core::ReferenceUploadCapabilities {
                 available: true,
-                authless_inline: false,
                 protocol_version: 2,
                 requires_api_key: true,
                 session_path: mold_core::reference_upload::SESSION_PATH.into(),
@@ -4171,6 +4384,7 @@ mod tests {
                 upload_handle_header: mold_core::reference_upload::UPLOAD_HANDLE_HEADER.into(),
                 max_file_bytes: 256 * 1024 * 1024,
                 max_session_bytes: 1024 * 1024 * 1024,
+                max_active_sessions: 4,
                 session_ttl_ms: 120_000,
             },
             ..Default::default()
@@ -4351,7 +4565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_use_reference_handles_never_use_blocking_fallback() {
+    async fn one_use_reference_handles_never_reach_a_second_endpoint() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -4370,6 +4584,7 @@ mod tests {
             provenance: mold_core::GenerationReferenceProvenance {
                 name: Some("reference.png".into()),
                 sha256: Some("a".repeat(64)),
+                crop: None,
             },
             mime_type: "image/png".into(),
             width: 32,
@@ -4378,7 +4593,13 @@ mod tests {
         let error = generate_remote_for_test(&MoldClient::new(&server.uri()), &request)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("secure streaming generation"));
+        // There is no blocking endpoint left to fall back to: a host that does
+        // not serve the streaming route is an error naming it, and the one-use
+        // upload handles are never replayed anywhere.
+        assert!(
+            format!("{error:#}").contains("/api/generate/stream"),
+            "{error:#}"
+        );
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].url.path(), "/api/generate/stream");
@@ -4404,6 +4625,7 @@ mod tests {
             provenance: mold_core::GenerationReferenceProvenance {
                 name: Some("reference.png".into()),
                 sha256: Some("a".repeat(64)),
+                crop: None,
             },
             mime_type: "image/png".into(),
             width: 32,
@@ -4510,8 +4732,22 @@ mod tests {
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
 
         let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 1);
-        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        // No capability probe: a singleton does not attempt canonical batch
+        // admission, so it goes straight to the attached stream. That is what
+        // keeps live progress, the denoise preview, and missing-model auto-pull
+        // on the single-image path.
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.url.path())
+                .collect::<Vec<_>>(),
+            vec!["/api/generate/stream"]
+        );
+        let generation = requests
+            .iter()
+            .find(|request| request.url.path() == "/api/generate/stream")
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&generation.body).unwrap();
         assert_eq!(body["output_format"], "mp4");
         assert_eq!(body["width"], mold_core::minimax_h3::DEFAULT_WIDTH);
         assert_eq!(body["height"], mold_core::minimax_h3::DEFAULT_HEIGHT);
@@ -5955,6 +6191,49 @@ mod hdr_chain_guard_tests {
 #[cfg(test)]
 mod audio_batch_passthrough_tests {
     use super::*;
+    use wiremock::{Request, Respond, ResponseTemplate};
+
+    struct CompleteCanonicalAdmission {
+        batch_id: &'static str,
+        job_id: &'static str,
+        filename: &'static str,
+        original_filename: Option<&'static str>,
+    }
+
+    impl Respond for CompleteCanonicalAdmission {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let mut result = serde_json::json!({ "filename": self.filename });
+            if let Some(original) = self.original_filename {
+                result["original_filename"] = original.into();
+            }
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": self.batch_id,
+                "client_batch_id": body["client_batch_id"],
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": self.job_id,
+                    "state": "complete",
+                    "result": result
+                }]
+            }))
+        }
+    }
+
+    async fn mount_canonical_capabilities(server: &wiremock::MockServer, limit: u32) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.queue.heterogeneous_batch_max_outputs = Some(limit);
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+            .mount(server)
+            .await;
+    }
 
     fn audio_response(seed: u64, bytes: &[u8]) -> GenerateResponse {
         GenerateResponse {
@@ -6063,6 +6342,247 @@ mod audio_batch_passthrough_tests {
         assert!(
             std::fs::read_dir(dir.path()).unwrap().next().is_none(),
             "the collector must not write for a batch of one",
+        );
+    }
+
+    #[test]
+    fn remote_batch_requests_freeze_singleton_provenance() {
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"source","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0,"batch_size":3}"#,
+        )
+        .unwrap();
+        let prompts = vec!["first".into(), "second".into(), "third".into()];
+        let children = remote_batch_requests(&request, 3, u64::MAX, Some(&prompts));
+
+        assert_eq!(children.len(), 3);
+        assert!(children.iter().all(|child| child.batch_size == 1));
+        assert_eq!(children[0].seed, Some(u64::MAX));
+        assert_eq!(children[1].seed, Some(0));
+        assert_eq!(children[2].seed, Some(1));
+        assert_eq!(children[0].prompt, "first");
+        assert_eq!(children[2].prompt, "third");
+        assert_eq!(children[0].batch_index, Some(1));
+        assert_eq!(children[2].batch_index, Some(3));
+        assert_eq!(children[0].batch_count, Some(3));
+        assert!(children
+            .iter()
+            .all(|child| child.batch_id == children[0].batch_id));
+    }
+
+    #[tokio::test]
+    async fn canonical_singleton_downloads_final_and_distinct_original_without_attached_generate() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server, 64).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(CompleteCanonicalAdmission {
+                batch_id: "batch-1",
+                job_id: "job-1",
+                filename: "finished.png",
+                original_filename: Some("original.png"),
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (filename, bytes) in [
+            ("original.png", b"original".as_slice()),
+            ("finished.png", b"final".as_slice()),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/gallery/image/{filename}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("result.png");
+        let output = Some(destination.to_string_lossy().into_owned());
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        run_canonical_remote_batch(
+            &MoldClient::new(&server.uri()),
+            &Config::default(),
+            &[request],
+            &output,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"final");
+        assert_eq!(
+            std::fs::read(dir.path().join("result-original.png")).unwrap(),
+            b"original"
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests.iter().any(|request| matches!(
+            request.url.path(),
+            "/api/generate" | "/api/generate/stream" | "/api/generate/placement-preview"
+        )));
+    }
+
+    #[tokio::test]
+    async fn later_chunk_failure_still_reconciles_and_downloads_accepted_chunks() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
+
+        #[derive(Debug)]
+        struct ChildIndex(u64);
+
+        impl Match for ChildIndex {
+            fn matches(&self, request: &Request) -> bool {
+                serde_json::from_slice::<serde_json::Value>(&request.body)
+                    .ok()
+                    .and_then(|body| body["requests"][0]["batch_index"].as_u64())
+                    == Some(self.0)
+            }
+        }
+
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server, 1).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .and(ChildIndex(1))
+            .respond_with(CompleteCanonicalAdmission {
+                batch_id: "batch-1",
+                job_id: "job-1",
+                filename: "first.png",
+                original_filename: None,
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .and(ChildIndex(2))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "error": "second chunk refused"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/image/first.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"first"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = Some(dir.path().join("result.png").to_string_lossy().into_owned());
+        let base: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let requests = remote_batch_requests(&base, 2, 7, None);
+        let error = run_canonical_remote_batch(
+            &MoldClient::new(&server.uri()),
+            &Config::default(),
+            &requests,
+            &output,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            std::fs::read(dir.path().join("result-0.png")).unwrap(),
+            b"first"
+        );
+        assert!(error.to_string().contains("accepted client ids"));
+        let submitted = server.received_requests().await.unwrap();
+        let accepted_client_id = submitted
+            .iter()
+            .filter(|request| request.url.path() == "/api/generation-batches")
+            .find_map(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+                (body["requests"][0]["batch_index"].as_u64() == Some(1))
+                    .then(|| body["client_batch_id"].as_str().unwrap().to_string())
+            })
+            .unwrap();
+        let failed_client_id = submitted
+            .iter()
+            .filter(|request| request.url.path() == "/api/generation-batches")
+            .find_map(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+                (body["requests"][0]["batch_index"].as_u64() == Some(2))
+                    .then(|| body["client_batch_id"].as_str().unwrap().to_string())
+            })
+            .unwrap();
+        assert!(error.to_string().contains(&accepted_client_id));
+        assert!(error.to_string().contains(&failed_client_id));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_admission_retries_lookup_and_always_names_client_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/by-client/recovery-key"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(5)
+            .mount(&server)
+            .await;
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let error = admit_for_test(
+            &MoldClient::new(&server.uri()),
+            &mold_core::GenerationBatchAdmissionRequest {
+                client_batch_id: "recovery-key".into(),
+                requests: vec![request],
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("recovery-key"));
+        assert!(error.to_string().contains("after 5 attempts"));
+    }
+
+    /// The client gates on the machine's durable queue alone; a media-carrying
+    /// request is admitted whatever the encrypted-media capability says and
+    /// the server's typed refusal answers for it.
+    #[test]
+    fn media_admission_gates_on_the_machine_not_the_request() {
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let mut media = request.clone();
+        media.source_image = Some(vec![1, 2, 3]);
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[media.clone()]),
+            Ok(64)
+        );
+        capabilities.durable_media = Some(mold_core::DurableMediaCapabilities::v2(false));
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[media]),
+            Ok(64)
+        );
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[request]),
+            Ok(64)
         );
     }
 }

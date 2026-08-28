@@ -10,10 +10,13 @@ clients, and custom integrations on one generation contract.
 | -------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `POST`   | `/api/generate`                               | Generate images from prompt                                                                                       |
 | `POST`   | `/api/generate/stream`                        | Generate with SSE progress streaming                                                                              |
+| `POST`   | `/api/generation-batches`                     | Durably admit an idempotent ordered batch of singleton generations                                                |
+| `GET`    | `/api/generation-batches/:id`                 | Read one durable generation batch by server batch ID                                                              |
+| `DELETE` | `/api/generation-batches/:id`                 | Cancel every non-terminal child of one durable generation batch                                                   |
+| `GET`    | `/api/generation-batches/by-client/:id`       | Recover a durable generation batch by its client idempotency ID                                                   |
+| `POST`   | `/api/generation-batches/status`              | Reconcile a bounded set of durable generation batches                                                             |
 | `POST`   | `/api/generate/estimate`                      | Estimate request-sensitive peak memory for a generation request                                                   |
-| `POST`   | `/api/generate/chain`                         | Chained video generation (LTX-2, LTX-Video, Wan)                                                                  |
 | `GET`    | `/api/capabilities/ltx2-control-adapters`     | Compatible official IC-LoRA controls for an installed LTX-2 model                                                 |
-| `POST`   | `/api/generate/chain/stream`                  | Chained video with SSE progress                                                                                   |
 | `POST`   | `/api/generate/chain/validate`                | Normalize and validate a chain without queueing work                                                              |
 | `POST`   | `/api/chain-jobs`                             | Create a durable async chain job                                                                                  |
 | `GET`    | `/api/chain-jobs`                             | List durable chain jobs                                                                                           |
@@ -37,7 +40,7 @@ clients, and custom integrations on one generation contract.
 | `POST`   | `/api/models/pull`                            | Pull/download a model                                                                                             |
 | `DELETE` | `/api/models/unload`                          | Unload model to free GPU memory                                                                                   |
 | `DELETE` | `/api/models/:model`                          | Remove a downloaded model (keeps components shared with other models)                                             |
-| `GET`    | `/api/gallery`                                | List saved images                                                                                                 |
+| `GET`    | `/api/gallery`                                | List saved images (`?view=library\|trash`, `?filename=` narrows to one print)                                     |
 | `POST`   | `/api/gallery/media-token`                    | Mint a short-lived, read-only ticket for one full-size gallery path                                               |
 | `POST`   | `/api/pairing/sessions`                       | Mint an authenticated, one-use, two-minute iPhone pairing ticket                                                  |
 | `POST`   | `/api/pairing/claim`                          | Redeem a pairing ticket once; the durable key is never present in the QR                                          |
@@ -68,6 +71,10 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/queue`                                  | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
 | `PATCH`  | `/api/queue/:id`                              | Update the preferred GPU lane and/or dispatch position for a queued job                                           |
 | `DELETE` | `/api/queue/:id`                              | Cancel a still-queued generation job                                                                              |
+| `GET`    | `/api/queue/:id/preview`                      | Latest folded progress snapshot for one live job (step, stage, weights, download, denoise preview)                |
+| `POST`   | `/api/queue/:id/retry`                        | Retry a held child using its complete fenced batch authority                                                      |
+| `POST`   | `/api/queue/held/sweep`                       | Purge held rows past `queue.held_retention_days` and release their staged media                                   |
+| `POST`   | `/api/generation-batches/sweep`               | Purge fully settled batch summaries past `queue.held_retention_days`                                              |
 | `GET`    | `/api/history`                                | Prompt history, newest first (`?query=` substring filter, `?limit=` up to 500)                                    |
 | `DELETE` | `/api/history`                                | Clear prompt history (`?keep=N` trims to the most recent N)                                                       |
 | `GET`    | `/api/capabilities`                           | Feature capabilities, including optional per-host expansion and LAN-discovery state                               |
@@ -205,7 +212,7 @@ host requires no credential.
 When `MOLD_RATE_LIMIT` is set, per-IP rate limiting is enforced with two tiers:
 
 - **Generation tier** (configured rate): `/api/generate`,
-  `/api/generate/stream`, `/api/expand`, `/api/upscale`,
+  `/api/generate/stream`, `/api/generation-batches`, `/api/expand`, `/api/upscale`,
   `/api/upscale/stream`, `/api/models/load`, `/api/models/pull`,
   `/api/models/unload`
 - **Read tier** (10x the configured rate): `/api/models`, `/api/loras`,
@@ -275,11 +282,179 @@ open http://localhost:7680/api/docs
 
 ## `/api/generate`
 
-`POST /api/generate` returns raw image bytes for `batch_size = 1`. A raw
-server-owned batch (`batch_size > 1`) returns one ordered
-`BatchGenerateResponse` JSON parent after its gallery transaction commits.
+`POST /api/generate` returns raw image bytes for exactly one output.
+`batch_size > 1` fails with HTTP 422 and `DIRECT_BATCH_UNSUPPORTED`; use
+`POST /api/generation-batches` for Batch N.
 The server includes an `x-mold-seed-used` header with the effective seed on
 singleton responses.
+
+A print that fails while the caller is still attached is the caller's error,
+in the shape this route always had: HTTP 404 with the held child's typed code
+(`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`) for a model the host cannot resolve,
+503 `QUEUE_FULL` for a saturated queue, otherwise 500 `INFERENCE_ERROR`
+carrying the engine's own sentence. The durable row behind it is held, not
+lost, so the error names the job to resume (`POST /api/queue/{job_id}/retry`)
+and the batch to reconcile. SSE delivers the same failure as its terminal
+`error` event, with the same code.
+
+Only when the attached observer disappears after commit does the route return
+HTTP 202 with its `GenerationBatchStatus` instead of an opaque 500; reconcile
+by batch or client operation ID and do not resubmit. SSE emits
+`retained: true`, code `durable_observer_detached`, after its queued job ID so
+clients can enter the same reconciliation path. Queued cancellation emits the
+terminal code `queued_cancelled`.
+
+Both facades accept an optional `X-Mold-Client-Batch-Id` header carrying a
+caller-chosen UUID. It is the batch's `client_batch_id`, so a retry of a lost
+response under the same value is answered with the batch the first attempt
+admitted — HTTP 200 with the `GenerationBatchStatus` as JSON, naming the
+gallery `result.filename` once the print is done — never a second render; a
+changed request under the same id is HTTP 409. Without the header every POST
+is a new print.
+
+Durable admission is the only admission. `POST /api/generate`,
+`POST /api/generate/stream`, and `POST /api/generation-batches` are one path
+with three delivery shapes, so a host that cannot admit durably does not
+generate: it returns HTTP 503 `DURABLE_ADMISSION_UNAVAILABLE` on all three,
+with a message naming the unmet requirement — a claimed queue owner, gallery
+output, an authoritative Scheduler V2 dispatcher, and a usable admission
+service. A degraded encrypted-media store is a separate axis and refuses only
+the requests that need it, with HTTP 503 `DURABLE_MEDIA_UNAVAILABLE`; a
+media-free request is unaffected. There is no `X-Mold-Operation-Id` header and
+no attached, non-durable fallback.
+
+A LoRA combined with conditioning media is an ordinary durable request: the
+adapter's path and scale are sealed in the encrypted media set beside the media,
+restored before the print is planned, and re-validated when the job is
+dispatched, so an adapter that was moved or deleted in the meantime holds its
+row with a reason naming the file rather than rendering without it.
+
+Ordered MiniMax H3 references are durable in the same way: each reference's
+descriptor (kind, probed shape, content `sha256`) stays on the queued request,
+its media — whether it arrived inline, through a request-bound upload session,
+or as a server path — is sealed into the encrypted media set at admission, and
+the row survives a restart and replays. One-use upload handles are consumed
+inside admission and never written to `mold.db`.
+
+One request trait is refused with HTTP 422, for a reason that is not about
+protocol versions: `hdr_exr_dir` names an output directory on the machine doing
+inference, which an HTTP client may not choose; re-run the CLI with `--local`.
+`POST /api/generate` additionally refuses `batch_size != 1` with
+`DIRECT_BATCH_UNSUPPORTED`; submit siblings through
+`POST /api/generation-batches`.
+
+`POST /api/generation-batches/status` is rate-limited as a read operation;
+`POST /api/queue/{id}/retry` is rate-limited with generation because it
+re-queues GPU work. A retry restores the job's dispatch budget but not its
+replay budget, which bounds a boot crash loop and is not an operator's to
+spend.
+
+### `GET /api/generation-batches/{id}/events`
+
+Server-sent events carrying the authoritative state of one durable batch.
+Every frame is a complete `GenerationBatchStatus` under the event name
+`generation_batch`, not a delta: the stream opens with one, emits another
+whenever a child commits a new authoritative state, and closes once every
+child is `complete`, `failed`, `cancelled` or `held`. A client that connects
+late, reconnects, or misses a frame is therefore correct from the first event
+it receives, and a lagged subscriber re-reads rather than resynchronising.
+
+This is the state channel, not a progress channel. Per-step progress and
+denoise previews ride the single observer a job's own admission registered —
+`POST /api/generate/stream` is that observer for a singleton, and
+`GET /api/queue/{id}/preview` is the snapshot every other surface polls.
+
+### `GET /api/queue/{id}/preview`
+
+One live job's folded progress snapshot, or `null` before it has reported
+any. `404` means the row has left the queue.
+
+```json
+{
+  "step": 4,
+  "total": 20,
+  "stage": "Denoising",
+  "weight_load": {
+    "bytes_loaded": 1,
+    "bytes_total": 2,
+    "component": "transformer"
+  },
+  "download": {
+    "filename": "t5xxl_fp16.safetensors",
+    "file_index": 1,
+    "total_files": 3,
+    "bytes_downloaded": 10,
+    "bytes_total": 100
+  },
+  "queue_position": 0,
+  "preview_image": "<base64 PNG>",
+  "updated_at_ms": 1756200000000
+}
+```
+
+Every field except `updated_at_ms` is omitted until the job reports it. In
+particular `preview_image` is absent for the whole render on a host started
+with `MOLD_STEP_PREVIEW=0`, while `step`, `total` and `stage` still advance —
+so read the counter from those fields rather than from the image.
+
+### Child results
+
+A completed child carries a `result`:
+
+```json
+{
+  "filename": "mold-flux-dev-1756200000000.png",
+  "original_filename": "mold-flux-dev-1756200000000-original.png",
+  "seed": 4242,
+  "generation_time_ms": 7500,
+  "gpu": 1
+}
+```
+
+`filename` and `original_filename` name the gallery rows the render published;
+the second is present only when a pre-upscale original was saved separately.
+`seed`, `generation_time_ms` and `gpu` are the terminal facts the settlement
+recorded, and are the same values the SSE complete event carries — the seed
+matters when the server chose it. All five fields are additive: a child
+settled before they existed, or replayed from the committed archive, omits
+what it does not know rather than reporting a zero.
+
+### Child revisions
+
+Every child in a `GenerationBatchStatus` carries a monotonic `revision`,
+incremented by each authoritative state transition and by nothing else. Order
+snapshots and events by it rather than by `updated_at_ms`: several transitions
+routinely commit inside one millisecond, and a retry moves a child backward
+from `held` to `accepted`, so a client that breaks that tie by timestamp can
+drop the retry entirely.
+
+`revision` is additive. A server that predates it omits the field, and `0`
+also means "not yet transitioned since the migration" — treat both as absent
+and fall back to the timestamp.
+
+A retry whose response was lost is reconciled by comparing the child's current
+revision against the one observed before the POST. A child that is still
+`held` at a HIGHER revision was retried and held again for a new reason; one
+still at the submitted revision was never retried, and the caller should keep
+its retry fence rather than treat the stale snapshot as fresh.
+
+### Held-row retention
+
+A held row survives `queue.held_retention_days` (default 30; `0` keeps held
+rows forever; env `MOLD_QUEUE_HELD_RETENTION_DAYS`) measured from when it was
+held. The server sweeps hourly, and `POST /api/queue/held/sweep` runs one pass
+on demand, returning `{ "purged", "remaining", "media_deferred" }`. Purging a
+row releases the encrypted request media it pinned and settles its batch child
+as `failed`, so a reconnecting client still sees a terminal outcome rather
+than a missing print. A retry or cancel that lands before the purge wins.
+
+The same horizon bounds settled batch summaries: a batch whose every child is
+`complete`, `failed`, or `cancelled` is purged once its newest child settlement
+is older than `queue.held_retention_days`, and `POST /api/generation-batches/sweep`
+runs that pass on demand, returning `{ "purged", "remaining" }`. A purged batch
+answers `404 GENERATION_BATCH_NOT_FOUND` from `GET /api/generation-batches/:id`
+and appears under `missing.batch_ids` in the bulk status lookup; clients read
+that as missing and never reopen a job they already saw settle.
 
 ```bash
 curl -i -X POST http://localhost:7680/api/generate \
@@ -367,7 +542,8 @@ For remote clients, MiniMax H3 Ref2VA media should use authenticated,
 request-bound streaming uploads so reference bytes stay out of the final
 generation JSON, URLs, logs, and durable metadata. Read `GET /api/capabilities`
 → `reference_uploads` before using the protocol. It advertises the endpoint
-paths, secret header names, file/session byte limits, and session TTL.
+paths, secret header names, file/session byte limits, the number of sessions
+one identity may hold open (`max_active_sessions`), and session TTL.
 
 1. `POST /api/generate/reference-upload-sessions` with the complete
    `GenerateRequest`, using `{ "authority": "descriptor" }` for each ordered
@@ -375,13 +551,17 @@ paths, secret header names, file/session byte limits, and session TTL.
 2. `PUT /api/generate/reference-upload` once per returned slot. Send its
    one-use handle in `X-Mold-Reference-Upload`, with exact `Content-Length` and
    `Content-Type`; the response returns content-probed canonical metadata.
-3. Submit the same request through `/api/generate` or
-   `/api/generate/stream`, replacing each descriptor with
-   `{ "authority": "upload", "handle": "…" }` and the canonical metadata.
+3. Submit the same request through `/api/generation-batches`,
+   `/api/generate`, or `/api/generate/stream`, replacing each descriptor with
+   `{ "authority": "upload", "handle": "…" }` and the canonical metadata. A
+   session binds ONE request, so a batch of siblings needs one session per
+   sibling.
 
 All calls require the same API-key identity. Handles are bearer secrets,
 expire after 30 minutes, are bound to the exact request scope and server
-instance, and can be consumed once. Cancel an abandoned session with
+instance, and can be consumed once — inside admission, before the request is
+journaled, so a retry of a lost `POST` under the same `client_batch_id` is
+answered from the journal rather than refused for a spent handle. Cancel an abandoned session with
 `DELETE /api/generate/reference-upload-sessions` using the
 `X-Mold-Reference-Upload-Session` header. Each file is capped at 256 MiB and a
 session at 1 GiB; use the live capability values rather than hardcoding those
@@ -479,14 +659,44 @@ rather than letting the expander invent a prompt) and is not written to prompt
 history.
 :::
 
-Authoritative Scheduler V2 servers with gallery output enabled advertise
-`queue.server_batch = true` and `queue.server_batch_max_outputs = 64` from
-`GET /api/capabilities`. The latter is the live atomic HTTP
-delivery/materialization limit, not a GPU planner limit. Requests above it
-fail promptly with HTTP 422 and stable code
-`BATCH_OUTPUT_LIMIT_EXCEEDED`, before model preparation, child enumeration, or
-gallery filename reservation. Clients that need more outputs should submit
-multiple parents or independent prepared siblings.
+A host that admits generation advertises `queue.heterogeneous_batch_max_outputs`
+— the per-operation child limit, and the single bit that says this host
+generates at all. Its absence means every generation route returns
+`503 DURABLE_ADMISSION_UNAVAILABLE`. Clients must also honor the exact
+`durable_media` capability for requests carrying source or identity media.
+
+## `/api/generation-batches`
+
+`POST /api/generation-batches` durably commits 1–64 ordered singleton
+`GenerateRequest` children before model resolution, downloads, or inference.
+Every child must set `batch_size: 1`; clients chunk larger Batch N requests.
+The body is `{ "client_batch_id": "<uuid>", "requests": [...] }`. A new
+operation returns HTTP 202; replaying the same client ID and identical requests
+returns the existing status, while changed requests return HTTP 409.
+
+If the admission response is lost, recover it with
+`GET /api/generation-batches/by-client/{client_batch_id}`. Poll one batch with
+`GET /api/generation-batches/{id}` or reconcile a bounded set with
+`POST /api/generation-batches/status`. That bulk request accepts at most 256
+unique UUID identities across `client_batch_ids` and `batch_ids`; clients must
+chunk larger recovery sets. Children expose `accepted`, `held`, `running`,
+`cancelling`, `complete`, `failed`, or `cancelled`; completed
+children name their gallery `result.filename`. A `held` child carries the
+machine's sentence in `error` and, when the hold has a typed cause, its code in
+additive `error_code` (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …) — the field a
+client's missing-model pull offer classifies on. Held retryable work remains in
+the durable queue with its error and can be resumed with
+`POST /api/queue/{job_id}/retry`. Its JSON body must repeat the complete
+authority captured from the admitted batch status:
+`{ "instance_id": "...", "batch_id": "...", "client_batch_id": "...", "job_id": "..." }`.
+The path and body job IDs must match; the server transactionally fences the
+serving instance and batch/client/job identity before returning HTTP 202. Cancel queued work with
+`DELETE /api/queue/{job_id}`, or the whole print run with
+`DELETE /api/generation-batches/{id}` — that is the same per-child cancel
+applied to every non-terminal child under one durable transition, returning
+the authoritative `GenerationBatchStatus` as of the revocation. A child that
+had already settled keeps its outcome, and running inference stops at the next
+model safe point.
 
 Important fields:
 
@@ -494,7 +704,7 @@ Important fields:
 | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `source_image`, `mask_image`                                                                            | img2img/inpainting source media as base64 PNG/JPEG bytes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `edit_images`                                                                                           | ordered Qwen-Image-Edit target/reference images; use this instead of `source_image` for `qwen-image-edit`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `references`                                                                                            | ordered MiniMax H3 Ref2VA image/video/audio descriptors. Use the authenticated request-bound upload protocol above for client files; only redacted metadata and digests survive admission.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `references`                                                                                            | ordered MiniMax H3 Ref2VA image/video/audio references, each a descriptor (kind, probed shape, content `sha256`) plus its media as `inline` bytes, a request-bound `upload` handle, or a trusted `server_path`. Admission resolves every media authority, keeps the descriptor on the queued request, and seals the bytes into the encrypted queue-media store; only the descriptors and digests survive into saved metadata.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `id_image`, `id_images`, `id_image_name(s)`, `id_weight`, `id_start_step`, `true_cfg`, `cfg_start_step` | Face-identity conditioning (PuLID). `id_image` is base64 PNG/JPEG bytes, bounds-checked from its header alone (≤ 16 MiB encoded, ≤ 8192 px per axis, ≤ 32 MP) before any decode; `id_images` is its plural shape, up to `ID_IMAGES_MAX` (4) references of one person averaged post-IDFormer into one identity, mutually exclusive with `id_image` (whole-set byte/pixel caps sit below the per-image limits times the count; a photograph with no detectable face refuses the whole request and names its one-based position). `id_weight` is `0.0..=3.0` (absent = `1.0`); `id_start_step` is the first identity-conditioned denoise step and must be `< steps` (absent = `0`) — both family-blind. `true_cfg` and `cfg_start_step` are FLUX only: `true_cfg` is `1.0..=10.0` (absent or `1.0` = off) and restores a real negative branch on FLUX's guidance-distilled model, reusing `negative_prompt`; `cfg_start_step` is the first step the branch runs at (absent = `1`) and requires `true_cfg`. An SDXL identity request refuses both fields outright — its ordinary `guidance` is already the classifier-free scale, so `negative_prompt` works unconditionally with no flag needed. Identity is accepted only on the qualified checkpoints: FLUX's `flux-dev:q4` / `flux-dev:q8` (bare `flux-dev` resolves to `:q8`; the legacy `flux-dev-q4` resolves too) and SDXL's `sdxl-base:fp16`, `juggernaut-xl:fp16`, `realvis-xl:fp16`, and `dreamshaper-xl:fp16` — and refuses it combined with a LoRA or with an img2img `source_image`, on either family. Any companion field without its parent (`id_weight`/`id_start_step`/`id_image_name` without `id_image`, `id_image_names` without `id_images`, `cfg_start_step` without `true_cfg`) is an error, not an ignored field; sending both `id_image` and `id_images`, or `true_cfg` without an active identity, is likewise an error. A server that cannot execute identity conditioning refuses any request carrying an identity field rather than rendering without the face, with two distinct messages: a build without the `pulid` feature says it was built without PuLID support (a differently compiled binary is needed), and a build that links `pulid` while the runtime adapter for that family is still pending says identity conditioning is not available in this build yet (a newer one is needed). No release advertises the capability until the matching adapter lands, so check `/api/models[].supports_identity` before offering the control and never infer support from the build feature or the checkpoint's family alone. `id_images` and `true_cfg` are additionally gated by `GET /api/capabilities` → `identity` (`{ multi_photo, max_photos, true_cfg }`); absence reads as no, so a client that needs either shape probes first and refuses by name rather than sending fields an older server would silently drop. An identity request materializes its family's asset bundle itself — `pulid-flux` for FLUX, `pulid-sdxl` for SDXL, sharing four of their five files: `POST /api/generate/placement-preview` reports anything missing under `pending_downloads` (kinds `identity_adapter`, `identity_vision_encoder`, `face_detector`, `face_recognizer`, `face_parser`) without fetching it, and admission downloads it after the InsightFace license gate. `id_weight` `0` is inert — it plans and downloads nothing, on either family. |
 | `control_image`, `control_model`, `control_scale`                                                       | SD1.5 ControlNet conditioning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `lora`, `loras`                                                                                         | singular legacy adapter or repeatable stack; `loras[]` wins when both are set                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -704,6 +914,48 @@ start/finish times, confidence, blocked reasons, and the next tentative replan
 deadline. Clients must treat it as advisory: the server revalidates the exact
 execution fingerprint and frozen artifacts before CUDA.
 
+Every row — in the listing and in the single-job read below — also carries its
+durable batch identity when it has one: `batch_id`, the client-minted
+`client_batch_id`, and the one-based `batch_index`. `POST /api/queue/:id/retry`
+requires the whole authority (`instance_id`, `batch_id`, `client_batch_id`,
+`job_id`) and only `instance_id` belongs to the server, so these three are what
+let a client holding a bare job id compose a retry. A row that was admitted
+outside a batch omits all three.
+
+Use `GET /api/queue/:id` to read ONE job in full, settings included:
+
+```bash
+curl http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000
+```
+
+```json
+{
+  "job": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "model": "flux-dev:q8",
+    "state": "queued",
+    "position": 3,
+    "durable": true,
+    "metadata": {
+      "prompt": "a lighthouse in a storm",
+      "width": 1024,
+      "steps": 28
+    }
+  },
+  "work_item": { "work_id": "00000000-...", "blocked_reason": "preparing" }
+}
+```
+
+The listing is deliberately payload-free — it never reads a request body per
+row — so a durably admitted job carries no `metadata` there until it is
+dispatched. This endpoint reads that one body and returns the same
+metadata shape a replayed job describes itself with; media payloads are not
+part of it. `work_item` is the planner's own entry for the job when it has
+placed one. Unknown ids return `404` with `QUEUE_JOB_NOT_FOUND`. `position`
+comes from the same bounded durable window the listing pages by default; a row
+beyond that window reports the window's length, exactly as it would be absent
+from the listing's first page.
+
 Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
 0-based position among queued jobs:
 
@@ -742,10 +994,10 @@ first. `?query=` filters by case-insensitive prompt substring; `?limit=`
 bounds the row count (default 50, max 500). `used_at` is Unix epoch
 milliseconds.
 
-The server records history automatically: every accepted `POST /api/generate`
-or `POST /api/generate/stream` appends the typed prompt (before prompt
-expansion), negative prompt, and model. Consecutive identical rows are
-collapsed, so batch siblings and retries produce a single entry.
+The server records history automatically for accepted `POST /api/generate`,
+`POST /api/generate/stream`, and `POST /api/generation-batches` requests. It
+stores the typed prompt before expansion, negative prompt, and model.
+Consecutive identical rows are collapsed, so retries do not duplicate history.
 
 ```bash
 curl "http://localhost:7680/api/history?query=sunset&limit=10"
@@ -825,13 +1077,15 @@ curl -N http://localhost:7680/api/generate/stream \
   }'
 ```
 
-For `batch_size = 1`, the final `complete` event matches the
-`GenerateResponse` JSON shape used by the server internally. A server-owned
-batch emits one ordered `batch_complete` event after durable commit and uses
-the same advertised 64-output live limit.
+The final `complete` event matches the `GenerateResponse` JSON shape used by
+the server internally. Streaming is singleton-only; Batch N uses the durable,
+pollable `/api/generation-batches` lifecycle above.
 
 ::: tip RunPod Note
-RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long generations to keep the connection alive.
+RunPod's proxy can close a long-lived generation response. For reliable delivery,
+submit through `POST /api/generation-batches` and reconcile the returned durable
+batch status; the accepted work survives a client or proxy disconnect. Treat the
+SSE streaming endpoint as live progress, not as the durability boundary.
 :::
 
 ## `/api/events`
@@ -887,7 +1141,7 @@ The three `chain_job_*` events are additive and deliberately distinct from
 `job_queued` / `job_started` / `job_ended`: chain jobs do not support the
 print-queue affordances (`PATCH`/`DELETE /api/queue/:id`), and older clients
 ignore unknown `type` tags. The ephemeral jobs backing
-`/api/generate/chain` stay silent — only durable `/api/chain-jobs` work is
+chain planning stay silent — only durable `/api/chain-jobs` work is
 announced. Clients that render sequences in a unified activity surface can
 use these instead of polling `GET /api/chain-jobs`.
 
@@ -903,135 +1157,31 @@ this endpoint omit the field. Keep-alive pings arrive every 15 s.
 curl -N http://localhost:7680/api/events
 ```
 
-## `/api/generate/chain`
+## Chained video generation
 
-Chained video generation for the LTX-2, LTX-Video, and Wan families, including
-installed catalog checkpoints with opaque `cv:` / `hf:` IDs. Splits a long
-video into N per-clip renders and returns a single stitched MP4. The seam is
-family- and checkpoint-specific: LTX-2 threads a motion tail of latents across
-each boundary (default 17 frames), Wan continues via last-frame image
-conditioning on image-conditioned checkpoints (the overlap is always 1 frame;
-text-to-video checkpoints concatenate independent clips), and LTX-Video joins
-independently rendered clips. See the
+Chained video for the LTX-2, LTX-Video, and Wan families — including installed
+catalog checkpoints with opaque `cv:` / `hf:` IDs — splits a long video into N
+per-clip renders and returns a single stitched MP4. The seam is family- and
+checkpoint-specific: LTX-2 threads a motion tail of latents across each
+boundary (default 17 frames), Wan continues via last-frame image conditioning
+on image-conditioned checkpoints (the overlap is always 1 frame; text-to-video
+checkpoints concatenate independent clips), and LTX-Video joins independently
+rendered clips. See the
 [LTX-2 chained video output guide](/models/ltx2#chained-video-output) for the
-user-facing story; this section documents the wire format.
+user-facing story.
 
-The request body maps to `mold_core::chain::ChainRequest`; the response body
-maps to `mold_core::chain::ChainResponse`. The canonical schema lives in the
-interactive docs at `/api/docs` (served by the running mold server) and in the
-OpenAPI JSON at `/api/openapi.json`.
-
-This legacy endpoint now executes through the durable chain-job runner
-internally. The response shape stays the same, while the backing ephemeral job
-is cleaned up after a successful response is assembled.
-
-The server accepts either a pre-authored `stages[]` body or the auto-expand
-form (single `prompt` + `total_frames` + `clip_frames`). Auto-expand is the
-shape `mold run` sends; the canonical `stages[]` shape is reserved for the
-forthcoming movie-maker UI that will author per-stage prompts/keyframes. Both
-normalise to the same internal `Vec<ChainStage>` before any engine work kicks
-off.
-
-Both forms also accept optional `original_prompt`, `batch_id`, `batch_index`,
-and `batch_count` provenance. These fields survive normalization and durable
-resume and are copied into the stitched output's completion and Gallery
-metadata.
-
-Both forms also accept the same optional `title`, `tags`, and `collection`
-fields as `/api/generate` — see
-[Creation-time filing](#creation-time-filing). They apply to the **stitched**
-print the chain produces: intermediate clips are working artifacts inside the
-job directory, never reach the gallery, and are never filed.
-
-**Auto-expand body** (what `mold run --frames N` emits):
-
-```json
-{
-  "model": "ltx-2-19b-distilled:fp8",
-  "prompt": "a cat walking through autumn leaves",
-  "total_frames": 400,
-  "clip_frames": 97,
-  "source_image": "<base64 PNG>",
-  "motion_tail_frames": 4,
-  "width": 1216,
-  "height": 704,
-  "fps": 24,
-  "seed": 42,
-  "steps": 8,
-  "guidance": 3.0,
-  "strength": 1.0,
-  "output_format": "mp4"
-}
-```
-
-**Canonical body** (what the v2 movie-maker UI will author):
-
-```json
-{
-  "model": "ltx-2-19b-distilled:fp8",
-  "stages": [
-    { "prompt": "a cat walking", "frames": 97, "source_image": "<base64 PNG>" },
-    { "prompt": "a cat walking", "frames": 97 },
-    { "prompt": "a cat walking", "frames": 97 },
-    { "prompt": "a cat walking", "frames": 97 }
-  ],
-  "motion_tail_frames": 4,
-  "width": 1216,
-  "height": 704,
-  "fps": 24,
-  "seed": 42,
-  "steps": 8,
-  "guidance": 3.0,
-  "strength": 1.0,
-  "output_format": "mp4"
-}
-```
-
-**Response:**
-
-```json
-{
-  "video": {
-    "data": "<base64 mp4>",
-    "format": "mp4",
-    "width": 1216,
-    "height": 704,
-    "frames": 400,
-    "fps": 24,
-    "thumbnail": "<base64 png>",
-    "gif_preview": "<base64 gif>",
-    "has_audio": false,
-    "duration_ms": 16666
-  },
-  "stage_count": 5,
-  "gpu": 0
-}
-```
-
-**Error cases:**
-
-- `422 Unprocessable Entity` — validation failure (missing `prompt` +
-  `total_frames` in the auto-expand form, a stage whose `frames` is off the
-  family's advertised grid (`k · frame_step + 1` — 8 for the LTX families, 4
-  for Wan), `motion_tail_frames >= clip_frames`, more than 16 stages, etc.).
-- `422 Unprocessable Entity` — unsupported model family. Only LTX-2,
-  LTX-Video, and Wan expose a chain renderer; other families are rejected with
-  an error that names the constraint.
-- `502 Bad Gateway` — the backing job failed before a legacy `ChainResponse`
-  could be assembled. Use `/api/chain-jobs` for explicit durable
-  resume/retake workflows.
-
-::: tip Runner behaviour
-The legacy chain endpoints are shims over the durable runner. The runner
-checkpoints each stage under `MOLD_HOME/jobs/<job_id>`, yields at stage
-boundaries when other work is waiting, then deletes successful ephemeral shim
-artifacts after building the legacy response. The public chain-job API keeps
-artifacts for resume and retake.
-:::
+A sequence is a **durable chain job** on every surface:
+[`POST /api/chain-jobs`](#api-chain-jobs) creates one and
+`GET /api/chain-jobs/{id}/events` streams its stage progress to settlement.
+The synchronous `POST /api/generate/chain` and SSE
+`POST /api/generate/chain/stream` endpoints, which ran a chain as a hidden
+ephemeral job and deleted its artifacts after answering, have been removed:
+they could not be resumed, retaken, or reattached after a dropped connection,
+and every client now creates a real job instead.
 
 ## `/api/generate/chain/validate`
 
-Accepts the same `ChainRequest` body as `/api/generate/chain`, but performs
+Accepts the same `ChainRequest` body as `POST /api/chain-jobs`, but performs
 only build-feature, model-family, and structural normalization. It does not
 create a durable job, start a download, lease a device, or touch inference.
 The response reports normalized stage transitions, each stage's contributed
@@ -1078,74 +1228,47 @@ serially) and an advisory `fits` verdict computed against stable device
 capacity. It is `null` when the server cannot price the run (model not
 downloaded, or no device sample); it is advisory and never gates submission.
 
-## `/api/generate/chain/stream`
-
-Same request body as `/api/generate/chain`, with the response delivered as
-Server-Sent Events. Progress frames stream as `event: progress` and the
-terminal frame is either `event: complete` (success) or `event: error`
-(failure; the connection closes after the error frame).
-
-Progress event payloads map to `mold_core::chain::ChainProgressEvent` variants:
-
-```text
-event: progress
-data: {"type":"chain_start","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_count":5,"estimated_total_frames":485}
-
-event: progress
-data: {"type":"stage_start","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_idx":0}
-
-event: progress
-data: {"type":"denoise_step","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_idx":0,"step":1,"total":8}
-
-event: progress
-data: {"type":"stage_done","job_id":"550e8400-e29b-41d4-a716-446655440000","stage_idx":0,"frames_emitted":97}
-
-event: progress
-data: {"type":"stitching","job_id":"550e8400-e29b-41d4-a716-446655440000","total_frames":385}
-
-event: complete
-data: {"video":"<base64 mp4>","format":"mp4","width":1216,"height":704,"frames":400,"fps":24,"thumbnail":"<base64 png>","gif_preview":"<base64 gif>","has_audio":false,"duration_ms":16666,"stage_count":5,"gpu":0,"generation_time_ms":226812}
-```
-
-The `complete` event payload maps to `mold_core::chain::SseChainCompleteEvent`.
-Non-denoise engine events (weight loads, cache hits, etc.) are intentionally
-not forwarded in v1 — the UX goal is per-stage progress, not per-component
-telemetry.
-
-`job_id` is an additive field on progress events so clients can correlate a
-legacy stream with the backing durable job. The terminal `complete` payload
-keeps the legacy shape.
-
-```bash
-curl -N -X POST http://localhost:7680/api/generate/chain/stream \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "ltx-2-19b-distilled:fp8",
-    "prompt": "a cat walking through autumn leaves",
-    "total_frames": 400,
-    "clip_frames": 97,
-    "motion_tail_frames": 4,
-    "width": 1216, "height": 704, "fps": 24,
-    "steps": 8, "guidance": 3.0,
-    "output_format": "mp4"
-  }'
-```
-
 ## `/api/chain-jobs`
 
 Durable async chain jobs persist the request, per-stage state, retakes, and
 final outputs under `MOLD_HOME/jobs/<job_id>` and mirror query state in
 `mold.db`. They use the same `mold_core::chain::ChainRequest` body as
-`/api/generate/chain`, but return immediately with `202 Accepted`:
+a chain plan, but return immediately with `202 Accepted`:
 
 ```json
 { "job_id": "550e8400-e29b-41d4-a716-446655440000" }
 ```
 
+### Ephemeral jobs
+
+`ChainRequest.ephemeral` (additive; absent means `false`) marks a chain that is
+ONE print's implementation detail rather than a sequence the user authored.
+`mold run --frames 200` splits a long video into clips because the model cannot
+render it in one pass — the user asked for a video, not for a chain — so the CLI
+sets this and browser surfaces should set it for the same auto-chained case.
+
+An ephemeral job renders identically to an authored one and publishes the same
+stitched print, with full per-clip provenance. What differs:
+
+- it is absent from `GET /api/chain-jobs`, so it never appears in History ▸
+  Sequences;
+- it emits no `chain_job_queued` event, so it never appears in "Now developing";
+- its working directory is swept after finalization, and `resume` answers
+  `409 CHAIN_JOB_EPHEMERAL`;
+- **its print records no `chain_job_id`**, so "Reuse settings" restores a
+  one-shot rather than opening the clip rail for a job that no longer exists.
+
+Chain jobs accept every video `output_format`. Stitching and its audio mux are
+MP4-native, so the job's own artifact is always MP4 (amend and retake decode
+it) and the gallery print is transcoded to the requested mp4, gif, webp, or
+apng at finalization; the `finalized` event names it in `gallery_filename`.
+
 Endpoints:
 
 - `POST /api/chain-jobs` — create a queued job.
-- `GET /api/chain-jobs` — list summaries, newest first.
+- `GET /api/chain-jobs` — list summaries, newest first. Ephemeral jobs are
+  omitted; pass `?include_ephemeral=true` only to recover an id lost during
+  suspension.
 - `GET /api/chain-jobs/:id` — detail including stages, retakes, finalizes, and effective script.
 - `GET /api/chain-jobs/:id/events` — SSE stream; first frame is always a snapshot.
 - `POST /api/chain-jobs/:id/resume` — requeue `interrupted`, `failed`, or `cancelled`.
@@ -1170,7 +1293,7 @@ surfaces call behind **Update sequence**.
 
 The body maps to `mold_core::chain_job::AmendRequest`. `stages` is the
 **complete** edited stage list in canonical order (not a patch) — the same
-`ChainStage` shape `/api/generate/chain` accepts. Everything else is an
+`ChainStage` shape `POST /api/chain-jobs` accepts. Everything else is an
 optional chain-level overlay applied over the job's current effective
 request:
 
@@ -1203,7 +1326,9 @@ rest of the chain wire format. Omitted overlays keep the job's current value.
 `batch_id` / `batch_index` / `batch_count` provenance are inherited from the
 original request and cannot be changed — create a fresh job for those. The
 amended candidate must still pass every create-time gate: `normalise()`,
-the family/audio check, and the durable-job `output_format = "mp4"` rule.
+the family/audio check, and the video-format rule (`mp4`, `gif`, `webp`, or
+`apng`; the job's own artifact is always stitched as MP4 and the gallery print
+is transcoded to the requested format at finalization).
 
 **Response** — `202 Accepted`. The body is the updated `ChainJobSummary`
 flattened, plus `preserved_stages`:
@@ -1252,7 +1377,7 @@ are folded and cleared. `GET /api/chain-jobs/:id` exposes the additive
 **Errors:**
 
 - `409 CHAIN_JOB_RUNNING` — the job is rendering; cancel it first.
-- `409 CHAIN_JOB_EPHEMERAL` — the job backs a legacy `/api/generate/chain` shim.
+- `409 CHAIN_JOB_EPHEMERAL` — the job is ephemeral and owns no retained artifacts.
 - `409 CHAIN_JOB_NOT_AMENDABLE` — the job left an amendable state mid-request. Amendable states are `queued`, `interrupted`, `failed`, `cancelled`, and `completed`.
 - `422` — the amended request failed validation (bad frame counts, motion tail ≥ clip frames, too many stages, a non-`mp4` output format, an unsupported family, audio on a checkpoint without an audio path).
 - `404 CHAIN_JOB_NOT_FOUND` — unknown id.
@@ -1753,8 +1878,7 @@ provenance, when sent, is echoed verbatim here as `source_fit`. Two additive
 fields record sequence provenance:
 
 - `chain_job_id` — the durable chain job this output was finalized from.
-  Absent for single generations, the ephemeral `/api/generate/chain` shim, and
-  legacy rows.
+  Absent for single generations and legacy rows.
 - `chain` — structured per-clip provenance, so a sequence is never recorded
   under clip 1's prompt alone. Absent for single generations and legacy rows.
 

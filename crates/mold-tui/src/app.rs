@@ -45,6 +45,30 @@ pub struct LicenseDownloadRequirement {
     pub licenses: Vec<mold_core::LicenseRefusal>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableGenerationChildOutcome {
+    pub index: u32,
+    pub job_id: String,
+    /// The admission authority this child belongs to. `POST
+    /// /api/queue/{id}/retry` fences on the whole of it, so only the client
+    /// that admitted the batch can retry a held child — which is why the
+    /// retry lives here and not in the Machines queue lanes, whose rows carry
+    /// no batch identity.
+    pub authority: mold_core::GenerationBatchAuthority,
+    pub filename: Option<String>,
+    pub original_filename: Option<String>,
+    pub error: Option<String>,
+    pub retryable: bool,
+    /// Terminal facts the child settled with. Absent for a child that did
+    /// not complete, and for one settled by a server that predates them.
+    pub seed: Option<u64>,
+    pub generation_time_ms: Option<u64>,
+    /// Bytes of the print this pane shows. Only the last completed child
+    /// carries them — the pane displays one image, so hydrating every
+    /// sibling would download a batch to throw it away.
+    pub preview_bytes: Option<Vec<u8>>,
+}
+
 /// Events sent from background tasks to the main TUI loop.
 pub enum BackgroundEvent {
     /// Progress update from generation or model pull.
@@ -59,6 +83,21 @@ pub enum BackgroundEvent {
         response: Box<GenerateResponse>,
         from_local: bool,
         metadata_snapshot: Box<GenerationMetadataSnapshot>,
+    },
+    /// A canonical remote Batch N settled through the reconnectable queue API.
+    /// Results are gallery identities, not fabricated response bytes.
+    DurableGenerationBatchComplete {
+        outcomes: Vec<DurableGenerationChildOutcome>,
+        /// The prompt, negative and model this batch was submitted with —
+        /// the form may have moved on while it rendered, and prompt history
+        /// records what was actually developed.
+        prompt: String,
+        negative_prompt: Option<String>,
+        model: String,
+        /// The host that admitted the batch. A held child can only be retried
+        /// there — the retry fence is that instance's authority — whatever
+        /// machine the form points at by the time the user presses `^T`.
+        host: HeldHost,
     },
     /// Generation or background task failed.
     Error(String),
@@ -135,9 +174,13 @@ pub enum BackgroundEvent {
     GalleryDeleteFailed(String),
     /// Chain progress update from server SSE.
     ChainProgress(mold_core::ChainProgressEvent),
-    /// Chain generation completed — video bytes ready.
+    /// The durable sequence job settled successfully. Carries only what the
+    /// view renders: the compatibility endpoint that returned a whole
+    /// `ChainResponse` is gone, and the stitched print now lands in the
+    /// host's gallery rather than in this event.
     ChainComplete {
-        response: Box<mold_core::ChainResponse>,
+        stage_count: u32,
+        request_warnings: Vec<String>,
     },
     /// Chain generation failed.
     ChainError(String),
@@ -1308,8 +1351,66 @@ pub struct GenerateState {
     /// strip's "done · saved to …" line. None when saving is disabled or
     /// the server kept the file.
     pub last_output_path: Option<std::path::PathBuf>,
+    /// The batch this client last submitted that still has held children,
+    /// for `^T`. Replaced by the next batch that settles and cleared by the
+    /// next submission — a retry is offered for work this session still
+    /// owns, never for a row somebody else admitted — and deliberately NOT
+    /// cleared when a retry fails: the children stay retryable on the host,
+    /// so the user must be able to press `^T` again once the cause is fixed.
+    pub held_batch: Option<HeldBatch>,
     /// Monotonic fence for async Expand/Remix results.
     pub prompt_transform_token: u64,
+}
+
+/// One held child this client can retry.
+#[derive(Debug, Clone)]
+pub struct HeldPrintRetry {
+    pub authority: mold_core::GenerationBatchAuthority,
+    pub job_id: String,
+    pub index: u32,
+}
+
+/// The authenticated route of the host that admitted a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldHost {
+    pub url: String,
+    pub api_key: Option<String>,
+}
+
+/// Everything a retry needs and nothing the form can change underneath it:
+/// the admitting host (the retry fence is that instance's authority), the
+/// submission prompt history must record for the print the host actually
+/// renders, and the children still held.
+#[derive(Debug, Clone)]
+pub struct HeldBatch {
+    pub host: HeldHost,
+    pub submission: crate::backend::OwnedBatchSubmission,
+    pub retries: Vec<HeldPrintRetry>,
+}
+
+impl HeldBatch {
+    /// The batch a settled report leaves behind for `^T`, or `None` when no
+    /// child is retryable.
+    pub fn from_outcomes(
+        host: HeldHost,
+        submission: crate::backend::OwnedBatchSubmission,
+        outcomes: &[DurableGenerationChildOutcome],
+    ) -> Option<Self> {
+        let retries = outcomes
+            .iter()
+            .filter(|outcome| outcome.retryable)
+            .map(|outcome| HeldPrintRetry {
+                authority: outcome.authority.clone(),
+                job_id: outcome.job_id.clone(),
+                index: outcome.index,
+            })
+            .collect::<Vec<_>>();
+        (!retries.is_empty()).then_some(Self {
+            host,
+            submission,
+            retries,
+        })
+    }
 }
 
 impl GenerateState {
@@ -2336,6 +2437,7 @@ impl App {
                 warning_message: None,
                 model_description,
                 last_output_path: None,
+                held_batch: None,
                 prompt_transform_token: 0,
             },
             gallery: GalleryState::default(),
@@ -4730,6 +4832,9 @@ impl App {
             }
             Action::RemixPrompt if self.active_view == View::Create => {
                 self.start_prompt_transform(PromptTransformOperation::Remix);
+            }
+            Action::RetryHeldPrints if self.active_view == View::Create => {
+                self.retry_held_prints();
             }
             Action::ToggleMode => {
                 self.generate.params.inference_mode = self.generate.params.inference_mode.next();
@@ -7478,6 +7583,9 @@ impl App {
         }
 
         self.generate.generating = true;
+        // A new submission owns the pane; held children of the previous batch
+        // are no longer this session's work to retry.
+        self.generate.held_batch = None;
         self.generate.batch_remaining = self.generate.params.batch;
         self.generate.error_message = None;
         // An advisory describes the print that produced it.
@@ -7536,6 +7644,35 @@ impl App {
                 tx,
             )
             .await;
+        });
+    }
+
+    /// Retry every held child of the batch this client last submitted.
+    ///
+    /// The retry fence is the whole admission authority, which only the
+    /// submitting client holds — a Machines queue row carries no batch
+    /// identity — so this is where the action lives, and it is offered only
+    /// for the work this session still owns.
+    fn retry_held_prints(&mut self) {
+        if self.generate.generating {
+            return;
+        }
+        // The held batch carries its own host and submission; the form and
+        // the Machines target may have moved on, and neither can retry a row
+        // another instance admitted or should record a prompt that never
+        // rendered. It is NOT cleared here: a failed retry leaves the children
+        // held on the host, and the settling report replaces it.
+        let Some(held) = self.generate.held_batch.clone() else {
+            self.generate.error_message =
+                Some("No held prints from this session to retry".to_string());
+            return;
+        };
+        self.generate.generating = true;
+        self.generate.error_message = None;
+        self.generate.progress.mark_generation_start();
+        let tx = self.bg_tx.clone();
+        self.tokio_handle.spawn(async move {
+            crate::backend::retry_held_prints(held, tx).await;
         });
     }
 
@@ -8346,6 +8483,114 @@ impl App {
                         });
                     }
                 }
+                BackgroundEvent::DurableGenerationBatchComplete {
+                    outcomes,
+                    prompt,
+                    negative_prompt,
+                    model,
+                    host,
+                } => {
+                    self.generate.generating = false;
+                    self.generate.batch_remaining = 0;
+                    self.generate.clear_live_preview();
+                    self.generate.progress.generation_started_at = None;
+                    self.generate.progress.stage_started_at = None;
+
+                    let mut failures = Vec::new();
+                    let mut completed = 0_usize;
+                    self.generate.held_batch = HeldBatch::from_outcomes(
+                        host,
+                        crate::backend::OwnedBatchSubmission {
+                            prompt: prompt.clone(),
+                            negative_prompt: negative_prompt.clone(),
+                            model: model.clone(),
+                        },
+                        &outcomes,
+                    );
+                    for outcome in outcomes {
+                        if let Some(seed) = outcome.seed {
+                            self.generate.last_seed = Some(seed);
+                            // Advance exactly as a singleton does, so a batch
+                            // does not leave the form pinned to the seed the
+                            // first sibling already rendered.
+                            self.generate.params.seed =
+                                self.generate.params.seed_mode.advance(seed);
+                        }
+                        if let Some(elapsed_ms) = outcome.generation_time_ms {
+                            self.generate.last_generation_time_ms = Some(elapsed_ms);
+                        }
+                        if let Some(bytes) = outcome.preview_bytes.as_deref() {
+                            if let Ok(img) = image::load_from_memory(bytes) {
+                                let protocol = self.picker.new_resize_protocol(img.clone());
+                                self.generate.preview_image = Some(img);
+                                self.generate.image_state = Some(protocol);
+                                self.generate.animation = None;
+                            }
+                        }
+                        let mut filenames = [outcome.filename, outcome.original_filename]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>();
+                        filenames.dedup();
+                        if !filenames.is_empty() {
+                            completed += 1;
+                            let elapsed = outcome
+                                .generation_time_ms
+                                .map(|ms| format!(" ({:.1}s)", ms as f64 / 1000.0))
+                                .unwrap_or_default();
+                            self.generate.progress.push_log(ProgressLogEntry {
+                                message: format!(
+                                    "Batch {} saved {}{elapsed}",
+                                    outcome.index,
+                                    filenames.join(" + ")
+                                ),
+                                style: ProgressStyle::Done,
+                            });
+                        } else if let Some(error) = outcome.error {
+                            let retry = if outcome.retryable {
+                                format!(" (^T retries queue job {})", outcome.job_id)
+                            } else {
+                                String::new()
+                            };
+                            let message = format!("Batch {}: {error}{retry}", outcome.index);
+                            self.generate.progress.push_log(ProgressLogEntry {
+                                message: message.clone(),
+                                style: if outcome.retryable {
+                                    ProgressStyle::Warning
+                                } else {
+                                    ProgressStyle::Error
+                                },
+                            });
+                            failures.push(message);
+                        }
+                    }
+                    // A durable batch always renders on a remote host, which
+                    // wrote the file into its own gallery: there is no local
+                    // path for the activity strip to name, exactly as a
+                    // remote singleton has none. The per-child log lines above
+                    // carry the filenames.
+                    self.generate.last_output_path = None;
+                    self.generate.error_message =
+                        (!failures.is_empty()).then(|| failures.join("; "));
+                    if completed > 0 {
+                        self.save_session();
+                        mold_db::settings::record_last_model(&model);
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        self.history.push(crate::history::HistoryEntry {
+                            prompt,
+                            negative: negative_prompt.filter(|text| !text.is_empty()),
+                            model,
+                            timestamp: ts,
+                        });
+                    }
+                    if self.should_poll_remote() {
+                        self.gallery.scanning = true;
+                        self.spawn_gallery_scan();
+                    }
+                }
                 BackgroundEvent::Error(msg) => {
                     self.generate.generating = false;
                     self.generate.batch_remaining = 0;
@@ -8893,26 +9138,22 @@ impl App {
                         style: ProgressStyle::Info,
                     });
                 }
-                BackgroundEvent::ChainComplete { response } => {
+                BackgroundEvent::ChainComplete {
+                    stage_count,
+                    request_warnings,
+                } => {
                     self.generate.generating = false;
                     self.generate.clear_live_preview();
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
                     self.generate.progress.push_log(ProgressLogEntry {
-                        message: format!(
-                            "Chain complete: {} stages, GPU {}",
-                            response.stage_count,
-                            response
-                                .gpu
-                                .map(|g| g.to_string())
-                                .unwrap_or_else(|| "unknown".into()),
-                        ),
+                        message: format!("Chain complete: {stage_count} stages"),
                         style: ProgressStyle::Done,
                     });
                     // A sequence's filing is stamped on the stitched print, so
                     // a host that could not apply it reports it here exactly
                     // as it does for a one-shot.
-                    self.surface_request_advisories(&response.request_warnings);
+                    self.surface_request_advisories(&request_warnings);
                 }
                 BackgroundEvent::ChainError(msg) => {
                     self.generate.generating = false;
@@ -9170,6 +9411,68 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
 
 #[cfg(test)]
 mod tests {
+    mod held_batch {
+        use super::super::*;
+
+        fn outcome(index: u32, retryable: bool) -> DurableGenerationChildOutcome {
+            DurableGenerationChildOutcome {
+                index,
+                job_id: format!("job-{index}"),
+                authority: mold_core::GenerationBatchAuthority {
+                    batch_id: "batch".into(),
+                    client_batch_id: "client".into(),
+                    instance_id: "instance".into(),
+                },
+                filename: None,
+                original_filename: None,
+                error: retryable.then(|| "model missing".to_string()),
+                retryable,
+                seed: None,
+                generation_time_ms: None,
+                preview_bytes: None,
+            }
+        }
+
+        fn host() -> HeldHost {
+            HeldHost {
+                url: "http://admitting:7680".into(),
+                api_key: Some("key".into()),
+            }
+        }
+
+        fn submission() -> crate::backend::OwnedBatchSubmission {
+            crate::backend::OwnedBatchSubmission {
+                prompt: "the prompt that rendered".into(),
+                negative_prompt: None,
+                model: "flux-dev:q8".into(),
+            }
+        }
+
+        /// A retry goes to the host that admitted the batch with the
+        /// submission that batch rendered — never to the current target or
+        /// the current form — and only the held children ride along.
+        #[test]
+        fn a_held_batch_keeps_the_admitting_host_and_submission() {
+            let held = HeldBatch::from_outcomes(
+                host(),
+                submission(),
+                &[outcome(1, false), outcome(2, true), outcome(3, true)],
+            )
+            .expect("two children are held");
+            assert_eq!(held.host, host());
+            assert_eq!(held.submission.prompt, "the prompt that rendered");
+            assert_eq!(
+                held.retries.iter().map(|r| r.index).collect::<Vec<_>>(),
+                vec![2, 3]
+            );
+        }
+
+        #[test]
+        fn a_batch_with_nothing_retryable_holds_nothing() {
+            assert!(HeldBatch::from_outcomes(host(), submission(), &[outcome(1, false)]).is_none());
+        }
+    }
+
     use super::*;
     use base64::Engine as _;
 
@@ -10378,6 +10681,7 @@ mod tests {
                 warning_message: None,
                 model_description: String::new(),
                 last_output_path: None,
+                held_batch: None,
                 prompt_transform_token: 0,
             },
             gallery: GalleryState::default(),
@@ -14130,7 +14434,8 @@ mod tests {
             "tags and collection were not applied; the print was generated and saved normally";
         app.bg_tx
             .send(BackgroundEvent::ChainComplete {
-                response: Box::new(chain_response_with_advisories(vec![advisory.to_string()])),
+                stage_count: 2,
+                request_warnings: vec![advisory.to_string()],
             })
             .unwrap();
         app.process_background_events();
@@ -14155,7 +14460,8 @@ mod tests {
         let mut app = make_settings_test_app();
         app.bg_tx
             .send(BackgroundEvent::ChainComplete {
-                response: Box::new(chain_response_with_advisories(Vec::new())),
+                stage_count: 2,
+                request_warnings: Vec::new(),
             })
             .unwrap();
         app.process_background_events();
@@ -14708,6 +15014,7 @@ mod tests {
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
+            held_batch: None,
             prompt_transform_token: 0,
         };
 
@@ -14774,6 +15081,7 @@ mod tests {
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
+            held_batch: None,
             prompt_transform_token: 0,
         };
 
@@ -14821,6 +15129,7 @@ mod tests {
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
+            held_batch: None,
             prompt_transform_token: 0,
         };
 
@@ -17577,6 +17886,7 @@ mod tests {
                     metadata: None,
                     durable: None,
                     held_reason: None,
+                    ..Default::default()
                 }],
                 live_only_entries: vec![],
                 plan: None,
@@ -17873,6 +18183,7 @@ mod tests {
                         metadata: None,
                         durable: None,
                         held_reason: None,
+                        ..Default::default()
                     },
                     mold_core::QueueJobEntryWire {
                         id: "job-q".into(),
@@ -17886,6 +18197,7 @@ mod tests {
                         metadata: None,
                         durable: None,
                         held_reason: None,
+                        ..Default::default()
                     },
                 ],
                 live_only_entries: vec![],

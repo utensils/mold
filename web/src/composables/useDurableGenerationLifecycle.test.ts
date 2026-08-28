@@ -6,13 +6,19 @@ import type {
   GenerationBatchStatus,
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
+import { ApiError } from "@studio/api/client";
 
 const admitGenerationBatch = vi.hoisted(() => vi.fn());
 const lookupGenerationBatchByClientId = vi.hoisted(() => vi.fn());
 const reconcileGenerationBatches = vi.hoisted(() => vi.fn());
 const fetchEventSource = vi.hoisted(() => vi.fn(() => new Promise(() => {})));
-const generateStream = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const cancelQueueJob = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const mutateQueueJobOnExpectedInstance = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
+);
+const retryQueueJobRecoveringAmbiguity = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ kind: "accepted" }),
+);
 const listGalleryFrom = vi.hoisted(() => vi.fn());
 const fetchGalleryBlob = vi.hoisted(() => vi.fn());
 const fetchGalleryThumbnailBlob = vi.hoisted(() => vi.fn());
@@ -26,10 +32,15 @@ vi.mock("@studio/api/generationAdmission", async (importOriginal) => ({
 
 vi.mock("@microsoft/fetch-event-source", () => ({ fetchEventSource }));
 
+vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/queuePlan")>()),
+  mutateQueueJobOnExpectedInstance,
+  retryQueueJobRecoveringAmbiguity,
+}));
+
 vi.mock("../api", () => ({
   cancelQueueJob,
   fetchQueue: vi.fn().mockResolvedValue({ entries: [] }),
-  generateStream,
   generateChainStream: vi.fn().mockResolvedValue(undefined),
   listGalleryFrom,
 }));
@@ -39,9 +50,37 @@ vi.mock("../lib/galleryMedia", () => ({
   fetchGalleryThumbnailBlob,
 }));
 
+type QueueJobProgress =
+  import("@studio/api/generationSelection").QueueJobProgress;
+const previewWatches: Array<{
+  jobId: string;
+  onPreview: (progress: QueueJobProgress) => void;
+  stop: ReturnType<typeof vi.fn>;
+}> = [];
+vi.mock("@studio/api/generationSelection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/generationSelection")>()),
+  watchSelectedQueuePreview: (
+    _target: unknown,
+    jobId: string,
+    onPreview: (progress: QueueJobProgress) => void,
+  ) => {
+    const stop = vi.fn();
+    previewWatches.push({ jobId, onPreview, stop });
+    return stop;
+  },
+}));
+
 import { __testing__, useGenerateStream, type Job } from "./useGenerateStream";
 
 const nativeStorageSetItem = localStorage.setItem;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 function request(prompt = "a patient red fox"): GenerateRequestWire {
   return {
@@ -56,14 +95,22 @@ function request(prompt = "a patient red fox"): GenerateRequestWire {
   };
 }
 
+// Every shipping machine advertises both halves of the durable contract; the
+// client gates on their presence and nothing about the request.
 const route: HostRoute = {
   hostId: "render-box",
   label: "Render box",
   target: { baseUrl: "http://render-box:7680", apiKey: "secret" },
   instanceId: "instance-1",
   durableGeneration: {
-    heterogeneous_batch: true,
-    durable_batch_outcomes: true,
+    heterogeneous_batch_max_outputs: 64,
+  },
+  durableMedia: {
+    protocol_version: 2,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    private_h3: false,
   },
   eventsAvailable: true,
 };
@@ -71,19 +118,39 @@ const route: HostRoute = {
 const durableMediaRoute: HostRoute = {
   ...route,
   durableMedia: {
-    protocol_version: 1,
+    protocol_version: 2,
     encrypted_at_rest: true,
     generate_request_media: true,
     identity: true,
-    h3_references: false,
     private_h3: false,
+  },
+};
+
+const canonicalH3Route: HostRoute = {
+  ...route,
+  modelFamily: "minimax-h3",
+  durableGeneration: {
+    ...route.durableGeneration,
+  },
+  durableMedia: {
+    protocol_version: 3,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    private_h3: true,
   },
 };
 
 function batch(
   clientBatchId: string,
   states: Array<
-    "accepted" | "queued" | "running" | "complete" | "failed" | "cancelled"
+    | "accepted"
+    | "queued"
+    | "running"
+    | "held"
+    | "complete"
+    | "failed"
+    | "cancelled"
   > = ["queued"],
   overrides: Partial<GenerationBatchStatus> = {},
 ): GenerationBatchStatus {
@@ -176,8 +243,10 @@ beforeEach(() => {
   lookupGenerationBatchByClientId.mockReset();
   reconcileGenerationBatches.mockReset();
   fetchEventSource.mockClear();
-  generateStream.mockClear();
   cancelQueueJob.mockClear();
+  mutateQueueJobOnExpectedInstance.mockClear();
+  retryQueueJobRecoveringAmbiguity.mockReset();
+  retryQueueJobRecoveringAmbiguity.mockResolvedValue({ kind: "accepted" });
   listGalleryFrom.mockReset();
   fetchGalleryBlob.mockReset();
   fetchGalleryThumbnailBlob.mockReset();
@@ -203,14 +272,14 @@ describe("web durable generation lifecycle", () => {
     expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
       source_image: "PRIVATE-DURABLE-SOURCE",
     });
-    expect(generateStream).not.toHaveBeenCalled();
     const persisted = Array.from({ length: localStorage.length }, (_, index) =>
       localStorage.getItem(localStorage.key(index)!),
     ).join("\n");
     expect(persisted).not.toContain("PRIVATE-DURABLE-SOURCE");
   });
 
-  it("keeps an opaque H3 family on the legacy stream", () => {
+  it("admits an opaque H3 family through the same durable batch", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
     const stream = useGenerateStream();
     const submitted = request("opaque H3");
     submitted.model = "hf:opaque-h3-checkpoint";
@@ -225,8 +294,23 @@ describe("web durable generation lifecycle", () => {
       },
     );
 
-    expect(admitGenerationBatch).not.toHaveBeenCalled();
-    expect(generateStream).toHaveBeenCalledTimes(1);
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("admits canonical v2 H3 through the durable batch transport", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
+    const stream = useGenerateStream();
+    const submitted = request("canonical H3");
+    submitted.model = "hf:opaque-h3-checkpoint";
+    submitted.source_image = "PRIVATE-H3-SOURCE";
+
+    stream.submit(submitted, { kind: "single" }, canonicalH3Route);
+
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
+    expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
+      model: "hf:opaque-h3-checkpoint",
+      source_image: "PRIVATE-H3-SOURCE",
+    });
   });
 
   it("has no browser submission-count cap and releases every POST immediately", () => {
@@ -239,7 +323,6 @@ describe("web durable generation lifecycle", () => {
 
     expect(new Set(ids).size).toBe(9);
     expect(admitGenerationBatch).toHaveBeenCalledTimes(9);
-    expect(generateStream).not.toHaveBeenCalled();
     expect(
       stream.jobs.value.filter((job) => job.state === "running"),
     ).toHaveLength(9);
@@ -282,6 +365,30 @@ describe("web durable generation lifecycle", () => {
     expect(admitGenerationBatch.mock.calls[1]![1].requests).toHaveLength(3);
   });
 
+  it("chunks Batch N at the host limit without opening attached streams", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
+    const limitedRoute: HostRoute = {
+      ...route,
+      durableGeneration: {
+        ...route.durableGeneration,
+        heterogeneous_batch_max_outputs: 2,
+      },
+    };
+    const stream = useGenerateStream();
+
+    const ids = stream.submitBatch(
+      [request("one"), request("two"), request("three")],
+      { kind: "single" },
+      limitedRoute,
+    );
+
+    expect(ids).toHaveLength(3);
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(2);
+    expect(
+      admitGenerationBatch.mock.calls.map((call) => call[1].requests.length),
+    ).toEqual([2, 1]);
+  });
+
   it("never turns browser quota into a durable admission gate", async () => {
     admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
     const storage = vi
@@ -303,7 +410,6 @@ describe("web durable generation lifecycle", () => {
       expect(job.error).toBeNull();
       expect(job.durableBatch).toBeDefined();
       expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
-      expect(generateStream).not.toHaveBeenCalled();
       expect(lookupGenerationBatchByClientId).not.toHaveBeenCalled();
       expect(fetchEventSource).toHaveBeenCalledTimes(1);
     } finally {
@@ -311,48 +417,54 @@ describe("web durable generation lifecycle", () => {
     }
   });
 
-  it("recovers an ambiguous POST only by UUID and never falls back after dispatch", async () => {
-    let generationWrites = 0;
-    const storage = vi
-      .spyOn(localStorage, "setItem")
-      .mockImplementation(function (key, value) {
-        if (key === "mold.generate.jobs" && generationWrites++ > 0) {
-          throw new DOMException("quota exceeded", "QuotaExceededError");
-        }
-        return Reflect.apply(nativeStorageSetItem, localStorage, [key, value]);
-      });
-    try {
-      admitGenerationBatch.mockRejectedValue(
-        new TypeError("connection closed"),
-      );
-      lookupGenerationBatchByClientId.mockImplementation(
-        (_target: unknown, clientBatchId: string) =>
-          Promise.resolve({ kind: "found", batch: batch(clientBatchId) }),
-      );
-      const stream = useGenerateStream();
-      const id = stream.submit(request(), { kind: "single" }, route);
+  it.each([
+    ["commit-then-500", new ApiError("response lost", 500)],
+    ["disconnect", new TypeError("connection closed")],
+  ])(
+    "recovers an ambiguous %s POST only by UUID and never falls back",
+    async (_case, failure) => {
+      let generationWrites = 0;
+      const storage = vi
+        .spyOn(localStorage, "setItem")
+        .mockImplementation(function (key, value) {
+          if (key === "mold.generate.jobs" && generationWrites++ > 0) {
+            throw new DOMException("quota exceeded", "QuotaExceededError");
+          }
+          return Reflect.apply(nativeStorageSetItem, localStorage, [
+            key,
+            value,
+          ]);
+        });
+      try {
+        admitGenerationBatch.mockRejectedValue(failure);
+        lookupGenerationBatchByClientId.mockImplementation(
+          (_target: unknown, clientBatchId: string) =>
+            Promise.resolve({ kind: "found", batch: batch(clientBatchId) }),
+        );
+        const stream = useGenerateStream();
+        const id = stream.submit(request(), { kind: "single" }, route);
 
-      await vi.waitFor(() =>
-        expect(
-          stream.jobs.value.find((job) => job.id === id)?.serverId,
-        ).toMatch(/^job-/),
-      );
-      const clientBatchId = stream.jobs.value.find((job) => job.id === id)!
-        .durableBatch!.clientBatchId;
-      const persisted = localStorage.getItem(
-        `mold.generate.jobs.recovery.${clientBatchId}`,
-      )!;
-      expect(persisted).toContain(clientBatchId);
-      expect(persisted).not.toContain("secret");
-      expect(lookupGenerationBatchByClientId).toHaveBeenCalledWith(
-        expect.anything(),
-        clientBatchId,
-      );
-      expect(generateStream).not.toHaveBeenCalled();
-    } finally {
-      storage.mockRestore();
-    }
-  });
+        await vi.waitFor(() =>
+          expect(
+            stream.jobs.value.find((job) => job.id === id)?.serverId,
+          ).toMatch(/^job-/),
+        );
+        const clientBatchId = stream.jobs.value.find((job) => job.id === id)!
+          .durableBatch!.clientBatchId;
+        const persisted = localStorage.getItem(
+          `mold.generate.jobs.recovery.${clientBatchId}`,
+        )!;
+        expect(persisted).toContain(clientBatchId);
+        expect(persisted).not.toContain("secret");
+        expect(lookupGenerationBatchByClientId).toHaveBeenCalledWith(
+          expect.anything(),
+          clientBatchId,
+        );
+      } finally {
+        storage.mockRestore();
+      }
+    },
+  );
 
   it("persists each deep outstanding batch independently instead of rewriting the backlog", () => {
     admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
@@ -425,16 +537,22 @@ describe("web durable generation lifecycle", () => {
     await stream.cancel(id);
     expect(job.state).toBe("running");
     expect(job.cancelRequested).toBe(true);
-    expect(cancelQueueJob).not.toHaveBeenCalled();
+    expect(mutateQueueJobOnExpectedInstance).not.toHaveBeenCalled();
     expect(
       localStorage.getItem(`mold.generate.jobs.recovery.${clientBatchId}`),
     ).toContain('"cancelRequested":true');
 
     confirmAdmission(batch(clientBatchId));
     await vi.waitFor(() =>
-      expect(cancelQueueJob).toHaveBeenCalledWith(
-        `job-${clientBatchId}-1`,
+      expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
         route.target,
+        {
+          instanceId: route.instanceId,
+          batchId: `server-${clientBatchId}`,
+          clientBatchId,
+          jobId: `job-${clientBatchId}-1`,
+        },
+        "cancel",
       ),
     );
     await vi.waitFor(() => expect(job.state).toBe("canceled"));
@@ -468,12 +586,102 @@ describe("web durable generation lifecycle", () => {
     recover({ kind: "found", batch: batch(clientBatchId) });
 
     await vi.waitFor(() =>
-      expect(cancelQueueJob).toHaveBeenCalledWith(
-        `job-${clientBatchId}-1`,
+      expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
         route.target,
+        {
+          instanceId: route.instanceId,
+          batchId: `server-${clientBatchId}`,
+          clientBatchId,
+          jobId: `job-${clientBatchId}-1`,
+        },
+        "cancel",
       ),
     );
     await vi.waitFor(() => expect(job.state).toBe("canceled"));
+  });
+
+  it("announces a held child once, with the machine's own reason", async () => {
+    // A print is admitted BEFORE its model is resolved, so "nobody has this
+    // model" arrives as a held child rather than an infeasible preview. The
+    // pull offer hangs off this listener; without it the pull is lost.
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const held: GenerationBatchStatus[] = [];
+    const stream = useGenerateStream(undefined, (job) =>
+      held.push(job as never),
+    );
+    const id = stream.submit(request("held print"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    const parked = batch(clientBatchId, ["held"]);
+    parked.children[0] = {
+      ...parked.children[0]!,
+      error:
+        "deferred generation preparation failed: model 'flux-dev:q8' is not downloaded",
+      error_code: "UNKNOWN_MODEL",
+      retryable: true,
+    };
+    reconcileGenerationBatches.mockResolvedValue(statusResponse([parked]));
+
+    await __testing__.reconcileDurableHost(route.hostId);
+    // A second reconciliation of the same hold must not re-announce it.
+    await __testing__.reconcileDurableHost(route.hostId);
+
+    expect(held).toHaveLength(1);
+    expect(job.holdError).toBe(
+      "deferred generation preparation failed: model 'flux-dev:q8' is not downloaded",
+    );
+    expect(job.holdCode).toBe("UNKNOWN_MODEL");
+    expect(job.retryable).toBe(true);
+  });
+
+  it("retries held durable work only through the admitting instance fence", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(request("retry held"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    const held = batch(clientBatchId, ["held"]);
+    held.children[0] = {
+      ...held.children[0]!,
+      error: "model dependency is unavailable",
+      retryable: true,
+    };
+    reconcileGenerationBatches.mockResolvedValue(statusResponse([held]));
+    await __testing__.reconcileDurableHost(route.hostId);
+
+    const confirmation = deferred<{ kind: "accepted" }>();
+    retryQueueJobRecoveringAmbiguity.mockReturnValue(confirmation.promise);
+    const retry = stream.retry(id);
+
+    expect(job).toMatchObject({ retryable: false, retrying: true });
+    confirmation.resolve({ kind: "accepted" });
+    await retry;
+
+    expect(retryQueueJobRecoveringAmbiguity).toHaveBeenCalledWith(
+      route.target,
+      {
+        instanceId: route.instanceId,
+        batchId: `server-${clientBatchId}`,
+        clientBatchId,
+        jobId: `job-${clientBatchId}-1`,
+      },
+    );
   });
 
   it("keeps recovery-record media redaction as defense in depth", () => {
@@ -544,7 +752,7 @@ describe("web durable generation lifecycle", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("reconciles again from the post-commit hint when earlier terminal hints race", async () => {
+  it("reconciles on the commit hint alone, never on job_ended", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>
         Promise.resolve(batch(body.client_batch_id)),
@@ -559,22 +767,19 @@ describe("web durable generation lifecycle", () => {
     );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
     const clientBatchId = job.durableBatch!.clientBatchId;
-    reconcileGenerationBatches
-      .mockResolvedValueOnce(
-        statusResponse([batch(clientBatchId, ["running"])]),
-      )
-      .mockResolvedValueOnce(
-        statusResponse([batch(clientBatchId, ["complete"])]),
-      );
+    reconcileGenerationBatches.mockResolvedValue(
+      statusResponse([batch(clientBatchId, ["complete"])]),
+    );
 
+    // `job_ended` precedes the row write; reading on it would race the
+    // commit hint the server publishes after every settlement.
     __testing__.handleDurableEvent(
       route.hostId,
       "event",
       JSON.stringify({ type: "job_ended", id: job.serverId }),
     );
-    await vi.waitFor(() =>
-      expect(reconcileGenerationBatches).toHaveBeenCalledTimes(1),
-    );
+    await Promise.resolve();
+    expect(reconcileGenerationBatches).not.toHaveBeenCalled();
     expect(job.state).toBe("running");
 
     __testing__.handleDurableEvent(
@@ -588,6 +793,7 @@ describe("web durable generation lifecycle", () => {
 
     await vi.waitFor(() => expect(job.state).toBe("done"));
     await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(1));
+    expect(reconcileGenerationBatches).toHaveBeenCalledTimes(1);
   });
 
   it("scopes child commits and reserves host-wide reads for bulk commits", async () => {
@@ -658,51 +864,6 @@ describe("web durable generation lifecycle", () => {
     );
   });
 
-  it("fences a replacement server instance instead of adopting its work", async () => {
-    admitGenerationBatch.mockImplementation(
-      (_target: unknown, body: { client_batch_id: string }) =>
-        Promise.resolve(batch(body.client_batch_id)),
-    );
-    const stream = useGenerateStream();
-    const id = stream.submit(request(), { kind: "single" }, route);
-    await vi.waitFor(() =>
-      expect(
-        stream.jobs.value.find((job) => job.id === id)?.serverId,
-      ).toBeTruthy(),
-    );
-    let confirmReplacement!: () => void;
-    reconcileGenerationBatches.mockImplementation(
-      () =>
-        new Promise<GenerationBatchStatusResponse>((resolve) => {
-          confirmReplacement = () =>
-            resolve({
-              ...statusResponse([]),
-              instance_id: "replacement",
-            });
-        }),
-    );
-
-    __testing__.handleDurableEvent(
-      route.hostId,
-      "authority",
-      JSON.stringify({ instance_id: "replacement" }),
-    );
-
-    expect(
-      stream.jobs.value.find((candidate) => candidate.id === id)?.state,
-    ).toBe("running");
-    confirmReplacement();
-    await vi.waitFor(() =>
-      expect(
-        stream.jobs.value.find((candidate) => candidate.id === id)?.state,
-      ).toBe("error"),
-    );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    expect(job.state).toBe("error");
-    expect(job.detached).toBe(true);
-    expect(job.error).toMatch(/replaced/i);
-  });
-
   it("lets an observed completion beat a racing cancel and emits its effects once", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>
@@ -732,7 +893,7 @@ describe("web durable generation lifecycle", () => {
     await __testing__.reconcileDurableHost(route.hostId);
     expect(stream.jobs.value.find((job) => job.id === id)?.state).toBe("done");
     await stream.cancel(id);
-    expect(cancelQueueJob).not.toHaveBeenCalled();
+    expect(mutateQueueJobOnExpectedInstance).not.toHaveBeenCalled();
     releaseMedia();
     await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
 
@@ -753,8 +914,6 @@ describe("web durable generation lifecycle", () => {
         stage: "Queued",
         step: null,
         totalSteps: null,
-        weightBytesLoaded: null,
-        weightBytesTotal: null,
         queuePosition: null,
         gpu: null,
         elapsedMs: null,
@@ -804,8 +963,6 @@ describe("web durable generation lifecycle", () => {
         stage: "Developing",
         step: null,
         totalSteps: null,
-        weightBytesLoaded: null,
-        weightBytesTotal: null,
         queuePosition: null,
         gpu: null,
         elapsedMs: null,
@@ -988,7 +1145,7 @@ describe("web durable generation lifecycle", () => {
     expect(listGalleryFrom).toHaveBeenCalledTimes(1);
   });
 
-  it("uses an exact gallery event row without launching a gallery listing", async () => {
+  it("caches the gallery event row and reads it on the commit hint without a listing", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>
         Promise.resolve(batch(body.client_batch_id)),
@@ -1017,6 +1174,13 @@ describe("web durable generation lifecycle", () => {
         image,
       }),
     );
+    await Promise.resolve();
+    expect(reconcileGenerationBatches).not.toHaveBeenCalled();
+    __testing__.handleDurableEvent(
+      route.hostId,
+      "event",
+      JSON.stringify({ type: "job_state_committed", id: job.serverId }),
+    );
 
     await vi.waitFor(() =>
       expect(
@@ -1032,6 +1196,33 @@ describe("web durable generation lifecycle", () => {
       client_batch_ids: [],
       batch_ids: [job.durableBatch!.serverBatchId],
     });
+  });
+
+  it("settles a completion that published no file as a failure, once", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(request("no file"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const fileless = batch(job.durableBatch!.clientBatchId, ["complete"]);
+    delete fileless.children[0]!.result;
+    reconcileGenerationBatches.mockResolvedValue(statusResponse([fileless]));
+
+    await __testing__.reconcileDurableHost(route.hostId);
+    await __testing__.reconcileDurableHost(route.hostId);
+
+    expect(job.state).toBe("error");
+    expect(job.error).toMatch(/published no file/);
+    expect(job.detached).not.toBe(true);
+    expect(fetchGalleryBlob).not.toHaveBeenCalled();
+    expect(stream.canvasErrorJobId.value).toBe(id);
   });
 
   it("keeps complete authority and retries after a transient artifact read failure", async () => {
@@ -1067,6 +1258,43 @@ describe("web durable generation lifecycle", () => {
     expect(job.state).toBe("done");
     expect(job.mediaHydrationError).toBeNull();
     expect(fetchGalleryBlob).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops retrying a completion's media once its authority is lost", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    fetchGalleryBlob.mockRejectedValue(new TypeError("read failed"));
+    const stream = useGenerateStream();
+    const id = stream.submit(request("lost media"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    reconcileGenerationBatches.mockResolvedValueOnce(
+      statusResponse([batch(clientBatchId, ["complete"])]),
+    );
+    await __testing__.reconcileDurableHost(route.hostId);
+    await vi.waitFor(() => expect(job.mediaHydrationError).toMatch(/read/));
+
+    // The replacement instance is not the one that published the file, and
+    // no reconciliation can repair a fenced batch: the outcome stays known,
+    // the read is not retried, and the tracker is released.
+    reconcileGenerationBatches.mockResolvedValue({
+      ...statusResponse([]),
+      instance_id: "replacement",
+    });
+    await __testing__.reconcileDurableHost(route.hostId);
+    await __testing__.reconcileDurableHost(route.hostId);
+
+    expect(job.state).toBe("done");
+    expect(job.result).toBeNull();
+    expect(fetchGalleryBlob).toHaveBeenCalledTimes(1);
+    expect(reconcileGenerationBatches).toHaveBeenCalledTimes(2);
   });
 
   it("targets an exact batch for ordinary lifecycle hints", async () => {
@@ -1113,31 +1341,32 @@ describe("web durable generation lifecycle", () => {
   });
 
   it.each([
-    ["older host", { ...route, durableGeneration: null }, request()],
-    ["identity", route, request("identity")],
-    ["references", route, request("references")],
     [
-      "MiniMax H3",
-      route,
-      { ...request(), model: "minimax-h3-fl2va:official-bf16" },
+      "a machine with no durable queue",
+      { ...route, durableGeneration: null },
+      "does not advertise the durable generation queue",
     ],
   ])(
-    "keeps %s on the explicit legacy stream",
-    async (_name, candidateRoute, candidate) => {
-      if (_name === "identity") candidate.id_image = "private-face";
-      if (_name === "references") candidate.references = [];
+    "refuses %s by name and queues nothing",
+    (_name, candidateRoute, reason) => {
       const stream = useGenerateStream();
-      stream.submit(candidate, { kind: "single" }, candidateRoute);
-      await Promise.resolve();
 
-      expect(generateStream).toHaveBeenCalledTimes(1);
+      expect(() =>
+        stream.submit(request(), { kind: "single" }, candidateRoute),
+      ).toThrow(reason);
       expect(admitGenerationBatch).not.toHaveBeenCalled();
+      expect(stream.jobs.value).toHaveLength(0);
     },
   );
 
+  /**
+   * The durable protocol carries every request trait. A client-side per-trait
+   * fence could only refuse work the server would have taken, so the server's
+   * own typed admission refusal is the single authority.
+   */
   it.each(GENERATION_REQUEST_MEDIA_FIELDS)(
-    "keeps media-bearing %s requests on the legacy stream",
-    async (field) => {
+    "admits a media-bearing %s request unchanged",
+    (field) => {
       const valueByField: Record<string, unknown> = {
         source_image: "source",
         edit_images: ["edit"],
@@ -1155,49 +1384,65 @@ describe("web durable generation lifecycle", () => {
         keyframes: [{ frame: 0, image: "keyframe" }],
         hdr_exr_dir: "/hdr",
       };
+      admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
       const stream = useGenerateStream();
 
       stream.submit(
         { ...request(), [field]: valueByField[field] },
         { kind: "single" },
-        route,
+        durableMediaRoute,
       );
-      await Promise.resolve();
 
-      expect(generateStream).toHaveBeenCalledTimes(1);
-      expect(admitGenerationBatch).not.toHaveBeenCalled();
+      expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
+      expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
+        [field]: valueByField[field],
+      });
     },
   );
 
-  it("keeps every waiting media job visible while draining four streams per target", async () => {
-    const opened: Array<{
-      prompt: string;
-      target: string;
-    }> = [];
-    generateStream.mockImplementation(
-      (
-        candidate: GenerateRequestWire,
-        _handlers: unknown,
-        signal: AbortSignal,
-        target: { baseUrl?: string } | undefined,
-      ) =>
-        new Promise<void>((resolve) => {
-          opened.push({
-            prompt: candidate.prompt,
-            target: target?.baseUrl ?? "origin",
-          });
-          signal.addEventListener("abort", () => resolve(), { once: true });
-        }),
+  it("admits media combined with a LoRA, and an HDR directory, unchanged", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
+    const stream = useGenerateStream();
+
+    stream.submit(
+      {
+        ...request("lora + media"),
+        source_image: "source",
+        loras: [{ path: "local", scale: 1 }],
+      },
+      { kind: "single" },
+      durableMediaRoute,
     );
+    stream.submit(
+      {
+        ...request("hdr"),
+        hdr_exr_dir: "/private/hdr",
+      } as unknown as GenerateRequestWire,
+      { kind: "single" },
+      durableMediaRoute,
+    );
+
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(2);
+    expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
+      source_image: "source",
+      loras: [{ path: "local", scale: 1 }],
+    });
+    expect(admitGenerationBatch.mock.calls[1]![1].requests[0]).toMatchObject({
+      hdr_exr_dir: "/private/hdr",
+    });
+  });
+
+  it("admits every media print immediately — there is no browser stream budget left to drain", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
     const otherRoute: HostRoute = {
-      ...route,
+      ...durableMediaRoute,
       hostId: "render-box-b",
       label: "Render box B",
       target: { baseUrl: "http://render-box-b:7680", apiKey: "secret-b" },
       instanceId: "instance-2",
     };
     const stream = useGenerateStream();
-    const ids = [route, otherRoute].flatMap((candidateRoute) =>
+    const ids = [durableMediaRoute, otherRoute].flatMap((candidateRoute) =>
       Array.from({ length: 5 }, (_, index) =>
         stream.submit(
           {
@@ -1210,53 +1455,109 @@ describe("web durable generation lifecycle", () => {
       ),
     );
 
-    try {
-      expect(
-        stream.jobs.value.filter((job) => ids.includes(job.id)),
-      ).toHaveLength(10);
-      expect(
-        opened.filter((entry) => entry.target === route.target.baseUrl),
-      ).toHaveLength(4);
-      expect(
-        opened.filter((entry) => entry.target === otherRoute.target.baseUrl),
-      ).toHaveLength(4);
+    expect(
+      stream.jobs.value.filter((job) => ids.includes(job.id)),
+    ).toHaveLength(10);
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(10);
+  });
 
-      const waitingA = stream.jobs.value.find(
-        (job) => job.request.prompt === "render-box-4",
-      )!;
-      const waitingB = stream.jobs.value.find(
-        (job) => job.request.prompt === "render-box-b-4",
-      )!;
-      expect(waitingA.streamStarted).toBe(false);
-      expect(waitingB.streamStarted).toBe(false);
-
-      await stream.cancel(waitingA.id);
-      expect(waitingA.state).toBe("canceled");
-      stream.jobs.value
-        .find((job) => job.request.prompt === "render-box-0")!
-        .controller.abort();
-      await Promise.resolve();
+  it("polls the host's queue preview for our own running print and stops when it settles", async () => {
+    previewWatches.length = 0;
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      request("previewed print"),
+      { kind: "single" },
+      route,
+    );
+    await vi.waitFor(() =>
       expect(
-        opened.filter((entry) => entry.target === route.target.baseUrl),
-      ).toHaveLength(4);
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    reconcileGenerationBatches.mockResolvedValue(
+      statusResponse([batch(clientBatchId, ["running"])]),
+    );
+    await __testing__.reconcileDurableHost(route.hostId);
+    expect(previewWatches).toHaveLength(1);
+    expect(previewWatches[0]!.jobId).toBe(job.serverId);
 
-      const activeB = stream.jobs.value.find(
-        (job) => job.request.prompt === "render-box-b-0",
-      )!;
-      activeB.controller.abort();
-      await vi.waitFor(() =>
-        expect(
-          opened.filter((entry) => entry.target === otherRoute.target.baseUrl),
-        ).toHaveLength(5),
-      );
-      expect(waitingB.streamStarted).toBe(true);
-    } finally {
-      for (const job of stream.jobs.value.filter((candidate) =>
-        ids.includes(candidate.id),
-      )) {
-        job.controller.abort();
-        stream.remove(job.id);
-      }
-    }
+    previewWatches[0]!.onPreview({
+      preview_image: "QUJD",
+      step: 3,
+      total: 8,
+      stage: "Denoising",
+      queue_position: null,
+    });
+    expect(job.previewUrl).toBe("data:image/png;base64,QUJD");
+    expect(job.progress.step).toBe(3);
+    expect(job.progress.totalSteps).toBe(8);
+    expect(job.progress.stage).toBe("Denoising");
+
+    // A host rendering with `MOLD_STEP_PREVIEW=0` still moves the counter,
+    // and never blanks the last image it did send.
+    previewWatches[0]!.onPreview({
+      preview_image: null,
+      step: 4,
+      total: 8,
+      stage: "Denoising",
+      queue_position: null,
+    });
+    expect(job.previewUrl).toBe("data:image/png;base64,QUJD");
+    expect(job.progress.step).toBe(4);
+
+    // A second running snapshot re-asks for the same server job: no new poller.
+    await __testing__.reconcileDurableHost(route.hostId);
+    expect(previewWatches).toHaveLength(1);
+
+    reconcileGenerationBatches.mockResolvedValue(
+      statusResponse([batch(clientBatchId, ["complete"])]),
+    );
+    await __testing__.reconcileDurableHost(route.hostId);
+    expect(previewWatches[0]!.stop).toHaveBeenCalled();
+  });
+
+  it("fails the print with the host's own sentence on a typed pre-commit 503", async () => {
+    admitGenerationBatch.mockRejectedValueOnce(
+      new ApiError("durable admission is unavailable: run chown", 503, {
+        error: "durable admission is unavailable: run chown",
+        code: "DURABLE_ADMISSION_UNAVAILABLE",
+      }),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      request("refused print"),
+      { kind: "single" },
+      route,
+    );
+    await vi.waitFor(() =>
+      expect(stream.jobs.value.find((job) => job.id === id)?.state).toBe(
+        "error",
+      ),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.error).toContain("durable admission is unavailable");
+  });
+
+  it("fails the print when the host confirms it never received an ambiguous POST", async () => {
+    admitGenerationBatch.mockRejectedValueOnce(
+      new ApiError("bad gateway", 502),
+    );
+    lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
+    const stream = useGenerateStream();
+    const id = stream.submit(request("lost print"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(stream.jobs.value.find((job) => job.id === id)?.state).toBe(
+        "error",
+      ),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.error).toContain("bad gateway");
+    expect(job.detached).not.toBe(true);
   });
 });

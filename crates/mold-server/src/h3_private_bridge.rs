@@ -50,6 +50,30 @@ impl H3PrivateIngressGrant {
         )
     }
 
+    /// Stable authenticated subject used only for client-operation
+    /// idempotency. Runtime policy, server instance, and the materialized
+    /// execution request belong to the sealed replay authority instead: a
+    /// later policy change must not make the same client operation conflict
+    /// with the batch it already admitted. Admission reads the same subject
+    /// through the free function [`idempotency_subject_sha256`] BEFORE the
+    /// grant exists; this accessor pins that the two agree.
+    #[cfg(test)]
+    pub(crate) fn idempotency_subject_sha256(&self) -> &str {
+        &self.authenticated_identity_sha256
+    }
+
+    /// Payload sealed by the queue-media AEAD and bound to owner + job ID.
+    /// The subject is a one-way identity digest, while the authority digest
+    /// binds the exact request, instance, task, partition, and current policy.
+    pub(crate) fn durable_replay_envelope(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&DurableH3ReplayEnvelope {
+            version: 1,
+            authenticated_identity_sha256: self.authenticated_identity_sha256.clone(),
+            authority_identity_sha256: self.authority_identity_sha256(),
+        })
+        .map_err(|error| format!("MiniMax H3 replay authority serialization failed: {error}"))
+    }
+
     pub(crate) fn validate_for_request(
         &self,
         request: &mold_core::GenerateRequest,
@@ -117,6 +141,41 @@ impl H3PrivateIngressGrant {
         Ok(rebound)
     }
 
+    /// Rebind authority after trusted, post-acknowledgement server preparation
+    /// materializes defaults, expansion results, and server-owned paths. The
+    /// original request must still match the authenticated envelope exactly;
+    /// the prepared value is then reclassified through the same partition and
+    /// current-runtime gates rather than accepting a caller-supplied mutation.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn rebind_server_prepared_request(
+        &self,
+        submitted: &mold_core::GenerateRequest,
+        prepared: &mold_core::GenerateRequest,
+        instance_id: &str,
+    ) -> Result<Self, crate::routes::ApiError> {
+        self.validate_for_request(submitted, instance_id)
+            .map_err(|error| {
+                crate::routes::ApiError::with_code(
+                    error,
+                    H3_PRIVATE_PARTITION_REJECTED,
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                )
+            })?;
+        build_h3_private_ingress_grant(
+            prepared,
+            instance_id,
+            self.authenticated_identity_sha256.clone(),
+            reviewed_h3_private_runtime_available,
+        )?
+        .ok_or_else(|| {
+            crate::routes::ApiError::with_code(
+                "prepared MiniMax H3 request left its authenticated partition",
+                H3_PRIVATE_PARTITION_REJECTED,
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            )
+        })
+    }
+
     #[cfg(test)]
     fn authenticated_identity_sha256(&self) -> &str {
         &self.authenticated_identity_sha256
@@ -143,6 +202,15 @@ impl H3PrivateIngressGrant {
     }
 }
 
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableH3ReplayEnvelope {
+    version: u16,
+    authenticated_identity_sha256: String,
+    authority_identity_sha256: String,
+}
+
 /// Classify the only private H3 HTTP partition before activation, artifact
 /// discovery, path resolution, or scheduler mutation. Non-H3 requests return
 /// `None` and retain the existing public ingress gates unchanged.
@@ -161,6 +229,84 @@ pub(crate) fn classify_h3_private_ingress(
     )
 }
 
+/// Capture durable authenticated authority without requiring the inference
+/// runtime to be healthy yet. Runtime qualification is rechecked by restore
+/// before the feeder publishes the job to the scheduler.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn capture_durable_h3_private_ingress(
+    request: &mold_core::GenerateRequest,
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    instance_id: &str,
+) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
+    classify_h3_private_ingress_with_runtime(request, authenticated, instance_id, |_| true)
+}
+
+/// Whether the private ingress boundary claims this request at all. Every
+/// reviewed H3 identity is claimed except a pinned one mold has no engine arm
+/// for, which defers to public model activation (#1354). This is the single
+/// predicate admission, capture, and restore all read.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn claims_private_ingress(request: &mold_core::GenerateRequest) -> bool {
+    mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some()
+        && !mold_core::is_pinned_unrunnable_minimax_h3_identity(&request.model)
+}
+
+/// The authenticated subject a private ingress grant binds idempotency to —
+/// exactly what [`H3PrivateIngressGrant::idempotency_subject_sha256`] will
+/// answer once the grant exists. `None` when this boundary does not claim the
+/// request.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn idempotency_subject_sha256(
+    request: &mold_core::GenerateRequest,
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    instance_id: &str,
+) -> Result<Option<String>, crate::routes::ApiError> {
+    if !claims_private_ingress(request) {
+        return Ok(None);
+    }
+    private_ingress_subject_sha256(authenticated, instance_id).map(Some)
+}
+
+/// The one derivation of the authenticated-subject digest. A build without
+/// public `h3` demands an API key before it classifies anything; the public
+/// build binds the instance instead, because there is no key to bind.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+fn private_ingress_subject_sha256(
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    instance_id: &str,
+) -> Result<String, crate::routes::ApiError> {
+    #[cfg(not(feature = "h3"))]
+    {
+        use axum::http::StatusCode;
+
+        let _ = instance_id;
+        authenticated.map_or_else(
+            || {
+                Err(crate::routes::ApiError::with_code(
+                    "API key authentication is required for MiniMax H3 private generation",
+                    "UNAUTHORIZED",
+                    StatusCode::UNAUTHORIZED,
+                ))
+            },
+            |authenticated| {
+                Ok(ingress_digest(
+                    b"mold.minimax-h3.private-authenticated-identity.v1\0",
+                    &[authenticated.durable_identity.as_bytes()],
+                ))
+            },
+        )
+    }
+    #[cfg(feature = "h3")]
+    {
+        let _ = authenticated;
+        Ok(ingress_digest(
+            b"mold.minimax-h3.public-ingress-identity.v1\0",
+            &[instance_id.as_bytes()],
+        ))
+    }
+}
+
 #[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn classify_h3_private_ingress_with_runtime(
     request: &mold_core::GenerateRequest,
@@ -168,12 +314,9 @@ fn classify_h3_private_ingress_with_runtime(
     instance_id: &str,
     runtime_available: impl FnOnce(mold_core::minimax_h3::Task) -> bool,
 ) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
-    use axum::http::StatusCode;
-
-    let Some(contract) = mold_core::minimax_h3::capability_contract_for_model(&request.model)
-    else {
+    if mold_core::minimax_h3::capability_contract_for_model(&request.model).is_none() {
         return Ok(None);
-    };
+    }
     // A pinned H3 identity mold has no engine arm for is not this boundary's
     // to refuse (#1354). This classifier runs ahead of `model_activation`, and
     // it used to claim every identity `capability_contract_for_model` resolves
@@ -198,33 +341,108 @@ fn classify_h3_private_ingress_with_runtime(
     // `h3` demands an API key before it classifies anything, and answering 401
     // here would hide the row's own reason behind a gate protecting nothing —
     // there is no runtime to protect.
+    if !claims_private_ingress(request) {
+        return Ok(None);
+    }
+    let authenticated_identity_sha256 = private_ingress_subject_sha256(authenticated, instance_id)?;
+
+    build_h3_private_ingress_grant(
+        request,
+        instance_id,
+        authenticated_identity_sha256,
+        runtime_available,
+    )
+}
+
+/// Reconstruct a payload-free private ingress grant for a durably admitted
+/// row. The caller supplies only the opaque authenticated-subject digest that
+/// was bound to the original admission row; every mutable security fact is
+/// rechecked against the current process before the grant is returned.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn restore_durable_h3_private_ingress(
+    request: &mold_core::GenerateRequest,
+    envelope: &[u8],
+    instance_id: &str,
+) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
+    restore_durable_h3_private_ingress_with_runtime(
+        request,
+        envelope,
+        instance_id,
+        reviewed_h3_private_runtime_available,
+    )
+}
+
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+fn restore_durable_h3_private_ingress_with_runtime(
+    request: &mold_core::GenerateRequest,
+    envelope: &[u8],
+    instance_id: &str,
+    runtime_available: impl FnOnce(mold_core::minimax_h3::Task) -> bool,
+) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
+    use axum::http::StatusCode;
+
+    let envelope: DurableH3ReplayEnvelope = serde_json::from_slice(envelope).map_err(|_| {
+        crate::routes::ApiError::with_code(
+            "durable MiniMax H3 admission authority is invalid",
+            H3_PRIVATE_PARTITION_REJECTED,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+    })?;
+    let valid_digest = |digest: &str| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if envelope.version != 1
+        || !valid_digest(&envelope.authenticated_identity_sha256)
+        || !valid_digest(&envelope.authority_identity_sha256)
+    {
+        return Err(crate::routes::ApiError::with_code(
+            "durable MiniMax H3 admission authority is invalid",
+            H3_PRIVATE_PARTITION_REJECTED,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    let restored = build_h3_private_ingress_grant(
+        request,
+        instance_id,
+        envelope.authenticated_identity_sha256,
+        runtime_available,
+    )?;
+    let Some(grant) = restored else {
+        return Err(crate::routes::ApiError::with_code(
+            "durable MiniMax H3 admission authority no longer names an H3 request",
+            H3_PRIVATE_PARTITION_REJECTED,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    };
+    if grant.authority_identity_sha256() != envelope.authority_identity_sha256 {
+        return Err(crate::routes::ApiError::with_code(
+            "durable MiniMax H3 admission authority does not match this request",
+            H3_PRIVATE_PARTITION_REJECTED,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    Ok(Some(grant))
+}
+
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+fn build_h3_private_ingress_grant(
+    request: &mold_core::GenerateRequest,
+    instance_id: &str,
+    authenticated_identity_sha256: String,
+    runtime_available: impl FnOnce(mold_core::minimax_h3::Task) -> bool,
+) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
+    use axum::http::StatusCode;
+
+    let Some(contract) = mold_core::minimax_h3::capability_contract_for_model(&request.model)
+    else {
+        return Ok(None);
+    };
     if mold_core::is_pinned_unrunnable_minimax_h3_identity(&request.model) {
         return Ok(None);
     }
-    #[cfg(not(feature = "h3"))]
-    let authenticated_identity_sha256 = authenticated.map_or_else(
-        || {
-            Err(crate::routes::ApiError::with_code(
-                "API key authentication is required for MiniMax H3 private generation",
-                "UNAUTHORIZED",
-                StatusCode::UNAUTHORIZED,
-            ))
-        },
-        |authenticated| {
-            Ok(ingress_digest(
-                b"mold.minimax-h3.private-authenticated-identity.v1\0",
-                &[authenticated.identity.as_bytes()],
-            ))
-        },
-    )?;
-    #[cfg(feature = "h3")]
-    let authenticated_identity_sha256 = ingress_digest(
-        b"mold.minimax-h3.public-ingress-identity.v1\0",
-        &[instance_id.as_bytes()],
-    );
-    #[cfg(feature = "h3")]
-    let _ = authenticated;
-
     let output_format = request
         .output_format
         .unwrap_or(mold_core::OutputFormat::Mp4);
@@ -1192,11 +1410,23 @@ fn private_ingress_partition_identity_sha256(task: mold_core::minimax_h3::Task) 
     )
 }
 
+/// Hash the PERSISTED request form: every setting `mold.db` journals, with
+/// every field the encrypted media set carries scrubbed out. The grant is
+/// captured before sealing and re-checked at the feeder, at dependency
+/// preparation, at the claim, on the owner, and on replay after a restart —
+/// sites holding the scrubbed row and sites holding their own hydration — so
+/// the one form they all share is the row. Media identity is the sealed set's:
+/// it is AEAD-bound to the owner and job id, and a consumer that hydrates it
+/// gets exactly the bytes admission sealed or nothing. Reference DESCRIPTORS
+/// are settings and stay in the hash.
 #[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn request_authority_sha256(request: &mold_core::GenerateRequest) -> Result<String, String> {
-    let serialized = serde_json::to_vec(request).map_err(|error| {
+    let mut canonical =
+        crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request.clone());
+    crate::queue_media::scrub_request_media(&mut canonical);
+    let serialized = zeroize::Zeroizing::new(serde_json::to_vec(&*canonical).map_err(|error| {
         format!("MiniMax H3 request authority could not be serialized: {error}")
-    })?;
+    })?);
     Ok(ingress_digest(
         b"mold.minimax-h3.private-request-authority.v1\0",
         &[&serialized],
@@ -1335,10 +1565,13 @@ pub(crate) struct H3PreparedMediaContract {
 }
 
 impl H3PreparedMediaContract {
-    pub(crate) fn from_request(
-        request: &mold_core::GenerateRequest,
-        resolved_reference_fingerprint_sha256: Option<&str>,
-    ) -> Result<Self, String> {
+    /// Derive the contract from the request alone. Both reference
+    /// fingerprints are pure functions of the ordered descriptors — the
+    /// resolved one over the probed metadata every hydration lease re-derives,
+    /// the prepared one over the target-shaped metadata — so a request in hand
+    /// is compared against a prepared attempt by deriving and comparing, never
+    /// by trusting a fingerprint handed in beside it.
+    pub(crate) fn from_request(request: &mold_core::GenerateRequest) -> Result<Self, String> {
         let task = mold_core::minimax_h3::task_for_model(&request.model)
             .ok_or_else(|| "MiniMax H3 prepared media lost its task partition".to_string())?;
         let mode = match task {
@@ -1358,7 +1591,7 @@ impl H3PreparedMediaContract {
             .unwrap_or(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES);
         let (reference_fingerprint_sha256, resolved_fingerprint, reference_count) = match task {
             mold_core::minimax_h3::Task::Fl2va => {
-                if resolved_reference_fingerprint_sha256.is_some() {
+                if request.references.is_some() {
                     return Err(
                         "MiniMax H3 FL2VA cannot inherit resolved Ref2VA authority".to_string()
                     );
@@ -1371,24 +1604,13 @@ impl H3PreparedMediaContract {
                 })?;
                 let reference_count = u32::try_from(references.len())
                     .map_err(|_| "MiniMax H3 Ref2VA reference count exceeded u32".to_string())?;
-                let resolved_fingerprint =
-                    resolved_reference_fingerprint_sha256.ok_or_else(|| {
-                        "MiniMax H3 Ref2VA prepared media lost resolved reference authority"
-                            .to_string()
-                    })?;
                 let resolved_metadata = references
                     .iter()
                     .enumerate()
                     .map(|(index, reference)| reference.redacted_metadata_lossless(index))
                     .collect::<Vec<_>>();
-                let expected_resolved =
+                let resolved_fingerprint =
                     mold_core::generation_reference_fingerprint(&resolved_metadata);
-                if expected_resolved != resolved_fingerprint {
-                    return Err(
-                        "MiniMax H3 Ref2VA resolved reference order or artifact identity changed"
-                            .to_string(),
-                    );
-                }
                 let prepared_metadata = references
                     .iter()
                     .enumerate()
@@ -1400,7 +1622,7 @@ impl H3PreparedMediaContract {
                     Some(mold_core::generation_reference_fingerprint(
                         &prepared_metadata,
                     )),
-                    Some(resolved_fingerprint.to_string()),
+                    Some(resolved_fingerprint),
                     reference_count,
                 )
             }
@@ -1420,12 +1642,14 @@ impl H3PreparedMediaContract {
         })
     }
 
+    /// Re-derive the contract from the request now in hand and require it to
+    /// match what the attempt was prepared with; a request whose descriptors
+    /// drifted since preparation derives a different contract.
     pub(crate) fn validate_for_request(
         &self,
         request: &mold_core::GenerateRequest,
-        resolved_reference_fingerprint_sha256: Option<&str>,
     ) -> Result<(), String> {
-        let expected = Self::from_request(request, resolved_reference_fingerprint_sha256)?;
+        let expected = Self::from_request(request)?;
         if &expected != self {
             return Err(
                 "MiniMax H3 prepared media changed from its ordered request authority".to_string(),
@@ -1726,12 +1950,37 @@ pub(crate) fn prepare_for_owner(
         .as_ref()
         .ok_or_else(|| "MiniMax H3 preparation lost its ingress grant".to_string())?;
     ingress_grant.validate_bound_request(&job.request)?;
-    let expected_media = H3PreparedMediaContract::from_request(
-        &job.request,
-        job.resolved_references
+    // Every consumer of durable media hydrates under its own lease. The owner
+    // hydrates a private copy of the request to bind the staged references
+    // from THIS hydration; `job.request` stays payload-free for the rest of
+    // the attempt. The copy is scrubbed and the staging released when this
+    // function returns; the bindings retain their opened descriptors.
+    let mut request =
+        crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(job.request.clone());
+    let (hydration, references) = match job.deferred_media.as_ref() {
+        Some(media) => {
+            let lease = media.hydrate_into(&job.id, &mut request).map_err(|error| {
+                format!("MiniMax H3 owner preparation could not hydrate its durable media: {error}")
+            })?;
+            let references = lease.references(&request).map_err(|error| {
+                format!("MiniMax H3 owner preparation could not bind its durable media: {error}")
+            })?;
+            (Some(lease), references)
+        }
+        None => (None, None),
+    };
+    let expected_media = H3PreparedMediaContract::from_request(&request)?;
+    if expected_media
+        .resolved_reference_fingerprint_sha256
+        .as_deref()
+        != references
             .as_ref()
-            .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
-    )?;
+            .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint)
+    {
+        return Err(
+            "MiniMax H3 Ref2VA resolved reference order or artifact identity changed".to_string(),
+        );
+    }
     let compute_capability = worker.gpu.compute_capability;
     let device_id = crate::scheduler::worker_device_id(worker);
     let admission_evidence = prepared_inputs
@@ -1819,11 +2068,10 @@ pub(crate) fn prepare_for_owner(
     // Bind the staged Ref2VA references immediately before preparation — the
     // reopen re-derives the frozen factory request through the same decoder
     // admission used, so it needs the same verified bindings. FL2VA jobs
-    // carry no resolved set and bind nothing.
-    let reference_bindings = job
-        .resolved_references
+    // carry no reference set and bind nothing.
+    let reference_bindings = references
         .as_ref()
-        .map(|references| references.inference_bindings(&job.request, Some(&cancellation)))
+        .map(|references| references.inference_bindings(&request, Some(&cancellation)))
         .transpose()
         .map_err(|error| {
             format!("MiniMax H3 owner preparation could not bind its staged references: {error}")
@@ -1832,7 +2080,7 @@ pub(crate) fn prepare_for_owner(
     progress.set_cancellation_token(cancellation);
     let prepared = mold_inference::prepare_h3_private_fl2va_attempt(
         mold_inference::H3PrivateFl2VaPrepareInput {
-            request: &job.request,
+            request: &request,
             frozen_factory,
             admission_evidence,
             paths: paths.inference_paths(),
@@ -1898,6 +2146,10 @@ pub(crate) fn prepare_for_owner(
     {
         return Err("MiniMax H3 prepared attempt changed from the frozen owner admission".into());
     }
+    // The bindings retain their opened descriptors; the private staging and
+    // the hydrated copy are released here, before the attempt runs.
+    drop(references);
+    drop(hydration);
     job.h3_prepared_attempt = Some(boxed);
     Ok(())
 }
@@ -1911,6 +2163,9 @@ pub(crate) fn private_prepare_error_message(
             "MiniMax H3 runtime has no reviewed runtime qualification".to_string()
         }
         mold_inference::H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall) => {
+            shortfall.to_string()
+        }
+        mold_inference::H3PrivateFl2VaPrepareError::InsufficientDeviceHeadroom(shortfall) => {
             shortfall.to_string()
         }
         mold_inference::H3PrivateFl2VaPrepareError::InvalidEvidence(reason) => {
@@ -1933,6 +2188,22 @@ pub(crate) fn private_prepare_host_shortfall(
 ) -> Option<mold_inference::H3PrivateHostHeadroomShortfall> {
     match error {
         mold_inference::H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall) => {
+            Some(*shortfall)
+        }
+        _ => None,
+    }
+}
+
+/// The device half of the same typed question. A device shortfall cannot be
+/// answered by releasing mold's own cache — eviction supplies host bytes —
+/// but it CAN be answered by waiting for the card, which is a park, not a
+/// hold.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn private_prepare_device_shortfall(
+    error: &mold_inference::H3PrivateFl2VaPrepareError,
+) -> Option<mold_inference::H3PrivateDeviceHeadroomShortfall> {
+    match error {
+        mold_inference::H3PrivateFl2VaPrepareError::InsufficientDeviceHeadroom(shortfall) => {
             Some(*shortfall)
         }
         _ => None,
@@ -2802,6 +3073,7 @@ mod structural_tests {
     fn authenticated() -> crate::auth::ApiKeyAuthenticated {
         crate::auth::ApiKeyAuthenticated {
             identity: "process-local-auth-marker".to_string(),
+            durable_identity: "restart-stable-auth-marker".to_string(),
         }
     }
 
@@ -2813,6 +3085,7 @@ mod structural_tests {
         let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
             name: Some(name.to_string()),
             sha256: Some(format!("{byte:02x}").repeat(32)),
+            crop: None,
         };
         let image = GenerationReference::Image {
             media: GenerationReferenceAuthority::Descriptor,
@@ -3061,22 +3334,12 @@ mod structural_tests {
     #[test]
     fn ref2va_preparation_binds_swapped_order_and_resolved_artifact_identity() {
         let original = ref2va_request(false);
-        let original_resolved =
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&original);
-        let original_media = super::H3PreparedMediaContract::from_request(
-            &original,
-            Some(original_resolved.fingerprint()),
-        )
-        .expect("resolved Ref2VA request must freeze ordered authority");
+        let original_media = super::H3PreparedMediaContract::from_request(&original)
+            .expect("resolved Ref2VA request must freeze ordered authority");
 
         let swapped = ref2va_request(true);
-        let swapped_resolved =
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&swapped);
-        let swapped_media = super::H3PreparedMediaContract::from_request(
-            &swapped,
-            Some(swapped_resolved.fingerprint()),
-        )
-        .expect("swapped Ref2VA request must freeze its distinct order");
+        let swapped_media = super::H3PreparedMediaContract::from_request(&swapped)
+            .expect("swapped Ref2VA request must freeze its distinct order");
 
         assert_ne!(
             original_media.reference_fingerprint_sha256,
@@ -3086,9 +3349,8 @@ mod structural_tests {
             original_media.resolved_reference_fingerprint_sha256,
             swapped_media.resolved_reference_fingerprint_sha256
         );
-        assert!(original_media
-            .validate_for_request(&swapped, Some(swapped_resolved.fingerprint()))
-            .is_err());
+        assert!(original_media.validate_for_request(&swapped).is_err());
+        assert!(swapped_media.validate_for_request(&swapped).is_ok());
 
         let mut replaced = original.clone();
         let first = replaced
@@ -3103,11 +3365,9 @@ mod structural_tests {
                 provenance.sha256 = Some("03".repeat(32));
             }
         }
-        assert!(super::H3PreparedMediaContract::from_request(
-            &replaced,
-            Some(original_resolved.fingerprint()),
-        )
-        .is_err());
+        // A replaced artifact digest is a different resolved identity, so an
+        // attempt prepared on the original refuses the request in hand.
+        assert!(original_media.validate_for_request(&replaced).is_err());
 
         let metadata = mold_core::OutputMetadata::from_generate_request(&original, 7, None, "test");
         let durable = metadata.references.expect("durable ordered references");
@@ -3129,15 +3389,8 @@ mod structural_tests {
 
         let replay_request: mold_core::GenerateRequest =
             serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
-        let replay_resolved =
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(
-                &replay_request,
-            );
-        let replay_media = super::H3PreparedMediaContract::from_request(
-            &replay_request,
-            Some(replay_resolved.fingerprint()),
-        )
-        .expect("descriptor-only durable replay must retain exact order identity");
+        let replay_media = super::H3PreparedMediaContract::from_request(&replay_request)
+            .expect("descriptor-only durable replay must retain exact order identity");
         assert_eq!(replay_media, original_media);
     }
 
@@ -3215,6 +3468,209 @@ mod structural_tests {
         let debug = format!("{cloned:?}");
         assert!(!debug.contains(&auth.identity));
         assert!(!debug.contains(&request.prompt));
+    }
+
+    #[test]
+    fn idempotency_subject_is_stable_but_replay_authority_is_exact() {
+        let auth = authenticated();
+        let request = request(mold_core::minimax_h3::FL2VA_COMFY);
+        let admitted = super::classify_h3_private_ingress_with_runtime(
+            &request,
+            Some(&auth),
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+
+        let restarted_auth = crate::auth::ApiKeyAuthenticated {
+            identity: "new-process-local-auth-marker".to_string(),
+            durable_identity: auth.durable_identity.clone(),
+        };
+        let same_client_other_instance = super::classify_h3_private_ingress_with_runtime(
+            &request,
+            Some(&restarted_auth),
+            "different-instance",
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            admitted.idempotency_subject_sha256(),
+            same_client_other_instance.idempotency_subject_sha256(),
+            "client-operation idempotency must not conflict after a server restart"
+        );
+        // Admission fingerprints the operation BEFORE any child is resolved,
+        // so it asks for the subject without a grant; it must be the same
+        // subject the grant captured afterwards will carry.
+        assert_eq!(
+            super::idempotency_subject_sha256(&request, Some(&auth), INSTANCE_ID)
+                .unwrap()
+                .as_deref(),
+            Some(admitted.idempotency_subject_sha256())
+        );
+        let mut plain = request.clone();
+        plain.model = "flux-dev".to_string();
+        assert_eq!(
+            super::idempotency_subject_sha256(&plain, Some(&auth), INSTANCE_ID).unwrap(),
+            None,
+            "a request the private boundary does not claim carries no subject"
+        );
+        assert_ne!(
+            admitted.authority_identity_sha256(),
+            same_client_other_instance.authority_identity_sha256(),
+            "durable replay authority must remain bound to the admitting instance"
+        );
+
+        let other_auth = crate::auth::ApiKeyAuthenticated {
+            identity: "different-process-local-auth-marker".to_string(),
+            durable_identity: "different-restart-stable-auth-marker".to_string(),
+        };
+        let other_client = super::classify_h3_private_ingress_with_runtime(
+            &request,
+            Some(&other_auth),
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(
+            admitted.idempotency_subject_sha256(),
+            other_client.idempotency_subject_sha256(),
+            "different authenticated clients must never share idempotency authority"
+        );
+
+        let envelope = admitted.durable_replay_envelope().unwrap();
+        let restored = super::restore_durable_h3_private_ingress_with_runtime(
+            &request,
+            &envelope,
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            restored.authority_identity_sha256(),
+            admitted.authority_identity_sha256()
+        );
+        restored
+            .validate_for_request(&request, INSTANCE_ID)
+            .expect("durable replay must revalidate the exact request");
+
+        let mut changed = request;
+        changed.prompt.push_str(" changed");
+        assert!(restored
+            .validate_for_request(&changed, INSTANCE_ID)
+            .is_err());
+    }
+
+    /// The grant binds the PERSISTED request form — what `mold.db` holds and
+    /// what every dispatch site (claim, owner, execution plan, replay after a
+    /// restart) has in hand. Media bytes are the sealed set's identity, not
+    /// the grant's, so an FL2VA first-frame request validates identically
+    /// against its scrubbed row and against a consumer's own hydration.
+    #[cfg(unix)]
+    #[test]
+    fn fl2va_grant_binds_the_persisted_form_across_seal_hydrate_and_replay() {
+        let auth = authenticated();
+        let mut submitted = request(mold_core::minimax_h3::FL2VA_COMFY);
+        submitted.source_image = Some(b"first-frame-bytes".to_vec());
+        submitted.source_image_name = Some("first-frame.png".to_string());
+        let grant = super::classify_h3_private_ingress_with_runtime(
+            &submitted,
+            Some(&auth),
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+        let envelope = grant.durable_replay_envelope().unwrap();
+
+        // Admission seals the media and journals the scrubbed form.
+        let home = tempfile::tempdir().unwrap();
+        let (deferred, request_json) = crate::queue_media_runtime::seal_request_for_test(
+            home.path(),
+            "fl2va-first-frame",
+            submitted.clone(),
+            None,
+        );
+        let persisted: mold_core::GenerateRequest = serde_json::from_str(&request_json).unwrap();
+        assert!(persisted.source_image.is_none());
+        grant
+            .validate_bound_request(&persisted)
+            .expect("the claim and owner sites hold the persisted form");
+
+        // Replay after a restart: the feeder restores the grant against its
+        // own hydration, and dispatch then validates the persisted form again.
+        let mut hydrated = persisted.clone();
+        let _lease = deferred
+            .hydrate_into("fl2va-first-frame", &mut hydrated)
+            .unwrap();
+        assert_eq!(
+            hydrated.source_image.as_deref(),
+            Some(b"first-frame-bytes".as_slice())
+        );
+        let restored = super::restore_durable_h3_private_ingress_with_runtime(
+            &hydrated,
+            &envelope,
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+        restored
+            .validate_bound_request(&persisted)
+            .expect("the restored grant validates the persisted form");
+        restored
+            .validate_bound_request(&hydrated)
+            .expect("and the hydrated form, because they are one request");
+        assert_eq!(
+            restored.authority_identity_sha256(),
+            grant.authority_identity_sha256()
+        );
+
+        // Settings still bind exactly.
+        let mut changed = persisted;
+        changed.prompt.push_str(" changed");
+        assert!(grant.validate_bound_request(&changed).is_err());
+    }
+
+    #[test]
+    fn durable_path_staging_does_not_change_h3_request_authority() {
+        let auth = authenticated();
+        let mut submitted = request(mold_core::minimax_h3::FL2VA_COMFY);
+        submitted.source_video_path = Some("/submitted/source.mp4".into());
+        submitted.audio_file_path = Some("/submitted/audio.wav".into());
+        let grant = super::classify_h3_private_ingress_with_runtime(
+            &submitted,
+            Some(&auth),
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut hydrated = submitted.clone();
+        hydrated.source_video_path = Some("/private/runtime/source.mp4".into());
+        hydrated.audio_file_path = Some("/private/runtime/audio.wav".into());
+        grant
+            .validate_for_request(&hydrated, INSTANCE_ID)
+            .expect("AEAD-bound staging paths are not caller request authority");
+
+        hydrated.prompt.push_str(" changed");
+        assert!(grant.validate_for_request(&hydrated, INSTANCE_ID).is_err());
+    }
+
+    #[test]
+    fn durable_h3_envelope_rejects_non_digest_authority() {
+        let error = super::restore_durable_h3_private_ingress(
+            &request(mold_core::minimax_h3::FL2VA_COMFY),
+            br#"{"version":1,"authenticated_identity_sha256":"not-a-digest","authority_identity_sha256":"not-a-digest"}"#,
+            INSTANCE_ID,
+        )
+        .expect_err("malformed durable authority must fail closed");
+        assert_eq!(error.code, super::H3_PRIVATE_PARTITION_REJECTED);
     }
 
     #[test]

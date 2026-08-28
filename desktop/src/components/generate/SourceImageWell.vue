@@ -24,6 +24,7 @@ import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import {
@@ -34,13 +35,16 @@ import {
 import {
   appendMinimaxH3PickedImageReferences,
   emptyMinimaxH3AuthoringState,
+  minimaxH3ReferenceCropTarget,
   setMinimaxH3BoundaryFile,
+  setMinimaxH3ReferenceCrop,
   setMinimaxH3PickedImageBoundary,
   type MinimaxH3BoundaryEndpoint,
   type MinimaxH3GalleryImageResult,
 } from "@studio/lib/minimaxH3Authoring";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import MaskEditorModal from "./MaskEditorModal.vue";
+import ReferenceCropModal from "./ReferenceCropModal.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -88,6 +92,20 @@ const pickerOpen = ref(false);
 const endPickerOpen = ref(false);
 const maskOpen = ref(false);
 const h3ReferencePickerOpen = ref(false);
+/** Which ordered reference the crop dialog is editing; null when closed. */
+const h3CropIndex = ref<number | null>(null);
+const h3CropTarget = computed(() =>
+  minimaxH3ReferenceCropTarget(props.form.h3Authoring, h3CropIndex.value),
+);
+function applyH3ReferenceCrop(crop: ReferenceCrop | null) {
+  if (h3CropIndex.value === null) return;
+  props.form.h3Authoring = setMinimaxH3ReferenceCrop(
+    props.form.h3Authoring ?? emptyMinimaxH3AuthoringState(),
+    h3CropIndex.value,
+    crop,
+  );
+  h3CropIndex.value = null;
+}
 
 function onSourcePicked(picked: PickedImage[]) {
   const first = picked[0];
@@ -365,6 +383,15 @@ function setSourceFitMode(e: Event) {
       image-picker-available
       @update:model-value="setH3Authoring"
       @open-image-picker="h3ReferencePickerOpen = true"
+      @crop-reference="h3CropIndex = $event"
+    />
+    <ReferenceCropModal
+      :open="h3CropTarget !== null"
+      :title="`Crop reference ${(h3CropIndex ?? 0) + 1}`"
+      :image="h3CropTarget?.image ?? null"
+      :crop="h3CropTarget?.crop ?? null"
+      @apply="applyH3ReferenceCrop"
+      @close="h3CropIndex = null"
     />
     <ImagePickerModal
       :open="h3ReferencePickerOpen"

@@ -1,7 +1,4 @@
 pub mod auth;
-pub mod batch_attempt;
-pub mod batch_parent;
-pub mod batch_runtime;
 pub mod batch_transaction;
 pub mod catalog_api;
 pub mod catalog_credentials;
@@ -9,6 +6,9 @@ pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
 pub(crate) mod dir_sync;
+mod durable_admission_authority;
+mod durable_disposition;
+mod durable_generation_settlement;
 mod gallery_authority;
 #[allow(dead_code)]
 mod h3_admission;
@@ -65,6 +65,7 @@ mod queue_media_admission;
 mod queue_media_ingress;
 mod queue_media_lifecycle;
 pub mod queue_media_runtime;
+mod queue_retention;
 // This dependency-free policy seam lands default-dark. The concrete
 // schema/store adapter activates it atomically with queue-media admission.
 #[allow(dead_code)]
@@ -86,6 +87,8 @@ pub mod variant_dependencies;
 mod wan_admission;
 pub mod web_ui;
 
+#[cfg(test)]
+mod admission_contract_test;
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_test;
 #[cfg(test)]
@@ -104,6 +107,43 @@ use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
+
+fn install_durable_admission_if_available(
+    queue_journal: &std::sync::Arc<queue_journal::QueueJournal>,
+    lifecycle: std::sync::Arc<queue_media_lifecycle::QueueMediaLifecycle>,
+    queue_capacity: usize,
+) -> bool {
+    let admission = queue_journal
+        .has_generation_v2_receipt_evidence()
+        .map_err(anyhow::Error::msg)
+        .and_then(|receipt_evidence_exists| {
+            queue_media_admission::DurableMediaAdmission::new(
+                lifecycle,
+                queue_capacity,
+                receipt_evidence_exists,
+            )
+            .map_err(anyhow::Error::new)
+        });
+    match admission {
+        Ok(admission) => match queue_journal.install_queue_media_admission(admission) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(
+                    error,
+                    "canonical durable admission service was already installed"
+                );
+                false
+            }
+        },
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "canonical durable admission disabled: receipt authority is unavailable"
+            );
+            false
+        }
+    }
+}
 
 use state::QueueHandle;
 
@@ -714,11 +754,7 @@ pub async fn run_server(
     // One admission/observer service is shared by both route shapes and the
     // sole durable feeder. Install it before runtime recovery or the router.
     if let Some(lifecycle) = queue_journal.queue_media_lifecycle() {
-        let admission =
-            queue_media_admission::DurableMediaAdmission::new(lifecycle, state.queue_capacity);
-        queue_journal
-            .install_queue_media_admission(admission)
-            .map_err(anyhow::Error::msg)?;
+        install_durable_admission_if_available(&queue_journal, lifecycle, state.queue_capacity);
     }
 
     // Startup token recovery is a serving precondition. Await it before any
@@ -727,40 +763,27 @@ pub async fn run_server(
     // late feeder recovery pass. Propagating the error fails startup closed.
     durable_queue_feeder::recover_runtime(&state).await?;
 
-    let mut recovered_live_batches = None;
-    // Batch recovery is a serving precondition, including when SQLite is
-    // disabled. No router, gallery observer, or generation job producer is started
-    // until every durable attempt is either rolled back or rolled forward.
+    // Gallery publication recovery is a serving precondition, including when
+    // SQLite is disabled. No router, gallery observer, or generation job
+    // producer is started until every staged transaction is either rolled back
+    // or rolled forward and the committed archive index is installed.
     {
         let config = state.config.read().await;
         if !state.is_output_disabled(&config) {
             let output_dir = config.effective_output_dir();
             drop(config);
             std::fs::create_dir_all(&output_dir)?;
-            let report = batch_attempt::recover_batches(
+            let report = batch_transaction::recover_transactions(
                 &output_dir,
                 &state.gallery_publication_gate,
                 state.metadata_db.clone(),
             )
             .await?;
-            if report.outcomes.iter().any(|outcome| {
-                matches!(
-                    outcome,
-                    batch_attempt::RecoveredParentOutcome::Resumable { .. }
-                )
-            }) {
-                recovered_live_batches = Some((output_dir.clone(), report.outcomes.clone()));
-            }
             tracing::info!(
-                joint_parents = report.parents_discovered,
-                joint_running = report.running_attempts_retained,
-                joint_rolled_forward = report.parents_rolled_forward,
-                receipts_removed = report.receipts_removed,
-                leases_requeued = report.leases_requeued,
-                rolled_back = report.legacy_transactions.rolled_back,
-                rolled_forward = report.legacy_transactions.rolled_forward,
-                healed_committed_rows = report.legacy_transactions.healed_committed_rows,
-                "batch transaction startup recovery complete"
+                rolled_back = report.rolled_back,
+                rolled_forward = report.rolled_forward,
+                healed_committed_rows = report.healed_committed_rows,
+                "gallery transaction startup recovery complete"
             );
         }
     }
@@ -907,21 +930,6 @@ pub async fn run_server(
         }
     };
 
-    // Recovered live parents are resumed only after their authoritative
-    // dispatch owner is running, but still before the router begins serving.
-    // Exact execution-equivalence drift fails closed into a durable cancelled
-    // parent and private-attempt rollback.
-    if let Some((output_dir, outcomes)) = recovered_live_batches {
-        let report =
-            batch_runtime::resume_recovered_batches(&state, &output_dir, &outcomes).await?;
-        tracing::info!(
-            resumed = report.resumed,
-            committed = report.committed,
-            rolled_back = report.rolled_back,
-            "live batch restart recovery settled"
-        );
-    }
-
     // A SIGKILL runs no destructor, so every hard stop used to leak a
     // directory of reference media under MOLD_HOME. Swept in the same startup
     // pass that recovers the queue, because the two have the same cause.
@@ -1013,6 +1021,14 @@ pub async fn run_server(
     // scheduler token (`begin_runtime_shutdown` cancels it) and joined after
     // the HTTP server drains like the other gallery observers.
     let mut trash_sweeper_handle = None;
+
+    // Retention sweeper for HELD durable queue rows and SETTLED batch
+    // summaries. Unlike the trash sweeper it does not wait on the gallery
+    // reconcile: it reads the queue, not the output directory, and a held
+    // row's media is released by the `generation_queue_media_retire` trigger
+    // rather than by a file walk.
+    let queue_sweeper_handle =
+        queue_retention::spawn_queue_sweeper(state.clone(), scheduler_shutdown.child_token());
 
     // Ensure output directory exists and pre-generate thumbnails.
     {
@@ -1377,6 +1393,8 @@ pub async fn run_server(
         // the cancel above; a pass already inside `spawn_blocking` finishes.
         let _ = handle.await;
     }
+    // Same child-token contract as the trash sweeper.
+    let _ = queue_sweeper_handle.await;
     if let Some(generation_worker_handle) = generation_worker_handle {
         if !uses_cooperative_gpu_dispatch {
             // The CPU/legacy worker predates the coordinator cancellation
@@ -1688,8 +1706,6 @@ mod tests {
     use std::time::Duration;
     use tower::ServiceExt;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     #[test]
     fn runtime_shutdown_cancels_chains_and_scheduler_before_http_drain() {
         let chains = crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests();
@@ -1752,7 +1768,7 @@ mod tests {
 
     #[test]
     fn shutdown_budget_falls_back_to_the_default_for_nonsense() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_support::env_lock();
         std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "90");
         assert_eq!(super::resolve_shutdown_abort_secs(), 90);
         std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "0");
@@ -1880,7 +1896,7 @@ mod tests {
 
     #[test]
     fn invalid_cors_origin_returns_error() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_support::env_lock();
         std::env::set_var("MOLD_CORS_ORIGIN", "\nnot-a-header");
         let result = build_cors_layer();
         std::env::remove_var("MOLD_CORS_ORIGIN");
@@ -1889,7 +1905,7 @@ mod tests {
 
     #[test]
     fn valid_cors_origin_builds_layer() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_support::env_lock();
         std::env::set_var("MOLD_CORS_ORIGIN", "https://example.com");
         let result = build_cors_layer();
         std::env::remove_var("MOLD_CORS_ORIGIN");
@@ -1899,7 +1915,7 @@ mod tests {
     #[tokio::test]
     async fn configured_origin_preflight_allows_authenticated_device_patch() {
         let cors = {
-            let _lock = ENV_LOCK.lock().unwrap();
+            let _lock = crate::test_support::env_lock();
             std::env::set_var("MOLD_CORS_ORIGIN", "https://studio.example");
             let cors = build_cors_layer().unwrap();
             std::env::remove_var("MOLD_CORS_ORIGIN");

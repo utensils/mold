@@ -1,0 +1,155 @@
+//! CLI adapters for the shared durable-generation state machine.
+
+use anyhow::{Context, Result};
+use mold_core::{GenerateRequest, GenerationBatchAuthority, GenerationBatchChild, MoldClient};
+
+pub(crate) use mold_core::durable_generation::{
+    CanonicalGenerationEvent, CanonicalGenerationReport, CanonicalRetrySubmission,
+};
+
+#[derive(Debug)]
+pub(crate) struct CanonicalGenerationArtifact {
+    pub bytes: Vec<u8>,
+    pub filename: String,
+    pub request: GenerateRequest,
+    pub metadata: mold_core::OutputMetadata,
+    /// The child's own terminal facts — seed, elapsed time, accelerator —
+    /// which the gallery row alone does not answer at this moment.
+    pub result: mold_core::GenerationBatchResult,
+}
+
+#[derive(Debug)]
+pub(crate) struct CanonicalHydratedArtifact {
+    pub bytes: Vec<u8>,
+    pub filename: String,
+    pub metadata: mold_core::OutputMetadata,
+}
+
+fn channel_observer(
+    events: &tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>,
+) -> impl Fn(CanonicalGenerationEvent) + Send + Sync + '_ {
+    |event| {
+        let _ = events.send(event);
+    }
+}
+
+pub(crate) async fn canonical_generation_observed(
+    client: &MoldClient,
+    requests: &[GenerateRequest],
+    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
+) -> Result<CanonicalGenerationReport> {
+    match events {
+        Some(events) => {
+            let observer = channel_observer(events);
+            mold_core::durable_generation::canonical_generation_observed(
+                client,
+                requests,
+                Some(&observer),
+            )
+            .await
+        }
+        None => mold_core::durable_generation::canonical_generation(client, requests).await,
+    }
+}
+
+pub(crate) async fn retry_canonical_child(
+    client: &MoldClient,
+    authority: &GenerationBatchAuthority,
+    job_id: &str,
+    observed_revision: u64,
+) -> Result<CanonicalRetrySubmission> {
+    mold_core::durable_generation::retry_canonical_child(
+        client,
+        authority,
+        job_id,
+        observed_revision,
+    )
+    .await
+}
+
+pub(crate) async fn hydrate_canonical_artifact(
+    client: &MoldClient,
+    child: &GenerationBatchChild,
+) -> Result<CanonicalHydratedArtifact> {
+    let job_id = child.job_id.clone();
+    let result = child
+        .result
+        .clone()
+        .context("canonical generation completed without a gallery result")?;
+    let filename = result
+        .filename
+        .or(result.original_filename)
+        .context("canonical generation completed without a gallery filename")?;
+    let bytes = client
+        .get_gallery_image(&filename)
+        .await
+        .with_context(|| format!("could not hydrate accepted output {filename}"))?;
+    let metadata = client
+        .gallery_item(&filename)
+        .await
+        .with_context(|| format!("could not read metadata for accepted output {filename}"))?
+        .with_context(|| format!("accepted output {filename} is missing from the gallery index"))?
+        .metadata;
+    if metadata.job_id.as_deref() != Some(job_id.as_str()) {
+        anyhow::bail!("accepted output {filename} does not belong to durable job {job_id}");
+    }
+    Ok(CanonicalHydratedArtifact {
+        bytes,
+        filename,
+        metadata,
+    })
+}
+
+pub(crate) async fn canonical_singleton_artifact(
+    client: &MoldClient,
+    request: &GenerateRequest,
+) -> Result<CanonicalGenerationArtifact> {
+    canonical_singleton_artifact_observed(client, request, None).await
+}
+
+/// As [`canonical_singleton_artifact`], reporting each authoritative child
+/// transition as it commits, plus the live progress the observer polls from
+/// the host's own queue snapshot while a child runs.
+pub(crate) async fn canonical_singleton_artifact_observed(
+    client: &MoldClient,
+    request: &GenerateRequest,
+    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
+) -> Result<CanonicalGenerationArtifact> {
+    let report =
+        canonical_generation_observed(client, std::slice::from_ref(request), events).await?;
+    if !report.failures.is_empty() {
+        let mut failures = report.failures;
+        if !report.admitted_client_ids.is_empty() {
+            failures.push(format!(
+                "accepted client ids: {}",
+                report.admitted_client_ids.join(", ")
+            ));
+        }
+        anyhow::bail!(failures.join("; "));
+    }
+    let outcome = report
+        .outcomes
+        .into_iter()
+        .find(|outcome| outcome.child.state == mold_core::GenerationBatchChildState::Complete)
+        .context("canonical singleton completed without a successful child")?;
+    if outcome.authority.client_batch_id != outcome.client_batch_id {
+        anyhow::bail!("canonical singleton outcome lost its admission authority");
+    }
+    let result = outcome.child.result.clone().unwrap_or_default();
+    let artifact = hydrate_canonical_artifact(client, &outcome.child).await?;
+    Ok(CanonicalGenerationArtifact {
+        bytes: artifact.bytes,
+        filename: artifact.filename,
+        request: outcome.request,
+        metadata: artifact.metadata,
+        result,
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn admit_for_test(
+    client: &MoldClient,
+    request: &mold_core::GenerationBatchAdmissionRequest,
+) -> Result<mold_core::GenerationBatchStatus> {
+    mold_core::durable_generation::admit_canonical_batch(client, request).await
+}

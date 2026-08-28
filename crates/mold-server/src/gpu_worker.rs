@@ -1,3 +1,5 @@
+use crate::durable_disposition::DurableDisposition;
+use crate::durable_generation_settlement;
 use crate::gpu_pool::{
     ActiveGeneration, AdminModelUnloadJob, GpuJob, GpuWorker, GpuWorkerCommand, LeaseGrant,
     OwnerWork, PostGenerationUpscaleJob, PromptExpansionJob, StandaloneUpscaleJob,
@@ -9,9 +11,7 @@ use crate::queue::{
     save_generated_image_outputs, save_video_to_dir, settle_post_generation_upscale,
 };
 use crate::state::{GenerationJobResult, SseMessage};
-use mold_core::{
-    Config, ImageData, ModelPaths, OutputFormat, OutputMetadata, SseErrorEvent, SseProgressEvent,
-};
+use mold_core::{Config, ImageData, ModelPaths, OutputFormat, OutputMetadata, SseProgressEvent};
 use mold_inference::device;
 use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
@@ -1197,10 +1197,7 @@ fn process_owner_work(
                 .as_ref()
                 .is_some_and(|plan| mold_core::minimax_h3::is_family(&plan.model_family)) =>
         {
-            Some(job.batch_child.as_ref().map_or_else(
-                mold_inference::InferenceCancellationToken::default,
-                |child| child.cancellation.clone(),
-            ))
+            Some(mold_inference::InferenceCancellationToken::default())
         }
         _ => None,
     };
@@ -2050,10 +2047,11 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
             quarantine_poisoned_worker(worker);
         }
         let message = fatal_cuda_user_message(&job.generation.model);
-        if let Some(ref tx) = job.generation.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
-        }
-        let _ = job.generation.result_tx.send(Err(message));
+        durable_generation_settlement::fail_blocking(
+            job.generation,
+            DurableDisposition::Retain,
+            message,
+        );
         drop(cleanup);
         return false;
     }
@@ -2323,18 +2321,15 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
     event.into()
 }
 
+/// Forward an engine progress event to the job's channel. The channel is
+/// the registry relay (`job_registry::progress_relay`), so the fold into the
+/// `/api/queue/{id}/preview` snapshot happens there for every producer alike.
 fn forward_generation_progress(
-    registry: &crate::job_registry::SharedJobRegistry,
-    job_id: &str,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     event: mold_inference::ProgressEvent,
 ) {
-    let event = progress_to_sse(event);
-    if let SseProgressEvent::Preview { image, step, total } = &event {
-        registry.record_preview(job_id, image.clone(), *step, *total);
-    }
     if let Some(progress_tx) = progress_tx {
-        let _ = progress_tx.send(SseMessage::Progress(event));
+        let _ = progress_tx.send(SseMessage::Progress(progress_to_sse(event)));
     }
 }
 
@@ -3113,7 +3108,10 @@ fn run_claimed_h3_generation(
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
         return reject_claimed_h3_generation_message(job, error.to_string());
     }
-    if job.result_tx.is_closed() {
+    if crate::state::should_cancel_for_observer_disconnect(
+        job.result_tx.is_closed(),
+        job.journal.is_some(),
+    ) {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping claimed H3 job — client disconnected");
         return false;
     }
@@ -3122,12 +3120,7 @@ fn run_claimed_h3_generation(
     if let Err(error) = validate_h3_prepared_attempt_facts(scope_facts, &prepared_facts) {
         return reject_claimed_h3_generation_message(job, error.to_string());
     }
-    if let Err(error) = prepared_facts.media.validate_for_request(
-        &job.request,
-        job.resolved_references
-            .as_ref()
-            .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
-    ) {
+    if let Err(error) = prepared_facts.media.validate_for_request(&job.request) {
         return reject_claimed_h3_generation_message(job, error);
     }
     let lease = match job.lease.clone() {
@@ -3195,17 +3188,10 @@ fn run_claimed_h3_generation(
     let _active_cleanup = ActiveGenerationCleanup { worker };
 
     let progress_tx = job.progress_tx.clone();
-    let preview_registry = job.registry.clone();
-    let preview_job_id = job.id.clone();
     let mut progress = mold_inference::progress::ProgressReporter::default();
     progress.set_callback(Box::new(move |event| {
         record_phase_timing(&event);
-        forward_generation_progress(
-            &preview_registry,
-            &preview_job_id,
-            progress_tx.as_ref(),
-            event,
-        );
+        forward_generation_progress(progress_tx.as_ref(), event);
     }));
 
     let allocation_commits = Arc::new(std::sync::atomic::AtomicU8::new(0));
@@ -3477,15 +3463,10 @@ fn validate_h3_publication_contract(
     output: &crate::h3_private_bridge::H3ClaimedRunOutput,
 ) -> anyhow::Result<()> {
     let contract = &prepared.media;
-    let expected_contract = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
-        &job.request,
-        job.resolved_references
-            .as_ref()
-            .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
-    )
-    .map_err(|_| {
-        anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract")
-    })?;
+    let expected_contract =
+        crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request).map_err(
+            |_| anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract"),
+        )?;
     let expected_seed = job.request.seed.ok_or_else(|| {
         anyhow::anyhow!("private H3 terminal media provenance mismatch: request-seed")
     })?;
@@ -3628,10 +3609,11 @@ fn validate_h3_publication_contract(
 }
 
 fn reject_claimed_h3_generation_message(job: GpuJob, error: String) -> bool {
-    if let Some(progress_tx) = &job.progress_tx {
-        let _ = progress_tx.send(SseMessage::Error(SseErrorEvent::failed(error.clone())));
-    }
-    let _ = job.result_tx.send(Err(error));
+    durable_generation_settlement::fail_blocking(
+        job,
+        DurableDisposition::Hold { retryable: true },
+        error,
+    );
     false
 }
 
@@ -3760,21 +3742,19 @@ fn process_job_with_sink(
     // job kills the context. Fail them without touching CUDA, including jobs
     // explicitly pinned to this ordinal.
     if let Some(unavailable) = worker_unavailable(worker, &model_name) {
-        let err_msg = unavailable.message;
-        let retained = job.journal.is_some() && unavailable.retainable;
-        if let Some(ref tx) = job.progress_tx {
-            let event = if retained {
-                SseErrorEvent::retained(err_msg.clone())
+        durable_generation_settlement::fail_blocking(
+            job,
+            if unavailable.retainable {
+                DurableDisposition::Retain
             } else {
-                SseErrorEvent::failed(err_msg.clone())
-            };
-            let _ = tx.send(SseMessage::Error(event));
-        }
-        let _ = job.result_tx.send(Err(err_msg));
+                DurableDisposition::Hold { retryable: true }
+            },
+            unavailable.message,
+        );
         return false;
     }
 
-    if job.result_tx.is_closed() {
+    if job.should_cancel_for_observer_disconnect() {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping dispatched job — client disconnected");
         return false;
     }
@@ -3786,26 +3766,20 @@ fn process_job_with_sink(
     if let Some(ticket) = job.journal.as_ref() {
         match ticket.claim_dispatch() {
             crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } => {
-                let err_msg = format!(
-                    "'{model_name}' was started {attempts} times without finishing (limit {cap}); \
-                 it is held for review instead of being retried"
+                durable_generation_settlement::refuse_exhausted_dispatch_blocking(
+                    job,
+                    &model_name,
+                    attempts,
+                    cap,
                 );
-                tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                }
-                // The row is already `held`; settle the ticket so its drop does
-                // not delete what the operator now needs to inspect.
-                if let Some(ticket) = job.journal.take() {
-                    ticket.hold("dispatch attempts exhausted");
-                }
-                let _ = job.result_tx.send(Err(err_msg));
                 return false;
             }
             crate::queue_journal::DispatchClaim::Fenced => {
-                let err_msg = "durable generation claim is stale; refusing dispatch".to_string();
-                tracing::warn!(job = %job.id, "refused a stale durable feeder claim");
-                let _ = job.result_tx.send(Err(err_msg));
+                durable_generation_settlement::refuse_fenced_dispatch(job, &job_id);
+                return false;
+            }
+            crate::queue_journal::DispatchClaim::Cancelled => {
+                finish_generation_cancelled(job, true);
                 return false;
             }
             crate::queue_journal::DispatchClaim::Granted
@@ -3813,20 +3787,13 @@ fn process_job_with_sink(
         }
     }
 
-    // The durable parent owns an attempt-scoped token. Reference hashing runs
-    // on this dedicated worker thread and polls the same token before any
-    // model or CUDA work begins.
-    let batch_cancellation = job
-        .batch_child
-        .as_ref()
-        .map(|child| child.cancellation.clone());
-    // An ordinary singleton gets a token too, so a shutdown aborts it at the
-    // next inference checkpoint instead of holding the deploy open. Registered
-    // through a guard because this function has a dozen early returns and a
-    // leaked token would cancel an unrelated later job with the same id.
-    let singleton_cancellation = (h3_attempt_cancellation.is_none()
-        && batch_cancellation.is_none())
-    .then(|| worker.generation_cancel.token(&job_id));
+    // Every job gets a token, so a shutdown aborts it at the next inference
+    // checkpoint instead of holding the deploy open. Registered through a
+    // guard because this function has a dozen early returns and a leaked token
+    // would cancel an unrelated later job with the same id.
+    let singleton_cancellation = h3_attempt_cancellation
+        .is_none()
+        .then(|| worker.generation_cancel.token(&job_id));
     let _singleton_cancel_guard = singleton_cancellation
         .is_some()
         .then(|| SingletonCancelGuard {
@@ -3835,7 +3802,6 @@ fn process_job_with_sink(
         });
     let inference_cancellation = h3_attempt_cancellation
         .as_ref()
-        .or(batch_cancellation.as_ref())
         .or(singleton_cancellation.as_ref());
     if let Some(cancellation) = inference_cancellation {
         job.registry
@@ -3866,12 +3832,25 @@ fn process_job_with_sink(
         match deferred.hydrate_into(&job_id, &mut job.request) {
             Ok(lease) => Some(lease),
             Err(error) => {
-                finish_generation_hydration_failure(job, error);
+                durable_generation_settlement::fail_hydration_blocking(job, &job_id, error);
                 return false;
             }
         }
     } else {
         None
+    };
+    // The ordered references are bound from THIS hydration, under this lease;
+    // no job field carries a reference set across admission or dispatch.
+    let references = match hydrated_media_lease
+        .as_ref()
+        .map(|lease| lease.references(&job.request))
+        .transpose()
+    {
+        Ok(references) => references.flatten(),
+        Err(error) => {
+            durable_generation_settlement::fail_hydration_blocking(job, &job_id, error);
+            return false;
+        }
     };
     let request = match hydrated_media_lease {
         Some(lease) => {
@@ -3889,17 +3868,19 @@ fn process_job_with_sink(
 
     let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
         &request,
-        job.resolved_references.as_ref(),
+        references.as_ref(),
         inference_cancellation,
     ) {
         Ok(bindings) => bindings,
         Err(error) => {
-            let err_msg = format!("generation reference binding error: {error:#}");
-            let err_msg = request.redact_staging_paths(err_msg);
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
+            let err_msg = request
+                .redact_staging_paths(format!("generation reference binding error: {error:#}"));
+            drop(request);
+            durable_generation_settlement::fail_blocking(
+                job,
+                DurableDisposition::Hold { retryable: true },
+                err_msg,
+            );
             return false;
         }
     };
@@ -3920,10 +3901,8 @@ fn process_job_with_sink(
     // this job waited on the load lock. Recheck before any CUDA operation.
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
         let err_msg = request.redact_staging_paths(error.to_string());
-        if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-        }
-        let _ = job.result_tx.send(Err(err_msg));
+        drop(request);
+        durable_generation_settlement::fail_blocking(job, DurableDisposition::Retain, err_msg);
         return false;
     }
 
@@ -3948,21 +3927,11 @@ fn process_job_with_sink(
     let carried_identity = job
         .prepared_execution_inputs
         .as_ref()
-        .and_then(|inputs| inputs.identity_embedding.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .and_then(|child| child.prepared_inputs.identity_embedding.clone())
-        });
+        .and_then(|inputs| inputs.identity_embedding.clone());
     let mut identity_warning = job
         .prepared_execution_inputs
         .as_ref()
-        .and_then(|inputs| inputs.identity_warning.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .and_then(|child| child.prepared_inputs.identity_warning.clone())
-        });
+        .and_then(|inputs| inputs.identity_warning.clone());
     // The batch plan's own cell, shared by every sibling. Consulted BEFORE the
     // resolver: a sibling arriving after another has already extracted takes
     // that exact embedding, whatever the bounded per-photograph LRU has done in
@@ -3971,87 +3940,85 @@ fn process_job_with_sink(
     let identity_pin = job
         .prepared_execution_inputs
         .as_ref()
-        .map(|inputs| inputs.identity_pin.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .map(|child| child.prepared_inputs.identity_pin.clone())
-        });
+        .map(|inputs| inputs.identity_pin.clone());
     // The pin carries the advisory too, so a sibling that never enters the
     // resolver still reports which face was chosen.
     let pinned = identity_pin.as_ref().and_then(|pin| pin.get());
     if let Some(warning) = pinned.as_ref().and_then(|pinned| pinned.warning.clone()) {
         identity_warning.get_or_insert(warning);
     }
-    let frozen_identity = match carried_identity.or_else(|| pinned.map(|pinned| pinned.embedding)) {
-        Some(frozen) => Some(frozen),
-        None => {
-            let identity_paths = job
-                .execution_plan
-                .as_ref()
-                .and_then(|plan| plan.engine_config.identity_assets.clone());
-            let pin = identity_pin.clone().unwrap_or_default();
-            match crate::identity_extraction::resolve_pinned_identity_for_lease(
-                &request,
-                identity_paths.as_ref(),
-                &pin,
-                worker.gpu.backend,
-                ordinal,
-            ) {
-                Ok(resolved) => {
-                    // Only a resolution that actually COMPUTED reports the
-                    // phase. A sibling served from the per-photograph cache,
-                    // or one that waited on a peer's single flight, costs
-                    // about two milliseconds — recording that would drag
-                    // `ewma_identity_extract_ms` to a figure no cold request
-                    // can meet and make every conditioned ETA wrong.
-                    if resolved.extracted {
-                        let elapsed = identity_started.elapsed();
-                        // The scheduler's learned evidence for this phase.
-                        // Only the sibling that actually extracted reports it;
-                        // every other one leaves `identity_extract_ms` at
-                        // `None`, exactly as `cold_load_ms` does on a warm
-                        // reuse.
-                        record_phase_timing(&mold_inference::ProgressEvent::PhaseDone {
-                            phase: mold_inference::ProgressPhase::IdentityExtract,
-                            name: "Extracting face identity".to_string(),
-                            elapsed,
-                        });
-                        if let Some(ref tx) = job.progress_tx {
-                            let _ = tx.send(SseMessage::Progress(progress_to_sse(
-                                mold_inference::ProgressEvent::StageDone {
-                                    name: "Extracting face identity".to_string(),
-                                    elapsed,
-                                },
-                            )));
+    let frozen_identity =
+        match carried_identity.or_else(|| pinned.map(|pinned| pinned.embedding)) {
+            Some(frozen) => Some(frozen),
+            None => {
+                let identity_paths = job
+                    .execution_plan
+                    .as_ref()
+                    .and_then(|plan| plan.engine_config.identity_assets.clone());
+                let pin = identity_pin.clone().unwrap_or_default();
+                match crate::identity_extraction::resolve_pinned_identity_for_lease(
+                    &request,
+                    identity_paths.as_ref(),
+                    &pin,
+                    worker.gpu.backend,
+                    ordinal,
+                ) {
+                    Ok(resolved) => {
+                        // Only a resolution that actually COMPUTED reports the
+                        // phase. A sibling served from the per-photograph cache,
+                        // or one that waited on a peer's single flight, costs
+                        // about two milliseconds — recording that would drag
+                        // `ewma_identity_extract_ms` to a figure no cold request
+                        // can meet and make every conditioned ETA wrong.
+                        if resolved.extracted {
+                            let elapsed = identity_started.elapsed();
+                            // The scheduler's learned evidence for this phase.
+                            // Only the sibling that actually extracted reports it;
+                            // every other one leaves `identity_extract_ms` at
+                            // `None`, exactly as `cold_load_ms` does on a warm
+                            // reuse.
+                            record_phase_timing(&mold_inference::ProgressEvent::PhaseDone {
+                                phase: mold_inference::ProgressPhase::IdentityExtract,
+                                name: "Extracting face identity".to_string(),
+                                elapsed,
+                            });
+                            if let Some(ref tx) = job.progress_tx {
+                                let _ = tx.send(SseMessage::Progress(progress_to_sse(
+                                    mold_inference::ProgressEvent::StageDone {
+                                        name: "Extracting face identity".to_string(),
+                                        elapsed,
+                                    },
+                                )));
+                            }
                         }
+                        if let Some(warning) = resolved.warning {
+                            identity_warning.get_or_insert(warning);
+                        }
+                        resolved.embedding
                     }
-                    if let Some(warning) = resolved.warning {
-                        identity_warning.get_or_insert(warning);
+                    Err(error) => {
+                        let err_msg = request.redact_staging_paths(
+                            settle_identity_extraction_failure(worker, &model_name, &error),
+                        );
+                        tracing::error!(
+                            gpu = ordinal,
+                            model = %model_name,
+                            %err_msg,
+                            "face-identity conditioning failed"
+                        );
+                        drop(request);
+                        durable_generation_settlement::fail_blocking(
+                            job,
+                            DurableDisposition::Hold {
+                                retryable: !error.user_input,
+                            },
+                            err_msg,
+                        );
+                        return false;
                     }
-                    resolved.embedding
-                }
-                Err(error) => {
-                    let err_msg = request.redact_staging_paths(settle_identity_extraction_failure(
-                        worker,
-                        &model_name,
-                        &error,
-                    ));
-                    tracing::error!(
-                        gpu = ordinal,
-                        model = %model_name,
-                        %err_msg,
-                        "face-identity conditioning failed"
-                    );
-                    if let Some(ref tx) = job.progress_tx {
-                        let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                    }
-                    let _ = job.result_tx.send(Err(err_msg));
-                    return false;
                 }
             }
-        }
-    };
+        };
 
     // Ensure model is loaded on this GPU.
     let config_snapshot = job.config.blocking_read().clone();
@@ -4130,10 +4097,16 @@ fn process_job_with_sink(
         };
         let err_msg = request.redact_staging_paths(err_msg);
         tracing::error!(gpu = ordinal, model = %model_name, %err_msg, "failed to load model");
-        if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-        }
-        let _ = job.result_tx.send(Err(err_msg));
+        drop(request);
+        durable_generation_settlement::fail_blocking(
+            job,
+            if is_fatal_cuda {
+                DurableDisposition::Retain
+            } else {
+                DurableDisposition::Hold { retryable: true }
+            },
+            err_msg,
+        );
         if count_worker_failure {
             record_failure(worker);
         }
@@ -4164,10 +4137,8 @@ fn process_job_with_sink(
 
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
         let err_msg = request.redact_staging_paths(error.to_string());
-        if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-        }
-        let _ = job.result_tx.send(Err(err_msg));
+        drop(request);
+        durable_generation_settlement::fail_blocking(job, DurableDisposition::Retain, err_msg);
         return false;
     }
 
@@ -4185,7 +4156,10 @@ fn process_job_with_sink(
         });
     }
 
-    if job.result_tx.is_closed() {
+    if crate::state::should_cancel_for_observer_disconnect(
+        job.result_tx.is_closed(),
+        job.journal.is_some(),
+    ) {
         tracing::debug!(
             gpu = ordinal,
             model = %model_name,
@@ -4202,27 +4176,21 @@ fn process_job_with_sink(
     };
 
     let Some(mut cached_engine) = taken else {
-        let err_msg = "engine not found in cache after load".to_string();
-        if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-        }
-        let _ = job.result_tx.send(Err(err_msg));
+        drop(request);
+        durable_generation_settlement::fail_blocking(
+            job,
+            DurableDisposition::Hold { retryable: true },
+            "engine not found in cache after load",
+        );
         clear_active_generation(worker);
         return false;
     };
 
     // Set progress callback if SSE streaming.
     let progress_tx = job.progress_tx.clone();
-    let preview_registry = job.registry.clone();
-    let preview_job_id = job.id.clone();
     cached_engine.engine.set_on_progress(Box::new(move |event| {
         record_phase_timing(&event);
-        forward_generation_progress(
-            &preview_registry,
-            &preview_job_id,
-            progress_tx.as_ref(),
-            event,
-        );
+        forward_generation_progress(progress_tx.as_ref(), event);
     }));
 
     // RSS sample taken just before inference; the post-inference sample below
@@ -4342,11 +4310,12 @@ fn process_job_with_sink(
                 "superseded generation cache restore",
             ) {
                 clear_active_generation(worker);
-                let error = error.to_string();
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(error.clone())));
-                }
-                let _ = job.result_tx.send(Err(error));
+                drop(request);
+                durable_generation_settlement::fail_blocking(
+                    job,
+                    DurableDisposition::Hold { retryable: true },
+                    error.to_string(),
+                );
                 return false;
             }
         }
@@ -4384,12 +4353,12 @@ fn process_job_with_sink(
             }
 
             if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
-                let err_msg =
-                    "generation error: engine returned no images, video, or audio".to_string();
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                }
-                let _ = job.result_tx.send(Err(err_msg));
+                drop(request);
+                durable_generation_settlement::fail_blocking(
+                    job,
+                    DurableDisposition::Hold { retryable: true },
+                    "generation error: engine returned no images, video, or audio",
+                );
                 return false;
             }
 
@@ -4576,18 +4545,19 @@ fn process_job_with_sink(
             // quiet close: a quiet close leaves the desktop app in `loading`
             // forever and hard-fails the web client. The flag is what lets a
             // new client read this as interrupted instead of failed.
-            let retained = job.journal.is_some()
+            let should_retain = job.journal.is_some()
                 && mold_inference::is_inference_cancelled(&e)
                 && !user_cancelled;
-            if let Some(ref tx) = job.progress_tx {
-                let event = if retained {
-                    SseErrorEvent::retained(err_msg.clone())
+            drop(request);
+            durable_generation_settlement::fail_blocking(
+                job,
+                if should_retain || fatal_cuda {
+                    DurableDisposition::Retain
                 } else {
-                    SseErrorEvent::failed(err_msg.clone())
-                };
-                let _ = tx.send(SseMessage::Error(event));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
+                    DurableDisposition::Hold { retryable: true }
+                },
+                err_msg,
+            );
             false
         }
         Err(panic_payload) => {
@@ -4600,10 +4570,16 @@ fn process_job_with_sink(
                 "inference panicked on GPU {ordinal}: {msg}; CUDA owner was quarantined and the server must restart"
             ));
             tracing::error!(gpu = ordinal, model = %model_name, %err_msg, "inference panicked");
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
+            drop(request);
+            // A panic is never auto-replayed and never user-retryable
+            // unchanged. `quarantine_poisoned_worker` above already raised the
+            // retention fence, which `settle_one` honours over any hold, so
+            // this row is still retained for the restart.
+            durable_generation_settlement::fail_blocking(
+                job,
+                DurableDisposition::Hold { retryable: false },
+                err_msg,
+            );
             false
         }
     }
@@ -4623,7 +4599,7 @@ fn hydrated_output_metadata(
 }
 
 fn finish_generation_success(
-    mut job: GpuJob,
+    job: GpuJob,
     response: mold_core::GenerateResponse,
     image: ImageData,
     original_image: Option<ImageData>,
@@ -4708,97 +4684,43 @@ fn finish_generation_success(
     }
 
     // Settle the durable row on what actually reached the gallery, not on the
-    // fact that inference returned. The save helpers answer `None` when
-    // publication fails — an unwritable directory, a full disk, a refused
-    // archive — and for a replayed job the gallery file IS the delivery, so
-    // clearing the row there would lose the generation outright: nothing on
-    // disk, nobody to tell, and no row left to replay.
-    //
-    // Settled here rather than on the ticket's ordinary drop so a shutdown
-    // racing the last microseconds of delivery cannot retain a completed job
-    // and replay it into a duplicate print.
-    if let Some(ticket) = job.journal.take() {
-        if saved_names.output.is_some() {
-            let result_json = saved_names.terminal_json();
-            ticket.complete_with_result(Some(&result_json));
-        } else {
-            tracing::error!(
-                job = %job.id,
-                dir = ?job.output_dir,
-                "generation finished but its output could not be saved; \
-                 holding the queue row for review"
-            );
-            ticket.hold("the generated output could not be saved to the gallery");
-        }
+    // fact that inference returned. Settled here rather than on the ticket's
+    // ordinary drop so a shutdown racing the last microseconds of delivery
+    // cannot retain a completed job and replay it into a duplicate print.
+    let job_id = job.id.clone();
+    let output_dir = job.output_dir.clone();
+    let registry = job.registry.clone();
+    let completion_payload = job.completion_payload;
+    let mut channels =
+        durable_generation_settlement::IntoSettlementChannels::into_settlement_channels(job);
+    if durable_generation_settlement::settle_publication_blocking(
+        &mut channels,
+        &job_id,
+        output_dir.as_deref(),
+        &registry,
+        &saved_names,
+        &response,
+    )
+    .is_err()
+    {
+        return;
     }
-
-    if let Some(ref tx) = job.progress_tx {
-        let message = build_sse_completion_message(
+    let completion = channels.progress_tx.is_some().then(|| {
+        build_sse_completion_message(
             &response,
             &image,
             original_image.as_ref(),
             Some(&metadata),
             &saved_names,
-            job.completion_payload,
-        );
-        let _ = tx.send(message);
-    }
-    let _ = job
-        .result_tx
-        .send(Ok(GenerationJobResult { image, response }));
+            completion_payload,
+        )
+    });
+    channels.complete(completion, GenerationJobResult { image, response });
 }
 
-fn finish_generation_cancelled(mut job: GpuJob, user_requested: bool) {
-    if let Some(ticket) = job.journal.take() {
-        if user_requested {
-            ticket.discard();
-        } else {
-            ticket.retain();
-        }
-    }
-    let message = if user_requested {
-        "Cancelled".to_string()
-    } else {
-        shutdown_retention_user_message(&job.model)
-    };
-    if let Some(ref tx) = job.progress_tx {
-        let event = if user_requested {
-            SseErrorEvent::failed(message.clone())
-        } else {
-            SseErrorEvent::retained(message.clone())
-        };
-        let _ = tx.send(SseMessage::Error(event));
-    }
-    let _ = job.result_tx.send(Err(message));
-}
-
-fn finish_generation_hydration_failure(
-    mut job: GpuJob,
-    error: crate::queue_media_runtime::DeferredQueueMediaError,
-) {
-    use crate::queue_media_runtime::DeferredHydrationDisposition;
-
-    let disposition = error.disposition();
-    if let Some(ticket) = job.journal.take() {
-        match disposition {
-            DeferredHydrationDisposition::Hold => {
-                ticket.hold("durable queue-media validation failed")
-            }
-            DeferredHydrationDisposition::Retain => {
-                ticket.retain();
-            }
-        }
-    }
-    tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
-    let message = error.public_message().to_string();
-    if let Some(ref tx) = job.progress_tx {
-        let event = match disposition {
-            DeferredHydrationDisposition::Hold => SseErrorEvent::failed(message.clone()),
-            DeferredHydrationDisposition::Retain => SseErrorEvent::retained(message.clone()),
-        };
-        let _ = tx.send(SseMessage::Error(event));
-    }
-    let _ = job.result_tx.send(Err(message));
+fn finish_generation_cancelled(job: GpuJob, user_requested: bool) {
+    let model = job.model.clone();
+    durable_generation_settlement::finish_cancelled_blocking(job, &model, user_requested);
 }
 
 /// Preflight memory check with evict-to-fit recovery.
@@ -6189,6 +6111,7 @@ mod tests {
     use crate::job_registry::JobRegistry;
     use crate::model_cache::ModelCache;
     use crate::state::{GenerationJob, QueueHandle, SseCompletionPayload};
+    use mold_core::SseErrorEvent;
     use mold_core::{
         Config, GenerateRequest, GenerateResponse, ImageData, ModelConfig, OutputFormat,
     };
@@ -6381,14 +6304,13 @@ mod tests {
                 .submit(
                     GenerationJob {
                         id: format!("{id}-reserved-{index}"),
+                        durable_queue_rank: None,
                         request: request.clone(),
                         deferred_media: None,
-                        resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx: placeholder_tx,
                         output_dir: None,
-                        batch_child: None,
                         journal: None,
                         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
@@ -6404,10 +6326,10 @@ mod tests {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let job = GpuJob {
             id: id.to_string(),
+            durable_queue_rank: None,
             model: request.model.clone(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
             result_tx,
@@ -6422,7 +6344,6 @@ mod tests {
             prepared_execution_inputs: None,
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: None,
         };
         (job, result_rx, progress_rx, queue_rx, queue, registry)
@@ -6632,6 +6553,7 @@ mod tests {
         let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
             name: Some(name.to_string()),
             sha256: Some(format!("{byte:02x}").repeat(32)),
+            crop: None,
         };
         request.model = mold_core::minimax_h3::REF2VA_COMFY.to_string();
         request.references = Some(vec![
@@ -6969,20 +6891,14 @@ mod tests {
         job.output_dir = Some(output.path().to_path_buf());
         job.request = fake_ref2va_request(job.request);
         job.model = job.request.model.clone();
-        let resolved =
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
         let mut facts = fake_h3_facts(id);
-        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
-            &job.request,
-            Some(resolved.fingerprint()),
-        )
-        .expect("synthetic resolved Ref2VA authority");
+        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request)
+            .expect("synthetic resolved Ref2VA authority");
         let reference_fingerprint = facts
             .media
             .reference_fingerprint_sha256
             .clone()
             .expect("Ref2VA fingerprint");
-        job.resolved_references = Some(resolved);
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         job.metadata_db = Arc::clone(&db);
         let (runs, drops) =
@@ -7052,26 +6968,20 @@ mod tests {
         job.output_dir = Some(output.path().to_path_buf());
         job.request = fake_ref2va_request(job.request);
         job.model = job.request.model.clone();
-        let admitted =
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
         let mut facts = fake_h3_facts(id);
-        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
-            &job.request,
-            Some(admitted.fingerprint()),
-        )
-        .expect("synthetic admitted Ref2VA authority");
-        job.resolved_references = Some(admitted);
+        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request)
+            .expect("synthetic admitted Ref2VA authority");
         let (runs, drops) =
             install_fake_h3_attempt_with_facts(&mut job, FakeH3Outcome::Success, facts);
 
+        // The descriptors on the request drift from the order the attempt was
+        // prepared with; the owner re-derives the contract from the request in
+        // hand and refuses before the runtime runs or anything publishes.
         job.request
             .references
             .as_mut()
             .expect("ordered references")
             .reverse();
-        job.resolved_references = Some(
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request),
-        );
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
         let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
         let owner_worker = Arc::clone(&worker);
@@ -7086,7 +6996,7 @@ mod tests {
             Ok(_) => panic!("reordered Ref2VA authority unexpectedly published"),
         };
 
-        assert!(error.contains("ordered request authority"));
+        assert!(error.contains("ordered request authority"), "{error}");
         assert_eq!(runs.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(settlements.load(Ordering::SeqCst), 1);
@@ -7105,15 +7015,9 @@ mod tests {
         job.output_dir = Some(output.path().to_path_buf());
         job.request = fake_ref2va_request(job.request);
         job.model = job.request.model.clone();
-        let resolved =
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
         let mut facts = fake_h3_facts(id);
-        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
-            &job.request,
-            Some(resolved.fingerprint()),
-        )
-        .expect("synthetic cancellation authority");
-        job.resolved_references = Some(resolved);
+        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request)
+            .expect("synthetic cancellation authority");
         let (runs, drops) =
             install_fake_h3_attempt_with_facts(&mut job, FakeH3Outcome::Cancelled, facts);
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
@@ -8493,10 +8397,10 @@ mod tests {
         request.upscale_model = Some(upscale_model.to_string());
         GpuJob {
             id: "job-upscale-test".to_string(),
+            durable_queue_rank: None,
             model: request.model.clone(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: crate::state::SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -8511,7 +8415,6 @@ mod tests {
             prepared_execution_inputs: None,
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: None,
         }
     }
@@ -8524,6 +8427,30 @@ mod tests {
             height: 512,
             index: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn gpu_worker_user_cancellation_emits_canonical_cancelled_observer() {
+        let mut job = fake_upscale_job(Config::default(), "unused");
+        job.id = "gpu-dispatch-cancelled".to_string();
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        job.progress_tx = Some(progress_tx);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        job.result_tx = result_tx;
+
+        finish_generation_cancelled(job, true);
+
+        let SseMessage::Error(error) = progress_rx.recv().await.unwrap() else {
+            panic!("user cancellation must emit a terminal SSE error frame");
+        };
+        assert_eq!(
+            error.code.as_deref(),
+            Some(mold_core::SSE_ERROR_CODE_QUEUED_CANCELLED)
+        );
+        assert!(matches!(
+            result_rx.await.unwrap(),
+            Err(ref message) if message == "Cancelled"
+        ));
     }
 
     fn protocol_worker(
@@ -8792,10 +8719,10 @@ mod tests {
         worker
             .send_job(GpuJob {
                 id: "stale".to_string(),
+                durable_queue_rank: None,
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -8820,7 +8747,6 @@ mod tests {
                     memory_sample_generation: 0,
                     memory_ledger_sequence: 0,
                 }),
-                batch_child: None,
                 journal: None,
             })
             .unwrap();
@@ -9658,10 +9584,10 @@ mod tests {
             let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
             let generation = GpuJob {
                 id: id.to_string(),
+                durable_queue_rank: None,
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -9677,7 +9603,6 @@ mod tests {
                 prepared_execution_inputs: None,
                 h3_prepared_attempt: None,
                 lease: None,
-                batch_child: None,
                 journal: None,
             };
             worker
@@ -9792,10 +9717,10 @@ mod tests {
                 },
                 work: OwnerWork::Generation(Box::new(GpuJob {
                     id: "barrier-generation".to_string(),
+                    durable_queue_rank: None,
                     model: request.model.clone(),
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -9811,7 +9736,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 })),
                 retry: None,
@@ -10429,10 +10353,10 @@ mod tests {
                 },
                 work: OwnerWork::Generation(Box::new(GpuJob {
                     id: "invalidated".to_string(),
+                    durable_queue_rank: None,
                     model: "test:q4".to_string(),
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -10448,7 +10372,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 })),
                 retry: None,
@@ -10976,14 +10899,13 @@ mod tests {
             .block_on(queue.submit(
                 GenerationJob {
                     id: "generate".to_string(),
+                    durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -10998,10 +10920,10 @@ mod tests {
         worker
             .send_job(GpuJob {
                 id: "generate".to_string(),
+                durable_queue_rank: None,
                 model: "lifecycle".to_string(),
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -11017,7 +10939,6 @@ mod tests {
                 prepared_execution_inputs: None,
                 h3_prepared_attempt: None,
                 lease: Some(fence("generate", 3)),
-                batch_child: None,
                 journal: None,
             })
             .unwrap();
@@ -11275,14 +11196,13 @@ mod tests {
             .submit(
                 GenerationJob {
                     id: "placeholder".to_string(),
+                    durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -11301,10 +11221,10 @@ mod tests {
             &worker,
             GpuJob {
                 id: "buffered-job".to_string(),
+                durable_queue_rank: None,
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: Some(progress_tx),
                 result_tx,
@@ -11320,7 +11240,6 @@ mod tests {
                 prepared_execution_inputs: None,
                 h3_prepared_attempt: None,
                 lease: None,
-                batch_child: None,
                 journal: None,
             },
             &event_tx,
@@ -11433,7 +11352,7 @@ mod tests {
         ));
         let request = fake_upscale_job(Config::default(), "unused").request;
         let ticket = journal
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id: "publish-fails",
                 request: &request,
                 output_dir: Some(&blocked),
@@ -11441,7 +11360,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .expect("a gallery-bound generation is durable");
         assert_eq!(
@@ -11453,10 +11371,10 @@ mod tests {
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
         let job = GpuJob {
             id: "publish-fails".to_string(),
+            durable_queue_rank: None,
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -11471,7 +11389,6 @@ mod tests {
             prepared_execution_inputs: None,
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: Some(ticket),
         };
 
@@ -11502,7 +11419,7 @@ mod tests {
         ));
         let request = fake_upscale_job(Config::default(), "unused").request;
         let ticket = journal
-            .record(crate::queue_journal::JournalAdmission {
+            .record_for_test(crate::queue_journal::JournalAdmission {
                 id: "publishes",
                 request: &request,
                 output_dir: Some(tmp.path()),
@@ -11510,7 +11427,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
         assert_eq!(
@@ -11522,10 +11438,10 @@ mod tests {
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
         let job = GpuJob {
             id: "publishes".to_string(),
+            durable_queue_rank: None,
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -11540,7 +11456,6 @@ mod tests {
             prepared_execution_inputs: None,
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: Some(ticket),
         };
 
@@ -11577,10 +11492,10 @@ mod tests {
                 &worker_for_job,
                 GpuJob {
                     id: "cancelled-job".to_string(),
+                    durable_queue_rank: None,
                     model: "cancel-model".to_string(),
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -11596,7 +11511,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 },
                 &scheduler_tx,
@@ -11648,14 +11562,13 @@ mod tests {
             .submit(
                 GenerationJob {
                     id: "placeholder".to_string(),
+                    durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -11674,10 +11587,10 @@ mod tests {
                 &worker_for_job,
                 GpuJob {
                     id: "panic-job".to_string(),
+                    durable_queue_rank: None,
                     model: "panic-model".to_string(),
                     request: panic_request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -11693,7 +11606,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 },
                 &scheduler_tx,
@@ -11723,14 +11635,13 @@ mod tests {
             .submit(
                 GenerationJob {
                     id: "placeholder-2".to_string(),
+                    durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -11747,10 +11658,10 @@ mod tests {
                 &worker_for_job,
                 GpuJob {
                     id: "followup".to_string(),
+                    durable_queue_rank: None,
                     model: "panic-model".to_string(),
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -11766,7 +11677,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 },
                 &scheduler_tx,
@@ -12171,14 +12081,13 @@ mod tests {
             .block_on(queue.submit(
                 GenerationJob {
                     id: "queue-slot".to_string(),
+                    durable_queue_rank: None,
                     request: job.request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: dummy_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,

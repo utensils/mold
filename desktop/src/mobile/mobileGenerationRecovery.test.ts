@@ -13,7 +13,7 @@ import {
   reduceMobileDurableGenerationRecovery,
   resolveMobileDurableHost,
   saveMobileDurableGenerationRecoveries,
-  useMobileDurableGenerationLifecycle,
+  mobileDurableGenerationRefusal,
 } from "./mobileGenerationRecovery";
 
 function request(index = 1): GenerateRequest {
@@ -68,15 +68,26 @@ describe("mobile durable generation recovery", () => {
     encrypted_at_rest: true,
     generate_request_media: true,
     identity: true,
-    h3_references: false,
     private_h3: false,
+  };
+  const canonicalQueue = {
+    heterogeneous_batch_max_outputs: 64,
+  };
+  const durableMediaV2 = {
+    ...durableMedia,
+    protocol_version: 2,
+    private_h3: true,
   };
 
   it("admits singleton and Batch N while repeated submissions add no client-side queue cap", () => {
-    const queue = { heterogeneous_batch: true, durable_batch_outcomes: true };
     expect(
-      useMobileDurableGenerationLifecycle({ queue, requests: [request()], chain: false }),
-    ).toBe(true);
+      mobileDurableGenerationRefusal({
+        queue: canonicalQueue,
+        durableMedia,
+        hostLabel: "Render",
+        instanceId: "instance-1",
+      }),
+    ).toBeNull();
     const records = Array.from({ length: 257 }, (_, index) =>
       recovery(`client-${index}`, [request(index + 1)]),
     );
@@ -85,73 +96,59 @@ describe("mobile durable generation recovery", () => {
     expect(recovery("batch", batchRequests).presentations).toHaveLength(batchRequests.length);
   });
 
-  it("routes supported media durably only with the exact v1 host capability", () => {
-    const queue = { heterogeneous_batch: true, durable_batch_outcomes: true };
-    for (const media of [
-      { id_image: "face" },
-      { id_images: ["face-a", "face-b"] },
-      { source_image: "source" },
-      { mask_image: "mask" },
-      { control_image: "control" },
-      { edit_images: ["edit"] },
-      { keyframes: [{ frame: 0, image: "keyframe" }] },
-      { audio_file: "audio" },
-      { audio_file_path: "/host/audio.wav" },
-      { source_video: "video" },
-      { source_video_path: "/host/source.mp4" },
-      { extend_video_path: "/host/video.mp4" },
-    ]) {
+  it("refuses a machine that has not reported its server instance", () => {
+    for (const instanceId of [undefined, null, "", "   "]) {
       expect(
-        useMobileDurableGenerationLifecycle({
-          queue,
+        mobileDurableGenerationRefusal({
+          queue: canonicalQueue,
           durableMedia,
-          requests: [{ ...request(), ...media } as GenerateRequest],
-          chain: false,
+          hostLabel: "Render",
+          instanceId,
         }),
-      ).toBe(true);
-      expect(
-        useMobileDurableGenerationLifecycle({
-          queue,
-          durableMedia: undefined,
-          requests: [{ ...request(), ...media } as GenerateRequest],
-          chain: false,
-        }),
-      ).toBe(false);
+      ).toBe("Render has not reported its server instance yet. Nothing was queued.");
     }
-    for (const excluded of [
-      { references: [{ image: { authority: "inline", data: "h3" } }] },
-      { source_image: "source", lora: { path: "adapter", scale: 1 } },
-      { source_image: "source", loras: [] },
-      { hdr_exr_dir: "/host/exr" },
-    ])
-      expect(
-        useMobileDurableGenerationLifecycle({
-          queue,
-          durableMedia,
-          requests: [{ ...request(), ...excluded } as GenerateRequest],
-          chain: false,
-        }),
-      ).toBe(false);
-    expect(useMobileDurableGenerationLifecycle({ queue, requests: [request()], chain: true })).toBe(
-      false,
+  });
+
+  it("refuses a machine that does not advertise the durable generation queue", () => {
+    expect(
+      mobileDurableGenerationRefusal({
+        queue: null,
+        durableMedia,
+        hostLabel: "Render",
+        instanceId: "instance-1",
+      }),
+    ).toBe(
+      "Render cannot queue this print: this machine does not advertise the durable generation queue. Nothing was queued.",
     );
+  });
+
+  it("admits a machine that advertises no durable request media", () => {
+    // durable_media is the server's per-request refusal (a typed 503 the
+    // client surfaces), never a client fence: a degraded media store still
+    // admits every media-free print.
     expect(
-      useMobileDurableGenerationLifecycle({
-        queue,
-        durableMedia,
-        requests: [{ ...request(), model: "minimax-h3-fl2va:official-bf16" }],
-        chain: false,
+      mobileDurableGenerationRefusal({
+        queue: canonicalQueue,
+        durableMedia: undefined,
+        hostLabel: "Render",
+        instanceId: "instance-1",
       }),
-    ).toBe(false);
+    ).toBeNull();
+  });
+
+  it("asks nothing about the request itself — the machine is the only client gate", () => {
+    // The durable protocol carries source media, LoRAs, hdr_exr_dir, identity
+    // photos and H3's ordered references. A client-side per-trait fence could
+    // only refuse work the server would have taken, so the server's own typed
+    // admission refusal is the single authority for anything it cannot take.
     expect(
-      useMobileDurableGenerationLifecycle({
-        queue,
-        durableMedia,
-        requests: [{ ...request(), model: "hf:opaque-h3-checkpoint" }],
-        chain: false,
-        modelFamily: "minimax-h3",
+      mobileDurableGenerationRefusal({
+        queue: canonicalQueue,
+        durableMedia: durableMediaV2,
+        hostLabel: "Render",
+        instanceId: "instance-1",
       }),
-    ).toBe(false);
+    ).toBeNull();
   });
 
   it("persists only byte-free identity and restores an ambiguous admission after restart", () => {
@@ -268,6 +265,29 @@ describe("mobile durable generation recovery", () => {
     const photos = claimMobileDurableTerminalEffect(viewer, key, "photos").recovery;
     const gallery = claimMobileDurableTerminalEffect(photos, key, "gallery").recovery;
     expect(mobileDurableTerminalEffectsClaimed(gallery)).toBe(true);
+
+    // A completion that published no file settled as a failure: the viewer
+    // announcement is the only effect it owes.
+    const fileless = batch("client-1", ["complete"]);
+    delete fileless.children[0]!.result;
+    const unpublished = reduceMobileDurableGenerationRecovery(recovery(), {
+      type: "batch_snapshot",
+      batch: fileless,
+    });
+    expect(
+      mobileDurableTerminalEffectsClaimed(
+        claimMobileDurableTerminalEffect(unpublished, key, "viewer").recovery,
+      ),
+    ).toBe(true);
+
+    // A batch whose authority was lost before any child arrived owes the
+    // app its "Outcome unknown" row and retirement notice; an empty job list
+    // must never read as "every effect claimed".
+    const orphaned = reduceMobileDurableGenerationRecovery(recovery("orphaned"), {
+      type: "event_gap",
+      instanceId: "replacement",
+    });
+    expect(mobileDurableTerminalEffectsClaimed(orphaned)).toBe(false);
 
     let rejected = reduceMobileDurableGenerationRecovery(recovery("rejected"), {
       type: "admission_rejected",

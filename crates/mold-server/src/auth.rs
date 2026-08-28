@@ -166,6 +166,14 @@ impl ApiKeySet {
         identity
     }
 
+    fn durable_identity(candidate: &str) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"mold-api-key-durable-subject-v1\0");
+        digest.update((candidate.len() as u64).to_le_bytes());
+        digest.update(candidate.as_bytes());
+        format!("{:x}", digest.finalize())
+    }
+
     fn validates_gallery_media_token(
         &self,
         token: &str,
@@ -406,6 +414,11 @@ pub(crate) struct ApiKeyAuthenticated {
     /// random signing secret, so neither the API key nor an offline-comparable
     /// digest enters logs.
     pub(crate) identity: String,
+    /// Restart-stable credential subject used only inside encrypted durable
+    /// admission authority. It is never logged or returned on the wire.
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+    #[cfg_attr(feature = "h3", allow(dead_code))]
+    pub(crate) durable_identity: String,
 }
 
 /// Present only when the request used an operator-configured credential.
@@ -516,9 +529,11 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
             let candidate = value.to_str().unwrap_or("").to_string();
             if let Some(kind) = key_set.authenticate(&candidate) {
                 let identity = key_set.audit_identity(&candidate);
-                request
-                    .extensions_mut()
-                    .insert(ApiKeyAuthenticated { identity });
+                let durable_identity = ApiKeySet::durable_identity(&candidate);
+                request.extensions_mut().insert(ApiKeyAuthenticated {
+                    identity,
+                    durable_identity,
+                });
                 if kind == AuthenticationKind::Operator {
                     request.extensions_mut().insert(PairingAuthority);
                 }
@@ -659,17 +674,12 @@ pub fn api_key_header_name() -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::env_lock;
     use tower::ServiceExt;
-
-    /// Serialize env var mutations across parallel test threads.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        &LOCK
-    }
 
     #[test]
     fn parse_single_key() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         unsafe { std::env::set_var("MOLD_API_KEY", "secret123") };
         let state = load_api_keys().unwrap();
         unsafe { std::env::remove_var("MOLD_API_KEY") };
@@ -680,7 +690,7 @@ mod tests {
 
     #[test]
     fn parse_comma_separated_keys() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         unsafe { std::env::set_var("MOLD_API_KEY", "key1,key2, key3 ") };
         let state = load_api_keys().unwrap();
         unsafe { std::env::remove_var("MOLD_API_KEY") };
@@ -712,7 +722,7 @@ mod tests {
 
     #[test]
     fn parse_file_keys() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         let dir = std::env::temp_dir().join("mold_test_keys");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("keys.txt");
@@ -730,7 +740,7 @@ mod tests {
 
     #[test]
     fn empty_env_returns_none() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         unsafe { std::env::set_var("MOLD_API_KEY", "") };
         let state = load_api_keys().unwrap();
         unsafe { std::env::remove_var("MOLD_API_KEY") };
@@ -739,7 +749,7 @@ mod tests {
 
     #[test]
     fn unset_env_returns_none() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         unsafe { std::env::remove_var("MOLD_API_KEY") };
         let state = load_api_keys().unwrap();
         assert!(state.is_none());

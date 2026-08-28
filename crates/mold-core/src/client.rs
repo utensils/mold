@@ -1,17 +1,20 @@
-use crate::chain::{ChainProgressEvent, ChainRequest, ChainResponse, SseChainCompleteEvent};
+use crate::chain::{ChainProgressEvent, ChainRequest};
 use crate::chain_job::{
     ChainJobDetail, ChainJobListing, ChainJobSummary, CreateChainJobResponse, GcOutcome,
     RetakeRequest,
 };
 use crate::error::MoldError;
+use crate::queue_progress::QueueJobProgress;
 use crate::types::{
     AudioData, Collection, CollectionCreateRequest, CollectionItemsRequest,
     CollectionUpdateRequest, DeviceState, EmptyTrashResult, ExpandRequest, ExpandResponse,
     GalleryImage, GalleryOrganizeRequest, GalleryPatchRequest, GenerateRequest, GenerateResponse,
-    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat, QueueListingWire,
-    ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest, ReferenceUploadSessionResponse,
-    ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, TagCount, TagRenameRequest,
-    TrashFilenamesRequest, TrashSweepResult, VideoData,
+    GenerationBatchAdmissionRequest, GenerationBatchStatus, GenerationBatchStatusRequest,
+    GenerationBatchStatusResponse, GenerationRetryRequest, ImageData, LoraInfo, ModelInfo,
+    ModelInfoExtended, OutputFormat, QueueListingWire, ReferenceUploadCompleteResponse,
+    ReferenceUploadSessionRequest, ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent,
+    SseErrorEvent, SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest,
+    TrashSweepResult, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -46,21 +49,15 @@ pub struct MoldClient {
     api_key_configured: bool,
 }
 
-/// How long the retention probe may take once the stream has already died.
-/// The shared reqwest client carries no request timeout, so a host that
-/// accepts the connection and never answers — wedged mid-restart, or a proxy
-/// holding the socket — would otherwise strand the original SSE error and the
-/// caller would never learn the stream failed at all.
-const RETENTION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
-
-/// An admitted generation plus the in-flight answer to "did the host journal
-/// THIS job?". Held only while a stream is open; read only if that stream dies
-/// before the terminal event.
-struct RetainedJobProbe {
-    job_id: String,
-    host: String,
-    durable: tokio::task::JoinHandle<bool>,
-    timeout: std::time::Duration,
+fn require_direct_singleton(req: &GenerateRequest) -> Result<()> {
+    if req.batch_size != 1 {
+        return Err(MoldError::Validation(
+            "direct generation accepts batch_size = 1; use durable generation-batch admission for multiple outputs"
+                .to_string(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Explain a TERMINAL error frame in which the host said it kept the job.
@@ -83,45 +80,31 @@ fn retained_frame_error(message: &str, job_id: Option<&str>, host: &str) -> anyh
 
 /// Explain a stream that ended without a terminal event.
 ///
-/// A host that journalled this job runs it whether or not a client is
-/// attached, and replays across a restart what it could not finish, so the job
-/// the caller just lost sight of is still going to render there. Say so — but
-/// only when that job is durable, because on an older server, and for a job
-/// the host excluded at admission, a lost stream really does mean lost work.
+/// The host journalled this job before it acknowledged it — that is the only
+/// admission path there is — so it runs whether or not a client is attached,
+/// and replays across a restart what it could not finish. The job the caller
+/// just lost sight of is still going to render there. Say so.
 ///
 /// The original transport error is preserved as the cause, so
 /// [`MoldClient::is_connection_error`] still reports `false` for a mid-body
 /// death and the CLI surfaces it instead of silently re-rendering locally.
-async fn annotate_lost_stream(
-    err: anyhow::Error,
-    retained: Option<RetainedJobProbe>,
-) -> anyhow::Error {
-    let Some(probe) = retained else {
+fn annotate_lost_stream(err: anyhow::Error, job_id: Option<&str>, host: &str) -> anyhow::Error {
+    let Some(job_id) = job_id else {
         return err;
     };
-    // Bounded: on expiry the original error is returned exactly as it would
-    // have been without a probe, and the task is abandoned rather than left
-    // holding the caller's future open.
-    let durable = match tokio::time::timeout(probe.timeout, probe.durable).await {
-        Ok(answer) => answer.unwrap_or(false),
-        Err(_) => {
-            tracing::debug!(
-                job_id = %probe.job_id,
-                host = %probe.host,
-                "retention probe timed out; reporting the stream failure unqualified"
-            );
-            return err;
-        }
-    };
-    if !durable {
-        return err;
-    }
-    let note = format!(
-        "job {} is retained on {} and will finish there",
-        probe.job_id, probe.host
-    );
-    tracing::warn!(job_id = %probe.job_id, host = %probe.host, "{note}");
+    let note = format!("job {job_id} is retained on {host} and will finish there");
+    tracing::warn!(job_id = %job_id, host = %host, "{note}");
     err.context(note)
+}
+
+/// Terminal outcome of one durable chain job, as observed from its event
+/// stream.
+#[derive(Debug, Clone)]
+pub struct ChainJobOutcome {
+    pub state: crate::chain_job::ChainJobState,
+    pub error: Option<String>,
+    /// Gallery filename of the stitched print, from the `Finalized` event.
+    pub output: Option<String>,
 }
 
 impl MoldClient {
@@ -309,14 +292,16 @@ impl MoldClient {
     /// The server returns raw bytes, not JSON — callers are responsible for
     /// writing the bytes to disk or further processing.
     pub async fn generate_raw(&self, req: &GenerateRequest) -> Result<Vec<u8>> {
+        require_direct_singleton(req)?;
         let wire_req = crate::prompt_text::protect_generate_request_for_wire(req);
-        let bytes = self
+        let response = self
             .client
             .post(format!("{}/api/generate", self.base_url))
             .json(&wire_req)
             .send()
+            .await?;
+        let bytes = require_direct_media_response(response)
             .await?
-            .error_for_status()?
             .bytes()
             .await?
             .to_vec();
@@ -328,6 +313,7 @@ impl MoldClient {
     /// For video responses the server sends `x-mold-video-*` metadata headers
     /// alongside the raw video bytes so we can reconstruct [`VideoData`].
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateResponse> {
+        require_direct_singleton(&req)?;
         let fallback_seed = req.seed.unwrap_or(0);
         let width = req.width;
         let height = req.height;
@@ -341,8 +327,8 @@ impl MoldClient {
             .post(format!("{}/api/generate", self.base_url))
             .json(&wire_req)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let resp = require_direct_media_response(resp).await?;
 
         // Read the seed the server actually used from the response header.
         // Fall back to the request seed for backward compat with older servers.
@@ -560,17 +546,17 @@ impl MoldClient {
         err.downcast_ref::<ModelNotFoundError>().is_some()
     }
 
-    /// Generate an image via SSE streaming, receiving progress events.
+    /// Generate one output via the durable `/api/generate/stream` facade,
+    /// receiving progress events.
     ///
-    /// Returns:
-    /// - `Ok(Some(response))` — streaming succeeded
-    /// - `Ok(None)` — server doesn't support SSE (endpoint returned 404 with empty body)
-    /// - `Err(e)` — generation error, model not found, or connection error
+    /// A host that does not serve the route is an error naming what it lacks:
+    /// this is the only singleton path, so there is nothing to degrade to.
     pub async fn generate_stream(
         &self,
         req: &GenerateRequest,
         progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
-    ) -> Result<Option<GenerateResponse>> {
+    ) -> Result<GenerateResponse> {
+        require_direct_singleton(req)?;
         let wire_req = crate::prompt_text::protect_generate_request_for_wire(req);
         let mut resp = self
             .client
@@ -582,8 +568,8 @@ impl MoldClient {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             let body = resp.text().await.unwrap_or_default();
             if body.is_empty() {
-                // Axum returns empty 404 for unmatched routes — server doesn't support SSE
-                return Ok(None);
+                // Axum returns an empty 404 for an unmatched route.
+                anyhow::bail!("{} does not serve POST /api/generate/stream", self.base_url);
             }
             // Non-empty 404 = model not found
             return Err(MoldError::ModelNotFound(body).into());
@@ -607,16 +593,20 @@ impl MoldClient {
 
         // Parse SSE events from chunked response body
         let mut buffer = String::new();
-        // The server-assigned job id, latched from the first `queued` event,
-        // plus the in-flight probe of that host's queue contract. Both exist
-        // only once the job is admitted, so an unqueued stream pays nothing.
-        let mut retained: Option<RetainedJobProbe> = None;
+        // The server-assigned job id, latched from the first `queued` event.
+        // It exists only once the job is admitted — and an admitted job is a
+        // journalled one.
+        let mut retained: Option<String> = None;
         loop {
             let chunk = match resp.chunk().await {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
                 Err(err) => {
-                    return Err(annotate_lost_stream(anyhow::Error::new(err), retained).await);
+                    return Err(annotate_lost_stream(
+                        anyhow::Error::new(err),
+                        retained.as_deref(),
+                        &self.base_url,
+                    ));
                 }
             };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -628,7 +618,7 @@ impl MoldClient {
                         if let Ok(p) = serde_json::from_str::<SseProgressEvent>(&data) {
                             if let SseProgressEvent::Queued { id, .. } = &p {
                                 if !id.is_empty() && retained.is_none() {
-                                    retained = Some(self.probe_retention(id.clone()));
+                                    retained = Some(id.clone());
                                 }
                             }
                             let _ = progress_tx.send(p);
@@ -667,7 +657,7 @@ impl MoldClient {
                                 .as_deref()
                                 .and_then(|s| b64.decode(s).ok())
                                 .unwrap_or_default();
-                            return Ok(Some(GenerateResponse {
+                            return Ok(GenerateResponse {
                                 images: Vec::new(),
                                 video: None,
                                 audio: Some(AudioData {
@@ -685,7 +675,7 @@ impl MoldClient {
                                 seed_used: complete.seed_used,
                                 gpu: complete.gpu,
                                 request_warnings,
-                            }));
+                            });
                         }
 
                         // Detect video response via video_frames field
@@ -736,7 +726,7 @@ impl MoldClient {
                             (vec![img], None)
                         };
 
-                        return Ok(Some(GenerateResponse {
+                        return Ok(GenerateResponse {
                             audio: None,
                             images,
                             generation_time_ms: complete.generation_time_ms,
@@ -745,22 +735,29 @@ impl MoldClient {
                             video,
                             gpu: complete.gpu,
                             request_warnings,
-                        }));
+                        });
                     }
                     "error" => {
                         let error: SseErrorEvent = serde_json::from_str(&data)?;
-                        // A terminal frame ends the stream either way, so the
-                        // in-flight probe has nothing left to answer.
-                        let probe = retained.take();
-                        if let Some(probe) = &probe {
-                            probe.durable.abort();
-                        }
+                        let job_id = retained.take();
                         if error.retained {
                             return Err(retained_frame_error(
                                 &error.message,
-                                probe.as_ref().map(|probe| probe.job_id.as_str()),
+                                job_id.as_deref(),
                                 &self.base_url,
                             ));
+                        }
+                        // Durable admission accepts before it resolves a
+                        // checkpoint, so "this model is not here" arrives as a
+                        // terminal frame where the attached path answered 404.
+                        // Re-typed here so `classify_generate_error` still
+                        // reaches `PullModelAndRetry` and `mold run` still
+                        // offers the pull.
+                        if error.code.as_deref().is_some_and(|code| {
+                            code == crate::types::SSE_ERROR_CODE_MODEL_NOT_FOUND
+                                || code == crate::types::SSE_ERROR_CODE_UNKNOWN_MODEL
+                        }) {
+                            return Err(MoldError::ModelNotFound(error.message).into());
                         }
                         // A definitive server failure promises nothing.
                         anyhow::bail!("server error: {}", error.message);
@@ -772,199 +769,126 @@ impl MoldClient {
 
         Err(annotate_lost_stream(
             anyhow::anyhow!("SSE stream ended without complete event"),
-            retained,
-        )
-        .await)
+            retained.as_deref(),
+            &self.base_url,
+        ))
     }
 
-    /// Ask this exact host, while it is demonstrably still up, whether it
-    /// journalled THIS job (`GET /api/queue` → the row's additive `durable`).
+    /// Follow one durable chain job to settlement, forwarding its stage
+    /// progress as [`ChainProgressEvent`] so the CLI and TUI renderers see the
+    /// same shape they always have.
     ///
-    /// Deliberately per-job rather than `capabilities.queue.durable_queue`: a
-    /// host that can promise durability still reports `durable: false` for a
-    /// job it excluded at admission — no gallery target, reference-upload
-    /// media, or a request over the journal's payload ceiling — and telling
-    /// the user one of those will finish later would be a lie. Started when
-    /// the job is queued and read only if the stream later dies, so a host
-    /// that never answers, or one that predates the field, promises nothing.
-    fn probe_retention(&self, job_id: String) -> RetainedJobProbe {
-        let client = self.clone();
-        let host = self.base_url.clone();
-        let wanted = job_id.clone();
-        let durable = tokio::spawn(async move {
-            // Bound the whole cursor chain so even an explicit lookup cannot
-            // outlive the answer anyone is waiting for.
-            tokio::time::timeout(RETENTION_PROBE_TIMEOUT, client.find_queue_job(&wanted))
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .flatten()
-                .and_then(|entry| entry.durable)
-                .unwrap_or(false)
-        });
-        RetainedJobProbe {
-            job_id,
-            host,
-            durable,
-            timeout: RETENTION_PROBE_TIMEOUT,
-        }
-    }
-
-    /// Submit a chained video generation request (non-streaming).
-    ///
-    /// The server normalises the auto-expand form into stages, runs each
-    /// stage sequentially with motion-tail latent carryover, stitches the
-    /// result into a single video, and returns a [`ChainResponse`]. Large
-    /// chains take minutes — prefer [`Self::generate_chain_stream`] for
-    /// interactive clients that want progress updates.
-    pub async fn generate_chain(&self, req: &ChainRequest) -> Result<ChainResponse> {
-        let wire_req = crate::prompt_text::protect_chain_request_for_wire(req);
-        let resp = self
-            .client
-            .post(format!("{}/api/generate/chain", self.base_url))
-            .json(&wire_req)
-            .send()
-            .await?;
-
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            let body = resp.text().await.unwrap_or_default();
-            if body.is_empty() {
-                anyhow::bail!("chain endpoint not found — server predates render-chain v1");
-            }
-            return Err(MoldError::ModelNotFound(body).into());
-        }
-        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(MoldError::Validation(api_error_detail(&body)).into());
-        }
-        if resp.status().is_client_error() || resp.status().is_server_error() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("server error {status}: {body}");
-        }
-
-        // Read before `resp` is consumed by `json()`. The body has its own
-        // `request_warnings` slot, but the server puts advisories on the
-        // header, so the header is the authority and the body's value (empty
-        // today) must not win over it.
-        let request_warnings = parse_request_warnings(resp.headers());
-        let mut chain: ChainResponse = resp.json().await?;
-        if !request_warnings.is_empty() {
-            chain.request_warnings = request_warnings;
-        }
-        Ok(chain)
-    }
-
-    /// Submit a chained video generation request with SSE progress streaming.
-    ///
-    /// Returns:
-    /// - `Ok(Some(response))` — streaming succeeded and the `complete` event
-    ///   carried the stitched video.
-    /// - `Ok(None)` — server doesn't have the chain endpoint (empty 404).
-    ///   Callers can fall back to [`Self::generate_chain`] or error.
-    /// - `Err(_)` — validation, model-not-found, or mid-stream server error.
-    pub async fn generate_chain_stream(
+    /// The stream opens with a snapshot, so a caller that attaches after some
+    /// stages have already run still learns the stage count and where the job
+    /// is — which the old fire-and-forget chain endpoint could not do.
+    pub async fn stream_chain_job_events(
         &self,
-        req: &ChainRequest,
+        job_id: &str,
         progress_tx: tokio::sync::mpsc::UnboundedSender<ChainProgressEvent>,
-    ) -> Result<Option<ChainResponse>> {
-        let wire_req = crate::prompt_text::protect_chain_request_for_wire(req);
+    ) -> Result<ChainJobOutcome> {
+        use crate::chain_job::{ChainJobEvent, ChainJobState};
+
         let mut resp = self
             .client
-            .post(format!("{}/api/generate/chain/stream", self.base_url))
-            .json(&wire_req)
+            .get(format!(
+                "{}/api/chain-jobs/{}/events",
+                self.base_url, job_id
+            ))
             .send()
             .await?;
-
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            let body = resp.text().await.unwrap_or_default();
-            if body.is_empty() {
-                return Ok(None);
-            }
-            return Err(MoldError::ModelNotFound(body).into());
-        }
-        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(MoldError::Validation(api_error_detail(&body)).into());
-        }
         if resp.status().is_client_error() || resp.status().is_server_error() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("server error {status}: {body}");
         }
 
-        // Captured before the body is drained chunk by chunk; the chain SSE
-        // headers arrive ahead of the first frame exactly as the one-shot's do.
-        let request_warnings = parse_request_warnings(resp.headers());
-
-        let b64 = base64::engine::general_purpose::STANDARD;
+        let mut outcome = ChainJobOutcome {
+            state: ChainJobState::Running,
+            error: None,
+            output: None,
+        };
         let mut buffer = String::new();
         while let Some(chunk) = resp.chunk().await? {
             buffer.push_str(&String::from_utf8_lossy(&chunk));
-
             while let Some(event_text) = next_sse_event(&mut buffer) {
-                let (event_type, data) = parse_sse_event(&event_text);
-                match event_type.as_str() {
-                    "progress" => {
-                        if let Ok(p) = serde_json::from_str::<ChainProgressEvent>(&data) {
-                            let _ = progress_tx.send(p);
+                let (_, data) = parse_sse_event(&event_text);
+                let Ok(event) = serde_json::from_str::<ChainJobEvent>(&data) else {
+                    continue;
+                };
+                match event {
+                    ChainJobEvent::Snapshot { job } => {
+                        outcome.state = job.summary.state;
+                        outcome.error = job.summary.error.clone();
+                        let _ = progress_tx.send(ChainProgressEvent::ChainStart {
+                            stage_count: job.summary.stage_count,
+                            estimated_total_frames: job
+                                .stages
+                                .iter()
+                                .filter_map(|stage| stage.frames_emitted)
+                                .sum(),
+                        });
+                        if crate::chain_job::settled(job.summary.state) {
+                            // A job that settled before we subscribed carries
+                            // its print in the manifest, not in a frame.
+                            outcome.output = job
+                                .finalizes
+                                .last()
+                                .and_then(|record| record.gallery_filename.clone());
+                            return Ok(outcome);
                         }
                     }
-                    "complete" => {
-                        let complete: SseChainCompleteEvent = serde_json::from_str(&data)?;
-                        let payload = b64.decode(&complete.video)?;
-                        let thumbnail = complete
-                            .thumbnail
-                            .as_deref()
-                            .and_then(|s| b64.decode(s).ok())
-                            .unwrap_or_default();
-                        let gif_preview = complete
-                            .gif_preview
-                            .as_deref()
-                            .and_then(|s| b64.decode(s).ok())
-                            .unwrap_or_default();
-                        let video = VideoData {
-                            data: payload,
-                            format: complete.format,
-                            width: complete.width,
-                            height: complete.height,
-                            frames: complete.frames,
-                            fps: complete.fps,
-                            pipeline: complete.metadata.as_ref().and_then(|m| m.pipeline),
-                            pipeline_provenance_sha256: complete
-                                .metadata
-                                .as_ref()
-                                .and_then(|metadata| metadata.pipeline_provenance_sha256.clone()),
-                            source_preprocessing: complete
-                                .metadata
-                                .as_ref()
-                                .and_then(|metadata| metadata.source_preprocessing.clone()),
-                            thumbnail,
-                            gif_preview,
-                            has_audio: complete.has_audio,
-                            duration_ms: complete.duration_ms,
-                            audio_sample_rate: complete.audio_sample_rate,
-                            audio_channels: complete.audio_channels,
-                        };
-                        return Ok(Some(ChainResponse {
-                            video,
-                            stage_count: complete.stage_count,
-                            gpu: complete.gpu,
-                            script: complete.script,
-                            vram_estimate: complete.vram_estimate,
-                            request_warnings,
-                        }));
+                    ChainJobEvent::StageStart { stage_idx } => {
+                        let _ = progress_tx.send(ChainProgressEvent::StageStart { stage_idx });
                     }
-                    "error" => {
-                        let error: SseErrorEvent = serde_json::from_str(&data)?;
-                        anyhow::bail!("server error: {}", error.message);
+                    ChainJobEvent::DenoiseStep {
+                        stage_idx,
+                        step,
+                        total,
+                    } => {
+                        let _ = progress_tx.send(ChainProgressEvent::DenoiseStep {
+                            stage_idx,
+                            step,
+                            total,
+                        });
                     }
-                    _ => {}
+                    ChainJobEvent::StageDone {
+                        stage_idx,
+                        frames_emitted,
+                        ..
+                    } => {
+                        let _ = progress_tx.send(ChainProgressEvent::StageDone {
+                            stage_idx,
+                            frames_emitted,
+                        });
+                    }
+                    ChainJobEvent::Finalizing { total_frames } => {
+                        let _ = progress_tx.send(ChainProgressEvent::Stitching { total_frames });
+                    }
+                    ChainJobEvent::Finalized {
+                        gallery_filename, ..
+                    } => outcome.output = gallery_filename,
+                    ChainJobEvent::StateChanged { state, error } => {
+                        outcome.state = state;
+                        if error.is_some() {
+                            outcome.error = error;
+                        }
+                        if crate::chain_job::settled(state) {
+                            return Ok(outcome);
+                        }
+                    }
+                    ChainJobEvent::Yielded { .. } => {}
                 }
             }
         }
-
-        anyhow::bail!("chain SSE stream ended without complete event")
+        // The runner closes the broadcast when the job settles, so a stream
+        // that ends without a terminal frame means the state changed while
+        // nobody was subscribed. Ask.
+        outcome.state = self
+            .get_chain_job(job_id)
+            .await
+            .map(|detail| detail.summary.state)
+            .unwrap_or(outcome.state);
+        Ok(outcome)
     }
 
     pub async fn create_chain_job(&self, req: &ChainRequest) -> Result<CreateChainJobResponse> {
@@ -1316,6 +1240,105 @@ impl MoldClient {
         self.server_capabilities().await
     }
 
+    /// Durably admit one ordered set of independently executing singleton
+    /// requests. `client_batch_id` is the caller's idempotency key.
+    pub async fn admit_generation_batch(
+        &self,
+        request: &GenerationBatchAdmissionRequest,
+    ) -> Result<GenerationBatchStatus> {
+        let response = self
+            .client
+            .post(format!("{}/api/generation-batches", self.base_url))
+            .json(request)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response)
+            .await?
+            .json::<GenerationBatchStatus>()
+            .await?)
+    }
+
+    /// Resolve an ambiguous admission response using the caller-owned
+    /// idempotency key. A genuine 404 is represented as `None`.
+    pub async fn generation_batch_by_client_id(
+        &self,
+        client_batch_id: &str,
+    ) -> Result<Option<GenerationBatchStatus>> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/generation-batches/by-client/{}",
+                self.base_url,
+                encode_path_segment(client_batch_id)
+            ))
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(
+            error_for_status_with_body(response)
+                .await?
+                .json::<GenerationBatchStatus>()
+                .await?,
+        ))
+    }
+
+    /// Read one durable generation batch by server-assigned id.
+    pub async fn generation_batch(&self, id: &str) -> Result<Option<GenerationBatchStatus>> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/generation-batches/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(
+            error_for_status_with_body(response)
+                .await?
+                .json::<GenerationBatchStatus>()
+                .await?,
+        ))
+    }
+
+    /// Reconcile a bounded set of durable generation batches in one request.
+    pub async fn generation_batch_statuses(
+        &self,
+        request: &GenerationBatchStatusRequest,
+    ) -> Result<GenerationBatchStatusResponse> {
+        let response = self
+            .client
+            .post(format!("{}/api/generation-batches/status", self.base_url))
+            .json(request)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response)
+            .await?
+            .json::<GenerationBatchStatusResponse>()
+            .await?)
+    }
+
+    /// Return a retryable held generation child to the durable queue.
+    pub async fn retry_queue_job(&self, request: &GenerationRetryRequest) -> Result<()> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/queue/{}/retry",
+                self.base_url,
+                encode_path_segment(&request.job_id)
+            ))
+            .json(request)
+            .send()
+            .await?;
+        error_for_status_with_body(response).await?;
+        Ok(())
+    }
+
     /// Enable or disable one stable device. The server may return a draining
     /// or starting state while the owner transition completes.
     pub async fn set_device_enabled(
@@ -1379,6 +1402,61 @@ impl MoldClient {
         self.fetch_queue_listing(Some(limit), cursor).await
     }
 
+    /// Walk every durable continuation page and return the whole queue.
+    ///
+    /// [`Self::list_queue`] returns ONE bounded page, which is right for a
+    /// poller reconciling live cards. It is wrong for anything exhaustive: a
+    /// backlog longer than the host's `queue_capacity` silently loses its
+    /// tail, so "nothing is held" and "that job is not held" become answers
+    /// about the first page rather than about the queue. Reserved for
+    /// explicit operator actions; periodic consumers keep polling one page.
+    ///
+    /// `page` and `live_only_entries` are dropped from the result: they
+    /// describe one page's position in a walk that is now finished, and
+    /// keeping either would invite a caller to page again from the middle.
+    ///
+    /// Rows are deduplicated by id across the whole walk. The server repeats
+    /// the bounded `live_only_entries` set on EVERY explicit page — it is the
+    /// registry's non-durable overlay, not a slice of the durable order — and
+    /// `fetch_queue_listing` folds it into `entries` per page, so appending
+    /// blindly would list each live-only job once per continuation.
+    pub async fn list_queue_all(&self) -> Result<QueueListingWire> {
+        let mut listing = self.list_queue().await?;
+        let plan = listing.plan.take();
+        let mut entries: Vec<crate::QueueJobEntryWire> = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut seen_cursors = std::collections::HashSet::new();
+        loop {
+            entries.extend(
+                std::mem::take(&mut listing.entries)
+                    .into_iter()
+                    .filter(|entry| seen_ids.insert(entry.id.clone())),
+            );
+            let Some(cursor) = listing
+                .page
+                .as_ref()
+                .and_then(|page| page.next_cursor.clone())
+            else {
+                break;
+            };
+            let limit = listing.page.as_ref().map_or(0, |page| page.limit);
+            if !seen_cursors.insert(cursor.clone()) {
+                anyhow::bail!("host repeated a queue continuation cursor");
+            }
+            listing = self.list_queue_page(limit, Some(&cursor)).await?;
+        }
+        // A walk of the durable order restates position per page, so the
+        // merged sequence is the authority for where each row sits — held
+        // rows included in the walk, excluded from the count.
+        crate::queue_wait::assign_listed_positions(&mut entries);
+        Ok(QueueListingWire {
+            entries,
+            live_only_entries: Vec::new(),
+            plan,
+            page: None,
+        })
+    }
+
     /// Resolve one exact job through bounded pages. This is reserved for an
     /// explicit per-job action/probe; periodic consumers use only
     /// [`Self::list_queue`] and never walk the durable journal.
@@ -1424,6 +1502,31 @@ impl MoldClient {
         Ok(listing)
     }
 
+    /// Read one live job's folded progress snapshot
+    /// (`GET /api/queue/{id}/preview`).
+    ///
+    /// The outer `Option` is live-row existence — a `404` means the row has
+    /// left the queue and is reported as `Ok(None)` rather than an error,
+    /// because that is the ordinary end of a render rather than a fault.
+    pub async fn queue_job_progress(&self, id: &str) -> Result<Option<QueueJobProgress>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/queue/{}/preview",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(resp
+            .error_for_status()?
+            .json::<Option<QueueJobProgress>>()
+            .await?)
+    }
+
     /// Cancel a still-queued job (`DELETE /api/queue/{id}`).
     ///
     /// The server answers `204` on success, `404` for unknown ids, and `409`
@@ -1445,6 +1548,149 @@ impl MoldClient {
         Ok(())
     }
 
+    /// Read ONE queued job with the planner's own work item for it
+    /// (`GET /api/queue/{id}`).
+    ///
+    /// Unlike [`Self::find_queue_job`], which scans the paged listing, this
+    /// asks the host directly — so it answers for a durable row deeper than
+    /// the runtime window, and it carries the request settings the
+    /// payload-free listing projection deliberately omits. A job that has
+    /// left the queue is `Ok(None)`, never an error: finishing is not a
+    /// failure.
+    pub async fn queue_job(&self, id: &str) -> Result<Option<crate::QueueJobDetailWire>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/queue/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(
+            error_for_status_with_body(resp)
+                .await?
+                .json::<crate::QueueJobDetailWire>()
+                .await?,
+        ))
+    }
+
+    /// Reorder one queued job (`PATCH /api/queue/{id}`), returning the row as
+    /// the server re-projected it. Positions past the tail are clamped by the
+    /// server, so the returned `position` is the authority, not the request.
+    pub async fn move_queue_job(
+        &self,
+        id: &str,
+        position: usize,
+    ) -> Result<crate::QueueJobEntryWire> {
+        let resp = self
+            .client
+            .patch(format!(
+                "{}/api/queue/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .json(&serde_json::json!({ "position": position }))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::QueueJobEntryWire>()
+            .await?)
+    }
+
+    /// Cancel every still-queued job on this host (`DELETE /api/queue`).
+    ///
+    /// Running work is deliberately left alone; the count is the number of
+    /// queued rows the server removed.
+    pub async fn cancel_all_queue_jobs(&self) -> Result<usize> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/queue", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::QueueCancelAllResult>()
+            .await?
+            .cancelled)
+    }
+
+    /// Cancel every non-terminal child of one durable batch
+    /// (`DELETE /api/generation-batches/{id}`), returning the authoritative
+    /// child states the server settled on.
+    pub async fn cancel_generation_batch(&self, id: &str) -> Result<GenerationBatchStatus> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/generation-batches/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<GenerationBatchStatus>()
+            .await?)
+    }
+
+    /// Hold dispatch of new generation jobs (`POST /api/queue/pause`). The
+    /// job already on a worker finishes. Returns the resulting pause state.
+    pub async fn pause_queue(&self) -> Result<bool> {
+        self.set_queue_paused("pause").await
+    }
+
+    /// Resume dispatch (`POST /api/queue/resume`). Returns the resulting
+    /// pause state, so a caller reports what the host settled on rather than
+    /// what it asked for.
+    pub async fn resume_queue(&self) -> Result<bool> {
+        self.set_queue_paused("resume").await
+    }
+
+    async fn set_queue_paused(&self, action: &str) -> Result<bool> {
+        let resp = self
+            .client
+            .post(format!("{}/api/queue/{action}", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::QueuePauseState>()
+            .await?
+            .paused)
+    }
+
+    /// Run the held-row retention sweep now (`POST /api/queue/held/sweep`).
+    pub async fn sweep_held_queue(&self) -> Result<crate::HeldSweepResult> {
+        let resp = self
+            .client
+            .post(format!("{}/api/queue/held/sweep", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::HeldSweepResult>()
+            .await?)
+    }
+
+    /// Run the settled-batch retention sweep now
+    /// (`POST /api/generation-batches/sweep`).
+    pub async fn sweep_settled_batches(&self) -> Result<crate::SettledBatchSweepResult> {
+        let resp = self
+            .client
+            .post(format!("{}/api/generation-batches/sweep", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<crate::SettledBatchSweepResult>()
+            .await?)
+    }
+
     /// List gallery images from the server's output directory.
     pub async fn list_gallery(&self) -> Result<Vec<GalleryImage>> {
         let resp = self
@@ -1456,6 +1702,25 @@ impl MoldClient {
             .json::<Vec<GalleryImage>>()
             .await?;
         Ok(resp)
+    }
+
+    /// Read one gallery row's metadata without transferring the whole index.
+    ///
+    /// Falls back to a full listing for a host that predates `?filename=`:
+    /// an older server ignores the unknown query parameter and returns
+    /// everything, which is exactly the pre-filter behaviour, so the local
+    /// `find` below stays correct either way.
+    pub async fn gallery_item(&self, filename: &str) -> Result<Option<GalleryImage>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery", self.base_url))
+            .query(&[("filename", filename)])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<GalleryImage>>()
+            .await?;
+        Ok(resp.into_iter().find(|item| item.filename == filename))
     }
 
     /// Download a gallery image by filename.
@@ -1949,8 +2214,12 @@ fn should_fallback_loras_endpoint(err: &anyhow::Error) -> bool {
 /// must not turn authentication, transport, or server failures into a legacy
 /// fallback that could mutate state without a successful preflight.
 pub fn is_missing_endpoint_error(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<reqwest::Error>()
-        .and_then(reqwest::Error::status)
+    err.downcast_ref::<ServerResponseError>()
+        .map(|error| error.status)
+        .or_else(|| {
+            err.downcast_ref::<reqwest::Error>()
+                .and_then(reqwest::Error::status)
+        })
         .is_some_and(|status| {
             matches!(
                 status,
@@ -1959,13 +2228,111 @@ pub fn is_missing_endpoint_error(err: &anyhow::Error) -> bool {
         })
 }
 
+/// True when retrying an idempotent read or reconciling an ambiguously
+/// committed mutation is safe. HTTP response failures are wrapped so their
+/// status and body remain actionable; keep the classification here rather
+/// than making callers guess from formatted error text.
+pub fn is_transient_request_error(err: &anyhow::Error) -> bool {
+    if MoldClient::is_connection_error(err) {
+        return true;
+    }
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<ServerResponseError>()
+            .is_some_and(|error| error.status.is_server_error() || error.status.as_u16() == 429)
+            || cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+                error.is_timeout()
+                    || error.is_connect()
+                    || error.is_body()
+                    || error.is_decode()
+                    || error.is_request()
+                    || error
+                        .status()
+                        .is_some_and(|status| status.is_server_error() || status.as_u16() == 429)
+            })
+    })
+}
+
+#[derive(Debug)]
+struct ServerResponseError {
+    status: StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for ServerResponseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "server error {}: {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for ServerResponseError {}
+
 async fn error_for_status_with_body(resp: reqwest::Response) -> Result<reqwest::Response> {
     if resp.status().is_client_error() || resp.status().is_server_error() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("server error {status}: {body}");
+        return Err(ServerResponseError { status, body }.into());
     }
     Ok(resp)
+}
+
+/// Read a `/api/generate` answer as the media it promises, or say exactly
+/// which of the three non-media answers arrived.
+///
+/// `202` is the attached observer detaching after commit — the print is
+/// still queued and must be reconciled, never resubmitted. A `200` carrying
+/// JSON is the idempotent replay of a `client_batch_id` this host already
+/// admitted: the batch status, with the gallery filename when the print is
+/// done. A non-empty `404` is the singleton contract's own "model not here"
+/// (`MODEL_NOT_FOUND` / `UNKNOWN_MODEL`), surfaced as
+/// [`MoldError::ModelNotFound`] so [`MoldClient::is_model_not_found`] and the
+/// CLI's auto-pull read it as they always have.
+async fn require_direct_media_response(resp: reqwest::Response) -> Result<reqwest::Response> {
+    match resp.status() {
+        StatusCode::ACCEPTED => {
+            let status = resp.json::<GenerationBatchStatus>().await?;
+            anyhow::bail!(
+                "durable generation was accepted but its direct observer detached; reconcile batch {} or client operation {}",
+                status.id,
+                status.client_batch_id
+            );
+        }
+        StatusCode::OK if response_is_json(&resp) => {
+            let status = resp.json::<GenerationBatchStatus>().await?;
+            let filename = status
+                .children
+                .first()
+                .and_then(|child| child.result.as_ref())
+                .and_then(|result| result.filename.as_deref());
+            match filename {
+                Some(filename) => anyhow::bail!(
+                    "client operation {} was already admitted as batch {}; its print is gallery file {filename}",
+                    status.client_batch_id,
+                    status.id
+                ),
+                None => anyhow::bail!(
+                    "client operation {} was already admitted as batch {}; reconcile it instead of resubmitting",
+                    status.client_batch_id,
+                    status.id
+                ),
+            }
+        }
+        StatusCode::NOT_FOUND => {
+            let body = resp.text().await.unwrap_or_default();
+            if body.is_empty() {
+                anyhow::bail!("the server does not serve POST /api/generate");
+            }
+            Err(MoldError::ModelNotFound(body).into())
+        }
+        _ => error_for_status_with_body(resp).await,
+    }
+}
+
+fn response_is_json(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"))
 }
 
 fn api_error_detail(body: &str) -> String {
@@ -2289,6 +2656,23 @@ impl std::error::Error for ModelNotFoundError {}
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    #[test]
+    fn transient_request_errors_include_wrapped_rate_limits_and_server_failures() {
+        for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
+            let error = anyhow::Error::new(ServerResponseError {
+                status,
+                body: "retry later".into(),
+            });
+            assert!(is_transient_request_error(&error), "status {status}");
+        }
+
+        let conflict = anyhow::Error::new(ServerResponseError {
+            status: StatusCode::CONFLICT,
+            body: "authority mismatch".into(),
+        });
+        assert!(!is_transient_request_error(&conflict));
+    }
 
     fn reference_session_request() -> ReferenceUploadSessionRequest {
         let request = serde_json::from_value(serde_json::json!({
@@ -2934,6 +3318,311 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn list_queue_carries_the_hold_and_batch_identity_a_retry_needs() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": "job-held",
+                    "model": "flux-dev:q8",
+                    "state": "held",
+                    "started_at_unix_ms": 1_711_305_600_000_u64,
+                    "position": 0,
+                    "held_reason": "dependency download failed",
+                    "error": "dependency download failed",
+                    "retryable": true,
+                    "replayed": true,
+                    "dispatch_attempts": 2,
+                    "batch_id": "batch-1",
+                    "client_batch_id": "client-1",
+                    "batch_index": 3
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let listing = client.list_queue_for_capacity(None).await.unwrap();
+        let row = &listing.entries[0];
+        assert_eq!(row.error.as_deref(), Some("dependency download failed"));
+        assert_eq!(row.retryable, Some(true));
+        assert_eq!(row.replayed, Some(true));
+        assert_eq!(row.dispatch_attempts, Some(2));
+        let retry = row.retry_request("instance-a").expect("batch identity");
+        assert_eq!(
+            retry,
+            crate::GenerationRetryRequest {
+                instance_id: "instance-a".into(),
+                batch_id: "batch-1".into(),
+                client_batch_id: "client-1".into(),
+                job_id: "job-held".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_row_with_no_batch_composes_no_retry_authority() {
+        // Half an authority is worse than none: the server rejects a
+        // mismatched body with a 409 the user cannot act on.
+        let row = crate::QueueJobEntryWire {
+            id: "solo".into(),
+            batch_id: Some("batch-1".into()),
+            ..Default::default()
+        };
+        assert!(row.retry_request("instance-a").is_none());
+        assert!(crate::QueueJobEntryWire::default()
+            .retry_request("instance-a")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn list_queue_all_walks_every_continuation_page() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "0.25.0",
+                "models_loaded": [],
+                "gpu_info": null,
+                "uptime_secs": 1,
+                "queue_capacity": 1
+            })))
+            .mount(&server)
+            .await;
+        let row = |id: &str| {
+            serde_json::json!({
+                "id": id,
+                "model": "flux-dev:q8",
+                "state": "held",
+                "started_at_unix_ms": 1_u64,
+                "position": 0
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/queue"))
+            .and(query_param("cursor", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [row("tail")],
+                "live_only_entries": [row("live")],
+                "page": { "limit": 1, "offset": 1, "returned": 1 }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [row("head")],
+                // Repeated on every explicit page, as the server does.
+                "live_only_entries": [row("live")],
+                "plan": { "plan_version": 1, "state_version": 1, "optimizer_state": "idle", "work_items": [] },
+                "page": { "limit": 1, "offset": 0, "returned": 1, "next_cursor": "page-2" }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        // One page is what a poller wants and is deliberately not the whole
+        // queue: it carries the durable head plus the live-only overlay, and
+        // the tail row is invisible to it.
+        let one_page = client.list_queue().await.unwrap();
+        assert_eq!(
+            one_page
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["head", "live"]
+        );
+
+        let all = client.list_queue_all().await.unwrap();
+        assert_eq!(
+            all.entries
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["head", "live", "tail"],
+            "the repeated live-only overlay must be listed once"
+        );
+        assert_eq!(
+            all.entries
+                .iter()
+                .map(|entry| entry.position)
+                .collect::<Vec<_>>(),
+            vec![0, 0, 0],
+            "the merged sequence is the authority for position; every row in this fixture is held, so none takes a place in line"
+        );
+        assert!(all.plan.is_some(), "the first page's plan is retained");
+        assert!(
+            all.page.is_none(),
+            "a finished walk must not offer a middle to resume from"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_job_reads_one_row_with_its_work_item() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue/job-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job": {
+                    "id": "job-1",
+                    "model": "flux-dev:q8",
+                    "state": "queued",
+                    "started_at_unix_ms": 1_711_305_600_000_u64,
+                    "position": 2
+                },
+                "work_item": {
+                    "work_id": "job-1",
+                    "parent_id": "job-1",
+                    "work_kind": "generation",
+                    "activity_phase": "denoise",
+                    "estimate_confidence": "high",
+                    "priority_class": "user",
+                    "queue_rank": 4,
+                    "bypass_count": 0,
+                    "blocked_reason": "insufficient_vram"
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue/missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "queue job missing not found"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let detail = client.queue_job("job-1").await.unwrap().expect("job");
+        assert_eq!(detail.job.id, "job-1");
+        assert_eq!(detail.job.position, 2);
+        assert_eq!(
+            detail
+                .work_item
+                .as_ref()
+                .and_then(|item| item.blocked_reason.clone()),
+            Some(crate::QueueBlockedReason::InsufficientVram)
+        );
+        // A job that left the queue is an answer, not an error.
+        assert!(client.queue_job("missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn queue_lifecycle_calls_report_the_server_s_own_numbers() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/queue"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"cancelled": 4})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/pause"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"paused": true})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/resume"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"paused": false})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/held/sweep"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"purged": 2, "remaining": 5, "media_deferred": 1}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches/sweep"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"purged": 3, "remaining": 6})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/queue/job-1"))
+            .and(body_json(serde_json::json!({"position": 0})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "job-1",
+                "model": "flux-dev:q8",
+                "state": "queued",
+                "started_at_unix_ms": 1_u64,
+                "position": 0
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": "client-1",
+                "instance_id": "instance-a",
+                "durable": true,
+                "children": []
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        assert_eq!(client.cancel_all_queue_jobs().await.unwrap(), 4);
+        assert!(client.pause_queue().await.unwrap());
+        assert!(!client.resume_queue().await.unwrap());
+        let held = client.sweep_held_queue().await.unwrap();
+        assert_eq!(
+            (held.purged, held.remaining, held.media_deferred),
+            (2, 5, 1)
+        );
+        let batches = client.sweep_settled_batches().await.unwrap();
+        assert_eq!((batches.purged, batches.remaining), (3, 6));
+        let moved = client.move_queue_job("job-1", 0).await.unwrap();
+        assert_eq!(moved.position, 0);
+        let cancelled = client.cancel_generation_batch("batch-1").await.unwrap();
+        assert_eq!(cancelled.id, "batch-1");
+    }
+
+    #[tokio::test]
+    async fn queue_lifecycle_errors_carry_the_server_s_own_sentence() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/queue/job-1"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "queue job job-1 is already running"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let err = client.move_queue_job("job-1", 0).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("409"), "{msg}");
+        assert!(msg.contains("already running"), "{msg}");
+    }
+
     #[test]
     fn qwen_edit_lora_fallback_uses_qwen_image_catalog_family() {
         assert_eq!(
@@ -3175,6 +3864,67 @@ mod tests {
         base
     }
 
+    #[tokio::test]
+    async fn a_replayed_direct_generation_names_its_batch_and_print() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": "6c2f3a7e-2d1b-4c58-8a0e-9f1d2b3c4d5e",
+                "instance_id": "server-1",
+                "durable": true,
+                "children": [{
+                    "index": 0,
+                    "job_id": "job-1",
+                    "state": "complete",
+                    "created_at_ms": 1,
+                    "updated_at_ms": 2,
+                    "result": { "filename": "mold-print.png" }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = MoldClient::new(&server.uri())
+            .generate(stream_request())
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("batch-1"), "{message}");
+        assert!(message.contains("mold-print.png"), "{message}");
+        assert!(!MoldClient::is_model_not_found(&error));
+    }
+
+    #[tokio::test]
+    async fn a_direct_404_with_a_body_is_a_model_not_found() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "model 'flux-schnell:q8' is not downloaded",
+                "code": crate::SSE_ERROR_CODE_MODEL_NOT_FOUND
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = MoldClient::new(&server.uri())
+            .generate(stream_request())
+            .await
+            .unwrap_err();
+        assert!(MoldClient::is_model_not_found(&error), "{error}");
+        assert!(error.to_string().contains("flux-schnell:q8"), "{error}");
+    }
+
     fn stream_request() -> GenerateRequest {
         serde_json::from_value(serde_json::json!({
             "prompt": "a lighthouse in a storm",
@@ -3269,8 +4019,7 @@ mod tests {
         let response = MoldClient::new(&base)
             .generate_stream(&stream_request(), tx)
             .await
-            .expect("the stream completes")
-            .expect("the server supports SSE");
+            .expect("the stream completes");
 
         assert_eq!(
             response.request_warnings,
@@ -3294,8 +4043,7 @@ mod tests {
         let response = MoldClient::new(&base)
             .generate_stream(&stream_request(), tx)
             .await
-            .expect("the stream completes")
-            .expect("the server supports SSE");
+            .expect("the stream completes");
 
         assert_eq!(
             response.request_warnings,
@@ -3360,52 +4108,23 @@ mod tests {
         );
     }
 
+    /// A lost stream now always promises retention, because an admitted job
+    /// is a journalled one by construction: `/api/generate/stream` admits
+    /// through the durable queue, so there is no "the host took it but will
+    /// not replay it" case left to guard against. The old per-job
+    /// `durable: false` probe went with the attached path that produced it.
     #[tokio::test]
-    async fn mid_stream_death_claims_no_retention_on_a_legacy_host() {
-        // A server that predates the durable queue: no `durable` field at all.
+    async fn mid_stream_death_promises_the_job_finishes_on_the_host() {
         let base = spawn_dying_stream_server(
             serde_json::json!({ "entries": [{
-                "id": "job-88",
-                "model": "z-image-turbo:q8",
-                "state": "queued",
-                "started_at_unix_ms": 0,
-                "position": 0
-            }] }),
-            "job-88",
-        )
-        .await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let err = MoldClient::new(&base)
-            .generate_stream(&stream_request(), tx)
-            .await
-            .expect_err("the stream dies mid-body");
-
-        let rendered = format!("{err:#}");
-        assert!(
-            !rendered.contains("retained"),
-            "a host without a durable queue must not promise retention: {rendered}"
-        );
-        assert_eq!(
-            crate::control::classify_generate_error(&err),
-            crate::control::GenerateServerAction::SurfaceError
-        );
-    }
-
-    #[tokio::test]
-    async fn mid_stream_death_claims_no_retention_for_a_job_the_host_did_not_journal() {
-        // A durable host still excludes some jobs at admission — no gallery
-        // target, reference-upload media, an oversized request — and reports
-        // `durable: false` for them. Host capability alone would over-promise.
-        let base = spawn_dying_stream_server(
-            serde_json::json!({ "entries": [{
-                "id": "job-99",
+                "id": "job-77",
                 "model": "z-image-turbo:q8",
                 "state": "queued",
                 "started_at_unix_ms": 0,
                 "position": 0,
-                "durable": false
+                "durable": true
             }] }),
-            "job-99",
+            "job-77",
         )
         .await;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3415,9 +4134,14 @@ mod tests {
             .expect_err("the stream dies mid-body");
 
         let rendered = format!("{err:#}");
-        assert!(
-            !rendered.contains("retained"),
-            "a job the host did not journal must not promise retention: {rendered}"
+        assert!(rendered.contains("retained"), "{rendered}");
+        assert!(rendered.contains("job-77"), "{rendered}");
+        // Still not a connect error: the CLI surfaces it rather than silently
+        // re-rendering the same job locally.
+        assert!(!MoldClient::is_connection_error(&err));
+        assert_eq!(
+            crate::control::classify_generate_error(&err),
+            crate::control::GenerateServerAction::SurfaceError
         );
     }
 
@@ -3530,41 +4254,6 @@ mod tests {
             "a definitive server failure must not promise retention: {rendered}"
         );
         assert!(rendered.contains("host ran out of memory"));
-    }
-
-    #[tokio::test]
-    async fn a_wedged_retention_probe_falls_back_to_the_original_error() {
-        // The shared reqwest client sets no request timeout, so a probe whose
-        // `/api/queue` connects and then never answers — a host wedged
-        // mid-restart, a proxy holding the socket — would strand the SSE error
-        // forever and CLI/TUI callers would never see it.
-        let probe = RetainedJobProbe {
-            job_id: "job-wedged".into(),
-            host: "http://wedged:7680".into(),
-            durable: tokio::spawn(async { std::future::pending::<bool>().await }),
-            timeout: std::time::Duration::from_millis(50),
-        };
-
-        let started = std::time::Instant::now();
-        let err = annotate_lost_stream(anyhow::anyhow!("stream died"), Some(probe)).await;
-
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "the join must be bounded, took {:?}",
-            started.elapsed()
-        );
-        let rendered = format!("{err:#}");
-        assert_eq!(rendered, "stream died", "expiry must promise nothing");
-        assert_eq!(
-            crate::control::classify_generate_error(&err),
-            crate::control::GenerateServerAction::SurfaceError
-        );
-    }
-
-    #[test]
-    fn the_retention_probe_timeout_is_bounded() {
-        assert!(RETENTION_PROBE_TIMEOUT > std::time::Duration::ZERO);
-        assert!(RETENTION_PROBE_TIMEOUT <= std::time::Duration::from_secs(10));
     }
 
     // ── Library organization + trash ────────────────────────────────────
@@ -4059,5 +4748,178 @@ mod tests {
         // …and it stays off the wire when the response is re-serialized.
         let wire = serde_json::to_value(&response).unwrap();
         assert!(wire.get("request_warnings").is_none(), "{wire}");
+    }
+
+    #[tokio::test]
+    async fn direct_generation_clients_reject_batches_before_network() {
+        let server = wiremock::MockServer::start().await;
+        let client = MoldClient::new(&server.uri());
+        let mut request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"two cats","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        request.batch_size = 2;
+
+        let raw = client.generate_raw(&request).await.unwrap_err().to_string();
+        let blocking = client
+            .generate(request.clone())
+            .await
+            .unwrap_err()
+            .to_string();
+        let (progress, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let streaming = client
+            .generate_stream(&request, progress)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        for error in [raw, blocking, streaming] {
+            assert!(error.contains("batch_size = 1"), "{error}");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_generation_surfaces_detached_durable_authority() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "batch-detached",
+                "client_batch_id": "operation-detached",
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "job-1",
+                    "state": "accepted",
+                    "created_at_ms": 10,
+                    "updated_at_ms": 11
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+
+        let error = MoldClient::new(&server.uri())
+            .generate_raw(&request)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("batch-detached"), "{error}");
+        assert!(error.contains("operation-detached"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn durable_generation_batch_methods_preserve_typed_ids_and_routes() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let admission = GenerationBatchAdmissionRequest {
+            client_batch_id: "00000000-0000-4000-8000-000000000001".into(),
+            requests: vec![request],
+        };
+        let status = serde_json::json!({
+            "id": "batch-1",
+            "client_batch_id": admission.client_batch_id,
+            "instance_id": "instance-1",
+            "durable": true,
+            "children": [{
+                "index": 1,
+                "job_id": "job-1",
+                "state": "accepted",
+                "created_at_ms": 1,
+                "updated_at_ms": 1
+            }]
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .and(body_json(&admission))
+            .respond_with(ResponseTemplate::new(202).set_body_json(&status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/generation-batches/by-client/{}",
+                admission.client_batch_id
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/job-1/retry"))
+            .and(body_json(serde_json::json!({
+                "instance_id": "instance-1",
+                "batch_id": "batch-1",
+                "client_batch_id": admission.client_batch_id,
+                "job_id": "job-1"
+            })))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let admitted = client.admit_generation_batch(&admission).await.unwrap();
+        assert_eq!(admitted.id, "batch-1");
+        assert_eq!(
+            client
+                .generation_batch_by_client_id(&admission.client_batch_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .children[0]
+                .job_id,
+            "job-1"
+        );
+        client
+            .retry_queue_job(&GenerationRetryRequest {
+                instance_id: "instance-1".into(),
+                batch_id: "batch-1".into(),
+                client_batch_id: admission.client_batch_id.clone(),
+                job_id: "job-1".into(),
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn generation_batch_missing_route_preserves_compatibility_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(ResponseTemplate::new(405).set_body_string("old host"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let error = MoldClient::new(&server.uri())
+            .admit_generation_batch(&GenerationBatchAdmissionRequest {
+                client_batch_id: "client-1".into(),
+                requests: vec![request],
+            })
+            .await
+            .unwrap_err();
+        assert!(super::is_missing_endpoint_error(&error));
+        assert!(error.to_string().contains("405 Method Not Allowed"));
     }
 }

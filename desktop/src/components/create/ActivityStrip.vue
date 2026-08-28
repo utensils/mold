@@ -143,6 +143,14 @@ function cancel(job: Job) {
     .catch((error) => toasts.push(error instanceof Error ? error.message : String(error), "error"));
 }
 
+function retry(job: Job) {
+  if (!job.retryable || job.retrying) return;
+  void generation
+    .retryHeld(job.clientId)
+    .then(() => toasts.push(`Retry queued on ${job.hostLabel ?? "this machine"}.`))
+    .catch((error) => toasts.push(error instanceof Error ? error.message : String(error), "error"));
+}
+
 // ── Sequences via the shared activity merge ──────────────────────────────────
 const hostLabel = (hostId: string) => hosts.all.find((h) => h.id === hostId)?.label ?? hostId;
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.unionInstalled);
@@ -191,6 +199,20 @@ const queueLabelByKey = computed(() => {
 });
 function queuedLabel(job: Job): string {
   return queueLabelByKey.value.get(`print:${job.clientId}`) ?? "Queued";
+}
+
+/** The presentation's own label for a settled print whose outcome is not
+ *  knowable here; `null` for a real failure. */
+const advisoryByKey = computed(
+  () =>
+    new Map(
+      generation.jobs
+        .filter((job) => job.outcomeUnknown)
+        .map((job) => [`print:${job.clientId}`, job.stage ?? "Outcome unknown"]),
+    ),
+);
+function advisoryLabel(vm: ActivityJobVM): string | null {
+  return advisoryByKey.value.get(vm.key) ?? null;
 }
 
 const sequenceVMs = computed<ActivityJobVM[]>(() =>
@@ -368,7 +390,18 @@ function deleteConfirmed() {
             queuedLabel(job)
           }}</span>
           · {{ job.prompt }}
+          <span v-if="job.holdError" class="ms-activity__seq-error"> · {{ job.holdError }}</span>
         </span>
+        <button
+          v-if="job.retryable"
+          type="button"
+          class="ms-activity__seq-action"
+          data-test="activity-held-retry"
+          :disabled="job.retrying"
+          @click.stop="retry(job)"
+        >
+          {{ job.retrying ? "Retrying…" : "Retry" }}
+        </button>
         <button
           type="button"
           class="ms-activity__cancel"
@@ -441,7 +474,11 @@ function deleteConfirmed() {
         @keydown.enter.prevent="selectPrintVm(vm)"
         @keydown.space.prevent="selectPrintVm(vm)"
       >
-        <span class="ms-activity__state data-mono text-stop">failed</span>
+        <span
+          class="ms-activity__state data-mono"
+          :class="advisoryLabel(vm) ? 'text-ink-2' : 'text-stop'"
+          >{{ advisoryLabel(vm) ?? "failed" }}</span
+        >
         <span class="ms-activity__seq-model" :title="vm.prompt">{{ vm.prompt }}</span>
         <div class="ms-activity__seq-spacer" />
         <span class="ms-activity__seq-error">Open Create for details</span>
@@ -449,8 +486,12 @@ function deleteConfirmed() {
           type="button"
           class="ms-activity__cancel"
           data-test="print-dismiss"
-          title="Hide this failure. Nothing is deleted."
-          :aria-label="`Dismiss failed print: ${vm.prompt}`"
+          :title="
+            advisoryLabel(vm)
+              ? 'Hide this row. Nothing is deleted.'
+              : 'Hide this failure. Nothing is deleted.'
+          "
+          :aria-label="`Dismiss ${advisoryLabel(vm) ? 'print' : 'failed print'}: ${vm.prompt}`"
           @click.stop="dismiss(vm)"
         >
           ✕

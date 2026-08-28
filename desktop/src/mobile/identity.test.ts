@@ -259,7 +259,6 @@ describe("mobileIdentityRouteRefusal", () => {
     carriesIdentity: true,
     hostLabel: "Render",
     hostAdvertisesIdentity: true,
-    legacyPlacement: false,
   };
 
   it("says nothing about a request that carries no identity photo", () => {
@@ -268,7 +267,6 @@ describe("mobileIdentityRouteRefusal", () => {
         ...base,
         carriesIdentity: false,
         hostAdvertisesIdentity: false,
-        legacyPlacement: true,
       }),
     ).toBeNull();
   });
@@ -280,13 +278,6 @@ describe("mobileIdentityRouteRefusal", () => {
   it("refuses the machine that would silently drop the face", () => {
     const refusal = mobileIdentityRouteRefusal({ ...base, hostAdvertisesIdentity: false });
     expect(refusal).toContain("Render");
-    expect(refusal).toContain("Nothing was queued.");
-  });
-
-  it("refuses a legacy machine whose placement preview is not authoritative", () => {
-    const refusal = mobileIdentityRouteRefusal({ ...base, legacyPlacement: true });
-    expect(refusal).toContain("Render");
-    expect(refusal).toContain("older");
     expect(refusal).toContain("Nothing was queued.");
   });
 });

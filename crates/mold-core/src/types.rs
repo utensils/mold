@@ -652,6 +652,74 @@ pub struct GenerationReferenceProvenance {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// The user crop a client applied to an IMAGE reference before digesting
+    /// and uploading it. The server already received the cropped bytes, so
+    /// this is provenance: it is validated as a non-degenerate rectangle
+    /// inside its source whose size is the reference's own, then retained
+    /// verbatim so Reuse settings can restore the crop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<GenerationReferenceCrop>,
+}
+
+/// A client-side crop rectangle in SOURCE pixels of the original photograph.
+///
+/// `width`/`height` are the cropped reference's own dimensions; `source_*`
+/// describe the uncropped photograph and `source_sha256` its digest, which is
+/// what lets a reattached original re-apply the same crop exactly. This is
+/// never a fit-to-canvas policy: the server normalizes every image reference
+/// onto its own 2048-short-edge canvas regardless.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationReferenceCrop {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub source_sha256: String,
+}
+
+impl GenerationReferenceCrop {
+    /// Check the rectangle against the reference that carries it: a
+    /// non-degenerate rect, inside the source, whose size equals the
+    /// reference's own `width`/`height` (a size mismatch is a pre-crop
+    /// projection whose bytes were never cropped), with a well-formed source
+    /// digest.
+    pub fn validate_for_image(
+        &self,
+        reference_width: u32,
+        reference_height: u32,
+    ) -> Result<(), &'static str> {
+        if self.width == 0 || self.height == 0 {
+            return Err("crop must be at least one pixel on each axis");
+        }
+        if self.source_width == 0 || self.source_height == 0 {
+            return Err("crop source dimensions must be positive");
+        }
+        let inside = self
+            .x
+            .checked_add(self.width)
+            .is_some_and(|right| right <= self.source_width)
+            && self
+                .y
+                .checked_add(self.height)
+                .is_some_and(|bottom| bottom <= self.source_height);
+        if !inside {
+            return Err("crop must lie inside its source image");
+        }
+        if self.width != reference_width || self.height != reference_height {
+            return Err("crop size must equal the cropped reference's own dimensions");
+        }
+        if self.source_sha256.len() != 64
+            || !self
+                .source_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("crop source_sha256 must contain exactly 64 hexadecimal characters");
+        }
+        Ok(())
+    }
 }
 
 /// Ordered heterogeneous reference input for MiniMax H3 Ref2VA.
@@ -763,6 +831,10 @@ pub struct GenerationReferenceMetadata {
     /// admission. Older metadata remains compatible when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared_shape: Option<crate::minimax_h3::GenerationReferencePreparedShape>,
+    /// The client-side crop an image reference carried (see
+    /// [`GenerationReferenceCrop`]); absent for every other reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<GenerationReferenceCrop>,
 }
 
 pub fn generation_reference_fingerprint(references: &[GenerationReferenceMetadata]) -> String {
@@ -911,6 +983,7 @@ impl GenerationReference {
                 channels: None,
                 sample_count: None,
                 prepared_shape,
+                crop: self.provenance().crop.clone(),
             },
             Self::Video {
                 mime_type,
@@ -945,6 +1018,7 @@ impl GenerationReference {
                 channels: None,
                 sample_count: None,
                 prepared_shape,
+                crop: None,
             },
             Self::Audio {
                 mime_type,
@@ -973,6 +1047,7 @@ impl GenerationReference {
                 channels: Some(*channels),
                 sample_count: *sample_count,
                 prepared_shape,
+                crop: None,
             },
         })
     }
@@ -1032,6 +1107,7 @@ impl GenerationReference {
                 channels: None,
                 sample_count: None,
                 prepared_shape,
+                crop: self.provenance().crop.clone(),
             },
             Self::Video {
                 mime_type,
@@ -1066,6 +1142,7 @@ impl GenerationReference {
                 channels: None,
                 sample_count: None,
                 prepared_shape,
+                crop: None,
             },
             Self::Audio {
                 mime_type,
@@ -1094,6 +1171,7 @@ impl GenerationReference {
                 channels: Some(*channels),
                 sample_count: *sample_count,
                 prepared_shape,
+                crop: None,
             },
         }
     }
@@ -1520,6 +1598,31 @@ pub struct GenerateRequest {
 }
 
 impl GenerateRequest {
+    /// Whether durable admission must extract request-owned media or media
+    /// provenance before persisting the JSON request. Ordered MiniMax H3
+    /// references count: their descriptors stay on the request while their
+    /// media is sealed beside every other source. Local HDR/LoRA authority
+    /// is classified separately.
+    pub fn has_durable_media_inputs(&self) -> bool {
+        self.references.is_some()
+            || self.source_image.is_some()
+            || self.source_image_name.is_some()
+            || self.id_image.is_some()
+            || self.id_image_name.is_some()
+            || self.id_images.is_some()
+            || self.id_image_names.is_some()
+            || self.edit_images.is_some()
+            || self.mask_image.is_some()
+            || self.control_image.is_some()
+            || self.audio_file.is_some()
+            || self.audio_file_path.is_some()
+            || self.source_video.is_some()
+            || self.source_video_path.is_some()
+            || self.extend_video.is_some()
+            || self.extend_video_path.is_some()
+            || self.keyframes.is_some()
+    }
+
     /// Returns the resolved output format, falling back to the default (`Png`)
     /// when the caller did not supply one.
     ///
@@ -2014,22 +2117,6 @@ pub struct GenerateResponse {
     /// Additive; empty on every response that carried no advisory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub request_warnings: Vec<String>,
-}
-
-/// Ordered response for a server-owned atomic batch submitted through
-/// `POST /api/generate` with `batch_size > 1`.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct BatchGenerateResponse {
-    pub batch_id: String,
-    pub outputs: Vec<BatchGenerateOutput>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct BatchGenerateOutput {
-    /// One-based stable position in the normalized parent.
-    pub batch_index: u32,
-    pub filename: String,
-    pub response: GenerateResponse,
 }
 
 /// LTX-2 still-image conditioning preprocessing as actually executed —
@@ -3340,7 +3427,7 @@ pub struct DiskUsage {
 ///   `#[serde(default)]` so older servers that omit them still parse, and
 ///   `skip_serializing_if` so re-serializing matches the server's contract
 ///   (queued rows carry no `gpu` key at all — never `"gpu": null`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueueJobEntryWire {
     pub id: String,
     pub model: String,
@@ -3373,6 +3460,67 @@ pub struct QueueJobEntryWire {
     /// Why a durable row is parked in the additive `held` state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_reason: Option<String>,
+    /// Durable preparation error for a held row — the same sentence as
+    /// [`Self::held_reason`] under the field name the batch child uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Whether `POST /api/queue/{id}/retry` may safely resume this held row.
+    /// A held row that answers `false` needs operator repair, not a retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// Whether the row was resumed from the journal rather than submitted by
+    /// a live client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    /// How many times a worker has claimed this row for execution. Diagnoses
+    /// a hold: a job that keeps taking the process down shows its count here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_attempts: Option<u32>,
+    /// Durable batch this row is a child of. Retry needs the whole authority
+    /// (instance + batch + client batch + job) and only the instance belongs
+    /// to the server, so these three are what make a bare job id retryable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// The client-minted idempotency id of [`Self::batch_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_batch_id: Option<String>,
+    /// One-based position of this row within its batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u32>,
+}
+
+impl QueueJobEntryWire {
+    /// The complete retry authority for this row, or `None` when the row is
+    /// not a durable batch child and therefore has no batch to retry against.
+    pub fn retry_request(&self, instance_id: &str) -> Option<GenerationRetryRequest> {
+        Some(GenerationRetryRequest {
+            instance_id: instance_id.to_string(),
+            batch_id: self.batch_id.clone()?,
+            client_batch_id: self.client_batch_id.clone()?,
+            job_id: self.id.clone(),
+        })
+    }
+}
+
+/// One queued job in full, as `GET /api/queue/{id}` answers it: the row plus
+/// the planner's own work item for it when the job has been placed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueueJobDetailWire {
+    pub job: QueueJobEntryWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item: Option<QueueWorkItem>,
+}
+
+/// Response of `POST /api/queue/pause` and `POST /api/queue/resume`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuePauseState {
+    pub paused: bool,
+}
+
+/// Response of `DELETE /api/queue` — how many queued jobs were cancelled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueCancelAllResult {
+    pub cancelled: usize,
 }
 
 /// Confidence attached to a learned scheduler ETA.
@@ -3446,6 +3594,14 @@ pub enum QueueBlockedReason {
     AggregateHostRamReserved,
     ExecutionPlanIncompatible,
     DependencyWait,
+    /// This job's own dependency preparation is running right now.
+    ///
+    /// Distinct from `DependencyWait`, which is every other reason a job is
+    /// not ready. A preparation that authenticates tens of gigabytes of
+    /// weights is minutes long on a spinning-disk model store, and reporting
+    /// it as a generic wait is what left an idle GPU looking idle for no
+    /// stated reason.
+    Preparing,
     WarmWait,
     QueuePaused,
     MaintenanceMode,
@@ -3472,6 +3628,7 @@ impl QueueBlockedReason {
             Self::AggregateHostRamReserved => "aggregate_host_ram_reserved",
             Self::ExecutionPlanIncompatible => "execution_plan_incompatible",
             Self::DependencyWait => "dependency_wait",
+            Self::Preparing => "preparing",
             Self::WarmWait => "warm_wait",
             Self::QueuePaused => "queue_paused",
             Self::MaintenanceMode => "maintenance_mode",
@@ -3480,6 +3637,36 @@ impl QueueBlockedReason {
             Self::NoIdleDevice => "no_idle_device",
             Self::LowerPriorityOpening => "lower_priority_opening",
             Self::Unknown(value) => value,
+        }
+    }
+
+    /// Parse the wire identifier. The one place the mapping lives, so
+    /// `Deserialize` and every caller holding a legacy `reason` string (which
+    /// is typed as a bare `String` on the wire) agree by construction.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "device_disabled" => Self::DeviceDisabled,
+            "device_draining" => Self::DeviceDraining,
+            "device_startup_excluded" => Self::DeviceStartupExcluded,
+            "device_unavailable" => Self::DeviceUnavailable,
+            "device_degraded" => Self::DeviceDegraded,
+            "hard_pin_unavailable" => Self::HardPinUnavailable,
+            "backend_unsupported" => Self::BackendUnsupported,
+            "model_not_installed" => Self::ModelNotInstalled,
+            "insufficient_vram" => Self::InsufficientVram,
+            "insufficient_host_ram" => Self::InsufficientHostRam,
+            "aggregate_host_ram_reserved" => Self::AggregateHostRamReserved,
+            "execution_plan_incompatible" => Self::ExecutionPlanIncompatible,
+            "dependency_wait" => Self::DependencyWait,
+            "preparing" => Self::Preparing,
+            "warm_wait" => Self::WarmWait,
+            "queue_paused" => Self::QueuePaused,
+            "maintenance_mode" => Self::MaintenanceMode,
+            "cancelling" => Self::Cancelling,
+            "no_schedulable_device" => Self::NoSchedulableDevice,
+            "no_idle_device" => Self::NoIdleDevice,
+            "lower_priority_opening" => Self::LowerPriorityOpening,
+            other => Self::Unknown(other.to_string()),
         }
     }
 }
@@ -3498,30 +3685,7 @@ impl<'de> Deserialize<'de> for QueueBlockedReason {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = String::deserialize(deserializer)?;
-        Ok(match value.as_str() {
-            "device_disabled" => Self::DeviceDisabled,
-            "device_draining" => Self::DeviceDraining,
-            "device_startup_excluded" => Self::DeviceStartupExcluded,
-            "device_unavailable" => Self::DeviceUnavailable,
-            "device_degraded" => Self::DeviceDegraded,
-            "hard_pin_unavailable" => Self::HardPinUnavailable,
-            "backend_unsupported" => Self::BackendUnsupported,
-            "model_not_installed" => Self::ModelNotInstalled,
-            "insufficient_vram" => Self::InsufficientVram,
-            "insufficient_host_ram" => Self::InsufficientHostRam,
-            "aggregate_host_ram_reserved" => Self::AggregateHostRamReserved,
-            "execution_plan_incompatible" => Self::ExecutionPlanIncompatible,
-            "dependency_wait" => Self::DependencyWait,
-            "warm_wait" => Self::WarmWait,
-            "queue_paused" => Self::QueuePaused,
-            "maintenance_mode" => Self::MaintenanceMode,
-            "cancelling" => Self::Cancelling,
-            "no_schedulable_device" => Self::NoSchedulableDevice,
-            "no_idle_device" => Self::NoIdleDevice,
-            "lower_priority_opening" => Self::LowerPriorityOpening,
-            _ => Self::Unknown(value),
-        })
+        Ok(Self::parse(&String::deserialize(deserializer)?))
     }
 }
 
@@ -3583,6 +3747,28 @@ impl<'de> Deserialize<'de> for QueueActivityPhase {
             _ => Self::Unknown(value),
         })
     }
+}
+
+/// What a running dependency preparation is currently working through.
+///
+/// Additive and best-effort: only preparations that report component progress
+/// (today, MiniMax H3's artifact authentication pass) fill it in, and an older
+/// server omits it entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueuePreparationProgress {
+    /// Human-readable component being prepared, supplied by the preparer.
+    pub component: String,
+    pub bytes_done: u64,
+    /// `0` means the pass reports no size — render the component name alone,
+    /// never a percentage.
+    pub bytes_total: u64,
+    /// How long THIS phase has been running, as distinct from
+    /// `QueueWorkItem.preparation_elapsed_ms`, which covers the whole
+    /// preparation. A minutes-long preparation is a sequence of
+    /// authentications, opens, and decodes; the total says it was slow and
+    /// this says which part is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -3685,6 +3871,13 @@ pub struct QueueWorkItem {
     pub assignment_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warm_wait_deadline_unix_ms: Option<u64>,
+    /// How long this job's dependency preparation has been running. Present
+    /// only while `blocked_reason` is `preparing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_elapsed_ms: Option<u64>,
+    /// What that preparation is working through, when it reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_progress: Option<QueuePreparationProgress>,
     #[serde(default)]
     #[schema(value_type = String)]
     pub activity_phase: QueueActivityPhase,
@@ -4147,7 +4340,7 @@ pub struct AdvancedPlacement {
 
 /// Progress event for SSE streaming. Mirrors `mold_inference::ProgressEvent`
 /// but uses `u64` milliseconds instead of `Duration` for JSON serialization.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseProgressEvent {
     /// The job is waiting for a concrete model dependency to become locally
@@ -4338,14 +4531,6 @@ pub struct SseCompleteEvent {
     pub metadata: Option<Box<OutputMetadata>>,
 }
 
-/// One atomic server-owned parent completion. Emitted as `batch_complete`
-/// only after every ordered output and metadata row is durably published.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct SseBatchCompleteEvent {
-    pub batch_id: String,
-    pub outputs: Vec<SseCompleteEvent>,
-}
-
 /// SSE event emitted when an upscale request completes.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseUpscaleCompleteEvent {
@@ -4378,6 +4563,20 @@ pub struct SseErrorEvent {
 
 /// `SseErrorEvent.code` for a job the host retained across a restart.
 pub const SSE_ERROR_CODE_SERVER_RESTARTING: &str = "server_restarting";
+/// The host admitted the job and then could not resolve its model.
+///
+/// Durable admission accepts before it resolves a checkpoint, so "this model
+/// is not here" arrives as a terminal frame rather than the `404` the attached
+/// path used to answer with. The code is carried so a client's
+/// missing-model classifier still fires and auto-pull still works.
+pub const SSE_ERROR_CODE_MODEL_NOT_FOUND: &str = "MODEL_NOT_FOUND";
+/// As [`SSE_ERROR_CODE_MODEL_NOT_FOUND`], for a model no manifest knows.
+pub const SSE_ERROR_CODE_UNKNOWN_MODEL: &str = "UNKNOWN_MODEL";
+/// A durable direct observer disconnected after admission. The job remains
+/// authoritative in the queue and clients reconcile it by the queued ID.
+pub const SSE_ERROR_CODE_DURABLE_OBSERVER_DETACHED: &str = "durable_observer_detached";
+/// A queued job was cancelled before its direct observer reached a worker.
+pub const SSE_ERROR_CODE_QUEUED_CANCELLED: &str = "queued_cancelled";
 
 impl SseErrorEvent {
     /// An ordinary failure: the job is over and the client should say so.
@@ -4389,12 +4588,34 @@ impl SseErrorEvent {
         }
     }
 
+    /// An ordinary failure that carries the server's own error code, so a
+    /// client can branch on it exactly as it branches on an HTTP body's.
+    pub fn failed_with_code(message: impl Into<String>, code: Option<String>) -> Self {
+        Self {
+            message: message.into(),
+            retained: false,
+            code,
+        }
+    }
+
     /// The host is restarting and will finish this job after it comes back.
     pub fn retained(message: impl Into<String>) -> Self {
+        Self::retained_with_code(message, SSE_ERROR_CODE_SERVER_RESTARTING)
+    }
+
+    pub fn retained_with_code(message: impl Into<String>, code: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             retained: true,
-            code: Some(SSE_ERROR_CODE_SERVER_RESTARTING.to_string()),
+            code: Some(code.into()),
+        }
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retained: false,
+            code: Some(SSE_ERROR_CODE_QUEUED_CANCELLED.to_string()),
         }
     }
 }
@@ -4972,6 +5193,7 @@ mod tests {
             metadata: None,
             durable: None,
             held_reason: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""state":"queued""#), "got: {json}");
@@ -5970,6 +6192,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("long.wav".to_string()),
                 sha256: Some("11".repeat(32)),
+                crop: None,
             },
             mime_type: "audio/wav".to_string(),
             duration_ms: 15_000,
@@ -7171,49 +7394,6 @@ mod tests {
     }
 
     #[test]
-    fn atomic_batch_complete_round_trips_as_one_ordered_parent() {
-        let output = |index| SseCompleteEvent {
-            request_warnings: Vec::new(),
-            audio_sample_rate: None,
-            audio_channels: None,
-            audio_duration_ms: None,
-            audio_thumbnail: None,
-            image: String::new(),
-            format: OutputFormat::Png,
-            width: 64,
-            height: 64,
-            original_image: None,
-            original_width: None,
-            original_height: None,
-            seed_used: index,
-            generation_time_ms: 1,
-            model: "flux".into(),
-            video_frames: None,
-            video_fps: None,
-            video_thumbnail: None,
-            video_gif_preview: None,
-            video_has_audio: false,
-            video_duration_ms: None,
-            video_audio_sample_rate: None,
-            video_audio_channels: None,
-            gpu: Some(index as usize),
-            filename: Some(format!("{index}.png")),
-            original_filename: None,
-            metadata: None,
-        };
-        let event = SseBatchCompleteEvent {
-            batch_id: "parent".into(),
-            outputs: vec![output(1), output(2)],
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: SseBatchCompleteEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.batch_id, "parent");
-        assert_eq!(decoded.outputs.len(), 2);
-        assert_eq!(decoded.outputs[0].seed_used, 1);
-        assert_eq!(decoded.outputs[1].seed_used, 2);
-    }
-
-    #[test]
     fn generate_request_control_scale_defaults_to_1() {
         let json = r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4}"#;
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
@@ -7512,13 +7692,19 @@ mod tests {
                 job_id: "job-1".into(),
                 state: super::GenerationBatchChildState::Complete,
                 error: None,
+                error_code: None,
+                retryable: None,
                 created_at_ms: 10,
                 updated_at_ms: 20,
+                revision: 2,
                 completed_at_ms: Some(20),
                 terminal_error: None,
                 result: Some(super::GenerationBatchResult {
                     filename: Some("finished.png".into()),
                     original_filename: Some("original.png".into()),
+                    seed: Some(4242),
+                    generation_time_ms: Some(7_500),
+                    gpu: Some(1),
                 }),
             }],
         };
@@ -7526,10 +7712,124 @@ mod tests {
         assert_eq!(json["instance_id"], "instance-1");
         assert_eq!(json["durable"], true);
         assert_eq!(json["children"][0]["result"]["filename"], "finished.png");
+        assert_eq!(json["children"][0]["result"]["seed"], 4242);
+        assert_eq!(json["children"][0]["result"]["generation_time_ms"], 7_500);
+        assert_eq!(json["children"][0]["result"]["gpu"], 1);
         assert_eq!(
             serde_json::from_value::<super::GenerationBatchStatus>(json).unwrap(),
             enriched
         );
+        // A child settled before the terminal facts existed still reads back,
+        // reporting absence rather than a fabricated zero.
+        let legacy: super::GenerationBatchResult =
+            serde_json::from_str(r#"{"filename":"finished.png"}"#).unwrap();
+        assert_eq!(legacy.seed, None);
+        assert_eq!(legacy.generation_time_ms, None);
+        assert_eq!(legacy.gpu, None);
+    }
+
+    #[test]
+    fn generation_batch_authority_rejects_identity_changes() {
+        let status = super::GenerationBatchStatus {
+            id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            instance_id: "instance-1".into(),
+            durable: true,
+            children: Vec::new(),
+        };
+        let authority =
+            super::GenerationBatchAuthority::from_admission(&status, "client-1").unwrap();
+        authority.validate_status(&status).unwrap();
+
+        for (field, changed) in [
+            (
+                "instance",
+                super::GenerationBatchStatus {
+                    instance_id: "instance-2".into(),
+                    ..status.clone()
+                },
+            ),
+            (
+                "batch",
+                super::GenerationBatchStatus {
+                    id: "batch-2".into(),
+                    ..status.clone()
+                },
+            ),
+            (
+                "client",
+                super::GenerationBatchStatus {
+                    client_batch_id: "client-2".into(),
+                    ..status.clone()
+                },
+            ),
+        ] {
+            assert!(authority
+                .validate_status(&changed)
+                .unwrap_err()
+                .contains(field));
+        }
+    }
+
+    #[test]
+    fn generation_batch_bulk_authority_rejects_foreign_duplicate_and_omitted_rows() {
+        let status = |batch: &str, client: &str| super::GenerationBatchStatus {
+            id: batch.into(),
+            client_batch_id: client.into(),
+            instance_id: "instance-1".into(),
+            durable: true,
+            children: Vec::new(),
+        };
+        let first = status("batch-1", "client-1");
+        let second = status("batch-2", "client-2");
+        let authorities = [
+            super::GenerationBatchAuthority::from_admission(&first, "client-1").unwrap(),
+            super::GenerationBatchAuthority::from_admission(&second, "client-2").unwrap(),
+        ];
+        let response = |batches, missing| super::GenerationBatchStatusResponse {
+            instance_id: "instance-1".into(),
+            batches,
+            missing: super::GenerationBatchMissing {
+                client_batch_ids: missing,
+                batch_ids: Vec::new(),
+            },
+        };
+        super::validate_generation_batch_status_response(
+            &response(vec![first.clone(), second.clone()], Vec::new()),
+            &authorities,
+        )
+        .unwrap();
+        assert!(super::validate_generation_batch_status_response(
+            &response(vec![first.clone(), first.clone()], Vec::new()),
+            &authorities,
+        )
+        .unwrap_err()
+        .contains("duplicated"));
+        assert!(super::validate_generation_batch_status_response(
+            &response(vec![first.clone()], Vec::new()),
+            &authorities,
+        )
+        .unwrap_err()
+        .contains("omitted"));
+        assert!(super::validate_generation_batch_status_response(
+            &response(vec![first, status("foreign", "foreign")], Vec::new()),
+            &authorities,
+        )
+        .unwrap_err()
+        .contains("foreign"));
+        assert!(super::validate_generation_batch_status_response(
+            &super::GenerationBatchStatusResponse {
+                instance_id: "instance-1".into(),
+                batches: vec![second],
+                missing: super::GenerationBatchMissing {
+                    client_batch_ids: Vec::new(),
+                    batch_ids: vec!["foreign-batch".into()],
+                },
+            },
+            &authorities,
+        )
+        .unwrap_err()
+        .contains("foreign batch"));
     }
 
     // ── UpscaleRequest / UpscaleResponse tests ────────────────────────────
@@ -8099,6 +8399,7 @@ pub struct GenerationBatchAdmissionRequest {
 #[serde(rename_all = "snake_case")]
 pub enum GenerationBatchChildState {
     Accepted,
+    Cancelling,
     Running,
     Complete,
     Failed,
@@ -8113,12 +8414,39 @@ pub struct GenerationBatchChild {
     pub state: GenerationBatchChildState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Typed cause of a `held` child — the preparation refusal's own code
+    /// (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …) beside its sentence, so a
+    /// client can offer the pull-and-resume instead of matching prose.
+    /// Absent for a hold with no typed cause and for every other state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// True only when an explicitly held durable child may be returned to the
+    /// queue through the retry endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
     /// Unix-epoch milliseconds when the durable child was admitted.
     #[serde(default)]
     pub created_at_ms: i64,
     /// Unix-epoch milliseconds of the latest authoritative state transition.
     #[serde(default)]
     pub updated_at_ms: i64,
+    /// Monotonic per-child version, incremented by every authoritative state
+    /// transition and by nothing else.
+    ///
+    /// This is the ordering authority clients compare to decide whether an
+    /// incoming snapshot supersedes the one they hold. `updated_at_ms` cannot
+    /// serve that role: several transitions commit inside one millisecond
+    /// routinely, and `POST /api/queue/{id}/retry` moves a child BACKWARD
+    /// through the client's forward-phase ordering (held -> accepted), so a
+    /// same-millisecond collision decides whether the retry is visible at all.
+    ///
+    /// Additive: a server that predates it sends nothing and every client
+    /// deserializes `0`, which reads as "no revision authority" and falls back
+    /// to the timestamp comparison. A client MUST NOT treat `0` as a real
+    /// revision — rows created before migration v29 also sit at `0` until
+    /// their next transition.
+    #[serde(default)]
+    pub revision: u64,
     /// Unix-epoch milliseconds when the child reached a terminal state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at_ms: Option<i64>,
@@ -8132,12 +8460,29 @@ pub struct GenerationBatchChild {
     pub result: Option<GenerationBatchResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+/// What a completed child produced, recorded once at settlement.
+///
+/// The terminal facts beside the filenames are the ones a caller cannot
+/// recover from the gallery alone at the moment it needs them — the seed it
+/// must advance from, how long the render took, and which accelerator ran it.
+/// They are additive: a child settled before they existed, and the
+/// committed-archive replay path (which knows only the filenames), leave them
+/// absent rather than reporting a fabricated zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, Default)]
 pub struct GenerationBatchResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_filename: Option<String>,
+    /// The seed the render actually used, including a server-chosen one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_time_ms: Option<u64>,
+    /// Index of the accelerator that ran it, the same ordinal
+    /// [`GenerateResponse::gpu`] and the SSE complete event report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -8173,6 +8518,168 @@ pub struct GenerationBatchStatusResponse {
     pub instance_id: String,
     pub batches: Vec<GenerationBatchStatus>,
     pub missing: GenerationBatchMissing,
+}
+
+/// Complete authority required to retry one held durable generation child.
+/// The route job id is repeated here so the server can reject a mismatched
+/// path/body pair before entering the transactional lifecycle mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationRetryRequest {
+    pub instance_id: String,
+    pub batch_id: String,
+    pub client_batch_id: String,
+    pub job_id: String,
+}
+
+impl GenerationRetryRequest {
+    pub fn from_authority(authority: &GenerationBatchAuthority, job_id: impl Into<String>) -> Self {
+        Self {
+            instance_id: authority.instance_id.clone(),
+            batch_id: authority.batch_id.clone(),
+            client_batch_id: authority.client_batch_id.clone(),
+            job_id: job_id.into(),
+        }
+    }
+}
+
+/// Immutable identity captured from canonical generation admission. Rust
+/// clients validate every later snapshot against this fence before merging
+/// lifecycle state or acting on a returned job id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationBatchAuthority {
+    pub instance_id: String,
+    pub batch_id: String,
+    pub client_batch_id: String,
+}
+
+impl GenerationBatchAuthority {
+    pub fn from_admission(
+        status: &GenerationBatchStatus,
+        expected_client_batch_id: &str,
+    ) -> Result<Self, String> {
+        if !status.durable || status.instance_id.is_empty() || status.id.is_empty() {
+            return Err("generation batch admission did not return durable identity".to_string());
+        }
+        if status.client_batch_id != expected_client_batch_id {
+            return Err(format!(
+                "generation batch admission returned client id {}, expected {expected_client_batch_id}",
+                status.client_batch_id
+            ));
+        }
+        Ok(Self {
+            instance_id: status.instance_id.clone(),
+            batch_id: status.id.clone(),
+            client_batch_id: status.client_batch_id.clone(),
+        })
+    }
+
+    pub fn validate_status(&self, status: &GenerationBatchStatus) -> Result<(), String> {
+        if status.instance_id != self.instance_id {
+            return Err(format!(
+                "generation batch instance changed from {} to {}",
+                self.instance_id, status.instance_id
+            ));
+        }
+        if status.id != self.batch_id {
+            return Err(format!(
+                "generation batch id changed from {} to {}",
+                self.batch_id, status.id
+            ));
+        }
+        if status.client_batch_id != self.client_batch_id {
+            return Err(format!(
+                "generation batch client id changed from {} to {}",
+                self.client_batch_id, status.client_batch_id
+            ));
+        }
+        if !status.durable {
+            return Err("generation batch lost its durable authority".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Validate one bulk lifecycle snapshot against the complete accepted set.
+/// Each authority must appear exactly once, either as a batch or as an
+/// explicit missing client or batch id; foreign and duplicate identities are
+/// rejected.
+pub fn validate_generation_batch_status_response(
+    response: &GenerationBatchStatusResponse,
+    authorities: &[GenerationBatchAuthority],
+) -> Result<(), String> {
+    if authorities.is_empty() {
+        return Err("generation batch authority set is empty".to_string());
+    }
+    if authorities
+        .iter()
+        .any(|authority| authority.instance_id != response.instance_id)
+    {
+        return Err(format!(
+            "generation batch reconciliation returned unexpected instance {}",
+            response.instance_id
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for batch in &response.batches {
+        let authority = authorities
+            .iter()
+            .find(|authority| authority.client_batch_id == batch.client_batch_id)
+            .ok_or_else(|| {
+                format!(
+                    "generation batch reconciliation returned foreign client id {}",
+                    batch.client_batch_id
+                )
+            })?;
+        authority.validate_status(batch)?;
+        if !seen.insert(batch.client_batch_id.as_str()) {
+            return Err(format!(
+                "generation batch reconciliation duplicated client id {}",
+                batch.client_batch_id
+            ));
+        }
+    }
+    for client_batch_id in &response.missing.client_batch_ids {
+        if !authorities
+            .iter()
+            .any(|authority| authority.client_batch_id == *client_batch_id)
+        {
+            return Err(format!(
+                "generation batch reconciliation marked foreign client id {client_batch_id} missing"
+            ));
+        }
+        if !seen.insert(client_batch_id.as_str()) {
+            return Err(format!(
+                "generation batch reconciliation duplicated client id {client_batch_id}"
+            ));
+        }
+    }
+    for batch_id in &response.missing.batch_ids {
+        let authority = authorities
+            .iter()
+            .find(|authority| authority.batch_id == *batch_id)
+            .ok_or_else(|| {
+                format!(
+                    "generation batch reconciliation marked foreign batch id {batch_id} missing"
+                )
+            })?;
+        if !seen.insert(authority.client_batch_id.as_str()) {
+            return Err(format!(
+                "generation batch reconciliation duplicated batch identity {batch_id}"
+            ));
+        }
+    }
+    if seen.len() != authorities.len() {
+        let omitted = authorities
+            .iter()
+            .filter(|authority| !seen.contains(authority.client_batch_id.as_str()))
+            .map(|authority| authority.client_batch_id.as_str())
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "generation batch reconciliation omitted client ids: {}",
+            omitted.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// Body of `POST /api/gallery/collections`.
@@ -8219,6 +8726,30 @@ pub struct TrashSweepResult {
     /// Trashed prints purged because they exceeded retention.
     pub purged: u64,
     /// Trashed prints still waiting for their purge date.
+    pub remaining: u64,
+}
+
+/// Result of `POST /api/queue/held/sweep` (durable held-row retention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct HeldSweepResult {
+    /// Held rows purged because they exceeded `queue.held_retention_days`.
+    pub purged: u64,
+    /// Held rows still inside their retention window.
+    pub remaining: u64,
+    /// Purged rows whose encrypted media could not be collected in this pass.
+    /// Their obligation is already `gc_pending`, so startup reconciliation
+    /// still owns them — reported rather than hidden.
+    #[serde(default)]
+    pub media_deferred: u64,
+}
+
+/// Result of `POST /api/generation-batches/sweep` (settled-batch retention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SettledBatchSweepResult {
+    /// Fully settled batches purged because their newest child settlement
+    /// exceeded `queue.held_retention_days`.
+    pub purged: u64,
+    /// Fully settled batches still inside their retention window.
     pub remaining: u64,
 }
 
@@ -8327,7 +8858,6 @@ pub struct DurableMediaCapabilities {
     pub encrypted_at_rest: bool,
     pub generate_request_media: bool,
     pub identity: bool,
-    pub h3_references: bool,
     pub private_h3: bool,
 }
 
@@ -8341,8 +8871,21 @@ impl DurableMediaCapabilities {
             encrypted_at_rest: true,
             generate_request_media: true,
             identity: true,
-            h3_references: false,
             private_h3: false,
+        }
+    }
+
+    /// Queue-media V2 can add authenticated, owner/job/request-bound replay
+    /// for private H3 admission when that adapter is compiled into the serving
+    /// binary. Ordered H3 references ride the same encrypted media set as
+    /// every other request media and need no separate bit.
+    pub const fn v2(private_h3: bool) -> Self {
+        Self {
+            protocol_version: 2,
+            encrypted_at_rest: true,
+            generate_request_media: true,
+            identity: true,
+            private_h3,
         }
     }
 }
@@ -8370,23 +8913,12 @@ pub struct QueueCapabilities {
     /// stream died — on this host that job is still going to run.
     #[serde(default)]
     pub durable_queue: bool,
-    /// Server accepts one atomic batch request instead of client siblings.
-    #[serde(default)]
-    pub server_batch: bool,
-    /// Maximum number of ordered outputs accepted by one live atomic
-    /// `POST /api/generate` or `/api/generate/stream` parent. Absent on older
-    /// servers and whenever live server batches are unavailable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_batch_max_outputs: Option<u32>,
-    /// Server accepts one idempotent heterogeneous prepared-batch admission.
-    #[serde(default)]
-    pub heterogeneous_batch: bool,
+    /// How many singleton children one `POST /api/generation-batches`
+    /// operation accepts. Present exactly when this host generates at all —
+    /// there is one admission path, so its absence means the host refuses
+    /// generation rather than that it offers an older protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heterogeneous_batch_max_outputs: Option<u32>,
-    /// Enriched durable child outcomes plus by-client and bulk
-    /// reconciliation routes are available.
-    #[serde(default)]
-    pub durable_batch_outcomes: bool,
 }
 
 /// Authenticated, stable-URL reference-media ingress advertised by current
@@ -8394,12 +8926,9 @@ pub struct QueueCapabilities {
 /// named headers, never in URLs, logs, or durable request metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReferenceUploadCapabilities {
+    /// The request-bound upload protocol is offered exactly when API-key auth
+    /// is enabled; a host without it accepts validated inline references.
     pub available: bool,
-    /// Positive evidence that this host has API-key auth disabled and accepts
-    /// validated inline references. Absent/false remains fail-closed for
-    /// clients holding a key and older capability snapshots.
-    #[serde(default)]
-    pub authless_inline: bool,
     pub protocol_version: u32,
     pub requires_api_key: bool,
     pub session_path: String,
@@ -8408,6 +8937,10 @@ pub struct ReferenceUploadCapabilities {
     pub upload_handle_header: String,
     pub max_file_bytes: u64,
     pub max_session_bytes: u64,
+    /// Open sessions one API-key identity may hold at once. A durable batch
+    /// takes one lease per reference-bearing sibling BEFORE it POSTs, so a
+    /// client chunks such batches to this many siblings.
+    pub max_active_sessions: u32,
     pub session_ttl_ms: u64,
 }
 
@@ -8838,6 +9371,68 @@ pub struct ServerCapabilities {
     pub licenses: bool,
 }
 
+/// Why a host cannot admit a particular set of requests.
+///
+/// A refusal names the request trait the host does not carry, because that is
+/// the only thing a caller can act on. Host-level absence is
+/// [`Self::GenerationUnavailable`]: there is ONE admission path, so a host
+/// that does not advertise it does not generate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalRefusal {
+    /// No requests were supplied.
+    Empty,
+    /// This host advertises no generation admission at all.
+    GenerationUnavailable,
+    /// The host advertises a zero-output limit.
+    ZeroOutputLimit,
+}
+
+impl std::fmt::Display for CanonicalRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(formatter, "no requests were supplied"),
+            Self::GenerationUnavailable => {
+                write!(formatter, "this host does not admit generation")
+            }
+            Self::ZeroOutputLimit => write!(formatter, "this host admits zero outputs per batch"),
+        }
+    }
+}
+
+impl std::error::Error for CanonicalRefusal {}
+
+impl ServerCapabilities {
+    /// Exact shared Rust-client gate for canonical durable Batch N admission.
+    /// Returns the host's per-operation child limit, or the named reason the
+    /// requests are not representable. Gates on the MACHINE alone — the
+    /// durable queue — exactly as `studio/lib/generationSubmissionPolicy.ts`
+    /// does; the server's typed refusal is the authority for the request.
+    pub fn canonical_generation_batch_limit(
+        &self,
+        requests: &[GenerateRequest],
+    ) -> Result<usize, CanonicalRefusal> {
+        if requests.is_empty() {
+            return Err(CanonicalRefusal::Empty);
+        }
+        let limit = self
+            .queue
+            .heterogeneous_batch_max_outputs
+            .and_then(|limit| usize::try_from(limit).ok())
+            .ok_or(CanonicalRefusal::GenerationUnavailable)?;
+        if limit == 0 {
+            return Err(CanonicalRefusal::ZeroOutputLimit);
+        }
+        // Deliberately blind to the request: the durable protocol carries
+        // media, LoRAs, identity photos, and H3, and the server's own typed
+        // admission refusal is the single authority for anything it cannot
+        // take. A client-side per-trait fence could only ever refuse work the
+        // host would have accepted, and diverge from web/desktop/iPhone,
+        // which gate on the machine alone.
+        let _ = requests;
+        Ok(limit)
+    }
+}
+
 /// One third-party model license and this server's acceptance state for it.
 ///
 /// The response element of `GET /api/licenses`. Acceptance is per Mold data
@@ -9020,7 +9615,6 @@ mod device_types_tests {
         assert!(!caps.dispatch.observes_v2_decisions);
         assert!(caps.model_access.restrictions.is_empty());
         assert!(!caps.reference_uploads.available);
-        assert!(!caps.reference_uploads.authless_inline);
         assert_eq!(caps.reference_uploads.protocol_version, 0);
     }
 }
@@ -10633,10 +11227,23 @@ mod queue_plan_wire_tests {
                 "encrypted_at_rest": true,
                 "generate_request_media": true,
                 "identity": true,
-                "h3_references": false,
                 "private_h3": false,
             })
         );
+
+        for private_h3 in [false, true] {
+            assert_eq!(
+                serde_json::to_value(DurableMediaCapabilities::v2(private_h3)).unwrap(),
+                serde_json::json!({
+                    "protocol_version": 2,
+                    "encrypted_at_rest": true,
+                    "generate_request_media": true,
+                    "identity": true,
+                    "private_h3": private_h3,
+                }),
+                "protocol v2 must advertise private H3 exactly as supplied by the build"
+            );
+        }
 
         let legacy_server: ServerCapabilities = serde_json::from_value(serde_json::json!({
             "gallery": {"can_delete": true},
@@ -10687,5 +11294,157 @@ mod queue_plan_wire_tests {
                 .contains_key("job_id"),
             "an unstamped print must not gain a null job id"
         );
+    }
+}
+
+#[cfg(test)]
+mod reference_crop_tests {
+    use super::*;
+
+    fn crop() -> GenerationReferenceCrop {
+        GenerationReferenceCrop {
+            x: 420,
+            y: 0,
+            width: 1080,
+            height: 1080,
+            source_width: 1920,
+            source_height: 1080,
+            source_sha256: "ab".repeat(32),
+        }
+    }
+
+    fn image(
+        width: u32,
+        height: u32,
+        crop: Option<GenerationReferenceCrop>,
+    ) -> GenerationReference {
+        GenerationReference::Image {
+            media: GenerationReferenceAuthority::Inline {
+                data: b"cropped-bytes".to_vec(),
+            },
+            provenance: GenerationReferenceProvenance {
+                name: Some("subject.png".to_string()),
+                sha256: None,
+                crop,
+            },
+            mime_type: "image/png".to_string(),
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn crop_validates_only_a_non_degenerate_rect_inside_its_source_that_matches_the_bytes() {
+        crop().validate_for_image(1080, 1080).unwrap();
+
+        let degenerate = GenerationReferenceCrop { width: 0, ..crop() };
+        assert!(degenerate.validate_for_image(0, 1080).is_err());
+
+        let outside = GenerationReferenceCrop { x: 900, ..crop() };
+        assert!(outside.validate_for_image(1080, 1080).is_err());
+
+        let overflow = GenerationReferenceCrop {
+            x: u32::MAX,
+            width: 2,
+            ..crop()
+        };
+        assert!(overflow.validate_for_image(2, 1080).is_err());
+
+        // The crop describes the bytes the server received: a rect whose size
+        // differs from the reference's own dimensions is a pre-crop
+        // projection that was never applied.
+        assert!(crop().validate_for_image(1920, 1080).is_err());
+
+        let bad_digest = GenerationReferenceCrop {
+            source_sha256: "nope".to_string(),
+            ..crop()
+        };
+        assert!(bad_digest.validate_for_image(1080, 1080).is_err());
+    }
+
+    #[test]
+    fn crop_provenance_is_additive_and_absent_when_unset() {
+        let plain = serde_json::to_value(image(1920, 1080, None)).unwrap();
+        assert!(plain["provenance"].get("crop").is_none());
+
+        let cropped = image(1080, 1080, Some(crop()));
+        let json = serde_json::to_value(&cropped).unwrap();
+        assert_eq!(json["provenance"]["crop"]["source_width"], 1920);
+        let back: GenerationReference = serde_json::from_value(json).unwrap();
+        assert_eq!(back.provenance().crop.as_ref(), Some(&crop()));
+    }
+
+    #[test]
+    fn redacted_metadata_carries_the_crop_and_reference_validation_enforces_it() {
+        let cropped = image(1080, 1080, Some(crop()));
+        let metadata = cropped.redacted_metadata(0).unwrap();
+        assert_eq!(metadata.crop.as_ref(), Some(&crop()));
+        let metadata_json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(metadata_json["crop"]["x"], 420);
+        let plain_json =
+            serde_json::to_value(image(1920, 1080, None).redacted_metadata(0).unwrap()).unwrap();
+        assert!(plain_json.get("crop").is_none());
+
+        crate::minimax_h3::validate_references(&[cropped]).unwrap();
+        let unapplied = image(1920, 1080, Some(crop()));
+        let error = crate::minimax_h3::validate_references(&[unapplied]).unwrap_err();
+        assert_eq!(error.code, "MINIMAX_H3_REFERENCE_CROP");
+
+        let video = GenerationReference::Video {
+            media: GenerationReferenceAuthority::Inline {
+                data: b"video".to_vec(),
+            },
+            provenance: GenerationReferenceProvenance {
+                name: Some("clip.mp4".to_string()),
+                sha256: None,
+                crop: Some(crop()),
+            },
+            mime_type: "video/mp4".to_string(),
+            width: 1080,
+            height: 1080,
+            frame_count: Some(96),
+            duration_ms: 4_000,
+            fps: 24.0,
+            has_audio: false,
+            audio_duration_ms: None,
+            audio_sample_count: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+        };
+        assert_eq!(
+            crate::minimax_h3::validate_references(&[video])
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_REFERENCE_CROP"
+        );
+    }
+
+    /// The browser's `referencePadEstimate` (studio/lib/referenceCrop.ts)
+    /// mirrors `reference_image_dimensions` + `rows_per_video_latent`; these
+    /// fixtures are the values its test pins, so the two can only drift
+    /// together.
+    #[test]
+    fn image_reference_pad_fixtures_match_the_browser_estimate() {
+        let fixtures: [(u32, u32, u32, u32, u64); 6] = [
+            (1920, 1080, 3648, 2048, 7296),
+            (1080, 1080, 2048, 2048, 4096),
+            (1024, 768, 2720, 2048, 5440),
+            (1080, 1920, 2048, 3648, 7296),
+            (1344, 768, 3584, 2048, 7168),
+            (1120, 1080, 2112, 2048, 4224),
+        ];
+        for (width, height, normalized_width, normalized_height, rows) in fixtures {
+            let shape =
+                crate::minimax_h3::reference_prepared_shape(&image(width, height, None)).unwrap();
+            assert_eq!(
+                (
+                    shape.normalized_width,
+                    shape.normalized_height,
+                    shape.visual_rows
+                ),
+                (Some(normalized_width), Some(normalized_height), rows),
+                "{width}x{height}"
+            );
+        }
     }
 }

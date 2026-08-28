@@ -470,6 +470,7 @@ mod tests {
             channels: None,
             sample_count: None,
             prepared_shape: None,
+            crop: None,
         }
     }
 

@@ -31,6 +31,8 @@ import SequenceComposer from "../components/SequenceComposer.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import RemixModal from "../components/RemixModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
+import ReferenceCropModal from "../components/ReferenceCropModal.vue";
+import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import MaskEditorModal from "../components/MaskEditorModal.vue";
 import GenerationTemplatesPanel from "../components/GenerationTemplatesPanel.vue";
 import ColdStartGuide from "../components/create/ColdStartGuide.vue";
@@ -38,6 +40,7 @@ import RecentGrid from "../components/create/RecentGrid.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
+import { HeldPullOffers } from "../lib/heldPullOffers";
 import Icon from "@ui/components/Icon.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { ASPECTS } from "@ui/lib/resolution";
@@ -55,8 +58,6 @@ import { createUuid } from "@studio/lib/id";
 import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
-import { requestNeedsReferenceUpload } from "@studio/api/referenceUploads";
-import { supportsDurableGenerationLifecycle } from "@studio/api/generationAdmission";
 import {
   expansionTaskForRequest,
   type ExpandTask,
@@ -139,7 +140,7 @@ import { apiJsonTo } from "@studio/api/client";
 import {
   settingsRestoreMetadata,
   watchSelectedQueuePreview,
-  type QueueJobPreview,
+  type QueueJobProgress,
   type SelectedQueuePreviewSource,
 } from "@studio/api/generationSelection";
 import {
@@ -243,12 +244,18 @@ import {
   MINIMAX_H3_PROMPT_PLACEHOLDER,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
+  applyMinimaxH3ReferenceCrops,
   minimaxH3AuthoringError,
+  minimaxH3ReferenceCropTarget,
+  minimaxH3ReferenceProjection,
   minimaxH3TaskForModel,
   setMinimaxH3GalleryImageFirstFrame,
   setMinimaxH3PickedImageBoundary,
+  setMinimaxH3ReferenceCrop,
+  type MinimaxH3AuthoringState,
   type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
+import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import {
   firstLastFrameRestoreNotice,
   sourceImageValidationError,
@@ -278,6 +285,7 @@ import {
   type InstallTarget,
 } from "../composables/useModelInstallTargets";
 import { planModelInstall } from "@studio/lib/modelInstallTargets";
+import { classifyMissingModelHold } from "@studio/api/generationPlacement";
 import type {
   ExpandFormState,
   GalleryImage,
@@ -331,6 +339,20 @@ function openTargetPicker() {
 // One picker serves both FL2VA boundaries; the target names the slot.
 const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
 const h3ReferencePickerOpen = ref(false);
+/** Which ordered H3 reference the crop dialog is editing; null when closed. */
+const h3CropIndex = ref<number | null>(null);
+const h3CropTarget = computed(() =>
+  minimaxH3ReferenceCropTarget(form.state.value.h3Authoring, h3CropIndex.value),
+);
+function applyH3ReferenceCrop(crop: ReferenceCrop | null): void {
+  if (h3CropIndex.value === null) return;
+  form.state.value.h3Authoring = setMinimaxH3ReferenceCrop(
+    form.state.value.h3Authoring ?? emptyMinimaxH3AuthoringState(),
+    h3CropIndex.value,
+    crop,
+  );
+  h3CropIndex.value = null;
+}
 /** Wan's closing still gets its own picker (#779) so attaching one can never
  * overwrite the opening frame the source well holds. */
 const showEndFramePicker = ref(false);
@@ -622,21 +644,18 @@ function cloneRoute(route: HostRoute | null): HostRoute | null {
   return route ? { ...route, target: { ...route.target } } : null;
 }
 
+/** Every print is admitted against a concrete machine, the origin included:
+ * durable admission reconciles against that machine's instance identity, so a
+ * route is never collapsed away here. */
 function normalizeSubmitRoute(
   route: HostRoute | null,
-  request?: GenerateRequestWire,
+  _request?: GenerateRequestWire,
 ): HostRoute | null {
-  const normalized =
-    route?.hostId === "origin" &&
-    !(request && requestNeedsReferenceUpload(request)) &&
-    !supportsDurableGenerationLifecycle(route.durableGeneration)
-      ? null
-      : route;
-  if (!normalized) return null;
-  const modelFamily = (normalized.modelFamily ?? currentFamily.value).trim();
+  if (!route) return null;
+  const modelFamily = (route.modelFamily ?? currentFamily.value).trim();
   return {
-    ...normalized,
-    target: { ...normalized.target },
+    ...route,
+    target: { ...route.target },
     ...(modelFamily ? { modelFamily } : {}),
   };
 }
@@ -769,32 +788,19 @@ function syncPhone() {
   isPhone.value = phoneQuery?.matches ?? false;
 }
 
-function mediaUrl(image: SourceImageState): string {
-  return `data:${image.mime || "image/png"};base64,${image.base64}`;
-}
-
-function loadHtmlImage(image: SourceImageState): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error(`failed to decode ${image.filename}`));
-    img.src = mediaUrl(image);
-  });
-}
-
-function canvasToSourceImage(
-  canvas: HTMLCanvasElement,
+/** A fitted/cropped PNG as a `SourceImageState` beside its original. */
+function fittedSourceImage(
+  base64: string,
+  size: { width: number; height: number },
   original: SourceImageState,
   suffix: string,
 ): SourceImageState {
-  const dataUrl = canvas.toDataURL("image/png");
-  const comma = dataUrl.indexOf(",");
   return {
     ...original,
     filename: original.filename.replace(/(\.[^.]+)?$/, `${suffix}.png`),
-    base64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl,
-    width: canvas.width,
-    height: canvas.height,
+    base64,
+    width: size.width,
+    height: size.height,
     mime: "image/png",
   };
 }
@@ -895,12 +901,18 @@ const selectedIndex = ref<number>(-1);
 // shortened list, so the job rail alone forgets the seed across reloads.
 // `completedSeedToLock` filters chain completions that fabricate seed_used=0.
 const lastSeedUsed = ref<number | null>(loadLastSeed());
-const stream = useGenerateStream((job) => {
-  const seed = completedSeedToLock(job);
-  if (seed === null) return;
-  lastSeedUsed.value = seed;
-  storeLastSeed(seed);
-});
+const stream = useGenerateStream(
+  (job) => {
+    const seed = completedSeedToLock(job);
+    if (seed === null) return;
+    lastSeedUsed.value = seed;
+    storeLastSeed(seed);
+  },
+  // A print is admitted before its model is resolved, so a machine that does
+  // not have the checkpoint parks the child instead of refusing the request.
+  // Same offer, same policy as the pre-submission dead end.
+  (job) => void offerHeldMissingModelPull(job),
+);
 // ── Durable sequence jobs (multi-host, mockup 1c: the chain Jobs list
 //    merges with the activity strip) ────────────────────────────────────
 const chainJobs = useChainJobs();
@@ -2389,6 +2401,14 @@ function cancelPrint(id: string) {
     );
 }
 
+function retryPrint(id: string) {
+  void stream
+    .retry(id)
+    .catch((error) =>
+      toast("error", error instanceof Error ? error.message : String(error)),
+    );
+}
+
 /**
  * Reuse a sequence print's recorded clips as a BRAND-NEW draft: no edit
  * session, nothing cached, Generate queues a fresh job. Shared params ride
@@ -2610,7 +2630,7 @@ const selectedQueueRender = ref<{
   source: SelectedQueuePreviewSource;
   width: number;
   height: number;
-  preview: QueueJobPreview | null;
+  preview: QueueJobProgress | null;
 } | null>(null);
 let stopSelectedQueuePreview: (() => void) | null = null;
 
@@ -2828,13 +2848,9 @@ const advCount = computed(() =>
 // ── Canvas state ──────────────────────────────────────────────────────
 function percentFor(job: Job): number | null {
   const p = job.progress;
-  if (p.step !== null && p.totalSteps) {
-    return Math.round((p.step / p.totalSteps) * 100);
-  }
-  if (p.weightBytesLoaded !== null && p.weightBytesTotal) {
-    return Math.round((p.weightBytesLoaded / p.weightBytesTotal) * 100);
-  }
-  return null;
+  return p.step !== null && p.totalSteps
+    ? Math.round((p.step / p.totalSteps) * 100)
+    : null;
 }
 
 // The job the canvas develops: the running job with a live preview (the one
@@ -2899,23 +2915,26 @@ const canvasMode = computed<
   return "empty";
 });
 
-const genProgress = computed(() =>
-  selectedQueueRender.value?.preview
-    ? Math.round(
-        (selectedQueueRender.value.preview.step /
-          selectedQueueRender.value.preview.total) *
-          100,
-      )
-    : runningJob.value
-      ? (percentFor(runningJob.value) ?? 0)
-      : 0,
-);
+/** The step counter a polled snapshot reports, once it has one. */
+function progressSteps(
+  progress: QueueJobProgress | null | undefined,
+): { step: number; total: number } | null {
+  return progress && progress.step !== null && progress.total !== null
+    ? { step: progress.step, total: progress.total }
+    : null;
+}
+
+const genProgress = computed(() => {
+  const steps = progressSteps(selectedQueueRender.value?.preview);
+  if (steps) return Math.round((steps.step / steps.total) * 100);
+  return runningJob.value ? (percentFor(runningJob.value) ?? 0) : 0;
+});
 const genStage = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
-    return selected.preview
-      ? `Developing ${selected.preview.step} / ${selected.preview.total}`
-      : "Preparing selected print";
+    const steps = progressSteps(selected.preview);
+    if (steps) return `Developing ${steps.step} / ${steps.total}`;
+    return selected.preview?.stage ?? "Preparing selected print";
   }
   const j = runningJob.value;
   if (!j) return "";
@@ -3117,61 +3136,31 @@ async function prepareStillSourceToRequest(
     policy,
     target,
     async () => {
-      const sourceImg = await loadHtmlImage(source!);
-      if (
-        sourceImg.naturalWidth === target.width &&
-        sourceImg.naturalHeight === target.height
-      ) {
+      const natural = await domCanvasOps.imageSize(source!.base64);
+      if (natural.width === target.width && natural.height === target.height) {
         return { source, mask };
       }
-      const transform = resolveSourceFitTransform(
-        { width: sourceImg.naturalWidth, height: sourceImg.naturalHeight },
-        target,
-        policy,
+      const transform = resolveSourceFitTransform(natural, target, policy);
+      const output = {
+        width: transform.outputWidth,
+        height: transform.outputHeight,
+      };
+      const fittedSource = fittedSourceImage(
+        await domCanvasOps.fitImage(source!.base64, transform),
+        output,
+        source!,
+        "-fit",
       );
-      const canvas = document.createElement("canvas");
-      canvas.width = transform.outputWidth;
-      canvas.height = transform.outputHeight;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return { source, mask };
-      ctx.fillStyle = "black";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(
-        sourceImg,
-        transform.offsetX,
-        transform.offsetY,
-        transform.drawWidth,
-        transform.drawHeight,
-      );
-      const fittedSource = canvasToSourceImage(canvas, source!, "-fit");
 
       if (policy.mode !== "pad-repaint" && !mask)
         return { source: fittedSource, mask };
-      const maskCanvas = document.createElement("canvas");
-      maskCanvas.width = transform.outputWidth;
-      maskCanvas.height = transform.outputHeight;
-      const maskCtx = maskCanvas.getContext("2d");
-      if (!maskCtx) return { source: fittedSource, mask };
-      maskCtx.fillStyle = "black";
-      maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
-      if (mask) {
-        const maskImg = await loadHtmlImage(mask);
-        maskCtx.drawImage(
-          maskImg,
-          transform.offsetX,
-          transform.offsetY,
-          transform.drawWidth,
-          transform.drawHeight,
-        );
-      }
-      if (policy.mode === "pad-repaint") {
-        maskCtx.fillStyle = "white";
-        for (const rect of maskPaddingRectangles(transform)) {
-          maskCtx.fillRect(rect.x, rect.y, rect.width, rect.height);
-        }
-      }
-      const fittedMask = canvasToSourceImage(
-        maskCanvas,
+      const fittedMask = fittedSourceImage(
+        await domCanvasOps.buildMask(
+          mask?.base64 ?? null,
+          transform,
+          policy.mode === "pad-repaint" ? maskPaddingRectangles(transform) : [],
+        ),
+        output,
         mask ?? { kind: source!.kind, filename: "pad-mask.png", base64: "" },
         "-fit-mask",
       );
@@ -3496,20 +3485,25 @@ function frozenRequestIsFinal(
   return !carriesMedia && !carriesLists;
 }
 
-async function offerMissingModelPull(
-  result: Exclude<FeasibilityResult, { kind: "route" }>,
-  request: GenerateRequestWire,
-  decision: ReturnType<typeof decideGenerateRequestRouting>,
-  quick: unknown,
-  signal: AbortSignal,
-): Promise<boolean> {
-  const failures = missingModelFailures(result);
-  if (failures.length === 0) return false;
-  const model = failures[0]!.missingModel!.model;
+/**
+ * Offer the pull for one named model on the machines that reported it absent,
+ * and arm the resume. `resume` is what happens once the download lands: a
+ * fresh submission for a print that was never admitted, a retry of the held
+ * child for one the machine already parked. Returns false only when there is
+ * nothing to offer, so the caller keeps its own failure message.
+ */
+async function armMissingModelPull(options: {
+  model: string;
+  candidateIds: string[];
+  signal: AbortSignal;
+  /** Absent when the frozen request would still change before it renders. */
+  resume: (() => void) | null;
+  pendingMessage: (hostLabel: string) => string;
+}): Promise<boolean> {
+  const { model, candidateIds, signal } = options;
   // Only the machines that actually reported the model absent are pull
   // targets: one that refused for capacity or policy would refuse again after
   // the download, and repairing it there would be pure waste.
-  const candidateIds = failures.map((failure) => failure.hostId);
   if (installTargets.planFor(model, false, candidateIds).targets.length === 0) {
     return false;
   }
@@ -3517,6 +3511,7 @@ async function offerMissingModelPull(
     modelId: model,
     displayName: modelDisplayNameForId(model, models.value),
     restrictToHostIds: candidateIds,
+    confirm: true,
   });
   if (signal?.aborted) return true;
   // An explicit cancel is an answer: nothing was queued, and the dead-end
@@ -3543,24 +3538,11 @@ async function offerMissingModelPull(
     return true;
   }
   if (signal.aborted) return true;
-  if (!frozenRequestIsFinal(request, quick)) {
-    toast(
-      "info",
-      `Pulling ${model} on ${hostLabel} — press Generate again once it's ready.`,
-    );
+  const resume = options.resume;
+  if (!resume) {
+    toast("info", options.pendingMessage(hostLabel));
     return true;
   }
-  const frozenModelFamily = currentFamily.value.trim();
-  const resolvedResumeRoute = routing.multiHost.value
-    ? routeForHostId(hostId)
-    : null;
-  const resumeRoute = resolvedResumeRoute
-    ? {
-        ...resolvedResumeRoute,
-        target: { ...resolvedResumeRoute.target },
-        ...(frozenModelFamily ? { modelFamily: frozenModelFamily } : {}),
-      }
-    : null;
   const pendingPull = {
     model,
     // A catalog download reports its queue id on both routes; a plain
@@ -3570,7 +3552,7 @@ async function offerMissingModelPull(
     hostId,
     hostLabel,
     resume: () => {
-      if (!signal.aborted) submitRequestCopies(request, decision, resumeRoute);
+      if (!signal.aborted) resume();
     },
   };
   if (signal.aborted) return true;
@@ -3579,11 +3561,96 @@ async function offerMissingModelPull(
     pullResume.cancel(pendingPull);
     return true;
   }
-  toast(
-    "info",
-    `Pulling ${model} on ${hostLabel} — generation starts when it's ready`,
-  );
+  toast("info", options.pendingMessage(hostLabel));
   return true;
+}
+
+/**
+ * Auto / Most capable must never dead-end. When nothing can run this print
+ * because no machine has the model, offer the pull on a machine that could —
+ * the same `planModelInstall` policy the Models workspace uses — and resume
+ * the exact frozen request there once the download lands.
+ */
+async function offerMissingModelPull(
+  result: Exclude<FeasibilityResult, { kind: "route" }>,
+  request: GenerateRequestWire,
+  decision: ReturnType<typeof decideGenerateRequestRouting>,
+  quick: unknown,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const failures = missingModelFailures(result);
+  if (failures.length === 0) return false;
+  const model = failures[0]!.missingModel!.model;
+  const candidateIds = failures.map((failure) => failure.hostId);
+  const final = frozenRequestIsFinal(request, quick);
+  const frozenModelFamily = currentFamily.value.trim();
+  return armMissingModelPull({
+    model,
+    candidateIds,
+    signal,
+    resume: final
+      ? () => {
+          const resolved = routing.multiHost.value
+            ? routeForHostId(candidateIds[0] ?? ORIGIN_HOST_ID)
+            : null;
+          submitRequestCopies(
+            request,
+            decision,
+            resolved
+              ? {
+                  ...resolved,
+                  target: { ...resolved.target },
+                  ...(frozenModelFamily
+                    ? { modelFamily: frozenModelFamily }
+                    : {}),
+                }
+              : null,
+          );
+        }
+      : null,
+    pendingMessage: (hostLabel) =>
+      final
+        ? `Pulling ${model} on ${hostLabel} — generation starts when it's ready`
+        : `Pulling ${model} on ${hostLabel} — press Generate again once it's ready.`,
+  });
+}
+
+/**
+ * A print is admitted BEFORE the machine resolves its model, so "nobody has
+ * this model" now arrives as a held child rather than as an infeasible
+ * placement preview. Same offer, same policy; the resume retries the child
+ * the machine is already holding rather than queueing a second print.
+ */
+const offeredMissingModelHolds = new HeldPullOffers();
+// A print that is no longer held is forgotten, so the ledger cannot grow for
+// the life of the tab and a resumed print parked again for the same missing
+// model is offered the pull again.
+watch(
+  () =>
+    stream.jobs.value
+      .filter((job) => job.holdCode !== null)
+      .map((job) => job.id),
+  (heldIds) => offeredMissingModelHolds.retain(heldIds),
+);
+async function offerHeldMissingModelPull(job: Job): Promise<void> {
+  const missing = classifyMissingModelHold(job.holdCode, job.request.model);
+  if (!missing) return;
+  if (!offeredMissingModelHolds.claim(job.id)) return;
+  const hostId = job.hostId ?? ORIGIN_HOST_ID;
+  await armMissingModelPull({
+    model: missing.model,
+    candidateIds: [hostId],
+    signal: new AbortController().signal,
+    resume: () =>
+      void stream.retry(job.id).catch((error: unknown) => {
+        toast(
+          "error",
+          `Could not resume the held print: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }),
+    pendingMessage: (hostLabel) =>
+      `Pulling ${missing.model} on ${hostLabel} — the held print resumes when it's ready`,
+  });
 }
 
 function terminalPunctuation(value: string): string {
@@ -3676,15 +3743,29 @@ function feasibilityMessage(
     .join(" ");
 }
 
+/** A print this machine cannot queue is refused by name and nothing is
+ * queued — there is no second submission path to fall through to. */
+function submitOrRefuse(submit: () => void): boolean {
+  try {
+    submit();
+    return true;
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
 function requestCopyCount(request: GenerateRequestWire): number {
   return Math.max(1, Math.floor(request.batch_size ?? 1));
 }
 
+/** False when the machine refused the print — nothing was queued, so the
+ * caller must keep the reviewed rewrite rather than clearing it. */
 function submitRequestCopies(
   base: GenerateRequestWire,
   decision: ReturnType<typeof decideGenerateRequestRouting>,
   route: HostRoute | null,
-): void {
+): boolean {
   // Batch N shares ONE File under choice, exactly like it shares the prompt
   // and the title: every sibling lands with the same tags and collection.
   const request: GenerateRequestWire = {
@@ -3693,8 +3774,9 @@ function submitRequestCopies(
   };
   const copies = requestCopyCount(request);
   if (copies === 1) {
-    stream.submit(request, decision, normalizeSubmitRoute(route, request));
-    return;
+    return submitOrRefuse(() =>
+      stream.submit(request, decision, normalizeSubmitRoute(route, request)),
+    );
   }
 
   const batchId = createUuid();
@@ -3710,7 +3792,13 @@ function submitRequestCopies(
     batch_count: copies,
     seed: baseSeed + index,
   }));
-  stream.submitBatch(requests, decision, normalizeSubmitRoute(route, request));
+  return submitOrRefuse(() =>
+    stream.submitBatch(
+      requests,
+      decision,
+      normalizeSubmitRoute(route, request),
+    ),
+  );
 }
 
 /** True while a Generate click is being routed/admitted. The feasibility
@@ -3781,7 +3869,33 @@ async function onSubmitInner(
     toast("error", decision.reason);
     return;
   }
+  // Ref2VA: pending image crops are applied at the original resolution BEFORE
+  // the first planning request exists, so placement preview, upload
+  // conversion, and the route all see the cropped reference; only the
+  // requests receive the cropped bytes — the composer keeps the original.
+  let h3Cropped: MinimaxH3AuthoringState | null = null;
+  if (
+    isMinimaxH3Identity(currentFamily.value, form.state.value.model) &&
+    form.state.value.h3Authoring &&
+    minimaxH3TaskForModel(form.state.value.model) === "ref2va"
+  ) {
+    try {
+      h3Cropped = await applyMinimaxH3ReferenceCrops(
+        form.state.value.h3Authoring,
+        domCanvasOps,
+      );
+    } catch (error) {
+      if (!isCurrent()) return;
+      const message = error instanceof Error ? error.message : String(error);
+      composerError.value = `Reference preprocessing failed: ${message}`;
+      return;
+    }
+    if (!isCurrent()) return;
+  }
   const currentRequest = form.toRequest(currentModel.value);
+  if (h3Cropped) {
+    currentRequest.references = minimaxH3ReferenceProjection(h3Cropped);
+  }
   const originalSource = form.state.value.imageAttachments[0]
     ? {
         ...form.state.value.imageAttachments[0],
@@ -3879,6 +3993,7 @@ async function onSubmitInner(
   // same client-side fit, coerced maskless.
   if (isMinimaxH3Identity(currentFamily.value, form.state.value.model)) {
     const h3 = form.state.value.h3Authoring;
+    if (h3Cropped) req.references = minimaxH3ReferenceProjection(h3Cropped);
     const boundaryRoute: HostRoute | null = route || null;
     const fitBoundary = async (
       base64: string,
@@ -3987,7 +4102,7 @@ async function onSubmitInner(
     ),
   });
   if (!accepted || !isCurrent()) return;
-  submitRequestCopies(req, decision, route);
+  if (!submitRequestCopies(req, decision, route)) return;
   quickPrepared.value = null;
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);
@@ -4417,11 +4532,17 @@ async function queueVariations() {
       };
       return request;
     });
-    stream.submitBatch(
-      requests,
-      prepared.decision,
-      normalizeSubmitRoute(revalidated.route, requests[0]),
-    );
+    if (
+      !submitOrRefuse(() =>
+        stream.submitBatch(
+          requests,
+          prepared.decision,
+          normalizeSubmitRoute(revalidated.route, requests[0]),
+        ),
+      )
+    ) {
+      return;
+    }
     variations.value = [];
     preparedBatch.value = null;
   } finally {
@@ -5057,6 +5178,7 @@ onBeforeUnmount(() => {
           :shared="sharedActivityRows"
           :queue-status="routing.queueStatus.value"
           @cancel="cancelPrint"
+          @retry="retryPrint"
           @dismiss="stream.remove"
           @open="openJob"
           @sequence-action="onSequenceAction"
@@ -5437,6 +5559,7 @@ onBeforeUnmount(() => {
                     h3BoundaryPickerTarget = 'lastFrame'
                   "
                   @open-h3-reference-picker="h3ReferencePickerOpen = true"
+                  @crop-h3-reference="h3CropIndex = $event"
                 />
                 <IdentityPanel
                   v-if="!sequenceMode"
@@ -5578,8 +5701,8 @@ onBeforeUnmount(() => {
             :progress="genProgress"
             :stage="genStage"
             :preview-src="
-              selectedQueueRender?.preview
-                ? `data:image/png;base64,${selectedQueueRender.preview.image}`
+              selectedQueueRender?.preview?.preview_image
+                ? `data:image/png;base64,${selectedQueueRender.preview.preview_image}`
                 : (runningJob?.previewUrl ?? undefined)
             "
             :progress-fraction="genProgress / 100"
@@ -5690,6 +5813,7 @@ onBeforeUnmount(() => {
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
           @open-h3-reference-picker="h3ReferencePickerOpen = true"
+          @crop-h3-reference="h3CropIndex = $event"
         />
         <!-- The identity photo is media the user attaches, not a setting, so
              it sits with the source wells; only its two knobs are Advanced. -->
@@ -5837,6 +5961,14 @@ onBeforeUnmount(() => {
       :multiple="true"
       @pick="onPickH3References"
       @close="h3ReferencePickerOpen = false"
+    />
+    <ReferenceCropModal
+      :open="h3CropTarget !== null"
+      :title="`Crop reference ${(h3CropIndex ?? 0) + 1}`"
+      :image="h3CropTarget?.image ?? null"
+      :crop="h3CropTarget?.crop ?? null"
+      @apply="applyH3ReferenceCrop"
+      @close="h3CropIndex = null"
     />
     <ImagePickerModal
       :open="showEndFramePicker"

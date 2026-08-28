@@ -233,13 +233,11 @@ pub struct StaticTimingEstimate {
 
 pub const fn static_timing_for(kind: WorkKind) -> StaticTimingEstimate {
     match kind {
-        WorkKind::Generation | WorkKind::PreparedSibling | WorkKind::BatchChild => {
-            StaticTimingEstimate {
-                cold_setup_ms: 8_000,
-                warm_setup_ms: 250,
-                predicted_run_ms: 30_000,
-            }
-        }
+        WorkKind::Generation | WorkKind::PreparedSibling => StaticTimingEstimate {
+            cold_setup_ms: 8_000,
+            warm_setup_ms: 250,
+            predicted_run_ms: 30_000,
+        },
         WorkKind::ChainStage => StaticTimingEstimate {
             cold_setup_ms: 10_000,
             warm_setup_ms: 250,
@@ -374,7 +372,6 @@ pub enum WorkKind {
     PromptExpansion,
     AdminModelLoad,
     AdminModelUnload,
-    BatchChild,
 }
 
 impl WorkKind {
