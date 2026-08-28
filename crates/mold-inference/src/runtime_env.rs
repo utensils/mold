@@ -50,6 +50,12 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_LTX2_FP8_WEIGHT_SCALE_MODE",
     "MOLD_LTX2_GEMMA_DEVICE",
     "MOLD_LTX2_GEMMA_VARIANT",
+    // Selects how INT8 ConvRot transformer linears execute on CUDA: the
+    // default W8A8 kernel (upstream's own path for these checkpoints) or the
+    // per-forward widening (W8A16) escape hatch. The two arms produce
+    // different pixels and different transient memory, so a run on one must
+    // never share a fingerprint or a learned-timing bucket with the other.
+    "MOLD_LTX2_INT8",
     "MOLD_LTX2_SPATIAL_TILE",
     "MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES",
     "MOLD_LTX2_VAE_DECODE_CONTEXT_FRAMES",

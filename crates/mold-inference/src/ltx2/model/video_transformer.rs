@@ -243,8 +243,64 @@ pub fn gelu_approximate(x: &Tensor) -> Result<Tensor> {
 }
 
 // ---------------------------------------------------------------------------
-// FP8-aware linear
+// Quantization-aware linear
 // ---------------------------------------------------------------------------
+
+/// A quantized checkpoint's synthetic `weight.*` sub-keys, as exposed by the
+/// LTX-2 `SimpleBackend`s through `VarBuilder::contains_tensor`.
+///
+/// A packed weight cannot be handed to `vb.get("weight")` as a dense tensor,
+/// so each quantized backend answers for a family of synthetic sub-keys of
+/// the logical weight instead, and [`LtxLinear::load_with_nvfp4_cache`]
+/// probes them in [`SideChannel::PROBE_ORDER`] before falling back to the
+/// dense `weight` (which the FP8 and BF16 backends serve).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SideChannel {
+    /// NVFP4: `weight.nvfp4_packed` (U8 nibbles), `weight.nvfp4_block_scales`
+    /// (F8E4M3, swizzled), `weight.nvfp4_tensor_scale` (F32).
+    Nvfp4,
+    // Gguf: reserved for the LTX-2.5 GGUF runtime (#1414), which will expose
+    // `weight.gguf_blocks` (U8) + `weight.gguf_dtype` (U32) and is probed
+    // between NVFP4 and ConvRot. Not a variant yet so nothing can match it
+    // by accident before that backend exists.
+    /// Comfy INT8 ConvRot: `weight.convrot_packed` (U8 `[out, in]`) and
+    /// `weight.convrot_scales` (F32 `[out, 1]`). Exposed by
+    /// `Ltx2ConvRotBackend` on CUDA only; Metal keeps the widening arm.
+    ConvRot,
+}
+
+impl SideChannel {
+    /// The order a loader probes the side channels in.
+    pub(crate) const PROBE_ORDER: [SideChannel; 2] = [SideChannel::Nvfp4, SideChannel::ConvRot];
+
+    /// The one sub-key whose presence means the channel is live.
+    pub(crate) const fn probe_key(self) -> &'static str {
+        match self {
+            SideChannel::Nvfp4 => "weight.nvfp4_packed",
+            SideChannel::ConvRot => "weight.convrot_packed",
+        }
+    }
+}
+
+/// Which side channel a synthetic `weight.*` sub-key belongs to, or `None`
+/// for a dense key (`weight`, `bias`, `weight_scale`, ...) and for any
+/// channel this build does not know.
+#[cfg_attr(not(test), allow(dead_code))] // the GGUF backend (#1414) is its next consumer
+pub(crate) fn ltx2_side_channel_component(name: &str) -> Option<SideChannel> {
+    match name {
+        "weight.nvfp4_packed" | "weight.nvfp4_block_scales" | "weight.nvfp4_tensor_scale" => {
+            Some(SideChannel::Nvfp4)
+        }
+        "weight.convrot_packed" | "weight.convrot_scales" => Some(SideChannel::ConvRot),
+        _ => None,
+    }
+}
+
+fn detect_side_channel(vb: &VarBuilder) -> Option<SideChannel> {
+    SideChannel::PROBE_ORDER
+        .into_iter()
+        .find(|channel| vb.contains_tensor(channel.probe_key()))
+}
 
 #[derive(Clone, Debug)]
 pub(crate) enum LtxLinear {
@@ -269,6 +325,18 @@ pub(crate) enum LtxLinear {
         bias: Option<Tensor>,
         adapters: Vec<LinearLoraAdapter>,
         cache: Arc<OnceLock<Tensor>>,
+    },
+    /// A Comfy INT8 ConvRot weight kept PACKED on the device: one byte per
+    /// parameter plus one F32 scale per output row, executed per
+    /// `MOLD_LTX2_INT8` — the W8A8 kernel (upstream's own path for this
+    /// checkpoint) by default, or widened per forward through the candle
+    /// ConvRot op and multiplied like `Standard`. The bias is applied after
+    /// either GEMM; LoRA adapters ride the same parallel low-rank branch as
+    /// every other arm and are never merged into the packed weight.
+    ConvRotPacked {
+        linear: mold_candle::comfy_int8::ComfyInt8ConvRotLinear,
+        bias: Option<Tensor>,
+        adapters: Vec<LinearLoraAdapter>,
     },
 }
 
@@ -330,7 +398,40 @@ impl LtxLinear {
         nvfp4_cache: Option<&Nvfp4LinearCache>,
         cache_key: Option<&str>,
     ) -> Result<Self> {
-        if vb.contains_tensor("weight.nvfp4_packed") {
+        let side_channel = detect_side_channel(&vb);
+        if side_channel == Some(SideChannel::ConvRot) {
+            let packed = vb.get_unchecked_dtype("weight.convrot_packed", DType::U8)?;
+            let scales = vb.get_unchecked_dtype("weight.convrot_scales", DType::F32)?;
+            if packed.dims() != [out_dim, in_dim] {
+                candle_core::bail!(
+                    "LTX-2 ConvRot packed weight shape mismatch: checkpoint {:?}, module expected [{out_dim}, {in_dim}]",
+                    packed.dims(),
+                );
+            }
+            if scales.dims() != [out_dim, 1] {
+                candle_core::bail!(
+                    "LTX-2 ConvRot scale shape mismatch: checkpoint {:?}, expected [{out_dim}, 1]",
+                    scales.dims(),
+                );
+            }
+            let linear =
+                mold_candle::comfy_int8::ComfyInt8ConvRotLinear::new_on_device(packed, scales)?;
+            let bias = if has_bias {
+                Some(vb.get(out_dim, "bias")?)
+            } else {
+                None
+            };
+            crate::ltx2::convrot::log_int8_arm_once(crate::ltx2::convrot::int8_arm_provenance(
+                crate::ltx2::convrot::device_kind(vb.device()),
+                crate::ltx2::convrot::ltx2_int8_arm(),
+            ));
+            return Ok(Self::ConvRotPacked {
+                linear,
+                bias,
+                adapters,
+            });
+        }
+        if side_channel == Some(SideChannel::Nvfp4) {
             let cpu = Device::Cpu;
             let packed = vb
                 .get_unchecked_dtype("weight.nvfp4_packed", DType::U8)?
@@ -854,6 +955,79 @@ impl Module for LtxLinear {
                 }?;
                 apply_linear_loras(out, &xs, adapters, dtype)
             }
+            Self::ConvRotPacked {
+                linear,
+                bias,
+                adapters,
+            } => {
+                let dtype = match xs.dtype() {
+                    DType::F8E4M3 => DType::BF16,
+                    other => other,
+                };
+                let xs = if xs.dtype() == dtype {
+                    xs.clone()
+                } else {
+                    xs.to_dtype(dtype)?
+                };
+                let out = convrot_packed_forward(
+                    linear,
+                    bias.as_ref(),
+                    &xs,
+                    dtype,
+                    crate::ltx2::convrot::ltx2_int8_arm(),
+                )?;
+                apply_linear_loras(out, &xs, adapters, dtype)
+            }
+        }
+    }
+}
+
+/// One packed INT8 ConvRot linear, executed per `MOLD_LTX2_INT8`.
+///
+/// `Native` is Comfy's W8A8 order — the rotate / dynamic per-row INT8 /
+/// INT8 GEMM / F32 scales path `mold_candle::comfy_int8` runs for the H3
+/// DiT, with the bias added after the GEMM — which is what ComfyUI executes
+/// for this very checkpoint through comfy-kitchen's `int8_linear`. `Dequant`
+/// widens the packed weight to the activation dtype through the candle
+/// ConvRot op (one transient dense linear, never a block) and multiplies it
+/// exactly as `LtxLinear::Standard` would, so it is the W8A16 escape hatch
+/// for A/B work and the arm whose output the `Standard`-from-widened-weight
+/// parity test pins bit-for-bit.
+fn convrot_packed_forward(
+    linear: &mold_candle::comfy_int8::ComfyInt8ConvRotLinear,
+    bias: Option<&Tensor>,
+    xs: &Tensor,
+    dtype: DType,
+    arm: crate::ltx2::convrot::Ltx2Int8Arm,
+) -> Result<Tensor> {
+    match arm {
+        crate::ltx2::convrot::Ltx2Int8Arm::Native => linear.forward(xs, bias, dtype),
+        crate::ltx2::convrot::Ltx2Int8Arm::Dequant => {
+            let weight = candle_core::convrot::dequantize_int8_convrot_256(
+                linear.weight(),
+                linear.weight_scale(),
+            )?;
+            let weight = if weight.device().same_device(xs.device()) {
+                weight
+            } else {
+                weight.to_device(xs.device())?
+            };
+            let weight = if weight.dtype() == dtype {
+                weight
+            } else {
+                weight.to_dtype(dtype)?
+            };
+            let bias = bias
+                .map(|bias| {
+                    let bias = if bias.device().same_device(xs.device()) {
+                        bias.clone()
+                    } else {
+                        bias.to_device(xs.device())?
+                    };
+                    bias.to_dtype(dtype)
+                })
+                .transpose()?;
+            nn::Linear::new(weight, bias).forward(xs)
         }
     }
 }
@@ -4379,11 +4553,12 @@ pub(crate) mod tests {
     use candle_nn::{Linear, Module, VarBuilder};
 
     use super::{
-        cached_timestep_embedding_inv_freq, emulate_static_fp8_input_quantization, gate_tokens,
-        modulate_tokens, FeedForward, LayerNormNoParams, LinearLoraAdapter,
+        cached_timestep_embedding_inv_freq, convrot_packed_forward,
+        emulate_static_fp8_input_quantization, gate_tokens, ltx2_side_channel_component,
+        modulate_tokens, nn, FeedForward, LayerNormNoParams, LinearLoraAdapter,
         Ltx2AvTransformer3DModel, Ltx2VideoRotaryPosEmbed, Ltx2VideoTransformer3DModelConfig,
-        LtxAttention, LtxLinear, LtxRopeType, Nvfp4LinearCache, TimestepEmbeddingInvFreqCache,
-        TimestepEmbeddingInvFreqCacheKey,
+        LtxAttention, LtxLinear, LtxRopeType, Nvfp4LinearCache, SideChannel,
+        TimestepEmbeddingInvFreqCache, TimestepEmbeddingInvFreqCacheKey,
     };
 
     fn fp8_input_scale_env_lock() -> &'static Mutex<()> {
@@ -5407,7 +5582,9 @@ pub(crate) mod tests {
                 assert!(bias.is_some());
                 assert!(adapters.is_empty());
             }
-            LtxLinear::Standard { .. } | LtxLinear::Nvfp4Streaming { .. } => {
+            LtxLinear::Standard { .. }
+            | LtxLinear::Nvfp4Streaming { .. }
+            | LtxLinear::ConvRotPacked { .. } => {
                 panic!("expected fp8 linear")
             }
         }
@@ -5451,6 +5628,285 @@ pub(crate) mod tests {
         assert_eq!(actual.len(), 2);
         assert!((actual[0] - 8.25).abs() < 1e-3, "{actual:?}");
         assert!((actual[1] - 15.5).abs() < 1e-3, "{actual:?}");
+    }
+
+    #[test]
+    fn ltx2_side_channel_components_map_each_synthetic_sub_key() {
+        let table = [
+            ("weight.nvfp4_packed", Some(SideChannel::Nvfp4)),
+            ("weight.nvfp4_block_scales", Some(SideChannel::Nvfp4)),
+            ("weight.nvfp4_tensor_scale", Some(SideChannel::Nvfp4)),
+            ("weight.convrot_packed", Some(SideChannel::ConvRot)),
+            ("weight.convrot_scales", Some(SideChannel::ConvRot)),
+            ("weight", None),
+            ("bias", None),
+            ("weight_scale", None),
+            // Reserved for the LTX-2.5 GGUF runtime (#1414): not a channel
+            // until that backend exists, so nothing can match it by accident.
+            ("weight.gguf_blocks", None),
+            ("weight.gguf_dtype", None),
+        ];
+        for (name, expected) in table {
+            assert_eq!(ltx2_side_channel_component(name), expected, "{name}");
+        }
+        assert_eq!(
+            SideChannel::PROBE_ORDER,
+            [SideChannel::Nvfp4, SideChannel::ConvRot]
+        );
+    }
+
+    /// A synthetic INT8 ConvRot weight: one 256-wide group per row so the
+    /// packed side channel's smallest legal shape stays cheap. Values cycle
+    /// the full signed range and each row has its own scale.
+    fn convrot_linear_var_builder(with_bias: bool) -> VarBuilder<'static> {
+        let device = Device::Cpu;
+        let (out_dim, in_dim) = (4usize, 256usize);
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight.convrot_packed".to_string(),
+            Tensor::from_vec(
+                (0..out_dim * in_dim)
+                    .map(|index| (((index * 37 + 11) % 251) as i16 - 125) as i8 as u8)
+                    .collect::<Vec<_>>(),
+                (out_dim, in_dim),
+                &device,
+            )
+            .unwrap(),
+        );
+        tensors.insert(
+            "weight.convrot_scales".to_string(),
+            Tensor::from_vec(
+                (0..out_dim)
+                    .map(|row| (row + 1) as f32 / 256.0)
+                    .collect::<Vec<_>>(),
+                (out_dim, 1),
+                &device,
+            )
+            .unwrap(),
+        );
+        if with_bias {
+            tensors.insert(
+                "bias".to_string(),
+                Tensor::from_vec(vec![0.25f32, -0.5, 1.0, -1.25], out_dim, &device).unwrap(),
+            );
+        }
+        VarBuilder::from_tensors(tensors, DType::F32, &device)
+    }
+
+    #[test]
+    fn ltx2_convrot_packed_linear_loads_from_the_side_channel_and_standard_otherwise() {
+        let linear =
+            LtxLinear::load(256, 4, true, convrot_linear_var_builder(true), vec![]).unwrap();
+        match &linear {
+            LtxLinear::ConvRotPacked { linear, bias, .. } => {
+                assert_eq!(linear.weight().dtype(), DType::U8);
+                assert_eq!(linear.weight().dims(), &[4, 256]);
+                assert_eq!(linear.weight_scale().dims(), &[4, 1]);
+                assert!(bias.is_some());
+            }
+            other => panic!("expected ConvRotPacked, got {other:?}"),
+        }
+
+        // A dense weight keeps the Standard arm.
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            Tensor::zeros((4, 256), DType::F32, &Device::Cpu).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu);
+        let dense = LtxLinear::load(256, 4, false, vb, vec![]).unwrap();
+        assert!(matches!(dense, LtxLinear::Standard { .. }));
+    }
+
+    /// The dequant arm widens through the exact candle op and multiplies like
+    /// `Standard`, so against a `Standard` linear built from that same
+    /// widened tensor it is bit-identical — bias, LoRA, and rank-3 shapes
+    /// included.
+    #[test]
+    fn ltx2_convrot_packed_dequant_arm_matches_standard_from_the_widened_weight() {
+        let device = Device::Cpu;
+        let loaded =
+            LtxLinear::load(256, 4, true, convrot_linear_var_builder(true), vec![]).unwrap();
+        let LtxLinear::ConvRotPacked {
+            linear,
+            bias,
+            adapters: _,
+        } = &loaded
+        else {
+            panic!("expected ConvRotPacked, got {loaded:?}");
+        };
+        let widened = candle_core::convrot::dequantize_int8_convrot_256(
+            linear.weight(),
+            linear.weight_scale(),
+        )
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap();
+        let standard = LtxLinear::Standard {
+            linear: nn::Linear::new(widened, bias.clone()),
+            adapters: vec![],
+        };
+
+        let xs = Tensor::from_vec(
+            (0..2 * 3 * 256)
+                .map(|index| ((index * 17 % 257) as f32 - 128.0) / 37.0)
+                .collect::<Vec<_>>(),
+            (2, 3, 256),
+            &device,
+        )
+        .unwrap();
+        let expected = standard.forward(&xs).unwrap();
+        let actual = convrot_packed_forward(
+            linear,
+            bias.as_ref(),
+            &xs,
+            DType::F32,
+            crate::ltx2::convrot::Ltx2Int8Arm::Dequant,
+        )
+        .unwrap();
+        assert_eq!(actual.dims(), &[2, 3, 4]);
+        assert_eq!(
+            actual
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The native arm on CPU runs the portable W8A8 reference, so its output
+    /// is `forward_reference` plus the bias — pinned here so the arm switch
+    /// is observable without a GPU.
+    #[test]
+    fn ltx2_convrot_packed_native_arm_runs_w8a8_semantics_on_cpu() {
+        let device = Device::Cpu;
+        let loaded =
+            LtxLinear::load(256, 4, true, convrot_linear_var_builder(true), vec![]).unwrap();
+        let LtxLinear::ConvRotPacked { linear, bias, .. } = &loaded else {
+            panic!("expected ConvRotPacked, got {loaded:?}");
+        };
+        let xs = Tensor::from_vec(
+            (0..3 * 256)
+                .map(|index| ((index * 17 % 257) as f32 - 128.0) / 37.0)
+                .collect::<Vec<_>>(),
+            (3, 256),
+            &device,
+        )
+        .unwrap();
+        let expected = linear
+            .forward_reference(
+                &xs,
+                None,
+                DType::F32,
+                mold_candle::comfy_int8::PORTABLE_ROW_CHUNK,
+            )
+            .unwrap()
+            .broadcast_add(bias.as_ref().unwrap())
+            .unwrap();
+        let actual = convrot_packed_forward(
+            linear,
+            bias.as_ref(),
+            &xs,
+            DType::F32,
+            crate::ltx2::convrot::Ltx2Int8Arm::Native,
+        )
+        .unwrap();
+        let error = actual
+            .sub(&expected)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(error <= 1e-5, "{error}");
+    }
+
+    /// Native (W8A8) against dequant (W8A16) on CUDA: the two arms differ by
+    /// the activation quantizer, so the comparison is a loose relative bound
+    /// rather than parity — the point is that both render, on the GPU, from
+    /// one packed weight.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "needs the candle fork's CUDA DequantizeInt8ConvRot256 arm (pin bump to the PR 0 revision)"]
+    fn ltx2_convrot_packed_native_and_dequant_agree_on_cuda_within_int8_tolerance() {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return;
+        };
+        let loaded =
+            LtxLinear::load(256, 4, true, convrot_linear_var_builder(true), vec![]).unwrap();
+        let LtxLinear::ConvRotPacked { linear, bias, .. } = &loaded else {
+            panic!("expected ConvRotPacked, got {loaded:?}");
+        };
+        let resident = mold_candle::comfy_int8::ComfyInt8ConvRotLinear::new_on_device(
+            linear.weight().to_device(&cuda).unwrap(),
+            linear.weight_scale().to_device(&cuda).unwrap(),
+        )
+        .unwrap();
+        let bias = bias.as_ref().map(|bias| bias.to_device(&cuda).unwrap());
+        let xs = Tensor::from_vec(
+            (0..3 * 256)
+                .map(|index| ((index * 17 % 257) as f32 - 128.0) / 37.0)
+                .collect::<Vec<_>>(),
+            (3, 256),
+            &cuda,
+        )
+        .unwrap();
+        let dequant = convrot_packed_forward(
+            &resident,
+            bias.as_ref(),
+            &xs,
+            DType::F32,
+            crate::ltx2::convrot::Ltx2Int8Arm::Dequant,
+        )
+        .unwrap()
+        .to_device(&Device::Cpu)
+        .unwrap();
+        let native = convrot_packed_forward(
+            &resident,
+            bias.as_ref(),
+            &xs,
+            DType::F32,
+            crate::ltx2::convrot::Ltx2Int8Arm::Native,
+        )
+        .unwrap()
+        .to_device(&Device::Cpu)
+        .unwrap();
+        let peak = dequant
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let error = native
+            .sub(&dequant)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(error <= 0.03 * peak + 1e-3, "error {error} vs peak {peak}");
     }
 
     fn nvfp4_linear_var_builder() -> VarBuilder<'static> {
