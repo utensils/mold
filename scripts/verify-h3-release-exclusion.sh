@@ -25,10 +25,13 @@ private_audio_capture_marker='mold.minimax-h3.private-uat-exact-fp32-audio-vae-c
 private_transformer_capture_marker='mold.minimax-h3.private-uat-transformer-capture.v1'
 omitted_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'
 h3_compiled_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
-global_compiled_markers=(
-  'mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
-  'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled'
-)
+# The sm89 shipping edge (`h3-cuda`) compiles the global FlashAttention
+# dispatch beside the H3-scoped kernel (#735): global-flash=compiled is
+# accepted exactly when paired with h3-rc=compiled. Standalone global flash —
+# an ordinary build that somehow compiled the developer feature — remains
+# forbidden in published artifacts.
+h3_flash_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled'
+forbidden_global_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
 
 [[ -f "$binary" ]] \
   || { echo "published binary is missing: $binary" >&2; exit 1; }
@@ -40,21 +43,20 @@ global_compiled_markers=(
 provenance_count=0
 grep -aFq "$omitted_marker" "$binary" && provenance_count=$((provenance_count + 1))
 grep -aFq "$h3_compiled_marker" "$binary" && provenance_count=$((provenance_count + 1))
+grep -aFq "$h3_flash_marker" "$binary" && provenance_count=$((provenance_count + 1))
 if [[ $provenance_count -ne 1 ]]; then
   echo "published binary lacks unambiguous MiniMax H3 attention provenance" >&2
   exit 1
 fi
 
-for compiled_marker in "${global_compiled_markers[@]}"; do
-  if grep -aFq "$compiled_marker" "$binary"; then
-    echo "published binary reports forbidden global FlashAttention code" >&2
-    exit 1
-  fi
-done
+if grep -aFq "$forbidden_global_marker" "$binary"; then
+  echo "published binary reports forbidden global FlashAttention code" >&2
+  exit 1
+fi
 
 # The H3-scoped kernel claim must agree with the positive provenance marker.
 # A normal build may omit both; a public H3 build must retain both.
-if grep -aFq "$h3_compiled_marker" "$binary"; then
+if grep -aFq "$h3_compiled_marker" "$binary" || grep -aFq "$h3_flash_marker" "$binary"; then
   grep -aFq "$claim_marker" "$binary" || {
     echo "published H3 binary lacks its H3-scoped kernel claim" >&2
     exit 1

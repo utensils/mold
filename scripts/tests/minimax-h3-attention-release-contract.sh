@@ -30,9 +30,20 @@ if grep -Fq 'feature = "h3-flash-attn-rc"' \
   crates/mold-candle/src/minimax_h3/visual_vae.rs; then
   fail "H3 qualification changes Visual VAE attention dispatch"
 fi
+# The Visual VAE's flash arm compiles under the global `flash-attn` feature —
+# which the sm89 `h3-cuda` edge now enables (#735) — so the arm alone must
+# never decide dispatch: `vae_runtime.rs` keys the backend off the
+# env-resolved `MOLD_ATTN` answer (Auto on Metal or under `MOLD_ATTN=flash`,
+# bounded Math otherwise), keeping shipped H3 CUDA pixels byte-identical.
 require_text crates/mold-candle/src/minimax_h3/visual_vae.rs \
   '#[cfg(feature = "flash-attn")]' \
   "Visual VAE no longer keys FlashAttention off the global developer feature"
+require_text crates/mold-inference/src/minimax_h3/vae_runtime.rs \
+  'visual_attention_backend_for(' \
+  "the H3 visual VAE no longer gates flash dispatch on the env-resolved MOLD_ATTN backend"
+require_text crates/mold-inference/src/minimax_h3/vae_runtime.rs \
+  'crate::attention::AttentionBackend::resolve()' \
+  "the H3 visual VAE backend guard must read the env-resolved backend, never cfg! alone"
 if ! awk '
   previous == "#[cfg(feature = \"h3-flash-attn-rc\")]" &&
     $0 ~ /^fn flash_attention\(q: &Tensor/ { found = 1 }
@@ -179,8 +190,8 @@ require_text crates/mold-server/Cargo.toml \
   'h3-cuda = ["h3", "cuda", "mold-inference/h3-cuda"]' \
   "mold-server does not expose the h3-cuda shipping edge"
 require_text crates/mold-inference/Cargo.toml \
-  'h3-cuda = ["h3", "cuda", "h3-attention-rc"]' \
-  "the h3-cuda edge does not carry the SM89 attention kernel"
+  'h3-cuda = ["h3", "cuda", "h3-attention-rc", "flash-attn"]' \
+  "the h3-cuda edge does not carry the SM89 attention kernel and the global dispatch"
 # The inverse guard: re-coupling a device to the bare feature is what made an
 # Apple Silicon H3 build inexpressible in the first place.
 if grep -Eq '^h3 = \[[^]]*"cuda"' crates/mold-inference/Cargo.toml \
@@ -194,10 +205,8 @@ claim_marker='mold.minimax-h3.attention-rc.kernel-compiled.v1'
 private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
 h3_compiled_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
 public_qwen_support_marker='mold.minimax-h3.qwen-support-loader.v1'
-global_compiled_markers=(
-  'mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
-  'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled'
-)
+h3_flash_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled'
+forbidden_global_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
 
 scratch_dir="$(mktemp -d)"
 trap 'rm -rf "$scratch_dir"' EXIT
@@ -229,12 +238,27 @@ printf '%s\n%s\n' "$omitted_marker" "$private_qwen_support_marker" > "$scratch_d
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-qwen-support" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted the private H3 Qwen support loader"
 fi
-for index in "${!global_compiled_markers[@]}"; do
-  printf '%s\n%s\n' "$omitted_marker" "${global_compiled_markers[$index]}" \
-    > "$scratch_dir/compiled-$index"
-  if scripts/verify-h3-release-exclusion.sh "$scratch_dir/compiled-$index" >/dev/null 2>&1; then
-    fail "release verifier accepted global FlashAttention provenance"
-  fi
-done
+printf '%s\n' "$forbidden_global_marker" > "$scratch_dir/global-only"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/global-only" >/dev/null 2>&1; then
+  fail "release verifier accepted standalone global FlashAttention provenance"
+fi
+printf '%s\n%s\n' "$omitted_marker" "$forbidden_global_marker" > "$scratch_dir/global-beside-omitted"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/global-beside-omitted" >/dev/null 2>&1; then
+  fail "release verifier accepted global FlashAttention provenance beside an ordinary marker"
+fi
+# The sm89 h3-cuda shape: global flash beside the H3 kernel, with the claim
+# and public Qwen support markers — accepted; without its claim — refused.
+printf '%s\n%s\n%s\n' "$h3_flash_marker" "$claim_marker" "$public_qwen_support_marker" \
+  > "$scratch_dir/public-h3-flash"
+scripts/verify-h3-release-exclusion.sh "$scratch_dir/public-h3-flash" >/dev/null
+printf '%s\n' "$h3_flash_marker" > "$scratch_dir/public-h3-flash-missing-claim"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/public-h3-flash-missing-claim" >/dev/null 2>&1; then
+  fail "release verifier accepted h3-cuda flash provenance without its kernel claim"
+fi
+# Two positive provenance markers at once stay ambiguous.
+printf '%s\n%s\n' "$h3_compiled_marker" "$h3_flash_marker" > "$scratch_dir/ambiguous-h3"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/ambiguous-h3" >/dev/null 2>&1; then
+  fail "release verifier accepted ambiguous double H3 provenance"
+fi
 
 echo "PASS: MiniMax H3 attention release-candidate contract"

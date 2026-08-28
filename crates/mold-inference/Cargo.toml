@@ -49,8 +49,13 @@ h3 = [
     "mold-candle/h3",
     "mold-core/h3",
 ]
-# The shipping CUDA H3 route: the family plus the SM89 attention kernel.
-h3-cuda = ["h3", "cuda", "h3-attention-rc"]
+# The shipping CUDA H3 route: the family plus the SM89 attention kernel, plus
+# the global FlashAttention dispatch (#735). `candle-flash-attn` was already
+# compiled and linked through `h3-attention-rc`, so this adds zero build cost;
+# it makes `MOLD_ATTN=flash` reachable in the shipped sm89 artifact. The
+# default attention backend stays `Math` in every build (#736) — compiling the
+# kernel never switches it on.
+h3-cuda = ["h3", "cuda", "h3-attention-rc", "flash-attn"]
 # Development-only access to the authorization-bound MiniMax H3 artifact
 # qualifier. This feature is intentionally not forwarded by mold-ai or any
 # shipping surface; release verification rejects its embedded claim marker.

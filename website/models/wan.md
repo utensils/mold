@@ -288,7 +288,7 @@ A `--features cuda,flash-attn` build can route the Wan DiT's self- and cross-att
 | `flash` | 21,354 MiB | 75.3 s     |
 | `math`  | 22,250 MiB | 158.4 s    |
 
-So flash is worth **2.1x on speed** and only ~900 MiB on peak. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that `flash-attn` ships in no release artifact, so this is a source-build configuration.
+So flash is worth **2.1x on speed** and only ~900 MiB on peak. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that among release artifacts only the sm89 (`h3-cuda`) binary compiles `flash-attn` — `MOLD_ATTN=flash` opts in there; on every other artifact this remains a source-build configuration.
 
 At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
 the default there), the image embeds the same `mold:parameters` provenance as
