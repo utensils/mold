@@ -612,7 +612,7 @@ describe("mobile Library organization", () => {
     expect(open?.[1]).toMatch(/display:\s*flex\s*;/);
     expect(body?.[1]).toMatch(/overflow-y:\s*auto\s*;/);
     expect(body?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
-    expect(body?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(body?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
     expect(body?.[1]).toContain("env(safe-area-inset-left)");
     expect(body?.[1]).toContain("env(safe-area-inset-right)");
     expect(body?.[1]).toContain("env(safe-area-inset-bottom)");

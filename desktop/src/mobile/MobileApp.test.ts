@@ -516,6 +516,22 @@ function fieldControl(label: string): DOMWrapper<Element> {
   return field.find("input, textarea, select");
 }
 
+function mobileTouch(type: string, x: number, y: number, ended = false): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  const point = { identifier: 17, clientX: x, clientY: y };
+  Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
+  Object.defineProperty(event, "changedTouches", { value: [point] });
+  return event;
+}
+
+async function swipeMobileContent(fromX: number, toX: number, y = 180): Promise<void> {
+  const content = wrapper!.get(".mobile-content").element;
+  content.dispatchEvent(mobileTouch("touchstart", fromX, y));
+  content.dispatchEvent(mobileTouch("touchmove", toX, y));
+  content.dispatchEvent(mobileTouch("touchend", toX, y, true));
+  await flushPromises();
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -7702,6 +7718,127 @@ describe("MobileApp create settings reset", () => {
 });
 
 describe("MobileApp primary navigation", () => {
+  it("swipes left and right through the four major destinations", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await swipeMobileContent(280, 100);
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+    await swipeMobileContent(280, 100);
+    expect(wrapper.get("[data-test='mobile-tab-catalog']").attributes("aria-current")).toBe("page");
+    await swipeMobileContent(100, 280);
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+  });
+
+  it("ignores left swipes in Settings and returns to the same underlying tab", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+    await swipeMobileContent(280, 100);
+    expect(wrapper.find("[data-test='mobile-settings-back']").exists()).toBe(true);
+
+    await wrapper.get("[data-test='mobile-settings-back']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+      "page",
+    );
+  });
+
+  it("swipes right out of Machine Detail without stealing swipe-row gestures", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(true);
+
+    await swipeMobileContent(90, 270);
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-tab-hosts']").attributes("aria-current")).toBe("page");
+  });
+
+  it("opens Machine Detail at the top and restores the Machines list scroll", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    const content = wrapper.get(".mobile-content").element as HTMLElement;
+    content.scrollTop = 360;
+
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    await flushPromises();
+    expect(content.scrollTop).toBe(0);
+
+    await wrapper.get("[data-test='host-detail-back']").trigger("click");
+    await flushPromises();
+    expect(content.scrollTop).toBe(360);
+  });
+
+  it("does not switch destinations when a horizontal control owns the gesture", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const modelPicker = fieldControl("Model").element;
+    modelPicker.dispatchEvent(mobileTouch("touchstart", 280, 180));
+    modelPicker.dispatchEvent(mobileTouch("touchmove", 100, 180));
+    modelPicker.dispatchEvent(mobileTouch("touchend", 100, 180, true));
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+      "page",
+    );
+  });
+
+  it("pulls Models and Machines to refresh their remote snapshots", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "discover_mold_hosts") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const content = wrapper.get(".mobile-content").element;
+
+    await wrapper.get("[data-test='mobile-tab-catalog']").trigger("click");
+    await flushPromises();
+    const catalogBefore = apiJsonTo.mock.calls.filter(([, path]) =>
+      String(path).startsWith("/api/catalog/search"),
+    ).length;
+    content.dispatchEvent(mobileTouch("touchstart", 120, 100));
+    content.dispatchEvent(mobileTouch("touchmove", 120, 230));
+    content.dispatchEvent(mobileTouch("touchend", 120, 230, true));
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => String(path).startsWith("/api/catalog/search"))
+          .length,
+      ).toBeGreaterThan(catalogBefore),
+    );
+
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await flushPromises();
+    const probesBefore = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status").length;
+    content.dispatchEvent(mobileTouch("touchstart", 120, 100));
+    content.dispatchEvent(mobileTouch("touchmove", 120, 230));
+    content.dispatchEvent(mobileTouch("touchend", 120, 230, true));
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status").length,
+      ).toBeGreaterThan(probesBefore),
+    );
+    expect(invoke).toHaveBeenCalledWith("discover_mold_hosts", { timeoutMs: 2500 });
+
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    await flushPromises();
+    const detailModelsBefore = apiJsonTo.mock.calls.filter(
+      ([, path]) => path === "/api/models",
+    ).length;
+    content.dispatchEvent(mobileTouch("touchstart", 120, 100));
+    content.dispatchEvent(mobileTouch("touchmove", 120, 230));
+    content.dispatchEvent(mobileTouch("touchend", 120, 230, true));
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/models").length,
+      ).toBeGreaterThan(detailModelsBefore),
+    );
+  });
+
   it("starts each tab at the top instead of carrying another tab's scroll position", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
@@ -11240,6 +11377,10 @@ describe("MobileApp Library organization", () => {
       configurable: true,
       value: clientY === undefined ? [] : [{ identifier: 7, clientX: 120, clientY }],
     });
+    Object.defineProperty(event, "changedTouches", {
+      configurable: true,
+      value: clientY === undefined ? [] : [{ identifier: 7, clientX: 120, clientY }],
+    });
     return event;
   }
 
@@ -11254,9 +11395,7 @@ describe("MobileApp Library organization", () => {
     content.dispatchEvent(move);
     await flushPromises();
     expect(move.defaultPrevented).toBe(true);
-    expect(wrapper!.get("[data-test='mobile-library-pull']").text()).toContain(
-      "Release to refresh",
-    );
+    expect(wrapper!.get("[data-test='mobile-view-pull']").text()).toContain("Release to refresh");
     content.dispatchEvent(libraryTouch("touchend"));
 
     await vi.waitFor(() =>
@@ -11277,7 +11416,7 @@ describe("MobileApp Library organization", () => {
     content.dispatchEvent(libraryTouch("touchcancel"));
     await flushPromises();
 
-    expect(wrapper!.get("[data-test='mobile-library-pull']").text()).not.toContain(
+    expect(wrapper!.get("[data-test='mobile-view-pull']").text()).not.toContain(
       "Release to refresh",
     );
     expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery")).toHaveLength(before);

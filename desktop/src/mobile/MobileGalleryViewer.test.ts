@@ -939,6 +939,31 @@ describe("MobileGalleryViewer info sheet", () => {
     expect(view.get("[data-test='gallery-viewer-print-details']").text()).toContain("1024×1024");
   });
 
+  it("dismisses the Info sheet with a downward swipe from its top", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+    const panel = view.get(".mobile-library-sheet-panel").element;
+    const touch = (type: string, y: number, ended = false) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      const point = { identifier: 5, clientX: 120, clientY: y };
+      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
+      Object.defineProperty(event, "changedTouches", { value: [point] });
+      return event;
+    };
+
+    panel.dispatchEvent(touch("touchstart", 100));
+    const move = touch("touchmove", 240);
+    panel.dispatchEvent(move);
+    expect(move.defaultPrevented).toBe(true);
+    await flushPromises();
+    expect(view.get(".mobile-library-sheet-panel").attributes("style")).toContain("translateY");
+    panel.dispatchEvent(touch("touchend", 240, true));
+    await flushPromises();
+
+    expect(view.get("[data-test='gallery-viewer-info-sheet']").classes()).not.toContain("is-open");
+  });
+
   it("matches the desktop print-detail metadata fields", async () => {
     const view = mountViewer({
       ...image,

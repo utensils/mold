@@ -803,6 +803,26 @@ describe("MobileCatalogView", () => {
     expect(wrapper.findAll("[data-test='mobile-catalog-card']")).toHaveLength(3);
   });
 
+  it("keeps installed rows when a manual refresh cannot reach their hosts", async () => {
+    wrapper = mountCatalog();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
+    expect(wrapper.text()).toContain("installed:q8");
+
+    apiFetchTo.mockImplementation((_target: ApiTarget, path: string) =>
+      path === "/api/models" || path === "/api/capabilities"
+        ? Promise.reject(new TypeError("offline"))
+        : Promise.resolve(new Response(null, { status: 204 })),
+    );
+    await (wrapper.vm as unknown as { refresh(): Promise<void> }).refresh();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("installed:q8");
+    expect(wrapper.get("[data-test='mobile-catalog-action-status']").text()).toContain(
+      "Saved model information is still shown",
+    );
+  });
+
   it("debounces search and ignores a late response from the previous host", async () => {
     vi.useFakeTimers();
     const pending: Array<(response: CatalogSearchResponse) => void> = [];

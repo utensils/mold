@@ -5141,6 +5141,7 @@ button:disabled {
   inset: 0;
   border: 0;
   background: color-mix(in srgb, var(--print) 62%, transparent);
+  transition: opacity 160ms ease-out;
 }
 
 .mobile-library-sheet-panel {
@@ -5154,6 +5155,12 @@ button:disabled {
   background: var(--bath);
   color: var(--rebate);
   animation: mobile-sheet-in 0.2s ease;
+  transition: transform 160ms ease-out;
+  will-change: transform;
+}
+
+.mobile-library-sheet-panel.is-dragging {
+  transition: none;
 }
 
 .mobile-library-sheet-grabber {
@@ -5174,7 +5181,7 @@ button:disabled {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: none;
-  touch-action: manipulation;
+  touch-action: pan-y;
   padding: 10px max(18px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
     max(18px, env(safe-area-inset-left));
 }
