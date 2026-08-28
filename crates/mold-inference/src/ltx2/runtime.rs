@@ -5690,7 +5690,8 @@ fn load_ltx2_audio_transformer(
             let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
             VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
         } else if checkpoint_is_convrot {
-            let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
+            let backend =
+                super::convrot::Ltx2ConvRotBackend::from_path_for_device(checkpoint_path, device)?;
             VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
         } else if checkpoint_is_fp8 {
             load_fp8_safetensors_with_callback(
@@ -6900,7 +6901,8 @@ fn ltx2_transformer_var_builder<'a>(
         ));
     }
     if checkpoint_is_convrot {
-        let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
+        let backend =
+            super::convrot::Ltx2ConvRotBackend::from_path_for_device(checkpoint_path, device)?;
         return Ok(VarBuilder::from_backend(
             Box::new(backend),
             compute_dtype(device),

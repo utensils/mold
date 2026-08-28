@@ -324,6 +324,7 @@ pub enum RuntimeSemanticVariable {
     Ltx2Fp8WeightScaleMode,
     Ltx2GemmaDevice,
     Ltx2GemmaVariant,
+    Ltx2Int8,
     Umt5Variant,
     Ltx2SpatialTile,
     Ltx2VaeDecodeChunkFrames,
@@ -680,6 +681,10 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_LTX2_FP8_WEIGHT_SCALE_MODE" => RuntimeSemanticVariable::Ltx2Fp8WeightScaleMode,
         "MOLD_LTX2_GEMMA_DEVICE" => RuntimeSemanticVariable::Ltx2GemmaDevice,
         "MOLD_LTX2_GEMMA_VARIANT" => RuntimeSemanticVariable::Ltx2GemmaVariant,
+        // Swaps the LTX-2 INT8 ConvRot execution arm (W8A8 kernel vs
+        // per-forward widening), which changes pixels, transient memory, and
+        // step latency — its own execution-equivalence and timing class.
+        "MOLD_LTX2_INT8" => RuntimeSemanticVariable::Ltx2Int8,
         "MOLD_UMT5_VARIANT" => RuntimeSemanticVariable::Umt5Variant,
         "MOLD_LTX2_SPATIAL_TILE" => RuntimeSemanticVariable::Ltx2SpatialTile,
         "MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES" => RuntimeSemanticVariable::Ltx2VaeDecodeChunkFrames,
@@ -793,6 +798,11 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
         }
         Some(value) if variable == RuntimeSemanticVariable::QwenFp8Cache => {
             CanonicalRuntimeValue::Boolean(value.trim() == "1")
+        }
+        // Mirrors the engine's `parse_ltx2_int8_arm` exactly: `dequant`
+        // selects the widening arm, every other spelling is the default.
+        Some(value) if variable == RuntimeSemanticVariable::Ltx2Int8 => {
+            CanonicalRuntimeValue::Boolean(value.trim().eq_ignore_ascii_case("dequant"))
         }
         // Mirrors the engine's `parse_zimage_qmatmul` exactly.
         Some(value) if variable == RuntimeSemanticVariable::ZimageQMatMul => {
