@@ -620,4 +620,118 @@ mod tests {
             .lookup("patchify_proj.weight.gguf_blocks", DType::U8, &Device::Cpu)
             .is_err());
     }
+    /// Real-checkpoint smoke (#1414 deliverable): resolve tensors from an
+    /// INSTALLED GGUF tier and run one quantized linear forward on the
+    /// first CUDA device (CPU when none). Ignored by default — it needs
+    /// `MOLD_LTX25_GGUF_SMOKE=<absolute path to the .gguf>` and is run
+    /// manually; nothing committed depends on the real file.
+    #[test]
+    #[ignore = "needs MOLD_LTX25_GGUF_SMOKE=<installed .gguf> (manual smoke)"]
+    fn real_gguf_smoke_resolves_and_forwards_one_quantized_linear() {
+        use candle_core::Module;
+        use std::sync::Arc;
+
+        let path = PathBuf::from(
+            std::env::var_os("MOLD_LTX25_GGUF_SMOKE")
+                .expect("set MOLD_LTX25_GGUF_SMOKE to an installed LTX-2.5 GGUF"),
+        );
+        assert!(checkpoint_is_gguf(&path), "{}", path.display());
+        let backend = Ltx2GgufBackend::from_path(&path).unwrap();
+
+        // The video AdaLN table is F32 and non-block: the plain dense arm.
+        let adaln_shape = backend
+            .shape_of("adaln_single.linear.weight")
+            .expect("real tier carries the video AdaLN table");
+        let adaln = backend
+            .lookup("adaln_single.linear.weight", DType::F32, &Device::Cpu)
+            .unwrap();
+        assert_eq!(adaln.shape(), &adaln_shape);
+        assert_eq!(adaln_shape.dims()[0], 36_864, "22B nine-component AdaLN");
+
+        // A block linear serves the packed side channel.
+        let key = "transformer_blocks.0.attn1.to_q.weight";
+        let weight_shape = backend.shape_of(key).expect("block 0 to_q present");
+        let dims = weight_shape.dims().to_vec();
+        assert!(
+            backend.contains_tensor(&format!("{key}.gguf_blocks")),
+            "quantized block linear must expose the side channel"
+        );
+        let blocks = backend
+            .lookup(&format!("{key}.gguf_blocks"), DType::U8, &Device::Cpu)
+            .unwrap();
+        let dtype_id = backend
+            .lookup(&format!("{key}.gguf_dtype"), DType::U32, &Device::Cpu)
+            .unwrap()
+            .to_vec1::<u32>()
+            .unwrap()[0];
+
+        let device = if candle_core::utils::cuda_is_available() {
+            Device::new_cuda(0).unwrap()
+        } else {
+            Device::Cpu
+        };
+        let weight = qtensor_from_side_channel(&blocks, dtype_id, dims.clone(), &device).unwrap();
+        let kernel_dtype = crate::ltx2::backend::compute_dtype(&device);
+        let linear = crate::quantized_linear::QuantizedLinear::new(
+            Arc::new(weight),
+            None,
+            &device,
+            kernel_dtype,
+            ltx2_qmatmul_enabled(),
+        )
+        .unwrap();
+
+        let (out_dim, in_dim) = (dims[0], dims[1]);
+        let xs_values: Vec<f32> = (0..4 * in_dim)
+            .map(|index| ((index % 29) as f32 - 14.0) / 32.0)
+            .collect();
+        let xs = Tensor::from_vec(xs_values, (1, 4, in_dim), &device)
+            .unwrap()
+            .to_dtype(kernel_dtype)
+            .unwrap();
+        let out = linear
+            .forward(&xs)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap();
+        assert_eq!(out.dims(), [1, 4, out_dim]);
+
+        // Reference: the same weight dequantized on the CPU, dense F32.
+        let dense = backend.lookup(key, DType::F32, &Device::Cpu).unwrap();
+        let reference = candle_nn::Linear::new(dense, None)
+            .forward(
+                &xs.to_dtype(DType::F32)
+                    .unwrap()
+                    .to_device(&Device::Cpu)
+                    .unwrap(),
+            )
+            .unwrap();
+        let peak = reference
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let diff = (out.clone() - reference)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(peak.is_finite() && diff.is_finite(), "non-finite output");
+        assert!(
+            diff <= 0.02 * peak + 1e-3,
+            "device forward diverges from the CPU dense reference: {diff} vs peak {peak}"
+        );
+        println!(
+            "real GGUF smoke: {} — {key} {dims:?} dtype id {dtype_id} on {device:?}, \
+             max |diff| {diff:.3e} against peak {peak:.3e}",
+            path.display()
+        );
+    }
 }
