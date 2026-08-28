@@ -13,6 +13,7 @@ pub mod secrets;
 pub mod server;
 pub mod settings;
 pub mod source_stash;
+pub mod thumbnail_cache;
 pub mod updater;
 
 use tauri::Manager;
@@ -98,6 +99,12 @@ pub fn run() {
             let state = context.app_handle().state::<commands::AppState>();
             gallery::protocol_response(&state, request)
         })
+        // Library tiles: served from the persistent thumbnail cache on disk
+        // (see `thumbnail_cache.rs`). Asynchronous so the file read never
+        // blocks the webview's protocol thread.
+        .register_asynchronous_uri_scheme_protocol("mold-thumb", |context, request, responder| {
+            gallery::thumb_protocol_response(context.app_handle().clone(), request, responder)
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
@@ -128,6 +135,9 @@ pub fn run() {
             let settings_store = commands::SettingsStore::load(app.handle())?;
             app.manage(updater::UpdaterState::default());
             let app_data = app.path().app_data_dir()?;
+            app.manage(std::sync::Arc::new(thumbnail_cache::ThumbnailCache::new(
+                app_data.join(thumbnail_cache::CACHE_DIR),
+            )));
             let secrets = secrets::SecretStore::new(app_data);
             // Retire remote-primary installs: re-home the ex-primary as a
             // connected host so the built-in engine is always the internal
@@ -182,6 +192,9 @@ pub fn run() {
             gallery::local_gallery_delete_forever,
             gallery::fetch_gallery_thumbnail,
             gallery::cancel_gallery_thumbnail,
+            gallery::prepare_gallery_thumbnail,
+            gallery::probe_gallery_thumbnails,
+            gallery::forget_gallery_thumbnail,
             gallery::fetch_gallery_media,
             gallery::import_source_image,
             gallery::save_output_bytes,

@@ -9252,24 +9252,12 @@ async fn get_gallery_thumbnail(
     )
 }
 
-fn file_media_version(metadata: &std::fs::Metadata) -> String {
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|value| value.as_nanos())
-        .unwrap_or_default();
-    format!("{modified}-{}", metadata.len())
-}
-
-fn versioned_thumbnail_path(
-    thumb_dir: &std::path::Path,
-    filename: &str,
-    media_version: &str,
-) -> std::path::PathBuf {
-    let key = Sha256::digest(format!("{filename}:{media_version}").as_bytes());
-    thumb_dir.join(format!("{key:x}.png"))
-}
+// The cache layout and the renderers live in `crate::thumbnails` so the
+// desktop app's offline tiles share them; these names stay as thin aliases
+// for the route, the warmup, and the trash sweeper.
+use crate::thumbnails::{
+    file_media_version, versioned_thumbnail_path, AUDIO_PLACEHOLDER_SVG, VIDEO_PLACEHOLDER_SVG,
+};
 
 fn thumbnail_singleflight(path: &std::path::Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
     static FLIGHTS: std::sync::LazyLock<
@@ -9316,10 +9304,6 @@ fn thumbnail_response(
         .body(Body::from(bytes))
         .map_err(|error| ApiError::internal(format!("thumbnail response failed: {error}")))
 }
-
-const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#a)"/><g fill="rgba(226,232,240,0.85)"><rect x="52" y="112" width="8" height="32" rx="4"/><rect x="72" y="92" width="8" height="72" rx="4"/><rect x="92" y="68" width="8" height="120" rx="4"/><rect x="112" y="100" width="8" height="56" rx="4"/><rect x="132" y="76" width="8" height="104" rx="4"/><rect x="152" y="104" width="8" height="48" rx="4"/><rect x="172" y="86" width="8" height="84" rx="4"/><rect x="192" y="116" width="8" height="24" rx="4"/></g></svg>"##;
-
-const VIDEO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#g)"/><circle cx="128" cy="128" r="52" fill="rgba(255,255,255,0.08)"/><polygon points="112,100 112,156 160,128" fill="rgba(226,232,240,0.85)"/></svg>"##;
 
 /// Serve a cached animated GIF preview for a gallery video output.
 ///
@@ -9408,10 +9392,25 @@ pub(crate) fn server_preview_gif_dir() -> std::path::PathBuf {
 
 /// Server-side thumbnail cache directory.
 pub(crate) fn server_thumbnail_dir() -> std::path::PathBuf {
-    mold_core::Config::mold_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
-        .join("cache")
-        .join("thumbnails")
+    crate::thumbnails::server_thumbnail_dir()
+}
+
+/// Write one rendered tile atomically (temp + rename) so a concurrent reader
+/// never sees a half-written PNG.
+fn write_thumbnail_atomically(
+    dest: &std::path::Path,
+    rendered: &crate::thumbnails::RenderedThumbnail,
+) -> anyhow::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&tmp, &rendered.bytes)?;
+    if let Err(error) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 /// Generate a 256x256 max thumbnail from source image. The result is always
@@ -9421,43 +9420,27 @@ fn generate_server_thumbnail(
     source: &std::path::Path,
     dest: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let img = image::open(source)?;
-    let thumb = img.thumbnail(256, 256);
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    thumb.save_with_format(dest, image::ImageFormat::Png)?;
-    Ok(())
+    let rendered = crate::thumbnails::render_raster_thumbnail(
+        source,
+        crate::thumbnails::DEFAULT_MAX_DIM,
+        crate::thumbnails::ThumbFormat::Png,
+    )?;
+    write_thumbnail_atomically(dest, &rendered)
 }
 
-/// Extract the first frame of an MP4 as a PNG thumbnail and downscale to
-/// 256px max via the `image` crate. Uses the openh264 pipeline that
-/// `mold_inference::ltx2::media` already ships for video probes.
-///
-/// The full-frame PNG is written to a sibling temp path first, then decoded
-/// and resized — this keeps `mold_inference`'s existing helper surface stable
-/// while still producing a compact thumbnail.
+/// Extract the first frame of an MP4 (and only the first frame — see
+/// `mold_inference::ltx2::media::extract_first_frame`) and downscale it to
+/// a 256px max PNG.
 fn generate_video_thumbnail(
     source: &std::path::Path,
     dest: &std::path::Path,
 ) -> anyhow::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Decode the first frame to a temporary full-resolution PNG, then
-    // thumbnail-resize via the `image` crate. We stage through a temp file
-    // rather than through memory to reuse `extract_thumbnail`'s existing
-    // I/O-based API.
-    let tmp = dest.with_extension("firstframe.png");
-    mold_inference::ltx2::media::extract_thumbnail(source, &tmp)?;
-    let decode_result = (|| -> anyhow::Result<()> {
-        let img = image::open(&tmp)?;
-        let thumb = img.thumbnail(256, 256);
-        thumb.save_with_format(dest, image::ImageFormat::Png)?;
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(&tmp);
-    decode_result
+    let rendered = crate::thumbnails::render_video_thumbnail(
+        source,
+        crate::thumbnails::DEFAULT_MAX_DIM,
+        crate::thumbnails::ThumbFormat::Png,
+    )?;
+    write_thumbnail_atomically(dest, &rendered)
 }
 
 /// Pre-generate thumbnails for all gallery images on server startup.

@@ -15,6 +15,7 @@ use tauri::Manager;
 use tokio::sync::Semaphore;
 
 use crate::commands::{AppState, LocalServer, LocalServerInfo, SettingsStore};
+use crate::thumbnail_cache::{origin_for, valid_origin, SizeTier, ThumbKey, ThumbnailCache};
 
 const MAX_SOURCE_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_GALLERY_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
@@ -1605,6 +1606,429 @@ fn error_response(status: StatusCode, message: &str) -> Response<Vec<u8>> {
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(message.as_bytes().to_vec())
         .expect("valid protocol response")
+}
+
+// ── Persistent thumbnail cache (`mold-thumb:`) ──────────────────────────────
+//
+// A Library tile is prepared through `prepare_gallery_thumbnail` (cache-first;
+// a miss fetches from the host or renders this device's file offline, then
+// writes the cache) and then displayed through the `mold-thumb://` protocol,
+// which only ever reads the cache. The split keeps the JS scheduler's
+// priority/cancel semantics on the expensive half while WebKit owns decoding
+// and its bitmap cache for the display half — no bytes, blobs, or object URLs
+// pass through JS for a tile.
+
+/// Mirror of `MAX_CONCURRENT_GALLERY_THUMBNAILS` for offline renders: image
+/// decoding is CPU-bound, so it is bounded by cores rather than sockets.
+static LOCAL_RENDER_PERMITS: LazyLock<Semaphore> = LazyLock::new(|| {
+    Semaphore::new(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(1, 4),
+    )
+});
+
+/// The `mold-thumb://localhost/<origin>/<size>/<filename>?v=<version>` URL of
+/// one tile. Percent-encoding uses the same set as the API paths so a
+/// filename with spaces or `#` survives the round trip.
+pub(crate) fn thumbnail_protocol_url(
+    origin: &str,
+    size: SizeTier,
+    filename: &str,
+    media_version: &str,
+) -> String {
+    let name = percent_encoding::utf8_percent_encode(filename, percent_encoding::NON_ALPHANUMERIC);
+    let version =
+        percent_encoding::utf8_percent_encode(media_version, percent_encoding::NON_ALPHANUMERIC);
+    format!("mold-thumb://localhost/{origin}/{}/{name}?v={version}", size.pixels())
+}
+
+fn valid_media_version(media_version: &str) -> bool {
+    !media_version.is_empty()
+        && media_version.len() <= 128
+        && !media_version.contains(['/', '\\', '\0'])
+}
+
+/// Ensure the cache holds `digest`, running `fetch` at most once across
+/// concurrent callers. The cache is consulted BEFORE and AFTER taking the
+/// per-digest flight so a hit performs no network I/O at all.
+pub(crate) async fn resolve_thumbnail<F, Fut>(
+    cache: &Arc<ThumbnailCache>,
+    digest: &str,
+    fetch: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+{
+    if cache.contains(digest) {
+        return Ok(());
+    }
+    let flight = cache.singleflight(digest);
+    let _guard = flight.lock().await;
+    if cache.contains(digest) {
+        return Ok(());
+    }
+    let bytes = fetch().await?;
+    let cache = cache.clone();
+    let digest = digest.to_string();
+    tokio::task::spawn_blocking(move || cache.put(&digest, &bytes))
+        .await
+        .map_err(|error| format!("The thumbnail cache write was cancelled: {error}"))?
+}
+
+/// Render one of this device's prints while the local server is Off. The
+/// server's own cache under `MOLD_HOME` is consulted first (a tile the
+/// embedded engine warmed is free), then the file is decoded in-process.
+fn render_offline_local_thumbnail(filename: &str, size: SizeTier) -> Result<Vec<u8>, String> {
+    use mold_server::thumbnails as thumbs;
+    let Some(dir) = output_dir() else {
+        return Err("Local gallery is disabled.".into());
+    };
+    let Some(path) = offline_media_path(&dir, filename, false)? else {
+        return Err(format!("Gallery file not found: {filename}"));
+    };
+    let thumb_dir = thumbs::server_thumbnail_dir();
+    if thumbs::is_audio_filename(filename) {
+        // The waveform tile is written at save time; nothing here can draw it.
+        let sidecar = thumb_dir.join(format!("{filename}.png"));
+        return Ok(std::fs::read(&sidecar)
+            .unwrap_or_else(|_| thumbs::AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec()));
+    }
+    if size == SizeTier::S256 {
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            let shared =
+                thumbs::versioned_thumbnail_path(&thumb_dir, filename, &thumbs::file_media_version(&metadata));
+            if let Ok(bytes) = std::fs::read(&shared) {
+                if crate::thumbnail_cache::sniff_content_type(&bytes).is_some() {
+                    return Ok(bytes);
+                }
+            }
+        }
+    }
+    match thumbs::render_thumbnail(&path, filename, size.pixels(), thumbs::ThumbFormat::Jpeg) {
+        Ok(rendered) => Ok(rendered.bytes),
+        Err(error) if thumbs::is_video_filename(filename) => {
+            tracing::warn!(file = %filename, error = %error, "offline video poster failed; placeholder");
+            Ok(thumbs::VIDEO_PLACEHOLDER_SVG.as_bytes().to_vec())
+        }
+        Err(error) => Err(format!("Couldn't render a thumbnail for {filename}: {error}")),
+    }
+}
+
+fn thumbnail_client() -> &'static reqwest::Client {
+    GALLERY_THUMBNAIL_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            // The per-host key must never follow a redirect off the host.
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_max_idle_per_host(MAX_CONCURRENT_GALLERY_THUMBNAILS)
+            .build()
+            .expect("static gallery HTTP client settings must be valid")
+    })
+}
+
+/// Make sure one tile is on disk and hand back its `mold-thumb://` URL.
+/// `target` is the host to fetch from; `None` means this device with its
+/// server Off, rendered from the output dir. Cancellation and prioritisation
+/// stay with the JS scheduler through `request_id` exactly as before.
+#[tauri::command]
+pub async fn prepare_gallery_thumbnail(
+    cache: tauri::State<'_, Arc<ThumbnailCache>>,
+    target: Option<MediaSaveTarget>,
+    cache_key: String,
+    filename: String,
+    media_version: String,
+    size: u32,
+    request_id: String,
+) -> Result<String, String> {
+    if !valid_filename(&filename) {
+        return Err("Invalid gallery filename.".into());
+    }
+    if !valid_media_version(&media_version) {
+        return Err("Invalid gallery media version.".into());
+    }
+    if request_id.is_empty() || request_id.len() > 128 {
+        return Err("Invalid gallery thumbnail request id.".into());
+    }
+    let size = SizeTier::try_from(size)?;
+    let origin = origin_for(&cache_key, target.as_ref().map(|t| t.base_url.as_str()));
+    let key = ThumbKey {
+        origin: &origin,
+        filename: &filename,
+        media_version: &media_version,
+        size,
+    };
+    let digest = key.digest();
+    let url = thumbnail_protocol_url(&origin, size, &filename, &media_version);
+    if cache.contains(&digest) {
+        return Ok(url);
+    }
+    let active = ActiveThumbnailRequest::register(request_id)?;
+    active.cancellation.check()?;
+    let cache_ref: &Arc<ThumbnailCache> = &cache;
+    resolve_thumbnail(cache_ref, &digest, || async {
+        match target.as_ref() {
+            Some(target) => {
+                let _permit = tokio::select! {
+                    permit = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        GALLERY_THUMBNAIL_PERMITS.acquire()
+                    ) => permit
+                        .map_err(|_| "The gallery thumbnail queue is busy; retrying may help.".to_string())?
+                        .map_err(|_| "The gallery thumbnail service is unavailable.".to_string())?,
+                    _ = active.cancellation.notify.notified() => {
+                        active.cancellation.check()?;
+                        return Err("Gallery thumbnail request cancelled.".into());
+                    }
+                };
+                active.cancellation.check()?;
+                let encoded = percent_encoding::utf8_percent_encode(
+                    &filename,
+                    percent_encoding::NON_ALPHANUMERIC,
+                );
+                // Older servers ignore the query and answer their 256 px PNG;
+                // the cache sniffs the bytes rather than trusting the request.
+                let api_path =
+                    format!("/api/gallery/thumbnail/{encoded}?size={}&fmt=jpeg", size.pixels());
+                let fetch = fetch_gallery_bytes(
+                    thumbnail_client(),
+                    target,
+                    &api_path,
+                    MAX_GALLERY_THUMBNAIL_BYTES,
+                    "thumbnail",
+                    Some(&active.cancellation),
+                );
+                tokio::pin!(fetch);
+                let (bytes, _content_type) = tokio::select! {
+                    result = &mut fetch => result?,
+                    _ = active.cancellation.notify.notified() => {
+                        active.cancellation.check()?;
+                        return Err("Gallery thumbnail request cancelled.".into());
+                    }
+                };
+                active.cancellation.check()?;
+                Ok(bytes)
+            }
+            None => {
+                let _permit = LOCAL_RENDER_PERMITS
+                    .acquire()
+                    .await
+                    .map_err(|_| "The thumbnail renderer is unavailable.".to_string())?;
+                active.cancellation.check()?;
+                let filename = filename.clone();
+                tokio::task::spawn_blocking(move || render_offline_local_thumbnail(&filename, size))
+                    .await
+                    .map_err(|error| format!("The thumbnail render was cancelled: {error}"))?
+            }
+        }
+    })
+    .await?;
+    Ok(url)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailRef {
+    filename: String,
+    media_version: String,
+}
+
+/// Which of these tiles are already cached — a stat per entry, no I/O
+/// beyond that. The prewarm planner asks in batches so it only schedules
+/// the misses.
+#[tauri::command]
+pub async fn probe_gallery_thumbnails(
+    cache: tauri::State<'_, Arc<ThumbnailCache>>,
+    cache_key: String,
+    base_url: Option<String>,
+    size: u32,
+    refs: Vec<ThumbnailRef>,
+) -> Result<Vec<bool>, String> {
+    let size = SizeTier::try_from(size)?;
+    let origin = origin_for(&cache_key, base_url.as_deref());
+    let cache = Arc::clone(&cache);
+    tokio::task::spawn_blocking(move || {
+        refs.iter()
+            .map(|r| {
+                valid_filename(&r.filename)
+                    && valid_media_version(&r.media_version)
+                    && cache.contains(
+                        &ThumbKey {
+                            origin: &origin,
+                            filename: &r.filename,
+                            media_version: &r.media_version,
+                            size,
+                        }
+                        .digest(),
+                    )
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| format!("The thumbnail probe was cancelled: {error}"))
+}
+
+/// Drop every tier of one tile (delete forever / purge).
+#[tauri::command]
+pub fn forget_gallery_thumbnail(
+    cache: tauri::State<'_, Arc<ThumbnailCache>>,
+    cache_key: String,
+    base_url: Option<String>,
+    filename: String,
+    media_version: String,
+) -> Result<(), String> {
+    if !valid_filename(&filename) || !valid_media_version(&media_version) {
+        return Ok(());
+    }
+    let origin = origin_for(&cache_key, base_url.as_deref());
+    for size in [SizeTier::S256, SizeTier::S512] {
+        cache.remove(
+            &ThumbKey {
+                origin: &origin,
+                filename: &filename,
+                media_version: &media_version,
+                size,
+            }
+            .digest(),
+        );
+    }
+    Ok(())
+}
+
+/// Parse `/<origin>/<size>/<encoded filename>` + `?v=<version>` off a
+/// `mold-thumb:` request. Rust recomputes the digest so the key logic has one
+/// owner; the URL carries only what a human could read.
+pub(crate) fn parse_thumbnail_protocol_request(
+    path: &str,
+    query: Option<&str>,
+) -> Result<(String, SizeTier, String, String), String> {
+    let mut segments = path.trim_start_matches('/').splitn(3, '/');
+    let origin = segments.next().unwrap_or_default();
+    let size = segments.next().unwrap_or_default();
+    let encoded = segments.next().unwrap_or_default();
+    if !valid_origin(origin) {
+        return Err("Invalid thumbnail origin.".into());
+    }
+    let size = size
+        .parse::<u32>()
+        .ok()
+        .and_then(|px| SizeTier::try_from(px).ok())
+        .ok_or_else(|| "Invalid thumbnail size.".to_string())?;
+    let filename = percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .map_err(|_| "Invalid gallery filename.".to_string())?
+        .into_owned();
+    if !valid_filename(&filename) {
+        return Err("Invalid gallery filename.".into());
+    }
+    let version = query
+        .and_then(|q| {
+            q.split('&')
+                .find_map(|pair| pair.strip_prefix("v="))
+                .map(|v| percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned())
+        })
+        .ok_or_else(|| "Missing thumbnail version.".to_string())?;
+    if !valid_media_version(&version) {
+        return Err("Invalid gallery media version.".into());
+    }
+    Ok((origin.to_string(), size, filename, version))
+}
+
+fn thumbnail_bytes_response(thumb: crate::thumbnail_cache::CachedThumb) -> Response<Vec<u8>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, thumb.content_type)
+        .header(header::CONTENT_LENGTH, thumb.bytes.len())
+        // The key already carries the content version, so the entry is
+        // immutable for the life of the URL: WebKit may keep its decoded
+        // bitmap across virtual-grid remounts without asking again.
+        .header(header::CACHE_CONTROL, "private, max-age=31536000, immutable")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(thumb.bytes)
+        .expect("valid protocol response")
+}
+
+/// `mold-thumb://` handler: a cache read off the protocol thread. A miss for
+/// this device renders inline (the offline listing may show a print that was
+/// never prepared); a remote miss is a 404 the tile's retry loop answers by
+/// preparing it again.
+pub fn thumb_protocol_response(
+    app: tauri::AppHandle,
+    request: Request<Vec<u8>>,
+    responder: tauri::UriSchemeResponder,
+) {
+    let parsed = parse_thumbnail_protocol_request(request.uri().path(), request.uri().query());
+    let (origin, size, filename, version) = match parsed {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            responder.respond(error_response(StatusCode::BAD_REQUEST, &message));
+            return;
+        }
+    };
+    let cache = Arc::clone(&app.state::<Arc<ThumbnailCache>>());
+    tauri::async_runtime::spawn(async move {
+        let digest = ThumbKey {
+            origin: &origin,
+            filename: &filename,
+            media_version: &version,
+            size,
+        }
+        .digest();
+        let read = {
+            let cache = cache.clone();
+            let digest = digest.clone();
+            tokio::task::spawn_blocking(move || cache.get(&digest)).await
+        };
+        match read {
+            Ok(Ok(Some(thumb))) => responder.respond(thumbnail_bytes_response(thumb)),
+            Ok(Ok(None)) if origin == "local" => {
+                let rendered = {
+                    let filename = filename.clone();
+                    tokio::task::spawn_blocking(move || render_offline_local_thumbnail(&filename, size))
+                        .await
+                };
+                match rendered {
+                    Ok(Ok(bytes)) => {
+                        let content_type =
+                            crate::thumbnail_cache::sniff_content_type(&bytes).unwrap_or("application/octet-stream");
+                        let put = {
+                            let cache = cache.clone();
+                            let bytes = bytes.clone();
+                            tokio::task::spawn_blocking(move || cache.put(&digest, &bytes)).await
+                        };
+                        if let Ok(Err(error)) = put {
+                            tracing::debug!(error = %error, "offline thumbnail not cached");
+                        }
+                        responder.respond(thumbnail_bytes_response(crate::thumbnail_cache::CachedThumb {
+                            bytes,
+                            content_type,
+                        }));
+                    }
+                    Ok(Err(message)) => {
+                        responder.respond(error_response(StatusCode::NOT_FOUND, &message))
+                    }
+                    Err(error) => responder.respond(error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &error.to_string(),
+                    )),
+                }
+            }
+            Ok(Ok(None)) => responder.respond(error_response(
+                StatusCode::NOT_FOUND,
+                "Thumbnail not cached; prepare it first.",
+            )),
+            Ok(Err(message)) => {
+                responder.respond(error_response(StatusCode::INTERNAL_SERVER_ERROR, &message))
+            }
+            Err(error) => responder.respond(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &error.to_string(),
+            )),
+        }
+    });
 }
 
 pub fn protocol_response(state: &AppState, request: Request<Vec<u8>>) -> Response<Vec<u8>> {

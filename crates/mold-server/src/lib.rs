@@ -83,6 +83,7 @@ pub mod routes_config;
 pub mod scheduler;
 mod signals;
 pub mod state;
+pub mod thumbnails;
 pub mod variant_dependencies;
 mod wan_admission;
 pub mod web_ui;
