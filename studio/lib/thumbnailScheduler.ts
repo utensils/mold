@@ -253,17 +253,25 @@ export class ThumbnailScheduler {
       ) {
         continue;
       }
-      for (const [hostKey, fifo] of this.queues[priority]) {
+      const byHost = this.queues[priority];
+      for (const [hostKey, fifo] of byHost) {
         if ((this.runningByHost.get(hostKey) ?? 0) >= this.perHostConcurrency)
           continue;
         for (;;) {
           const entry = fifo.shift();
           if (!entry) {
-            this.queues[priority].delete(hostKey);
+            byHost.delete(hostKey);
             break;
           }
           this.dispatchScans += 1;
-          if (this.isLive(entry, priority)) return entry;
+          if (this.isLive(entry, priority)) {
+            // Round-robin: the host that just won moves to the back so a
+            // third host is never starved while two busy ones keep refilling
+            // freed slots ahead of it.
+            byHost.delete(hostKey);
+            byHost.set(hostKey, fifo);
+            return entry;
+          }
         }
       }
     }

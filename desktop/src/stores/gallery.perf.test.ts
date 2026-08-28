@@ -6,6 +6,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
+import { toRaw } from "vue";
 
 const counters = vi.hoisted(() => ({
   unionOrganization: 0,
@@ -169,6 +170,20 @@ describe("gallery store derived work is indexed once per data change", () => {
   it("resolves every copy of a print without scanning the buckets", () => {
     const gallery = seedFleet();
     const entries = gallery.merged;
+    // Instrument the bucket arrays themselves: every element read is
+    // counted, so an inline `.find()`/`.some()` scan (which would not call
+    // `sameLogicalGalleryPrint`) still shows up as N² reads.
+    let elementReads = 0;
+    const counted = (items: GalleryImage[]) =>
+      new Proxy(items, {
+        get(target, prop, receiver) {
+          if (typeof prop === "string" && /^\d+$/.test(prop)) elementReads += 1;
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+    for (const key of Object.keys(gallery.buckets)) {
+      gallery.buckets[key]!.items = counted(toRaw(gallery.buckets[key]!.items));
+    }
     counters.reset();
     let copies = 0;
     for (const entry of entries) {
@@ -178,6 +193,23 @@ describe("gallery store derived work is indexed once per data change", () => {
     }
     expect(copies).toBe(LOCAL + REMOTE_SHARED + REMOTE_ONLY + LEGACY_COPIES);
     expectOpsUnder("sameLogicalGalleryPrint scans", counters.sameLogicalGalleryPrint, 0);
+    // Rebuilding the per-bucket indexes reads each row a bounded number of
+    // times; 4 200 lookups over 4 200 rows must stay far from 17 million.
+    const totalRows = LOCAL + REMOTE_SHARED + REMOTE_ONLY + LEGACY_COPIES;
+    expectOpsUnder("bucket element reads during copy lookups", elementReads, 6 * totalRows);
+  });
+
+  it("returns a print's copies in bucket order, legacy twin before canonical row", () => {
+    const gallery = seedFleet();
+    // Plato lists a legacy-named twin ABOVE the canonical row for one print.
+    const canonical = row("local-7.png", 7);
+    const twin = row("mold-flux-twin.png", 7, { timestamp: canonical.timestamp + 3 });
+    gallery.buckets["plato-7680"] = bucket([twin, canonical]);
+    const entry = gallery.merged.find((e) => e.item.filename === "local-7.png")!;
+    expect(gallery.locationsOf(entry).filter((l) => l.sourceKey === "plato-7680")).toEqual([
+      { sourceKey: "plato-7680", filename: "mold-flux-twin.png" },
+      { sourceKey: "plato-7680", filename: "local-7.png" },
+    ]);
   });
 
   it("finds a legacy copy (different filename, same identity) through the index", () => {

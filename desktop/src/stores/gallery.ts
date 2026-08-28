@@ -707,8 +707,8 @@ export const useGalleryStore = defineStore("gallery", {
         if (local.byFilename.has(entry.item.filename)) return true;
         const identity = printIdentity(entry.item);
         if (identity === null) return false;
-        return (local.byIdentity.get(identity) ?? []).some((item) =>
-          withinIdentityWindow(item, entry.item),
+        return (local.byIdentity.get(identity) ?? []).some((row) =>
+          withinIdentityWindow(row.item, entry.item),
         );
       };
     },
@@ -1461,8 +1461,8 @@ export const useGalleryStore = defineStore("gallery", {
     /** Find the bucket row (live or trash) a mutation should update. */
     rowOf(hostKey: string, filename: string): GalleryImage | null {
       return (
-        this.bucketIndex.get(hostKey)?.byFilename.get(filename) ??
-        this.trashBucketIndex.get(hostKey)?.byFilename.get(filename) ??
+        this.bucketIndex.get(hostKey)?.byFilename.get(filename)?.item ??
+        this.trashBucketIndex.get(hostKey)?.byFilename.get(filename)?.item ??
         null
       );
     },
@@ -2064,22 +2064,29 @@ export const useGalleryStore = defineStore("gallery", {
  * every row sharing a seed:size:model identity so the caller can still apply
  * the per-pair timestamp window (`sameLogicalGalleryPrint`'s contract).
  */
+export interface IndexedRow {
+  item: GalleryImage;
+  /** Position in the bucket, so lookups can reproduce bucket order. */
+  ordinal: number;
+}
+
 export interface BucketIndex {
-  byFilename: Map<string, GalleryImage>;
-  byIdentity: Map<string, GalleryImage[]>;
+  byFilename: Map<string, IndexedRow>;
+  byIdentity: Map<string, IndexedRow[]>;
 }
 
 export function indexBucketRows(items: readonly GalleryImage[]): BucketIndex {
-  const byFilename = new Map<string, GalleryImage>();
-  const byIdentity = new Map<string, GalleryImage[]>();
-  for (const item of items) {
-    if (!byFilename.has(item.filename)) byFilename.set(item.filename, item);
+  const byFilename = new Map<string, IndexedRow>();
+  const byIdentity = new Map<string, IndexedRow[]>();
+  items.forEach((item, ordinal) => {
+    const row = { item, ordinal };
+    if (!byFilename.has(item.filename)) byFilename.set(item.filename, row);
     const identity = printIdentity(item);
-    if (identity === null) continue;
+    if (identity === null) return;
     const twins = byIdentity.get(identity);
-    if (twins) twins.push(item);
-    else byIdentity.set(identity, [item]);
-  }
+    if (twins) twins.push(row);
+    else byIdentity.set(identity, [row]);
+  });
   return { byFilename, byIdentity };
 }
 
@@ -2095,25 +2102,25 @@ function indexBuckets(buckets: Record<string, GalleryBucket>): Map<string, Bucke
  * Every copy of a logical print inside one bucket map — the same answer the
  * old full scan gave (`sameLogicalGalleryPrint` per row: exact filename, or
  * identity inside the timestamp window), read off the per-bucket index so a
- * grid of N tiles costs O(N), never O(N²). Filename matches come first, then
- * identity twins in bucket order, matching the scan's row order per bucket.
+ * grid of N tiles costs O(N), never O(N²). Matches are emitted in BUCKET
+ * order (by ordinal), exactly as the scan did — cover selection takes the
+ * first copy per host, so a legacy-named twin listed before the canonical
+ * row must still come first.
  */
 function locationsIn(index: Map<string, BucketIndex>, entry: MergedPrint): GalleryLocation[] {
   const locations: GalleryLocation[] = [];
   const identity = printIdentity(entry.item);
   for (const [sourceKey, bucket] of index) {
-    const seen = new Set<string>();
+    const matches: IndexedRow[] = [];
     const exact = bucket.byFilename.get(entry.item.filename);
-    if (exact) {
-      seen.add(exact.filename);
-      locations.push({ sourceKey, filename: exact.filename });
+    if (exact) matches.push(exact);
+    if (identity !== null) {
+      for (const twin of bucket.byIdentity.get(identity) ?? []) {
+        if (twin !== exact && withinIdentityWindow(twin.item, entry.item)) matches.push(twin);
+      }
     }
-    if (identity === null) continue;
-    for (const twin of bucket.byIdentity.get(identity) ?? []) {
-      if (seen.has(twin.filename) || !withinIdentityWindow(twin, entry.item)) continue;
-      seen.add(twin.filename);
-      locations.push({ sourceKey, filename: twin.filename });
-    }
+    if (matches.length > 1) matches.sort((a, b) => a.ordinal - b.ordinal);
+    for (const match of matches) locations.push({ sourceKey, filename: match.item.filename });
   }
   return locations;
 }
