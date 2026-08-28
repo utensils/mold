@@ -3,6 +3,7 @@ import {
   DEFAULT_EXPAND_MODEL,
   expandModelId,
   expansionPolicyForSelection,
+  parseMissingExpandModel,
   resolveExpansionRoute,
   type ExpansionCandidate,
 } from "./expansionRouting";
@@ -178,6 +179,30 @@ describe("expansionPolicyForSelection", () => {
       kind: "pinned",
       hostId: "plato",
     });
+  });
+});
+
+describe("parseMissingExpandModel", () => {
+  it("extracts legacy and model-qualified missing-model errors", () => {
+    expect(
+      parseMissingExpandModel(
+        "local expand model not found — run: mold pull qwen3-expand",
+      ),
+    ).toBe("qwen3-expand");
+    expect(
+      parseMissingExpandModel(
+        "local expand model 'qwen3-expand:q8' not found — run: mold pull qwen3-expand:q8",
+      ),
+    ).toBe("qwen3-expand:q8");
+  });
+
+  it("does not turn output-count recovery advice into a missing-model state", () => {
+    expect(
+      parseMissingExpandModel(
+        "expected exactly 10 distinct non-empty prompts, but the expansion backend returned 9. " +
+          "The model may need re-downloading: mold pull qwen3-expand",
+      ),
+    ).toBeNull();
   });
 });
 

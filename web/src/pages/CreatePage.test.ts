@@ -2589,6 +2589,30 @@ describe("CreatePage layout and behavior", () => {
     expect(batchIds.size).toBe(1);
   });
 
+  it("does not offer a model pull for an exact-count expansion failure", async () => {
+    expandPromptMock.mockRejectedValueOnce(
+      new Error(
+        "expected exactly 3 distinct non-empty prompts, but the expansion backend returned 2. " +
+          "The model may need re-downloading: mold pull qwen3-expand",
+      ),
+    );
+    hostModelsMock.mockResolvedValue([installedModelRow("flux-dev:q4", "flux")]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 3;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(false);
+    expect(wrapper.getComponent({ name: "ResultCanvas" }).props("variations")).toEqual([]);
+  });
+
   it("blocks ordinary submit while variations are preparing and awaiting review", async () => {
     let releaseExpansion!: (value: {
       original: string;

@@ -1315,6 +1315,24 @@ describe("GenerateView prepared expansion batches", () => {
     );
   });
 
+  it("keeps exact-count failures out of the missing-model pull flow", async () => {
+    vi.mocked(expandPrompt).mockRejectedValue(
+      new Error(
+        "expected exactly 3 distinct non-empty prompts, but the expansion backend returned 2. " +
+          "The model may need re-downloading: mold pull qwen3-expand",
+      ),
+    );
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="expansion-pull-status"]').exists()).toBe(false);
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      "Expansion failed on This device: expected exactly 3 distinct non-empty prompts",
+    );
+  });
+
   it("keeps Batch 1 pull progress inline from connection through exact-job readiness", async () => {
     useGenerateFormStore().form.batchSize = 1;
     const stream = deferred<void>();
