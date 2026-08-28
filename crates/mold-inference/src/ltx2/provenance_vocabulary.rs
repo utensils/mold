@@ -7,10 +7,11 @@
 //! only expect a member of [`KNOWN_PROVENANCE_LINES`] / [`KNOWN_METADATA_FIELDS`],
 //! and the emitters must log these exact prefixes.
 //!
-//! The emitting side (`ltx2::provenance` from the cuda-core / gguf-runtime
-//! work) lands separately; the lead merges the two modules into one
-//! authority when both are on `main`. Until then this module is the harness's
-//! read-side pin and deliberately carries no runtime behaviour.
+//! The emitting side is `ltx2::provenance` (attention / residency / audio),
+//! `ltx2::convrot` (the INT8 arm), and `ltx2::gguf` (the linear kind); the
+//! `vocabulary_matches_the_emitting_constants` test pins every pinned string
+//! here to the constant that actually emits it, so the harness's read-side
+//! pin and the runtime cannot drift apart.
 //!
 //! Vocabulary (one line per decision, values `|`-separated):
 //!
@@ -118,6 +119,67 @@ pub(crate) const KNOWN_PROFILE_VARIABLES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every pinned read-side string is byte-equal to (or a prefix of, for
+    /// the residency line whose counts vary) what the emitters compose from
+    /// their own constants.
+    #[test]
+    fn vocabulary_matches_the_emitting_constants() {
+        use crate::ltx2::provenance as emit;
+        assert_eq!(
+            ATTENTION_PATH_BF16_MATH,
+            emit::attention_path_line(emit::ATTENTION_PATH_BF16_MATH)
+        );
+        assert_eq!(
+            ATTENTION_PATH_BF16_FLASH,
+            emit::attention_path_line(emit::ATTENTION_PATH_BF16_FLASH)
+        );
+        assert_eq!(
+            ATTENTION_PATH_F32_CHUNKED,
+            emit::attention_path_line(emit::ATTENTION_PATH_F32_CHUNKED)
+        );
+        assert_eq!(
+            ATTENTION_PATH_METAL_SDPA,
+            emit::attention_path_line(emit::ATTENTION_PATH_METAL_SDPA)
+        );
+        for (pinned, mode) in [
+            (RESIDENCY_MODE_STREAMING, emit::RESIDENCY_MODE_STREAMING),
+            (RESIDENCY_MODE_ADAPTIVE, emit::RESIDENCY_MODE_ADAPTIVE),
+            (RESIDENCY_MODE_EAGER, emit::RESIDENCY_MODE_EAGER),
+        ] {
+            assert!(emit::residency_mode_line(mode, 0, 0).starts_with(pinned));
+        }
+        for (pinned, arm) in [
+            (
+                INT8_ARM_NATIVE_W8A8,
+                crate::ltx2::convrot::INT8_ARM_NATIVE_W8A8,
+            ),
+            (
+                INT8_ARM_DEQUANT_CUDA,
+                crate::ltx2::convrot::INT8_ARM_DEQUANT_CUDA,
+            ),
+            (
+                INT8_ARM_DEQUANT_METAL,
+                crate::ltx2::convrot::INT8_ARM_DEQUANT_METAL,
+            ),
+            (
+                INT8_ARM_DEQUANT_HOST,
+                crate::ltx2::convrot::INT8_ARM_DEQUANT_HOST,
+            ),
+        ] {
+            assert_eq!(pinned, format!("ltx2 int8 arm={arm}"));
+        }
+        assert_eq!(LINEAR_KIND_QMATMUL, crate::ltx2::gguf::LINEAR_KIND_QMATMUL);
+        assert_eq!(LINEAR_KIND_DEQUANT, crate::ltx2::gguf::LINEAR_KIND_DEQUANT);
+        assert_eq!(AUDIO_BRANCH_RUN, emit::audio_branch_line(true));
+        assert_eq!(AUDIO_BRANCH_SKIPPED, emit::audio_branch_line(false));
+        // Metadata values are the bare emitter literals.
+        let (_, attention_values) = KNOWN_METADATA_FIELDS
+            .iter()
+            .find(|(name, _)| *name == METADATA_ATTENTION_PATH)
+            .unwrap();
+        assert_eq!(attention_values, &emit::ATTENTION_PATHS);
+    }
 
     const MATRIX: &str = include_str!("../../../../scripts/fixtures/ltx25-cuda-matrix.json");
 
