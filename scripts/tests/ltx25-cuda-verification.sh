@@ -388,6 +388,23 @@ cp "$tmp/server.bak" "$passed_dir/server.log"
 cp "$tmp/full.bak" "$evidence/server-default.log"
 run_seal --seal >/dev/null
 
+# The process-scoped dispatcher evidence is retained per row and hash-bound.
+grep -Fq 'attention backend selected backend=Math' "$passed_dir/server-process.log" \
+  || fail "seal did not retain the process-scoped line in server-process.log"
+jq -e '.server_process_log_sha256 | test("^[0-9a-f]{64}$")' "$passed_dir/manifest.json" >/dev/null \
+  || fail "row manifest does not hash-bind server-process.log"
+cp "$passed_dir/server-process.log" "$tmp/process.bak"
+printf 'tampered\n' >>"$passed_dir/server-process.log"
+if "$validator" "$report" >/dev/null 2>&1; then
+  fail "validator accepted a mutated server-process.log"
+fi
+if run_seal --seal >/dev/null 2>&1; then
+  fail "seal accepted a mutated server-process.log"
+fi
+cp "$tmp/process.bak" "$passed_dir/server-process.log"
+run_seal --seal >/dev/null
+"$validator" "$report" >/dev/null || fail "restored server-process.log did not seal"
+
 # Without a Metal reference root the block is null, never a failure.
 METAL_REF_OVERRIDE="$tmp/no-such-reference" run_seal --seal >/dev/null
 jq -e '(.rows[] | select(.status == "passed") | has("metal_ab") and .metal_ab == null)' "$report" >/dev/null \

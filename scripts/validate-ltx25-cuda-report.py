@@ -134,16 +134,22 @@ def validate_row(row: dict[str, Any], evidence_dir: Path, matrix_ids: set[str]) 
             raise ValidationFailure(f"{label}: Library row is not a CLI-recorded real generation")
         server_log = Path(manifest["server_log_path"])
         text = server_log.read_text(encoding="utf-8", errors="replace")
-        full_text = ""
-        full_path = manifest.get("server_log_full_path")
-        if isinstance(full_path, str) and Path(full_path).is_file():
-            full_text = Path(full_path).read_text(encoding="utf-8", errors="replace")
+        # Process-scoped lines must be satisfied from retained, hash-bound
+        # evidence: the row's slice or its server-process.log (both re-hashed
+        # by bind_hash_pairs above). The live full server log is mutable and
+        # is deliberately not consulted here.
+        process_text = ""
+        process_path = manifest.get("server_process_log_path")
+        if isinstance(process_path, str) and Path(process_path).is_file():
+            process_text = Path(process_path).read_text(encoding="utf-8", errors="replace")
         for item in observed:
             line = item["line"]
             if item["scope"] == "slice" and line not in text:
                 raise ValidationFailure(f"{label}: {line!r} is absent from the retained server log slice")
-            if item["scope"] == "process" and line not in text and line not in full_text:
-                raise ValidationFailure(f"{label}: {line!r} is absent from the retained server logs")
+            if item["scope"] == "process" and line not in text and line not in process_text:
+                raise ValidationFailure(
+                    f"{label}: {line!r} is absent from the retained slice and server-process.log"
+                )
 
 
 def validate_comfy(reference: dict[str, Any], label: str) -> None:
@@ -207,6 +213,11 @@ def validate_report(report_path: Path, schema_path: Path) -> None:
     counts = {status: sum(1 for row in rows if row["status"] == status) for status in ROW_STATUSES}
     if report["summary"] != counts:
         raise ValidationFailure(f"summary {report['summary']} disagrees with rows {counts}")
+    unattempted = sum(
+        1
+        for row in rows
+        if row["status"] == "not_run" and row["kind"] not in ("deferred", "fatal_cuda")
+    )
 
     for gate in report["gates"]:
         bind_hash_pairs({"log_path": gate["log_path"], "log_sha256": gate["log_sha256"]},
@@ -231,9 +242,12 @@ def validate_report(report_path: Path, schema_path: Path) -> None:
     elif counts["failed"] > 0:
         if status != "failed":
             raise ValidationFailure("a report with failed rows must be marked failed")
-    elif counts["passed"] == 0:
+    elif counts["passed"] == 0 or unattempted > 0:
+        # Unattempted runnable rows are missing coverage — never a pass.
         if status != "incomplete":
-            raise ValidationFailure("a report with no passed rows is incomplete")
+            raise ValidationFailure(
+                f"{unattempted} runnable row(s) were never attempted; the report must be incomplete"
+            )
     elif status != "passed":
         raise ValidationFailure("a report with passed rows and no failures is passed")
 

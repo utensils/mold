@@ -332,9 +332,13 @@ generator_commit_of() {
 
 # Every expected provenance line must be in the row's server-log slice, except
 # the shared dispatcher's once-per-process line, which may sit anywhere in
-# that profile's full server log. Prints the observed list as JSON.
+# that profile's full server log. Each process-scoped match is copied into the
+# row's own `server-process.log` so the evidence the seal relied on is itself
+# retained and hash-bound — the full server log is unhashed and mutable.
+# Prints the observed list as JSON.
 observe_provenance() {
-  local slice="$1" full="$2" expected="$3" observed='[]' line scope
+  local slice="$1" full="$2" expected="$3" dir="$4" observed='[]' line scope
+  rm -f "$dir/server-process.log"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     if grep -Fq -- "$line" "$slice"; then
@@ -342,6 +346,7 @@ observe_provenance() {
     elif [[ "$line" == "attention backend selected "* && -n "$full" && -f "$full" ]] \
       && grep -Fq -- "$line" "$full"; then
       scope=process
+      grep -F -- "$line" "$full" | head -1 >>"$dir/server-process.log"
     else
       echo "expected provenance line is absent from the retained server log: $line" >&2
       return 1
@@ -416,8 +421,6 @@ run_mode() {
 
   local gpu_uuid
   gpu_uuid="$(jq -r '.gpus[0].uuid' <<<"$host")"
-  local baseline_mib
-  baseline_mib="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d '[:space:]')"
 
   local row_ids
   if [[ -n "${LTX25_ROWS:-}" ]]; then
@@ -450,7 +453,7 @@ run_mode() {
         run_fatal_cuda_row "$row" "$server_log" "$host_url"
         ;;
       cancellation)
-        run_cancellation_row "$row" "$server_log" "$server_pid" "$host_url" "$gpu_uuid" "$baseline_mib" "$models_json"
+        run_cancellation_row "$row" "$server_log" "$server_pid" "$host_url" "$gpu_uuid" "$models_json"
         ;;
       render | perf)
         run_render_row "$row" "$server_log" "$server_pid" "$gpu_uuid" "$models_json"
@@ -709,7 +712,7 @@ run_render_row() {
   fi
   if [[ -z "$failure" ]]; then
     observed="$(observe_provenance "$dir/server.log" "$server_log" "$(jq -c '.expect.provenance' <<<"$row")" \
-      2>"$dir/provenance.err")" || failure="$(cat "$dir/provenance.err")"
+      "$dir" 2>"$dir/provenance.err")" || failure="$(cat "$dir/provenance.err")"
   fi
   if [[ -z "$failure" && "$(jq -r '.gpu.cuda_work_observed' <<<"$manifest")" != true ]]; then
     failure="server PID $server_pid was never observed on $gpu_uuid by nvidia-smi during the render"
@@ -735,7 +738,7 @@ run_render_row() {
 }
 
 run_cancellation_row() {
-  local row="$1" server_log="$2" server_pid="$3" host_url="$4" gpu_uuid="$5" baseline_mib="$6" models_json="$7"
+  local row="$1" server_log="$2" server_pid="$3" host_url="$4" gpu_uuid="$5" models_json="$6"
   local id model dir
   id="$(jq -r '.id' <<<"$row")"
   model="$(jq -r '.model' <<<"$row")"
@@ -768,6 +771,11 @@ run_cancellation_row() {
   jq -n --arg model "$model" --arg prompt "$prompt" --argjson seed "$seed" --argjson args "$(jq -c '.args' <<<"$row")" \
     --arg output "$output" '{model: $model, prompt: $prompt, seed: $seed, args: $args, output: $output}' \
     >"$dir/request.json"
+  # The memory floor is what the server held IMMEDIATELY before this job:
+  # earlier rows legitimately leave persistent allocations (cached engines,
+  # CUDA context), so a startup-time baseline would fail a correct cancel.
+  local baseline_mib
+  baseline_mib="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d '[:space:]')"
   local started started_epoch offset
   started="$(utc_now)"
   started_epoch="$(date +%s)"
@@ -902,10 +910,19 @@ run_fatal_cuda_row() {
       server_log_path: ($dir + "/server.log"), server_log_sha256: $server_sha,
       server_log_full_path: $full_log, status_after_http: $status_code,
       provenance_expected: [], provenance_observed: []}' <<<"$base")"
-  if grep -Fq -- "$sentence" "$dir/server.log"; then
+  # Both halves of the matrix expectation are required: the quarantine
+  # sentence AND the server refusing /api/status afterwards. A reproducer
+  # that logs the sentence while the server stays healthy is not a pass.
+  local failure=""
+  grep -Fq -- "$sentence" "$dir/server.log" \
+    || failure="the server log never recorded: $sentence"
+  if [[ -z "$failure" && "$status_code" == 200 ]]; then
+    failure="/api/status still answered 200 after the fatal context; the server did not refuse"
+  fi
+  if [[ -z "$failure" ]]; then
     write_manifest "$dir" "$(jq -c '. + {status: "passed"}' <<<"$manifest")"
   else
-    write_manifest "$dir" "$(jq -c --arg reason "the server log never recorded: $sentence" \
+    write_manifest "$dir" "$(jq -c --arg reason "$failure" \
       '. + {status: "failed", reason: $reason}' <<<"$manifest")"
   fi
 }
@@ -1068,12 +1085,19 @@ seal_mode() {
     failed: ([.[] | select(.status == "failed")] | length),
     blocked: ([.[] | select(.status == "blocked")] | length),
     not_run: ([.[] | select(.status == "not_run")] | length)}' <<<"$rows")"
+  # A not_run row whose kind is runnable (render/perf/cancellation) is missing
+  # coverage, not an answered question: only the explicitly deferred kinds may
+  # be absent from a passed campaign. Blocked rows ARE answers (a typed
+  # refusal with retained evidence) and do not hold the campaign incomplete.
+  local unattempted
+  unattempted="$(jq '[.[] | select(.status == "not_run"
+    and (.kind | IN("deferred", "fatal_cuda") | not))] | length' <<<"$rows")"
   if [[ "$contract_test" == 1 ]]; then
     qualification_status=not_qualified_contract_test
     source_tree_state=contract_test
   elif [[ "$(jq '.failed' <<<"$summary")" -gt 0 ]]; then
     qualification_status=failed
-  elif [[ "$(jq '.passed' <<<"$summary")" -eq 0 ]]; then
+  elif [[ "$(jq '.passed' <<<"$summary")" -eq 0 || "$unattempted" -gt 0 ]]; then
     qualification_status=incomplete
   else
     qualification_status=passed
@@ -1184,12 +1208,17 @@ seal_passed_row() {
   generation="$(library_row_for "$media" "$row")" || fail "$id: Library provenance mismatch"
   commit="$(generator_commit_of "$generation")" || fail "$id: generator commit mismatch"
   observed="$(observe_provenance "$dir/server.log" "$(jq -r '.server_log_full_path // empty' "$manifest")" \
-    "$(jq -c '.provenance_expected' "$manifest")")" || fail "$id: provenance mismatch"
+    "$(jq -c '.provenance_expected' "$manifest")" "$dir")" || fail "$id: provenance mismatch"
   # The matrix is the authority: a row manifest may add observations (the
   # dispatcher line, for instance) but never drop a matrix expectation.
   jq -e --argjson expected "$(jq -c '.expect.provenance' <<<"$row")" \
     '($expected - .provenance_expected) == []' "$manifest" >/dev/null \
     || fail "$id: row manifest dropped a matrix provenance expectation"
+  local process_log=null process_log_sha=null
+  if [[ -s "$dir/server-process.log" ]]; then
+    process_log="\"$dir/server-process.log\""
+    process_log_sha="\"$(file_sha256 "$dir/server-process.log")\""
+  fi
   local metal_ab
   metal_ab="$(metal_ab_block "$row" "$media" "$dir")"
   # Re-seal the derived fields from what was just re-verified so the report
@@ -1199,8 +1228,12 @@ seal_passed_row() {
     --arg probe "$dir/ffprobe.json" --arg probe_sha "$(file_sha256 "$dir/ffprobe.json")" \
     --argjson bytes "$(file_size "$media")" --argjson metal_ab "${metal_ab:-null}" \
     --argjson ab_row "$([[ -n "$metal_ab" ]] && echo true || echo false)" \
+    --argjson process_log "$process_log" --argjson process_log_sha "$process_log_sha" \
     '.generation = $generation | .generator_commit = $commit | .provenance_observed = $observed
      | .media.bytes = $bytes | .media.ffprobe_path = $probe | .media.ffprobe_sha256 = $probe_sha
+     | (if $process_log == null
+        then del(.server_process_log_path, .server_process_log_sha256)
+        else .server_process_log_path = $process_log | .server_process_log_sha256 = $process_log_sha end)
      | if $ab_row then .metal_ab = $metal_ab else del(.metal_ab) end' \
     "$manifest" >"$tmp"
   mv "$tmp" "$manifest"
