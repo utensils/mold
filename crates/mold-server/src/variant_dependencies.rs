@@ -1384,6 +1384,7 @@ pub(crate) async fn prepare_inputs_for_devices(
             grant,
             context.h3_resolved_references.clone(),
             context.preparation_progress.clone(),
+            context.queue_media_projection.as_ref(),
         )
         .await;
     }
@@ -2053,8 +2054,15 @@ async fn prepare_h3_private_inputs_for_devices(
     ingress_grant: crate::h3_private_bridge::H3PrivateIngressGrant,
     resolved_references: Option<crate::reference_uploads::ResolvedReferenceAdmissionView>,
     preparation_progress: Option<PreparationProgressSink>,
+    queue_media_projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Result<PreparedExecutionInputs, String> {
     use sha2::{Digest, Sha256};
+    // The row being re-prepared may be payload-free; the projection is what
+    // the queue-media store holds for it (a FL2VA first frame in particular).
+    let resolved_media = mold_core::minimax_h3::ResolvedMediaPresence {
+        source_image: request.source_image.is_some()
+            || queue_media_projection.is_some_and(|projection| projection.source_image),
+    };
 
     let devices = crate::execution_plan::eligible_devices_for_private_h3(config, request, &devices)
         .map_err(|error| error.to_string())?;
@@ -2266,6 +2274,7 @@ async fn prepare_h3_private_inputs_for_devices(
             evidence
                 .validate_for(
                     &next_request,
+                    resolved_media,
                     &device.id,
                     device.ordinal,
                     compute_capability,

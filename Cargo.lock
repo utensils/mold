@@ -3342,6 +3342,7 @@ dependencies = [
  "utoipa",
  "uuid",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

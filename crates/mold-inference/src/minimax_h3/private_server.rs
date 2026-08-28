@@ -73,8 +73,8 @@ use super::private_qualification::{qualify_private_artifacts_with_control, H3Qua
 #[cfg(feature = "mp4")]
 use super::private_qwen::{
     open_authorized_private_qwen_authority, released_h3_private_qwen_loader_memory_authority,
-    H3PrivateQwenArtifactLease, H3PrivateQwenConditionerLease, H3PrivateQwenLoaderMemoryRoute,
-    H3PrivateQwenOpenRouteAuthority,
+    released_h3_private_qwen_output_tensor_bytes, H3PrivateQwenArtifactLease,
+    H3PrivateQwenConditionerLease, H3PrivateQwenLoaderMemoryRoute, H3PrivateQwenOpenRouteAuthority,
 };
 #[cfg(feature = "mp4")]
 use super::private_qwen_support::{load_qualified_private_qwen_support, H3PrivateQwenSupport};
@@ -939,23 +939,77 @@ fn private_h3_unified_target_peak_bytes(budget: &H3FactoryTargetBudgetInput) -> 
     })
 }
 
+/// The device bytes the Qwen encode phase would hold on a CUDA route, and
+/// the room it has to hold them in.
+#[cfg(feature = "mp4")]
+#[derive(Clone, Copy, Debug)]
+struct H3PrivateQwenDevicePhase {
+    fixed_runtime_device_bytes: u64,
+    activation_workspace_bytes: u64,
+    output_state_device_bytes: u64,
+    available_device_bytes: u64,
+}
+
+/// Where the conditioner runs, and which loader memory route opens it.
+///
+/// Metal is always the streamed device route (#1323). CUDA was pinned to the
+/// host from #919 through #1425 regardless of memory — every FL2VA and Ref2VA
+/// render paid the 32B conditioner's prefill on the CPU (a 2048-square Ref2VA
+/// image reference took 40 minutes on hal9000, #1423). The `Accelerated`
+/// placement keeps the 14.5 GB NVFP4 payload host-resident and puts only the
+/// 1.19 GB of dense tensors on the device, so the device phase is fixed
+/// runtime + dense residency + the request's activation demand + the output
+/// state. When that fits the device it is the route; when it does not — a
+/// small card, or a reference set whose activation demand outgrows it — the
+/// host route is kept exactly as before, so nothing that rendered stops
+/// rendering.
 #[cfg(feature = "mp4")]
 fn private_h3_qwen_route(
     compute_capability: Option<(u16, u16)>,
-) -> (
+    device_phase: H3PrivateQwenDevicePhase,
+) -> Result<(
     H3PrivateQwenLoaderMemoryRoute,
     H3FactoryConditionerPlacement,
-) {
-    if compute_capability.is_some() {
-        (
-            H3PrivateQwenLoaderMemoryRoute::Cpu,
-            H3FactoryConditionerPlacement::HostCpuThenDrop,
-        )
-    } else {
-        (
+)> {
+    if compute_capability.is_none() {
+        return Ok((
             H3PrivateQwenLoaderMemoryRoute::Metal,
             H3FactoryConditionerPlacement::AssignedMetalThenDrop,
-        )
+        ));
+    }
+    let cuda =
+        released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Cuda)?;
+    let device_peak = [
+        device_phase.fixed_runtime_device_bytes,
+        cuda.device_resident_parameter_bytes,
+        device_phase.activation_workspace_bytes,
+        device_phase.output_state_device_bytes,
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, bytes| total.checked_add(bytes))
+    .ok_or_else(|| anyhow!("private H3 CUDA Qwen phase device bytes overflow"))?;
+    if device_peak <= device_phase.available_device_bytes {
+        tracing::info!(
+            target: "mold::minimax_h3::private_qwen_route",
+            device_peak_bytes = device_peak,
+            available_device_bytes = device_phase.available_device_bytes,
+            "MiniMax H3 conditioner placed on the CUDA device"
+        );
+        Ok((
+            H3PrivateQwenLoaderMemoryRoute::Cuda,
+            H3FactoryConditionerPlacement::AssignedCudaThenDrop,
+        ))
+    } else {
+        tracing::info!(
+            target: "mold::minimax_h3::private_qwen_route",
+            device_peak_bytes = device_peak,
+            available_device_bytes = device_phase.available_device_bytes,
+            "MiniMax H3 conditioner falls back to the host: Qwen phase does not fit the CUDA device"
+        );
+        Ok((
+            H3PrivateQwenLoaderMemoryRoute::Cpu,
+            H3FactoryConditionerPlacement::HostCpuThenDrop,
+        ))
     }
 }
 impl H3PrivateRuntimeBoundRecord {
@@ -1618,6 +1672,7 @@ impl H3PrivateFl2VaAdmissionEvidence {
     pub fn validate_for(
         &self,
         request: &GenerateRequest,
+        media: contract::ResolvedMediaPresence,
         device_id: &str,
         device_ordinal: usize,
         compute_capability: Option<(u16, u16)>,
@@ -1642,44 +1697,137 @@ impl H3PrivateFl2VaAdmissionEvidence {
         // request must satisfy THAT route. Re-asserting FL2VA here is what
         // killed the Ref2VA evidence the rest of admission had just derived.
         let recorded_contract = contract::capability_contract_for_model(&self.canonical_model);
-        if !recorded_contract.is_some_and(|recorded| recorded.task == self.task)
-            || contract::validate_resolved_request_contract(request, self.task)
-                .map_err(|error| anyhow!("{}: {}", error.code, error.message))?
-                != self.mode
-            || self.device_id != device_id
-            || self.device_ordinal != device_ordinal
-            || self.compute_capability != compute_capability
-            || self.base_factory_authority.canonical_model() != self.canonical_model
-            || self.base_factory_authority.task() != self.task
-            || self.base_factory_authority.device_id() != self.device_id
-            || self.base_factory_authority.device_ordinal() != self.device_ordinal
-            || self.base_factory_authority.compute_capability() != self.compute_capability
-            || self.base_factory_authority.execution_fingerprint() != self.execution_fingerprint
-            || self.base_factory_authority.component_set_identity_sha256()
-                != self.component_set_identity_sha256
-            || self
-                .base_factory_authority
-                .prepared_target_attempt_identities()
-                .is_some()
-            || !self
-                .base_factory_authority
-                .attention_runtime_identity_sha256()
-                .is_empty()
-            || self.attention.runtime_identity_sha256 != attention_identity
-            || self.attention.qualification_sha256
-                != self.base_factory_authority.attention_qualification_sha256()
-            || available_device_bytes < self.predicted_device_peak_bytes
-            || available_host_headroom_bytes < self.predicted_host_increment_bytes
-            || self.admitted_available_device_bytes < self.predicted_device_peak_bytes
-            || self.admitted_host_headroom_bytes < self.predicted_host_increment_bytes
-            || !valid_sha256(&self.prepared_request_identity_sha256)
-            || !valid_sha256(&self.prepared_attempt_identity_sha256)
-            || !valid_sha256(&self.target_budget_identity_sha256)
-            || !valid_sha256(&self.artifact_qualification_identity_sha256)
-            || !valid_sha256(&self.runtime_qualification_identity_sha256)
-            || self.identity_sha256 != private_h3_admission_evidence_identity(self)
-        {
-            bail!("private H3 allocation-free admission evidence changed or no longer fits")
+        // The request here may be the payload-free durable row; `media` is
+        // what the queue-media store holds for it, so a FL2VA job's first
+        // frame still counts toward its mode.
+        let resolved_mode =
+            contract::validate_resolved_request_contract_with_media(request, self.task, media)
+                .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+        // Every conjunct is named: a bare "changed or no longer fits" was the
+        // one opaque sentence in this admission, and it hid a CUDA-placement
+        // plan being refused for four hours (#1423).
+        let checks: [(&str, bool); 27] = [
+            (
+                "recorded route task",
+                recorded_contract.is_some_and(|recorded| recorded.task == self.task),
+            ),
+            ("resolved request mode", resolved_mode == self.mode),
+            ("device id", self.device_id == device_id),
+            ("device ordinal", self.device_ordinal == device_ordinal),
+            (
+                "compute capability",
+                self.compute_capability == compute_capability,
+            ),
+            (
+                "factory canonical model",
+                self.base_factory_authority.canonical_model() == self.canonical_model,
+            ),
+            (
+                "factory task",
+                self.base_factory_authority.task() == self.task,
+            ),
+            (
+                "factory device id",
+                self.base_factory_authority.device_id() == self.device_id,
+            ),
+            (
+                "factory device ordinal",
+                self.base_factory_authority.device_ordinal() == self.device_ordinal,
+            ),
+            (
+                "factory compute capability",
+                self.base_factory_authority.compute_capability() == self.compute_capability,
+            ),
+            (
+                "factory execution fingerprint",
+                self.base_factory_authority.execution_fingerprint() == self.execution_fingerprint,
+            ),
+            (
+                "factory component set identity",
+                self.base_factory_authority.component_set_identity_sha256()
+                    == self.component_set_identity_sha256,
+            ),
+            (
+                "factory prepared target attempt identities absent",
+                self.base_factory_authority
+                    .prepared_target_attempt_identities()
+                    .is_none(),
+            ),
+            (
+                "factory attention runtime identity empty",
+                self.base_factory_authority
+                    .attention_runtime_identity_sha256()
+                    .is_empty(),
+            ),
+            (
+                "attention runtime identity",
+                self.attention.runtime_identity_sha256 == attention_identity,
+            ),
+            (
+                "attention qualification",
+                self.attention.qualification_sha256
+                    == self.base_factory_authority.attention_qualification_sha256(),
+            ),
+            (
+                "available device bytes >= predicted device peak",
+                available_device_bytes >= self.predicted_device_peak_bytes,
+            ),
+            (
+                "available host headroom >= predicted host increment",
+                available_host_headroom_bytes >= self.predicted_host_increment_bytes,
+            ),
+            (
+                "admitted available device bytes >= predicted device peak",
+                self.admitted_available_device_bytes >= self.predicted_device_peak_bytes,
+            ),
+            (
+                "admitted host headroom >= predicted host increment",
+                self.admitted_host_headroom_bytes >= self.predicted_host_increment_bytes,
+            ),
+            (
+                "prepared request identity",
+                valid_sha256(&self.prepared_request_identity_sha256),
+            ),
+            (
+                "prepared attempt identity",
+                valid_sha256(&self.prepared_attempt_identity_sha256),
+            ),
+            (
+                "target budget identity",
+                valid_sha256(&self.target_budget_identity_sha256),
+            ),
+            (
+                "artifact qualification identity",
+                valid_sha256(&self.artifact_qualification_identity_sha256),
+            ),
+            (
+                "runtime qualification identity",
+                valid_sha256(&self.runtime_qualification_identity_sha256),
+            ),
+            (
+                "evidence identity",
+                self.identity_sha256 == private_h3_admission_evidence_identity(self),
+            ),
+            ("recorded route present", recorded_contract.is_some()),
+        ];
+        let failed = checks
+            .iter()
+            .filter(|(_, ok)| !ok)
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        if !failed.is_empty() {
+            bail!(
+                "private H3 allocation-free admission evidence changed or no longer fits: {} \
+                 (predicted device peak {} against {} available / {} admitted; predicted host \
+                 increment {} against {} available / {} admitted)",
+                failed.join(", "),
+                self.predicted_device_peak_bytes,
+                available_device_bytes,
+                self.admitted_available_device_bytes,
+                self.predicted_host_increment_bytes,
+                available_host_headroom_bytes,
+                self.admitted_host_headroom_bytes
+            )
         }
         Ok(())
     }
@@ -2177,7 +2325,26 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         attention.identity_sha256(),
         &component_digests,
     );
-    let (qwen_route, conditioner_placement) = private_h3_qwen_route(compute_capability);
+    // Request-derived for both tasks — FL2VA clamped by its reviewed grant,
+    // Ref2VA refused past its provisional one — computed once here so the
+    // placement decision and the frozen authority read one number.
+    let qwen_activation_workspace_bytes = qwen_activation_workspace_demand_bytes(
+        &admission_request.request,
+        runtime_qualification
+            .bounds()
+            .qwen_activation_workspace_bytes,
+    )?;
+    let (qwen_route, conditioner_placement) = private_h3_qwen_route(
+        compute_capability,
+        H3PrivateQwenDevicePhase {
+            fixed_runtime_device_bytes: runtime_qualification.bounds().fixed_runtime_device_bytes,
+            activation_workspace_bytes: qwen_activation_workspace_bytes,
+            output_state_device_bytes: released_h3_private_qwen_output_tensor_bytes(
+                admission_request.request.rows.qwen_output_text_rows,
+            )?,
+            available_device_bytes,
+        },
+    )?;
     let qwen_memory = released_h3_private_qwen_loader_memory_authority(qwen_route)?;
     let transformer_policy_sha256 = opened_transformer
         .candidate()
@@ -2207,16 +2374,9 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
             qwen_host_resident_parameter_bytes: qwen_memory.host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: qwen_memory.device_resident_parameter_bytes,
-            // Request-derived for both tasks — FL2VA clamped by its reviewed
-            // grant, Ref2VA refused past its provisional one — through the
-            // same seam the budget builder charges from, so the freeze-time
-            // projection comparison cannot drift.
-            qwen_activation_workspace_bytes: qwen_activation_workspace_demand_bytes(
-                &admission_request.request,
-                runtime_qualification
-                    .bounds()
-                    .qwen_activation_workspace_bytes,
-            )?,
+            // Through the same seam the budget builder charges from, so the
+            // freeze-time projection comparison cannot drift.
+            qwen_activation_workspace_bytes,
             qwen_maximum_tensor_staging_bytes: qwen_memory.maximum_tensor_staging_bytes,
             qwen_retained_raw_header_bytes: qwen_memory.retained_raw_header_bytes,
             qwen_output_text_rows: admission_request.request.rows.qwen_output_text_rows,
@@ -2354,6 +2514,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     evidence.identity_sha256 = private_h3_admission_evidence_identity(&evidence);
     evidence.validate_for(
         request,
+        contract::ResolvedMediaPresence::from_request(request),
         device_id,
         device_ordinal,
         compute_capability,
@@ -2381,12 +2542,22 @@ struct H3PrivateComponentDigest {
     validation_sha256: String,
 }
 
+/// The request identity the admission evidence binds and every later
+/// consumer re-derives.
+///
+/// Hashed over the PERSISTED form (`mold_core::request_media`'s scrub
+/// applied) so a hydrated request at admission or on the worker and the
+/// payload-free durable row the scheduler resolves produce one digest — the
+/// same rule the durable ingress grant's `request_authority_sha256` follows.
+/// Hashing the hydrated request held every H3 first-frame job at resolve
+/// with "resolved request differs from allocation-free admission" (#1423).
 fn private_h3_request_identity(request: &GenerateRequest) -> Result<String> {
+    let persisted = mold_core::request_media::persisted_request_form(request);
     let bytes = zeroize::Zeroizing::new(
-        serde_json::to_vec(request).context("failed to serialize exact private H3 request")?,
+        serde_json::to_vec(&persisted).context("failed to serialize exact private H3 request")?,
     );
     let mut digest = Sha256::new();
-    digest.update(b"mold.minimax-h3.private-admission-request.v1\0");
+    digest.update(b"mold.minimax-h3.private-admission-request.v2\0");
     digest.update((bytes.len() as u64).to_le_bytes());
     digest.update(bytes.as_slice());
     Ok(format!("{:x}", digest.finalize()))
@@ -3103,6 +3274,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     owner_fence.validate()?;
     admission_evidence.validate_for(
         request,
+        contract::ResolvedMediaPresence::from_request(request),
         &owner_fence.device_id,
         owner_fence.device_ordinal,
         owner_fence.compute_capability,
@@ -10916,22 +11088,98 @@ mod tests {
         assert_eq!(metal_target.required_device_bytes, 9_000_000_001);
     }
 
+    /// The admission identity must survive the round trip through the
+    /// durable journal: a hydrated request and its scrubbed row hash alike,
+    /// because the hash is over the persisted form (#1423).
     #[cfg(feature = "mp4")]
     #[test]
-    fn metal_runs_qwen_on_the_assigned_unified_memory_device() {
+    fn request_identity_is_over_the_persisted_form() {
+        let mut hydrated: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a lighthouse in a storm",
+            "model": contract::FL2VA_COMFY,
+            "width": 768,
+            "height": 768,
+            "steps": 4,
+            "guidance": 0.0,
+            "seed": 7,
+            "source_image": "AQID",
+            "source_image_name": "first.png",
+        }))
+        .unwrap();
+        let mut scrubbed = hydrated.clone();
+        mold_core::request_media::scrub_request_media(&mut scrubbed);
+        assert!(scrubbed.source_image.is_none());
         assert_eq!(
-            private_h3_qwen_route(None),
+            private_h3_request_identity(&hydrated).unwrap(),
+            private_h3_request_identity(&scrubbed).unwrap()
+        );
+        // The identity still binds what the row keeps.
+        hydrated.prompt.push('!');
+        assert_ne!(
+            private_h3_request_identity(&hydrated).unwrap(),
+            private_h3_request_identity(&scrubbed).unwrap()
+        );
+    }
+
+    /// Metal is always the streamed device route; CUDA takes the device
+    /// route exactly when the Qwen phase — fixed runtime + the 1.19 GB of
+    /// dense-resident tensors + the request's activation demand + the output
+    /// state — fits the device, and keeps the host route otherwise (#1423).
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn qwen_placement_follows_the_device_fit() {
+        let phase = |activation: u64, available: u64| H3PrivateQwenDevicePhase {
+            fixed_runtime_device_bytes: 603_979_776,
+            activation_workspace_bytes: activation,
+            output_state_device_bytes: 4_131 * 5_120 * 2,
+            available_device_bytes: available,
+        };
+        assert_eq!(
+            private_h3_qwen_route(None, phase(0, 0)).unwrap(),
             (
                 H3PrivateQwenLoaderMemoryRoute::Metal,
                 H3FactoryConditionerPlacement::AssignedMetalThenDrop,
             )
         );
+        let dense_resident = 1_191_583_200;
+        // The #1418 image reference on a 4090: 16.2 GB of activation demand
+        // beside ~23.5 GB free is a device route.
+        let image_reference = 16_240_000_000;
         assert_eq!(
-            private_h3_qwen_route(Some((8, 9))),
+            private_h3_qwen_route(Some((8, 9)), phase(image_reference, 23_500_000_000)).unwrap(),
+            (
+                H3PrivateQwenLoaderMemoryRoute::Cuda,
+                H3FactoryConditionerPlacement::AssignedCudaThenDrop,
+            )
+        );
+        // The exact boundary is admitted; one byte less is the host route.
+        let exact = 603_979_776 + dense_resident + image_reference + 4_131 * 5_120 * 2;
+        assert_eq!(
+            private_h3_qwen_route(Some((8, 9)), phase(image_reference, exact))
+                .unwrap()
+                .1,
+            H3FactoryConditionerPlacement::AssignedCudaThenDrop
+        );
+        assert_eq!(
+            private_h3_qwen_route(Some((8, 9)), phase(image_reference, exact - 1)).unwrap(),
             (
                 H3PrivateQwenLoaderMemoryRoute::Cpu,
                 H3FactoryConditionerPlacement::HostCpuThenDrop,
             )
+        );
+        // A 16 GB card keeps the host route for that reference but takes the
+        // device route for FL2VA's reviewed grant.
+        assert_eq!(
+            private_h3_qwen_route(Some((8, 6)), phase(image_reference, 15_500_000_000))
+                .unwrap()
+                .1,
+            H3FactoryConditionerPlacement::HostCpuThenDrop
+        );
+        assert_eq!(
+            private_h3_qwen_route(Some((8, 6)), phase(4_831_838_208, 15_500_000_000))
+                .unwrap()
+                .1,
+            H3FactoryConditionerPlacement::AssignedCudaThenDrop
         );
     }
 

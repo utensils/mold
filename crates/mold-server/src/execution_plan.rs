@@ -1574,7 +1574,7 @@ fn resolve_execution_plans_with_policy(
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(prepared) = prepared.filter(|prepared| prepared.h3_private_ingress_grant.is_some())
     {
-        return resolve_private_h3_execution_plans(config, request, devices, prepared);
+        return resolve_private_h3_execution_plans(config, request, devices, prepared, projection);
     }
     let overlaid_config = prepared_config_overlay(config, request, prepared);
     let config = overlaid_config.as_ref().unwrap_or(config);
@@ -1683,7 +1683,15 @@ fn resolve_private_h3_execution_plans(
     request: &GenerateRequest,
     devices: &[DeviceFact],
     prepared: &PreparedExecutionInputs,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
+    // The scheduler resolves the payload-free durable row; what the queue
+    // media store holds for it is the projection. Dropping it here read every
+    // FL2VA first-frame job as T2AV and refused it at resolve (#1423).
+    let media = mold_core::minimax_h3::ResolvedMediaPresence {
+        source_image: request.source_image.is_some()
+            || projection.is_some_and(|projection| projection.source_image),
+    };
     let grant = prepared.h3_private_ingress_grant.as_ref().ok_or_else(|| {
         ExecutionPlanError::PreparedInputsStale(
             "MiniMax H3 private planning lost its authenticated ingress grant".into(),
@@ -1740,12 +1748,24 @@ fn resolve_private_h3_execution_plans(
         }
         if let Err(error) = evidence.validate_for(
             request,
+            media,
             &device.id,
             device.ordinal,
             device.compute_capability,
             available_device_bytes,
             available_host_headroom_bytes,
         ) {
+            // The planner reports this as a VRAM block with only the two byte
+            // counts; the sentence that says WHICH conjunct refused must reach
+            // the log or the block is undiagnosable (#1423: a fitting plan
+            // sat blocked for four hours with "required < headroom").
+            tracing::warn!(
+                target: "mold_server::execution_plan",
+                device_id = %device.id,
+                model = %request.model,
+                error = %format!("{error:#}"),
+                "private H3 admission evidence refused at resolve"
+            );
             rejections.push(DeviceInfeasibility {
                 device_id: device.id,
                 predicted_peak_bytes: evidence.predicted_device_peak_bytes(),

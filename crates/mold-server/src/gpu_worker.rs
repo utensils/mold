@@ -3120,7 +3120,10 @@ fn run_claimed_h3_generation(
     if let Err(error) = validate_h3_prepared_attempt_facts(scope_facts, &prepared_facts) {
         return reject_claimed_h3_generation_message(job, error.to_string());
     }
-    if let Err(error) = prepared_facts.media.validate_for_request(&job.request) {
+    if let Err(error) = prepared_facts.media.validate_for_request_with_media(
+        &job.request,
+        crate::h3_private_bridge::job_media_presence(&job),
+    ) {
         return reject_claimed_h3_generation_message(job, error);
     }
     let lease = match job.lease.clone() {
@@ -3464,9 +3467,13 @@ fn validate_h3_publication_contract(
 ) -> anyhow::Result<()> {
     let contract = &prepared.media;
     let expected_contract =
-        crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request).map_err(
-            |_| anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract"),
-        )?;
+        crate::h3_private_bridge::H3PreparedMediaContract::from_request_with_media(
+            &job.request,
+            crate::h3_private_bridge::job_media_presence(job),
+        )
+        .map_err(|_| {
+            anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract")
+        })?;
     let expected_seed = job.request.seed.ok_or_else(|| {
         anyhow::anyhow!("private H3 terminal media provenance mismatch: request-seed")
     })?;
