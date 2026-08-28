@@ -186,29 +186,32 @@ Browse and organize existing prints on the server selected by `MOLD_HOST`
 direct filesystem access.
 
 ```bash
-mold library list [--query TEXT] [--tag TAG] [--collection NAME-OR-SLUG] [--favorite] [--format FORMAT] [--limit N] [--offset N] [--json]
+mold library list [--query TEXT] [--tag TAG] [--tag TAG]... [--collection NAME-OR-SLUG] [--favorite] [--format FORMAT] [--limit N] [--offset N] [--json]
 mold library show <FILENAME> [--json | --preview]
-mold library title <FILENAME> <TEXT> | --clear
+mold library grid [--host URL | --local]
+mold library title <FILENAME> <TEXT>
+mold library title <FILENAME> --clear
 mold library favorite <FILENAME>...
 mold library unfavorite <FILENAME>...
 mold library trash <FILENAME>...
 
 mold library tag list [--json]
-mold library tag add <FILENAME>... --tag <TAG>...
-mold library tag remove <FILENAME>... --tag <TAG>...
+mold library tag add <FILENAME>... --tag <TAG> [--tag <TAG>]...
+mold library tag remove <FILENAME>... --tag <TAG> [--tag <TAG>]...
 mold library tag rename <OLD> <NEW>
 mold library tag delete <TAG> [--yes]
 
 mold library collection list [--json]
 mold library collection show <NAME-OR-SLUG> [--json]
 mold library collection create <NAME> [--description TEXT]
-mold library collection update <NAME-OR-SLUG> [OPTIONS]
+mold library collection update <NAME-OR-SLUG> [--name TEXT] [--description TEXT | --clear-description] [--cover FILENAME | --clear-cover] [--hidden | --visible]
 mold library collection delete <NAME-OR-SLUG> [--yes]
 mold library collection add <NAME-OR-SLUG> <FILENAME>...
 mold library collection remove <NAME-OR-SLUG> <FILENAME>...
 ```
 
-Multiple `--tag` filters use AND semantics. Listing filters first, orders by
+Repeat `--tag` for every tag; one flag consumes exactly one value. Multiple
+`--tag` filters use AND semantics. Listing filters first, orders by
 newest timestamp and then filename, and only then applies `--offset` and
 `--limit` (50 by default, 1,000 maximum). JSON contains the identical selected
 page and never includes preview or terminal escape bytes.
@@ -223,8 +226,9 @@ permanent delete.
 `mold library show --preview` reuses the same inline renderer as `mold run
 --preview`; video entries prefer their animated preview and fall back to the
 thumbnail. `mold library grid [--host URL | --local]` opens the existing TUI
-directly on its protocol-aware Library grid. An unreachable explicit host is
-an error rather than a silent switch to local files.
+directly on its protocol-aware Library grid and carries `MOLD_API_KEY` only for
+that process. An unreachable host or rejected gallery credential is an error;
+the strict grid never switches to local files.
 
 ## `mold trash`
 

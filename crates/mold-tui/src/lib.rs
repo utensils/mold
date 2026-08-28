@@ -35,6 +35,33 @@ use ratatui::prelude::*;
 
 use app::App;
 
+#[derive(Default)]
+struct TerminalRestoreGuard {
+    active: bool,
+}
+
+impl TerminalRestoreGuard {
+    fn arm(&mut self) {
+        self.active = true;
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
 /// Initial workspace for callers that launch the TUI as a focused command.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TuiInitialWorkspace {
@@ -48,6 +75,9 @@ pub enum TuiInitialWorkspace {
 pub struct TuiLaunchOptions {
     pub host: Option<String>,
     pub local: bool,
+    /// Ephemeral credential for the selected launch host. It is never saved
+    /// to the TUI database.
+    pub api_key: Option<String>,
     pub initial_workspace: TuiInitialWorkspace,
     /// Refuse an unreachable `host` / `MOLD_HOST` instead of silently
     /// changing the data authority to local files.
@@ -79,14 +109,24 @@ pub async fn run_tui_with_options(options: TuiLaunchOptions) -> Result<()> {
     // the caller's terminal in the alternate screen.
     let version = mold_core::build_info::version_string();
     tracing::info!(%version, "starting mold tui");
-    let mut app =
-        App::new_with_launch_policy(options.host, options.local, picker, options.strict_host)?;
+    let api_key = options
+        .api_key
+        .or_else(|| std::env::var("MOLD_API_KEY").ok());
+    let mut app = App::new_with_launch_policy(
+        options.host,
+        options.local,
+        picker,
+        api_key,
+        options.strict_host,
+    )?;
     if options.initial_workspace == TuiInitialWorkspace::Library {
         app.open_library();
     }
 
     // Set up the terminal
+    let mut restore_guard = TerminalRestoreGuard::default();
     enable_raw_mode()?;
+    restore_guard.arm();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -106,12 +146,7 @@ pub async fn run_tui_with_options(options: TuiLaunchOptions) -> Result<()> {
     app.shutdown();
 
     // Restore the terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    restore_guard.restore()?;
     terminal.show_cursor()?;
 
     result
@@ -167,6 +202,9 @@ async fn run_event_loop(
 #[cfg(test)]
 mod launch_tests {
     use super::*;
+    use serial_test::serial;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn strict_library_launch_refuses_unreachable_explicit_host() {
@@ -175,6 +213,7 @@ mod launch_tests {
             Some("http://127.0.0.1:1".to_string()),
             false,
             picker,
+            None,
             true,
         ) {
             Ok(_) => panic!("strict launch must not fall back to local files"),
@@ -183,5 +222,49 @@ mod launch_tests {
         assert!(error
             .to_string()
             .contains("did not fall back to local files"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(mold_env)]
+    async fn strict_library_launch_authenticates_the_gallery_before_opening() {
+        crate::test_env::disable_db_for_non_isolated_tests();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery"))
+            .and(header("x-api-key", "library-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .and(header("x-api-key", "library-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let picker = ratatui_image::picker::Picker::from_fontsize((8, 16));
+        let app = App::new_with_launch_policy(
+            Some(server.uri()),
+            false,
+            picker,
+            Some("library-secret".to_string()),
+            true,
+        )
+        .expect("the strict launch should accept the authenticated gallery");
+
+        let requests = server.received_requests().await.expect("request history");
+        assert!(requests.iter().any(|request| {
+            request.url.path() == "/api/gallery"
+                && request
+                    .headers
+                    .get("x-api-key")
+                    .is_some_and(|value| value == "library-secret")
+        }));
+        drop(app);
     }
 }

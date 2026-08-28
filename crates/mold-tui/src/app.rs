@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
 use mold_core::{
     validation::{MAX_STG_BLOCKS, MAX_STG_BLOCK_INDEX},
@@ -2103,6 +2103,12 @@ pub struct App {
     pub layout: LayoutAreas,
     /// Background server process spawned by the TUI (killed on quit).
     pub server_process: Option<std::process::Child>,
+    /// Host id whose API key was supplied only for this TUI process. The key
+    /// itself lives in `hosts::SESSION_API_KEYS` and is cleared on shutdown.
+    pub(crate) session_api_key_host_id: Option<String>,
+    /// A focused Library launch must never reinterpret a failed loopback HTTP
+    /// scan as permission to walk and mutate the output directory directly.
+    pub(crate) strict_gallery_authority: bool,
     /// Whether an upscale job is currently running.
     pub upscale_in_progress: bool,
     /// Handle to the background upscale task (for cancellation).
@@ -2145,6 +2151,18 @@ fn check_server_health(url: &str) -> bool {
         .build()
         .new_agent();
     agent.get(&health_url).call().is_ok()
+}
+
+/// Verify that the requested Library authority is both reachable and usable
+/// with the launch credential. `/health` is intentionally public, so it cannot
+/// prove an authenticated gallery will work.
+fn check_gallery_access(url: &str, api_key: Option<&str>) -> Result<()> {
+    let client = crate::hosts::client_for(url, api_key);
+    let runtime = tokio::runtime::Handle::current();
+    std::thread::spawn(move || runtime.block_on(client.list_gallery()))
+        .join()
+        .map_err(|_| anyhow::anyhow!("gallery access probe panicked"))?
+        .map(|_| ())
 }
 
 /// Spawn a background `mold serve` process.
@@ -2190,16 +2208,24 @@ fn wait_for_server_health(url: &str, timeout_secs: u64) -> bool {
 
 impl App {
     pub fn new(host: Option<String>, local: bool, picker: Picker) -> Result<Self> {
-        Self::new_with_launch_policy(host, local, picker, false)
+        Self::new_with_launch_policy(
+            host,
+            local,
+            picker,
+            std::env::var("MOLD_API_KEY").ok(),
+            false,
+        )
     }
 
     pub(crate) fn new_with_launch_policy(
         host: Option<String>,
         local: bool,
         picker: Picker,
+        api_key: Option<String>,
         strict_host: bool,
     ) -> Result<Self> {
         let config = Config::load_or_default();
+        let api_key = api_key.filter(|key| !key.is_empty());
 
         // Determine initial server URL and inference mode
         let env_host = std::env::var("MOLD_HOST").ok();
@@ -2257,6 +2283,16 @@ impl App {
             }
         };
 
+        if strict_host {
+            if let Some(url) = server_url.as_deref() {
+                check_gallery_access(url, api_key.as_deref()).with_context(|| {
+                    format!(
+                        "mold host {url} did not accept the Library credential; Library grid did not fall back to local files"
+                    )
+                })?;
+            }
+        }
+
         // Boot-time user preferences (Settings → Preferences).
         let prefs = crate::prefs::TuiPrefs::load();
 
@@ -2279,9 +2315,10 @@ impl App {
             // Blocking fetch from server for startup catalog
             let rt = tokio::runtime::Handle::current();
             let url_clone = url.clone();
+            let api_key_clone = api_key.clone();
             std::thread::spawn(move || {
                 rt.block_on(async {
-                    let client = mold_core::MoldClient::new(&url_clone);
+                    let client = crate::hosts::client_for(&url_clone, api_key_clone.as_deref());
                     client.list_models_extended().await.ok()
                 })
             })
@@ -2424,7 +2461,23 @@ impl App {
             .unwrap_or(true);
 
         let rows = crate::ui::create_form::visible_rows(&capabilities, &advanced);
-        let app = Ok(Self {
+        let machines = crate::hosts::MachinesState::load();
+        let session_api_key_host_id = server_url.as_deref().and_then(|url| {
+            api_key.as_ref().map(|_| {
+                if crate::gallery_scan::is_loopback_url(url) {
+                    crate::hosts::LOCAL_HOST_ID.to_string()
+                } else {
+                    machines
+                        .registry
+                        .hosts
+                        .iter()
+                        .find(|host| host.url == url)
+                        .map(|host| host.id.clone())
+                        .unwrap_or_else(|| crate::hosts::host_id_from_url(url))
+                }
+            })
+        });
+        let mut app = Self {
             active_view: View::Create,
             create_mode: CreateMode::default(),
             generate: GenerateState {
@@ -2464,7 +2517,7 @@ impl App {
                 filter: String::new(),
                 filtering: false,
             },
-            machines: crate::hosts::MachinesState::load(),
+            machines,
             target: if local {
                 // `mold tui --local` pins this run to the local engine;
                 // the persisted target is left untouched.
@@ -2498,20 +2551,25 @@ impl App {
             history,
             layout: LayoutAreas::default(),
             server_process,
+            session_api_key_host_id: None,
+            strict_gallery_authority: strict_host,
             upscale_in_progress: false,
             upscale_task: None,
             upscale_tile_progress: None,
             upscale_progress: ProgressState::default(),
             connecting: false,
             show_timeline,
-        });
+        };
 
-        // Spawn background gallery scan
-        if let Ok(ref app) = app {
-            app.spawn_gallery_scan();
+        if let (Some(host_id), Some(key)) = (session_api_key_host_id, api_key.as_deref()) {
+            crate::hosts::set_session_api_key(&host_id, key);
+            app.session_api_key_host_id = Some(host_id);
         }
 
-        app
+        // Spawn background gallery scan
+        app.spawn_gallery_scan();
+
+        Ok(app)
     }
 
     /// Spawn a merged all-hosts gallery scan: the local output dir, the
@@ -2522,8 +2580,9 @@ impl App {
         let tx = self.bg_tx.clone();
         let sources =
             crate::gallery_scan::scan_sources(self.server_url.as_deref(), &self.machines.registry);
+        let allow_local_fallback = !self.strict_gallery_authority;
         self.tokio_handle.spawn(async move {
-            let scan = crate::gallery_scan::scan_all_hosts(sources).await;
+            let scan = crate::gallery_scan::scan_all_hosts(sources, allow_local_fallback).await;
             let _ = tx.send(BackgroundEvent::GalleryScanComplete(scan));
         });
     }
@@ -3185,12 +3244,19 @@ impl App {
         // Save current session so settings persist even without generating
         self.save_session();
 
+        self.cleanup_runtime_authority();
+    }
+
+    fn cleanup_runtime_authority(&mut self) {
         if let Some(ref mut child) = self.server_process {
             tracing::info!(pid = child.id(), "stopping background server");
             let _ = child.kill();
             let _ = child.wait();
         }
         self.server_process = None;
+        if let Some(host_id) = self.session_api_key_host_id.take() {
+            crate::hosts::clear_session_api_key(&host_id);
+        }
     }
 
     /// Persist current prompt, negative prompt, model, and all params to session file.
@@ -9430,6 +9496,15 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
     false
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        // Setup failures can drop the app before the event loop gets a chance
+        // to call `shutdown`. Never leave an auto-started server or ephemeral
+        // launch credential behind in that path.
+        self.cleanup_runtime_authority();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     mod held_batch {
@@ -10740,6 +10815,8 @@ mod tests {
             history: crate::history::PromptHistory::empty(),
             layout: LayoutAreas::default(),
             server_process: None,
+            session_api_key_host_id: None,
+            strict_gallery_authority: false,
             upscale_in_progress: false,
             upscale_task: None,
             upscale_tile_progress: None,
@@ -10747,6 +10824,28 @@ mod tests {
             connecting: false,
             show_timeline: true,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_app_cleans_up_an_autostarted_server() {
+        let mut app = make_settings_test_app();
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn disposable server stand-in");
+        let pid = child.id();
+        app.server_process = Some(child);
+
+        drop(app);
+
+        let still_running = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(!still_running, "App::drop must reap its background server");
     }
 
     /// Helper: find the row_index for a given SettingsKey.

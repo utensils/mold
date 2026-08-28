@@ -681,6 +681,7 @@ async fn library_grid(host: Option<String>, local: bool) -> Result<()> {
     mold_tui::run_tui_with_options(mold_tui::TuiLaunchOptions {
         host,
         local,
+        api_key: std::env::var("MOLD_API_KEY").ok(),
         initial_workspace: mold_tui::TuiInitialWorkspace::Library,
         strict_host: true,
     })
