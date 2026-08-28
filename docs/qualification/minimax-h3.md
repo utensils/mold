@@ -798,6 +798,7 @@ artifact pass and so overstates the anonymous working set.
 | a′ | image | 4 | 2,708 s | 9,104 MiB | H.264 768x768 x124 + AAC (#1418, 2026-08-27: base tag, seed 770021, one 768x768 PNG normalized to 2048x2048) |
 | a″ | image | 4 | 302 s | 18,794 MiB | H.264 768x768 x124 + AAC (#1423, 2026-08-28: row a′'s exact request with the conditioner placed on the CUDA device; frame-for-frame the same print, PSNR 32.1 dB against a′) |
 | a‴ | image | 21 | 918 s | — | H.264 768x768 x124 + AAC (2026-08-28: row a″'s request at ComfyUI's 21-step default on the CUDA route — the QUALITY control; VRAM not sampled) |
+| a⁗ | image | 5 (Turbo) | 322 s | — | H.264 768x768 x124 + AAC (2026-08-28: `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, row a″'s request at the adapter's reviewed 5 grid points; first Ref2VA Turbo render — the tag was refused at provenance before #1432; coherent trot, denoise 132.2 s) |
 | b | video (with soundtrack) | 8 | 1,604 s | 15,024 MiB | H.264 1344x768 x124 + AAC |
 | c | image, audio | 8 | 3,100 s | 12,594 MiB | H.264 1344x768 x124 + AAC |
 | g | video (with soundtrack), audio, audio | 8 | 1,575 s | 15,138 MiB | H.264 + AAC, seed 825825 |
@@ -932,7 +933,8 @@ tags, labels, 2048 short-edge normalization — which is the official
 `reference_image_short_edge`, ComfyUI alone defaulting to down-only) matched
 on every axis; the confirmed divergences it did find are #1430–#1433 and
 none of them touches a PNG image reference. Only a Turbo tag's distilled
-schedule is a 4- or 8-step recipe.
+schedule is a 4- or 8-step recipe — row `a⁗` is that recipe on the Ref2VA
+Turbo tag, and it is as coherent as `a‴` at a third of the wall clock.
 
 **On the host route the host, not the card, is the binding constraint.** Until
 #1423 the compact stack placed its Qwen3-VL conditioner on the CPU for every
