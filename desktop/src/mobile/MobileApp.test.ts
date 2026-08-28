@@ -2751,8 +2751,12 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await flushPromises();
+    const content = wrapper.get(".mobile-content").element as HTMLElement;
+    content.scrollTop = 640;
     const row = wrapper.get("[data-test='mobile-generation-job']");
-    await row.get(".mobile-generation-job").trigger("click");
+    const rowButton = row.get(".mobile-generation-job");
+    (rowButton.element as HTMLElement).focus();
+    await rowButton.trigger("keydown", { key: "Enter" });
     await flushPromises();
     await flushPromises();
 
@@ -2762,6 +2766,8 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-generation-job']").text()).not.toContain(
       "Recovered print",
     );
+    expect(content.scrollTop).toBe(0);
+    expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-create-heading']").element);
   });
 
   it("persists one pre-admission cancel tap until the exact server job id is reconciled", async () => {
