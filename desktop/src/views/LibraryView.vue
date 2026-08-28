@@ -11,6 +11,7 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
+import type { ThumbnailPriority } from "@studio/lib/thumbnailScheduler";
 import Icon from "@ui/components/Icon.vue";
 import {
   loadGalleryThumbnailSize,
@@ -1592,11 +1593,17 @@ const virtualizer = useVirtualizer(
  */
 const visibleTiles = computed(() => {
   const laid = rows.value;
-  const out: Array<LaidTile & { y: number }> = [];
-  for (const vrow of unref(virtualizer).getVirtualItems()) {
+  const instance = unref(virtualizer);
+  // `range` is the on-screen row span without overscan; rows outside it are
+  // fetched at `near` priority so a fast scroll never starves what is shown.
+  const range = instance.range;
+  const out: Array<LaidTile & { y: number; priority: ThumbnailPriority }> = [];
+  for (const vrow of instance.getVirtualItems()) {
     const row = laid[vrow.index];
     if (!row) continue;
-    for (const tile of row.items) out.push({ ...tile, y: vrow.start });
+    const priority: ThumbnailPriority =
+      range && (vrow.index < range.startIndex || vrow.index > range.endIndex) ? "near" : "visible";
+    for (const tile of row.items) out.push({ ...tile, y: vrow.start, priority });
   }
   return out;
 });
@@ -2276,7 +2283,11 @@ onUnmounted(() => {
           :key="tile.model.key"
           class="ms-lib-tile group overflow-hidden rounded-[9px] border"
           :class="
-            (selectMode ? bulkSelection.has(tile.model.item.filename) : isSelected(tile.model.entry))
+            (
+              selectMode
+                ? bulkSelection.has(tile.model.item.filename)
+                : isSelected(tile.model.entry)
+            )
               ? 'border-transparent ring-2 ring-safelight'
               : 'border-[color-mix(in_srgb,var(--rebate)_14%,transparent)]'
           "
@@ -2303,6 +2314,7 @@ onUnmounted(() => {
               :target="tile.model.target"
               :cache-key="tile.model.entry.sourceKey"
               :media-version="tile.model.mediaVersion"
+              :priority="tile.priority"
               :video="tile.model.localVideo"
               :alt="tile.model.item.metadata.prompt"
             />

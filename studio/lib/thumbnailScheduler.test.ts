@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { expectOpsUnder } from "./galleryPerfBudget";
 import {
   ThumbnailScheduler,
   type ThumbnailPriority,
@@ -125,6 +126,51 @@ describe("ThumbnailScheduler", () => {
     await turn();
     expect(order[0]).toBe("promoted");
     older.cancel();
+  });
+
+  it("drains a 10 000-tile backlog in O(Q) dispatch work without sorting", async () => {
+    const Q = 10_000;
+    const scheduler = new ThumbnailScheduler({
+      concurrency: 12,
+      perHostConcurrency: 6,
+      backgroundConcurrency: 2,
+    });
+    const sortSpy = vi.spyOn(Array.prototype, "sort");
+    const priorities: ThumbnailPriority[] = ["visible", "near", "background"];
+    const handles = [];
+    let completed = 0;
+    for (let i = 0; i < Q; i++) {
+      handles.push(
+        scheduler.schedule({
+          key: `tile-${i}`,
+          hostKey: `host-${i % 3}`,
+          priority: priorities[i % 3]!,
+          run: async () => {
+            completed += 1;
+          },
+        }),
+      );
+    }
+    // Every other tile scrolls into view, and every fifth leaves the window.
+    for (let i = 0; i < Q; i += 2) handles[i]!.setPriority("visible");
+    for (let i = 0; i < Q; i += 5) {
+      void handles[i]!.promise.catch(() => {});
+      handles[i]!.cancel();
+    }
+    // Drain: each turn completes the running batch and pumps the next.
+    for (let spins = 0; spins < Q && scheduler.stats.keys > 0; spins++)
+      await turn();
+    sortSpy.mockRestore();
+
+    expect(scheduler.stats.keys).toBe(0);
+    expect(completed).toBe(Q - Q / 5);
+    expect(sortSpy).not.toHaveBeenCalled();
+    // One live slot plus at most one stale slot (the raised copy) per tile.
+    expectOpsUnder(
+      "scheduler dispatch scans",
+      scheduler.stats.dispatchScans,
+      2 * Q,
+    );
   });
 
   it("starts a fresh generation when a cancelled key is requested again", async () => {

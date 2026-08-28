@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
-import { galleryThumbnailScheduler, type ThumbnailHandle } from "@studio/lib/thumbnailScheduler";
+import {
+  galleryThumbnailScheduler,
+  type ThumbnailHandle,
+  type ThumbnailPriority,
+} from "@studio/lib/thumbnailScheduler";
 import { authedMediaUrl, fullSizeMediaUrl } from "../../lib/gallery/media";
 import type { ApiTarget } from "../../lib/api/client";
 
@@ -17,6 +21,10 @@ const props = withDefaults(
     /** Blob-cache bucket, usually the origin host id. */
     cacheKey?: string | null;
     mediaVersion?: string | null;
+    /** Scheduler priority for a thumbnail: on-screen tiles are `visible`,
+     *  overscan rows `near`, prewarm `background`. Raising it promotes a
+     *  queued request in place; the scheduler never demotes. */
+    priority?: ThumbnailPriority;
   }>(),
   {
     video: false,
@@ -26,6 +34,7 @@ const props = withDefaults(
     target: null,
     cacheKey: null,
     mediaVersion: null,
+    priority: "visible",
   },
 );
 
@@ -64,7 +73,7 @@ async function load() {
             const handle = galleryThumbnailScheduler.schedule({
               key: `${props.cacheKey ?? "primary"}|${props.path}|${props.mediaVersion ?? "legacy"}|${props.target?.baseUrl ?? "primary"}|${props.target?.apiKey ?? ""}`,
               hostKey: props.cacheKey ?? props.target?.baseUrl ?? "primary",
-              priority: "visible",
+              priority: props.priority,
               run: (signal) => authedMediaUrl(props.path, { ...options, signal }),
             });
             thumbnailHandle = handle;
@@ -102,6 +111,12 @@ watch(
   ],
   load,
 );
+// A tile scrolling from the overscan band into view promotes its queued
+// request without restarting it.
+watch(
+  () => props.priority,
+  (priority) => thumbnailHandle?.setPriority(priority),
+);
 onMounted(load);
 onUnmounted(() => {
   loadEpoch += 1;
@@ -121,7 +136,14 @@ onUnmounted(() => {
     disablepictureinpicture
   />
   <audio v-else-if="audio && src" :src="src" class="w-full" controls />
-  <img v-else-if="src" :src="src" :alt="alt" class="h-full w-full object-cover" draggable="false" />
+  <img
+    v-else-if="src"
+    :src="src"
+    :alt="alt"
+    class="h-full w-full object-cover"
+    decoding="async"
+    draggable="false"
+  />
   <div v-else-if="failed" class="flex h-full w-full items-center justify-center bg-bench">
     <span class="edge-code">UNREADABLE</span>
   </div>

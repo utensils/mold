@@ -10,7 +10,11 @@
  */
 
 /** Throws a descriptive error when `observed` exceeds `budget`. */
-export function expectOpsUnder(label: string, observed: number, budget: number): void {
+export function expectOpsUnder(
+  label: string,
+  observed: number,
+  budget: number,
+): void {
   if (observed <= budget) return;
   const over = observed - budget;
   throw new Error(

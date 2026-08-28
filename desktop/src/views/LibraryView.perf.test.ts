@@ -201,7 +201,9 @@ describe("Library grid at 2 000 prints", () => {
 
   it("re-flows on a thumbnail-size change without remounting surviving tiles", async () => {
     const { wrapper } = await mountGrid();
-    const before = new Set(wrapper.findAll(".ms-lib-tile").map((t) => t.attributes("data-filename")));
+    const before = new Set(
+      wrapper.findAll(".ms-lib-tile").map((t) => t.attributes("data-filename")),
+    );
     counters.reset();
 
     // Three slider ticks, as a drag delivers them.
@@ -213,7 +215,9 @@ describe("Library grid at 2 000 prints", () => {
     }
     await flushPromises();
 
-    const after = new Set(wrapper.findAll(".ms-lib-tile").map((t) => t.attributes("data-filename")));
+    const after = new Set(
+      wrapper.findAll(".ms-lib-tile").map((t) => t.attributes("data-filename")),
+    );
     const survivors = [...before].filter((name) => after.has(name));
     expect(survivors.length).toBeGreaterThan(10);
     let remounted = 0;

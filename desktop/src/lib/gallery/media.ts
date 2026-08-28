@@ -25,24 +25,42 @@ interface CachedObjectUrl {
 const THUMBNAIL_CACHE_ENTRIES = 512;
 const THUMBNAIL_CACHE_BYTES = 64 * 1024 * 1024;
 const cache = new Map<string, CachedObjectUrl>();
+/** Sum of `bytes` over settled cache entries, kept incrementally: summing
+ *  (or copying) the whole map per insert made every thumbnail load O(cache). */
+let retainedBytes = 0;
 
 function revokeCachedObjectUrl(entry: CachedObjectUrl): void {
   void entry.url.then((url) => URL.revokeObjectURL(url)).catch(() => {});
 }
 
+/** Record a settled entry's bytes exactly once. */
+function settleThumbnail(entry: CachedObjectUrl, bytes: number): void {
+  entry.bytes = bytes;
+  entry.settled = true;
+  retainedBytes += bytes;
+}
+
+function dropThumbnail(key: string, entry: CachedObjectUrl): void {
+  cache.delete(key);
+  if (entry.settled) retainedBytes -= entry.bytes ?? 0;
+}
+
 function trimThumbnailCache(): void {
-  let retainedBytes = 0;
-  for (const entry of cache.values()) retainedBytes += entry.bytes ?? 0;
   while (cache.size > THUMBNAIL_CACHE_ENTRIES || retainedBytes > THUMBNAIL_CACHE_BYTES) {
     // Never evict an unresolved promise: its caller has not received a usable
     // URL yet. Resolution re-enters this function, so a burst can exceed the
-    // bound only while requests are actively in flight.
-    const oldest = [...cache].find(([, entry]) => entry.settled);
+    // bound only while requests are actively in flight. Map iteration order
+    // is recency order, so the first settled entry is the oldest.
+    let oldest: [string, CachedObjectUrl] | null = null;
+    for (const candidate of cache) {
+      if (candidate[1].settled) {
+        oldest = candidate;
+        break;
+      }
+    }
     if (!oldest) break;
-    const [key, entry] = oldest;
-    cache.delete(key);
-    retainedBytes -= entry.bytes ?? 0;
-    revokeCachedObjectUrl(entry);
+    dropThumbnail(oldest[0], oldest[1]);
+    revokeCachedObjectUrl(oldest[1]);
   }
 }
 
@@ -140,20 +158,23 @@ export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Pro
           ).blob(),
       )
       .then((blob) => {
-        entry.bytes = blob.size;
-        entry.settled = true;
         const objectUrl = URL.createObjectURL(blob);
         // The host/path may have been invalidated while its request was in
         // flight. Do not leak an object URL that is no longer authoritative.
-        if (cache.get(key) !== entry) URL.revokeObjectURL(objectUrl);
-        else trimThumbnailCache();
+        if (cache.get(key) !== entry) {
+          entry.settled = true;
+          URL.revokeObjectURL(objectUrl);
+        } else {
+          settleThumbnail(entry, blob.size);
+          trimThumbnailCache();
+        }
         return objectUrl;
       });
     cached = entry;
     rememberThumbnail(key, entry);
     entry.url.catch(() => {
+      if (cache.get(key) === entry) dropThumbnail(key, entry);
       entry.settled = true;
-      if (cache.get(key) === entry) cache.delete(key);
     });
   } else {
     // Map insertion order is recency order.
@@ -338,12 +359,14 @@ export async function fetchGalleryMediaBytes(path: string, target: ApiTarget): P
 }
 
 function evictPrefix(prefix: string): void {
-  for (const [key, cached] of [...cache]) {
+  // Deleting the current entry during Map iteration is well-defined, so no
+  // snapshot copy is needed (a refetch called this once per removed row).
+  for (const [key, cached] of cache) {
     if (!key.startsWith(prefix)) continue;
-    cache.delete(key);
+    dropThumbnail(key, cached);
     revokeCachedObjectUrl(cached);
   }
-  for (const [key, cached] of [...fullSizeCache]) {
+  for (const [key, cached] of fullSizeCache) {
     if (!key.startsWith(prefix)) continue;
     fullSizeCache.delete(key);
     void cached.then((url) => URL.revokeObjectURL(url)).catch(() => {});

@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { markRaw, toRaw } from "vue";
 import { apiFetchTo, conditionalApiJsonTo, type ApiTarget } from "../lib/api/client";
 import { isTransportFailure } from "../lib/api/errors";
 import {
@@ -272,12 +273,28 @@ function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+/**
+ * Gallery rows are immutable snapshots: every change replaces the row object
+ * (`replaceRow` / `patchRow`), never a field on it. That lets the rows skip
+ * Vue's deep reactivity — a 1 000-print bucket of 60-field metadata objects
+ * would otherwise be a few thousand proxies whose get traps sit on every
+ * merge, identity, and layout pass. Arrays stay reactive; the rows inside do
+ * not. Apply at every site that puts a row into a bucket.
+ */
+function rawRow(image: GalleryImage): GalleryImage {
+  return markRaw(image);
+}
+function rawRows(images: GalleryImage[]): GalleryImage[] {
+  for (const image of images) markRaw(image);
+  return images;
+}
+
 /** Replace a bucket row in place (same index) so the grid keeps its order. */
 function replaceRow(bucket: GalleryBucket | undefined, image: GalleryImage): boolean {
   if (!bucket) return false;
   const at = bucket.items.findIndex((i) => i.filename === image.filename);
   if (at === -1) return false;
-  bucket.items.splice(at, 1, image);
+  bucket.items.splice(at, 1, rawRow(image));
   return true;
 }
 
@@ -285,8 +302,8 @@ function replaceRow(bucket: GalleryBucket | undefined, image: GalleryImage): boo
 function insertRow(bucket: GalleryBucket, image: GalleryImage) {
   if (bucket.items.some((i) => i.filename === image.filename)) return;
   const at = bucket.items.findIndex((i) => i.timestamp < image.timestamp);
-  if (at === -1) bucket.items.push(image);
-  else bucket.items.splice(at, 0, image);
+  if (at === -1) bucket.items.push(rawRow(image));
+  else bucket.items.splice(at, 0, rawRow(image));
 }
 
 /** Trash order: newest-DELETED first (`trashed_at`, matching the server's
@@ -298,8 +315,8 @@ const trashOrderKey = (i: GalleryImage) => i.trashed_at ?? i.timestamp;
 function insertTrashRow(bucket: GalleryBucket, image: GalleryImage) {
   if (bucket.items.some((i) => i.filename === image.filename)) return;
   const at = bucket.items.findIndex((i) => trashOrderKey(i) < trashOrderKey(image));
-  if (at === -1) bucket.items.push(image);
-  else bucket.items.splice(at, 0, image);
+  if (at === -1) bucket.items.push(rawRow(image));
+  else bucket.items.splice(at, 0, rawRow(image));
 }
 
 function takeRow(bucket: GalleryBucket | undefined, filename: string): GalleryImage | null {
@@ -752,9 +769,7 @@ export const useGalleryStore = defineStore("gallery", {
       );
       const organization = this.organizationIndex;
       const hidesInDefault = (item: GalleryImage) =>
-        (organization.get(item.filename)?.collections ?? []).some((slug) =>
-          hiddenSlugs.has(slug),
-        );
+        (organization.get(item.filename)?.collections ?? []).some((slug) => hiddenSlugs.has(slug));
       return this.sources.map((source) => {
         const items = this.buckets[source.key]?.items ?? [];
         const count =
@@ -884,14 +899,20 @@ export const useGalleryStore = defineStore("gallery", {
           items = await conditionalApiJsonTo<GalleryImage[]>(target, "/api/gallery");
           authorityTarget = target;
         }
-        // Prints that vanished out-of-band (deleted by another client) must
-        // release their cached blob URLs — the media cache only evicts on
-        // explicit remove()/host teardown otherwise.
-        const next = new Set(items.map((i) => i.filename));
         const authorityChanged =
           bucket.authorityResolved &&
           (bucket.authorityTarget?.baseUrl !== authorityTarget?.baseUrl ||
             bucket.authorityTarget?.apiKey !== authorityTarget?.apiKey);
+        // A 304 hands back the very array already in the bucket. Nothing
+        // changed, so nothing downstream (merge, indexes, layout, every
+        // tile) may be invalidated — assigning the same rows again would
+        // re-run all of it on every 15 s poll of every host. A changed
+        // authority still falls through: its cached media must be evicted.
+        if (bucket.loaded && !authorityChanged && toRaw(bucket.items) === items) return;
+        // Prints that vanished out-of-band (deleted by another client) must
+        // release their cached blob URLs — the media cache only evicts on
+        // explicit remove()/host teardown otherwise.
+        const next = new Set(items.map((i) => i.filename));
         for (const old of bucket.items) {
           if (!authorityChanged && next.has(old.filename)) continue;
           evictMedia(galleryMediaPath(old.filename, previousSource, true), key);
@@ -900,7 +921,7 @@ export const useGalleryStore = defineStore("gallery", {
         bucket.authorityTarget = authorityTarget;
         bucket.authorityResolved = true;
         // Newest first, like a print drawer.
-        bucket.items = items.sort((a, b) => b.timestamp - a.timestamp);
+        bucket.items = rawRows(items.sort((a, b) => b.timestamp - a.timestamp));
         bucket.loaded = true;
       } catch (err) {
         bucket.error = String(err);
@@ -1398,7 +1419,7 @@ export const useGalleryStore = defineStore("gallery", {
         }
         bucket.authorityTarget = authorityTarget;
         bucket.authorityResolved = true;
-        bucket.items = items.sort((a, b) => trashOrderKey(b) - trashOrderKey(a));
+        bucket.items = rawRows(items.sort((a, b) => trashOrderKey(b) - trashOrderKey(a)));
         bucket.loaded = true;
       } catch (err) {
         bucket.error = String(err);
@@ -1444,6 +1465,23 @@ export const useGalleryStore = defineStore("gallery", {
         this.trashBucketIndex.get(hostKey)?.byFilename.get(filename) ??
         null
       );
+    },
+    /**
+     * Replace one row (live or trash) with a patched copy. Rows are raw,
+     * immutable snapshots (see `rawRow`), so an optimistic organization edit
+     * must swap the object rather than assign a field — a field write would
+     * neither notify the grid nor invalidate the organization index.
+     */
+    patchRow(hostKey: string, filename: string, patch: Partial<GalleryImage>): GalleryImage | null {
+      for (const bucket of [this.buckets[hostKey], this.trashBuckets[hostKey]]) {
+        if (!bucket) continue;
+        const at = bucket.items.findIndex((i) => i.filename === filename);
+        if (at === -1) continue;
+        const next = rawRow({ ...bucket.items[at]!, ...patch });
+        bucket.items.splice(at, 1, next);
+        return next;
+      }
+      return null;
     },
     /** Apply a server-echoed row in place of whichever bucket holds it. */
     absorbRow(hostKey: string, image: GalleryImage) {
@@ -1491,8 +1529,7 @@ export const useGalleryStore = defineStore("gallery", {
           if (bulk && useHostsStore().capabilities[op.hostId]?.gallery?.bulk_mutations === true) {
             await mutateGalleryBulk(target, bulk);
             for (const filename of op.filenames) {
-              const row = this.rowOf(op.hostId, filename);
-              if (row) row.title = op.title;
+              this.patchRow(op.hostId, filename, { title: op.title });
             }
             return;
           }
@@ -1501,18 +1538,14 @@ export const useGalleryStore = defineStore("gallery", {
               title: op.title ?? "",
             });
             if (echoed) this.absorbRow(op.hostId, echoed);
-            else {
-              const row = this.rowOf(op.hostId, filename);
-              if (row) row.title = op.title;
-            }
+            else this.patchRow(op.hostId, filename, { title: op.title });
           }
           return;
         }
         case "setFavorite": {
           await organizeGallery(target, { filenames: op.filenames, favorite: op.favorite });
           for (const filename of op.filenames) {
-            const row = this.rowOf(op.hostId, filename);
-            if (row) row.favorite = op.favorite;
+            this.patchRow(op.hostId, filename, { favorite: op.favorite });
           }
           return;
         }
@@ -1524,11 +1557,15 @@ export const useGalleryStore = defineStore("gallery", {
             const row = this.rowOf(op.hostId, filename);
             if (!row) continue;
             const have = new Set((row.tags ?? []).map(tagKey));
+            const next = [...(row.tags ?? [])];
             for (const tag of tags) {
               if (have.has(tagKey(tag))) continue;
               have.add(tagKey(tag));
-              row.tags = [...(row.tags ?? []), tag];
+              next.push(tag);
               this.adjustTagCounts(op.hostId, tag, 1);
+            }
+            if (next.length !== (row.tags ?? []).length) {
+              this.patchRow(op.hostId, filename, { tags: next });
             }
           }
           return;
@@ -1545,7 +1582,7 @@ export const useGalleryStore = defineStore("gallery", {
               if (keys.has(tagKey(tag))) this.adjustTagCounts(op.hostId, tag, -1);
               else kept.push(tag);
             }
-            row.tags = kept;
+            this.patchRow(op.hostId, filename, { tags: kept });
           }
           return;
         }
@@ -1564,7 +1601,9 @@ export const useGalleryStore = defineStore("gallery", {
             const row = this.rowOf(op.hostId, filename);
             if (!row) continue;
             if ((row.collections ?? []).includes(collection.id)) continue;
-            row.collections = [...(row.collections ?? []), collection.id];
+            this.patchRow(op.hostId, filename, {
+              collections: [...(row.collections ?? []), collection.id],
+            });
             collection.count += 1;
           }
           return;
@@ -1579,7 +1618,9 @@ export const useGalleryStore = defineStore("gallery", {
           for (const filename of op.filenames) {
             const row = this.rowOf(op.hostId, filename);
             if (!row?.collections?.includes(collection.id)) continue;
-            row.collections = row.collections.filter((id) => id !== collection.id);
+            this.patchRow(op.hostId, filename, {
+              collections: row.collections.filter((id) => id !== collection.id),
+            });
             collection.count = Math.max(0, collection.count - 1);
           }
           return;
@@ -1805,11 +1846,17 @@ export const useGalleryStore = defineStore("gallery", {
           const bucket = this.ensureCollectionsBucket(host.hostId);
           bucket.items = bucket.items.filter((c) => c.id !== host.id);
           for (const store of [this.buckets[host.hostId], this.trashBuckets[host.hostId]]) {
-            for (const row of store?.items ?? []) {
-              if (row.collections?.includes(host.id)) {
-                row.collections = row.collections.filter((id) => id !== host.id);
-              }
-            }
+            if (!store) continue;
+            let touched = false;
+            const next = store.items.map((row) => {
+              if (!row.collections?.includes(host.id)) return row;
+              touched = true;
+              return rawRow({
+                ...row,
+                collections: row.collections.filter((id) => id !== host.id),
+              });
+            });
+            if (touched) store.items = next;
           }
         }),
       );

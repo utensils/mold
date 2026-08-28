@@ -41,6 +41,7 @@ import { useChainJobsStore } from "../../stores/chainJobs";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import type { GalleryImage } from "../../lib/api/types";
 import type { ChainJobSummary } from "@studio/lib/api/chainTypes";
+import { HISTORY_JOBS_RENDER_CAP } from "@studio/lib/activity";
 
 const stub = { template: "<div />" };
 
@@ -188,6 +189,21 @@ describe("HistoryDrawer runs", () => {
       }),
     });
     expect(router.currentRoute.value.path).toBe("/create");
+  });
+
+  it("caps the Runs list at the History render cap and says so", async () => {
+    const wrapper = await mountDrawer();
+    const gallery = useGalleryStore();
+    const many: GalleryImage[] = [];
+    for (let i = 0; i < HISTORY_JOBS_RENDER_CAP + 50; i++) {
+      many.push(run(`bulk-${i}.png`, `bulk print ${i}`, 1_700_100_000 - i));
+    }
+    gallery.buckets["local"]!.items = many;
+    await flushPromises();
+    expect(wrapper.findAll('[data-test="run-row"]').length).toBe(HISTORY_JOBS_RENDER_CAP);
+    expect(wrapper.get('[data-test="runs-cap-note"]').text()).toContain(
+      `showing ${HISTORY_JOBS_RENDER_CAP} of ${HISTORY_JOBS_RENDER_CAP + 50}`,
+    );
   });
 
   it("filters runs by prompt text", async () => {
