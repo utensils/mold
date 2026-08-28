@@ -23,6 +23,53 @@ pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Env vars that redirect the model store / mold home away from a test's own
+/// tempdir. `Config::resolved_models_dir` lets `MOLD_MODELS_DIR` beat the
+/// struct field by design, so a developer's direnv
+/// (`MOLD_MODELS_DIR=/storage-fast/mold/models`) silently points a test's
+/// `Ltx25ModelPaths::resolve` / catalog scan at the PRODUCTION store — and a
+/// fixture writer then overwrites real weights: on 2026-08-28 the
+/// split-audio fixture in `model_manager.rs` overwrote the real
+/// 364,866,540-byte LTX-2.5 audio VAE with its 194-byte stub. Twice.
+#[cfg(test)]
+const MOLD_STORE_ENV_VARS: &[&str] = &["MOLD_MODELS_DIR", "MOLD_HOME", "MOLD_OUTPUT_DIR"];
+
+/// Holds [`env_lock`] with every store-redirecting `MOLD_*` var removed, and
+/// restores the saved values on drop (panic included). Any test that builds
+/// a `Config` and then resolves model paths through it — read OR write —
+/// must hold this; a bare `env_lock()` only serializes the damage.
+#[cfg(test)]
+pub struct HermeticStoreEnv {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+#[cfg(test)]
+pub fn hermetic_store_env() -> HermeticStoreEnv {
+    let lock = env_lock();
+    let saved = MOLD_STORE_ENV_VARS
+        .iter()
+        .map(|name| {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            (*name, previous)
+        })
+        .collect();
+    HermeticStoreEnv { _lock: lock, saved }
+}
+
+#[cfg(test)]
+impl Drop for HermeticStoreEnv {
+    fn drop(&mut self) {
+        for (name, previous) in self.saved.drain(..) {
+            match previous {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
 pub struct TestResponse {
     pub status: StatusCode,
     pub body: String,
