@@ -6,7 +6,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { isReactive, toRaw } from "vue";
-import { conditionalApiJsonTo } from "../lib/api/client";
+import { apiFetchTo, conditionalApiJsonTo } from "../lib/api/client";
+import { ipc } from "../lib/ipc";
 import { evictMedia } from "../lib/gallery/media";
 import { useConnectionStore } from "./connection";
 import { useGalleryStore } from "./gallery";
@@ -15,7 +16,10 @@ import type { GalleryImage } from "../lib/api/types";
 import * as organization from "@studio/api/galleryOrganization";
 
 vi.mock("../lib/ipc", () => ({
-  ipc: { localGalleryList: vi.fn().mockResolvedValue({ images: [], target: null }) },
+  ipc: {
+    localGalleryList: vi.fn().mockResolvedValue({ images: [], target: null }),
+    forgetGalleryThumbnail: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 vi.mock("../lib/api/client", () => ({
   conditionalApiJsonTo: vi.fn(),
@@ -81,6 +85,29 @@ describe("gallery refetch discipline", () => {
     expect(gallery.merged).toBe(merged);
     expect(gallery.organizationIndex).toBe(index);
     expect(evictMedia).not.toHaveBeenCalled();
+  });
+
+  it("forgets a permanently deleted print's tiles under the same version the tile was filed as", async () => {
+    connectPlato();
+    const gallery = useGalleryStore();
+    // An older host reports no media_version: the tile key used the
+    // `timestamp:size` fallback, so the eviction must too.
+    vi.mocked(conditionalApiJsonTo).mockResolvedValue([img("legacy.png", 5)]);
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }));
+    await gallery.fetchBucket("plato-7680");
+    await gallery.remove("plato-7680", "legacy.png", { permanent: true });
+    expect(ipc.forgetGalleryThumbnail).toHaveBeenCalledWith(
+      "plato-7680",
+      "http://plato:7680",
+      "legacy.png",
+      "5:10",
+    );
+    // A trash (non-permanent) delete keeps the tile for the Trash grid.
+    vi.mocked(ipc.forgetGalleryThumbnail).mockClear();
+    vi.mocked(conditionalApiJsonTo).mockResolvedValue([img("kept.png", 6)]);
+    await gallery.fetchBucket("plato-7680");
+    await gallery.remove("plato-7680", "kept.png");
+    expect(ipc.forgetGalleryThumbnail).not.toHaveBeenCalled();
   });
 
   it("keeps rows raw and replaces them on an optimistic edit", async () => {

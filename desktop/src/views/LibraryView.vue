@@ -1706,14 +1706,21 @@ async function runPrewarm() {
           key: `${sourceKey}|${model.mediaPath}|${model.mediaVersion}|${target?.baseUrl ?? "primary"}|${target?.apiKey ?? ""}`,
           hostKey: sourceKey,
           priority: entry.priority,
-          run: (signal) =>
-            prepareNativeThumbnail({
+          // A visible tile that arrives while this prewarm is queued dedupes
+          // onto this promise, so a native refusal must REJECT rather than
+          // resolve null: the tile's own retry then runs its fallback-capable
+          // load instead of settling on an empty source.
+          run: async (signal) => {
+            const url = await prepareNativeThumbnail({
               path: model.mediaPath,
               target,
               cacheKey: sourceKey,
               mediaVersion: model.mediaVersion,
               signal,
-            }),
+            });
+            if (url === null) throw new Error("Native thumbnail unavailable; tile will fall back.");
+            return url;
+          },
         });
         void handle.promise.catch(() => {});
         prewarmHandles.push(handle);

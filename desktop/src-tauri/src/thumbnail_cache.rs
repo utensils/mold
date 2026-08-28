@@ -58,7 +58,9 @@ impl TryFrom<u32> for SizeTier {
         match value {
             256 => Ok(SizeTier::S256),
             512 => Ok(SizeTier::S512),
-            other => Err(format!("Unsupported thumbnail size {other}; use 256 or 512.")),
+            other => Err(format!(
+                "Unsupported thumbnail size {other}; use 256 or 512."
+            )),
         }
     }
 }
@@ -96,7 +98,12 @@ pub fn origin_for(cache_key: &str, base_url: Option<&str>) -> String {
     }
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(base_url.unwrap_or(cache_key).trim_end_matches('/').as_bytes());
+    hasher.update(
+        base_url
+            .unwrap_or(cache_key)
+            .trim_end_matches('/')
+            .as_bytes(),
+    );
     let hex = format!("{:x}", hasher.finalize());
     hex[..16].to_string()
 }
@@ -204,9 +211,9 @@ impl ThumbnailCache {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("Couldn't read the thumbnail cache: {error}")),
         };
-        let Some(content_type) = sniff_content_type(&bytes).filter(|_| {
-            !bytes.is_empty() && bytes.len() <= MAX_ENTRY_BYTES
-        }) else {
+        let Some(content_type) = sniff_content_type(&bytes)
+            .filter(|_| !bytes.is_empty() && bytes.len() <= MAX_ENTRY_BYTES)
+        else {
             self.remove(digest);
             return Ok(None);
         };
@@ -267,7 +274,10 @@ impl ThumbnailCache {
         {
             let mut guard = self.index.lock().map_err(|_| "cache index poisoned")?;
             let index = self.ensure_index(&mut guard)?;
-            if let Some((previous, _)) = index.files.insert(digest.to_string(), (bytes.len() as u64, now)) {
+            if let Some((previous, _)) = index
+                .files
+                .insert(digest.to_string(), (bytes.len() as u64, now))
+            {
                 index.total_bytes = index.total_bytes.saturating_sub(previous);
             }
             index.total_bytes += bytes.len() as u64;
@@ -390,7 +400,9 @@ impl ThumbnailCache {
                         }
                         let mtime = metadata.modified().unwrap_or(now);
                         index.total_bytes += metadata.len();
-                        index.files.insert(digest.to_string(), (metadata.len(), mtime));
+                        index
+                            .files
+                            .insert(digest.to_string(), (metadata.len(), mtime));
                     }
                 }
             }
@@ -407,7 +419,12 @@ mod tests {
     const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
     const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0, 1, 2, 3];
 
-    fn key<'a>(origin: &'a str, filename: &'a str, version: &'a str, size: SizeTier) -> ThumbKey<'a> {
+    fn key<'a>(
+        origin: &'a str,
+        filename: &'a str,
+        version: &'a str,
+        size: SizeTier,
+    ) -> ThumbKey<'a> {
         ThumbKey {
             origin,
             filename,
@@ -440,7 +457,10 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| name.ends_with(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "no temp file left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "no temp file left behind: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -482,8 +502,11 @@ mod tests {
             cache.put(digest, PNG).unwrap();
             // Distinct mtimes so LRU order is unambiguous.
             let when = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 + i as u64);
-            filetime::set_file_mtime(cache.path_for(digest), filetime::FileTime::from_system_time(when))
-                .unwrap();
+            filetime::set_file_mtime(
+                cache.path_for(digest),
+                filetime::FileTime::from_system_time(when),
+            )
+            .unwrap();
             if let Ok(mut guard) = cache.index.lock() {
                 guard.as_mut().unwrap().files.get_mut(digest).unwrap().1 = when;
             }
@@ -565,7 +588,11 @@ mod tests {
         drop(a);
         drop(b);
         let d = cache.singleflight("d1");
-        assert_eq!(Arc::strong_count(&d), 1, "a released flight is minted fresh");
+        assert_eq!(
+            Arc::strong_count(&d),
+            1,
+            "a released flight is minted fresh"
+        );
     }
 
     #[test]
@@ -573,9 +600,18 @@ mod tests {
         assert_eq!(sniff_content_type(PNG), Some("image/png"));
         assert_eq!(sniff_content_type(JPEG), Some("image/jpeg"));
         assert_eq!(sniff_content_type(b"GIF89a...."), Some("image/gif"));
-        assert_eq!(sniff_content_type(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
-        assert_eq!(sniff_content_type(b"<svg xmlns=\"x\"/>"), Some("image/svg+xml"));
-        assert_eq!(sniff_content_type(b"  <?xml version=\"1.0\"?><svg/>"), Some("image/svg+xml"));
+        assert_eq!(
+            sniff_content_type(b"RIFF\0\0\0\0WEBPVP8 "),
+            Some("image/webp")
+        );
+        assert_eq!(
+            sniff_content_type(b"<svg xmlns=\"x\"/>"),
+            Some("image/svg+xml")
+        );
+        assert_eq!(
+            sniff_content_type(b"  <?xml version=\"1.0\"?><svg/>"),
+            Some("image/svg+xml")
+        );
         assert_eq!(sniff_content_type(b"<html></html>"), None);
         assert_eq!(sniff_content_type(b""), None);
         assert_eq!(sniff_content_type(b"\x7fELF"), None);

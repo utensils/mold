@@ -1632,7 +1632,10 @@ pub(crate) fn thumbnail_protocol_url(
     let name = percent_encoding::utf8_percent_encode(filename, percent_encoding::NON_ALPHANUMERIC);
     let version =
         percent_encoding::utf8_percent_encode(media_version, percent_encoding::NON_ALPHANUMERIC);
-    format!("mold-thumb://localhost/{origin}/{}/{name}?v={version}", size.pixels())
+    format!(
+        "mold-thumb://localhost/{origin}/{}/{name}?v={version}",
+        size.pixels()
+    )
 }
 
 fn valid_media_version(media_version: &str) -> bool {
@@ -1728,7 +1731,131 @@ pub(crate) fn render_offline_thumbnail_in(
             tracing::warn!(file = %filename, error = %error, "offline video poster failed; placeholder");
             Ok(thumbs::VIDEO_PLACEHOLDER_SVG.as_bytes().to_vec())
         }
-        Err(error) => Err(format!("Couldn't render a thumbnail for {filename}: {error}")),
+        Err(error) => Err(format!(
+            "Couldn't render a thumbnail for {filename}: {error}"
+        )),
+    }
+}
+
+/// Hosts observed answering a 512 px request with a smaller tile (an older
+/// server that ignores `?size`). Their retina requests are keyed and served
+/// as the 256 tier from then on, so the cache stays honest about what it
+/// holds and a later upgraded server is re-asked after the next launch.
+static DOWNGRADED_TIER_ORIGINS: LazyLock<Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+fn origin_tier(origin: &str, requested: SizeTier) -> SizeTier {
+    if requested == SizeTier::S512
+        && DOWNGRADED_TIER_ORIGINS
+            .lock()
+            .map(|set| set.contains(origin))
+            .unwrap_or(false)
+    {
+        SizeTier::S256
+    } else {
+        requested
+    }
+}
+
+/// The longer edge of a PNG or JPEG from its header alone (IHDR; SOF0/SOF2
+/// frame header), so a tile's real tier can be recorded without decoding.
+pub(crate) fn probe_max_dimension(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() >= 24 && bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        return Some(w.max(h));
+    }
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        let mut i = 2;
+        while i + 9 < bytes.len() {
+            if bytes[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let marker = bytes[i + 1];
+            if marker == 0xFF {
+                i += 1;
+                continue;
+            }
+            let length = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+            if matches!(
+                marker,
+                0xC0 | 0xC1
+                    | 0xC2
+                    | 0xC3
+                    | 0xC5
+                    | 0xC6
+                    | 0xC7
+                    | 0xC9
+                    | 0xCA
+                    | 0xCB
+                    | 0xCD
+                    | 0xCE
+                    | 0xCF
+            ) {
+                let h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+                let w = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as u32;
+                return Some(w.max(h));
+            }
+            i += 2 + length;
+        }
+    }
+    None
+}
+
+/// This device's tile under the singular-authority rule: while the local
+/// server is running its authenticated HTTP API is the only reader of the
+/// output dir, so the bytes come from it; only a lifecycle lock that proves
+/// the server Off renders from the filesystem, and the guard is held for the
+/// whole render so a server starting mid-decode cannot race publication.
+async fn fetch_local_thumbnail(
+    state: &AppState,
+    filename: &str,
+    size: SizeTier,
+    from_trash: bool,
+    cancellation: Option<&ThumbnailCancellation>,
+) -> Result<Vec<u8>, String> {
+    match local_gallery_authority(state).await {
+        LocalGalleryAuthority::Server(info) => {
+            let target = MediaSaveTarget {
+                base_url: info.base_url.clone(),
+                api_key: Some(api_key(&info)?.to_string()),
+            };
+            let encoded =
+                percent_encoding::utf8_percent_encode(filename, percent_encoding::NON_ALPHANUMERIC);
+            let trash = if from_trash { "&view=trash" } else { "" };
+            let api_path = format!(
+                "/api/gallery/thumbnail/{encoded}?size={}&fmt=jpeg{trash}",
+                size.pixels()
+            );
+            let (bytes, _) = fetch_gallery_bytes(
+                thumbnail_client(),
+                &target,
+                &api_path,
+                MAX_GALLERY_THUMBNAIL_BYTES,
+                "thumbnail",
+                cancellation,
+            )
+            .await?;
+            Ok(bytes)
+        }
+        LocalGalleryAuthority::Offline(_guard) => {
+            let _permit = LOCAL_RENDER_PERMITS
+                .acquire()
+                .await
+                .map_err(|_| "The thumbnail renderer is unavailable.".to_string())?;
+            if let Some(cancellation) = cancellation {
+                cancellation.check()?;
+            }
+            let filename = filename.to_string();
+            // `_guard` stays held across this await: the render runs while
+            // the lifecycle mutex still proves the server Off.
+            tokio::task::spawn_blocking(move || {
+                render_offline_local_thumbnail(&filename, size, from_trash)
+            })
+            .await
+            .map_err(|error| format!("The thumbnail render was cancelled: {error}"))?
+        }
     }
 }
 
@@ -1752,6 +1879,7 @@ fn thumbnail_client() -> &'static reqwest::Client {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri commands are flat keyword arguments.
 pub async fn prepare_gallery_thumbnail(
+    state: tauri::State<'_, AppState>,
     cache: tauri::State<'_, Arc<ThumbnailCache>>,
     target: Option<MediaSaveTarget>,
     cache_key: String,
@@ -1771,8 +1899,9 @@ pub async fn prepare_gallery_thumbnail(
     if request_id.is_empty() || request_id.len() > 128 {
         return Err("Invalid gallery thumbnail request id.".into());
     }
-    let size = SizeTier::try_from(size)?;
+    let requested = SizeTier::try_from(size)?;
     let origin = origin_for(&cache_key, target.as_ref().map(|t| t.base_url.as_str()));
+    let size = origin_tier(&origin, requested);
     let key = ThumbKey {
         origin: &origin,
         filename: &filename,
@@ -1787,8 +1916,11 @@ pub async fn prepare_gallery_thumbnail(
     let active = ActiveThumbnailRequest::register(request_id)?;
     active.cancellation.check()?;
     let cache_ref: &Arc<ThumbnailCache> = &cache;
+    // An older host answers a 512 request with its 256 tile: record that,
+    // file the bytes under the tier they really are, and answer that URL.
+    let downgraded = AtomicBool::new(false);
     resolve_thumbnail(cache_ref, &digest, || async {
-        match target.as_ref() {
+        let bytes = match target.as_ref() {
             Some(target) => {
                 let _permit = tokio::select! {
                     permit = tokio::time::timeout(
@@ -1828,24 +1960,57 @@ pub async fn prepare_gallery_thumbnail(
                     }
                 };
                 active.cancellation.check()?;
-                Ok(bytes)
+                bytes
             }
             None => {
-                let _permit = LOCAL_RENDER_PERMITS
-                    .acquire()
-                    .await
-                    .map_err(|_| "The thumbnail renderer is unavailable.".to_string())?;
-                active.cancellation.check()?;
-                let filename = filename.clone();
-                tokio::task::spawn_blocking(move || {
-                    render_offline_local_thumbnail(&filename, size, from_trash)
-                })
-                .await
-                .map_err(|error| format!("The thumbnail render was cancelled: {error}"))?
+                fetch_local_thumbnail(
+                    &state,
+                    &filename,
+                    size,
+                    from_trash,
+                    Some(&active.cancellation),
+                )
+                .await?
             }
+        };
+        if size == SizeTier::S512 && probe_max_dimension(&bytes).is_some_and(|dim| dim <= 256) {
+            downgraded.store(true, Ordering::Release);
+            if let Ok(mut set) = DOWNGRADED_TIER_ORIGINS.lock() {
+                set.insert(origin.clone());
+            }
+            // File under the tier the bytes actually are; the 512 slot stays
+            // empty so an upgraded server is asked again next launch.
+            let real = ThumbKey {
+                origin: &origin,
+                filename: &filename,
+                media_version: &media_version,
+                size: SizeTier::S256,
+            }
+            .digest();
+            let cache = cache_ref.clone();
+            tokio::task::spawn_blocking(move || cache.put(&real, &bytes))
+                .await
+                .map_err(|error| format!("The thumbnail cache write was cancelled: {error}"))??;
+            return Err("downgraded".to_string());
         }
+        Ok(bytes)
     })
-    .await?;
+    .await
+    .or_else(|error| {
+        if downgraded.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    })?;
+    if downgraded.load(Ordering::Acquire) {
+        return Ok(thumbnail_protocol_url(
+            &origin,
+            SizeTier::S256,
+            &filename,
+            &media_version,
+        ));
+    }
     Ok(url)
 }
 
@@ -1948,7 +2113,11 @@ pub(crate) fn parse_thumbnail_protocol_request(
         .and_then(|q| {
             q.split('&')
                 .find_map(|pair| pair.strip_prefix("v="))
-                .map(|v| percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned())
+                .map(|v| {
+                    percent_encoding::percent_decode_str(v)
+                        .decode_utf8_lossy()
+                        .into_owned()
+                })
         })
         .ok_or_else(|| "Missing thumbnail version.".to_string())?;
     if !valid_media_version(&version) {
@@ -1965,7 +2134,10 @@ fn thumbnail_bytes_response(thumb: crate::thumbnail_cache::CachedThumb) -> Respo
         // The key already carries the content version, so the entry is
         // immutable for the life of the URL: WebKit may keep its decoded
         // bitmap across virtual-grid remounts without asking again.
-        .header(header::CACHE_CONTROL, "private, max-age=31536000, immutable")
+        .header(
+            header::CACHE_CONTROL,
+            "private, max-age=31536000, immutable",
+        )
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(thumb.bytes)
         .expect("valid protocol response")
@@ -2005,19 +2177,20 @@ pub fn thumb_protocol_response(
         match read {
             Ok(Ok(Some(thumb))) => responder.respond(thumbnail_bytes_response(thumb)),
             Ok(Ok(None)) if origin == "local" => {
+                // A protocol miss has no trash hint; a trashed print that was
+                // never prepared reads live-first like `mold-local:`. The
+                // singular-authority rule applies here too (server running ⇒
+                // its HTTP API; proven Off ⇒ render under the lock).
                 let rendered = {
-                    let filename = filename.clone();
-                    // A protocol miss has no trash hint; a trashed print that
-                    // was never prepared reads live-first like `mold-local:`.
-                    tokio::task::spawn_blocking(move || {
-                        render_offline_local_thumbnail(&filename, size, false)
-                    })
-                    .await
+                    let state = app.state::<AppState>();
+                    Ok::<_, tokio::task::JoinError>(
+                        fetch_local_thumbnail(&state, &filename, size, false, None).await,
+                    )
                 };
                 match rendered {
                     Ok(Ok(bytes)) => {
-                        let content_type =
-                            crate::thumbnail_cache::sniff_content_type(&bytes).unwrap_or("application/octet-stream");
+                        let content_type = crate::thumbnail_cache::sniff_content_type(&bytes)
+                            .unwrap_or("application/octet-stream");
                         let put = {
                             let cache = cache.clone();
                             let bytes = bytes.clone();
@@ -2026,10 +2199,12 @@ pub fn thumb_protocol_response(
                         if let Ok(Err(error)) = put {
                             tracing::debug!(error = %error, "offline thumbnail not cached");
                         }
-                        responder.respond(thumbnail_bytes_response(crate::thumbnail_cache::CachedThumb {
-                            bytes,
-                            content_type,
-                        }));
+                        responder.respond(thumbnail_bytes_response(
+                            crate::thumbnail_cache::CachedThumb {
+                                bytes,
+                                content_type,
+                            },
+                        ));
                     }
                     Ok(Err(message)) => {
                         responder.respond(error_response(StatusCode::NOT_FOUND, &message))
@@ -2703,7 +2878,8 @@ mod tests {
             size: SizeTier::S256,
         }
         .digest();
-        let refused = resolve_thumbnail(&cache, &other, || async { Err("offline".to_string()) }).await;
+        let refused =
+            resolve_thumbnail(&cache, &other, || async { Err("offline".to_string()) }).await;
         assert!(refused.is_err());
         assert!(!cache.contains(&other));
     }
@@ -2718,9 +2894,13 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let name = "mold-flux-dev-1700000000.png";
         let source = output.path().join(name);
-        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1024, 768, image::Rgb([200, 40, 40])))
-            .save(&source)
-            .unwrap();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            1024,
+            768,
+            image::Rgb([200, 40, 40]),
+        ))
+        .save(&source)
+        .unwrap();
         let full_size = std::fs::read(&source).unwrap();
 
         // Nothing shared yet: a fresh in-process render, and a thumbnail —
@@ -2735,15 +2915,21 @@ mod tests {
         // Seed the server's cache slot for this exact file version; the next
         // request must return those bytes verbatim.
         let metadata = std::fs::metadata(&source).unwrap();
-        let shared =
-            thumbs::versioned_thumbnail_path(cache.path(), name, &thumbs::file_media_version(&metadata));
+        let shared = thumbs::versioned_thumbnail_path(
+            cache.path(),
+            name,
+            &thumbs::file_media_version(&metadata),
+        );
         std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
         let marker: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 9, 9, 9];
         std::fs::write(&shared, &marker).unwrap();
         let hit =
             render_offline_thumbnail_in(output.path(), cache.path(), name, SizeTier::S256, false)
                 .unwrap();
-        assert_eq!(hit, marker, "the shared server tile is served, not re-rendered");
+        assert_eq!(
+            hit, marker,
+            "the shared server tile is served, not re-rendered"
+        );
 
         // The retina tier is never in the server's 256 px cache: it renders.
         let retina =
@@ -2751,7 +2937,32 @@ mod tests {
                 .unwrap();
         let decoded = image::load_from_memory(&retina).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (512, 384));
-        assert!(retina.starts_with(&[0xFF, 0xD8, 0xFF]), "opaque prints render as JPEG");
+        assert!(
+            retina.starts_with(&[0xFF, 0xD8, 0xFF]),
+            "opaque prints render as JPEG"
+        );
+    }
+
+    /// An older server ignores `?size=512` and answers its 256 px PNG; the
+    /// header probe is what lets the cache file that under its real tier.
+    #[test]
+    fn header_probe_reads_png_and_jpeg_dimensions() {
+        let png = image::DynamicImage::ImageRgb8(image::RgbImage::new(256, 192));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        assert_eq!(probe_max_dimension(&buf.into_inner()), Some(256));
+        let jpeg = image::DynamicImage::ImageRgb8(image::RgbImage::new(320, 512));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        jpeg.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!(probe_max_dimension(&buf.into_inner()), Some(512));
+        assert_eq!(probe_max_dimension(b"<svg/>"), None);
+        assert_eq!(origin_tier("abc", SizeTier::S512), SizeTier::S512);
+        DOWNGRADED_TIER_ORIGINS
+            .lock()
+            .unwrap()
+            .insert("abc".to_string());
+        assert_eq!(origin_tier("abc", SizeTier::S512), SizeTier::S256);
+        assert_eq!(origin_tier("abc", SizeTier::S256), SizeTier::S256);
     }
 
     #[test]
