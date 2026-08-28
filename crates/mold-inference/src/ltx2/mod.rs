@@ -16,6 +16,7 @@ mod pipeline;
 mod plan;
 pub(crate) mod preprocess;
 mod preset;
+pub(crate) mod provenance_vocabulary;
 mod runtime;
 mod sampler;
 pub(crate) mod single_file;
