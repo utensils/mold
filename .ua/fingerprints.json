@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
-  "gitCommitHash": "0ac04008eb0296736f9b033c37f8616a04fb9d45",
-  "generatedAt": "2026-08-28T04:29:56.609Z",
+  "gitCommitHash": "7a56077d0b1364309f0c8b7e6fa51a02e838f7c3",
+  "generatedAt": "2026-08-28T14:10:09.351Z",
   "files": {
     "apps/mobile/plugins/android/src/androidTest/java/AndroidDiscoveryInstrumentedTest.kt": {
       "filePath": "apps/mobile/plugins/android/src/androidTest/java/AndroidDiscoveryInstrumentedTest.kt",
@@ -50888,7 +50888,7 @@
     },
     "crates/mold-core/src/minimax_h3.rs": {
       "filePath": "crates/mold-core/src/minimax_h3.rs",
-      "contentHash": "49fa8f242ad5a22bb4d6160426e8f97caac98a2d869656eaa7e610f0e2221d67",
+      "contentHash": "aed04899819f14b27afa538281156717a176819b5d94e7178030000959e8e829",
       "functions": [
         {
           "name": "is_reviewed_compact_model",
@@ -50934,6 +50934,26 @@
           "returnType": "Option<&'static TurboManifestTier>",
           "exported": true,
           "lineCount": 6
+        },
+        {
+          "name": "qwen_vision_pad_rows_per_block",
+          "params": [
+            "width",
+            "height"
+          ],
+          "returnType": "u64",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "qwen_vision_patch_rows_per_block",
+          "params": [
+            "width",
+            "height"
+          ],
+          "returnType": "u64",
+          "exported": true,
+          "lineCount": 3
         },
         {
           "name": "is_admitted_compact_canvas",
@@ -52041,6 +52061,8 @@
         "base_compact_model",
         "storage_identity",
         "turbo_tier_for_model",
+        "qwen_vision_pad_rows_per_block",
+        "qwen_vision_patch_rows_per_block",
         "is_admitted_compact_canvas",
         "reviewed_compact_max_pixels",
         "reviewed_compact_max_axis_pixels",
@@ -52116,7 +52138,7 @@
         "artifact_contract",
         "manifests"
       ],
-      "totalLines": 5887,
+      "totalLines": 5958,
       "hasStructuralAnalysis": true
     },
     "crates/mold-core/src/model_policy.rs": {
@@ -91246,7 +91268,7 @@
     },
     "crates/mold-inference/src/h3_factory.rs": {
       "filePath": "crates/mold-inference/src/h3_factory.rs",
-      "contentHash": "8825ce3ad6c775aabef7890c465dba19dd42ac9d66c93a96812329005670027b",
+      "contentHash": "671dfd0e6d4d2dc187d3ae15fe5137467bd0434736821b2641538bcf46c6a9f9",
       "functions": [
         {
           "name": "new",
@@ -91523,7 +91545,7 @@
           ],
           "returnType": "Result<H3ReferenceCharges>",
           "exported": false,
-          "lineCount": 279
+          "lineCount": 288
         },
         {
           "name": "validate_prepared_references",
@@ -92230,7 +92252,7 @@
             "native_host_bytes"
           ],
           "exported": true,
-          "lineCount": 44
+          "lineCount": 46
         },
         {
           "name": "H3FactoryPreparedRowsInput",
@@ -93110,7 +93132,7 @@
         "quantization",
         "validate_for_dispatch"
       ],
-      "totalLines": 8259,
+      "totalLines": 8309,
       "hasStructuralAnalysis": true
     },
     "crates/mold-inference/src/identity/align.rs": {
@@ -116642,7 +116664,7 @@
     },
     "crates/mold-inference/src/minimax_h3/engine.rs": {
       "filePath": "crates/mold-inference/src/minimax_h3/engine.rs",
-      "contentHash": "eb0720a0a0eff91e615e16453335e0f95f08f4302446beb4b53f6758970cdbcb",
+      "contentHash": "6802ab7e3e0926244daff962f0dedb65336fa8d27ec53a47e0d9c743acb495aa",
       "functions": [
         {
           "name": "new_injected",
@@ -117677,7 +117699,7 @@
         "H3StreamedRef2VaPipelineBackend",
         "new"
       ],
-      "totalLines": 3121,
+      "totalLines": 3132,
       "hasStructuralAnalysis": true
     },
     "crates/mold-inference/src/minimax_h3/metal_memory_guard.rs": {
@@ -119319,7 +119341,7 @@
     },
     "crates/mold-inference/src/minimax_h3/pipeline/ref2va.rs": {
       "filePath": "crates/mold-inference/src/minimax_h3/pipeline/ref2va.rs",
-      "contentHash": "1d7ddda979bc2cf7092d9c32859d75dd8ea2c1d74176e5f777a5ceaf0aca085f",
+      "contentHash": "5eebed7dd6f17789a43477d3815aeac80a311db64103d7d5f51943838e843190",
       "functions": [
         {
           "name": "references",
@@ -119408,7 +119430,7 @@
           ],
           "returnType": "Result<H3StagedAvOutput>",
           "exported": true,
-          "lineCount": 375
+          "lineCount": 393
         },
         {
           "name": "validate_reference_bindings",
@@ -119448,7 +119470,7 @@
           ],
           "returnType": "Result<()>",
           "exported": false,
-          "lineCount": 26
+          "lineCount": 29
         },
         {
           "name": "reference_layout_spec",
@@ -119755,7 +119777,7 @@
         "prepare_resolved_request",
         "execute_staged"
       ],
-      "totalLines": 2140,
+      "totalLines": 2304,
       "hasStructuralAnalysis": true
     },
     "crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs": {
@@ -121775,7 +121797,7 @@
     },
     "crates/mold-inference/src/minimax_h3/private_opened_evidence.rs": {
       "filePath": "crates/mold-inference/src/minimax_h3/private_opened_evidence.rs",
-      "contentHash": "0245ad72146c1093c1022263584856f9b8f632a44435494bc0564c742a0b0f7f",
+      "contentHash": "90110fc0c315a26981b6a0a61cb3dd6266c1a421f06e5fdba23942065bae069c",
       "functions": [
         {
           "name": "comfy_task_sources",
@@ -122818,7 +122840,7 @@
         "total_packed_rows",
         "qwen_activation_workspace_demand_bytes"
       ],
-      "totalLines": 3181,
+      "totalLines": 3188,
       "hasStructuralAnalysis": true
     },
     "crates/mold-inference/src/minimax_h3/private_qualification.rs": {
@@ -125577,7 +125599,7 @@
     },
     "crates/mold-inference/src/minimax_h3/private_runtime_observer.rs": {
       "filePath": "crates/mold-inference/src/minimax_h3/private_runtime_observer.rs",
-      "contentHash": "38c76beff851c637df7da2624907d9b16dbe67ea1c58e2a1d3dacb0265f039b6",
+      "contentHash": "1325963a2df0603048449b2f5e69f61b33e13e0b837a808219f8f2e89bda5292",
       "functions": [
         {
           "name": "capture_process_observation",
@@ -125650,7 +125672,16 @@
           ],
           "returnType": "bool",
           "exported": false,
-          "lineCount": 11
+          "lineCount": 12
+        },
+        {
+          "name": "condition_encode_transient_bytes",
+          "params": [
+            "state"
+          ],
+          "returnType": "Result<u64>",
+          "exported": false,
+          "lineCount": 13
         },
         {
           "name": "observe_event",
@@ -125751,7 +125782,7 @@
           ],
           "returnType": "Result<H3PrivateRuntimeBoundObservation>",
           "exported": false,
-          "lineCount": 97
+          "lineCount": 99
         },
         {
           "name": "routed_qwen_workspace",
@@ -125995,7 +126026,7 @@
         "observe_aac_staging_capacity",
         "observe_mux_output_capacity"
       ],
-      "totalLines": 670,
+      "totalLines": 746,
       "hasStructuralAnalysis": true
     },
     "crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs": {
@@ -126548,7 +126579,7 @@
     },
     "crates/mold-inference/src/minimax_h3/private_server.rs": {
       "filePath": "crates/mold-inference/src/minimax_h3/private_server.rs",
-      "contentHash": "ac0e03257d8105fb2fea9b28b1ed28c4e63d483ed8c407ce8999e8b576b3d1ce",
+      "contentHash": "6e16953171504f4f000064ee61e147eb9c6508ad49887f91a7e9fe49455a4da0",
       "functions": [
         {
           "name": "valid_stable_cuda_device_id",
@@ -128468,13 +128499,31 @@
           "lineCount": 32
         },
         {
+          "name": "reference_qwen_blocks",
+          "params": [
+            "shape"
+          ],
+          "returnType": "u64",
+          "exported": false,
+          "lineCount": 9
+        },
+        {
           "name": "reference_qwen_vision_rows",
           "params": [
             "shape"
           ],
           "returnType": "u64",
           "exported": false,
-          "lineCount": 10
+          "lineCount": 6
+        },
+        {
+          "name": "reference_qwen_vision_pads",
+          "params": [
+            "shape"
+          ],
+          "returnType": "u64",
+          "exported": false,
+          "lineCount": 6
         },
         {
           "name": "ref2va_reference_rows",
@@ -128484,7 +128533,7 @@
           ],
           "returnType": "Result<Ref2VaReferenceRows>",
           "exported": false,
-          "lineCount": 31
+          "lineCount": 35
         },
         {
           "name": "public_ref2va_runtime_envelope_for_shape",
@@ -128496,7 +128545,7 @@
           ],
           "returnType": "H3PrivateRuntimeEnvelopeRecord",
           "exported": false,
-          "lineCount": 38
+          "lineCount": 40
         },
         {
           "name": "public_ref2va_runtime_bounds_for_shape",
@@ -128507,14 +128556,14 @@
           ],
           "returnType": "H3PrivateRuntimeBoundRecord",
           "exported": false,
-          "lineCount": 76
+          "lineCount": 79
         },
         {
           "name": "capture_runtime_envelope",
           "params": [],
           "returnType": "H3PrivateRuntimeEnvelopeRecord",
           "exported": false,
-          "lineCount": 24
+          "lineCount": 26
         },
         {
           "name": "public_style_generated_caps",
@@ -129799,10 +129848,11 @@
             "visual",
             "audio",
             "qwen_vision",
+            "qwen_vision_pads",
             "largest_canvas_pixels"
           ],
           "exported": false,
-          "lineCount": 13
+          "lineCount": 19
         },
         {
           "name": "H3PrivateReviewedRuntimeQualification",
@@ -130274,7 +130324,7 @@
         "validate_runtime_qualification_record_shape",
         "runtime_qualification_identity"
       ],
-      "totalLines": 11038,
+      "totalLines": 11099,
       "hasStructuralAnalysis": true
     },
     "crates/mold-inference/src/minimax_h3/private_vae_adapter.rs": {
@@ -215667,7 +215717,7 @@
     },
     "desktop/src/components/create/ActivityStrip.test.ts": {
       "filePath": "desktop/src/components/create/ActivityStrip.test.ts",
-      "contentHash": "e64095f3d7eead80440122baf3921109266189ec582656634b3a2a898710f0bb",
+      "contentHash": "2a330108bff51d81d77c95585b84577e1ac2047aad100bc6a5e17eff1327960a",
       "functions": [
         {
           "name": "baseJob",
@@ -215774,7 +215824,7 @@
         }
       ],
       "exports": [],
-      "totalLines": 552,
+      "totalLines": 589,
       "hasStructuralAnalysis": true
     },
     "desktop/src/components/create/AdvancedSettings.test.ts": {
@@ -219660,7 +219710,7 @@
     },
     "desktop/src/components/shell/NavRail.test.ts": {
       "filePath": "desktop/src/components/shell/NavRail.test.ts",
-      "contentHash": "ace965d1d20acbb1d301da26eec5a0830cfbb7bb119c0e67f78e37bd33b8a892",
+      "contentHash": "8471ecad005f36639ef462ebb0658c51e3b5a2af1fc6b4868854e7f5fe3a5fe9",
       "functions": [
         {
           "name": "makeRouter",
@@ -219785,7 +219835,7 @@
         }
       ],
       "exports": [],
-      "totalLines": 641,
+      "totalLines": 683,
       "hasStructuralAnalysis": true
     },
     "desktop/src/components/shell/PanelResizeHandle.test.ts": {
@@ -230546,7 +230596,7 @@
     },
     "desktop/src/mobile/MobileApp.test.ts": {
       "filePath": "desktop/src/mobile/MobileApp.test.ts",
-      "contentHash": "1a192d7a3dace0b73064fc3fb070ba712b7cd364cd4aae4a47a69bd063268812",
+      "contentHash": "c82c010ef4ada2f4f6ad7b0e281421c39f427921d3171983433bd2fd41453095",
       "functions": [
         {
           "name": "plannedPlacement",
@@ -230816,7 +230866,7 @@
         }
       ],
       "exports": [],
-      "totalLines": 13162,
+      "totalLines": 13212,
       "hasStructuralAnalysis": true
     },
     "desktop/src/mobile/MobileBatchControl.test.ts": {
@@ -238325,7 +238375,7 @@
     },
     "desktop/src/stores/generation.test.ts": {
       "filePath": "desktop/src/stores/generation.test.ts",
-      "contentHash": "4214315f486edf3e990d4b0e94b3120868ac89202d099127e5351504d99d670e",
+      "contentHash": "0269d41f6ffd91c7ae3f8d701604c01ea46324f84a35456417ca0fffee3c2a44",
       "functions": [],
       "classes": [],
       "imports": [
@@ -238357,12 +238407,12 @@
         }
       ],
       "exports": [],
-      "totalLines": 296,
+      "totalLines": 300,
       "hasStructuralAnalysis": true
     },
     "desktop/src/stores/generation.ts": {
       "filePath": "desktop/src/stores/generation.ts",
-      "contentHash": "60b4d7fb18c8a13763945c1c1cbb45e313814ca4d1da0a38d4c6a63083214635",
+      "contentHash": "4355fb4a870553082c7690891428782f26a8caf2ea180a2b4663e0ac8204faaf",
       "functions": [
         {
           "name": "suggestOutputFilename",
@@ -238429,7 +238479,7 @@
           ],
           "returnType": "Job[]",
           "exported": true,
-          "lineCount": 12
+          "lineCount": 5
         },
         {
           "name": "runWithConcurrency",
@@ -238860,7 +238910,7 @@
         "jobCanBeRemoved",
         "useGenerationStore"
       ],
-      "totalLines": 2064,
+      "totalLines": 2056,
       "hasStructuralAnalysis": true
     },
     "desktop/src/stores/generationQueue.test.ts": {
@@ -251227,7 +251277,7 @@
     },
     "studio/api/activity.test.ts": {
       "filePath": "studio/api/activity.test.ts",
-      "contentHash": "24192b46e486ae1693cb54dde0f5cb79c9e9f128625fffe2d98792d7e42be009",
+      "contentHash": "cd10fa10613d00b311fe01c3e6c8b0f8d8a33f3b255ddca3e299fee8e3500966",
       "functions": [],
       "classes": [],
       "imports": [
@@ -251249,12 +251299,12 @@
         }
       ],
       "exports": [],
-      "totalLines": 252,
+      "totalLines": 282,
       "hasStructuralAnalysis": true
     },
     "studio/api/activity.ts": {
       "filePath": "studio/api/activity.ts",
-      "contentHash": "46359e873a3a198097cf2f466b62a747804627a3786252bb2702371605966dea",
+      "contentHash": "b9b00a187f753a38abedb66a659cae99b75c522a776c79bc0902c2076e17dd8a",
       "functions": [
         {
           "name": "isRecord",
@@ -251300,7 +251350,7 @@
           ],
           "returnType": "FleetActiveWork[]",
           "exported": true,
-          "lineCount": 33
+          "lineCount": 29
         }
       ],
       "classes": [],
@@ -251319,7 +251369,7 @@
         "reconcileActivityHost",
         "mergeFleetActivity"
       ],
-      "totalLines": 188,
+      "totalLines": 184,
       "hasStructuralAnalysis": true
     },
     "studio/api/chains.test.ts": {
@@ -254434,7 +254484,7 @@
     },
     "studio/lib/activity.test.ts": {
       "filePath": "studio/lib/activity.test.ts",
-      "contentHash": "183b267d8c029ede525705b04ac3618f9759afa33e575d8e9978ed6678324f93",
+      "contentHash": "49c576e04587fc50781241266b004ac8665c9d03c586ec3d45a250e0df51bd25",
       "functions": [
         {
           "name": "print",
@@ -254503,7 +254553,7 @@
     },
     "studio/lib/activity.ts": {
       "filePath": "studio/lib/activity.ts",
-      "contentHash": "833ba8cc2385a1d32b7a127dfdcd105814ae8e4e76408ce3b9cd721f8cee148c",
+      "contentHash": "abcb74e26d9f5d9246826c6cc4cb03f8ec1e0c1e05fcc0d432a80191c5516847",
       "functions": [
         {
           "name": "sequenceActions",
@@ -254592,15 +254642,6 @@
           "lineCount": 5
         },
         {
-          "name": "isRunning",
-          "params": [
-            "vm"
-          ],
-          "returnType": "boolean",
-          "exported": false,
-          "lineCount": 5
-        },
-        {
           "name": "mergeActivity",
           "params": [
             "prints",
@@ -254608,7 +254649,7 @@
           ],
           "returnType": "ActivityJobVM[]",
           "exported": true,
-          "lineCount": 12
+          "lineCount": 11
         },
         {
           "name": "partitionActivity",
@@ -254672,7 +254713,7 @@
         "partitionActivity",
         "activityDigestLabel"
       ],
-      "totalLines": 347,
+      "totalLines": 341,
       "hasStructuralAnalysis": true
     },
     "studio/lib/api/chainTypes.ts": {
@@ -255172,7 +255213,7 @@
     },
     "studio/lib/chainJobProgress.test.ts": {
       "filePath": "studio/lib/chainJobProgress.test.ts",
-      "contentHash": "c3f09bdc6d8c790b3574c26c41722abd5202edfc93c28418fb419bc983131570",
+      "contentHash": "8fe256a200755e988cf251d9ff2369538565c9521c103f1c15a9de5516c543d6",
       "functions": [
         {
           "name": "detail",
@@ -255222,12 +255263,12 @@
         }
       ],
       "exports": [],
-      "totalLines": 219,
+      "totalLines": 258,
       "hasStructuralAnalysis": true
     },
     "studio/lib/chainJobProgress.ts": {
       "filePath": "studio/lib/chainJobProgress.ts",
-      "contentHash": "e17951180153666f912f9f0c7b18f590987346953164d0ad94ea6b3201747935",
+      "contentHash": "91c73de979b9dfdad09db86a4087d95cad90d84b505494d06c4e7d74ccca46eb",
       "functions": [
         {
           "name": "estimatedChainFrames",
@@ -255274,7 +255315,7 @@
           ],
           "returnType": "ChainJobFrameResult",
           "exported": true,
-          "lineCount": 93
+          "lineCount": 115
         }
       ],
       "classes": [],
@@ -255301,7 +255342,7 @@
         "estimatedChainFrames",
         "reduceChainJobFrame"
       ],
-      "totalLines": 191,
+      "totalLines": 213,
       "hasStructuralAnalysis": true
     },
     "studio/lib/chainRouting.ts": {
@@ -271700,7 +271741,7 @@
     },
     "web/src/components/create/ActivityStrip.test.ts": {
       "filePath": "web/src/components/create/ActivityStrip.test.ts",
-      "contentHash": "fd293d6fef05fef5a22ea4878cf0a63e7ffb907ffdab8e00a60c12dba1aa5663",
+      "contentHash": "cf3d0da757cfe124d77a6ddf27b5df213c15d633c9d6852fac565de7fff61a59",
       "functions": [
         {
           "name": "makeJob",
@@ -271788,7 +271829,7 @@
         }
       ],
       "exports": [],
-      "totalLines": 623,
+      "totalLines": 686,
       "hasStructuralAnalysis": true
     },
     "web/src/components/create/AdvancedDrawer.test.ts": {
@@ -276083,7 +276124,7 @@
     },
     "web/src/composables/useGenerateStream.test.ts": {
       "filePath": "web/src/composables/useGenerateStream.test.ts",
-      "contentHash": "c67245fd6480c46f6f3c42670d51619fa3fe89d278ccf4a9d1e2524f16222ece",
+      "contentHash": "eb29298bf51843fb629530a868f8c28be6b228f4ef1f619a8f552d254b83ab45",
       "functions": [
         {
           "name": "persistedPayload",
@@ -276284,7 +276325,7 @@
         }
       ],
       "exports": [],
-      "totalLines": 1684,
+      "totalLines": 1710,
       "hasStructuralAnalysis": true
     },
     "web/src/composables/useGenerateStream.ts": {
