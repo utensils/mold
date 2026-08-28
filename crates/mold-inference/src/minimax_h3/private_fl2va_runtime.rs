@@ -2553,8 +2553,16 @@ where
         self.continuing_execution.device()
     }
 
+    /// The integrator is the frozen quantization authority's, exactly as on
+    /// the FL2VA face: a reviewed Ref2VA Turbo tier distils to `comfy-euler`,
+    /// and a hard-coded `comfy-res-multistep` here rendered the whole clip
+    /// with the wrong integrator and then failed the provenance guard.
     fn sampler_kind(&self) -> H3SamplerKind {
-        H3SamplerKind::ComfyResMultistep
+        self.admitted.quantization.sampler_kind()
+    }
+
+    fn sampler_video_shift(&self) -> f32 {
+        self.admitted.quantization.video_shift()
     }
 
     fn maximum_packed_rows(&self) -> usize {
@@ -3290,6 +3298,27 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// The Ref2VA face of the phase backend must take its integrator from the
+    /// frozen quantization authority like the FL2VA face does; a Turbo tag
+    /// otherwise renders res-multistep and is refused at provenance.
+    #[test]
+    fn ref2va_phase_backend_delegates_sampler_to_the_quantization_authority() {
+        let source = include_str!("private_fl2va_runtime.rs");
+        let start = source
+            .find("impl<C, E, A> H3Ref2VaBackend for H3PrivatePhaseBackend<C, E, A>")
+            .expect("Ref2VA phase backend impl");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("impl end");
+        let body = &body[..end];
+        assert!(body.contains("self.admitted.quantization.sampler_kind()"));
+        assert!(body.contains("self.admitted.quantization.video_shift()"));
+        let literal = format!("H3SamplerKind::{}", "ComfyResMultistep");
+        assert!(
+            !body.contains(&literal),
+            "no hard-coded integrator on the Ref2VA face"
+        );
+    }
+
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
