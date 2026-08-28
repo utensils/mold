@@ -5842,7 +5842,6 @@ pub(crate) mod tests {
     /// one packed weight.
     #[cfg(feature = "cuda")]
     #[test]
-    #[ignore = "needs the candle fork's CUDA DequantizeInt8ConvRot256 arm (pin bump to the PR 0 revision)"]
     fn ltx2_convrot_packed_native_and_dequant_agree_on_cuda_within_int8_tolerance() {
         let Ok(cuda) = Device::new_cuda(0) else {
             return;

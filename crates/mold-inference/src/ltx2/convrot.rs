@@ -771,7 +771,6 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    #[ignore = "needs the candle fork's CUDA DequantizeInt8ConvRot256 arm (pin bump to the PR 0 revision)"]
     fn cuda_dequant_matches_host_rows_within_bf16() {
         let Ok(cuda) = Device::new_cuda(0) else {
             return;
