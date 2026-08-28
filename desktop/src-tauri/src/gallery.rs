@@ -1677,14 +1677,31 @@ fn render_offline_local_thumbnail(
     size: SizeTier,
     from_trash: bool,
 ) -> Result<Vec<u8>, String> {
-    use mold_server::thumbnails as thumbs;
     let Some(dir) = output_dir() else {
         return Err("Local gallery is disabled.".into());
     };
-    let Some(path) = offline_media_path(&dir, filename, from_trash)? else {
+    render_offline_thumbnail_in(
+        &dir,
+        &mold_server::thumbnails::server_thumbnail_dir(),
+        filename,
+        size,
+        from_trash,
+    )
+}
+
+/// The directory-injected half of `render_offline_local_thumbnail`, so a
+/// test can prove the shared server cache wins over a fresh render.
+pub(crate) fn render_offline_thumbnail_in(
+    dir: &std::path::Path,
+    thumb_dir: &std::path::Path,
+    filename: &str,
+    size: SizeTier,
+    from_trash: bool,
+) -> Result<Vec<u8>, String> {
+    use mold_server::thumbnails as thumbs;
+    let Some(path) = offline_media_path(dir, filename, from_trash)? else {
         return Err(format!("Gallery file not found: {filename}"));
     };
-    let thumb_dir = thumbs::server_thumbnail_dir();
     if thumbs::is_audio_filename(filename) {
         // The waveform tile is written at save time; nothing here can draw it.
         let sidecar = thumb_dir.join(format!("{filename}.png"));
@@ -1693,8 +1710,11 @@ fn render_offline_local_thumbnail(
     }
     if size == SizeTier::S256 {
         if let Ok(metadata) = std::fs::metadata(&path) {
-            let shared =
-                thumbs::versioned_thumbnail_path(&thumb_dir, filename, &thumbs::file_media_version(&metadata));
+            let shared = thumbs::versioned_thumbnail_path(
+                thumb_dir,
+                filename,
+                &thumbs::file_media_version(&metadata),
+            );
             if let Ok(bytes) = std::fs::read(&shared) {
                 if crate::thumbnail_cache::sniff_content_type(&bytes).is_some() {
                     return Ok(bytes);
@@ -2685,6 +2705,52 @@ mod tests {
         let refused = resolve_thumbnail(&cache, &other, || async { Err("offline".to_string()) }).await;
         assert!(refused.is_err());
         assert!(!cache.contains(&other));
+    }
+
+    /// With the engine Off, this device's tiles come from the SERVER's own
+    /// cache under `MOLD_HOME` when it already holds the tile (a free hit),
+    /// render in-process otherwise, and never hand back the full-size file.
+    #[test]
+    fn offline_local_prefers_shared_server_cache_over_render() {
+        use mold_server::thumbnails as thumbs;
+        let output = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let name = "mold-flux-dev-1700000000.png";
+        let source = output.path().join(name);
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1024, 768, image::Rgb([200, 40, 40])))
+            .save(&source)
+            .unwrap();
+        let full_size = std::fs::read(&source).unwrap();
+
+        // Nothing shared yet: a fresh in-process render, and a thumbnail —
+        // never the print's own bytes.
+        let rendered =
+            render_offline_thumbnail_in(output.path(), cache.path(), name, SizeTier::S256, false)
+                .unwrap();
+        assert_ne!(rendered, full_size);
+        let decoded = image::load_from_memory(&rendered).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (256, 192));
+
+        // Seed the server's cache slot for this exact file version; the next
+        // request must return those bytes verbatim.
+        let metadata = std::fs::metadata(&source).unwrap();
+        let shared =
+            thumbs::versioned_thumbnail_path(cache.path(), name, &thumbs::file_media_version(&metadata));
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        let marker: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 9, 9, 9];
+        std::fs::write(&shared, &marker).unwrap();
+        let hit =
+            render_offline_thumbnail_in(output.path(), cache.path(), name, SizeTier::S256, false)
+                .unwrap();
+        assert_eq!(hit, marker, "the shared server tile is served, not re-rendered");
+
+        // The retina tier is never in the server's 256 px cache: it renders.
+        let retina =
+            render_offline_thumbnail_in(output.path(), cache.path(), name, SizeTier::S512, false)
+                .unwrap();
+        let decoded = image::load_from_memory(&retina).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (512, 384));
+        assert!(retina.starts_with(&[0xFF, 0xD8, 0xFF]), "opaque prints render as JPEG");
     }
 
     #[test]
