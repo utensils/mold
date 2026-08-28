@@ -7907,7 +7907,10 @@ mod tests {
         // LTX 2.5 contract/runtime bump (#1372/#1373): six split-pack
         // manifests. Dev/Distilled each expose compact INT8 and full BF16
         // Conv-VAE runtimes; the two diffusion-VAE contracts stay hidden.
-        assert_eq!(known_manifests().len(), 170);
+        // LTX 2.5 GGUF bump (#1414): +7 Abiray Distilled transformer tiers
+        // (:q3-k-s :q3 :q4-k-s :q4 :q5 :q6 :q8) on the shared int8-conv
+        // companion graph — visible downloads, runtime still gated.
+        assert_eq!(known_manifests().len(), 177);
     }
 
     #[test]
