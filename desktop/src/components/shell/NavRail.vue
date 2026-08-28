@@ -180,30 +180,24 @@ type RailRow =
  * developing work above older queued work. */
 const railRows = computed<RailRow[]>(() =>
   [
-    ...sharedRows.value.map(
-      (shared): RailRow => ({
-        key: `shared:${shared.key}`,
-        createdAtMs: shared.created_at_unix_ms,
-        kind: "shared",
-        shared,
-      }),
-    ),
-    ...railSequences.value.map(
-      (sequence): RailRow => ({
-        key: sequence.key,
-        createdAtMs: sequence.createdAtMs,
-        kind: "sequence",
-        sequence,
-      }),
-    ),
-    ...railJobs.value.map(
-      (print): RailRow => ({
-        key: `print:${print.clientId}`,
-        createdAtMs: print.submittedAtUnixMs,
-        kind: "print",
-        print,
-      }),
-    ),
+    ...sharedRows.value.map((shared): RailRow => ({
+      key: `shared:${shared.key}`,
+      createdAtMs: shared.created_at_unix_ms,
+      kind: "shared",
+      shared,
+    })),
+    ...railSequences.value.map((sequence): RailRow => ({
+      key: sequence.key,
+      createdAtMs: sequence.createdAtMs,
+      kind: "sequence",
+      sequence,
+    })),
+    ...railJobs.value.map((print): RailRow => ({
+      key: `print:${print.clientId}`,
+      createdAtMs: print.submittedAtUnixMs,
+      kind: "print",
+      print,
+    })),
   ].sort((a, b) => a.createdAtMs - b.createdAtMs || a.key.localeCompare(b.key)),
 );
 
