@@ -8281,6 +8281,11 @@ describe("MobileApp gallery", () => {
     expect(
       wrapper.findAll("[data-test='mobile-library-chip-tag']").map((chip) => chip.text()),
     ).toEqual(["Barbie6", "moon6"]);
+    const filters = wrapper.get("[data-test='mobile-library-chips']").element;
+    const error = wrapper.get("[data-test='mobile-library-gallery-error']").element;
+    const grid = wrapper.get("[data-test='mobile-gallery-pinch-surface']").element;
+    expect(filters.compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(error.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("does not restore saved tags across a host instance boundary", async () => {

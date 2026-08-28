@@ -581,6 +581,7 @@ describe("mobile Library organization", () => {
     const chips = css.match(/\.mobile-library-chips\s*\{([^}]*)\}/s);
     const window = css.match(/\.gallery-grid-window\s*\{([^}]*)\}/s);
 
+    expect(chips?.[1]).toMatch(/flex:\s*none\s*;/);
     expect(chips?.[1]).toMatch(/position:\s*relative\s*;/);
     expect(chips?.[1]).toMatch(/z-index:\s*2\s*;/);
     expect(window?.[1]).toMatch(/z-index:\s*0\s*;/);

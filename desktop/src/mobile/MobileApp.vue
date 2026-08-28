@@ -11338,15 +11338,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             <span class="mobile-library-scope-count">{{ libraryScopeCounts[scope] }}</span>
           </button>
         </div>
-        <p v-if="galleryError" class="status-line error-text">{{ galleryError }}</p>
-        <p
-          v-if="organizationError"
-          class="status-line error-text"
-          role="alert"
-          data-test="mobile-library-organization-error"
-        >
-          {{ organizationError }}
-        </p>
         <div
           v-if="libraryChipRowVisible"
           class="mobile-library-chips"
@@ -11399,6 +11390,21 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             {{ host.name }}<span class="mobile-library-chip-count">{{ host.count }}</span>
           </button>
         </div>
+        <p
+          v-if="galleryError"
+          class="status-line error-text"
+          data-test="mobile-library-gallery-error"
+        >
+          {{ galleryError }}
+        </p>
+        <p
+          v-if="organizationError"
+          class="status-line error-text"
+          role="alert"
+          data-test="mobile-library-organization-error"
+        >
+          {{ organizationError }}
+        </p>
 
         <template v-if="libraryScope === 'collections' && !activeCollection">
           <ul
