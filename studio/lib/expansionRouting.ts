@@ -120,12 +120,16 @@ export function expansionPolicyForSelection(
 }
 
 /**
- * The engine's missing-expansion-model error embeds its own fix:
- * "local expand model not found — run: mold pull qwen3-expand". Extract the
- * model name so any surface can offer that pull directly.
+ * The engine's definitive missing-expansion-model error embeds its own fix:
+ * "local expand model not found — run: mold pull qwen3-expand". Require both
+ * halves before offering a pull: other expansion failures may mention that
+ * command as recovery advice, but they do not prove the model is absent.
  */
 export function parseMissingExpandModel(message: string): string | null {
-  const match = /mold pull ([\w.:@/-]+)/.exec(message);
+  const match =
+    /local expand model(?:\s+'[^']+')?\s+not found[^\n]*?mold pull ([\w.:@/-]+)/i.exec(
+      message,
+    );
   return match?.[1] ?? null;
 }
 

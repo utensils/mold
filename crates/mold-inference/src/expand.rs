@@ -738,20 +738,20 @@ impl PromptExpander for LocalExpander {
                 },
             )
         })
-        .map_err(|error| {
-            if error.to_string().contains("expected exactly") {
-                anyhow::anyhow!(
-                    "{error}. The model may need re-downloading: mold pull qwen3-expand"
-                )
-            } else {
-                error
-            }
-        })?;
+        .map_err(local_expand_error_with_recovery)?;
 
         Ok(ExpandResult {
             original: prompt.to_string(),
             expanded,
         })
+    }
+}
+
+fn local_expand_error_with_recovery(error: anyhow::Error) -> anyhow::Error {
+    if error.to_string().contains("expected exactly") {
+        anyhow::anyhow!("{error}. Retry expansion or reduce the batch size.")
+    } else {
+        error
     }
 }
 
@@ -1152,5 +1152,16 @@ mod exact_plan_tests {
             expander.progress.checkpoint().is_ok(),
             "cancelled token leaked into the next attempt"
         );
+    }
+
+    #[test]
+    fn exact_count_failure_never_claims_the_model_is_missing() {
+        let message = local_expand_error_with_recovery(anyhow::anyhow!(
+            "expected exactly 10 distinct non-empty prompts, but the expansion backend returned 9"
+        ))
+        .to_string();
+
+        assert!(message.contains("Retry expansion or reduce the batch size"));
+        assert!(!message.contains("mold pull"), "{message}");
     }
 }

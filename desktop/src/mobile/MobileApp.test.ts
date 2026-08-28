@@ -4941,6 +4941,26 @@ describe("MobileApp generation queue", () => {
     ).toBeUndefined();
   });
 
+  it("keeps exact-count failures out of the missing-model pull flow", async () => {
+    expandPrompt.mockRejectedValueOnce(
+      new Error(
+        "expected exactly 2 distinct non-empty prompts, but the expansion backend returned 1. " +
+          "The model may need re-downloading: mold pull qwen3-expand",
+      ),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-pull-expansion']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-expansion-error']").text()).toContain(
+      "Expansion failed on Studio: expected exactly 2 distinct non-empty prompts",
+    );
+  });
+
   it("refuses a missing-model Remix pull after its frozen dimensions change", async () => {
     remixPrompt.mockRejectedValueOnce(
       new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
