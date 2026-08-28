@@ -365,6 +365,7 @@ mod tests {
         let metadata = OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -554,6 +555,7 @@ mod tests {
         let mut metadata = Some(OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -639,6 +641,7 @@ mod tests {
         OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -817,6 +820,7 @@ mod tests {
         let metadata = OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,

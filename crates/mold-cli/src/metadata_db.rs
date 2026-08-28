@@ -194,6 +194,7 @@ mod tests {
         let video = mold_core::VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: Vec::new(),
             format: OutputFormat::Mp4,
             width: 1216,

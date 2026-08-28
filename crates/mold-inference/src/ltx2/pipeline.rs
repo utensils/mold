@@ -1063,6 +1063,7 @@ impl Ltx2Engine {
 
         let source_len = source_frames.len();
         let outcome_attention_path = outcome.attention_path.clone();
+        let outcome_int8_arm = outcome.int8_arm.clone();
         let frames = stitch_extend_frames(source_frames, &outcome.frames, overlap)?;
         let appended = frames.len() - source_len;
 
@@ -1077,6 +1078,7 @@ impl Ltx2Engine {
             audio_sample_rate: None,
             audio_channels: None,
             attention_path: None,
+            int8_arm: None,
         };
         let (output_bytes, thumbnail_bytes, gif_preview, out_probe) =
             self.encode_native_video(req, &plan, &rendered, work_dir.path())?;
@@ -1097,6 +1099,7 @@ impl Ltx2Engine {
             video: Some(VideoData {
                 video_only: (!plan.execution_graph.run_audio_branch).then_some(true),
                 attention_path: outcome_attention_path,
+                int8_arm: outcome_int8_arm,
                 data: output_bytes,
                 format: req.resolved_output_format(),
                 width: plan.width,
@@ -1277,6 +1280,7 @@ impl Ltx2Engine {
             video: Some(VideoData {
                 video_only: (!plan.execution_graph.run_audio_branch).then_some(true),
                 attention_path: rendered.attention_path.map(str::to_string),
+                int8_arm: rendered.int8_arm.map(str::to_string),
                 data: output_bytes,
                 format: req.resolved_output_format(),
                 width,
@@ -1551,6 +1555,7 @@ impl Ltx2Engine {
         let audio = rendered.audio_track;
         let hdr_frames_written = rendered.hdr_frames_written;
         let attention_path = rendered.attention_path.map(str::to_string);
+        let int8_arm = rendered.int8_arm.map(str::to_string);
         let tail_pixel_frames = motion_tail_pixel_frames as usize;
         if frames.len() < tail_pixel_frames {
             bail!(
@@ -1576,6 +1581,7 @@ impl Ltx2Engine {
             hdr_frames_written,
             generation_time_ms,
             attention_path,
+            int8_arm,
         })
     }
 }

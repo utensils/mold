@@ -216,6 +216,7 @@ mod tests {
         mold_core::OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,

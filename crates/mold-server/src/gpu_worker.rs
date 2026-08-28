@@ -6585,6 +6585,7 @@ mod tests {
         let video = complete.then(|| mold_core::VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: vec![0, 0, 0, 24, b'f', b't', b'y', b'p'],
             format: OutputFormat::Mp4,
             width: facts.media.width,
@@ -7977,6 +7978,7 @@ mod tests {
             hdr_frames_written: None,
             generation_time_ms: 1,
             attention_path: None,
+            int8_arm: None,
         };
         assert!(matches!(
             fence_chain_stage_render(Ok(outcome), false, true).unwrap(),

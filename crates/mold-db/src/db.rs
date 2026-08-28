@@ -865,6 +865,7 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
     let legacy_metadata = OutputMetadata {
         video_only: None,
         attention_path: None,
+        int8_arm: None,
         collection: None,
         tags: None,
         title: None,
@@ -1050,6 +1051,7 @@ mod tests {
         OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,

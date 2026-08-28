@@ -4346,6 +4346,7 @@ mod tests {
             hdr_frames_written: None,
             generation_time_ms: 10,
             attention_path: None,
+            int8_arm: None,
         }
     }
 

@@ -1035,6 +1035,7 @@ mod tests {
             video: Some(mold_core::VideoData {
                 video_only: None,
                 attention_path: None,
+                int8_arm: None,
                 data: vec![0u8; 16],
                 format: OutputFormat::Mp4,
                 width: 768,
@@ -1085,6 +1086,7 @@ mod tests {
             video: Some(mold_core::VideoData {
                 video_only: None,
                 attention_path: None,
+                int8_arm: None,
                 data: vec![0u8; 16],
                 format: OutputFormat::Gif,
                 width: 512,

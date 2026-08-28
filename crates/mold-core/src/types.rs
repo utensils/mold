@@ -2179,6 +2179,13 @@ pub struct VideoData {
     /// synthetic placeholder render, and for older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention_path: Option<String>,
+    /// Which INT8 ConvRot execution arm the LTX-2 transformer's quantized
+    /// linears took (`native-w8a8`, `dequant-cuda`, `dequant-metal`,
+    /// `dequant-host`; literals in `mold_inference::ltx2::convrot`).
+    /// Output-changing between arms, so it is recorded rather than inferred.
+    /// Absent for every non-INT8-ConvRot checkpoint and for older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub int8_arm: Option<String>,
     /// First frame as PNG thumbnail for gallery grid.
     pub thumbnail: Vec<u8>,
     /// Animated GIF preview for gallery detail view / TUI playback.
@@ -2466,6 +2473,10 @@ pub struct OutputMetadata {
     /// like `pipeline`; see `VideoData::attention_path`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention_path: Option<String>,
+    /// LTX-2 INT8 ConvRot execution arm actually run (recorded from the
+    /// response, like `pipeline`; see `VideoData::int8_arm`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub int8_arm: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ic_lora_control: Option<String>,
     /// Where the HDR EXR sidecar was written. The gallery holds the tonemapped
@@ -2693,6 +2704,7 @@ impl OutputMetadata {
             pipeline_provenance_sha256: None,
             source_preprocessing: None,
             attention_path: None,
+            int8_arm: None,
             ic_lora_control: req.ic_lora_control.clone(),
             hdr_exr_dir: req.hdr_exr_dir.clone(),
             hdr_exr_full_float: req.hdr_exr_full_float,
@@ -2732,6 +2744,9 @@ impl OutputMetadata {
         }
         if let Some(attention_path) = &video.attention_path {
             self.attention_path = Some(attention_path.clone());
+        }
+        if let Some(int8_arm) = &video.int8_arm {
+            self.int8_arm = Some(int8_arm.clone());
         }
         if let Some(video_only) = video.video_only {
             self.video_only = Some(video_only);
@@ -5047,6 +5062,7 @@ mod tests {
         let video = VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: vec![1],
             format: OutputFormat::Mp4,
             width: 768,
@@ -5098,6 +5114,7 @@ mod tests {
         let video = VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: vec![1],
             format: OutputFormat::Mp4,
             width: 768,
@@ -5752,6 +5769,56 @@ mod tests {
         assert!(bare.attention_path.is_none());
         stamped.apply_video_output(&bare);
         assert_eq!(stamped.attention_path.as_deref(), Some("ltx2-bf16-math"));
+    }
+
+    /// `int8_arm` follows the exact `attention_path` contract: additive on
+    /// response and metadata, every vocabulary literal round-trips verbatim,
+    /// and a response without the field never erases a recorded value.
+    #[test]
+    fn int8_arm_serde_is_additive_and_round_trips_every_value() {
+        let metadata: OutputMetadata =
+            serde_json::from_str(r#"{"version":"1","prompt":"p","model":"m","seed":1,"steps":8,"guidance":3.0,"width":8,"height":8}"#)
+                .unwrap();
+        assert!(metadata.int8_arm.is_none());
+        assert!(!serde_json::to_string(&metadata)
+            .unwrap()
+            .contains("int8_arm"));
+
+        for value in [
+            "native-w8a8",
+            "dequant-cuda",
+            "dequant-metal",
+            "dequant-host",
+        ] {
+            let video: VideoData = serde_json::from_value(serde_json::json!({
+                "data": [], "format": "mp4", "width": 8, "height": 8,
+                "frames": 9, "fps": 24, "thumbnail": [],
+                "int8_arm": value,
+            }))
+            .unwrap();
+            assert_eq!(video.int8_arm.as_deref(), Some(value));
+            let round: VideoData =
+                serde_json::from_str(&serde_json::to_string(&video).unwrap()).unwrap();
+            assert_eq!(round.int8_arm.as_deref(), Some(value));
+
+            let mut stamped = metadata.clone();
+            stamped.apply_video_output(&video);
+            assert_eq!(stamped.int8_arm.as_deref(), Some(value));
+            let round: OutputMetadata =
+                serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
+            assert_eq!(round.int8_arm.as_deref(), Some(value));
+        }
+
+        let mut stamped = metadata.clone();
+        stamped.int8_arm = Some("native-w8a8".to_string());
+        let bare: VideoData = serde_json::from_value(serde_json::json!({
+            "data": [], "format": "mp4", "width": 8, "height": 8,
+            "frames": 9, "fps": 24, "thumbnail": [],
+        }))
+        .unwrap();
+        assert!(bare.int8_arm.is_none());
+        stamped.apply_video_output(&bare);
+        assert_eq!(stamped.int8_arm.as_deref(), Some("native-w8a8"));
     }
 
     /// `video_only` is additive on the request, the response, and the

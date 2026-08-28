@@ -22,9 +22,12 @@
 //!   stream through the a2v cross-attention, so a silent export rendered
 //!   with it skipped is a different print from one rendered with it on.
 //!
-//! The INT8 ConvRot arm (`ltx2 int8 arm=native|dequant`) is defined beside the
-//! arm that selects it, in `ltx2/convrot.rs`, and follows the same rule: a
-//! literal, emitted once at INFO, never composed at the call site.
+//! The INT8 ConvRot arm (`ltx2 int8 arm=<native-w8a8 | dequant-cuda |
+//! dequant-metal | dequant-host>`) is defined beside the arm that selects it,
+//! in `ltx2/convrot.rs`, and follows the same rule: a literal, emitted once
+//! at INFO, never composed at the call site. The same literal is stamped
+//! into `VideoData.int8_arm` / `OutputMetadata.int8_arm` for INT8 ConvRot
+//! checkpoints (`convrot::int8_arm_for_render`).
 
 /// Metadata value: unmasked self-attention ran through `crate::attention`'s
 /// math backend in BF16 (the CUDA default since #735).

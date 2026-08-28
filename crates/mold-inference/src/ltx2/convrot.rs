@@ -154,6 +154,48 @@ fn parse_quantized_format(config: &serde_json::Value) -> Result<QuantizedFormat>
     }
 }
 
+/// Whether `path` carries at least one tensorwise INT8 ConvRot weight — the
+/// LTX-2.5 `int8-conv` layout, identified by its own `.comfy_quant` marker
+/// rather than by tensor dtypes, so a W4A4 checkpoint (whose weights are
+/// also I8-plus-scale) never matches.
+pub(crate) fn checkpoint_is_int8_convrot(path: &Path) -> bool {
+    let Ok(st) = (unsafe { MmapedSafetensors::new(path) }) else {
+        return false;
+    };
+    st.tensors().iter().any(|(key, _)| {
+        key.ends_with(".comfy_quant")
+            && st
+                .get(key)
+                .ok()
+                .and_then(|view| serde_json::from_slice::<serde_json::Value>(view.data()).ok())
+                .and_then(|config| parse_quantized_format(&config).ok())
+                .is_some_and(|format| {
+                    matches!(
+                        format,
+                        QuantizedFormat::Int8Tensorwise {
+                            convrot: true,
+                            group_size: CONVROT_GROUP_SIZE,
+                        }
+                    )
+                })
+    })
+}
+
+/// The literal a finished render stamps into `VideoData.int8_arm` /
+/// `OutputMetadata.int8_arm` for an INT8 ConvRot checkpoint: what the engine
+/// actually constructed on this device class, never what the env asked for.
+/// CUDA builds `ConvRotPacked` linears and honours `MOLD_LTX2_INT8`; Metal
+/// and CPU never see the packed side channel — their linears multiply a
+/// widened BF16 weight, which is the dequant arm by construction, whatever
+/// the env says.
+pub(crate) fn int8_arm_for_render(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Cuda => int8_arm_provenance(DeviceKind::Cuda, ltx2_int8_arm()),
+        DeviceKind::Metal => INT8_ARM_DEQUANT_METAL,
+        DeviceKind::Cpu => INT8_ARM_DEQUANT_HOST,
+    }
+}
+
 pub(crate) fn checkpoint_is_convrot_w4a4(path: &Path) -> bool {
     let Ok(st) = (unsafe { MmapedSafetensors::new(path) }) else {
         return false;
@@ -838,6 +880,54 @@ mod tests {
         assert_eq!(INT8_ARM_DEQUANT_CUDA, "dequant-cuda");
         assert_eq!(INT8_ARM_DEQUANT_METAL, "dequant-metal");
         assert_eq!(INT8_ARM_DEQUANT_HOST, "dequant-host");
+    }
+
+    /// The metadata stamp reports construction, not configuration: Metal and
+    /// CPU widen by construction (the packed side channel is CUDA-only), so
+    /// they stamp their dequant literal whatever `MOLD_LTX2_INT8` says, and
+    /// CUDA stamps whichever arm the process-frozen env decision selected.
+    #[test]
+    fn render_arm_is_construction_honest_off_cuda() {
+        assert_eq!(
+            int8_arm_for_render(DeviceKind::Metal),
+            INT8_ARM_DEQUANT_METAL
+        );
+        assert_eq!(int8_arm_for_render(DeviceKind::Cpu), INT8_ARM_DEQUANT_HOST);
+        assert_eq!(
+            int8_arm_for_render(DeviceKind::Cuda),
+            int8_arm_provenance(DeviceKind::Cuda, ltx2_int8_arm()),
+        );
+    }
+
+    /// The int8-conv predicate reads the `.comfy_quant` marker, so a W4A4
+    /// checkpoint — I8 weights beside scales, but no tensorwise-INT8 marker —
+    /// never matches, and a missing file answers false rather than erroring.
+    #[test]
+    fn int8_convrot_checkpoint_predicate_reads_the_comfy_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("int8-convrot.safetensors");
+        write_int8_convrot_fixture(&path);
+        assert!(checkpoint_is_int8_convrot(&path));
+        assert!(!checkpoint_is_int8_convrot(Path::new(
+            "/nonexistent/x.safetensors"
+        )));
+
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        let w4a4 = dir.path().join("w4a4.safetensors");
+        let weight = vec![0u8; CONVROT_GROUP_SIZE];
+        let scale = 0.5f32.to_le_bytes().to_vec();
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            "transformer_blocks.0.attn1.to_q.weight".to_string(),
+            TensorView::new(SafeDtype::I8, vec![1, CONVROT_GROUP_SIZE], &weight).unwrap(),
+        );
+        tensors.insert(
+            "transformer_blocks.0.attn1.to_q.weight_scale".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1, 1], &scale).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &w4a4).unwrap();
+        assert!(checkpoint_is_convrot_w4a4(&w4a4));
+        assert!(!checkpoint_is_int8_convrot(&w4a4));
     }
 
     fn write_int8_convrot_fixture(path: &Path) {

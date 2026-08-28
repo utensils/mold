@@ -4583,6 +4583,7 @@ fn private_run_output(
         video: Some(VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: output.mp4,
             format: OutputFormat::Mp4,
             width: owner.media.width,

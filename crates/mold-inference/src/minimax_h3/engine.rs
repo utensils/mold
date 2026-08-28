@@ -330,6 +330,7 @@ impl H3Fl2VaEngine {
             video: Some(VideoData {
                 video_only: None,
                 attention_path: None,
+                int8_arm: None,
                 data: output.mp4,
                 format: OutputFormat::Mp4,
                 width: output.width,

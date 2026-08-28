@@ -5033,6 +5033,7 @@ mod tests {
             video: Some(mold_core::VideoData {
                 video_only: None,
                 attention_path: None,
+                int8_arm: None,
                 data: b"successful-video".to_vec(),
                 format: OutputFormat::Mp4,
                 width: 512,

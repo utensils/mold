@@ -5974,6 +5974,7 @@ mod tests {
         let video = mold_core::VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: b"synthetic-h3-mp4-with-synchronized-audio".to_vec(),
             format: OutputFormat::Mp4,
             width: 1344,
@@ -6131,6 +6132,7 @@ mod tests {
         let video = mold_core::VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: b"synthetic-ref2va-mp4-with-synchronized-audio".to_vec(),
             format: OutputFormat::Mp4,
             width: request.width,
@@ -6586,6 +6588,7 @@ mod tests {
         let video = mold_core::VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: vec![0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p'],
             format: OutputFormat::Mp4,
             width: 768,
@@ -6694,6 +6697,7 @@ mod tests {
         let video = mold_core::VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: vec![0x00, 0x00, 0x00, 0x18],
             format: OutputFormat::Mp4,
             width: 256,
@@ -6930,6 +6934,7 @@ mod tests {
         let video = mold_core::VideoData {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             data: vec![0, 0, 0, 24],
             format: OutputFormat::Mp4,
             width: 512,

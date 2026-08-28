@@ -8328,6 +8328,7 @@ impl App {
                         let meta = mold_core::OutputMetadata {
                             video_only: None,
                             attention_path: None,
+                            int8_arm: None,
                             collection: submitted_params.collection.clone(),
                             tags: (!submitted_filing.is_empty()).then_some(submitted_filing),
                             title: submitted_params.title.clone(),
@@ -8856,6 +8857,7 @@ impl App {
                     let meta = mold_core::OutputMetadata {
                         video_only: None,
                         attention_path: None,
+                        int8_arm: None,
                         // An upscale of a filed print stays filed: the copy
                         // is the same picture, and losing its title and tags
                         // would strand it in the Library.
@@ -10192,6 +10194,7 @@ mod tests {
             metadata: mold_core::OutputMetadata {
                 video_only: None,
                 attention_path: None,
+                int8_arm: None,
                 collection: None,
                 tags: None,
                 title: None,
@@ -10279,6 +10282,7 @@ mod tests {
             metadata: mold_core::OutputMetadata {
                 video_only: None,
                 attention_path: None,
+                int8_arm: None,
                 collection: None,
                 tags: None,
                 title: None,
@@ -10427,6 +10431,7 @@ mod tests {
         mold_core::OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -13068,6 +13073,7 @@ mod tests {
                 video: Some(mold_core::VideoData {
                     video_only: None,
                     attention_path: None,
+                    int8_arm: None,
                     data: b"test-mp4".to_vec(),
                     format: OutputFormat::Mp4,
                     width: 1216,
@@ -14499,6 +14505,7 @@ mod tests {
             video: mold_core::VideoData {
                 video_only: None,
                 attention_path: None,
+                int8_arm: None,
                 data: vec![0u8; 4],
                 format: OutputFormat::Mp4,
                 width: 64,

@@ -794,6 +794,10 @@ export interface OutputMetadata {
    * `ltx2-bf16-math` | `ltx2-bf16-flash` | `ltx2-f32-chunked` |
    * `ltx2-metal-sdpa`. Output-changing, so it is recorded, never inferred. */
   attention_path?: string | null;
+  /** LTX-2 INT8 ConvRot execution arm the print was rendered with (newer
+   * servers): `native-w8a8` | `dequant-cuda` | `dequant-metal` |
+   * `dequant-host`. Output-changing between arms, so it is recorded. */
+  int8_arm?: string | null;
   ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;

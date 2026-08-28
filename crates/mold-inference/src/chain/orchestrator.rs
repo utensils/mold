@@ -169,6 +169,9 @@ pub struct StageOutcome {
     /// vocabulary; see `ltx2::provenance`). `None` for families that do not
     /// record one.
     pub attention_path: Option<String>,
+    /// INT8 ConvRot execution arm the stage's quantized linears took (LTX-2
+    /// provenance vocabulary). `None` for every other checkpoint layout.
+    pub int8_arm: Option<String>,
 }
 
 /// Abstraction over "render one chain stage". Production impls: `Ltx2Engine`
@@ -724,6 +727,7 @@ mod tests {
                 hdr_frames_written,
                 generation_time_ms: 100,
                 attention_path: None,
+                int8_arm: None,
             })
         }
     }

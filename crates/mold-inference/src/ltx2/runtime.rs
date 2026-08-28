@@ -106,6 +106,10 @@ pub struct NativeRenderedVideo {
     /// `provenance::ATTENTION_PATHS`. `None` only for the synthetic
     /// placeholder path, which runs no transformer at all.
     pub attention_path: Option<&'static str>,
+    /// Which INT8 ConvRot execution arm the transformer's quantized linears
+    /// took — one of `convrot`'s `INT8_ARM_*` literals. `None` for every
+    /// checkpoint that is not tensorwise INT8 ConvRot.
+    pub int8_arm: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -1075,6 +1079,11 @@ impl Ltx2RuntimeSession {
                 "{}",
                 provenance::attention_path_line(attention_path)
             );
+            if super::convrot::checkpoint_is_int8_convrot(Path::new(&plan.checkpoint_path)) {
+                rendered.int8_arm = Some(super::convrot::int8_arm_for_render(
+                    super::convrot::device_kind(device),
+                ));
+            }
             if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
                 eprintln!(
                     "[ltx2-debug] render_native_video using real path pipeline={:?}",
@@ -1138,6 +1147,7 @@ impl Ltx2RuntimeSession {
 
         Ok(NativeRenderedVideo {
             attention_path: None,
+            int8_arm: None,
             frames,
             hdr_frames_written: None,
             audio_track: None,
@@ -3374,6 +3384,7 @@ fn render_real_distilled_av(
 
     Ok(NativeRenderedVideo {
         attention_path: None,
+        int8_arm: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4366,6 +4377,7 @@ fn render_real_two_stage_av(
 
     Ok(NativeRenderedVideo {
         attention_path: None,
+        int8_arm: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4571,6 +4583,7 @@ fn render_real_one_stage_av(
 
     Ok(NativeRenderedVideo {
         attention_path: None,
+        int8_arm: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4770,6 +4783,7 @@ fn render_real_retake_av(
 
     Ok(NativeRenderedVideo {
         attention_path: None,
+        int8_arm: None,
         frames,
         hdr_frames_written,
         audio_track,

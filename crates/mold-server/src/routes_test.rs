@@ -1075,6 +1075,7 @@ mod tests {
         mold_core::OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -15628,6 +15629,7 @@ mod tests {
         let metadata = mold_core::OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -16561,6 +16563,7 @@ mod tests {
         let metadata = mold_core::OutputMetadata {
             video_only: None,
             attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -18315,6 +18318,7 @@ mod tests {
             video: Some(mold_core::VideoData {
                 video_only: None,
                 attention_path: None,
+                int8_arm: None,
                 data: b"mp4-bytes".to_vec(),
                 format: OutputFormat::Mp4,
                 width: 960,

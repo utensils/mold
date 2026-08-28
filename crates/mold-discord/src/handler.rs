@@ -219,6 +219,7 @@ mod tests {
             video: Some(VideoData {
                 video_only: None,
                 attention_path: None,
+                int8_arm: None,
                 data,
                 format,
                 width: 768,
