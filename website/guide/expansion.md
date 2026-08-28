@@ -34,7 +34,7 @@ not introduce camera or image language.
 The additive `/api/expand` `task` values are `text-to-image`, `text-to-video`,
 `image-to-video`, `video-to-video`, `retake`, `keyframe-interpolation`,
 `audio-driven-video`, and `text-to-audio`. Only this semantic value is sent for
-preview expansion — source media stays on the generation request.
+preview expansion; source media stays on the generation request.
 
 ## Generate with Expansion
 
@@ -74,7 +74,7 @@ best-ranked reachable machine that does have it, using the same ranking the
 generation router uses, while the print itself still goes where it was routed.
 A pinned machine is never left, and Remix follows the same rule because it runs
 on the same model. When no eligible machine has the model, Create offers to
-pull it and names the machine — the one expansion would have used — instead of
+pull it and names the machine (the one expansion would have used) instead of
 failing. iPhone pins one machine, so expansion always runs there.
 Large expansions are assembled from bounded
 four-prompt model calls with position-aware instructions and per-chunk token

@@ -5,17 +5,16 @@
 - **macOS desktop:** download the signed and notarized
   [Mold DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg),
   then follow the [Desktop App guide](/guide/desktop).
-- **Windows desktop:** download the self-signed
-  [NSIS installer](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe)
-  and its [public certificate](https://github.com/utensils/mold/releases/latest/download/mold-windows-self-signing.cert.cer),
+- **Windows desktop (nightly):** download the self-signed
+  [NSIS installer](https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe)
+  and its [public certificate](https://github.com/utensils/mold/releases/download/latest/mold-windows-self-signing.cert.cer),
   then follow the [Windows desktop trust instructions](/guide/desktop#windows).
 - **iPhone:** the current remote-only app is distributed through the project's
   invited internal and external TestFlight groups; there is not yet a public
   App Store listing. See the [iPhone App guide](/guide/iphone) for supported
   workflows and host setup.
-- **Android:** download the raw signed
-  [stable APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)
-  or [nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)
+- **Android (nightly):** download the raw signed
+  [APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)
   directly to an Android 7.0 or newer device. No archive extraction is needed;
   follow the [Android App guide](/guide/android#download-and-install) for the
   one-time sideload permission.
@@ -31,11 +30,11 @@ agents, and custom API clients.
 
 ## Windows CLI
 
-The prebuilt x64 Windows CLI is a self-signed CPU inference and remote-client
-build. Download and unpack it with PowerShell:
+The current prebuilt x64 Windows CLI is a self-signed nightly CPU inference and
+remote-client build. Download and unpack it with PowerShell:
 
 ```powershell
-$release = 'https://github.com/utensils/mold/releases/latest/download'
+$release = 'https://github.com/utensils/mold/releases/download/latest'
 Invoke-WebRequest "$release/mold-x86_64-pc-windows-msvc-cpu.zip" `
   -OutFile mold-windows.zip
 Expand-Archive .\mold-windows.zip `
@@ -112,7 +111,7 @@ curl -fsSL ... | MOLD_CUDA_ARCH=sm100 sh   # Datacenter Blackwell (B200 / B300)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm120 sh   # Consumer Blackwell (RTX 50-series)
 ```
 
-> **Note:** the env var has to be on the `sh` side of the pipe — with
+> **Note:** the env var has to be on the `sh` side of the pipe; with
 > `VAR=value curl ... | sh`, the variable only applies to `curl` and the
 > installer itself still sees the default.
 
@@ -132,7 +131,7 @@ requires a successful sm86 generation and treats the same-source sm89 failure
 as an expected incompatibility regression, not a successful smoke.
 
 `MOLD_VERSION` accepts any tag that exists on the
-[releases page](https://github.com/utensils/mold/releases) — for example
+[releases page](https://github.com/utensils/mold/releases), for example
 `v0.8.0` to reproduce an older install. Without it the script follows the
 `releases/latest` redirect on GitHub and installs whatever that currently
 points at.
@@ -158,7 +157,7 @@ Three packages on the [AUR](https://aur.archlinux.org/):
 
 ```bash
 paru -S mold-ai-bin     # Prebuilt binary, CUDA sm_89 (RTX 40-series). Fastest.
-paru -S mold-ai         # Builds from source — set CUDA_COMPUTE_CAP for other GPUs
+paru -S mold-ai         # Builds from source; set CUDA_COMPUTE_CAP for other GPUs
 paru -S mold-ai-git     # Builds from main HEAD
 ```
 
@@ -172,7 +171,7 @@ makepkg -si
 ```
 
 **Conflict with `extra/mold`**: All three packages declare `conflicts=('mold')`
-because they install `/usr/bin/mold` — the same path used by the
+because they install `/usr/bin/mold`; the same path used by the
 [rui314 linker](https://archlinux.org/packages/extra/x86_64/mold/). You cannot
 have both installed simultaneously. If you need the linker for your build
 toolchain, install mold via Nix or the one-line installer (which targets
@@ -204,7 +203,7 @@ clients default to the mutable `latest*` container channel unless a release
 builder explicitly embeds an official distribution version.
 
 ```bash
-# Run directly — no install needed
+# Run directly: no install needed
 nix run github:utensils/mold -- run "a cat"
 
 # RTX 3090 / A40
@@ -253,7 +252,7 @@ Optional features can be added to the same build, for example
 `--features metal,preview,expand,discord,tui` if you also want terminal preview,
 local prompt expansion, the Discord bot, or the interactive TUI.
 
-`pulid` — [face identity](/guide/identity) — is one of those features, and it is
+`pulid` ([face identity](/guide/identity)) is one of those features, and it is
 the only one with a build-time dependency of its own: `protoc` must be on `PATH`,
 because `candle-onnx`'s build script drives `prost-build`. It is in the `nix
 develop` shell already; otherwise install it before building, since the build
@@ -266,8 +265,8 @@ sudo pacman -S protobuf                     # Arch
 sudo dnf install protobuf-compiler          # Fedora
 ```
 
-Every official binary — the release tarballs, the Nix packages, the AUR
-packages, and the desktop app — already ships with `pulid` on, so this only
+Every official binary (the release tarballs, the Nix packages, the AUR
+packages, and the desktop app) already ships with `pulid` on, so this only
 concerns building it yourself.
 
 `dev-fast` is the repo's local-iteration profile: it keeps debuginfo, enables

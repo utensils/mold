@@ -36,7 +36,7 @@ multiples of 16.
 
 ## Example
 
-**Z-Image Turbo** — 9 steps, seed 777:
+**Z-Image Turbo**: 9 steps, seed 777:
 
 ```bash
 mold run z-image-turbo:q8 \
@@ -45,7 +45,7 @@ mold run z-image-turbo:q8 \
   --seed 777
 ```
 
-![Astronaut — Z-Image Turbo](/gallery/zimage-astronaut.png)
+![Astronaut, Z-Image Turbo](/gallery/zimage-astronaut.png)
 
 ## Notes
 

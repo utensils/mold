@@ -18,7 +18,7 @@ known model name. Otherwise it becomes part of the prompt. Prompt text can also
 come from stdin.
 
 `PROMPT` is required, with one exception: an LTX-2 or LTX-Video run that already
-carries visual conditioning — `--image`, `--keyframe`, `--video`, or `--extend` —
+carries visual conditioning (`--image`, `--keyframe`, `--video`, or `--extend`)
 may be left unprompted, so `mold run ltx-2-19b-distilled:fp8 --image still.png
 --frames 97` is a complete command. It buys no VRAM and usually renders
 near-static motion; see
@@ -31,7 +31,7 @@ other run, including img2img on an image family, still errors with
 | Flag                                                                                         | Description                                                                                                                 |
 | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `-o, --output <PATH>`                                                                        | Output path; `-` writes media bytes to stdout                                                                               |
-| `--format <FMT>`                                                                             | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`, or `wav` (LTX-2 `--pipeline t2a`)                                              |
+| `--format <FMT>`                                                                             | `png`, `jpeg`/`jpg`, `gif`, `apng`, `webp`, `mp4`, or `wav` (LTX-2 `--pipeline t2a`)                                        |
 | `--width <N>`, `--height <N>`                                                                | Output dimensions                                                                                                           |
 | `--steps <N>`, `--guidance <N>`, `--seed <N>`, `--batch <N>`                                 | Core generation controls                                                                                                    |
 | `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan)                                                            |
@@ -40,6 +40,7 @@ other run, including img2img on an image family, still errors with
 | `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                              |
 | `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                            |
 | `--duration <SECONDS>`                                                                       | MiniMax H3 duration from 4–15 seconds; resolves to its exact `17n+5` frame grid at 24 fps                                   |
+| `--predict-duration`                                                                         | Let a qualified LTX-2.5 model choose a clip length from 1–20 seconds                                                        |
 | `--clip-frames <N>`                                                                          | Per-clip cap for chained video renders                                                                                      |
 | `--motion-tail <N>`                                                                          | Overlap frames reused between chained clips                                                                                 |
 | `--extend <PATH>`                                                                            | Continue an existing video clip (LTX-2 and image-conditioned Wan); mutually exclusive with `--video`/`--image`/`--keyframe` |
@@ -92,8 +93,8 @@ other run, including img2img on an image family, still errors with
 
 For video, the `--output` extension outranks the family's container default:
 `mold run <video-model> "…" -o clip.gif` writes a real GIF even where the family
-would have picked MP4. An extension this binary cannot encode — `.mp4` without
-the `mp4` feature, `.webp` without `webp` — is refused before any weight is read
+would have picked MP4. An extension this binary cannot encode (`.mp4` without
+the `mp4` feature, `.webp` without `webp`) is refused before any weight is read
 rather than filled with another container's bytes, as is a raster or audio
 extension on a video render, and an explicit `--format` that disagrees with the
 filename is reported instead of silently overriding it. `--output -` claims no
@@ -154,7 +155,7 @@ no local fallback, because a queue belongs to one serving host.
 mold queue list [--held] [--json]        # job, state, model, batch, prompt, admitted
 mold queue show <JOB-ID> [--json]        # one job in full, with its batch progress
 mold queue cancel <JOB-ID>...            # DELETE /api/queue/{id}
-mold queue cancel --all [--yes]          # DELETE /api/queue — queued rows only
+mold queue cancel --all [--yes]          # DELETE /api/queue for queued rows only
 mold queue cancel --batch <BATCH-ID>     # DELETE /api/generation-batches/{id}
 mold queue retry <JOB-ID>... | --held    # POST /api/queue/{id}/retry
 mold queue move <JOB-ID> --to <N>        # PATCH /api/queue/{id} {position}
@@ -166,8 +167,8 @@ The `STATE` column is the same vocabulary the web, desktop, and iPhone
 surfaces render: a running row counts its denoise steps, position 0 is
 `Next up`, everyone behind is `#N in line`, and only an actionable scheduler
 reason (`Model not installed`, `Waiting for GPU memory`, …) replaces the
-position. Ordinary serialization on a busy host — no idle device, a warm
-wait, a lower-priority opening — keeps the row counting rather than reading
+position. Ordinary serialization on a busy host (no idle device, a warm
+wait, a lower-priority opening) keeps the row counting rather than reading
 as a fault.
 
 `mold queue list` and `mold queue retry --held` walk every durable
@@ -236,7 +237,7 @@ Inspect, restore, or empty the gallery trash on a running `mold serve`
 instance. Deleting a print from any surface moves it to the host's trash
 (`<output_dir>/.trash/`) instead of removing it; the server purges trashed
 prints after `gallery.trash_retention_days` (default 30, `0` keeps them
-forever — see [Configuration](/guide/configuration#library-trash)). The
+forever; see [Configuration](/guide/configuration#library-trash)). The
 commands use `MOLD_HOST` and send `MOLD_API_KEY` when configured; there is no
 local fallback, because the trash belongs to that host's gallery.
 

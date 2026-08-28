@@ -30,7 +30,7 @@ A lightweight linear chain architecture optimized for speed. Uses significantly 
 ```
 Input (3, H, W)
   ↓ Conv2d(3 → 64)
-  ↓ [RRDB block × 23] — each: 3 × ResidualDenseBlock (5 convs with dense connections)
+  ↓ [RRDB block × 23], each with 3 × ResidualDenseBlock (5 convs with dense connections)
   ↓ Conv2d(64 → 64)
   ↓ Upsample 2x (nearest) + Conv2d
   ↓ Upsample 2x (nearest) + Conv2d   ← only for 4x models

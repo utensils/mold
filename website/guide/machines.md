@@ -26,9 +26,9 @@ serving origin.
 
 Choose **+ Add machine** and use either path:
 
-- **Remote server** — enter an IP address, DNS name, HTTPS URL, or Tailscale
+- **Remote server**: enter an IP address, DNS name, HTTPS URL, or Tailscale
   MagicDNS name. A schemeless address defaults to HTTP and port `7680`.
-- **Local network** — on current servers, the primary `mold serve` process
+- **Local network**: on current servers, the primary `mold serve` process
   browses `_mold._tcp` with DNS-SD and returns its cached peers to the web app.
   Select a result to test it and save it. If the peer advertises authentication,
   Mold asks for that peer's API key first.

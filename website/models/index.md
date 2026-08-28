@@ -1,8 +1,7 @@
 # Models
 
-mold supports a broad range of model families spanning different architectures,
-quality levels, and VRAM requirements — including both image and video
-generation.
+Mold supports image and video model families across a range of quality levels,
+hardware requirements, and creative workflows.
 
 ::: tip Community models from Civitai
 The models documented here are not the limit. Open **Models → Discover** in
@@ -13,27 +12,25 @@ community checkpoints and LoRAs. See the
 
 ## Choosing a Model
 
-| Need                | Recommended                           | Why                                                    |
-| ------------------- | ------------------------------------- | ------------------------------------------------------ |
-| Fast iterations     | `flux2-klein:q8`                      | 4 steps, ungated, Apache 2.0                           |
-| Best quality        | `flux-dev:q4`                         | 25 steps, excellent detail                             |
-| Smallest checkpoint | `flux2-klein:q4`                      | 2.6 GB transformer, 4 steps                            |
-| Classic ecosystem   | `sd15:fp16` or `dreamshaper-v8`       | Huge model library, ControlNet                         |
-| Fast + great        | `z-image-turbo:q8`                    | 9 steps, excellent quality                             |
-| SDXL                | `sdxl-turbo:fp16`                     | 4 steps, 1024x1024                                     |
-| **Video**           | `ltx-video-0.9.6-distilled:bf16`      | Text-to-video, 30fps, APNG/MP4, best-supported default |
-| **Audio + video**   | `ltx-2.5-22b-distilled:int8-conv`     | Compact LTX-2.5 default; joint audio-video on Metal    |
-| **Wan video**       | `wan22-ti2v-5b:q8`                    | Text/image-to-video with broad Wan workflow support    |
-| **Reference AV**    | `minimax-h3-ref2va:comfy-pruned-int8` | Ordered image/video/audio references; SM89 CUDA build  |
+| Need                | Recommended                           | Why                                                   |
+| ------------------- | ------------------------------------- | ----------------------------------------------------- |
+| Fast iterations     | `flux2-klein:q8`                      | 4 steps, ungated, Apache 2.0                          |
+| Best quality        | `flux-dev:q4`                         | 25 steps, excellent detail                            |
+| Smallest checkpoint | `flux2-klein:q4`                      | 2.6 GB transformer, 4 steps                           |
+| Classic ecosystem   | `sd15:fp16` or `dreamshaper-v8`       | Huge model library, ControlNet                        |
+| Fast + great        | `z-image-turbo:q8`                    | 9 steps, excellent quality                            |
+| SDXL                | `sdxl-turbo:fp16`                     | 4 steps, 1024x1024                                    |
+| **LTX Video**       | `ltx-video-0.9.6-distilled:bf16`      | Broad text-to-video default; LTX-2.x adds joint audio |
+| **Wan video**       | `wan22-ti2v-5b:q8`                    | Text/image-to-video with broad Wan workflow support   |
+| **Reference AV**    | `minimax-h3-ref2va:comfy-pruned-int8` | Ordered image/video/audio references; SM89 CUDA build |
 
 ## Choosing a Video Family
 
-| Family                            | Start with                           | Best for                                              | Important boundary                            |
-| --------------------------------- | ------------------------------------ | ----------------------------------------------------- | --------------------------------------------- |
-| [LTX Video](/models/ltx-video)    | `ltx-video-0.9.6-distilled:bf16`     | Straightforward text-to-video                         | No generated audio                            |
-| [LTX-2 / 2.3 / 2.5](/models/ltx2) | `ltx-2.5-22b-distilled:int8-conv`    | Joint audio-video; compact LTX-2.5 Metal default      | Gated split pack; some 2.5 workflows deferred |
-| [Wan Video](/models/wan)          | `wan22-ti2v-5b:q8`                   | Text/image-to-video, first/last frames, and sequences | CUDA-qualified; Metal/CPU correctness-only    |
-| [MiniMax H3](/models/minimax-h3)  | `minimax-h3-fl2va:comfy-pruned-int8` | First-frame or ordered-reference audio-video          | 42.482 GB base pull; runtime is build-scoped  |
+| Family                           | Start with                           | Best for                                              | Important boundary                                       |
+| -------------------------------- | ------------------------------------ | ----------------------------------------------------- | -------------------------------------------------------- |
+| [LTX Video](/models/ltx2)        | `ltx-video-0.9.6-distilled:bf16`     | Text-to-video plus joint audio-video on LTX-2.x       | Legacy models have no generated audio; newer packs gated |
+| [Wan Video](/models/wan)         | `wan22-ti2v-5b:q8`                   | Text/image-to-video, first/last frames, and sequences | CUDA-qualified; Metal/CPU correctness-only               |
+| [MiniMax H3](/models/minimax-h3) | `minimax-h3-fl2va:comfy-pruned-int8` | First-frame or ordered-reference audio-video          | 42.482 GB base pull; runtime is build-scoped             |
 
 MiniMax H3's pull size is disk/download size, not peak VRAM. Its compact
 runtime is available on H3-enabled SM89 CUDA builds; Metal is shipped as an
@@ -75,19 +72,19 @@ streaming (~4-5 GB peak, 2-4x slower).
 
 <div class="gallery-grid">
 
-![Flux.2 Klein — 4 steps](/gallery/flux2-klein-owl.png)
+![Flux.2 Klein, 4 steps](/gallery/flux2-klein-owl.png)
 
-![FLUX Schnell — 4 steps](/gallery/flux-schnell-leopard.png)
+![FLUX Schnell, 4 steps](/gallery/flux-schnell-leopard.png)
 
-![FLUX Dev Q4 — 25 steps](/gallery/flux-dev-teahouse.png)
+![FLUX Dev Q4, 25 steps](/gallery/flux-dev-teahouse.png)
 
-![Z-Image Turbo — 9 steps](/gallery/zimage-astronaut.png)
+![Z-Image Turbo, 9 steps](/gallery/zimage-astronaut.png)
 
-![SD 3.5 Large — 28 steps](/gallery/sd35-clocktower.png)
+![SD 3.5 Large, 28 steps](/gallery/sd35-clocktower.png)
 
-![SDXL Turbo — 4 steps](/gallery/sdxl-turbo-market.png)
+![SDXL Turbo, 4 steps](/gallery/sdxl-turbo-market.png)
 
-![DreamShaper v8 — 25 steps](/gallery/sd15-castle.png)
+![DreamShaper v8, 25 steps](/gallery/sd15-castle.png)
 
 </div>
 
@@ -117,14 +114,14 @@ Some model repos (marked `[gated]`) require a
 [HuggingFace access token](https://huggingface.co/settings/tokens). You may
 need to accept the model's license on its HuggingFace page before downloading.
 
-**Option 1 — Environment variable** (simplest):
+**Option 1: Environment variable** (simplest):
 
 ```bash
 export HF_TOKEN=hf_...
 mold pull flux-dev:q4
 ```
 
-**Option 2 — HuggingFace CLI** (persists the token):
+**Option 2: HuggingFace CLI** (persists the token):
 
 ```bash
 # Install the HF CLI
@@ -134,7 +131,7 @@ curl -LsSf https://hf.co/cli/install.sh | bash
 hf auth login
 ```
 
-Once logged in, `mold pull` picks up the stored token automatically — no
+Once logged in, `mold pull` picks up the stored token automatically; no
 `HF_TOKEN` export needed.
 
 See the [HuggingFace CLI docs](https://huggingface.co/docs/huggingface_hub/guides/cli)
@@ -153,8 +150,7 @@ for more options.
 | [Wuerstchen](/models/wuerstchen)      | 1024x1024                     | 3-stage cascade, 42x compress                  |
 | [Qwen-Image](/models/qwen-image)      | 1328x1328                     | Qwen2.5-VL, flow-matching, CFG                 |
 | [Qwen-Image-Edit](/models/qwen-image) | Derived from first edit image | Qwen2.5-VL multimodal edit, flow-matching, CFG |
-| [LTX-2 / 2.3 / 2.5](/models/ltx2)     | 1216x704                      | Gemma 3/4, joint audio-video transformer       |
-| [LTX Video](/models/ltx-video)        | 768x512                       | T5-XXL, DiT, 3D causal VAE                     |
+| [LTX Video](/models/ltx2)             | 768x512 / 1216x704            | T5/Gemma, video transformers, causal VAEs      |
 | [MiniMax H3](/models/minimax-h3)      | 1344x768                      | Qwen3-VL, joint audio-video DiT, dual VAEs     |
 | [Wan Video](/models/wan)              | 832x480 / 1280x704            | UMT5-XXL, flow DiT, causal 3D VAE, A14B MoE    |
 | [Upscalers](/models/upscalers)        | 2x / 4x source size           | Real-ESRGAN super-resolution                   |
@@ -178,9 +174,9 @@ being completed separately. The LTX-2 family CPU path stays
 correctness-oriented and can be extremely slow. Wan is
 performance-qualified on CUDA; its CPU and Apple
 Metal paths are correctness-oriented (fp8-scaled Wan checkpoints stay
-CUDA-only — Metal has no fp8 widening kernel). MiniMax H3 compact checkpoints
-are downloadable everywhere, and both reviewed routes — FL2VA's boundary frame
-and Ref2VA's ordered image/video/audio references — execute on supported SM89
+CUDA-only; Metal has no fp8 widening kernel). MiniMax H3 compact checkpoints
+are downloadable everywhere, and both reviewed routes (FL2VA's boundary frame
+and Ref2VA's ordered image/video/audio references) execute on supported SM89
 CUDA builds; the CPU path is unsupported, and the Apple Metal route is admitted
 and shipped but correctness-only and not yet hardware-qualified.
 :::
