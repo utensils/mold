@@ -4821,6 +4821,7 @@ button:disabled {
   position: relative;
   z-index: 2;
   display: flex;
+  flex: none;
   margin-top: 10px;
   gap: 7px;
   overflow-x: auto;
