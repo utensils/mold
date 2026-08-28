@@ -80,7 +80,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       }
@@ -125,7 +124,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       }
@@ -174,7 +172,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       },
@@ -222,7 +219,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       },
@@ -272,7 +268,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       },
@@ -330,7 +325,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       },
@@ -380,7 +374,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       },
@@ -426,7 +419,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       },
@@ -517,7 +509,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-f32-chunked",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       },
@@ -562,7 +553,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-flash",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       },
@@ -607,7 +597,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "dequant-cuda"
         }
       },
@@ -678,7 +667,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         },
         "scheduler_estimates": true
@@ -736,8 +724,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -779,8 +766,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -826,8 +812,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -869,8 +854,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "A 42 GB BF16 transformer cannot be resident on a 24 GB card: the adaptive planner must engage without --offload."
@@ -914,8 +898,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "--offload is the forced-streaming request; the retained vram.csv is the floor against residency_adaptive's peak."
@@ -958,8 +941,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1001,8 +983,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1048,8 +1029,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1091,8 +1071,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "A 42 GB BF16 transformer cannot be resident on a 24 GB card: the adaptive planner must engage without --offload."
@@ -1135,8 +1114,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "This manifest's only VAE is the diffusion decoder (ltx-2.5-video-vae-bf16); upstream decodes seed-0 deterministically (na_diffusion_decoder.py:516-520)."
@@ -1181,7 +1159,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       }
@@ -1226,7 +1203,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       }
@@ -1275,7 +1251,6 @@
         ],
         "metadata": {
           "attention_path": "ltx2-bf16-math",
-          "video_only": false,
           "int8_arm": "native-w8a8"
         }
       },
@@ -1319,8 +1294,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1362,8 +1336,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1409,8 +1382,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "Dev runs the dynamic-shift schedule (base_shift 0.95 / max_shift 2.05 / terminal 0.1) rather than the distilled literal sigma list."
@@ -1453,8 +1425,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1496,8 +1467,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1543,8 +1513,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "Dev runs the dynamic-shift schedule (base_shift 0.95 / max_shift 2.05 / terminal 0.1) rather than the distilled literal sigma list."
@@ -1587,8 +1556,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1630,8 +1598,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1672,8 +1639,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1714,8 +1680,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1756,8 +1721,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1798,8 +1762,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1842,8 +1805,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1886,8 +1848,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1932,8 +1893,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -1980,8 +1940,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -2024,8 +1983,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "Audio-only: 16-bit PCM WAV, 48 kHz stereo, no video stream. Steps below the non-distilled default are raised with a disclosed message."
@@ -2073,8 +2031,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "{models_dir} resolves to MOLD_MODELS_DIR. The GGUF LoRA runs as a parallel low-rank branch (never merged into the QTensor)."
@@ -2118,8 +2075,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "Same seed as t2v_silent_apng: both must decode with no NaN; hashes differ by kernel, which is the expected A/B."
@@ -2158,8 +2114,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         },
         "scheduler_estimates": true
       }
@@ -2203,8 +2158,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -2247,8 +2201,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -2291,8 +2244,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -2335,8 +2287,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       }
     },
@@ -2379,8 +2330,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "Q8_0 is 23.6 GB against a 24 GB card: `blocked` with reason_source oom_envelope or `passed` with residency evidence are both valid; `failed` is not."
@@ -2424,8 +2374,7 @@
           "attention backend selected backend=Math"
         ],
         "metadata": {
-          "attention_path": "ltx2-bf16-math",
-          "video_only": false
+          "attention_path": "ltx2-bf16-math"
         }
       },
       "notes": "Q8_0 is 23.6 GB against a 24 GB card: `blocked` with reason_source oom_envelope or `passed` with residency evidence are both valid; `failed` is not."
