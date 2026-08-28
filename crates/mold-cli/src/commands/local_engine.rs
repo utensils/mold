@@ -139,8 +139,6 @@ pub(crate) async fn plan_local_batch(
     config: &Config,
     ov: &EngineOverrides,
 ) -> Result<LocalBatchPlan> {
-    use sysinfo::System;
-
     apply_local_engine_env_overrides(
         ov.t5_variant.as_deref(),
         ov.qwen3_variant.as_deref(),
@@ -213,18 +211,20 @@ pub(crate) async fn plan_local_batch(
         })
         .collect::<Vec<_>>();
 
-    let mut system = System::new_with_specifics(
-        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
-    );
-    system.refresh_memory();
-    let total = system.total_memory();
-    let safety_floor = (total.saturating_mul(15) / 100).max(8 << 30);
-    let host_headroom = system.available_memory().saturating_sub(safety_floor);
+    // The server's own sampler, so the forced-local path spends exactly the
+    // figure a `mold serve` on this machine would: `MemAvailable` plus the
+    // evictable ZFS ARC credit, added once (#1439).
+    let ram = mold_server::resources::ram_snapshot();
+    let safety_floor = (ram.total.saturating_mul(15) / 100).max(8 << 30);
+    let host_headroom = ram
+        .available_with_evictable_arc()
+        .saturating_sub(safety_floor);
     Ok(LocalBatchPlan {
         candidates,
         execution_plans: by_ordinal,
         prepared_execution_inputs: prepared,
         host_headroom_bytes: host_headroom,
+        host_reclaimable_zfs_arc_bytes: ram.reclaimable_zfs_arc,
     })
 }
 
@@ -332,6 +332,9 @@ pub(crate) struct LocalBatchPlan {
         std::collections::BTreeMap<usize, mold_server::execution_plan::ResolvedExecutionPlan>,
     pub prepared_execution_inputs: mold_server::execution_plan::PreparedExecutionInputs,
     pub host_headroom_bytes: u64,
+    /// Evictable ZFS ARC the same sample counted into `host_headroom_bytes`
+    /// (#1439), named in the refusal when positive.
+    pub host_reclaimable_zfs_arc_bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -352,6 +355,7 @@ pub(crate) struct LocalBatchAdmission {
     active: std::collections::BTreeMap<usize, usize>,
     resident_host_bytes: std::collections::BTreeMap<usize, u64>,
     host_headroom_bytes: u64,
+    host_reclaimable_zfs_arc_bytes: Option<u64>,
     plan_version: u64,
 }
 
@@ -361,6 +365,7 @@ impl LocalBatchAdmission {
         candidates: &[LocalCandidate],
         item_count: usize,
         host_headroom_bytes: u64,
+        host_reclaimable_zfs_arc_bytes: Option<u64>,
     ) -> anyhow::Result<Self> {
         if item_count > 0 && candidates.is_empty() {
             anyhow::bail!("local scheduler has no eligible device");
@@ -388,8 +393,18 @@ impl LocalBatchAdmission {
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
+            // A ZFS host's headroom already contains the evictable ARC; say
+            // so, and only when there is some, so every other host keeps the
+            // sentence it always had.
+            let arc = match host_reclaimable_zfs_arc_bytes {
+                Some(credit) if credit > 0 => format!(
+                    "; host headroom includes ~{:.1} GB evictable ZFS ARC",
+                    credit as f64 / 1_000_000_000.0
+                ),
+                _ => String::new(),
+            };
             anyhow::bail!(
-                "local scheduler cannot admit an engine within current GPU and host-memory headroom ({shortfall})"
+                "local scheduler cannot admit an engine within current GPU and host-memory headroom ({shortfall}{arc})"
             );
         }
         Ok(Self {
@@ -403,6 +418,7 @@ impl LocalBatchAdmission {
             active: Default::default(),
             resident_host_bytes: Default::default(),
             host_headroom_bytes,
+            host_reclaimable_zfs_arc_bytes,
             plan_version: 0,
         })
     }
@@ -534,6 +550,7 @@ impl LocalBatchAdmission {
                 headroom_bytes: self.host_headroom_bytes.saturating_sub(reserved),
                 sample_generation: 1,
                 ledger_sequence: 1,
+                reclaimable_zfs_arc_bytes: self.host_reclaimable_zfs_arc_bytes,
             },
             devices,
             work,
@@ -641,8 +658,8 @@ mod tests {
 
     #[test]
     fn local_batch_admission_supports_zero_one_and_arbitrary_device_counts() {
-        assert!(LocalBatchAdmission::new(&[], 1, 32 << 30).is_err());
-        assert!(LocalBatchAdmission::new(&[], 0, 32 << 30)
+        assert!(LocalBatchAdmission::new(&[], 1, 32 << 30, None).is_err());
+        assert!(LocalBatchAdmission::new(&[], 0, 32 << 30, None)
             .unwrap()
             .lease_ready()
             .unwrap()
@@ -651,7 +668,7 @@ mod tests {
         for count in [1_usize, 2, 8, 16, 64] {
             let item_count = count * 2 + 1;
             let mut admission =
-                LocalBatchAdmission::new(&candidates(count), item_count, 128 << 30).unwrap();
+                LocalBatchAdmission::new(&candidates(count), item_count, 128 << 30, None).unwrap();
             for ordinal in 0..count {
                 admission.owner_ready(ordinal).unwrap();
             }
@@ -672,7 +689,7 @@ mod tests {
 
     #[test]
     fn faster_owner_takes_next_global_item_instead_of_idling() {
-        let mut admission = LocalBatchAdmission::new(&candidates(2), 4, 32 << 30).unwrap();
+        let mut admission = LocalBatchAdmission::new(&candidates(2), 4, 32 << 30, None).unwrap();
         admission.owner_ready(0).unwrap();
         admission.owner_ready(1).unwrap();
         let opening = admission.lease_ready().unwrap();
@@ -689,7 +706,7 @@ mod tests {
 
     #[test]
     fn failed_owner_does_not_strand_unstarted_global_items() {
-        let mut admission = LocalBatchAdmission::new(&candidates(2), 4, 32 << 30).unwrap();
+        let mut admission = LocalBatchAdmission::new(&candidates(2), 4, 32 << 30, None).unwrap();
         admission.owner_ready(0).unwrap();
         admission.owner_ready(1).unwrap();
         let opening = admission.lease_ready().unwrap();
@@ -712,7 +729,7 @@ mod tests {
 
     #[test]
     fn transport_failure_requeues_the_same_item_on_a_surviving_ready_owner() {
-        let mut admission = LocalBatchAdmission::new(&candidates(2), 1, 32 << 30).unwrap();
+        let mut admission = LocalBatchAdmission::new(&candidates(2), 1, 32 << 30, None).unwrap();
         admission.owner_ready(0).unwrap();
         admission.owner_ready(1).unwrap();
         let failed = admission.lease_ready().unwrap().pop().unwrap();
@@ -726,7 +743,8 @@ mod tests {
 
     #[test]
     fn host_ram_admission_limits_only_current_leases_not_future_ownership() {
-        let mut admission = LocalBatchAdmission::new(&candidates(2), 2, (2 << 30) - 1).unwrap();
+        let mut admission =
+            LocalBatchAdmission::new(&candidates(2), 2, (2 << 30) - 1, None).unwrap();
         admission.owner_ready(0).unwrap();
         admission.owner_ready(1).unwrap();
         let first = admission.lease_ready().unwrap();
@@ -742,13 +760,38 @@ mod tests {
         );
     }
 
+    /// The forced-local refusal names the ZFS credit its headroom already
+    /// includes (#1439), and only when there is one.
+    #[test]
+    fn local_scheduler_refusal_names_the_evictable_arc() {
+        let devices = candidates(1);
+        let refusal =
+            |arc: Option<u64>| match LocalBatchAdmission::new(&devices, 1, (1 << 30) - 1, arc) {
+                Ok(_) => panic!("one byte short of the host charge must refuse"),
+                Err(error) => error.to_string(),
+            };
+        let zfs = refusal(Some(15_081_432_704));
+        assert!(
+            zfs.ends_with("; host headroom includes ~15.1 GB evictable ZFS ARC)"),
+            "{zfs}"
+        );
+        let plain = refusal(None);
+        assert!(!plain.contains("ZFS"), "{plain}");
+        assert!(plain.ends_with("headroom)"), "{plain}");
+        assert_eq!(
+            refusal(Some(0)),
+            plain,
+            "a cold ARC reads like any other host"
+        );
+    }
+
     #[test]
     fn single_item_uses_the_same_gpu_and_host_admission_path() {
         let mut devices = candidates(2);
         devices[0].available_vram_bytes = 7 << 30;
-        assert!(LocalBatchAdmission::new(&devices, 1, (1 << 30) - 1).is_err());
+        assert!(LocalBatchAdmission::new(&devices, 1, (1 << 30) - 1, None).is_err());
 
-        let mut admission = LocalBatchAdmission::new(&devices, 1, 2 << 30).unwrap();
+        let mut admission = LocalBatchAdmission::new(&devices, 1, 2 << 30, None).unwrap();
         admission.owner_ready(0).unwrap();
         admission.owner_ready(1).unwrap();
         assert_eq!(

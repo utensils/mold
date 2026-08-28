@@ -20,7 +20,11 @@ import {
   setQueueDevicePin,
   type QueuePlan,
 } from "@studio/api/queuePlan";
-import { hostMemoryLevel } from "@studio/lib/hostMemory";
+import {
+  hostMemoryLevel,
+  hostMemoryScheduleLabel,
+} from "@studio/lib/hostMemory";
+import { formatGB } from "../util/format";
 import {
   modelDisplayName,
   modelDisplayNameForId,
@@ -136,6 +140,10 @@ const telemetry = computed(() =>
 /** RAM pressure from the scheduler's ledger rather than used/total — a
  * reservation that has not allocated yet still parks the queue and the OS
  * cannot see it. Absent on older servers, which keeps the plain info bar. */
+const hostMemoryLabel = computed(() => {
+  const memory = queuePlan.value?.host_memory;
+  return memory ? hostMemoryScheduleLabel(memory, formatGB) : null;
+});
 const hostMemoryPressure = computed(() =>
   hostMemoryLevel(queuePlan.value?.host_memory),
 );
@@ -1039,6 +1047,7 @@ onBeforeUnmount(() => {
             :tone="ramTone"
             label="System RAM"
             :data-pressure="hostMemoryPressure ?? undefined"
+            :title="hostMemoryLabel ?? undefined"
           />
 
           <div class="md-tiles">

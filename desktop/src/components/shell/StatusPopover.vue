@@ -10,7 +10,7 @@ import { useToastStore } from "../../stores/toasts";
 import { apiJson } from "../../lib/api/client";
 import { gpuSnapshotsFromWorkers } from "../../lib/api/gpuStatus";
 import { sseStream } from "../../lib/api/sse";
-import { hostMemoryLevel } from "@studio/lib/hostMemory";
+import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
 import { formatGB, percent, vramLevel } from "../../lib/format";
 import { normalizeTargetHost, pickDisplayHost } from "../../lib/hosts";
 import { shouldRestartEmbeddedEngine } from "../../lib/connectionRecovery";
@@ -124,7 +124,7 @@ const ramToneClass = computed(() => {
 const ramTitle = computed(() => {
   const memory = hostMemory.value;
   if (!memory) return undefined;
-  return `${formatGB(memory.headroom_bytes)} of ${formatGB(memory.total_bytes)} available to schedule`;
+  return hostMemoryScheduleLabel(memory, formatGB, { withTotal: true });
 });
 const replanLabel = computed(() => {
   const deadline = queuePlan.value?.next_replan_at_unix_ms;

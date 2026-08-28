@@ -156,6 +156,16 @@ pub enum LeaseRejection {
     PlanInvalidated(crate::execution_plan::ExecutionPlanError),
 }
 
+/// The answer to a [`WorkerEvent::HostMemoryRecheck`]: this lease's headroom
+/// on a fresh ledger sample, beside the evictable ZFS ARC that SAME sample
+/// counted into it (#1439), so a dispatch refusal can name the credit it
+/// already includes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostHeadroomReply {
+    pub headroom_bytes: u64,
+    pub reclaimable_zfs_arc_bytes: Option<u64>,
+}
+
 pub enum WorkerEvent {
     Ready {
         device_id: String,
@@ -188,7 +198,7 @@ pub enum WorkerEvent {
     /// worker cannot spend headroom already promised to a peer GPU.
     HostMemoryRecheck {
         fence: LeaseFence,
-        reply: std::sync::mpsc::SyncSender<Result<u64, String>>,
+        reply: std::sync::mpsc::SyncSender<Result<HostHeadroomReply, String>>,
     },
     FollowupReady {
         work: Box<ScheduledOwnerWork>,
@@ -679,6 +689,9 @@ struct MemoryBlock {
     required_bytes: u64,
     /// The headroom that demand was compared against.
     headroom_bytes: u64,
+    /// Evictable ZFS ARC the SAME sample counted into `headroom_bytes`
+    /// (#1439); only a host block carries one, and only on ZFS.
+    reclaimable_zfs_arc_bytes: Option<u64>,
     reclaim: ReclaimAttempt,
 }
 
@@ -730,7 +743,7 @@ fn device_headroom_from_driver(ordinal: usize, backend: mold_core::GpuBackend) -
 fn host_headroom_from_system() -> u64 {
     let reading = SystemHostMemorySampler.sample();
     reading
-        .available_bytes
+        .spendable_bytes()
         .saturating_sub(host_safety_floor_bytes(reading.total_bytes))
 }
 
@@ -1143,7 +1156,28 @@ impl ReplanWindow {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HostMemoryReading {
     total_bytes: u64,
+    /// `MemAvailable` (or the OS estimate) alone — never the credit below.
     available_bytes: u64,
+    /// Evictable ZFS ARC the same sample counted (#1439); `None` off ZFS.
+    reclaimable_zfs_arc_bytes: Option<u64>,
+}
+
+impl HostMemoryReading {
+    fn from_ram(ram: &mold_core::RamSnapshot) -> Self {
+        Self {
+            total_bytes: ram.total,
+            available_bytes: ram.available_or_estimate(),
+            reclaimable_zfs_arc_bytes: ram.reclaimable_zfs_arc,
+        }
+    }
+
+    /// What the ledger spends: `MemAvailable` plus the evictable ARC credit,
+    /// which `RamSnapshot::with_zfs_arc_credit` already clamped to `total`.
+    fn spendable_bytes(&self) -> u64 {
+        self.available_bytes
+            .saturating_add(self.reclaimable_zfs_arc_bytes.unwrap_or(0))
+            .min(self.total_bytes)
+    }
 }
 
 trait HostMemorySampler: Send + Sync {
@@ -1154,13 +1188,7 @@ struct SystemHostMemorySampler;
 
 impl HostMemorySampler for SystemHostMemorySampler {
     fn sample(&self) -> HostMemoryReading {
-        let ram = crate::resources::ram_snapshot();
-        HostMemoryReading {
-            total_bytes: ram.total,
-            available_bytes: ram
-                .available
-                .unwrap_or_else(|| ram.total.saturating_sub(ram.used)),
-        }
+        HostMemoryReading::from_ram(&crate::resources::ram_snapshot())
     }
 }
 
@@ -1182,7 +1210,18 @@ struct MemorySample {
     generation: u64,
     collection_started_sequence: u64,
     total_bytes: u64,
+    /// `MemAvailable` alone; published on the wire under that meaning.
     available_bytes: u64,
+    /// Evictable ZFS ARC this sample counted into what it spends (#1439).
+    reclaimable_zfs_arc_bytes: Option<u64>,
+}
+
+impl MemorySample {
+    fn spendable_bytes(&self) -> u64 {
+        self.available_bytes
+            .saturating_add(self.reclaimable_zfs_arc_bytes.unwrap_or(0))
+            .min(self.total_bytes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1216,10 +1255,11 @@ impl HostMemoryLedger {
         self.sequence = self.sequence.saturating_add(1);
         let collection_started_sequence = self.sequence;
         let reading = self.sampler.sample();
-        self.publish_sample(
+        self.publish_sample_with_arc(
             collection_started_sequence,
             reading.total_bytes,
             reading.available_bytes,
+            reading.reclaimable_zfs_arc_bytes,
         );
     }
 
@@ -1229,11 +1269,29 @@ impl HostMemoryLedger {
         self.sequence
     }
 
+    /// A sample with no ZFS credit — every non-ZFS host, and the shape the
+    /// existing pins publish.
+    #[cfg(test)]
     fn publish_sample(
         &mut self,
         collection_started_sequence: u64,
         total_bytes: u64,
         available_bytes: u64,
+    ) {
+        self.publish_sample_with_arc(
+            collection_started_sequence,
+            total_bytes,
+            available_bytes,
+            None,
+        );
+    }
+
+    fn publish_sample_with_arc(
+        &mut self,
+        collection_started_sequence: u64,
+        total_bytes: u64,
+        available_bytes: u64,
+        reclaimable_zfs_arc_bytes: Option<u64>,
     ) {
         let generation = self
             .sample
@@ -1243,6 +1301,7 @@ impl HostMemoryLedger {
             collection_started_sequence,
             total_bytes,
             available_bytes,
+            reclaimable_zfs_arc_bytes,
         });
         // Only allocations committed before collection began are guaranteed
         // to be present in `available_bytes`. A concurrent/later commit stays
@@ -1284,10 +1343,17 @@ impl HostMemoryLedger {
         let Some(sample) = self.sample else {
             return 0;
         };
-        sample.available_bytes.saturating_sub(
+        sample.spendable_bytes().saturating_sub(
             self.safety_floor_bytes()
                 .saturating_add(self.bytes_accepted_after_sample_started()),
         )
+    }
+
+    /// The evictable ZFS ARC the current sample counted into its headroom
+    /// (#1439), for the messages and logs that name that headroom.
+    fn reclaimable_zfs_arc_bytes(&self) -> Option<u64> {
+        self.sample
+            .and_then(|sample| sample.reclaimable_zfs_arc_bytes)
     }
 
     fn headroom_for_reserved_work(&self, work_id: &str) -> Option<u64> {
@@ -1302,7 +1368,7 @@ impl HostMemoryLedger {
             .map(|(_, reservation)| reservation.bytes)
             .sum::<u64>();
         Some(
-            sample.available_bytes.saturating_sub(
+            sample.spendable_bytes().saturating_sub(
                 self.safety_floor_bytes()
                     .saturating_add(peer_reserved_bytes),
             ),
@@ -1324,6 +1390,7 @@ impl HostMemoryLedger {
             available_bytes: sample.available_bytes,
             headroom_bytes: self.headroom_bytes(),
             safety_floor_bytes: self.safety_floor_bytes(),
+            reclaimable_zfs_arc_bytes: sample.reclaimable_zfs_arc_bytes,
         })
     }
 
@@ -1332,6 +1399,7 @@ impl HostMemoryLedger {
             headroom_bytes: self.headroom_bytes(),
             sample_generation: self.sample.map_or(0, |sample| sample.generation),
             ledger_sequence: self.sequence,
+            reclaimable_zfs_arc_bytes: self.reclaimable_zfs_arc_bytes(),
         }
     }
 
@@ -2372,6 +2440,10 @@ impl Coordinator {
                 let result = if valid {
                     self.memory
                         .collect_headroom_for_reserved_work(&fence.work_id)
+                        .map(|headroom_bytes| HostHeadroomReply {
+                            headroom_bytes,
+                            reclaimable_zfs_arc_bytes: self.memory.reclaimable_zfs_arc_bytes(),
+                        })
                         .ok_or_else(|| {
                             "host-memory recheck lost the exact scheduler reservation".to_string()
                         })
@@ -3650,6 +3722,7 @@ impl Coordinator {
     /// host RAM, with the numbers the planner compared.
     fn record_memory_blocks(&mut self, snapshot: &PlannerSnapshot, plan: &Plan) {
         let headroom_bytes = snapshot.host_memory.headroom_bytes;
+        let host_reclaimable_zfs_arc_bytes = snapshot.host_memory.reclaimable_zfs_arc_bytes;
         let required_by_work = snapshot
             .work
             .iter()
@@ -3726,27 +3799,30 @@ impl Coordinator {
             })
             .collect::<BTreeMap<_, _>>();
         for (id, pending) in &mut self.pending {
-            let (kind, required_bytes, headroom_bytes) = if host_blocked.contains(id) {
-                (
-                    MemoryBlockKind::Host,
-                    required_by_work.get(id).copied().unwrap_or(0),
-                    headroom_bytes,
-                )
-            } else if let Some((required, available, kind)) = vram_blocked.get(id) {
-                (kind.clone(), *required, *available)
-            } else {
-                // A job the plan placed or left unblocked has no block; one
-                // the resolver kept out of the plan altogether keeps the block
-                // the resolver recorded for it.
-                if snapshot.work.iter().any(|work| work.id.as_str() == id) {
-                    pending.memory_block = None;
-                }
-                continue;
-            };
+            let (kind, required_bytes, headroom_bytes, reclaimable_zfs_arc_bytes) =
+                if host_blocked.contains(id) {
+                    (
+                        MemoryBlockKind::Host,
+                        required_by_work.get(id).copied().unwrap_or(0),
+                        headroom_bytes,
+                        host_reclaimable_zfs_arc_bytes,
+                    )
+                } else if let Some((required, available, kind)) = vram_blocked.get(id) {
+                    (kind.clone(), *required, *available, None)
+                } else {
+                    // A job the plan placed or left unblocked has no block; one
+                    // the resolver kept out of the plan altogether keeps the block
+                    // the resolver recorded for it.
+                    if snapshot.work.iter().any(|work| work.id.as_str() == id) {
+                        pending.memory_block = None;
+                    }
+                    continue;
+                };
             match pending.memory_block.as_mut() {
                 Some(block) if block.kind == kind => {
                     block.required_bytes = required_bytes;
                     block.headroom_bytes = headroom_bytes;
+                    block.reclaimable_zfs_arc_bytes = reclaimable_zfs_arc_bytes;
                 }
                 _ => {
                     tracing::warn!(
@@ -3755,12 +3831,14 @@ impl Coordinator {
                         memory = kind.noun(),
                         required_bytes,
                         headroom_bytes,
+                        reclaimable_zfs_arc_bytes,
                         "queued generation is blocked on memory"
                     );
                     pending.memory_block = Some(MemoryBlock {
                         kind,
                         required_bytes,
                         headroom_bytes,
+                        reclaimable_zfs_arc_bytes,
                         reclaim: ReclaimAttempt::NotStarted,
                     });
                 }
@@ -3810,6 +3888,7 @@ impl Coordinator {
                     kind,
                     required_bytes: shortfall.required_peak_bytes,
                     headroom_bytes: device.available_vram_bytes,
+                    reclaimable_zfs_arc_bytes: None,
                     reclaim: ReclaimAttempt::NotStarted,
                 });
             }
@@ -6739,6 +6818,7 @@ fn memory_shortfall_reason(pending: &PendingGeneration) -> Option<String> {
         outcome,
         block.required_bytes,
         block.headroom_bytes,
+        block.reclaimable_zfs_arc_bytes,
     ))
 }
 
@@ -8165,6 +8245,20 @@ mod tests {
         HostMemoryReading {
             total_bytes: total_gib << 30,
             available_bytes: available_gib << 30,
+            reclaimable_zfs_arc_bytes: None,
+        }
+    }
+
+    /// A ZFS host: `MemAvailable` beside the evictable ARC the same sample
+    /// counted (#1439).
+    fn memory_reading_with_arc(
+        total_gib: u64,
+        available_gib: u64,
+        arc_gib: u64,
+    ) -> HostMemoryReading {
+        HostMemoryReading {
+            reclaimable_zfs_arc_bytes: Some(arc_gib << 30),
+            ..memory_reading(total_gib, available_gib)
         }
     }
 
@@ -8173,8 +8267,116 @@ mod tests {
             reading: HostMemoryReading {
                 total_bytes,
                 available_bytes,
+                reclaimable_zfs_arc_bytes: None,
             },
         }))
+    }
+
+    fn sampled_memory_with_reading(reading: HostMemoryReading) -> HostMemoryLedger {
+        let mut memory = HostMemoryLedger::new(Arc::new(FixedHostMemorySampler { reading }));
+        memory.collect_now();
+        memory
+    }
+
+    /// The ledger spends `MemAvailable + evictable ARC` and publishes both
+    /// halves separately: `available_bytes` stays `MemAvailable` for every
+    /// client, and the credit rides beside it under its own name.
+    #[test]
+    fn the_ledger_spends_available_plus_evictable_arc_and_publishes_both() {
+        const GIB: u64 = 1 << 30;
+        let mut memory = sampled_memory_with_reading(memory_reading_with_arc(64, 20, 8));
+        let floor = host_safety_floor_bytes(64 * GIB);
+        assert_eq!(floor, (64 * GIB * 15) / 100);
+        assert_eq!(memory.headroom_bytes(), 28 * GIB - floor);
+        let wire = memory.wire_snapshot().expect("sampled");
+        assert_eq!(wire.available_bytes, 20 * GIB, "MemAvailable is untouched");
+        assert_eq!(wire.reclaimable_zfs_arc_bytes, Some(8 * GIB));
+        assert_eq!(wire.headroom_bytes, 28 * GIB - floor);
+        assert_eq!(memory.snapshot().reclaimable_zfs_arc_bytes, Some(8 * GIB));
+
+        memory.reservations.insert(
+            "peer".to_string(),
+            HostReservation {
+                bytes: 4 * GIB,
+                state: ReservationState::Reserved,
+                charge_until_release: true,
+            },
+        );
+        memory.reservations.insert(
+            "mine".to_string(),
+            HostReservation {
+                bytes: 2 * GIB,
+                state: ReservationState::Reserved,
+                charge_until_release: true,
+            },
+        );
+        assert_eq!(
+            memory.headroom_for_reserved_work("mine"),
+            Some(28 * GIB - floor - 4 * GIB),
+            "the recheck spends the credit too, minus peers only"
+        );
+
+        let plain = sampled_memory_with_reading(memory_reading(64, 20));
+        assert_eq!(plain.headroom_bytes(), 20 * GIB - floor);
+        assert_eq!(
+            plain.wire_snapshot().unwrap().reclaimable_zfs_arc_bytes,
+            None
+        );
+        assert_eq!(plain.snapshot().reclaimable_zfs_arc_bytes, None);
+    }
+
+    /// hal9000, 2026-08-27 (#1439): the Ref2VA print's 32.78 GB host charge
+    /// against MemAvailable 36.27 GB on a 67.15 GB host was refused at
+    /// 26.20 GB of headroom while 15.08 GB of evictable ARC sat beside it.
+    #[test]
+    fn hal9000_ref2va_host_charge_fits_the_ledger_once_evictable_arc_counts() {
+        const REQUIRED: u64 = 32_775_178_178;
+        let zfs = sampled_memory_with_reading(HostMemoryReading {
+            total_bytes: 67_149_967_360,
+            available_bytes: 36_272_495_104,
+            reclaimable_zfs_arc_bytes: Some(15_081_432_704),
+        });
+        assert_eq!(zfs.headroom_bytes(), 41_281_432_704);
+        assert!(zfs.headroom_bytes() >= REQUIRED);
+
+        let blind = sampled_memory_with_reading(HostMemoryReading {
+            total_bytes: 67_149_967_360,
+            available_bytes: 36_272_495_104,
+            reclaimable_zfs_arc_bytes: None,
+        });
+        assert_eq!(blind.headroom_bytes(), 26_200_000_000);
+        assert!(blind.headroom_bytes() < REQUIRED);
+    }
+
+    /// One `RamSnapshot`, three readers, one figure: the ledger, H3
+    /// admission, and the snapshot's own method must agree byte for byte,
+    /// and none of them may touch `MemAvailable`.
+    #[test]
+    fn the_credit_is_added_exactly_once_across_ledger_and_h3() {
+        let ram = mold_core::RamSnapshot {
+            total: 67_149_967_360,
+            used: 30_000_000_000,
+            available: Some(36_272_495_104),
+            reclaimable_zfs_arc: None,
+            used_by_mold: 1_000_000_000,
+            used_by_other: 29_000_000_000,
+        }
+        .with_zfs_arc_credit(Some(15_081_432_704));
+        let ledger = HostMemoryReading::from_ram(&ram);
+        let h3 = crate::h3_admission::H3HostMemory::from_ram(&ram);
+        assert_eq!(ledger.spendable_bytes(), ram.available_with_evictable_arc());
+        assert_eq!(h3.spendable_bytes(), ram.available_with_evictable_arc());
+        assert_eq!(ledger.spendable_bytes(), 51_353_927_808);
+        assert_eq!(ledger.available_bytes, ram.available.unwrap());
+        assert_eq!(h3.available_bytes, ram.available.unwrap());
+        assert_eq!(ledger.reclaimable_zfs_arc_bytes, Some(15_081_432_704));
+        assert_eq!(h3.reclaimable_zfs_arc_bytes, Some(15_081_432_704));
+        let floor = host_safety_floor_bytes(ram.total);
+        assert_eq!(
+            h3.headroom_bytes(),
+            ram.available_with_evictable_arc() - floor,
+            "H3's floor arithmetic lands on the same headroom"
+        );
     }
 
     fn sampled_memory(total_bytes: u64, available_bytes: u64) -> HostMemoryLedger {
@@ -9553,6 +9755,7 @@ mod tests {
                 total: 128 << 30,
                 used: 1 << 30,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 1 << 30,
             },
@@ -10398,6 +10601,7 @@ mod tests {
                     total: 128 << 30,
                     used: 1 << 30,
                     available: None,
+                    reclaimable_zfs_arc: None,
                     used_by_mold: 1 << 30,
                     used_by_other: 0,
                 },
@@ -10474,6 +10678,7 @@ mod tests {
             "cuda:0",
             15_300_615_032,
             8_869_770_650,
+            None,
         );
         assert!(reason.contains("host"), "{reason}");
         assert!(reason.contains("15300615032"), "{reason}");
@@ -10563,6 +10768,7 @@ mod tests {
                 available_bytes: 40 << 30,
                 headroom_bytes: 20 << 30,
                 safety_floor_bytes: 10 << 30,
+                reclaimable_zfs_arc_bytes: None,
             }),
             ..Default::default()
         };
@@ -10572,6 +10778,7 @@ mod tests {
                 available_bytes: 12 << 30,
                 headroom_bytes: 0,
                 safety_floor_bytes: 10 << 30,
+                reclaimable_zfs_arc_bytes: None,
             }),
             ..base.clone()
         };
@@ -11179,6 +11386,7 @@ mod tests {
                 total: 64 << 30,
                 used: 8 << 30,
                 available: Some(56 << 30),
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },
@@ -11309,6 +11517,7 @@ mod tests {
                 total: 128 << 30,
                 used: 1 << 30,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 1 << 30,
             },
@@ -11493,6 +11702,7 @@ mod tests {
                 total: 128 * GIB,
                 used: GIB,
                 available: Some(127 * GIB),
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: GIB,
             },
@@ -11606,6 +11816,7 @@ mod tests {
                 total: 128 << 30,
                 used: 1 << 30,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 1 << 30,
             },
@@ -14906,6 +15117,7 @@ mod tests {
                 total: 128 << 30,
                 used: 1 << 30,
                 available: Some(127 << 30),
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 1 << 30,
             },
@@ -17386,6 +17598,7 @@ mod tests {
                         headroom_bytes: 64 << 30,
                         sample_generation: 1,
                         ledger_sequence: 1,
+                        reclaimable_zfs_arc_bytes: None,
                     },
                     devices: devices.clone(),
                     work: vec![work.clone()],
@@ -17430,6 +17643,7 @@ mod tests {
                         headroom_bytes: 64 << 30,
                         sample_generation: 2,
                         ledger_sequence: 2,
+                        reclaimable_zfs_arc_bytes: None,
                     },
                     devices: busy_devices,
                     work: vec![busy_work],
@@ -17482,6 +17696,7 @@ mod tests {
                     headroom_bytes: 12 << 30,
                     sample_generation: 1,
                     ledger_sequence: 1,
+                    reclaimable_zfs_arc_bytes: None,
                 },
                 devices: devices.clone(),
                 work: work.clone(),
@@ -17501,6 +17716,7 @@ mod tests {
                     headroom_bytes: 0,
                     sample_generation: 0,
                     ledger_sequence: 0,
+                    reclaimable_zfs_arc_bytes: None,
                 },
                 devices,
                 work,

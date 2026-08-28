@@ -657,8 +657,12 @@ async fn run_chain_local(
         req.fps,
     );
     let local_plan = plan_local_batch(&planning_request, &effective_config, &overrides).await?;
-    let mut admission =
-        LocalBatchAdmission::new(&local_plan.candidates, 1, local_plan.host_headroom_bytes)?;
+    let mut admission = LocalBatchAdmission::new(
+        &local_plan.candidates,
+        1,
+        local_plan.host_headroom_bytes,
+        local_plan.host_reclaimable_zfs_arc_bytes,
+    )?;
     for candidate in &local_plan.candidates {
         admission.owner_ready(candidate.ordinal)?;
     }

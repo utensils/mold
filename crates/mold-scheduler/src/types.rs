@@ -538,6 +538,10 @@ pub struct HostMemorySnapshot {
     pub headroom_bytes: u64,
     pub sample_generation: u64,
     pub ledger_sequence: u64,
+    /// Evictable ZFS ARC counted into `headroom_bytes` by the SAME sample
+    /// (#1439), so a block recorded against this headroom can name the
+    /// credit that headroom already contains. `None` off ZFS.
+    pub reclaimable_zfs_arc_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -571,6 +575,7 @@ impl PlannerSnapshot {
                 headroom_bytes: host_headroom_bytes,
                 sample_generation: 0,
                 ledger_sequence: 0,
+                reclaimable_zfs_arc_bytes: None,
             },
             devices,
             work,

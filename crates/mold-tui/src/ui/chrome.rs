@@ -517,6 +517,7 @@ mod tests {
             available_bytes: 48 * 1024_u64.pow(3),
             headroom_bytes,
             safety_floor_bytes: 10 * 1024_u64.pow(3),
+            reclaimable_zfs_arc_bytes: None,
         }
     }
 

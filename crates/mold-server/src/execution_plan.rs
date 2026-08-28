@@ -1711,8 +1711,8 @@ fn resolve_private_h3_execution_plans(
         ));
     }
     let eligible = eligible_devices_for_private_h3(config, request, devices)?;
-    let available_host_headroom_bytes =
-        crate::h3_admission::current_h3_host_memory().headroom_bytes();
+    let host = crate::h3_admission::current_h3_host_memory();
+    let available_host_headroom_bytes = host.headroom_bytes();
     let mut plans = Vec::new();
     let mut rejections = Vec::new();
     let mut host_shortfall: Option<String> = None;
@@ -1742,6 +1742,7 @@ fn resolve_private_h3_execution_plans(
                     &device.id,
                     required_host_bytes,
                     available_host_headroom_bytes,
+                    host.reclaimable_zfs_arc_bytes,
                 )
             });
             continue;
@@ -1873,14 +1874,25 @@ fn resolve_private_h3_execution_plans(
 /// staleness, and the whole point of #1218's honest refusals is that a user can
 /// read the shortfall and act on it.
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+///
+/// `reclaimable_zfs_arc_bytes` is the evictable ZFS ARC the SAME sample
+/// counted into `available_host_headroom_bytes` (#1439); a positive credit is
+/// named so the figure already includes everything the kernel would drain.
 pub(crate) fn h3_host_headroom_shortfall_reason(
     device_id: &str,
     required_host_bytes: u64,
     available_host_headroom_bytes: u64,
+    reclaimable_zfs_arc_bytes: Option<u64>,
 ) -> String {
+    let clause = match reclaimable_zfs_arc_bytes {
+        Some(credit) if credit > 0 => {
+            format!(" (the sample includes {credit} bytes of evictable ZFS ARC)")
+        }
+        _ => String::new(),
+    };
     format!(
         "MiniMax H3 host-memory capacity changed after private admission: {device_id} needs \
-         {required_host_bytes} host bytes but only {available_host_headroom_bytes} are available"
+         {required_host_bytes} host bytes but only {available_host_headroom_bytes} are available{clause}"
     )
 }
 
@@ -4649,6 +4661,36 @@ mod tests {
         GenerationReferenceProvenance, ModelConfig,
     };
     use tempfile::TempDir;
+
+    /// The H3 host shortfall names the evictable ZFS ARC its sample already
+    /// counted (#1439), and stays byte-identical for every other host.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn h3_host_headroom_shortfall_reason_names_the_evictable_arc() {
+        let plain =
+            h3_host_headroom_shortfall_reason("cuda:0", 32_775_178_178, 26_200_000_000, None);
+        assert_eq!(
+            plain,
+            "MiniMax H3 host-memory capacity changed after private admission: cuda:0 needs \
+             32775178178 host bytes but only 26200000000 are available"
+        );
+        assert_eq!(
+            h3_host_headroom_shortfall_reason("cuda:0", 32_775_178_178, 26_200_000_000, Some(0)),
+            plain,
+            "a cold ARC on a ZFS host reads like any other host"
+        );
+        assert_eq!(
+            h3_host_headroom_shortfall_reason(
+                "cuda:0",
+                45_000_000_000,
+                41_281_432_704,
+                Some(15_081_432_704),
+            ),
+            "MiniMax H3 host-memory capacity changed after private admission: cuda:0 needs \
+             45000000000 host bytes but only 41281432704 are available (the sample includes \
+             15081432704 bytes of evictable ZFS ARC)"
+        );
+    }
 
     #[test]
     fn packed_gemma4_safetensors_are_streamed_weights() {
