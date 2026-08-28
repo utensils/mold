@@ -178,7 +178,12 @@ mod tests {
     fn gradient(w: u32, h: u32, alpha: bool) -> image::DynamicImage {
         if alpha {
             image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(w, h, |x, y| {
-                image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, if x < w / 2 { 255 } else { 0 }])
+                image::Rgba([
+                    (x % 256) as u8,
+                    (y % 256) as u8,
+                    128,
+                    if x < w / 2 { 255 } else { 0 },
+                ])
             }))
         } else {
             image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {

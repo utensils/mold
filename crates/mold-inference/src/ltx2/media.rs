@@ -1117,7 +1117,11 @@ mod tests {
     fn first_frame_extraction_stops_after_frame_zero() {
         let mut frames = Vec::new();
         for i in 0..30u8 {
-            frames.push(ImageBuffer::from_pixel(64, 64, Rgb([i * 8, 40, 200 - i * 4])));
+            frames.push(ImageBuffer::from_pixel(
+                64,
+                64,
+                Rgb([i * 8, 40, 200 - i * 4]),
+            ));
         }
         let (_dir, path) = write_mp4(&frames, 12).unwrap();
         let mut checkpoints = 0usize;
@@ -1127,8 +1131,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!((frame.width(), frame.height()), (64, 64));
+        // openh264 needs a few samples in flight before it emits frame 0, and
+        // the loop checkpoints once per sample read; eight is well under the
+        // thirty-plus a full decode costs.
         assert!(
-            checkpoints <= 4,
+            checkpoints <= 8,
             "first-frame extraction checkpointed {checkpoints} times — it decoded past frame 0"
         );
         // The full decode is the yardstick the bound is measured against.
