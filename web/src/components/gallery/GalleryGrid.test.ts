@@ -43,6 +43,60 @@ describe("GalleryGrid", () => {
     delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
   });
 
+  it("mounts only the viewport's rows plus overscan at 2 000 prints", async () => {
+    // happy-dom lays nothing out; give the grid a 1200×800 viewport.
+    const rect = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "getBoundingClientRect",
+    );
+    Object.defineProperty(Element.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 1200,
+        bottom: 800,
+        width: 1200,
+        height: 800,
+        toJSON: () => ({}),
+      }),
+    });
+    const innerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 800,
+    });
+    try {
+      const entries: GalleryImage[] = [];
+      for (let i = 0; i < 2_000; i++) {
+        entries.push({
+          filename: `print-${i}.png`,
+          timestamp: 1_700_000_000 - i,
+          format: "png",
+          metadata: meta({ seed: i }),
+        });
+      }
+      const wrapper = mount(GalleryGrid, {
+        props: { entries, loading: false, thumbnailSize: 220 },
+      });
+      await wrapper.vm.$nextTick();
+      const cells = wrapper.findAll(".gg__cell").length;
+      expect(cells).toBeGreaterThan(0);
+      // ~5 columns × (4 visible + 2×2 overscan rows) — never the whole list.
+      expect(cells).toBeLessThanOrEqual(80);
+      wrapper.unmount();
+    } finally {
+      if (rect)
+        Object.defineProperty(Element.prototype, "getBoundingClientRect", rect);
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        value: innerHeight,
+      });
+    }
+  });
+
   it("renders a tile per entry", () => {
     const wrapper = mount(GalleryGrid, {
       props: { entries: [image, video], loading: false },

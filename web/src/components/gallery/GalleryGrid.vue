@@ -29,6 +29,7 @@ import { mediaKind } from "../../types";
 import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import { purgeCountdownFromPurgeAt } from "@studio/lib/libraryOrganization";
 import { virtualGridWindow } from "@studio/lib/virtualGrid";
+import type { ThumbnailPriority } from "@studio/lib/thumbnailScheduler";
 
 const props = withDefaults(
   defineProps<{
@@ -120,6 +121,26 @@ const visibleEntries = computed(() => {
     gridWindow.value.endIndex,
   );
 });
+
+/** The on-screen band inside the window (the rest is overscan): tiles in
+ *  it request their thumbnail at `visible`, the overscan rows at `near`. */
+const onScreenRange = computed(() => {
+  const { columns, rowStep } = gridWindow.value;
+  if (containerWidth.value <= 0 || rowStep <= 0) {
+    return { start: 0, end: Number.MAX_SAFE_INTEGER };
+  }
+  const firstRow = Math.floor(viewportStart.value / rowStep);
+  const lastRow = Math.ceil(
+    (viewportStart.value + viewportSize.value) / rowStep,
+  );
+  return { start: firstRow * columns, end: lastRow * columns };
+});
+
+function tilePriority(offset: number): ThumbnailPriority {
+  const index = gridWindow.value.startIndex + offset;
+  const { start, end } = onScreenRange.value;
+  return index >= start && index < end ? "visible" : "near";
+}
 
 function measureWindow() {
   frame = 0;
@@ -348,7 +369,7 @@ onBeforeUnmount(() => {
           :style="{ transform: `translateY(${gridWindow.offset}px)` }"
         >
           <div
-            v-for="entry in visibleEntries"
+            v-for="(entry, offset) in visibleEntries"
             :key="keyOf(entry)"
             class="gg__cell"
             :data-filename="entry.filename"
@@ -357,7 +378,7 @@ onBeforeUnmount(() => {
             @contextmenu.prevent="onContextMenu(entry, $event)"
           >
             <MediaTile
-              :src="tileSrc(entry)"
+              :src="tileSrc(entry, tilePriority(offset))"
               :alt="entry.metadata.prompt || entry.filename"
               :fresh="fresh.has(keyOf(entry))"
               @open="onTileOpen(entry)"

@@ -17,6 +17,13 @@
  * registry, so it always uses plain relative URLs — exactly today's behaviour.
  * Mirrors the desktop app's desktop/src/lib/gallery/media.ts contract.
  */
+import {
+  persistentThumbnailKey,
+  persistentThumbnailStore,
+  thumbnailRenditionQuery,
+  thumbnailTier,
+  type PersistentThumbnailStore,
+} from "@studio/lib/thumbnailPersistentCache";
 import { ORIGIN_HOST_ID, type HostEntry } from "./hostRegistry";
 
 /** Blob object-URL cache, keyed by `${hostId}|${path}`. Ticket URLs are not
@@ -30,12 +37,36 @@ interface CachedThumbnail {
 const THUMBNAIL_CACHE_ENTRIES = 512;
 const THUMBNAIL_CACHE_BYTES = 64 * 1024 * 1024;
 const cache = new Map<string, CachedThumbnail>();
+/** Sum of settled entries' bytes, kept incrementally (summing the whole map
+ *  per insert made every tile load O(cache)). */
+let retainedBytes = 0;
+
+/**
+ * Authenticated hosts' tiles persist in the Cache API (secure contexts
+ * only; `null` on a plain-http origin), so a reload paints the grid without
+ * one request per tile. Resolved lazily and once per page.
+ */
+let persistent: PersistentThumbnailStore | null | undefined;
+function persistentStore(): PersistentThumbnailStore | null {
+  persistent ??= persistentThumbnailStore();
+  return persistent;
+}
 
 const keyOf = (hostId: string, path: string) => `${hostId}|${path}`;
 
+/**
+ * The tile path. `?v=` carries the content version so a rewritten print is a
+ * different URL to the browser's own HTTP cache (keyless hosts load this
+ * directly); the rendition query asks a current server for the display's
+ * tier as JPEG, which an older server ignores.
+ */
 export function thumbnailPath(filename: string, mediaVersion?: string): string {
   const path = `/api/gallery/thumbnail/${encodeURIComponent(filename)}`;
-  return mediaVersion ? `${path}?v=${encodeURIComponent(mediaVersion)}` : path;
+  const params = [
+    mediaVersion ? `v=${encodeURIComponent(mediaVersion)}` : null,
+    thumbnailRenditionQuery(),
+  ].filter((p): p is string => p !== null);
+  return `${path}?${params.join("&")}`;
 }
 
 export function mediaPath(filename: string): string {
@@ -48,8 +79,12 @@ export function hostMediaBase(host: HostEntry): string {
 }
 
 /** Direct (keyless) URL for a host's thumbnail — relative for the origin. */
-export function directThumbnailUrl(host: HostEntry, filename: string): string {
-  return `${hostMediaBase(host)}${thumbnailPath(filename)}`;
+export function directThumbnailUrl(
+  host: HostEntry,
+  filename: string,
+  mediaVersion?: string,
+): string {
+  return `${hostMediaBase(host)}${thumbnailPath(filename, mediaVersion)}`;
 }
 
 /** Direct (keyless) URL for a host's full-size media — relative for the origin. */
@@ -71,7 +106,17 @@ async function fetchAuthedObjectUrl(
   host: HostEntry,
   path: string,
   signal?: AbortSignal,
+  persistentKey?: string,
 ): Promise<{ url: string; bytes: number }> {
+  const store = persistentKey ? persistentStore() : null;
+  if (store && persistentKey) {
+    const stored = await store.get(persistentKey);
+    if (stored) {
+      if (signal?.aborted)
+        throw new DOMException("Thumbnail cancelled", "AbortError");
+      return { url: URL.createObjectURL(stored), bytes: stored.size };
+    }
+  }
   const res = await fetch(`${hostMediaBase(host)}${path}`, {
     headers: authHeaders(host),
     signal,
@@ -80,6 +125,7 @@ async function fetchAuthedObjectUrl(
   const blob = await res.blob();
   if (signal?.aborted)
     throw new DOMException("Thumbnail cancelled", "AbortError");
+  if (store && persistentKey) void store.put(persistentKey, blob);
   return { url: URL.createObjectURL(blob), bytes: blob.size };
 }
 
@@ -104,7 +150,9 @@ export async function fetchGalleryThumbnailBlob(
   host: HostEntry,
   filename: string,
 ): Promise<Blob> {
-  const path = thumbnailPath(filename);
+  // The exact artifact (a video poster / audio waveform), not a grid
+  // rendition — no rendition query here.
+  const path = `/api/gallery/thumbnail/${encodeURIComponent(filename)}`;
   const res = await fetch(`${hostMediaBase(host)}${path}`, {
     headers: authHeaders(host),
   });
@@ -135,21 +183,37 @@ export function resolveThumbnailSrc(
       bytes: null,
       settled: false,
     };
-    entry.url = fetchAuthedObjectUrl(host, path, options.signal).then(
-      ({ url, bytes }) => {
-        entry.bytes = bytes;
+    // Only a print with a content version may persist: a "legacy" key would
+    // pin stale bytes across reloads forever.
+    const persistentKey = options.mediaVersion
+      ? persistentThumbnailKey(
+          host.id,
+          filename,
+          options.mediaVersion,
+          thumbnailTier(),
+        )
+      : undefined;
+    entry.url = fetchAuthedObjectUrl(
+      host,
+      path,
+      options.signal,
+      persistentKey,
+    ).then(({ url, bytes }) => {
+      if (cache.get(key) !== entry) {
         entry.settled = true;
-        if (cache.get(key) !== entry) URL.revokeObjectURL(url);
-        else trimThumbnailCache();
-        return url;
-      },
-    );
+        URL.revokeObjectURL(url);
+      } else {
+        settleThumbnail(entry, bytes);
+        trimThumbnailCache();
+      }
+      return url;
+    });
     cached = entry;
     cache.set(key, entry);
     trimThumbnailCache();
     entry.url.catch(() => {
+      if (cache.get(key) === entry) dropThumbnail(key, entry);
       entry.settled = true;
-      if (cache.get(key) === entry) cache.delete(key);
     });
   } else {
     cache.delete(key);
@@ -158,19 +222,33 @@ export function resolveThumbnailSrc(
   return cached.url;
 }
 
+function settleThumbnail(entry: CachedThumbnail, bytes: number): void {
+  entry.bytes = bytes;
+  entry.settled = true;
+  retainedBytes += bytes;
+}
+
+function dropThumbnail(key: string, entry: CachedThumbnail): void {
+  cache.delete(key);
+  if (entry.settled) retainedBytes -= entry.bytes ?? 0;
+}
+
 function trimThumbnailCache(): void {
-  let retainedBytes = 0;
-  for (const entry of cache.values()) retainedBytes += entry.bytes ?? 0;
   while (
     cache.size > THUMBNAIL_CACHE_ENTRIES ||
     retainedBytes > THUMBNAIL_CACHE_BYTES
   ) {
-    const oldest = [...cache].find(([, entry]) => entry.settled);
+    // Map order is recency order; the first settled entry is the oldest.
+    let oldest: [string, CachedThumbnail] | null = null;
+    for (const candidate of cache) {
+      if (candidate[1].settled) {
+        oldest = candidate;
+        break;
+      }
+    }
     if (!oldest) break;
-    const [key, entry] = oldest;
-    cache.delete(key);
-    retainedBytes -= entry.bytes ?? 0;
-    void entry.url.then(revokeIfObjectUrl).catch(() => {});
+    dropThumbnail(oldest[0], oldest[1]);
+    void oldest[1].url.then(revokeIfObjectUrl).catch(() => {});
   }
 }
 
@@ -224,11 +302,13 @@ export async function resolveStreamableSrc(
 /** Drop every cached object URL for one host (e.g. host removed / refetched). */
 export function evictHostMedia(hostId: string): void {
   const prefix = `${hostId}|`;
-  for (const [key, cached] of [...cache]) {
+  // Deleting the current entry during Map iteration is well-defined.
+  for (const [key, cached] of cache) {
     if (!key.startsWith(prefix)) continue;
-    cache.delete(key);
+    dropThumbnail(key, cached);
     void cached.url.then((u) => revokeIfObjectUrl(u)).catch(() => {});
   }
+  void persistentStore()?.evictPrefix(prefix);
 }
 
 function revokeIfObjectUrl(url: string): void {
@@ -241,4 +321,6 @@ export function __resetGalleryMediaForTests(): void {
     void cached.url.then(revokeIfObjectUrl).catch(() => {});
   }
   cache.clear();
+  retainedBytes = 0;
+  persistent = undefined;
 }

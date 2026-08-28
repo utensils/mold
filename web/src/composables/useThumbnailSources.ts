@@ -10,6 +10,7 @@ import { onBeforeUnmount, reactive } from "vue";
 import {
   galleryThumbnailScheduler,
   type ThumbnailHandle,
+  type ThumbnailPriority,
 } from "@studio/lib/thumbnailScheduler";
 import { thumbnailUrl } from "../api";
 import { getHost } from "../lib/hostRegistry";
@@ -27,7 +28,13 @@ export function useThumbnailSources(maxResolvedSources = 320) {
   // transient host error must not blank the tile forever (codex review).
   const requested = new Map<string, ThumbnailHandle<string>>();
 
-  function srcFor(entry: GalleryImage): string {
+  /** `priority` is `visible` for on-screen tiles and `near` for the overscan
+   *  band; a queued request is promoted (never demoted) when a tile scrolls
+   *  into view, so a fast scroll never starves what is actually shown. */
+  function srcFor(
+    entry: GalleryImage,
+    priority: ThumbnailPriority = "visible",
+  ): string {
     const id = (entry as { hostId?: string }).hostId;
     const host = id ? getHost(id) : null;
     if (!host) return thumbnailUrl(entry.filename);
@@ -47,11 +54,14 @@ export function useThumbnailSources(maxResolvedSources = 320) {
       recency.set(key, true);
       return resolved;
     }
-    if (!requested.has(key)) {
+    const pending = requested.get(key);
+    if (pending) {
+      pending.setPriority(priority);
+    } else {
       const handle = galleryThumbnailScheduler.schedule({
         key: `${host.id}|${entry.filename}|${mediaVersion}`,
         hostKey: host.id,
-        priority: "visible",
+        priority,
         run: (signal) =>
           resolveThumbnailSrc(host, entry.filename, { signal, mediaVersion }),
       });
