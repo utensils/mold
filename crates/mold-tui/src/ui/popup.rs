@@ -1581,6 +1581,8 @@ mod tests {
             history: crate::history::PromptHistory::load(),
             layout: crate::app::LayoutAreas::default(),
             server_process: None,
+            session_api_key_host_id: None,
+            strict_gallery_authority: false,
             upscale_in_progress: false,
             upscale_task: None,
             upscale_tile_progress: None,

@@ -32,8 +32,8 @@ pub fn cached_image_path(host_id: &str, filename: &str) -> PathBuf {
 
 /// Scan one remote host's gallery via its API. Returns `None` when the
 /// host is unreachable (or `origin` has no URL) so the caller can count
-/// it as offline without failing the merged scan. Honors the host's
-/// saved API key.
+/// it as offline without failing the merged scan. Honors the host's saved API
+/// key or the ephemeral key supplied by the command that launched this TUI.
 pub async fn scan_images_from_server(origin: &GalleryOrigin) -> Option<Vec<GalleryEntry>> {
     let url = origin.url.as_deref()?;
     let api_key = crate::hosts::api_key_for(&origin.host_id);
@@ -311,7 +311,8 @@ pub(crate) fn is_loopback_url(url: &str) -> bool {
 /// A connected **loopback** server collapses into the this-machine
 /// source: its gallery is authoritative for the local output dir (the
 /// pre-merge behavior), so this machine is scanned through it over HTTP —
-/// with a directory-walk fallback if the server stops answering.
+/// with a directory-walk fallback only for ordinary TUI launches. Focused
+/// strict Library launches disable that fallback in [`scan_all_hosts`].
 pub(crate) fn scan_sources(
     server_url: Option<&str>,
     registry: &HostRegistry,
@@ -358,7 +359,7 @@ pub(crate) fn scan_sources(
 /// nothing and is counted in `offline_hosts`; the this-machine source
 /// never goes offline — if its loopback server stops answering, it falls
 /// back to walking the output directory.
-pub async fn scan_all_hosts(sources: Vec<GalleryOrigin>) -> MergedScan {
+pub async fn scan_all_hosts(sources: Vec<GalleryOrigin>, allow_local_fallback: bool) -> MergedScan {
     let mut handles = Vec::with_capacity(sources.len());
     for origin in sources {
         handles.push(tokio::spawn(async move {
@@ -368,6 +369,13 @@ pub async fn scan_all_hosts(sources: Vec<GalleryOrigin>) -> MergedScan {
                         return SourceScan {
                             origin,
                             entries: Some(entries),
+                            local_trash_available: false,
+                        };
+                    }
+                    if !allow_local_fallback {
+                        return SourceScan {
+                            origin,
+                            entries: None,
                             local_trash_available: false,
                         };
                     }
@@ -1121,6 +1129,19 @@ mod tests {
             entries: Some(vec![local_entry("a.png", 1)]),
             local_trash_available: false,
         }]);
+        assert!(!merged.local_trash_available);
+    }
+
+    #[tokio::test]
+    async fn strict_loopback_scan_never_falls_back_to_disk() {
+        let origin = GalleryOrigin {
+            host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+            url: Some("http://127.0.0.1:1".to_string()),
+            name: crate::hosts::local_display_name().to_string(),
+        };
+        let merged = scan_all_hosts(vec![origin], false).await;
+        assert!(merged.entries.is_empty());
+        assert_eq!(merged.offline_hosts, 0, "this-machine is not a remote host");
         assert!(!merged.local_trash_available);
     }
 

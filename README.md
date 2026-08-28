@@ -188,6 +188,16 @@ mold queue retry --held         # resume every retryable hold
 mold queue cancel --all --yes   # clear the backlog; running work finishes
 ```
 
+Browse and organize that host's existing prints with `mold library`:
+
+```bash
+mold library list --tag portrait --favorite
+mold library show print.png --preview
+mold library tag add print.png --tag selected
+mold library collection add Portfolio print.png
+mold library grid
+```
+
 Install Mold's embedded Agent Skill for your coding agent:
 
 ```bash
