@@ -22,7 +22,10 @@ import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
-import { hostMemoryLevel } from "@studio/lib/hostMemory";
+import {
+  hostMemoryLevel,
+  hostMemoryScheduleLabel,
+} from "@studio/lib/hostMemory";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { gpuSnapshotsFromStatus } from "../lib/api/gpuStatus";
@@ -174,7 +177,7 @@ const unifiedMemory = computed(() => unifiedMemoryHost(gpus.value));
 const hostMemoryPressure = computed(() => hostMemoryLevel(queuePlan.value?.host_memory));
 const hostMemoryLabel = computed(() => {
   const memory = queuePlan.value?.host_memory;
-  return memory ? `${formatGB(memory.headroom_bytes)} available to schedule` : null;
+  return memory ? hostMemoryScheduleLabel(memory, formatGB) : null;
 });
 const disk = computed(() => status.value?.models_disk ?? null);
 const h3Host = computed(() => [

@@ -95,14 +95,24 @@ impl HostReclaimOutcome {
 /// who is told "12.40 GB available" after mold already handed back everything
 /// it could is reading an actionable figure, where the pre-eviction one would
 /// send them hunting for memory mold was still holding.
+///
+/// `reclaimable_zfs_arc_bytes` is the evictable ZFS ARC the SAME sample
+/// counted into `available_bytes` (#1439). A positive credit is named beside
+/// the figure, because a user told "41.28 GB available" on a ZFS host would
+/// otherwise go looking for memory the kernel has already promised.
 pub(crate) fn host_shortfall_message(
     outcome: &HostReclaimOutcome,
     required_bytes: u64,
     available_bytes: u64,
+    reclaimable_zfs_arc_bytes: Option<u64>,
 ) -> String {
     let shortfall = required_bytes.saturating_sub(available_bytes);
+    let arc = match reclaimable_zfs_arc_bytes {
+        Some(credit) if credit > 0 => format!(", including {} evictable ZFS ARC", gb2(credit)),
+        _ => String::new(),
+    };
     let tail = format!(
-        "still {} short (requires {}, {} available)",
+        "still {} short (requires {}, {} available{arc})",
         gb1(shortfall),
         gb2(required_bytes),
         gb2(available_bytes)
@@ -544,7 +554,7 @@ mod tests {
             released_bytes: 9_800_000_000,
             evicted: vec!["flux-schnell".into(), "sdxl-base".into()],
         };
-        let message = host_shortfall_message(&outcome, 15_300_615_032, 12_400_000_000);
+        let message = host_shortfall_message(&outcome, 15_300_615_032, 12_400_000_000, None);
         assert_eq!(
             message,
             "released 9.8 GB by unloading 2 idle models; still 2.9 GB short \
@@ -569,8 +579,45 @@ mod tests {
         assert!(!outcome.released_anything());
         assert_eq!(outcome.release_summary(), None);
         assert_eq!(
-            host_shortfall_message(&outcome, 15_300_615_032, 12_659_979_674),
+            host_shortfall_message(&outcome, 15_300_615_032, 12_659_979_674, None),
             "still 2.6 GB short (requires 15.30 GB, 12.66 GB available)"
+        );
+        assert_eq!(
+            host_shortfall_message(&outcome, 15_300_615_032, 12_659_979_674, Some(0)),
+            "still 2.6 GB short (requires 15.30 GB, 12.66 GB available)",
+            "a cold ARC on a ZFS host reads like any other host"
+        );
+    }
+
+    /// hal9000 (#1439): the figure a user acts on already includes the
+    /// evictable ARC, so the refusal says so instead of sending them after
+    /// memory the kernel has already promised.
+    #[test]
+    fn host_shortfall_message_names_the_evictable_arc() {
+        let outcome = HostReclaimOutcome::default();
+        assert_eq!(
+            host_shortfall_message(
+                &outcome,
+                45_000_000_000,
+                41_281_432_704,
+                Some(15_081_432_704)
+            ),
+            "still 3.7 GB short (requires 45.00 GB, 41.28 GB available, including 15.08 GB evictable ZFS ARC)"
+        );
+        let released = HostReclaimOutcome {
+            sample_failed: false,
+            released_bytes: 9_800_000_000,
+            evicted: vec!["flux-schnell".into(), "sdxl-base".into()],
+        };
+        assert_eq!(
+            host_shortfall_message(
+                &released,
+                45_000_000_000,
+                41_281_432_704,
+                Some(15_081_432_704)
+            ),
+            "released 9.8 GB by unloading 2 idle models; still 3.7 GB short \
+             (requires 45.00 GB, 41.28 GB available, including 15.08 GB evictable ZFS ARC)"
         );
     }
 
@@ -685,7 +732,7 @@ mod tests {
         assert_eq!(outcome.released_bytes, 4_400_000_000);
         assert!(state.model_cache.lock().await.is_empty());
         assert_eq!(
-            host_shortfall_message(&outcome, 15_300_615_032, 12_400_000_000),
+            host_shortfall_message(&outcome, 15_300_615_032, 12_400_000_000, None),
             "released 4.4 GB by unloading 2 idle models; still 2.9 GB short \
              (requires 15.30 GB, 12.40 GB available)"
         );
@@ -732,7 +779,7 @@ mod tests {
         assert!(outcome.evicted.is_empty());
         assert!(state.model_cache.lock().await.contains("minimax-h3-fl2va"));
         assert_eq!(
-            host_shortfall_message(&outcome, 15_300_615_032, 12_659_979_674),
+            host_shortfall_message(&outcome, 15_300_615_032, 12_659_979_674, None),
             "still 2.6 GB short (requires 15.30 GB, 12.66 GB available)"
         );
     }

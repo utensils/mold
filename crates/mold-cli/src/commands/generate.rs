@@ -2753,6 +2753,7 @@ async fn generate_local_batch(
         &local_plan.candidates,
         batch as usize,
         local_plan.host_headroom_bytes,
+        local_plan.host_reclaimable_zfs_arc_bytes,
     )?;
     let batch_requests = local_batch_requests(&base_req, batch, base_seed, batch_prompts);
     let mut planned_items = batch_requests

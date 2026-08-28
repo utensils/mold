@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { hostMemoryLevel, parseHostMemory } from "./hostMemory";
+import {
+  hostMemoryLevel,
+  hostMemoryScheduleLabel,
+  parseHostMemory,
+} from "./hostMemory";
 
 const snapshot = {
   total_bytes: 64_000_000_000,
@@ -23,6 +27,59 @@ describe("parseHostMemory", () => {
     ).toBeNull();
     const { total_bytes: _dropped, ...missing } = snapshot;
     expect(parseHostMemory(missing)).toBeNull();
+  });
+
+  it("reads the additive ZFS ARC credit and tolerates its absence or garbage", () => {
+    expect(
+      parseHostMemory({ ...snapshot, reclaimable_zfs_arc_bytes: 14_000_000_000 }),
+    ).toEqual({ ...snapshot, reclaimable_zfs_arc_bytes: 14_000_000_000 });
+    expect(
+      parseHostMemory({ ...snapshot, reclaimable_zfs_arc_bytes: 0 }),
+    ).toEqual({ ...snapshot, reclaimable_zfs_arc_bytes: 0 });
+    // An older server omits it; a broken one must not spoil the meter.
+    expect(parseHostMemory(snapshot)).not.toHaveProperty(
+      "reclaimable_zfs_arc_bytes",
+    );
+    expect(
+      parseHostMemory({ ...snapshot, reclaimable_zfs_arc_bytes: "lots" }),
+    ).toEqual(snapshot);
+    expect(
+      parseHostMemory({ ...snapshot, reclaimable_zfs_arc_bytes: null }),
+    ).toEqual(snapshot);
+  });
+});
+
+describe("hostMemoryScheduleLabel", () => {
+  const fmt = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+
+  it("names the credit only when positive", () => {
+    expect(hostMemoryScheduleLabel(snapshot, fmt)).toBe(
+      "32.0 GB available to schedule",
+    );
+    expect(hostMemoryScheduleLabel(snapshot, fmt, { withTotal: true })).toBe(
+      "32.0 GB of 64.0 GB available to schedule",
+    );
+    expect(
+      hostMemoryScheduleLabel(
+        { ...snapshot, reclaimable_zfs_arc_bytes: 0 },
+        fmt,
+      ),
+    ).toBe("32.0 GB available to schedule");
+    expect(
+      hostMemoryScheduleLabel(
+        { ...snapshot, reclaimable_zfs_arc_bytes: 14_000_000_000 },
+        fmt,
+      ),
+    ).toBe("32.0 GB available to schedule (includes 14.0 GB evictable ZFS ARC)");
+    expect(
+      hostMemoryScheduleLabel(
+        { ...snapshot, reclaimable_zfs_arc_bytes: 14_000_000_000 },
+        fmt,
+        { withTotal: true },
+      ),
+    ).toBe(
+      "32.0 GB of 64.0 GB available to schedule (includes 14.0 GB evictable ZFS ARC)",
+    );
   });
 });
 

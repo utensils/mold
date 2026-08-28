@@ -28,7 +28,10 @@ import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
-import { hostMemoryLevel } from "@studio/lib/hostMemory";
+import {
+  hostMemoryLevel,
+  hostMemoryScheduleLabel,
+} from "@studio/lib/hostMemory";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
@@ -535,7 +538,7 @@ const ramFill = computed(() => {
 const ramPressureLabel = computed(() => {
   const memory = queueSnapshot.value?.plan?.host_memory;
   if (!memory) return null;
-  return `${formatGB(memory.headroom_bytes)} available to schedule`;
+  return hostMemoryScheduleLabel(memory, formatGB);
 });
 
 /** `14 · 96.4 GB` summary for the models section header; null without sizes. */

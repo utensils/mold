@@ -60,6 +60,10 @@ export interface GpuSnapshot {
 export interface RamSnapshot {
   total: number;
   used: number;
+  /** `MemAvailable`; additive on newer servers. */
+  available?: number;
+  /** Evictable ZFS ARC beside `available`, never inside it (#1439). */
+  reclaimable_zfs_arc?: number;
   used_by_mold: number;
   used_by_other: number;
 }

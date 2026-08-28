@@ -11202,6 +11202,7 @@ mod tests {
             available_bytes: 48 * 1024_u64.pow(3),
             headroom_bytes: 40 * 1024_u64.pow(3),
             safety_floor_bytes: 10 * 1024_u64.pow(3),
+            reclaimable_zfs_arc_bytes: None,
         });
         app.resource_info.server_status = Some(status.clone());
         assert_eq!(activity_line(&app).1, baseline);

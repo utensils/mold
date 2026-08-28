@@ -515,6 +515,7 @@ mod tests {
                 total: 128_000_000_000,
                 used: 32_000_000_000,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 1_000_000_000,
                 used_by_other: 31_000_000_000,
             },
@@ -3014,6 +3015,7 @@ mod tests {
                 total: 64_000_000_000,
                 used: 20_000_000_000,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 2_000_000_000,
                 used_by_other: 18_000_000_000,
             },
@@ -7285,7 +7287,10 @@ mod tests {
     /// preparation must validate that form rather than the admission form —
     /// hal9000 held the first live Ref2VA print with
     /// `MINIMAX_H3_REFERENCE_DESCRIPTOR_ONLY` (2026-08-27).
-    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    ///
+    /// `h3` only: `authless_app` and `inline_ref2va_body` are `h3`-gated
+    /// helpers, so the `h3-private-uat` test graph could not compile this.
+    #[cfg(feature = "h3")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deferred_preparation_validates_references_in_their_resolved_form() {
         let root = tempfile::tempdir().unwrap();
@@ -7361,7 +7366,7 @@ mod tests {
         spawn_durable_feeder(&state);
         tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let mut last = serde_json::Value::Null;
+        let mut last;
         loop {
             let detail = json_body(
                 authless_app(state.clone())
@@ -11521,6 +11526,7 @@ mod tests {
                 total: 128_000_000_000,
                 used: 32_000_000_000,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 2_000_000_000,
                 used_by_other: 30_000_000_000,
             },
@@ -17947,6 +17953,7 @@ mod tests {
                 total: 1,
                 used: 0,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 0,
             },
@@ -18002,6 +18009,7 @@ mod tests {
                 total: 1,
                 used: 0,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 0,
             },

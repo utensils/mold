@@ -63,9 +63,19 @@ pub(crate) fn format_gb(bytes: u64) -> String {
 
 /// Detail-pane value: what the scheduler can still spend, out of what the
 /// machine has, with the pressure named whenever it is not `ok`.
+///
+/// A ZFS host's headroom already counts its evictable ARC (#1439); the value
+/// says so whenever the credit is positive, so the number a user reads names
+/// what it includes.
 pub fn host_memory_detail_value(snapshot: &mold_core::HostMemorySnapshot) -> String {
+    let arc = match snapshot.reclaimable_zfs_arc_bytes {
+        Some(credit) if credit > 0 => {
+            format!(" (incl. {} evictable ZFS ARC)", format_gb(credit))
+        }
+        _ => String::new(),
+    };
     let base = format!(
-        "{} schedulable of {}",
+        "{} schedulable of {}{arc}",
         format_gb(snapshot.headroom_bytes),
         format_gb(snapshot.total_bytes)
     );
@@ -97,6 +107,7 @@ mod tests {
             available_bytes: 48 * 1024_u64.pow(3),
             headroom_bytes,
             safety_floor_bytes,
+            reclaimable_zfs_arc_bytes: None,
         }
     }
 
@@ -155,6 +166,37 @@ mod tests {
             host_memory_detail_value(&snapshot(0, FLOOR)),
             "0.0 GB schedulable of 64.0 GB · critical",
             "pressure is always spelled out; colour alone is not a signal"
+        );
+    }
+
+    /// Mirrors `hostMemoryScheduleLabel` in `studio/lib/hostMemory.ts`: the
+    /// credit is named only when positive, and never changes the level.
+    #[test]
+    fn detail_value_names_the_evictable_arc_when_present() {
+        let zfs = mold_core::HostMemorySnapshot {
+            reclaimable_zfs_arc_bytes: Some(14 * 1024_u64.pow(3)),
+            ..snapshot(40 * 1024_u64.pow(3), FLOOR)
+        };
+        assert_eq!(
+            host_memory_detail_value(&zfs),
+            "40.0 GB schedulable of 64.0 GB (incl. 14.0 GB evictable ZFS ARC)"
+        );
+        let tight = mold_core::HostMemorySnapshot {
+            reclaimable_zfs_arc_bytes: Some(2 * 1024_u64.pow(3)),
+            ..snapshot(3 * 1024_u64.pow(3), FLOOR)
+        };
+        assert_eq!(
+            host_memory_detail_value(&tight),
+            "3.0 GB schedulable of 64.0 GB (incl. 2.0 GB evictable ZFS ARC) · tight"
+        );
+        let cold = mold_core::HostMemorySnapshot {
+            reclaimable_zfs_arc_bytes: Some(0),
+            ..snapshot(40 * 1024_u64.pow(3), FLOOR)
+        };
+        assert_eq!(
+            host_memory_detail_value(&cold),
+            "40.0 GB schedulable of 64.0 GB",
+            "a cold ARC on a ZFS host reads like any other host"
         );
     }
 

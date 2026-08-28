@@ -2151,7 +2151,7 @@ pub(crate) fn release_host_memory_after_unload(state: &AppState) {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .release_unreferenced_cpu_tensors();
     let rss_pre_trim = crate::gpu_worker::trim_malloc_arenas();
-    let rss_after = crate::resources::ram_snapshot().used_by_mold;
+    let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
     tracing::info!(
         shared_pool_released_mb = released / 1_000_000,
         rss_pre_trim_mb = rss_pre_trim.map(|value| value / 1_000_000).unwrap_or(0),

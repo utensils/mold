@@ -267,14 +267,15 @@ and each row in `GET /api/queue` reports whether that particular job is durable)
 a job with no gallery target or one whose request exceeds the payload ceiling
 runs normally but is not replayed.
 
-| Variable                           | Default             | Description                                                                                                                                                                                                                                                                                                                                                                  |
-| ---------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MOLD_QUEUE_JOURNAL_DISABLE`       | --                  | `1` turns the durable queue off entirely. Jobs still run; nothing survives a restart, and `queue.durable_queue` reports `false`.                                                                                                                                                                                                                                             |
-| `MOLD_QUEUE_JOURNAL_MAX_BYTES`     | `33554432` (32 MiB) | Ceiling on one recorded request. A larger request (an inline video, say) runs normally and is reported `durable: false` rather than being half-persisted.                                                                                                                                                                                                                    |
-| `MOLD_QUEUE_MAX_DISPATCH_ATTEMPTS` | `2`                 | How many times a worker may start a job before it is **held** instead of retried. Charged only when a worker actually claims the job, so a job that merely waits behind a long render through many restarts is never charged.                                                                                                                                                |
-| `MOLD_QUEUE_MAX_REPLAY_SEEN`       | `10`                | How many restarts may replay a job that never starts before it is **held**. Sized for a crash loop; ordinary deploys never approach it.                                                                                                                                                                                                                                      |
-| `MOLD_QUEUE_ADOPT_OWNER`           | --                  | Adopt a specific orphaned queue by its owner id, printed in the startup warning. Only needed when several retained queues share one `MOLD_HOME` and none matches this server.                                                                                                                                                                                                |
-| `MOLD_SHUTDOWN_ABORT_SECS`         | `45`                | Hard deadline for the whole shutdown after `SIGTERM`. The running generation is aborted at its next checkpoint and requeued; queued work is retained and replayed. If shutdown overruns, `mold serve` ends the process rather than wait; a cold model load is not interruptible, and hanging past systemd's stop timeout is what used to get the server SIGKILLed mid-write. |
+| Variable                           | Default             | Description                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOLD_QUEUE_JOURNAL_DISABLE`       | --                  | `1` turns the durable queue off entirely. Jobs still run; nothing survives a restart, and `queue.durable_queue` reports `false`.                                                                                                                                                                                                                                                 |
+| `MOLD_QUEUE_JOURNAL_MAX_BYTES`     | `33554432` (32 MiB) | Ceiling on one recorded request. A larger request (an inline video, say) runs normally and is reported `durable: false` rather than being half-persisted.                                                                                                                                                                                                                        |
+| `MOLD_QUEUE_MAX_DISPATCH_ATTEMPTS` | `2`                 | How many times a worker may start a job before it is **held** instead of retried. Charged only when a worker actually claims the job, so a job that merely waits behind a long render through many restarts is never charged.                                                                                                                                                    |
+| `MOLD_QUEUE_MAX_REPLAY_SEEN`       | `10`                | How many restarts may replay a job that never starts before it is **held**. Sized for a crash loop; ordinary deploys never approach it.                                                                                                                                                                                                                                          |
+| `MOLD_QUEUE_ADOPT_OWNER`           | --                  | Adopt a specific orphaned queue by its owner id, printed in the startup warning. Only needed when several retained queues share one `MOLD_HOME` and none matches this server.                                                                                                                                                                                                    |
+| `MOLD_SHUTDOWN_ABORT_SECS`         | `45`                | Hard deadline for the whole shutdown after `SIGTERM`. The running generation is aborted at its next checkpoint and requeued; queued work is retained and replayed. If shutdown overruns, `mold serve` ends the process rather than wait; a cold model load is not interruptible, and hanging past systemd's stop timeout is what used to get the server SIGKILLed mid-write.     |
+| `MOLD_HOST_RAM_ZFS_ARC`            | on                  | `0` / `off` / `false` / `no` stops counting evictable ZFS ARC as host-RAM headroom (see [What counts as available host RAM](#what-counts-as-available-host-ram)). Set it on a container that can see the host's ARC but is limited by its own cgroup, or on OpenZFS 2.2 where `zfs_arc_shrinker_limit` cannot be zeroed. Absent arcstats already disables the credit on its own. |
 
 A **held** job is listed by `GET /api/queue` with `state: "held"` and a reason,
 and is never started automatically; it is waiting for you to look at it.
@@ -679,6 +680,48 @@ instead of discarding the server's reason. Current chain and local
 prompt-expansion/post-generation-upscale utility previews deliberately return
 non-authoritative `unsupported`: those paths are not advertised as exact until
 their real device/CPU fallbacks are represented.
+
+#### What counts as available host RAM
+
+Host-RAM admission spends one figure on every path — the scheduler ledger,
+MiniMax H3's own admission, the between-eviction re-sample, and
+`mold run --local`:
+
+- the OS's `MemAvailable` (on macOS, free plus inactive pages),
+- **plus** the evictable ZFS ARC on a Linux host running OpenZFS,
+- **minus** the safety floor mold never spends, `max(15% of RAM, 8 GiB)`,
+- **minus** every live reservation the scheduler has already granted.
+
+The ZFS term exists because Linux never counts the ARC in `MemAvailable`
+(openzfs/zfs#10255), even though the kernel shrinker drains it inline the
+moment an allocation needs the room. Reading a 37 GB checkpoint set through
+the page cache on a ZFS pool can therefore remove 16 GB from the very sample
+that admits the render, and a render the kernel would have made room for is
+refused instead. The credit is OpenZFS's own reclaimable figure — what
+`arc_evictable_memory()` hands the shrinker —
+`min(mru_evictable_data + mru_evictable_metadata + mfu_evictable_data +
+mfu_evictable_metadata, size − c_min)`, read from
+`/proc/spl/kstat/zfs/arcstats`. Neither `size` alone (pinned, dirty, and
+in-flight buffers are not evictable) nor the evictable sum alone (`c_min`,
+1/32 of RAM by default, is a hard floor the ARC never shrinks below) is what
+ZFS will actually give back, so neither is used. The credit is zero while
+`memory_available_bytes` is negative (ZFS is already self-evicting), while
+`zfs_arc_pc_percent` is non-zero, and — the case that matters on OpenZFS 2.2
+— whenever `zfs_arc_shrinker_limit` is non-zero or unreadable: 2.2's default
+of 10000 pages caps each reclaim pass at roughly 160 MiB, so a burst
+allocation can hit the OOM killer before the ARC drains. OpenZFS 2.3 defaults
+that limit to 0 and TrueNAS forces it; on 2.2 set
+`options zfs zfs_arc_shrinker_limit=0` to earn the credit. Lowering
+`zfs_arc_max` is no longer required to run large host-resident encoders on a
+ZFS host.
+
+Refusals, `host_memory` on `/api/status` and `GET /api/queue`
+(`reclaimable_zfs_arc_bytes`, beside an `available_bytes` that stays
+`MemAvailable`), `/api/resources` (`system_ram.reclaimable_zfs_arc`), the
+Machines pages, and the TUI all name the credit whenever it is above zero, so
+the number you act on says what it already includes. Inside a container the
+kernel's arcstats describe the host's ARC, which evicting does not raise the
+container's own cgroup limit; set `MOLD_HOST_RAM_ZFS_ARC=0` there.
 
 Forced-local batches (`mold run --local --batch N`) use the same deterministic
 assignment core across all GPUs selected by `--gpus`/`MOLD_GPUS`. There is no

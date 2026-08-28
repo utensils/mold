@@ -87,6 +87,7 @@ pub mod thumbnails;
 pub mod variant_dependencies;
 mod wan_admission;
 pub mod web_ui;
+mod zfs_arc;
 
 #[cfg(test)]
 mod admission_contract_test;

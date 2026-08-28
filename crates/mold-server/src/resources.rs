@@ -519,9 +519,25 @@ pub fn metal_snapshot() -> Vec<GpuSnapshot> {
     }
 }
 
+/// Build a single `RamSnapshot` for host admission: the `sysinfo` reading
+/// with the evictable ZFS ARC credit recorded beside `MemAvailable` (#1439).
+///
+/// This is the ONE place the credit enters a sample. Every consumer that
+/// spends host memory — the scheduler ledger, H3 admission, the reclaim
+/// re-sample, the forced-local CLI — reads
+/// [`RamSnapshot::available_with_evictable_arc`] off this snapshot, so the
+/// credit is added exactly once and `available` keeps meaning `MemAvailable`.
+pub fn ram_snapshot() -> RamSnapshot {
+    ram_snapshot_from_system().with_zfs_arc_credit(crate::zfs_arc::evictable_arc_credit())
+}
+
 /// Build a single `RamSnapshot` using `sysinfo`. Refreshes only memory and
 /// the current process — cheap enough to run at 1 Hz (~200 µs).
-pub fn ram_snapshot() -> RamSnapshot {
+///
+/// `reclaimable_zfs_arc` is `None` here on purpose: this is the reading for
+/// RSS-only probes (`used_by_mold` before/after an unload), which have no
+/// business reading arcstats. Admission goes through [`ram_snapshot`].
+pub(crate) fn ram_snapshot_from_system() -> RamSnapshot {
     let mut sys = System::new_with_specifics(
         RefreshKind::nothing()
             .with_memory(sysinfo::MemoryRefreshKind::everything())
@@ -543,6 +559,7 @@ pub fn ram_snapshot() -> RamSnapshot {
         total,
         used,
         available: Some(available.min(total)),
+        reclaimable_zfs_arc: None,
         used_by_mold,
         used_by_other,
     }
@@ -842,6 +859,7 @@ pub(crate) fn spawn_aggregator(
                             total: 0,
                             used: 0,
                             available: None,
+                            reclaimable_zfs_arc: None,
                             used_by_mold: 0,
                             used_by_other: 0,
                         },
