@@ -8,24 +8,29 @@ import {
 } from "./thumbnailPersistentCache";
 
 /** A minimal in-memory `CacheStorage` with insertion-ordered keys. */
-function fakeCacheStorage(opts: { failOpen?: boolean; failPut?: boolean } = {}) {
+function fakeCacheStorage(
+  opts: { failOpen?: boolean; failPut?: boolean } = {},
+) {
   const entries = new Map<string, Response>();
   const cache = {
     async match(request: RequestInfo | URL) {
-      const url = typeof request === "string" ? request : (request as Request).url;
+      const url =
+        typeof request === "string" ? request : (request as Request).url;
       const hit = entries.get(url);
       return hit ? hit.clone() : undefined;
     },
     async put(request: RequestInfo | URL, response: Response) {
       if (opts.failPut) throw new DOMException("quota", "QuotaExceededError");
-      const url = typeof request === "string" ? request : (request as Request).url;
+      const url =
+        typeof request === "string" ? request : (request as Request).url;
       entries.set(url, response);
     },
     async keys() {
       return [...entries.keys()].map((url) => new Request(url));
     },
     async delete(request: RequestInfo | URL) {
-      const url = typeof request === "string" ? request : (request as Request).url;
+      const url =
+        typeof request === "string" ? request : (request as Request).url;
       return entries.delete(url);
     },
   };
@@ -70,17 +75,24 @@ describe("persistentThumbnailStore", () => {
     expect(await hit!.text()).toBe("jpeg bytes");
     expect(entries.size).toBe(1);
 
-    await store.put(persistentThumbnailKey("hal", "z.png", "1:1", 256), new Blob(["x"]));
+    await store.put(
+      persistentThumbnailKey("hal", "z.png", "1:1", 256),
+      new Blob(["x"]),
+    );
     await store.evictPrefix("plato|");
     expect(await store.get(key)).toBeNull();
     expect(entries.size).toBe(1);
   });
 
   it("never throws when storage refuses", async () => {
-    const refused = persistentThumbnailStore(fakeCacheStorage({ failOpen: true }).storage)!;
+    const refused = persistentThumbnailStore(
+      fakeCacheStorage({ failOpen: true }).storage,
+    )!;
     expect(await refused.get("k")).toBeNull();
     await expect(refused.put("k", new Blob(["x"]))).resolves.toBeUndefined();
-    const quota = persistentThumbnailStore(fakeCacheStorage({ failPut: true }).storage)!;
+    const quota = persistentThumbnailStore(
+      fakeCacheStorage({ failPut: true }).storage,
+    )!;
     await expect(quota.put("k", new Blob(["x"]))).resolves.toBeUndefined();
   });
 
@@ -88,13 +100,23 @@ describe("persistentThumbnailStore", () => {
     const { storage, entries } = fakeCacheStorage();
     const store = persistentThumbnailStore(storage)!;
     for (let i = 0; i < THUMBNAIL_STORE_MAX_ENTRIES + 64; i++) {
-      await store.put(persistentThumbnailKey("h", `${i}.png`, "1:1", 256), new Blob(["x"]));
+      await store.put(
+        persistentThumbnailKey("h", `${i}.png`, "1:1", 256),
+        new Blob(["x"]),
+      );
     }
     expect(entries.size).toBeLessThanOrEqual(THUMBNAIL_STORE_MAX_ENTRIES);
-    expect(await store.get(persistentThumbnailKey("h", "0.png", "1:1", 256))).toBeNull();
+    expect(
+      await store.get(persistentThumbnailKey("h", "0.png", "1:1", 256)),
+    ).toBeNull();
     expect(
       await store.get(
-        persistentThumbnailKey("h", `${THUMBNAIL_STORE_MAX_ENTRIES + 63}.png`, "1:1", 256),
+        persistentThumbnailKey(
+          "h",
+          `${THUMBNAIL_STORE_MAX_ENTRIES + 63}.png`,
+          "1:1",
+          256,
+        ),
       ),
     ).not.toBeNull();
   });

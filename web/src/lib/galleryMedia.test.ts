@@ -123,24 +123,34 @@ describe("resolveThumbnailSrc", () => {
         return { ok: true, blob: async () => new Blob(["tile"]) };
       });
       // Miss: one fetch, then the bytes land in the store.
-      await resolveThumbnailSrc(authedRemote, "cat.png", { mediaVersion: "1:10" });
+      await resolveThumbnailSrc(authedRemote, "cat.png", {
+        mediaVersion: "1:10",
+      });
       await new Promise((r) => setTimeout(r, 0));
       expect(fetches).toBe(1);
       expect(stored.size).toBe(1);
 
       // A fresh page (memory cache cleared) hits the store: zero fetches.
       __resetGalleryMediaForTests();
-      (globalThis as { caches?: unknown }).caches = { open: async () => fakeCache };
-      const src = await resolveThumbnailSrc(authedRemote, "cat.png", { mediaVersion: "1:10" });
+      (globalThis as { caches?: unknown }).caches = {
+        open: async () => fakeCache,
+      };
+      const src = await resolveThumbnailSrc(authedRemote, "cat.png", {
+        mediaVersion: "1:10",
+      });
       expect(src.startsWith("blob:")).toBe(true);
       expect(fetches).toBe(1);
 
       // A new content version is a different key: fetched again.
-      await resolveThumbnailSrc(authedRemote, "cat.png", { mediaVersion: "2:10" });
+      await resolveThumbnailSrc(authedRemote, "cat.png", {
+        mediaVersion: "2:10",
+      });
       expect(fetches).toBe(2);
       // Without a version nothing persists (a "legacy" key could go stale).
       __resetGalleryMediaForTests();
-      (globalThis as { caches?: unknown }).caches = { open: async () => fakeCache };
+      (globalThis as { caches?: unknown }).caches = {
+        open: async () => fakeCache,
+      };
       await resolveThumbnailSrc(authedRemote, "dog.png");
       await new Promise((r) => setTimeout(r, 0));
       expect(stored.size).toBe(2);

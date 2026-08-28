@@ -20,13 +20,17 @@ const PRUNE_EVERY = 64;
 
 /** The rendition a display should ask for: 512 px on retina, 256 otherwise.
  *  Two tiers only, so no cache holds one entry per slider position. */
-export function thumbnailTier(devicePixelRatio = globalThis.devicePixelRatio ?? 1): 256 | 512 {
+export function thumbnailTier(
+  devicePixelRatio = globalThis.devicePixelRatio ?? 1,
+): 256 | 512 {
   return devicePixelRatio >= 1.5 ? 512 : 256;
 }
 
 /** Query string for the rendition (`?size=…&fmt=jpeg`); older servers ignore
  *  it and answer their 256 px PNG, which the caller still displays. */
-export function thumbnailRenditionQuery(tier: 256 | 512 = thumbnailTier()): string {
+export function thumbnailRenditionQuery(
+  tier: 256 | 512 = thumbnailTier(),
+): string {
   return `size=${tier}&fmt=jpeg`;
 }
 
@@ -59,7 +63,8 @@ function keyOfRequestUrl(url: string): string | null {
  * `globalThis.caches`.
  */
 export function persistentThumbnailStore(
-  storage: CacheStorage | undefined = (globalThis as { caches?: CacheStorage }).caches,
+  storage: CacheStorage | undefined = (globalThis as { caches?: CacheStorage })
+    .caches,
   name = THUMBNAIL_STORE_NAME,
 ): PersistentThumbnailStore | null {
   if (!storage || typeof storage.open !== "function") return null;
@@ -95,7 +100,8 @@ export function persistentThumbnailStore(
           const keys = await cache.keys();
           // Prune down to a headroom below the bound so the store never
           // exceeds it between two prune passes.
-          const excess = keys.length - (THUMBNAIL_STORE_MAX_ENTRIES - PRUNE_EVERY);
+          const excess =
+            keys.length - (THUMBNAIL_STORE_MAX_ENTRIES - PRUNE_EVERY);
           for (let i = 0; i < excess; i++) await cache.delete(keys[i]!);
         }
       } catch {
@@ -108,7 +114,8 @@ export function persistentThumbnailStore(
         if (!cache) return;
         for (const request of await cache.keys()) {
           const key = keyOfRequestUrl(request.url);
-          if (key !== null && key.startsWith(prefix)) await cache.delete(request);
+          if (key !== null && key.startsWith(prefix))
+            await cache.delete(request);
         }
       } catch {
         // Best effort.
