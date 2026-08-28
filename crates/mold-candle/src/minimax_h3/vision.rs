@@ -897,7 +897,7 @@ mod tests {
         let vb = VarBuilder::from_varmap(&vars, DType::F32, &Device::Cpu);
         let model = Qwen3VlVisionModel::new(&config, vb).unwrap();
         // Deterministic non-trivial weights and pixels.
-        for (_, var) in vars.data().lock().unwrap().iter() {
+        for var in vars.data().lock().unwrap().values() {
             let n = var.elem_count();
             let values = (0..n)
                 .map(|i| ((i * 7919 % 1013) as f32 / 1013.0 - 0.5) * 0.2)
