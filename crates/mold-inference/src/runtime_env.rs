@@ -59,6 +59,12 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     // different pixels and different transient memory, so a run on one must
     // never share a fingerprint or a learned-timing bucket with the other.
     "MOLD_LTX2_INT8",
+    // Selects the LTX-2.5 GGUF quantized-linear arm on CUDA: the default
+    // per-forward dequant (the Qwen #1048 / Z-Image NaN precedent) or
+    // candle's QMatMul fast path. The arms differ in numerics, transient
+    // memory, and step latency, so a run on one must never share a
+    // fingerprint or a learned-timing bucket with the other.
+    "MOLD_LTX2_QMATMUL",
     "MOLD_LTX2_SPATIAL_TILE",
     "MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES",
     "MOLD_LTX2_VAE_DECODE_CONTEXT_FRAMES",

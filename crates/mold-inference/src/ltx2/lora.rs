@@ -74,7 +74,24 @@ fn effective_lora_scale(user_scale: f64, rank: usize, alpha: Option<f64>) -> f64
     }
 }
 
+/// Test convenience over [`load_lora_registry_for_checkpoint`] for a
+/// safetensors checkpoint; production call sites always know the format.
+#[cfg(test)]
 pub(crate) fn load_lora_registry(loras: &[LoraWeight]) -> Result<Option<Arc<Ltx2LoraRegistry>>> {
+    load_lora_registry_for_checkpoint(loras, false)
+}
+
+/// [`load_lora_registry`] with the checkpoint's storage format known.
+///
+/// A low-rank A/B pair applies to every checkpoint format as a parallel
+/// branch at forward time. A full-weight `.diff` / `.diff_b` delta instead
+/// asks for `W + diff`, which on a GGUF checkpoint would mean dequantize,
+/// add, and re-quantize — a different, unvalidated set of weights — so it is
+/// refused by name for GGUF rather than silently dropped.
+pub(crate) fn load_lora_registry_for_checkpoint(
+    loras: &[LoraWeight],
+    checkpoint_is_gguf: bool,
+) -> Result<Option<Arc<Ltx2LoraRegistry>>> {
     if loras.is_empty() {
         return Ok(None);
     }
@@ -83,6 +100,19 @@ pub(crate) fn load_lora_registry(loras: &[LoraWeight]) -> Result<Option<Arc<Ltx2
     for lora in loras {
         let tensors = candle_core::safetensors::load(&lora.path, &Device::Cpu)
             .with_context(|| format!("failed to load LTX-2 LoRA {}", lora.path))?;
+        if checkpoint_is_gguf {
+            if let Some(delta) = tensors
+                .keys()
+                .find(|name| name.ends_with(".diff") || name.ends_with(".diff_b"))
+            {
+                bail!(
+                    "LTX-2 LoRA {} carries the full-weight delta {delta}, which cannot be \
+                     applied to a GGUF-quantized checkpoint (re-quantization is not supported); \
+                     use an official safetensors pack for this LoRA, or a low-rank A/B adapter",
+                    lora.path,
+                );
+            }
+        }
         let mut a_tensors: HashMap<String, Tensor> = HashMap::new();
         let mut b_tensors: HashMap<String, Tensor> = HashMap::new();
         let mut alpha_values: HashMap<String, f64> = HashMap::new();
@@ -302,6 +332,66 @@ mod tests {
             true_cfg: None,
             cfg_start_step: None,
         }
+    }
+
+    /// Full-weight `.diff` deltas are refused for a GGUF checkpoint by
+    /// name, while the same file keeps today's behavior against a
+    /// safetensors checkpoint and an ordinary A/B pack loads for both.
+    #[test]
+    fn gguf_checkpoints_refuse_full_weight_diff_deltas() {
+        use candle_core::Device;
+
+        let dir = tempfile::tempdir().unwrap();
+        let diff_path = dir.path().join("diff-lora.safetensors");
+        let mut diff_tensors = std::collections::HashMap::new();
+        diff_tensors.insert(
+            "diffusion_model.transformer_blocks.0.attn1.to_q.diff".to_string(),
+            Tensor::zeros((4, 4), candle_core::DType::F32, &Device::Cpu).unwrap(),
+        );
+        candle_core::safetensors::save(&diff_tensors, &diff_path).unwrap();
+        let diff_lora = [LoraWeight {
+            path: diff_path.to_string_lossy().into_owned(),
+            scale: 1.0,
+            expert: None,
+        }];
+
+        let error = load_lora_registry_for_checkpoint(&diff_lora, true).unwrap_err();
+        assert!(error.to_string().contains("safetensors pack"), "{error}");
+        assert!(
+            error.to_string().contains(".diff"),
+            "the refusal names the delta: {error}"
+        );
+
+        // Against a safetensors checkpoint the same file keeps today's
+        // outcome: no A/B pairs found.
+        let error = load_lora_registry_for_checkpoint(&diff_lora, false).unwrap_err();
+        assert!(
+            error.to_string().contains("no LTX-2 LoRA A/B pairs"),
+            "{error}"
+        );
+
+        // An ordinary low-rank pack loads for a GGUF checkpoint.
+        let ab_path = dir.path().join("ab-lora.safetensors");
+        let mut ab_tensors = std::collections::HashMap::new();
+        ab_tensors.insert(
+            "diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight".to_string(),
+            Tensor::zeros((2, 8), candle_core::DType::F32, &Device::Cpu).unwrap(),
+        );
+        ab_tensors.insert(
+            "diffusion_model.transformer_blocks.0.attn1.to_q.lora_B.weight".to_string(),
+            Tensor::zeros((8, 2), candle_core::DType::F32, &Device::Cpu).unwrap(),
+        );
+        candle_core::safetensors::save(&ab_tensors, &ab_path).unwrap();
+        let registry = load_lora_registry_for_checkpoint(
+            &[LoraWeight {
+                path: ab_path.to_string_lossy().into_owned(),
+                scale: 1.0,
+                expert: None,
+            }],
+            true,
+        )
+        .unwrap();
+        assert!(registry.is_some());
     }
 
     #[test]

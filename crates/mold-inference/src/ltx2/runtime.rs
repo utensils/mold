@@ -5785,15 +5785,23 @@ fn load_ltx2_audio_transformer(
     let probe = PhaseVramProbe::enter_if("audio_transformer_load".to_string(), device.is_cuda());
     let result = (|| -> Result<Ltx2AudioTransformerModel> {
         let config = ltx2_video_transformer_config(plan);
-        let lora_registry = super::lora::load_lora_registry(loras)?;
         let checkpoint_path = Path::new(&plan.checkpoint_path);
-        let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
-        let checkpoint_is_convrot =
-            !checkpoint_is_nvfp4 && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
+        let checkpoint_is_gguf = super::gguf::checkpoint_is_gguf(checkpoint_path);
+        let lora_registry =
+            super::lora::load_lora_registry_for_checkpoint(loras, checkpoint_is_gguf)?;
+        let checkpoint_is_nvfp4 =
+            !checkpoint_is_gguf && super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
+        let checkpoint_is_convrot = !checkpoint_is_gguf
+            && !checkpoint_is_nvfp4
+            && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
         let weight_index = Ltx2TransformerWeightIndex::read(checkpoint_path).ok();
-        let checkpoint_is_fp8 =
-            !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, weight_index.as_ref());
-        let vb = if checkpoint_is_nvfp4 {
+        let checkpoint_is_fp8 = !checkpoint_is_gguf
+            && !checkpoint_is_nvfp4
+            && ltx2_checkpoint_is_fp8(plan, weight_index.as_ref());
+        let vb = if checkpoint_is_gguf {
+            let backend = super::gguf::Ltx2GgufBackend::from_path(checkpoint_path)?;
+            VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
+        } else if checkpoint_is_nvfp4 {
             let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
             VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
         } else if checkpoint_is_convrot {
@@ -5817,7 +5825,7 @@ fn load_ltx2_audio_transformer(
                 progress,
             )?
         };
-        let vb = if checkpoint_is_nvfp4 || checkpoint_is_convrot {
+        let vb = if checkpoint_is_gguf || checkpoint_is_nvfp4 || checkpoint_is_convrot {
             vb
         } else {
             vb.rename_f(remap_ltx2_transformer_key)
@@ -7006,11 +7014,20 @@ fn ltx2_transformer_var_builder<'a>(
     plan: &Ltx2GeneratePlan,
     checkpoint_path: &Path,
     device: &candle_core::Device,
+    checkpoint_is_gguf: bool,
     checkpoint_is_nvfp4: bool,
     checkpoint_is_convrot: bool,
     checkpoint_is_fp8: bool,
     progress: Option<&ProgressCallback>,
 ) -> Result<VarBuilder<'a>> {
+    if checkpoint_is_gguf {
+        let backend = super::gguf::Ltx2GgufBackend::from_path(checkpoint_path)?;
+        return Ok(VarBuilder::from_backend(
+            Box::new(backend),
+            compute_dtype(device),
+            device.clone(),
+        ));
+    }
     if checkpoint_is_nvfp4 {
         let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
         return Ok(VarBuilder::from_backend(
@@ -7057,7 +7074,10 @@ fn load_ltx2_av_transformer_with_loras_inner(
     let force_streaming = ltx2_force_streaming_enabled();
     let force_eager = crate::runtime_env::value("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
-    let lora_registry = super::lora::load_lora_registry(loras)?;
+    let lora_registry = super::lora::load_lora_registry_for_checkpoint(
+        loras,
+        super::gguf::checkpoint_is_gguf(Path::new(&plan.checkpoint_path)),
+    )?;
     // Absence of the synthetic gradient is not proof a LoRA was applied, so say
     // what actually resolved: the ordered stack, each adapter's scale, and how
     // many transformer layers it landed on.
@@ -7082,9 +7102,12 @@ fn load_ltx2_av_transformer_with_loras_inner(
         }
     }
     let checkpoint_path = Path::new(&plan.checkpoint_path);
-    let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
-    let checkpoint_is_convrot =
-        !checkpoint_is_nvfp4 && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
+    let checkpoint_is_gguf = super::gguf::checkpoint_is_gguf(checkpoint_path);
+    let checkpoint_is_nvfp4 =
+        !checkpoint_is_gguf && super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
+    let checkpoint_is_convrot = !checkpoint_is_gguf
+        && !checkpoint_is_nvfp4
+        && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
     // ConvRot on CUDA stays resident in its packed form and is priced that
     // way; on Metal/CPU the compatibility backend reconstructs BF16 weights,
     // so blocks keep streaming there rather than pricing compact bytes as
@@ -7098,8 +7121,9 @@ fn load_ltx2_av_transformer_with_loras_inner(
     // index is the same authority admission priced this job with, so the
     // plan the engine builds cannot disagree with the grant it was given.
     let weight_index = Ltx2TransformerWeightIndex::read(checkpoint_path).ok();
-    let checkpoint_is_fp8 =
-        !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, weight_index.as_ref());
+    let checkpoint_is_fp8 = !checkpoint_is_gguf
+        && !checkpoint_is_nvfp4
+        && ltx2_checkpoint_is_fp8(plan, weight_index.as_ref());
     // `candle` re-exports the `safetensors` error transparently, so a corrupt
     // or truncated checkpoint arrives as bare text ("header too small") with
     // nothing identifying the file. Name it here: this is the error the user
@@ -7108,6 +7132,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
         plan,
         checkpoint_path,
         device,
+        checkpoint_is_gguf,
         checkpoint_is_nvfp4,
         checkpoint_is_convrot,
         checkpoint_is_fp8,
@@ -7120,7 +7145,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
             checkpoint_path.display()
         )
     })?;
-    let vb = if checkpoint_is_nvfp4 || checkpoint_is_convrot {
+    let vb = if checkpoint_is_gguf || checkpoint_is_nvfp4 || checkpoint_is_convrot {
         vb
     } else {
         vb.rename_f(remap_ltx2_transformer_key)

@@ -259,10 +259,11 @@ pub(crate) enum SideChannel {
     /// NVFP4: `weight.nvfp4_packed` (U8 nibbles), `weight.nvfp4_block_scales`
     /// (F8E4M3, swizzled), `weight.nvfp4_tensor_scale` (F32).
     Nvfp4,
-    // Gguf: reserved for the LTX-2.5 GGUF runtime (#1414), which will expose
-    // `weight.gguf_blocks` (U8) + `weight.gguf_dtype` (U32) and is probed
-    // between NVFP4 and ConvRot. Not a variant yet so nothing can match it
-    // by accident before that backend exists.
+    /// GGUF (#1414): `weight.gguf_blocks` (U8 raw ggml payload bytes) and
+    /// `weight.gguf_dtype` (U32 ggml dtype id), exposed by `Ltx2GgufBackend`
+    /// for the accepted quantized storage types only; float-stored GGUF
+    /// tensors take the plain dense arm.
+    Gguf,
     /// Comfy INT8 ConvRot: `weight.convrot_packed` (U8 `[out, in]`) and
     /// `weight.convrot_scales` (F32 `[out, 1]`). Exposed by
     /// `Ltx2ConvRotBackend` on CUDA only; Metal keeps the widening arm.
@@ -271,12 +272,14 @@ pub(crate) enum SideChannel {
 
 impl SideChannel {
     /// The order a loader probes the side channels in.
-    pub(crate) const PROBE_ORDER: [SideChannel; 2] = [SideChannel::Nvfp4, SideChannel::ConvRot];
+    pub(crate) const PROBE_ORDER: [SideChannel; 3] =
+        [SideChannel::Nvfp4, SideChannel::Gguf, SideChannel::ConvRot];
 
     /// The one sub-key whose presence means the channel is live.
     pub(crate) const fn probe_key(self) -> &'static str {
         match self {
             SideChannel::Nvfp4 => "weight.nvfp4_packed",
+            SideChannel::Gguf => "weight.gguf_blocks",
             SideChannel::ConvRot => "weight.convrot_packed",
         }
     }
@@ -291,6 +294,7 @@ pub(crate) fn ltx2_side_channel_component(name: &str) -> Option<SideChannel> {
         "weight.nvfp4_packed" | "weight.nvfp4_block_scales" | "weight.nvfp4_tensor_scale" => {
             Some(SideChannel::Nvfp4)
         }
+        "weight.gguf_blocks" | "weight.gguf_dtype" => Some(SideChannel::Gguf),
         "weight.convrot_packed" | "weight.convrot_scales" => Some(SideChannel::ConvRot),
         _ => None,
     }
@@ -325,6 +329,16 @@ pub(crate) enum LtxLinear {
         bias: Option<Tensor>,
         adapters: Vec<LinearLoraAdapter>,
         cache: Arc<OnceLock<Tensor>>,
+    },
+    /// A GGUF quantized weight kept as a device-resident `QTensor`, executed
+    /// through the shared `crate::quantized_linear` dispatch: the per-forward
+    /// dequant arm by default on CUDA (the Qwen/Z-Image #1048 NaN precedent;
+    /// `MOLD_LTX2_QMATMUL=1` opts into candle's fast path), `QMatMul` on
+    /// Metal. LoRA adapters ride the same parallel low-rank branch as every
+    /// other arm and are never merged into the quantized weight.
+    Quantized {
+        inner: Arc<crate::quantized_linear::QuantizedLinear>,
+        adapters: Vec<LinearLoraAdapter>,
     },
     /// A Comfy INT8 ConvRot weight kept PACKED on the device: one byte per
     /// parameter plus one F32 scale per output row, executed per
@@ -399,6 +413,49 @@ impl LtxLinear {
         cache_key: Option<&str>,
     ) -> Result<Self> {
         let side_channel = detect_side_channel(&vb);
+        if side_channel == Some(SideChannel::Gguf) {
+            let blocks = vb.get_unchecked_dtype("weight.gguf_blocks", DType::U8)?;
+            let dtype_ids = vb
+                .get_unchecked_dtype("weight.gguf_dtype", DType::U32)?
+                .flatten_all()?
+                .to_vec1::<u32>()?;
+            let &[dtype_id] = dtype_ids.as_slice() else {
+                candle_core::bail!(
+                    "LTX-2 GGUF side channel returned {} dtype ids for one weight",
+                    dtype_ids.len(),
+                );
+            };
+            let weight = crate::ltx2::gguf::qtensor_from_side_channel(
+                &blocks,
+                dtype_id,
+                vec![out_dim, in_dim],
+                vb.device(),
+            )?;
+            let bias = if has_bias {
+                Some(vb.get(out_dim, "bias")?)
+            } else {
+                None
+            };
+            let inner = crate::quantized_linear::QuantizedLinear::new(
+                Arc::new(weight),
+                bias,
+                vb.device(),
+                crate::ltx2::backend::compute_dtype(vb.device()),
+                crate::ltx2::gguf::ltx2_qmatmul_enabled(),
+            )?;
+            crate::ltx2::gguf::log_linear_kind_once(match inner.kind() {
+                crate::quantized_linear::QuantizedLinearKind::QMatMul => {
+                    crate::ltx2::gguf::LINEAR_KIND_QMATMUL
+                }
+                crate::quantized_linear::QuantizedLinearKind::Dequant => {
+                    crate::ltx2::gguf::LINEAR_KIND_DEQUANT
+                }
+            });
+            return Ok(Self::Quantized {
+                inner: Arc::new(inner),
+                adapters,
+            });
+        }
         if side_channel == Some(SideChannel::ConvRot) {
             let packed = vb.get_unchecked_dtype("weight.convrot_packed", DType::U8)?;
             let scales = vb.get_unchecked_dtype("weight.convrot_scales", DType::F32)?;
@@ -953,6 +1010,19 @@ impl Module for LtxLinear {
                     }
                     None => Ok(out),
                 }?;
+                apply_linear_loras(out, &xs, adapters, dtype)
+            }
+            Self::Quantized { inner, adapters } => {
+                let dtype = match xs.dtype() {
+                    DType::F8E4M3 => DType::BF16,
+                    other => other,
+                };
+                let xs = if xs.dtype() == dtype {
+                    xs.clone()
+                } else {
+                    xs.to_dtype(dtype)?
+                };
+                let out = inner.forward(&xs)?;
                 apply_linear_loras(out, &xs, adapters, dtype)
             }
             Self::ConvRotPacked {
@@ -5697,6 +5767,7 @@ pub(crate) mod tests {
             }
             LtxLinear::Standard { .. }
             | LtxLinear::Nvfp4Streaming { .. }
+            | LtxLinear::Quantized { .. }
             | LtxLinear::ConvRotPacked { .. } => {
                 panic!("expected fp8 linear")
             }
@@ -5754,18 +5825,141 @@ pub(crate) mod tests {
             ("weight", None),
             ("bias", None),
             ("weight_scale", None),
-            // Reserved for the LTX-2.5 GGUF runtime (#1414): not a channel
-            // until that backend exists, so nothing can match it by accident.
-            ("weight.gguf_blocks", None),
-            ("weight.gguf_dtype", None),
+            ("weight.gguf_blocks", Some(SideChannel::Gguf)),
+            ("weight.gguf_dtype", Some(SideChannel::Gguf)),
         ];
         for (name, expected) in table {
             assert_eq!(ltx2_side_channel_component(name), expected, "{name}");
         }
         assert_eq!(
             SideChannel::PROBE_ORDER,
-            [SideChannel::Nvfp4, SideChannel::ConvRot]
+            [SideChannel::Nvfp4, SideChannel::Gguf, SideChannel::ConvRot]
         );
+    }
+
+    /// A synthetic GGUF quantized weight served through the side channel:
+    /// raw Q8_0 payload bytes plus the dtype id, exactly as `Ltx2GgufBackend`
+    /// exposes them. Returns the dequantized twin (the values the payload
+    /// actually stores) so references share the exact weight.
+    fn gguf_linear_fixture(with_bias: bool) -> (VarBuilder<'static>, Tensor, Option<Tensor>) {
+        let device = Device::Cpu;
+        let (out_dim, in_dim) = (4usize, 64usize);
+        let dense = Tensor::from_vec(
+            (0..out_dim * in_dim)
+                .map(|index| ((index % 23) as f32 - 11.0) * 0.0625)
+                .collect::<Vec<_>>(),
+            (out_dim, in_dim),
+            &device,
+        )
+        .unwrap();
+        let quantized = candle_core::quantized::QTensor::quantize(
+            &dense,
+            candle_core::quantized::GgmlDType::Q8_0,
+        )
+        .unwrap();
+        let dequantized = quantized.dequantize(&device).unwrap();
+        let raw = quantized.data().unwrap().to_vec();
+        let raw_len = raw.len();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight.gguf_blocks".to_string(),
+            Tensor::from_vec(raw, raw_len, &device).unwrap(),
+        );
+        tensors.insert(
+            "weight.gguf_dtype".to_string(),
+            Tensor::from_vec(vec![8u32], 1, &device).unwrap(),
+        );
+        let bias = with_bias
+            .then(|| Tensor::from_vec(vec![0.25f32, -0.5, 0.75, 0.0], out_dim, &device).unwrap());
+        if let Some(bias) = &bias {
+            tensors.insert("bias".to_string(), bias.clone());
+        }
+        (
+            VarBuilder::from_tensors(tensors, DType::F32, &device),
+            dequantized,
+            bias,
+        )
+    }
+
+    #[test]
+    fn ltx2_linear_resolves_quantized_iff_the_gguf_side_channel_is_live() {
+        let (vb, _dequantized, _bias) = gguf_linear_fixture(true);
+        let linear = LtxLinear::load(64, 4, true, vb, vec![]).unwrap();
+        assert!(matches!(linear, LtxLinear::Quantized { .. }), "{linear:?}");
+
+        // A dense map without the side channel stays Standard.
+        let device = Device::Cpu;
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            Tensor::zeros((4, 64), DType::F32, &device).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let linear = LtxLinear::load(64, 4, false, vb, vec![]).unwrap();
+        assert!(matches!(linear, LtxLinear::Standard { .. }), "{linear:?}");
+    }
+
+    #[test]
+    fn ltx2_quantized_linear_matches_standard_over_the_dequantized_weight() {
+        let (vb, dequantized, bias) = gguf_linear_fixture(true);
+        let quantized = LtxLinear::load(64, 4, true, vb, vec![]).unwrap();
+        let standard = LtxLinear::Standard {
+            linear: nn::Linear::new(dequantized, bias),
+            adapters: vec![],
+        };
+
+        let xs = Tensor::from_vec(
+            (0..2 * 64)
+                .map(|i| i as f32 * 0.01 - 0.4)
+                .collect::<Vec<_>>(),
+            (1, 2, 64),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let got = quantized.forward(&xs).unwrap();
+        let expected = standard.forward(&xs).unwrap();
+        assert_tensors_close(&got, &expected, 1e-6);
+    }
+
+    #[test]
+    fn ltx2_quantized_linear_applies_lora_adapters_like_standard() {
+        let adapter = LinearLoraAdapter {
+            a: Tensor::from_vec(
+                (0..2 * 64)
+                    .map(|i| ((i % 7) as f32 - 3.0) * 0.05)
+                    .collect::<Vec<_>>(),
+                (2, 64),
+                &Device::Cpu,
+            )
+            .unwrap(),
+            b: Tensor::from_vec(
+                (0..4 * 2)
+                    .map(|i| ((i % 5) as f32 - 2.0) * 0.1)
+                    .collect::<Vec<_>>(),
+                (4, 2),
+                &Device::Cpu,
+            )
+            .unwrap(),
+            scale: 0.5,
+        };
+        let (vb, dequantized, bias) = gguf_linear_fixture(true);
+        let quantized = LtxLinear::load(64, 4, true, vb, vec![adapter.clone()]).unwrap();
+        let standard = LtxLinear::Standard {
+            linear: nn::Linear::new(dequantized, bias),
+            adapters: vec![adapter],
+        };
+
+        let xs = Tensor::from_vec(
+            (0..2 * 64)
+                .map(|i| i as f32 * 0.02 - 0.6)
+                .collect::<Vec<_>>(),
+            (1, 2, 64),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let got = quantized.forward(&xs).unwrap();
+        let expected = standard.forward(&xs).unwrap();
+        assert_tensors_close(&got, &expected, 1e-6);
     }
 
     /// A synthetic INT8 ConvRot weight: one 256-wide group per row so the
