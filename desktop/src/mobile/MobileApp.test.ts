@@ -8228,6 +8228,117 @@ describe("MobileApp gallery", () => {
     expect(wrapper.text()).toContain("Showing saved Library");
   });
 
+  it("keeps saved Library tag filters visible when its host is offline", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: false,
+        },
+      ]),
+    );
+    localStorage.setItem(
+      "mold.mobile.gallery-capabilities.v1",
+      JSON.stringify({
+        "url-derived-id": {
+          instanceId: "studio-instance",
+          gallery: { organize: true, trash: { enabled: true, retention_days: 30 } },
+        },
+      }),
+    );
+    localStorage.setItem(
+      "mold.mobile.gallery-tags.v1",
+      JSON.stringify({
+        "url-derived-id": {
+          instanceId: "studio-instance",
+          tags: [
+            { name: "Barbie", count: 6 },
+            { name: "moon", count: 6 },
+          ],
+        },
+      }),
+    );
+    // Older saved rows may not carry organization fields. Their known tag
+    // inventory must still survive the loading -> saved-Library transition.
+    await storeCachedGallery("studio-instance", [print]);
+    apiJsonTo.mockRejectedValue(new Error("offline"));
+    apiFetchTo.mockRejectedValue(new Error("offline"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.text()).toContain("Showing saved Library"));
+
+    expect(wrapper.find("[data-test='mobile-library-chip-favorites']").exists()).toBe(true);
+    expect(
+      wrapper.findAll("[data-test='mobile-library-chip-tag']").map((chip) => chip.text()),
+    ).toEqual(["Barbie6", "moon6"]);
+  });
+
+  it("does not restore saved tags across a host instance boundary", async () => {
+    localStorage.setItem(
+      "mold.mobile.gallery-capabilities.v1",
+      JSON.stringify({
+        "studio-id": {
+          instanceId: "mobile-host",
+          gallery: { organize: true },
+        },
+      }),
+    );
+    localStorage.setItem(
+      "mold.mobile.gallery-tags.v1",
+      JSON.stringify({
+        "studio-id": {
+          instanceId: "replaced-instance",
+          tags: [{ name: "Wrong server", count: 9 }],
+        },
+      }),
+    );
+    apiJsonTo.mockRejectedValue(new Error("offline"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+
+    expect(wrapper.find("[data-test='mobile-library-chip-tag']").exists()).toBe(false);
+  });
+
+  it("ignores malformed saved tag inventories", async () => {
+    localStorage.setItem(
+      "mold.mobile.gallery-capabilities.v1",
+      JSON.stringify({
+        "studio-id": {
+          instanceId: "mobile-host",
+          gallery: { organize: true },
+        },
+      }),
+    );
+    localStorage.setItem(
+      "mold.mobile.gallery-tags.v1",
+      JSON.stringify({
+        "studio-id": {
+          instanceId: "mobile-host",
+          tags: [{ name: null, count: 2 }],
+        },
+      }),
+    );
+    apiJsonTo.mockRejectedValue(new Error("offline"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+
+    expect(wrapper.find("[data-test='mobile-library-chip-tag']").exists()).toBe(false);
+  });
+
   it("does not restore an old instance cache from a gallery response that resolves after replacement", async () => {
     Object.defineProperty(globalThis, "indexedDB", {
       configurable: true,

@@ -633,6 +633,7 @@ const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
+const GALLERY_TAGS_KEY = "mold.mobile.gallery-tags.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 /** A broken WebView connection must not hold a thumbnail page forever. Five
@@ -750,6 +751,53 @@ function loadSavedGalleryCapabilities(): Record<string, SavedGalleryCapability> 
   }
 }
 const savedGalleryCapabilities = reactive(loadSavedGalleryCapabilities());
+interface SavedGalleryTags {
+  instanceId: string | null;
+  tags: TagCount[];
+}
+function loadSavedGalleryTags(): Record<string, SavedGalleryTags> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(GALLERY_TAGS_KEY) ?? "{}") as Record<
+      string,
+      SavedGalleryTags
+    >;
+    return Object.fromEntries(
+      Object.entries(saved).filter(
+        ([, entry]) =>
+          entry &&
+          (entry.instanceId === null || typeof entry.instanceId === "string") &&
+          Array.isArray(entry.tags) &&
+          entry.tags.every(
+            (tag) =>
+              tag &&
+              typeof tag.name === "string" &&
+              tag.name.trim().length > 0 &&
+              Number.isFinite(tag.count) &&
+              tag.count >= 0,
+          ),
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+const savedGalleryTags = reactive(loadSavedGalleryTags());
+function savedTagsForHost(host: MobileHost): readonly TagCount[] | undefined {
+  const saved = savedGalleryTags[host.id];
+  const instanceId = host.instanceId?.trim() || null;
+  if (!saved || host.instanceMismatch || !saved.instanceId || !instanceId) return undefined;
+  if (saved.instanceId !== instanceId) return undefined;
+  return saved.tags;
+}
+function rememberHostTags(host: MobileHost, tags: TagCount[]): void {
+  const instanceId = host.instanceId?.trim() || null;
+  if (!instanceId || host.instanceMismatch) return;
+  savedGalleryTags[host.id] = {
+    instanceId,
+    tags,
+  };
+  localStorage.setItem(GALLERY_TAGS_KEY, JSON.stringify(savedGalleryTags));
+}
 const effectiveGalleryCapabilities = computed<
   Record<string, ServerCapabilities | null | undefined>
 >(() => {
@@ -3762,6 +3810,7 @@ function updateHostStatus(payload: {
     const priorCacheKey = host.instanceId?.trim() || host.id;
     if (recordMobileHostStatus(host, payload.status) === "instance_mismatch") {
       retireMobileHostAuthority(host.id);
+      pruneHostOrganization(host.id);
       void clearCachedGalleryHosts([priorCacheKey]);
       return false;
     }
@@ -7924,7 +7973,9 @@ const hiddenCollectionSlugs = computed(
 // retained bucket leaves no ghost chips (its bucket is also pruned below).
 const mergedTags = computed(() =>
   mergeHostTags(
-    hostTags,
+    Object.fromEntries(
+      connectedHosts.value.map((host) => [host.id, hostTags[host.id] ?? savedTagsForHost(host)]),
+    ),
     connectedHosts.value.map((host) => host.id),
   ),
 );
@@ -8246,7 +8297,11 @@ async function refreshHostOrganization(hostIds: readonly string[]): Promise<void
         listHostTags(target),
       ]);
       if (collections.status === "fulfilled") hostCollections[hostId] = collections.value;
-      if (tags.status === "fulfilled") hostTags[hostId] = tags.value;
+      if (tags.status === "fulfilled") {
+        hostTags[hostId] = tags.value;
+        const host = connectedHosts.value.find((candidate) => candidate.id === hostId);
+        if (host) rememberHostTags(host, tags.value);
+      }
     }),
   );
 }
