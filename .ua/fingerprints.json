@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
-  "gitCommitHash": "6a18814b6081fd954d1c7471565d741594b19ad5",
-  "generatedAt": "2026-08-28T15:45:52.694Z",
+  "gitCommitHash": "3db4501d931196954bb80290797c4cc6c004bc5b",
+  "generatedAt": "2026-08-28T16:27:44.501Z",
   "files": {
     "apps/mobile/plugins/android/src/androidTest/java/AndroidDiscoveryInstrumentedTest.kt": {
       "filePath": "apps/mobile/plugins/android/src/androidTest/java/AndroidDiscoveryInstrumentedTest.kt",
@@ -202700,7 +202700,7 @@
     },
     "crates/mold-tui/src/app.rs": {
       "filePath": "crates/mold-tui/src/app.rs",
-      "contentHash": "3cb2eba8782e2a6f970e1e4993ea930cc3ea209f4c3a15637ee54427e5936b47",
+      "contentHash": "b70250acd2a46fd5c8414fa3709d051aad08a74fea294b36d5b774f406d20689",
       "functions": [
         {
           "name": "clear",
@@ -202717,12 +202717,14 @@
         {
           "name": "generation_elapsed",
           "params": [],
+          "returnType": "Option<std::time::Duration>",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "stage_elapsed",
           "params": [],
+          "returnType": "Option<std::time::Duration>",
           "exported": true,
           "lineCount": 3
         },
@@ -202743,12 +202745,14 @@
         {
           "name": "is_downloading",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "download_status_text",
           "params": [],
+          "returnType": "&str",
           "exported": true,
           "lineCount": 15
         },
@@ -202772,6 +202776,7 @@
           "params": [
             "has_negative"
           ],
+          "returnType": "Self",
           "exported": true,
           "lineCount": 9
         },
@@ -202780,12 +202785,14 @@
           "params": [
             "has_negative"
           ],
+          "returnType": "Self",
           "exported": true,
           "lineCount": 9
         },
         {
           "name": "label",
           "params": [],
+          "returnType": "&'static str",
           "exported": true,
           "lineCount": 46
         },
@@ -202794,6 +202801,7 @@
           "params": [
             "path"
           ],
+          "returnType": "Option<(u32, u32)>",
           "exported": false,
           "lineCount": 15
         },
@@ -202802,18 +202810,21 @@
           "params": [
             "text"
           ],
+          "returnType": "Option<(u32, u32)>",
           "exported": true,
           "lineCount": 9
         },
         {
           "name": "label",
           "params": [],
+          "returnType": "&'static str",
           "exported": true,
           "lineCount": 7
         },
         {
           "name": "next",
           "params": [],
+          "returnType": "Self",
           "exported": true,
           "lineCount": 7
         },
@@ -202822,6 +202833,7 @@
           "params": [
             "current"
           ],
+          "returnType": "u64",
           "exported": true,
           "lineCount": 9
         },
@@ -202830,6 +202842,7 @@
           "params": [
             "used_seed"
           ],
+          "returnType": "Option<u64>",
           "exported": true,
           "lineCount": 7
         },
@@ -202840,18 +202853,21 @@
             "prompt",
             "negative_prompt"
           ],
+          "returnType": "Self",
           "exported": true,
           "lineCount": 11
         },
         {
           "name": "label",
           "params": [],
+          "returnType": "&'static str",
           "exported": true,
           "lineCount": 7
         },
         {
           "name": "next",
           "params": [],
+          "returnType": "Self",
           "exported": true,
           "lineCount": 7
         },
@@ -202861,6 +202877,7 @@
             "params",
             "config"
           ],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 6
         },
@@ -202869,6 +202886,7 @@
           "params": [
             "config"
           ],
+          "returnType": "Self",
           "exported": true,
           "lineCount": 58
         },
@@ -202877,6 +202895,7 @@
           "params": [
             "field"
           ],
+          "returnType": "String",
           "exported": true,
           "lineCount": 179
         },
@@ -202885,6 +202904,7 @@
           "params": [
             "value"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 5
         },
@@ -202896,6 +202916,7 @@
             "step",
             "max"
           ],
+          "returnType": "Option<f64>",
           "exported": false,
           "lineCount": 15
         },
@@ -202906,6 +202927,7 @@
             "delta",
             "max"
           ],
+          "returnType": "Option<u32>",
           "exported": false,
           "lineCount": 15
         },
@@ -202914,6 +202936,7 @@
           "params": [
             "input"
           ],
+          "returnType": "std::result::Result<Option<Vec<u32>>, String>",
           "exported": false,
           "lineCount": 33
         },
@@ -202922,6 +202945,7 @@
           "params": [
             "target"
           ],
+          "returnType": "u32",
           "exported": false,
           "lineCount": 8
         },
@@ -202931,6 +202955,7 @@
             "grid",
             "fps"
           ],
+          "returnType": "u32",
           "exported": false,
           "lineCount": 13
         },
@@ -202950,6 +202975,7 @@
             "negative_cleared",
             "advertised_default"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 13
         },
@@ -202958,6 +202984,7 @@
           "params": [
             "text"
           ],
+          "returnType": "TextArea<'static>",
           "exported": false,
           "lineCount": 10
         },
@@ -202968,6 +202995,7 @@
             "submission",
             "outcomes"
           ],
+          "returnType": "Option<Self>",
           "exported": true,
           "lineCount": 20
         },
@@ -202980,18 +203008,21 @@
         {
           "name": "guidance_adjustable",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "negative_visible",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 5
         },
         {
           "name": "default",
           "params": [],
+          "returnType": "Self",
           "exported": false,
           "lineCount": 27
         },
@@ -203004,12 +203035,14 @@
         {
           "name": "selected_pos",
           "params": [],
+          "returnType": "Option<usize>",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "rescan_due",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 9
         },
@@ -203019,12 +203052,14 @@
             "code",
             "modifiers"
           ],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 27
         },
         {
           "name": "local",
           "params": [],
+          "returnType": "Self",
           "exported": true,
           "lineCount": 7
         },
@@ -203033,6 +203068,7 @@
           "params": [
             "entry"
           ],
+          "returnType": "Self",
           "exported": true,
           "lineCount": 7
         },
@@ -203041,42 +203077,49 @@
           "params": [
             "url"
           ],
+          "returnType": "Self",
           "exported": true,
           "lineCount": 7
         },
         {
           "name": "is_local",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "is_this_machine",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "filename",
           "params": [],
+          "returnType": "String",
           "exported": true,
           "lineCount": 6
         },
         {
           "name": "owning_origins",
           "params": [],
+          "returnType": "Vec<GalleryOrigin>",
           "exported": true,
           "lineCount": 9
         },
         {
           "name": "primary_origin",
           "params": [],
+          "returnType": "GalleryOrigin",
           "exported": true,
           "lineCount": 6
         },
         {
           "name": "machine_label",
           "params": [],
+          "returnType": "String",
           "exported": true,
           "lineCount": 8
         },
@@ -203085,12 +203128,14 @@
           "params": [
             "days"
           ],
+          "returnType": "String",
           "exported": true,
           "lineCount": 7
         },
         {
           "name": "hint_label",
           "params": [],
+          "returnType": "&'static str",
           "exported": true,
           "lineCount": 6
         },
@@ -203101,6 +203146,7 @@
             "machines",
             "kind"
           ],
+          "returnType": "String",
           "exported": true,
           "lineCount": 12
         },
@@ -203109,6 +203155,7 @@
           "params": [
             "model"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 6
         },
@@ -203118,18 +203165,21 @@
             "catalog",
             "query"
           ],
+          "returnType": "Vec<String>",
           "exported": false,
           "lineCount": 12
         },
         {
           "name": "is_field",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "is_read_only",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 9
         },
@@ -203138,6 +203188,17 @@
           "params": [
             "url"
           ],
+          "returnType": "bool",
+          "exported": false,
+          "lineCount": 8
+        },
+        {
+          "name": "check_gallery_access",
+          "params": [
+            "url",
+            "api_key"
+          ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 8
         },
@@ -203146,6 +203207,7 @@
           "params": [
             "port"
           ],
+          "returnType": "Option<std::process::Child>",
           "exported": false,
           "lineCount": 6
         },
@@ -203155,6 +203217,7 @@
             "col",
             "tab_bar_x"
           ],
+          "returnType": "Option<View>",
           "exported": true,
           "lineCount": 5
         },
@@ -203173,6 +203236,7 @@
             "url",
             "timeout_secs"
           ],
+          "returnType": "bool",
           "exported": false,
           "lineCount": 10
         },
@@ -203183,8 +203247,9 @@
             "local",
             "picker"
           ],
+          "returnType": "Result<Self>",
           "exported": true,
-          "lineCount": 3
+          "lineCount": 9
         },
         {
           "name": "new_with_launch_policy",
@@ -203192,26 +203257,30 @@
             "host",
             "local",
             "picker",
+            "api_key",
             "strict_host"
           ],
+          "returnType": "Result<Self>",
           "exported": true,
-          "lineCount": 320
+          "lineCount": 354
         },
         {
           "name": "spawn_gallery_scan",
           "params": [],
           "exported": true,
-          "lineCount": 9
+          "lineCount": 10
         },
         {
           "name": "should_poll_remote",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "should_save_output_locally",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 6
         },
@@ -203220,6 +203289,7 @@
           "params": [
             "from_local"
           ],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 9
         },
@@ -203263,18 +203333,21 @@
           "params": [
             "model"
           ],
+          "returnType": "Option<mold_core::SourceImageCapability>",
           "exported": false,
           "lineCount": 11
         },
         {
           "name": "identity_gate_error",
           "params": [],
+          "returnType": "Option<String>",
           "exported": false,
           "lineCount": 27
         },
         {
           "name": "identity_dispatch_error",
           "params": [],
+          "returnType": "Option<String>",
           "exported": false,
           "lineCount": 7
         },
@@ -203310,6 +203383,12 @@
           "name": "shutdown",
           "params": [],
           "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "cleanup_runtime_authority",
+          "params": [],
+          "exported": false,
           "lineCount": 11
         },
         {
@@ -203367,12 +203446,14 @@
         {
           "name": "model_default_size",
           "params": [],
+          "returnType": "(u32, u32)",
           "exported": false,
           "lineCount": 19
         },
         {
           "name": "active_generation_recipe",
           "params": [],
+          "returnType": "Option<mold_core::GenerationRecipeProfile>",
           "exported": false,
           "lineCount": 10
         },
@@ -203415,6 +203496,7 @@
         {
           "name": "available_upscaler_models",
           "params": [],
+          "returnType": "Vec<String>",
           "exported": false,
           "lineCount": 20
         },
@@ -203480,6 +203562,7 @@
           "params": [
             "path"
           ],
+          "returnType": "bool",
           "exported": false,
           "lineCount": 16
         },
@@ -203516,6 +203599,7 @@
           "params": [
             "origin"
           ],
+          "returnType": "Option<&mold_core::ServerCapabilities>",
           "exported": true,
           "lineCount": 12
         },
@@ -203524,6 +203608,7 @@
           "params": [
             "origin"
           ],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 9
         },
@@ -203532,12 +203617,14 @@
           "params": [
             "entry"
           ],
+          "returnType": "RemovalKind",
           "exported": true,
           "lineCount": 11
         },
         {
           "name": "selected_removal_kind",
           "params": [],
+          "returnType": "RemovalKind",
           "exported": true,
           "lineCount": 7
         },
@@ -203558,12 +203645,14 @@
           "params": [
             "model_name"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 49
         },
         {
           "name": "needs_confirm",
           "params": [],
+          "returnType": "bool",
           "exported": true,
           "lineCount": 3
         },
@@ -203615,6 +203704,7 @@
           "params": [
             "field"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 10
         },
@@ -203643,6 +203733,7 @@
         {
           "name": "build_settings_rows",
           "params": [],
+          "returnType": "Vec<SettingsRow>",
           "exported": true,
           "lineCount": 323
         },
@@ -203651,6 +203742,7 @@
           "params": [
             "key"
           ],
+          "returnType": "String",
           "exported": true,
           "lineCount": 139
         },
@@ -203667,6 +203759,7 @@
           "params": [
             "key"
           ],
+          "returnType": "Option<&'static str>",
           "exported": true,
           "lineCount": 24
         },
@@ -203789,6 +203882,7 @@
         {
           "name": "prompt_transform_task",
           "params": [],
+          "returnType": "mold_core::ExpandTask",
           "exported": false,
           "lineCount": 18
         },
@@ -203797,6 +203891,7 @@
           "params": [
             "target"
           ],
+          "returnType": "std::result::Result<String, String>",
           "exported": false,
           "lineCount": 37
         },
@@ -203824,6 +203919,7 @@
             "snapshot",
             "dimensions"
           ],
+          "returnType": "mold_core::PromptTransformProvenance",
           "exported": false,
           "lineCount": 13
         },
@@ -203832,6 +203928,7 @@
           "params": [
             "snapshot"
           ],
+          "returnType": "Option<String>",
           "exported": false,
           "lineCount": 32
         },
@@ -203840,6 +203937,7 @@
           "params": [
             "snapshot"
           ],
+          "returnType": "Option<String>",
           "exported": false,
           "lineCount": 31
         },
@@ -203849,6 +203947,7 @@
             "snapshot",
             "response"
           ],
+          "returnType": "bool",
           "exported": false,
           "lineCount": 9
         },
@@ -203889,6 +203988,7 @@
           "params": [
             "config"
           ],
+          "returnType": "Vec<mold_core::ModelInfoExtended>",
           "exported": false,
           "lineCount": 19
         },
@@ -203897,6 +203997,7 @@
           "params": [
             "encoded"
           ],
+          "returnType": "Option<image::DynamicImage>",
           "exported": false,
           "lineCount": 18
         },
@@ -203905,6 +204006,7 @@
           "params": [
             "position"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 7
         },
@@ -203914,8 +204016,15 @@
             "progress",
             "event"
           ],
+          "returnType": "bool",
           "exported": false,
           "lineCount": 161
+        },
+        {
+          "name": "drop",
+          "params": [],
+          "exported": false,
+          "lineCount": 6
         }
       ],
       "classes": [
@@ -204621,6 +204730,7 @@
             "sync_pipeline_guidance",
             "spawn_upscale",
             "shutdown",
+            "cleanup_runtime_authority",
             "save_session",
             "apply_theme_preset",
             "update_model",
@@ -204697,7 +204807,8 @@
             "apply_prompt_variant",
             "prepare_prompt_variants",
             "process_background_events",
-            "handle_progress"
+            "handle_progress",
+            "drop"
           ],
           "properties": [
             "active_view",
@@ -204725,6 +204836,8 @@
             "history",
             "layout",
             "server_process",
+            "session_api_key_host_id",
+            "strict_gallery_authority",
             "upscale_in_progress",
             "upscale_task",
             "upscale_tile_progress",
@@ -204733,7 +204846,7 @@
             "show_timeline"
           ],
           "exported": true,
-          "lineCount": 52
+          "lineCount": 58
         },
         {
           "name": "LayoutAreas",
@@ -204756,20 +204869,106 @@
       ],
       "imports": [
         {
-          "source": "crates/mold-tui/src/action.rs",
-          "specifiers": []
+          "source": "anyhow",
+          "specifiers": [
+            "Context",
+            "Result"
+          ]
         },
         {
-          "source": "crates/mold-tui/src/event.rs",
-          "specifiers": []
+          "source": "crossterm::event",
+          "specifiers": [
+            "KeyCode",
+            "KeyModifiers"
+          ]
         },
         {
-          "source": "crates/mold-tui/src/model_info.rs",
-          "specifiers": []
+          "source": "mold_core",
+          "specifiers": [
+            "Config",
+            "GenerateResponse",
+            "Ltx2GuidanceOverrides",
+            "Ltx2PipelineMode",
+            "Ltx2SpatialUpscale",
+            "Ltx2TemporalUpscale",
+            "ModelInfoExtended",
+            "OutputFormat",
+            "PromptTransformOperation",
+            "RemixResponse",
+            "Scheduler",
+            "ServerStatus",
+            "SseProgressEvent"
+          ]
         },
         {
-          "source": "crates/mold-tui/src/ui/theme.rs",
-          "specifiers": []
+          "source": "rand",
+          "specifiers": [
+            "Rng"
+          ]
+        },
+        {
+          "source": "ratatui_image::picker",
+          "specifiers": [
+            "Picker"
+          ]
+        },
+        {
+          "source": "ratatui_image::protocol",
+          "specifiers": [
+            "Protocol",
+            "StatefulProtocol"
+          ]
+        },
+        {
+          "source": "std::collections",
+          "specifiers": [
+            "VecDeque"
+          ]
+        },
+        {
+          "source": "tokio::sync",
+          "specifiers": [
+            "mpsc"
+          ]
+        },
+        {
+          "source": "tui_textarea",
+          "specifiers": [
+            "TextArea"
+          ]
+        },
+        {
+          "source": "crate::action",
+          "specifiers": [
+            "Action",
+            "View"
+          ]
+        },
+        {
+          "source": "crate::event",
+          "specifiers": [
+            "map_event"
+          ]
+        },
+        {
+          "source": "crate::model_info",
+          "specifiers": [
+            "capabilities_for_family"
+          ]
+        },
+        {
+          "source": "crate::model_info",
+          "specifiers": [
+            "capabilities_for_model",
+            "family_for_model",
+            "ModelCapabilities"
+          ]
+        },
+        {
+          "source": "crate::ui::theme",
+          "specifiers": [
+            "Theme"
+          ]
         }
       ],
       "exports": [
@@ -204882,7 +205081,7 @@
         "settings_env_override",
         "process_background_events"
       ],
-      "totalLines": 18675,
+      "totalLines": 18774,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/backend.rs": {
@@ -205484,7 +205683,7 @@
     },
     "crates/mold-tui/src/gallery_scan.rs": {
       "filePath": "crates/mold-tui/src/gallery_scan.rs",
-      "contentHash": "b8db22152591e1f9aa14a3ab98ce50ace2e2d73cde3b49442399d87d799c160c",
+      "contentHash": "cc7e6d2bf16e865e8d28a07ac7862bda6df27c33fe5948ae591885a0dff7a06d",
       "functions": [
         {
           "name": "default_gallery_dir",
@@ -205615,11 +205814,12 @@
         {
           "name": "scan_all_hosts",
           "params": [
-            "sources"
+            "sources",
+            "allow_local_fallback"
           ],
           "returnType": "MergedScan",
           "exported": true,
-          "lineCount": 41
+          "lineCount": 48
         },
         {
           "name": "merge_scans",
@@ -205737,7 +205937,7 @@
         "filter_entries",
         "library_hint"
       ],
-      "totalLines": 1144,
+      "totalLines": 1165,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/gallery_trash.rs": {
@@ -206257,7 +206457,7 @@
     },
     "crates/mold-tui/src/hosts.rs": {
       "filePath": "crates/mold-tui/src/hosts.rs",
-      "contentHash": "162fd4c9a45e875689a8c6dac547c28920569ae44f6cbad4354f6d5672e492b5",
+      "contentHash": "f4ac58abcafc451d9ffed32dc85d629f165cacc9623fd5c29580843409221168",
       "functions": [
         {
           "name": "local_display_name",
@@ -206371,13 +206571,30 @@
           "lineCount": 3
         },
         {
+          "name": "set_session_api_key",
+          "params": [
+            "id",
+            "key"
+          ],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "clear_session_api_key",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
           "name": "api_key_for",
           "params": [
             "id"
           ],
           "returnType": "Option<String>",
           "exported": true,
-          "lineCount": 7
+          "lineCount": 15
         },
         {
           "name": "save_api_key",
@@ -207035,6 +207252,13 @@
           ]
         },
         {
+          "source": "std::sync",
+          "specifiers": [
+            "LazyLock",
+            "RwLock"
+          ]
+        },
+        {
           "source": "tokio::sync",
           "specifiers": [
             "mpsc"
@@ -207085,6 +207309,8 @@
         "all",
         "host_id_from_url",
         "host_port_label",
+        "set_session_api_key",
+        "clear_session_api_key",
         "api_key_for",
         "save_api_key",
         "delete_api_key",
@@ -207145,7 +207371,7 @@
         "test_connection",
         "cancel_host_job"
       ],
-      "totalLines": 2278,
+      "totalLines": 2310,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/identity.rs": {
@@ -207227,14 +207453,34 @@
     },
     "crates/mold-tui/src/lib.rs": {
       "filePath": "crates/mold-tui/src/lib.rs",
-      "contentHash": "3e922090b8730e8b996876a58e88ec963dda1e19fc04d6b28497fe2e0ebe80d4",
+      "contentHash": "6c32ca2e3be0cdc54ad12a31d66ec29f8fa66956414ac406b8f1379949da3aed",
       "functions": [
+        {
+          "name": "arm",
+          "params": [],
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "restore",
+          "params": [],
+          "returnType": "io::Result<()>",
+          "exported": false,
+          "lineCount": 9
+        },
+        {
+          "name": "drop",
+          "params": [],
+          "exported": false,
+          "lineCount": 3
+        },
         {
           "name": "run_tui",
           "params": [
             "host",
             "local"
           ],
+          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 8
         },
@@ -207243,8 +207489,9 @@
           "params": [
             "options"
           ],
+          "returnType": "Result<()>",
           "exported": true,
-          "lineCount": 48
+          "lineCount": 53
         },
         {
           "name": "run_event_loop",
@@ -207252,11 +207499,25 @@
             "terminal",
             "app"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 46
         }
       ],
       "classes": [
+        {
+          "name": "TerminalRestoreGuard",
+          "methods": [
+            "arm",
+            "restore",
+            "drop"
+          ],
+          "properties": [
+            "active"
+          ],
+          "exported": false,
+          "lineCount": 3
+        },
         {
           "name": "TuiInitialWorkspace",
           "methods": [],
@@ -207273,89 +207534,50 @@
           "properties": [
             "host",
             "local",
+            "api_key",
             "initial_workspace",
             "strict_host"
           ],
           "exported": true,
-          "lineCount": 8
+          "lineCount": 11
         }
       ],
       "imports": [
         {
-          "source": "crates/mold-tui/src/action.rs",
-          "specifiers": []
+          "source": "std",
+          "specifiers": [
+            "io"
+          ]
         },
         {
-          "source": "crates/mold-tui/src/animation.rs",
-          "specifiers": []
+          "source": "std",
+          "specifiers": [
+            "panic"
+          ]
         },
         {
-          "source": "crates/mold-tui/src/app.rs",
-          "specifiers": []
+          "source": "anyhow",
+          "specifiers": [
+            "Result"
+          ]
         },
         {
-          "source": "crates/mold-tui/src/backend.rs",
-          "specifiers": []
+          "source": "crossterm",
+          "specifiers": [
+            "execute"
+          ]
         },
         {
-          "source": "crates/mold-tui/src/event.rs",
-          "specifiers": []
+          "source": "ratatui::prelude",
+          "specifiers": [
+            "*"
+          ]
         },
         {
-          "source": "crates/mold-tui/src/gallery_scan.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/gallery_trash.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/h3_references.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/history.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/hosts.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/identity.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/model_info.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/motion.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/palette.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/prefs.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/session.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/test_env.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/thumbnails.rs",
-          "specifiers": []
-        },
-        {
-          "source": "crates/mold-tui/src/ui/mod.rs",
-          "specifiers": []
+          "source": "app",
+          "specifiers": [
+            "App"
+          ]
         }
       ],
       "exports": [
@@ -207364,7 +207586,7 @@
         "run_tui",
         "run_tui_with_options"
       ],
-      "totalLines": 188,
+      "totalLines": 271,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/model_info.rs": {
@@ -210007,7 +210229,7 @@
     },
     "crates/mold-tui/src/ui/popup.rs": {
       "filePath": "crates/mold-tui/src/ui/popup.rs",
-      "contentHash": "61a2bed0d8af64f8de1750f4c0beb14b539d32ab0fa031853d15cd275bafaaa1",
+      "contentHash": "f108eee7734ff57bbffd147a23219e667d6632788389f1b2f333b24768dc0288",
       "functions": [
         {
           "name": "render",
@@ -210283,7 +210505,7 @@
       "exports": [
         "render"
       ],
-      "totalLines": 1671,
+      "totalLines": 1673,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/ui/preview.rs": {
@@ -283080,13 +283302,14 @@
     },
     "crates/mold-cli/src/commands/library.rs": {
       "filePath": "crates/mold-cli/src/commands/library.rs",
-      "contentHash": "8508ee1e033f01a49b38500079f8bcebb098a0c4dfce4a5c6f37b276e8745b72",
+      "contentHash": "619f32df40276dcc474cff0a20b1d430450c1a71940f53cbcb4002084523ec75",
       "functions": [
         {
           "name": "run",
           "params": [
             "action"
           ],
+          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 6
         },
@@ -283096,6 +283319,7 @@
             "action",
             "client"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 49
         },
@@ -283105,6 +283329,7 @@
             "client",
             "options"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 49
         },
@@ -283116,6 +283341,7 @@
             "json",
             "preview"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 22
         },
@@ -283125,6 +283351,7 @@
             "client",
             "image"
           ],
+          "returnType": "Result<Vec<u8>>",
           "exported": false,
           "lineCount": 13
         },
@@ -283136,6 +283363,7 @@
             "title",
             "clear"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 20
         },
@@ -283145,6 +283373,7 @@
             "client",
             "action"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 39
         },
@@ -283157,6 +283386,7 @@
             "add_tags",
             "remove_tags"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 33
         },
@@ -283166,6 +283396,7 @@
             "client",
             "action"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 118
         },
@@ -283177,6 +283408,7 @@
             "filenames",
             "add"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 26
         },
@@ -283186,6 +283418,7 @@
             "client",
             "filenames"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 24
         },
@@ -283194,6 +283427,7 @@
           "params": [
             "client"
           ],
+          "returnType": "Result<ServerCapabilities>",
           "exported": false,
           "lineCount": 13
         },
@@ -283203,6 +283437,7 @@
             "collections",
             "value"
           ],
+          "returnType": "Result<&'a Collection>",
           "exported": false,
           "lineCount": 31
         },
@@ -283224,6 +283459,7 @@
           "params": [
             "row"
           ],
+          "returnType": "Option<OutputFormat>",
           "exported": false,
           "lineCount": 7
         },
@@ -283232,6 +283468,7 @@
           "params": [
             "row"
           ],
+          "returnType": "&str",
           "exported": false,
           "lineCount": 7
         },
@@ -283243,6 +283480,7 @@
             "offset",
             "collections"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 53
         },
@@ -283251,6 +283489,7 @@
           "params": [
             "row"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 30
         },
@@ -283259,6 +283498,7 @@
           "params": [
             "rows"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 23
         },
@@ -283268,6 +283508,7 @@
             "value",
             "max"
           ],
+          "returnType": "String",
           "exported": false,
           "lineCount": 12
         },
@@ -283276,6 +283517,7 @@
           "params": [
             "prompt"
           ],
+          "returnType": "Result<bool>",
           "exported": false,
           "lineCount": 13
         },
@@ -283285,8 +283527,9 @@
             "host",
             "local"
           ],
+          "returnType": "Result<()>",
           "exported": false,
-          "lineCount": 9
+          "lineCount": 10
         },
         {
           "name": "library_grid",
@@ -283294,6 +283537,7 @@
             "_host",
             "_local"
           ],
+          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 3
         }
@@ -283316,11 +283560,64 @@
           "lineCount": 10
         }
       ],
-      "imports": [],
+      "imports": [
+        {
+          "source": "std::collections",
+          "specifiers": [
+            "HashMap"
+          ]
+        },
+        {
+          "source": "std::io",
+          "specifiers": [
+            "self",
+            "IsTerminal",
+            "Write"
+          ]
+        },
+        {
+          "source": "anyhow",
+          "specifiers": [
+            "bail",
+            "Context",
+            "Result"
+          ]
+        },
+        {
+          "source": "colored",
+          "specifiers": [
+            "Colorize"
+          ]
+        },
+        {
+          "source": "mold_core",
+          "specifiers": [
+            "Collection",
+            "CollectionCreateRequest",
+            "CollectionItemsRequest",
+            "CollectionUpdateRequest",
+            "GalleryBulkMutationRequest",
+            "GalleryImage",
+            "GalleryOrganizeRequest",
+            "GalleryPatchRequest",
+            "MoldClient",
+            "OutputFormat",
+            "ServerCapabilities"
+          ]
+        },
+        {
+          "source": "crate",
+          "specifiers": [
+            "LibraryAction",
+            "LibraryCollectionAction",
+            "LibraryTagAction"
+          ]
+        }
+      ],
       "exports": [
         "run"
       ],
-      "totalLines": 773,
+      "totalLines": 774,
       "hasStructuralAnalysis": true
     }
   }
