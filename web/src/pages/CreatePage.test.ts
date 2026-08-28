@@ -2596,7 +2596,9 @@ describe("CreatePage layout and behavior", () => {
           "The model may need re-downloading: mold pull qwen3-expand",
       ),
     );
-    hostModelsMock.mockResolvedValue([installedModelRow("flux-dev:q4", "flux")]);
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     const form = useGenerateForm();
@@ -2609,8 +2611,12 @@ describe("CreatePage layout and behavior", () => {
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(false);
-    expect(wrapper.getComponent({ name: "ResultCanvas" }).props("variations")).toEqual([]);
+    expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(
+      false,
+    );
+    expect(
+      wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
+    ).toEqual([]);
   });
 
   it("blocks ordinary submit while variations are preparing and awaiting review", async () => {

@@ -24,9 +24,7 @@ describe("parseMissingExpandModel", () => {
   it("returns null for unrelated errors", () => {
     expect(parseMissingExpandModel("inference failed: out of memory")).toBeNull();
     expect(
-      parseMissingExpandModel(
-        "The model may need re-downloading: mold pull qwen3-expand",
-      ),
+      parseMissingExpandModel("The model may need re-downloading: mold pull qwen3-expand"),
     ).toBeNull();
   });
 });
