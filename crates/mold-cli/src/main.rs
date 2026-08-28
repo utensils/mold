@@ -58,6 +58,16 @@ fn collection_name_parser(raw: &str) -> Result<String, String> {
     mold_core::validate_collection_name(raw).map(|(name, _slug)| name)
 }
 
+fn library_limit_parser(raw: &str) -> Result<usize, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|_| "limit must be an integer from 1 to 1000".to_string())?;
+    if !(1..=1000).contains(&value) {
+        return Err("limit must be from 1 to 1000".to_string());
+    }
+    Ok(value)
+}
+
 #[derive(Clone, clap::ValueEnum)]
 enum LogFormat {
     Text,
@@ -737,6 +747,179 @@ pub enum TrashAction {
     Sweep,
 }
 
+#[derive(clap::Subcommand)]
+pub enum LibraryTagAction {
+    /// List tags and their print counts
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add one or more tags to existing prints
+    Add {
+        #[arg(required = true, value_name = "FILENAME")]
+        filenames: Vec<String>,
+        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser)]
+        tags: Vec<String>,
+    },
+    /// Remove one or more tags from existing prints
+    Remove {
+        #[arg(required = true, value_name = "FILENAME")]
+        filenames: Vec<String>,
+        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser)]
+        tags: Vec<String>,
+    },
+    /// Rename a tag everywhere it is used
+    Rename {
+        #[arg(value_name = "OLD", value_parser = tag_parser)]
+        old: String,
+        #[arg(value_name = "NEW", value_parser = tag_parser)]
+        new: String,
+    },
+    /// Delete a tag and detach it from every print
+    Delete {
+        #[arg(value_name = "TAG", value_parser = tag_parser)]
+        tag: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub enum LibraryCollectionAction {
+    /// List collections and their print counts
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one collection and its ordered member filenames
+    Show {
+        #[arg(value_name = "NAME-OR-SLUG")]
+        collection: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a collection
+    Create {
+        #[arg(value_name = "NAME", value_parser = collection_name_parser)]
+        name: String,
+        #[arg(long, value_name = "TEXT")]
+        description: Option<String>,
+    },
+    /// Update a collection's name, description, cover, or visibility
+    Update {
+        #[arg(value_name = "NAME-OR-SLUG")]
+        collection: String,
+        #[arg(long, value_name = "TEXT", value_parser = collection_name_parser)]
+        name: Option<String>,
+        #[arg(long, value_name = "TEXT", conflicts_with = "clear_description")]
+        description: Option<String>,
+        #[arg(long, conflicts_with = "description")]
+        clear_description: bool,
+        #[arg(long, value_name = "FILENAME", conflicts_with = "clear_cover")]
+        cover: Option<String>,
+        #[arg(long, conflicts_with = "cover")]
+        clear_cover: bool,
+        #[arg(long, conflicts_with = "visible")]
+        hidden: bool,
+        #[arg(long, conflicts_with = "hidden")]
+        visible: bool,
+    },
+    /// Delete a collection without deleting its prints
+    Delete {
+        #[arg(value_name = "NAME-OR-SLUG")]
+        collection: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Add existing prints to a collection
+    Add {
+        #[arg(value_name = "NAME-OR-SLUG")]
+        collection: String,
+        #[arg(required = true, value_name = "FILENAME")]
+        filenames: Vec<String>,
+    },
+    /// Remove existing prints from a collection
+    Remove {
+        #[arg(value_name = "NAME-OR-SLUG")]
+        collection: String,
+        #[arg(required = true, value_name = "FILENAME")]
+        filenames: Vec<String>,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub enum LibraryAction {
+    /// List and filter live Library prints
+    List {
+        #[arg(long, value_name = "TEXT")]
+        query: Option<String>,
+        #[arg(long = "tag", value_name = "TAG", value_parser = tag_parser)]
+        tags: Vec<String>,
+        #[arg(long, value_name = "NAME-OR-SLUG")]
+        collection: Option<String>,
+        #[arg(long)]
+        favorite: bool,
+        #[arg(long, value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav"]))]
+        format: Option<OutputFormat>,
+        #[arg(long, default_value_t = 50, value_parser = library_limit_parser)]
+        limit: usize,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one print's metadata and optionally preview it inline
+    Show {
+        #[arg(value_name = "FILENAME")]
+        filename: String,
+        #[arg(long, conflicts_with = "preview")]
+        json: bool,
+        #[arg(long, conflicts_with = "json")]
+        preview: bool,
+    },
+    /// Open the protocol-aware terminal Library grid
+    Grid {
+        #[arg(long, value_name = "URL", conflicts_with = "local")]
+        host: Option<String>,
+        #[arg(long, conflicts_with = "host")]
+        local: bool,
+    },
+    /// Set or clear one existing print's title
+    Title {
+        #[arg(value_name = "FILENAME")]
+        filename: String,
+        #[arg(value_name = "TEXT", required_unless_present = "clear", conflicts_with = "clear", value_parser = print_title_parser)]
+        title: Option<String>,
+        #[arg(long, conflicts_with = "title")]
+        clear: bool,
+    },
+    /// Mark existing prints as favorites
+    Favorite {
+        #[arg(required = true, value_name = "FILENAME")]
+        filenames: Vec<String>,
+    },
+    /// Remove the favorite mark from existing prints
+    Unfavorite {
+        #[arg(required = true, value_name = "FILENAME")]
+        filenames: Vec<String>,
+    },
+    /// Manage tags on existing prints
+    Tag {
+        #[command(subcommand)]
+        action: LibraryTagAction,
+    },
+    /// Manage collections and membership
+    Collection {
+        #[command(subcommand)]
+        action: LibraryCollectionAction,
+    },
+    /// Move live prints into the recoverable gallery trash
+    Trash {
+        #[arg(required = true, value_name = "FILENAME")]
+        filenames: Vec<String>,
+    },
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -1398,6 +1581,25 @@ desktop, and iPhone surfaces render.")]
     Queue {
         #[command(subcommand)]
         action: QueueAction,
+    },
+
+    /// Browse and organize existing Library prints on a running server
+    #[command(after_long_help = "\
+Examples:
+  mold library list --tag portrait --favorite
+  mold library show mold-flux-dev-1700000000000.png --preview
+  mold library tag add a.png b.png --tag portrait --tag selected
+  mold library collection add Portfolio a.png b.png
+  mold library collection remove Portfolio b.png
+  mold library trash a.png
+  mold library grid
+
+Non-grid commands target MOLD_HOST (with MOLD_API_KEY when configured) and
+never fall back to direct filesystem access. The grid opens the existing Mold
+TUI Library; an unreachable explicit host is an error, not a local fallback.")]
+    Library {
+        #[command(subcommand)]
+        action: LibraryAction,
     },
 
     /// Inspect, restore, or empty the gallery trash on a running server
@@ -2469,6 +2671,9 @@ async fn run() -> anyhow::Result<()> {
         }
         Commands::Queue { action } => {
             commands::queue::run(action).await?;
+        }
+        Commands::Library { action } => {
+            commands::library::run(action).await?;
         }
         Commands::Trash { action } => {
             commands::trash::run(action).await?;
@@ -3635,6 +3840,123 @@ mod tests {
             };
             assert_eq!(matched, expected);
         }
+    }
+
+    // ── library tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn library_list_parses_filters_and_bounds_limit() {
+        match parse(&[
+            "library",
+            "list",
+            "--tag",
+            "Night Owls",
+            "--collection",
+            "Portfolio",
+            "--favorite",
+            "--format",
+            "png",
+            "--limit",
+            "1000",
+            "--offset",
+            "4",
+            "--json",
+        ])
+        .command
+        {
+            Commands::Library {
+                action:
+                    LibraryAction::List {
+                        tags,
+                        collection,
+                        favorite,
+                        format,
+                        limit,
+                        offset,
+                        json,
+                        ..
+                    },
+            } => {
+                assert_eq!(tags, vec!["Night Owls"]);
+                assert_eq!(collection.as_deref(), Some("Portfolio"));
+                assert!(favorite);
+                assert_eq!(format, Some(OutputFormat::Png));
+                assert_eq!(limit, 1000);
+                assert_eq!(offset, 4);
+                assert!(json);
+            }
+            _ => panic!("expected Library list"),
+        }
+        assert!(try_parse(&["library", "list", "--limit", "0"]).is_err());
+        assert!(try_parse(&["library", "list", "--limit", "1001"]).is_err());
+    }
+
+    #[test]
+    fn library_show_keeps_json_and_preview_exclusive() {
+        assert!(try_parse(&["library", "show", "print.png", "--json", "--preview",]).is_err());
+        match parse(&["library", "show", "print.png", "--preview"]).command {
+            Commands::Library {
+                action:
+                    LibraryAction::Show {
+                        filename,
+                        preview,
+                        json,
+                    },
+            } => {
+                assert_eq!(filename, "print.png");
+                assert!(preview);
+                assert!(!json);
+            }
+            _ => panic!("expected Library show"),
+        }
+    }
+
+    #[test]
+    fn library_tag_and_collection_membership_parse() {
+        match parse(&[
+            "library", "tag", "add", "a.png", "b.png", "--tag", "owl", "--tag", "night",
+        ])
+        .command
+        {
+            Commands::Library {
+                action:
+                    LibraryAction::Tag {
+                        action: LibraryTagAction::Add { filenames, tags },
+                    },
+            } => {
+                assert_eq!(filenames, vec!["a.png", "b.png"]);
+                assert_eq!(tags, vec!["owl", "night"]);
+            }
+            _ => panic!("expected Library tag add"),
+        }
+        match parse(&["library", "collection", "remove", "Portfolio", "a.png"]).command {
+            Commands::Library {
+                action:
+                    LibraryAction::Collection {
+                        action:
+                            LibraryCollectionAction::Remove {
+                                collection,
+                                filenames,
+                            },
+                    },
+            } => {
+                assert_eq!(collection, "Portfolio");
+                assert_eq!(filenames, vec!["a.png"]);
+            }
+            _ => panic!("expected Library collection remove"),
+        }
+    }
+
+    #[test]
+    fn library_title_requires_text_or_clear() {
+        assert!(try_parse(&["library", "title", "a.png"]).is_err());
+        assert!(try_parse(&["library", "title", "a.png", "new title", "--clear"]).is_err());
+        assert!(matches!(
+            parse(&["library", "title", "a.png", "--clear"]).command,
+            Commands::Library {
+                action: LibraryAction::Title { clear: true, .. }
+            }
+        ));
     }
 
     // ── trash tests ─────────────────────────────────────────────────────

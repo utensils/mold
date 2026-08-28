@@ -3272,6 +3272,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "viuer",
  "walkdir",
  "wiremock",

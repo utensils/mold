@@ -6,15 +6,16 @@ use crate::chain_job::{
 use crate::error::MoldError;
 use crate::queue_progress::QueueJobProgress;
 use crate::types::{
-    AudioData, Collection, CollectionCreateRequest, CollectionItemsRequest,
+    AudioData, Collection, CollectionCreateRequest, CollectionDetail, CollectionItemsRequest,
     CollectionUpdateRequest, DeviceState, EmptyTrashResult, ExpandRequest, ExpandResponse,
-    GalleryImage, GalleryOrganizeRequest, GalleryPatchRequest, GenerateRequest, GenerateResponse,
-    GenerationBatchAdmissionRequest, GenerationBatchStatus, GenerationBatchStatusRequest,
-    GenerationBatchStatusResponse, GenerationRetryRequest, ImageData, LoraInfo, ModelInfo,
-    ModelInfoExtended, OutputFormat, QueueListingWire, ReferenceUploadCompleteResponse,
-    ReferenceUploadSessionRequest, ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent,
-    SseErrorEvent, SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest,
-    TrashSweepResult, VideoData,
+    GalleryBulkMutationRequest, GalleryBulkMutationResult, GalleryImage, GalleryOrganizeRequest,
+    GalleryPatchRequest, GenerateRequest, GenerateResponse, GenerationBatchAdmissionRequest,
+    GenerationBatchStatus, GenerationBatchStatusRequest, GenerationBatchStatusResponse,
+    GenerationRetryRequest, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat,
+    QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
+    ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent, SseErrorEvent,
+    SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest, TrashSweepResult,
+    VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -1727,7 +1728,11 @@ impl MoldClient {
     pub async fn get_gallery_image(&self, filename: &str) -> Result<Vec<u8>> {
         let resp = self
             .client
-            .get(format!("{}/api/gallery/image/{filename}", self.base_url))
+            .get(format!(
+                "{}/api/gallery/image/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
             .send()
             .await?
             .error_for_status()?
@@ -1739,7 +1744,11 @@ impl MoldClient {
     /// Delete a gallery image on the server.
     pub async fn delete_gallery_image(&self, filename: &str) -> Result<()> {
         self.client
-            .delete(format!("{}/api/gallery/image/{filename}", self.base_url))
+            .delete(format!(
+                "{}/api/gallery/image/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
             .send()
             .await?
             .error_for_status()?;
@@ -1891,6 +1900,24 @@ impl MoldClient {
         Ok(())
     }
 
+    /// Apply one replay-safe bulk organization mutation
+    /// (`POST /api/gallery/mutations`).
+    pub async fn mutate_gallery_bulk(
+        &self,
+        req: &GalleryBulkMutationRequest,
+    ) -> Result<GalleryBulkMutationResult> {
+        let resp = self
+            .client
+            .post(format!("{}/api/gallery/mutations", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<GalleryBulkMutationResult>()
+            .await?)
+    }
+
     /// List the host's collections (`GET /api/gallery/collections`).
     pub async fn list_collections(&self) -> Result<Vec<Collection>> {
         let resp = self
@@ -1901,6 +1928,24 @@ impl MoldClient {
         Ok(error_for_status_with_body(resp)
             .await?
             .json::<Vec<Collection>>()
+            .await?)
+    }
+
+    /// Read one collection and its ordered member filenames
+    /// (`GET /api/gallery/collections/:id`).
+    pub async fn get_collection(&self, id: &str) -> Result<CollectionDetail> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/gallery/collections/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<CollectionDetail>()
             .await?)
     }
 
@@ -2028,7 +2073,11 @@ impl MoldClient {
     pub async fn get_gallery_preview(&self, filename: &str) -> Result<Option<Vec<u8>>> {
         let resp = self
             .client
-            .get(format!("{}/api/gallery/preview/{filename}", self.base_url))
+            .get(format!(
+                "{}/api/gallery/preview/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -2043,8 +2092,9 @@ impl MoldClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/gallery/thumbnail/{filename}",
-                self.base_url
+                "{}/api/gallery/thumbnail/{}",
+                self.base_url,
+                encode_path_segment(filename)
             ))
             .send()
             .await?
@@ -2656,6 +2706,46 @@ impl std::error::Error for ModelNotFoundError {}
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    #[tokio::test]
+    async fn gallery_media_helpers_encode_reserved_filename_characters() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let encoded = "odd%20%23%20100%25-%E6%97%A5%E6%9C%AC.png";
+        for (method_name, route, body) in [
+            ("GET", "image", b"image".as_slice()),
+            ("GET", "preview", b"preview".as_slice()),
+            ("GET", "thumbnail", b"thumbnail".as_slice()),
+        ] {
+            Mock::given(method(method_name))
+                .and(path(format!("/api/gallery/{route}/{encoded}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/gallery/image/{encoded}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let filename = "odd # 100%-日本.png";
+        assert_eq!(client.get_gallery_image(filename).await.unwrap(), b"image");
+        assert_eq!(
+            client.get_gallery_preview(filename).await.unwrap().unwrap(),
+            b"preview"
+        );
+        assert_eq!(
+            client.get_gallery_thumbnail(filename).await.unwrap(),
+            b"thumbnail"
+        );
+        client.delete_gallery_image(filename).await.unwrap();
+    }
 
     #[test]
     fn transient_request_errors_include_wrapped_rate_limits_and_server_failures() {

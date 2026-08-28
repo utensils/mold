@@ -2190,6 +2190,15 @@ fn wait_for_server_health(url: &str, timeout_secs: u64) -> bool {
 
 impl App {
     pub fn new(host: Option<String>, local: bool, picker: Picker) -> Result<Self> {
+        Self::new_with_launch_policy(host, local, picker, false)
+    }
+
+    pub(crate) fn new_with_launch_policy(
+        host: Option<String>,
+        local: bool,
+        picker: Picker,
+        strict_host: bool,
+    ) -> Result<Self> {
         let config = Config::load_or_default();
 
         // Determine initial server URL and inference mode
@@ -2204,6 +2213,10 @@ impl App {
             let url = mold_core::client::normalize_host(&h);
             if check_server_health(&url) {
                 (Some(url), InferenceMode::Auto)
+            } else if strict_host {
+                anyhow::bail!(
+                    "mold host {url} is unreachable; Library grid did not fall back to local files"
+                )
             } else {
                 (None, InferenceMode::Local)
             }
@@ -2211,6 +2224,10 @@ impl App {
             let url = mold_core::client::normalize_host(&h);
             if check_server_health(&url) {
                 (Some(url), InferenceMode::Auto)
+            } else if strict_host {
+                anyhow::bail!(
+                    "mold host {url} is unreachable; Library grid did not fall back to local files"
+                )
             } else {
                 (None, InferenceMode::Local)
             }
@@ -4499,6 +4516,10 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    pub(crate) fn open_library(&mut self) {
+        self.set_active_view(View::Library);
     }
 
     /// Dispatch a semantic action.

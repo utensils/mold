@@ -179,6 +179,53 @@ own `batch_id` / `client_batch_id`; a hold that needs operator repair is
 refused by name rather than silently skipped. `--json` prints the raw server
 documents.
 
+## `mold library`
+
+Browse and organize existing prints on the server selected by `MOLD_HOST`
+(`MOLD_API_KEY` is sent when configured). Non-grid commands never fall back to
+direct filesystem access.
+
+```bash
+mold library list [--query TEXT] [--tag TAG] [--collection NAME-OR-SLUG] [--favorite] [--format FORMAT] [--limit N] [--offset N] [--json]
+mold library show <FILENAME> [--json | --preview]
+mold library title <FILENAME> <TEXT> | --clear
+mold library favorite <FILENAME>...
+mold library unfavorite <FILENAME>...
+mold library trash <FILENAME>...
+
+mold library tag list [--json]
+mold library tag add <FILENAME>... --tag <TAG>...
+mold library tag remove <FILENAME>... --tag <TAG>...
+mold library tag rename <OLD> <NEW>
+mold library tag delete <TAG> [--yes]
+
+mold library collection list [--json]
+mold library collection show <NAME-OR-SLUG> [--json]
+mold library collection create <NAME> [--description TEXT]
+mold library collection update <NAME-OR-SLUG> [OPTIONS]
+mold library collection delete <NAME-OR-SLUG> [--yes]
+mold library collection add <NAME-OR-SLUG> <FILENAME>...
+mold library collection remove <NAME-OR-SLUG> <FILENAME>...
+```
+
+Multiple `--tag` filters use AND semantics. Listing filters first, orders by
+newest timestamp and then filename, and only then applies `--offset` and
+`--limit` (50 by default, 1,000 maximum). JSON contains the identical selected
+page and never includes preview or terminal escape bytes.
+
+Tag and favorite edits use the replay-safe bulk mutation route when the host
+advertises it, with an automatic fallback to the older organization route.
+Hosts without Library organization fail with an upgrade-or-metadata-database
+diagnostic. `mold library trash` is allowed only when the host explicitly
+advertises recoverable trash, so an older server cannot reinterpret it as a
+permanent delete.
+
+`mold library show --preview` reuses the same inline renderer as `mold run
+--preview`; video entries prefer their animated preview and fall back to the
+thumbnail. `mold library grid [--host URL | --local]` opens the existing TUI
+directly on its protocol-aware Library grid. An unreachable explicit host is
+an error rather than a silent switch to local files.
+
 ## `mold trash`
 
 Inspect, restore, or empty the gallery trash on a running `mold serve`

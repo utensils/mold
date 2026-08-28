@@ -35,15 +35,55 @@ use ratatui::prelude::*;
 
 use app::App;
 
+/// Initial workspace for callers that launch the TUI as a focused command.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TuiInitialWorkspace {
+    #[default]
+    Create,
+    Library,
+}
+
+/// Launch policy for embedding the TUI behind another CLI command.
+#[derive(Debug, Clone, Default)]
+pub struct TuiLaunchOptions {
+    pub host: Option<String>,
+    pub local: bool,
+    pub initial_workspace: TuiInitialWorkspace,
+    /// Refuse an unreachable `host` / `MOLD_HOST` instead of silently
+    /// changing the data authority to local files.
+    pub strict_host: bool,
+}
+
 /// Launch the mold TUI.
 ///
 /// `host` overrides the default MOLD_HOST for remote generation.
 /// `local` forces local-only inference (no server connection).
 pub async fn run_tui(host: Option<String>, local: bool) -> Result<()> {
+    run_tui_with_options(TuiLaunchOptions {
+        host,
+        local,
+        ..Default::default()
+    })
+    .await
+}
+
+/// Launch the TUI with an explicit workspace and host-fallback policy.
+pub async fn run_tui_with_options(options: TuiLaunchOptions) -> Result<()> {
     // Probe the terminal image protocol *before* entering raw mode / alternate screen,
     // because the query writes to stdout and reads the terminal's reply.
     let picker = ratatui_image::picker::Picker::from_query_stdio()
         .unwrap_or_else(|_| ratatui_image::picker::Picker::from_fontsize((8, 16)));
+
+    // Resolve the requested data authority before raw mode. In particular, a
+    // strict unreachable host must return a normal shell error without leaving
+    // the caller's terminal in the alternate screen.
+    let version = mold_core::build_info::version_string();
+    tracing::info!(%version, "starting mold tui");
+    let mut app =
+        App::new_with_launch_policy(options.host, options.local, picker, options.strict_host)?;
+    if options.initial_workspace == TuiInitialWorkspace::Library {
+        app.open_library();
+    }
 
     // Set up the terminal
     enable_raw_mode()?;
@@ -60,10 +100,6 @@ pub async fn run_tui(host: Option<String>, local: bool) -> Result<()> {
         original_hook(panic_info);
     }));
 
-    // Create the app and run
-    let version = mold_core::build_info::version_string();
-    tracing::info!(%version, "starting mold tui");
-    let mut app = App::new(host, local, picker)?;
     let result = run_event_loop(&mut terminal, &mut app).await;
 
     // Clean up background server process
@@ -125,5 +161,27 @@ async fn run_event_loop(
         if app.should_quit {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn strict_library_launch_refuses_unreachable_explicit_host() {
+        let picker = ratatui_image::picker::Picker::from_fontsize((8, 16));
+        let error = match App::new_with_launch_policy(
+            Some("http://127.0.0.1:1".to_string()),
+            false,
+            picker,
+            true,
+        ) {
+            Ok(_) => panic!("strict launch must not fall back to local files"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("did not fall back to local files"));
     }
 }
