@@ -9,7 +9,7 @@ describe("source attachment", () => {
     attachPickedImage(form, { filename: "source.png", base64: "QUJD" });
     expect(form.sourceImage).toBe("QUJD");
     expect(form.sourceImageName).toBe("source.png");
-    expect(form.sourceFit).toEqual({ mode: "lanczos-resize" });
+    expect(form.sourceFit).toEqual({ mode: "crop-fill" });
   });
 
   it("attaches a gallery video to the existing LTX source-video field", () => {

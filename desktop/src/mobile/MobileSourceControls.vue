@@ -19,8 +19,11 @@ import {
 import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../lib/image";
 import {
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   MASKLESS_SOURCE_FIT_OPTIONS,
   sourceFitHelp,
+  sourceFitPolicyForMode,
+  type SourceFitMode,
 } from "@studio/lib/sourceFit";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
@@ -357,13 +360,13 @@ function pickSource(image: MobilePickedImage): void {
   error.value = "";
   props.form.sourceImage = image.base64;
   props.form.sourceImageName = image.filename || null;
-  props.form.sourceFit = { mode: "lanczos-resize" };
+  props.form.sourceFit = defaultSourceFitPolicy();
   sourcePickerOpen.value = false;
 }
 
 function replaceEditTarget(base64: string): void {
   props.form.imageAttachments = [base64, ...props.form.imageAttachments.slice(1)];
-  props.form.sourceFit = { mode: "lanczos-resize" };
+  props.form.sourceFit = defaultSourceFitPolicy();
 }
 
 function pickEditTarget(image: MobilePickedImage): void {
@@ -409,7 +412,7 @@ async function onSingleSourceFile(slot: SourceMediaSlot, file: File): Promise<vo
     if (slot === "source") {
       props.form.sourceImage = base64;
       props.form.sourceImageName = file.name;
-      props.form.sourceFit = { mode: "lanczos-resize" };
+      props.form.sourceFit = defaultSourceFitPolicy();
     } else {
       props.form.endFrame = { filename: file.name, base64 };
     }
@@ -444,8 +447,13 @@ function removeEndFrame(): void {
 async function pickEditImages(event: Event): Promise<void> {
   const picked = await readImages(event, true);
   if (picked.length === 0) return;
+  const establishesTarget =
+    plan.value.kind === "attachments" &&
+    plan.value.primary === "target" &&
+    props.form.imageAttachments.length === 0;
   const next = [...props.form.imageAttachments, ...picked.map((image) => image.b64)];
   props.form.imageAttachments = flux2Dev.value ? next.slice(0, 4) : next;
+  if (establishesTarget) props.form.sourceFit = defaultSourceFitPolicy();
 }
 
 async function pickMask(event: Event): Promise<void> {
@@ -482,24 +490,13 @@ function moveEditImage(index: number, delta: -1 | 1): void {
 }
 
 function setSourceFit(event: Event): void {
-  const mode = (event.target as HTMLSelectElement).value;
-  if (mode === "crop-fill") {
-    props.form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
-  } else if (mode === "pad-fit") {
-    props.form.sourceFit = { mode: "pad-fit" };
-  } else if (mode === "lanczos-resize") {
-    props.form.sourceFit = { mode: "lanczos-resize" };
-  } else if (mode === "upscale-then-fit") {
-    props.form.sourceFit = {
-      mode: "upscale-then-fit",
+  props.form.sourceFit = sourceFitPolicyForMode(
+    (event.target as HTMLSelectElement).value as SourceFitMode,
+    {
+      supportsMask: caps.value.supportsMask,
       upscalerModel: props.form.upscaleModel || props.upscalers[0]?.name || "",
-      fit: caps.value.supportsMask
-        ? { mode: "pad-repaint" }
-        : { mode: "crop-fill", alignX: "center", alignY: "center" },
-    };
-  } else {
-    props.form.sourceFit = { mode: "pad-repaint" };
-  }
+    },
+  );
 }
 
 function setControlModel(event: Event): void {

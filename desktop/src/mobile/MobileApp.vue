@@ -303,7 +303,11 @@ import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
-import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
+import {
+  coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
+  parseSourceFitPolicy,
+} from "@studio/lib/sourceFit";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import {
   persistGenerationSourceMedia,
@@ -1856,7 +1860,7 @@ watch(
     previousStillResolution = next.resolution;
     previousStillAutomaticResolution = next.automaticResolution;
     if (replaced && caps.value.sourceImageMode === "single") {
-      form.sourceFit = { mode: "lanczos-resize" };
+      form.sourceFit = defaultSourceFitPolicy();
     }
   },
   { immediate: true },
@@ -6330,7 +6334,7 @@ async function generate(): Promise<void> {
         filename: draft.sourceImageName ?? "Source image",
         width: draft.sourceImageWidth,
         height: draft.sourceImageHeight,
-        sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? { mode: "pad-repaint" },
+        sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? defaultSourceFitPolicy(),
       }
     : draft.h3Authoring?.firstFrame?.data
       ? {
@@ -6339,7 +6343,7 @@ async function generate(): Promise<void> {
           width: draft.h3Authoring.firstFrame.width,
           height: draft.h3Authoring.firstFrame.height,
           mime: draft.h3Authoring.firstFrame.mimeType,
-          sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? { mode: "pad-repaint" },
+          sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? defaultSourceFitPolicy(),
         }
       : null;
   const draftCaps = generationCapabilitiesForFamily(
@@ -7621,7 +7625,7 @@ async function restoreOrdinaryReusedSource(
     preserveRestoredSourceCanvas(stored.base64);
     form.sourceImage = stored.base64;
     form.sourceImageName = stored.filename;
-    // The normal source-change watcher selects Resize for a newly attached
+    // The normal source-change watcher selects Crop fill for a newly attached
     // image. Let that watcher settle, then reassert provenance attributes:
     // Library reuse is restoration, not a new pick.
     await nextTick();
@@ -7833,6 +7837,7 @@ async function useSelectedPrintAsSource(): Promise<void> {
         0,
         isFlux2DevModel(form.model) ? 4 : undefined,
       );
+      form.sourceFit = defaultSourceFitPolicy();
       setGenerationStatus(
         isFlux2DevModel(form.model)
           ? "Added gallery print as reference 1"
@@ -7841,6 +7846,7 @@ async function useSelectedPrintAsSource(): Promise<void> {
     } else {
       form.sourceImage = base64;
       form.sourceImageName = print.filename;
+      form.sourceFit = defaultSourceFitPolicy();
       setGenerationStatus("Gallery print selected as source");
     }
     selectedPrint.value = null;

@@ -29,8 +29,11 @@ import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import {
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   MASKLESS_SOURCE_FIT_OPTIONS,
   sourceFitHelp,
+  sourceFitPolicyForMode,
+  type SourceFitMode,
 } from "@studio/lib/sourceFit";
 import {
   appendMinimaxH3PickedImageReferences,
@@ -134,12 +137,17 @@ const dragIndex = ref<number | null>(null);
 
 function onEditPicked(picked: PickedImage[]) {
   if (picked.length === 0) return;
+  const establishesTarget =
+    plan.value.kind === "attachments" &&
+    plan.value.primary === "target" &&
+    props.form.imageAttachments.length === 0;
   const next = [...props.form.imageAttachments, ...picked.map((p) => p.base64)];
   props.form.imageAttachments = flux2Dev.value ? next.slice(0, 4) : next;
+  if (establishesTarget) props.form.sourceFit = defaultSourceFitPolicy();
 }
 function replaceEditTarget(base64: string) {
   props.form.imageAttachments = [base64, ...props.form.imageAttachments.slice(1)];
-  props.form.sourceFit = { mode: "lanczos-resize" };
+  props.form.sourceFit = defaultSourceFitPolicy();
 }
 function onTargetPicked(picked: PickedImage[]) {
   if (picked[0]) replaceEditTarget(picked[0].base64);
@@ -264,7 +272,7 @@ function setSlot(slot: Slot, b64: string | null, name: string | null = null) {
     props.form.sourceImage = b64;
     // The label lives and dies with the image (Reuse-settings restore).
     props.form.sourceImageName = b64 ? name : null;
-    if (b64) props.form.sourceFit = { mode: "lanczos-resize" };
+    if (b64) props.form.sourceFit = defaultSourceFitPolicy();
   } else if (slot === "end") {
     // The closing still keeps its own name: it ships as the second keyframe,
     // whose provenance is all saved metadata will ever hold of it.
@@ -347,28 +355,13 @@ function onH3Picked(images: PickedImage[]) {
 
 /** Port of the web SPA's `setSourceFitPolicy` mode→policy mapping. */
 function setSourceFitMode(e: Event) {
-  const raw = (e.target as HTMLSelectElement).value;
-  if (raw === "crop-fill") {
-    props.form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
-    return;
-  }
-  if (raw === "lanczos-resize") {
-    props.form.sourceFit = { mode: "lanczos-resize" };
-    return;
-  }
-  if (raw === "upscale-then-fit") {
-    props.form.sourceFit = {
-      mode: "upscale-then-fit",
+  props.form.sourceFit = sourceFitPolicyForMode(
+    (e.target as HTMLSelectElement).value as SourceFitMode,
+    {
+      supportsMask: caps.value.supportsMask,
       upscalerModel: props.form.upscaleModel || models.upscalers[0]?.name || "",
-      // Maskless families (video img2img) can't repaint pad bands — fill the
-      // canvas instead of padding it.
-      fit: caps.value.supportsMask
-        ? { mode: "pad-repaint" }
-        : { mode: "crop-fill", alignX: "center", alignY: "center" },
-    };
-    return;
-  }
-  props.form.sourceFit = { mode: raw === "pad-fit" ? "pad-fit" : "pad-repaint" };
+    },
+  );
 }
 </script>
 
@@ -552,7 +545,7 @@ function setSourceFitMode(e: Event) {
       <label class="mt-3 block text-caption text-ink-2" for="source-fit-policy">Source fit</label>
       <select
         id="source-fit-policy"
-        :value="form.sourceFit?.mode ?? 'pad-repaint'"
+        :value="form.sourceFit?.mode ?? defaultSourceFitPolicy().mode"
         data-test="source-fit-policy"
         class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
         @change="setSourceFitMode"

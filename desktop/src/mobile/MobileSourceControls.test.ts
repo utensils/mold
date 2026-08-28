@@ -258,7 +258,7 @@ describe("MobileSourceControls", () => {
 
     expect(form.sourceImage).toBe("R0FMTEVSWQ==");
     expect(form.sourceImageName).toBe("gallery-print.png");
-    expect(form.sourceFit).toEqual({ mode: "lanczos-resize" });
+    expect(form.sourceFit).toEqual({ mode: "crop-fill" });
     expect(picker.props("open")).toBe(false);
     expect(wrapper.find("[data-test='mobile-source-error']").exists()).toBe(false);
   });
@@ -364,6 +364,19 @@ describe("MobileSourceControls", () => {
     ]);
     await vi.waitFor(() => expect(form.imageAttachments).toHaveLength(3));
     expect(form.imageAttachments).toEqual(["EXISTING", "YQ==", "Yg=="]);
+  });
+
+  it("defaults the first Qwen edit target to crop fill", async () => {
+    const form = formFor("qwen-image-edit");
+    form.sourceFit = { mode: "lanczos-resize" };
+    const wrapper = mount(MobileSourceControls, { props: { form } });
+
+    await chooseFiles(wrapper, "[data-test='mobile-edit-input']", [
+      new File(["target"], "target.png", { type: "image/png" }),
+    ]);
+
+    await vi.waitFor(() => expect(form.imageAttachments).toEqual(["dGFyZ2V0"]));
+    expect(form.sourceFit).toEqual({ mode: "crop-fill" });
   });
 
   it("supports an SD1.5 ControlNet photo, known model, custom id, and scale", async () => {

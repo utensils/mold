@@ -200,6 +200,7 @@ import {
 import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import {
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   maskPaddingRectangles,
   parseSourceFitPolicy,
   resolveSourceFitTransform,
@@ -808,7 +809,7 @@ function fittedSourceImage(
 function drawableFitPolicy(
   policy: SourceFitPolicy | undefined,
 ): SourceFitPolicy {
-  if (!policy) return { mode: "pad-repaint" };
+  if (!policy) return defaultSourceFitPolicy();
   if (policy.mode === "upscale-then-fit") return policy.fit;
   return policy;
 }
@@ -3042,7 +3043,7 @@ async function prepareStillSourceToRequest(
   const configuredPolicy =
     override?.settings?.policy ??
     form.state.value.sourceFitPolicy ??
-    ({ mode: "pad-repaint" } as const);
+    defaultSourceFitPolicy();
   const family =
     override?.settings?.family ??
     currentModel.value?.family ??
@@ -3899,9 +3900,8 @@ async function onSubmitInner(
   const originalSource = form.state.value.imageAttachments[0]
     ? {
         ...form.state.value.imageAttachments[0],
-        sourceFit: parseSourceFitPolicy(form.state.value.sourceFitPolicy) ?? {
-          mode: "pad-repaint",
-        },
+        sourceFit:
+          parseSourceFitPolicy(form.state.value.sourceFitPolicy) ?? defaultSourceFitPolicy(),
       }
     : form.state.value.h3Authoring?.firstFrame?.data
       ? {
@@ -3910,9 +3910,8 @@ async function onSubmitInner(
           width: form.state.value.h3Authoring.firstFrame.width,
           height: form.state.value.h3Authoring.firstFrame.height,
           mime: form.state.value.h3Authoring.firstFrame.mimeType,
-          sourceFit: parseSourceFitPolicy(form.state.value.sourceFitPolicy) ?? {
-            mode: "pad-repaint",
-          },
+          sourceFit:
+            parseSourceFitPolicy(form.state.value.sourceFitPolicy) ?? defaultSourceFitPolicy(),
         }
       : null;
   const copies = requestCopyCount(currentRequest);
@@ -4568,9 +4567,7 @@ async function onPickSource(v: SourceImageState[]) {
         width: first.width ?? undefined,
         height: first.height ?? undefined,
       };
-      form.state.value.sourceFitPolicy = coerceSourceFitForMaskless(
-        form.state.value.sourceFitPolicy ?? { mode: "crop-fill" },
-      );
+      form.state.value.sourceFitPolicy = defaultSourceFitPolicy();
     }
     composerError.value = null;
     return;
@@ -4581,6 +4578,11 @@ async function onPickSource(v: SourceImageState[]) {
     ) || form.state.value.model.startsWith("qwen-image-edit:");
   const flux2Dev = isFlux2DevModel(form.state.value.model);
   const referenceEdit = qwenEdit || flux2Dev;
+  const establishesTarget =
+    qwenEdit &&
+    !replaceTargetOnPick.value &&
+    form.state.value.imageAttachments.length === 0 &&
+    v.length > 0;
   if (
     !referenceEdit &&
     form.state.value.maskImage &&
@@ -4600,12 +4602,11 @@ async function onPickSource(v: SourceImageState[]) {
           )
         : v.slice(0, 1);
   if (
-    (!referenceEdit || (qwenEdit && replaceTargetOnPick.value)) &&
+    (!referenceEdit || (qwenEdit && replaceTargetOnPick.value) || establishesTarget) &&
     v.length > 0
   ) {
-    // A source-matched canvas differs only by the model's pixel grid or safe
-    // downscale. Resize exactly instead of manufacturing narrow repaint bands.
-    form.state.value.sourceFitPolicy = { mode: "lanczos-resize" };
+    // Every newly selected source starts from the shared crop-fill policy.
+    form.state.value.sourceFitPolicy = defaultSourceFitPolicy();
   }
   replaceTargetOnPick.value = false;
   composerError.value = null;
@@ -4799,7 +4800,7 @@ function openJob(job: Job) {
   };
   form.state.value.sourceFitPolicy = parseSourceFitPolicy(
     request.source_fit,
-  ) ?? { mode: "pad-repaint" };
+  ) ?? defaultSourceFitPolicy();
   form.state.value.cameraControl = null;
   form.state.value.model = request.model;
   const requestModel = models.value.find(
@@ -4878,9 +4879,7 @@ function openJob(job: Job) {
         form.state.value.height = request.height;
         form.state.value.sourceFitPolicy = parseSourceFitPolicy(
           request.source_fit,
-        ) ?? {
-          mode: "pad-repaint",
-        };
+        ) ?? defaultSourceFitPolicy();
       });
   }
   // Unlike saved metadata, a queued request still holds the face payload, so
@@ -5015,9 +5014,7 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
           width: dimensions.width,
           height: dimensions.height,
         };
-        state.sourceFitPolicy = coerceSourceFitForMaskless(
-          state.sourceFitPolicy ?? { mode: "crop-fill" },
-        );
+        state.sourceFitPolicy = defaultSourceFitPolicy();
         return true;
       }
       const h3Task = minimaxH3TaskForModel(state.model);
@@ -5050,6 +5047,7 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
         state.imageAttachments = [
           { kind: "gallery", filename: item.filename, base64 },
         ];
+        state.sourceFitPolicy = defaultSourceFitPolicy();
       }
     }
     return true;

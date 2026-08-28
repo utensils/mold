@@ -156,7 +156,11 @@ import {
 } from "../lib/generateValidation";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
-import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
+import {
+  coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
+  parseSourceFitPolicy,
+} from "@studio/lib/sourceFit";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
@@ -3413,7 +3417,7 @@ async function generate() {
           filename: draft.sourceImageName ?? "Source image",
           width: draft.sourceImageWidth,
           height: draft.sourceImageHeight,
-          sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? { mode: "pad-repaint" },
+          sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? defaultSourceFitPolicy(),
         }
       : draft.h3Authoring?.firstFrame?.data
         ? {
@@ -3422,7 +3426,7 @@ async function generate() {
             width: draft.h3Authoring.firstFrame.width,
             height: draft.h3Authoring.firstFrame.height,
             mime: draft.h3Authoring.firstFrame.mimeType,
-            sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? { mode: "pad-repaint" },
+            sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? defaultSourceFitPolicy(),
           }
         : null;
     const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);

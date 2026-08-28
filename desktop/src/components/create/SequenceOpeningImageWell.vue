@@ -6,6 +6,7 @@ import type { ModelEntry } from "../../lib/api/types";
 import {
   SOURCE_FIT_OPTIONS,
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   sourceFitPolicyForMode,
   type SourceFitMode,
 } from "@studio/lib/sourceFit";
@@ -54,7 +55,7 @@ function onPickImage(images: PickedImage[]) {
   pickerOpen.value = false;
   if (!image) return;
   draft.openingImage = { filename: image.filename, base64: image.base64 };
-  props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
+  props.form.sourceFit = defaultSourceFitPolicy();
 }
 
 async function onOpeningImageFile(file: File) {
@@ -71,7 +72,7 @@ async function onOpeningImageFile(file: File) {
       width: dimensions.width,
       height: dimensions.height,
     };
-    props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
+    props.form.sourceFit = defaultSourceFitPolicy();
   } catch {
     toasts.push("Couldn't read the image.", "error");
   }

@@ -66,6 +66,7 @@ import {
   type MergedCollection,
   type OrganizationMutation,
 } from "@studio/lib/libraryOrganization";
+import { defaultSourceFitPolicy } from "@studio/lib/sourceFit";
 import { useChainJobs } from "../composables/useChainJobs";
 import { blobToBase64 } from "../lib/base64";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
@@ -1821,6 +1822,7 @@ async function setAsSource(item: GalleryImage): Promise<boolean> {
       state.imageAttachments = [
         { kind: "gallery", filename: item.filename, base64 },
       ];
+      state.sourceFitPolicy = defaultSourceFitPolicy();
     }
     return true;
   } catch (err) {

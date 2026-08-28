@@ -807,16 +807,15 @@ describe("CreatePage layout and behavior", () => {
     });
     const wrapper = mount(CreatePage, { global: { stubs } });
     await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.sourceFitPolicy = { mode: "pad-fit" };
     await wrapper.get('[data-test="open-recent"]').trigger("click");
     await wrapper.get('[data-test="lightbox-upscale"]').trigger("click");
     await flushPromises();
 
-    expect(useGenerateForm().state.value.imageAttachments[0]?.filename).toBe(
-      entry.filename,
-    );
-    expect(useGenerateForm().state.value.upscaleModel).toBe(
-      "real-esrgan-x4plus:fp16",
-    );
+    expect(form.state.value.imageAttachments[0]?.filename).toBe(entry.filename);
+    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
+    expect(form.state.value.upscaleModel).toBe("real-esrgan-x4plus:fp16");
     globalThis.fetch = originalFetch;
   });
 
@@ -966,6 +965,12 @@ describe("CreatePage layout and behavior", () => {
     const wrapper = mount(CreatePage, { global: { stubs } });
     await flushPromises();
     const draft = enterSequenceMode();
+    const form = useGenerateForm();
+    form.state.value.sourceFitPolicy = {
+      mode: "upscale-then-fit",
+      upscalerModel: "real-esrgan-x4plus:fp16",
+      fit: { mode: "pad-fit" },
+    };
 
     await wrapper
       .get('[data-test="context-recent-sequence"]')
@@ -973,7 +978,8 @@ describe("CreatePage layout and behavior", () => {
     await wrapper.get('[data-test="recent-context-source"]').trigger("click");
     await flushPromises();
     expect(draft.openingImage).toMatchObject({ filename: entry.filename });
-    expect(useGenerateForm().state.value.imageAttachments).toHaveLength(0);
+    expect(form.state.value.imageAttachments).toHaveLength(0);
+    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
     wrapper.unmount();
     globalThis.fetch = originalFetch;
   });
@@ -1967,6 +1973,48 @@ describe("CreatePage layout and behavior", () => {
 
     expect(form.state.value.imageAttachments[0]?.filename).toBe("new.png");
     expect(form.state.value.maskImage).toBeNull();
+  });
+
+  it("defaults a sequence gallery pick to crop fill", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.sourceFitPolicy = { mode: "lanczos-resize" };
+    const draft = enterSequenceMode();
+
+    wrapper
+      .getComponent({ name: "ImagePickerModal" })
+      .vm.$emit("pick", [
+        { kind: "upload", filename: "opening.png", base64: "OPENING" },
+      ]);
+    await nextTick();
+
+    expect(draft.openingImage).toMatchObject({ filename: "opening.png" });
+    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
+  });
+
+  it("defaults the first Qwen edit target to crop fill", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("qwen-image-edit:q4", "qwen-image-edit"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "qwen-image-edit:q4";
+    form.state.value.modelFamily = "qwen-image-edit";
+    form.state.value.sourceFitPolicy = { mode: "pad-fit" };
+    await nextTick();
+
+    wrapper
+      .getComponent({ name: "ImagePickerModal" })
+      .vm.$emit("pick", [
+        { kind: "upload", filename: "target.png", base64: "TARGET" },
+        { kind: "upload", filename: "reference.png", base64: "REFERENCE" },
+      ]);
+    await nextTick();
+
+    expect(form.state.value.imageAttachments).toHaveLength(2);
+    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
   });
 
   it("keeps the visible Output control synchronized with sequence mode", async () => {

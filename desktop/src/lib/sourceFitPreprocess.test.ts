@@ -34,11 +34,10 @@ function fakeOps(size: { width: number; height: number }): SourceFitCanvasOps & 
 const TARGET = { width: 1024, height: 1024 };
 
 describe("drawableFitPolicy", () => {
-  it("falls back to pad-repaint when unset and honors upscale-then-fit's inner fit", () => {
-    expect(drawableFitPolicy(undefined)).toEqual({ mode: "pad-repaint" });
+  it("falls back to crop-fill when unset and honors upscale-then-fit's inner fit", () => {
+    expect(drawableFitPolicy(undefined)).toEqual({ mode: "crop-fill" });
     // The inner fit drives the draw — required so maskless (video) img2img can
-    // upscale-then-fit without pad bands it has no way to repaint. The UI's
-    // default inner fit is still pad-repaint, so image flows are unchanged.
+    // upscale-then-fit without pad bands it has no way to repaint.
     expect(
       drawableFitPolicy({
         mode: "upscale-then-fit",

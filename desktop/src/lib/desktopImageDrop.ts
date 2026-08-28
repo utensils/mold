@@ -1,6 +1,7 @@
 import { generationCapabilitiesForFamily } from "./capabilities";
 import type { ModelEntry, OutputMetadata } from "./api/types";
 import { applyMetadataToForm, type GenerateForm } from "./generateForm";
+import { defaultSourceFitPolicy } from "@studio/lib/sourceFit";
 
 /** A local still read by the native desktop backend after an OS file drop. */
 export interface DesktopImageImport {
@@ -42,10 +43,10 @@ export function applyDesktopImageDrop(
     form.imageAttachments = [];
     form.sourceImage = image.base64;
     form.sourceImageName = image.filename;
-    form.sourceFit = { mode: "lanczos-resize" };
   } else {
     return { attached: false, metadataApplied };
   }
+  form.sourceFit = defaultSourceFitPolicy();
   form.sourceImageWidth = image.width;
   form.sourceImageHeight = image.height;
 

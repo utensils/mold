@@ -20,6 +20,7 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   SOURCE_FIT_OPTIONS,
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   sourceFitPolicyForMode,
   type SourceFitMode,
 } from "@studio/lib/sourceFit";
@@ -65,7 +66,7 @@ function setSourceFit(mode: SourceFitMode): void {
 
 function setOpeningImage(image: MobilePickedImage): void {
   draft.openingImage = { filename: image.filename, base64: image.base64 };
-  props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
+  props.form.sourceFit = defaultSourceFitPolicy();
   imagePickerOpen.value = false;
 }
 

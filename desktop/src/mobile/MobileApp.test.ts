@@ -9281,6 +9281,8 @@ describe("MobileApp gallery", () => {
 
     wrapper = mountMobileApp();
     await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceFit = { mode: "lanczos-resize" };
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='gallery-item']").trigger("click");
@@ -9300,6 +9302,7 @@ describe("MobileApp gallery", () => {
     expect(wrapper.get("[data-test='mobile-source-preview']").attributes("alt")).toBe(
       "source print.png",
     );
+    expect(liveForm.sourceFit).toEqual({ mode: "crop-fill" });
   });
 
   it("appends a gallery source to the selected Ref2VA partition", async () => {

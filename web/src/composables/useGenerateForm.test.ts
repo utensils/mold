@@ -79,7 +79,7 @@ describe("useGenerateForm", () => {
     expect(form.state.value.outputFormat).toBe("png");
     expect(form.state.value.imageAttachments).toEqual([]);
     expect(form.state.value.icLoraControl).toBeNull();
-    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "pad-repaint" });
+    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
   });
 
   it("serializes a host-provided IC-LoRA control without replacing custom LoRAs", () => {
@@ -1234,7 +1234,7 @@ describe("useGenerateForm", () => {
     expect(form.state.value.scheduler).toBeNull();
     expect(form.state.value.cfgPlus).toBe(false);
     expect(form.state.value.outputFormat).toBe("png");
-    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "pad-repaint" });
+    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
     expect(form.state.value.imageAttachments).toEqual([]);
     expect(form.state.value.gifPreview).toBe(false);
   });

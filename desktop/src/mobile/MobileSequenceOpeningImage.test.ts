@@ -49,7 +49,9 @@ afterEach(() => {
 describe("MobileSequenceOpeningImage", () => {
   it("round-trips an attached opening image through the shared draft", async () => {
     const draft = useSequenceDraftStore();
-    mountOpeningImage();
+    const form = newGenerateForm();
+    form.sourceFit = { mode: "lanczos-resize" };
+    mountOpeningImage({ form });
     expect(wrapper!.find("[data-test='mobile-sequence-source-strength']").exists()).toBe(false);
 
     await wrapper!.get("[data-test='mobile-sequence-source-well']").trigger("click");
@@ -59,6 +61,7 @@ describe("MobileSequenceOpeningImage", () => {
     await wrapper!.vm.$nextTick();
 
     expect(draft.openingImage).toEqual({ filename: "opening.jpg", base64: "wire-bytes" });
+    expect(form.sourceFit).toEqual({ mode: "crop-fill" });
     expect(wrapper!.get("[data-test='mobile-sequence-source-preview']").attributes("src")).toBe(
       "data:image/jpeg;base64,wire-bytes",
     );
