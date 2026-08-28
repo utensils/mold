@@ -115,9 +115,14 @@ const partition = computed(() =>
   }),
 );
 
-const orderedSequences = computed(() =>
-  [...partition.value.active, ...partition.value.attention].filter(
-    (vm) => vm.kind === "sequence",
+const activeSequences = computed(() =>
+  partition.value.active.filter(
+    (vm): vm is ActivityJobVM & { kind: "sequence" } => vm.kind === "sequence",
+  ),
+);
+const attentionSequences = computed(() =>
+  partition.value.attention.filter(
+    (vm): vm is ActivityJobVM & { kind: "sequence" } => vm.kind === "sequence",
   ),
 );
 
@@ -206,41 +211,69 @@ const running = computed(() =>
 const queued = computed(() =>
   props.jobs.filter((j) => j.state === "running" && !j.workStarted),
 );
-/** Render exactly the host-authoritative next queued print, then summarize the
- * rest. Cancellation reveals the following row, so every job remains
- * reachable without producing one interactive DOM subtree per backlog item. */
+/** Render exactly the oldest submitted queued print, then summarize the rest.
+ * Cancellation reveals the following row, so every job remains reachable
+ * without producing one interactive DOM subtree per backlog item. */
 const nextQueued = computed(() => {
-  // A held print has no queue position and needs a human: it is always the
-  // row that is shown, so its reason and Retry are never folded into
-  // "N more queued".
-  const held = queued.value.find((job) => job.holdError && !job.cancelling);
-  if (held) return held;
-  let best: Job | null = null;
-  let bestPosition: number | null = null;
   const actionable = queued.value.filter((job) => !job.cancelling);
-  for (const job of actionable.length > 0 ? actionable : queued.value) {
-    const position = queueStatusFor(
-      props.queueStatus,
-      job.hostId ?? ORIGIN_HOST_ID,
-      job.serverId,
-    )?.position;
-    if (
-      best === null ||
-      (position !== null &&
-        position !== undefined &&
-        (bestPosition === null || position < bestPosition)) ||
-      ((position === null || position === undefined) &&
-        bestPosition === null &&
-        job.startedAt < best.startedAt)
-    ) {
-      best = job;
-      bestPosition = position ?? null;
-    }
-  }
-  return best;
+  return (
+    [...(actionable.length > 0 ? actionable : queued.value)].sort(
+      (a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id),
+    )[0] ?? null
+  );
 });
 const summarizedQueuedCount = computed(() =>
   Math.max(0, queued.value.length - (nextQueued.value ? 1 : 0)),
+);
+
+type WebActivityRow =
+  | {
+      key: string;
+      createdAtMs: number;
+      kind: "shared";
+      shared: FleetActiveWork;
+    }
+  | { key: string; createdAtMs: number; kind: "print"; print: Job }
+  | {
+      key: string;
+      createdAtMs: number;
+      kind: "sequence";
+      sequence: ActivityJobVM & { kind: "sequence" };
+    };
+
+/** One visual queue across local prints, sequences, and recovered fleet work.
+ * A phase transition changes only the row contents, never its position. */
+const activeRows = computed<WebActivityRow[]>(() =>
+  [
+    ...props.shared.map((shared): WebActivityRow => ({
+      key: `shared:${shared.key}`,
+      createdAtMs: shared.created_at_unix_ms,
+      kind: "shared",
+      shared,
+    })),
+    ...running.value.map((print): WebActivityRow => ({
+      key: `print:${print.id}`,
+      createdAtMs: print.startedAt,
+      kind: "print",
+      print,
+    })),
+    ...(nextQueued.value
+      ? [
+          {
+            key: `print:${nextQueued.value.id}`,
+            createdAtMs: nextQueued.value.startedAt,
+            kind: "print" as const,
+            print: nextQueued.value,
+          },
+        ]
+      : []),
+    ...activeSequences.value.map((sequence): WebActivityRow => ({
+      key: sequence.key,
+      createdAtMs: sequence.createdAtMs,
+      kind: "sequence",
+      sequence,
+    })),
+  ].sort((a, b) => a.createdAtMs - b.createdAtMs || a.key.localeCompare(b.key)),
 );
 const active = computed(
   () =>
@@ -269,75 +302,198 @@ const active = computed(
       </button>
     </div>
 
-    <LiveActivityList
-      :rows="shared"
-      interactive
-      @select="emit('shared-open', $event)"
-    />
+    <template v-for="row in activeRows" :key="row.key">
+      <LiveActivityList
+        v-if="row.kind === 'shared'"
+        :rows="[row.shared]"
+        interactive
+        @select="emit('shared-open', $event)"
+      />
 
-    <div v-for="job in running" :key="job.id" class="activity__running">
-      <button
-        type="button"
-        class="activity__open"
-        :data-test="`activity-running-${job.id}`"
-        @click="emit('open', job)"
+      <div
+        v-else-if="row.kind === 'print' && row.print.workStarted"
+        class="activity__running"
       >
-        <span class="activity__thumb ms-shimmer" aria-hidden="true" />
-        <span class="activity__body">
+        <button
+          type="button"
+          class="activity__open"
+          :data-test="`activity-running-${row.print.id}`"
+          @click="emit('open', row.print)"
+        >
+          <span class="activity__thumb ms-shimmer" aria-hidden="true" />
+          <span class="activity__body">
+            <span class="activity__prompt">
+              <span
+                v-if="hostBadge(row.print)"
+                class="activity__host"
+                :data-test="`activity-host-${row.print.id}`"
+                >{{ hostBadge(row.print) }}</span
+              >
+              {{ promptFor(row.print) }}
+            </span>
+            <ProgressBar
+              :value="percentFor(row.print) ?? 0"
+              tone="accent"
+              :height="3"
+              :label="
+                isFinalizing(row.print)
+                  ? `${promptFor(row.print)} finalizing`
+                  : `${promptFor(row.print)} progress`
+              "
+            />
+          </span>
+          <span
+            v-if="isFinalizing(row.print)"
+            class="activity__pct activity__pct--stage"
+            >Finalizing</span
+          >
+          <span v-else-if="percentFor(row.print) !== null" class="activity__pct"
+            >{{ percentFor(row.print) }}%</span
+          >
+          <span v-else class="activity__pct activity__pct--stage">{{
+            row.print.progress.stage
+          }}</span>
+        </button>
+        <button
+          type="button"
+          class="activity__cancel activity__cancel--running"
+          :aria-label="
+            row.print.cancelling
+              ? `Cancelling ${promptFor(row.print)}`
+              : `Cancel ${promptFor(row.print)}`
+          "
+          :data-test="`activity-cancel-${row.print.id}`"
+          :disabled="row.print.cancelling"
+          @click="emit('cancel', row.print.id)"
+        >
+          <span v-if="row.print.cancelling" class="data-mono">…</span>
+          <Icon v-else name="close" :size="14" />
+        </button>
+      </div>
+
+      <div
+        v-else-if="row.kind === 'sequence'"
+        class="activity__sequence"
+        :data-test="`activity-sequence-${row.sequence.jobId}`"
+        role="button"
+        tabindex="0"
+        @click="emit('sequence-action', 'watch', row.sequence)"
+        @keydown.enter.prevent="emit('sequence-action', 'watch', row.sequence)"
+        @keydown.space.prevent="emit('sequence-action', 'watch', row.sequence)"
+      >
+        <span class="activity__seq-icon" aria-hidden="true">
+          <Icon name="video" :size="14" />
+        </span>
+        <span class="activity__seq-body">
           <span class="activity__prompt">
             <span
-              v-if="hostBadge(job)"
+              v-if="sequenceHostBadge(row.sequence)"
               class="activity__host"
-              :data-test="`activity-host-${job.id}`"
-              >{{ hostBadge(job) }}</span
+              :data-test="`activity-sequence-host-${row.sequence.jobId}`"
+              >{{ sequenceHostBadge(row.sequence) }}</span
             >
-            {{ promptFor(job) }}
+            {{ row.sequence.model }}
+            <span class="activity__seq-meta">
+              · {{ row.sequence.stageCount }} clips ·
+              {{ row.sequence.phase ?? row.sequence.state }}
+              <template v-if="sequenceStageLabel(row.sequence)">
+                · {{ sequenceStageLabel(row.sequence) }}</template
+              >
+            </span>
           </span>
           <ProgressBar
-            :value="percentFor(job) ?? 0"
+            v-if="sequencePercent(row.sequence) !== null"
+            :value="sequencePercent(row.sequence) ?? 0"
             tone="accent"
             :height="3"
-            :label="
-              isFinalizing(job)
-                ? `${promptFor(job)} finalizing`
-                : `${promptFor(job)} progress`
-            "
+            :label="`${row.sequence.model} sequence progress`"
           />
         </span>
         <span
-          v-if="isFinalizing(job)"
-          class="activity__pct activity__pct--stage"
-          >Finalizing</span
+          v-if="sequencePercent(row.sequence) !== null"
+          class="activity__pct"
+          >{{ sequencePercent(row.sequence) }}%</span
         >
-        <span v-else-if="percentFor(job) !== null" class="activity__pct"
-          >{{ percentFor(job) }}%</span
+        <span class="activity__seq-actions">
+          <button
+            v-for="action in row.sequence.actions"
+            :key="action"
+            type="button"
+            class="activity__seq-action"
+            :data-action="action"
+            @click.stop="emit('sequence-action', action, row.sequence)"
+          >
+            {{ ACTION_LABELS[action] }}
+          </button>
+        </span>
+      </div>
+
+      <div v-else class="activity__queued">
+        <span
+          class="activity__pill"
+          :data-test="`activity-queued-${row.print.id}`"
+          role="button"
+          tabindex="0"
+          @click="emit('open', row.print)"
+          @keydown.enter.prevent="emit('open', row.print)"
+          @keydown.space.prevent="emit('open', row.print)"
         >
-        <span v-else class="activity__pct activity__pct--stage">{{
-          job.progress.stage
-        }}</span>
-      </button>
-      <button
-        type="button"
-        class="activity__cancel activity__cancel--running"
-        :aria-label="
-          job.cancelling
-            ? `Cancelling ${promptFor(job)}`
-            : `Cancel ${promptFor(job)}`
-        "
-        :data-test="`activity-cancel-${job.id}`"
-        :disabled="job.cancelling"
-        @click="emit('cancel', job.id)"
-      >
-        <span v-if="job.cancelling" class="data-mono">…</span>
-        <Icon v-else name="close" :size="14" />
-      </button>
-    </div>
+          <span class="activity__pill-text">
+            <span
+              v-if="hostBadge(row.print)"
+              class="activity__host"
+              :data-test="`activity-host-${row.print.id}`"
+              >{{ hostBadge(row.print) }}</span
+            >
+            <span
+              class="activity__queue-position"
+              :data-test="`activity-queue-position-${row.print.id}`"
+              >{{ queueLabel(row.print) }}</span
+            >
+            {{ promptFor(row.print) }}
+            <span v-if="row.print.holdError" class="activity__hold-error">
+              · {{ row.print.holdError }}
+            </span>
+          </span>
+          <button
+            v-if="row.print.retryable"
+            type="button"
+            class="activity__seq-action"
+            :disabled="row.print.retrying"
+            :data-test="`activity-retry-${row.print.id}`"
+            @click.stop="emit('retry', row.print.id)"
+          >
+            {{ row.print.retrying ? "Retrying…" : "Retry" }}
+          </button>
+          <button
+            type="button"
+            class="activity__cancel"
+            :aria-label="`Cancel ${promptFor(row.print)}`"
+            :data-test="`activity-cancel-${row.print.id}`"
+            :disabled="row.print.cancelling"
+            @click.stop="emit('cancel', row.print.id)"
+          >
+            <span v-if="row.print.cancelling" class="data-mono">…</span>
+            <Icon v-else name="close" :size="12" />
+          </button>
+        </span>
+      </div>
+    </template>
+
+    <span
+      v-if="summarizedQueuedCount"
+      class="activity__queue-summary"
+      data-test="activity-queued-summary"
+    >
+      {{ summarizedQueuedCount }} other queued
+      {{ summarizedQueuedCount === 1 ? "print" : "prints" }}
+    </span>
 
     <div
-      v-for="vm in orderedSequences"
+      v-for="vm in attentionSequences"
       :key="vm.key"
       class="activity__sequence"
-      :data-test="`activity-sequence-${vm.kind === 'sequence' ? vm.jobId : ''}`"
+      :data-test="`activity-sequence-${vm.jobId}`"
       role="button"
       tabindex="0"
       @click="emit('sequence-action', 'watch', vm)"
@@ -348,32 +504,8 @@ const active = computed(
         <Icon name="video" :size="14" />
       </span>
       <span class="activity__seq-body">
-        <span class="activity__prompt">
-          <span
-            v-if="sequenceHostBadge(vm)"
-            class="activity__host"
-            :data-test="`activity-sequence-host-${vm.kind === 'sequence' ? vm.jobId : ''}`"
-            >{{ sequenceHostBadge(vm) }}</span
-          >
-          {{ vm.model }}
-          <span v-if="vm.kind === 'sequence'" class="activity__seq-meta">
-            · {{ vm.stageCount }} clips · {{ vm.phase ?? vm.state }}
-            <template v-if="sequenceStageLabel(vm)">
-              · {{ sequenceStageLabel(vm) }}</template
-            >
-          </span>
-        </span>
-        <ProgressBar
-          v-if="sequencePercent(vm) !== null"
-          :value="sequencePercent(vm) ?? 0"
-          tone="accent"
-          :height="3"
-          :label="`${vm.model} sequence progress`"
-        />
+        <span class="activity__prompt">{{ vm.model }}</span>
       </span>
-      <span v-if="sequencePercent(vm) !== null" class="activity__pct"
-        >{{ sequencePercent(vm) }}%</span
-      >
       <span class="activity__seq-actions">
         <button
           v-for="action in vm.actions"
@@ -389,73 +521,13 @@ const active = computed(
           v-if="attentionKeys.has(vm.key)"
           type="button"
           class="activity__cancel"
-          :data-test="`activity-seq-dismiss-${vm.kind === 'sequence' ? vm.jobId : ''}`"
+          :data-test="`activity-seq-dismiss-${vm.jobId}`"
           title="Hide this from Activity. The sequence stays in Library ▸ History."
           :aria-label="`Dismiss ${vm.model}`"
           @click.stop="dismissSequence(vm)"
         >
           <Icon name="close" :size="13" />
         </button>
-      </span>
-    </div>
-
-    <div v-if="nextQueued" class="activity__queued">
-      <span
-        :key="nextQueued.id"
-        class="activity__pill"
-        :data-test="`activity-queued-${nextQueued.id}`"
-        role="button"
-        tabindex="0"
-        @click="emit('open', nextQueued)"
-        @keydown.enter.prevent="emit('open', nextQueued)"
-        @keydown.space.prevent="emit('open', nextQueued)"
-      >
-        <span class="activity__pill-text">
-          <span
-            v-if="hostBadge(nextQueued)"
-            class="activity__host"
-            :data-test="`activity-host-${nextQueued.id}`"
-            >{{ hostBadge(nextQueued) }}</span
-          >
-          <span
-            class="activity__queue-position"
-            :data-test="`activity-queue-position-${nextQueued.id}`"
-            >{{ queueLabel(nextQueued) }}</span
-          >
-          {{ promptFor(nextQueued) }}
-          <span v-if="nextQueued.holdError" class="activity__hold-error">
-            · {{ nextQueued.holdError }}
-          </span>
-        </span>
-        <button
-          v-if="nextQueued.retryable"
-          type="button"
-          class="activity__seq-action"
-          :disabled="nextQueued.retrying"
-          :data-test="`activity-retry-${nextQueued.id}`"
-          @click.stop="emit('retry', nextQueued.id)"
-        >
-          {{ nextQueued.retrying ? "Retrying…" : "Retry" }}
-        </button>
-        <button
-          type="button"
-          class="activity__cancel"
-          :aria-label="`Cancel ${promptFor(nextQueued)}`"
-          :data-test="`activity-cancel-${nextQueued.id}`"
-          :disabled="nextQueued.cancelling"
-          @click.stop="emit('cancel', nextQueued.id)"
-        >
-          <span v-if="nextQueued.cancelling" class="data-mono">…</span>
-          <Icon v-else name="close" :size="12" />
-        </button>
-      </span>
-      <span
-        v-if="summarizedQueuedCount"
-        class="activity__queue-summary"
-        data-test="activity-queued-summary"
-      >
-        {{ summarizedQueuedCount }} other queued
-        {{ summarizedQueuedCount === 1 ? "print" : "prints" }}
       </span>
     </div>
 

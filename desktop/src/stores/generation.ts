@@ -243,22 +243,14 @@ export function planBatchRequests(
 }
 
 /**
- * Display order for the jobs rail: actively developing first, then the
- * server's real queue order. Concurrent batch submissions race to the
- * server, so submission order and queue position can disagree — the rail
- * must show the order the engine will actually run.
+ * Stable chronological display order for the jobs rail. A transition from
+ * queued to loading/developing must update a row in place, never move it to
+ * the top of the visual queue.
  */
 export function railOrder(jobs: Job[]): Job[] {
-  const rank = (j: Job): number =>
-    j.status === "denoising" || j.status === "finishing" ? 0 : j.status === "loading" ? 1 : 2;
-  return [...jobs].sort((a, b) => {
-    const r = rank(a) - rank(b);
-    if (r !== 0) return r;
-    const pa = a.queuePosition ?? Number.MAX_SAFE_INTEGER;
-    const pb = b.queuePosition ?? Number.MAX_SAFE_INTEGER;
-    if (pa !== pb) return pa - pb;
-    return a.clientId - b.clientId;
-  });
+  return [...jobs].sort(
+    (a, b) => a.submittedAtUnixMs - b.submittedAtUnixMs || a.clientId - b.clientId,
+  );
 }
 
 /**

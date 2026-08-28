@@ -1086,6 +1086,51 @@ describe("MobileApp sequence generation", () => {
     expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(target.apiKey);
   });
 
+  it("interleaves local and recovered work by submission time", async () => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        return Promise.resolve(durableBatchResponse(init));
+      }
+      if (path === "/api/generation-batches/status") {
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          batches: [],
+          missing: { client_batch_ids: [], batch_ids: [] },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: Date.now(),
+          items: [
+            {
+              id: "newer-running",
+              kind: "generation",
+              phase: "running",
+              model: "newer developing print",
+              created_at_unix_ms: Date.now() + 60_000,
+              updated_at_unix_ms: Date.now() + 60_000,
+              can_cancel: false,
+            },
+          ],
+        });
+      }
+      return durableApiFallback(path, init, callTarget);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("older queued print");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    const text = wrapper.get(".mobile-generation-queue-list").text();
+    expect(text.indexOf("older queued print")).toBeLessThan(text.indexOf("newer developing print"));
+  });
+
   it("swipes a queued item from another client to exact-host pause and resume", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/status")

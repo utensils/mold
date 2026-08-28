@@ -35,6 +35,43 @@ function baseJob(): Job {
 }
 
 describe("ActivityStrip", () => {
+  it("keeps queued and recovered running work in chronological order", () => {
+    useGenerationStore().jobs = [
+      {
+        ...baseJob(),
+        prompt: "older queued print",
+        submittedAtUnixMs: 1_000,
+      },
+    ];
+    useLiveActivityStore().hosts = {
+      render: {
+        hostId: "render",
+        hostLabel: "Render box",
+        target: { baseUrl: "http://render", apiKey: null },
+        routeUrl: "http://render",
+        instanceId: "render-instance",
+        observedAtUnixMs: 3_000,
+        stale: false,
+        error: null,
+        items: [
+          {
+            id: "newer-running",
+            kind: "generation",
+            phase: "running",
+            model: "newer developing print",
+            created_at_unix_ms: 2_000,
+            updated_at_unix_ms: 3_000,
+            can_cancel: false,
+          },
+        ],
+        unavailableKinds: [],
+      },
+    };
+
+    const text = mount(ActivityStrip).get("[data-test='activity-list-scroll']").text();
+    expect(text.indexOf("older queued print")).toBeLessThan(text.indexOf("newer developing print"));
+  });
+
   it("keeps recovered shared work visible and actionable", async () => {
     useLiveActivityStore().hosts = {
       render: {

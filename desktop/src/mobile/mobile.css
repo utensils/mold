@@ -2539,7 +2539,8 @@ button:disabled {
   font: inherit;
 }
 
-.mobile-generation-queue ol {
+.mobile-generation-queue-list,
+.mobile-generation-queue-list ol {
   margin: 0;
   padding: 0;
   list-style: none;

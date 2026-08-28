@@ -227,30 +227,34 @@ describe("job reactivity wiring", () => {
 });
 
 describe("railOrder", () => {
-  const job = (clientId: number, status: JobStatus, queuePosition: number | null): Job => ({
+  const job = (
+    clientId: number,
+    status: JobStatus,
+    queuePosition: number | null,
+    submittedAtUnixMs = clientId,
+  ): Job => ({
     ...newJob(req),
     clientId,
     status,
     queuePosition,
+    submittedAtUnixMs,
   });
 
-  it("shows developing first, then the server's queue order — not submission order", async () => {
+  it("keeps submission order when a newer job starts developing", async () => {
     const { railOrder } = await import("./generation");
-    // Concurrent batch submissions raced: job 1 landed at position #3,
-    // job 3 at #1. The rail must show the engine's actual run order.
     const jobs = [
       job(1, "queued", 3),
       job(2, "queued", 2),
       job(3, "queued", 1),
       job(4, "denoising", null),
     ];
-    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([4, 3, 2, 1]);
+    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([1, 2, 3, 4]);
   });
 
-  it("positionless queued jobs sink below positioned ones, stable by clientId", async () => {
+  it("uses client identity only to break equal submission timestamps", async () => {
     const { railOrder } = await import("./generation");
-    const jobs = [job(5, "queued", null), job(6, "queued", 1), job(7, "loading", null)];
-    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([7, 6, 5]);
+    const jobs = [job(7, "loading", null, 10), job(5, "queued", null, 10), job(6, "queued", 1, 10)];
+    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([5, 6, 7]);
   });
 });
 

@@ -165,6 +165,42 @@ const sharedRows = computed(() => {
   return liveActivity.rows.filter((row) => !local.has(row.key));
 });
 
+type RailRow =
+  | { key: string; createdAtMs: number; kind: "shared"; shared: FleetActiveWork }
+  | {
+      key: string;
+      createdAtMs: number;
+      kind: "sequence";
+      sequence: ActivityJobVM & { kind: "sequence" };
+    }
+  | { key: string; createdAtMs: number; kind: "print"; print: Job };
+
+/** One visual timeline across recovered work, sequences, prints, and retained
+ * print history. Status transitions update rows in place instead of promoting
+ * developing work above older queued work. */
+const railRows = computed<RailRow[]>(() =>
+  [
+    ...sharedRows.value.map((shared): RailRow => ({
+      key: `shared:${shared.key}`,
+      createdAtMs: shared.created_at_unix_ms,
+      kind: "shared",
+      shared,
+    })),
+    ...railSequences.value.map((sequence): RailRow => ({
+      key: sequence.key,
+      createdAtMs: sequence.createdAtMs,
+      kind: "sequence",
+      sequence,
+    })),
+    ...railJobs.value.map((print): RailRow => ({
+      key: `print:${print.clientId}`,
+      createdAtMs: print.submittedAtUnixMs,
+      kind: "print",
+      print,
+    })),
+  ].sort((a, b) => a.createdAtMs - b.createdAtMs || a.key.localeCompare(b.key)),
+);
+
 const developingCount = computed(
   () => generation.pending.length + railSequences.value.length + sharedRows.value.length,
 );
@@ -377,94 +413,97 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
         </span>
       </div>
       <div
-        v-if="railJobs.length > 0 || railSequences.length > 0 || sharedRows.length > 0"
+        v-if="railRows.length > 0"
         data-test="developing-jobs"
         class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2"
       >
-        <LiveActivityList
-          :rows="sharedRows"
-          compact
-          interactive
-          @select="openLiveWork"
-          @contextmenu="(row, event) => contextMenu.open(event, sharedJobMenu(row))"
-        />
-        <a
-          v-for="vm in railSequences"
-          :key="vm.key"
-          href="#"
-          data-test="developing-sequence"
-          class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
-          @click.prevent="selectSequence(vm)"
-        >
-          <span
-            class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
+        <template v-for="row in railRows" :key="row.key">
+          <LiveActivityList
+            v-if="row.kind === 'shared'"
+            :rows="[row.shared]"
+            compact
+            interactive
+            @select="openLiveWork"
+            @contextmenu="(item, event) => contextMenu.open(event, sharedJobMenu(item))"
+          />
+          <a
+            v-else-if="row.kind === 'sequence'"
+            href="#"
+            data-test="developing-sequence"
+            class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
+            @click.prevent="selectSequence(row.sequence)"
           >
             <span
-              v-if="vm.phase === 'running' || vm.phase === 'finalizing'"
-              class="ms-shimmer block h-full w-full"
-              aria-hidden="true"
-            />
-            <span v-else class="block h-full w-full bg-print-surface" aria-hidden="true" />
-          </span>
-          <span class="min-w-0 flex-1">
-            <span class="block truncate text-[11.5px] text-ink-2" :title="vm.model">
-              {{ modelLabel(vm.model) }} · {{ vm.hostLabel }}
-            </span>
-            <span class="block font-utility text-[9.5px] text-safelight">
-              {{ sequenceLine(vm) }}
-            </span>
-          </span>
-        </a>
-        <a
-          v-for="job in railJobs"
-          :key="job.clientId"
-          href="#"
-          data-test="developing-print"
-          class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
-          @click.prevent="selectPrint(job)"
-          @contextmenu.prevent="contextMenu.open($event, jobMenu(job))"
-        >
-          <span
-            class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
-          >
-            <AuthedMedia
-              v-if="job.status === 'complete' && job.result?.filename"
-              :path="thumbnailPath(job.result.filename)"
-              :target="generation.targetForJob(job.clientId)"
-              :cache-key="job.hostId ?? hosts.primaryHost?.id ?? 'primary'"
-              :alt="job.prompt"
-            />
-            <img
-              v-else-if="job.resultUrl && !job.result?.video_frames"
-              :src="job.resultUrl"
-              alt=""
-              class="h-full w-full object-cover"
-            />
-            <img
-              v-else-if="job.previewUrl"
-              :src="job.previewUrl"
-              alt=""
-              class="h-full w-full object-cover"
-              style="filter: blur(1px)"
-            />
-            <span v-else-if="jobRunning(job)" class="ms-shimmer block h-full w-full" />
-            <span v-else class="block h-full w-full bg-print-surface" />
-          </span>
-          <span class="min-w-0 flex-1">
-            <span class="block truncate text-[11.5px] text-ink-2" :title="job.prompt">
-              {{ modelLabel(job.model)
-              }}<template v-if="job.hostLabel"> · {{ job.hostLabel }}</template>
-            </span>
-            <span
-              class="block font-utility text-[9.5px]"
-              :class="
-                job.status === 'error' && !job.outcomeUnknown ? 'text-stop' : 'text-safelight'
-              "
+              class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
             >
-              {{ developingLabel(job) }}
+              <span
+                v-if="row.sequence.phase === 'running' || row.sequence.phase === 'finalizing'"
+                class="ms-shimmer block h-full w-full"
+                aria-hidden="true"
+              />
+              <span v-else class="block h-full w-full bg-print-surface" aria-hidden="true" />
             </span>
-          </span>
-        </a>
+            <span class="min-w-0 flex-1">
+              <span class="block truncate text-[11.5px] text-ink-2" :title="row.sequence.model">
+                {{ modelLabel(row.sequence.model) }} · {{ row.sequence.hostLabel }}
+              </span>
+              <span class="block font-utility text-[9.5px] text-safelight">
+                {{ sequenceLine(row.sequence) }}
+              </span>
+            </span>
+          </a>
+          <a
+            v-else
+            href="#"
+            data-test="developing-print"
+            class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
+            @click.prevent="selectPrint(row.print)"
+            @contextmenu.prevent="contextMenu.open($event, jobMenu(row.print))"
+          >
+            <span
+              class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
+            >
+              <AuthedMedia
+                v-if="row.print.status === 'complete' && row.print.result?.filename"
+                :path="thumbnailPath(row.print.result.filename)"
+                :target="generation.targetForJob(row.print.clientId)"
+                :cache-key="row.print.hostId ?? hosts.primaryHost?.id ?? 'primary'"
+                :alt="row.print.prompt"
+              />
+              <img
+                v-else-if="row.print.resultUrl && !row.print.result?.video_frames"
+                :src="row.print.resultUrl"
+                alt=""
+                class="h-full w-full object-cover"
+              />
+              <img
+                v-else-if="row.print.previewUrl"
+                :src="row.print.previewUrl"
+                alt=""
+                class="h-full w-full object-cover"
+                style="filter: blur(1px)"
+              />
+              <span v-else-if="jobRunning(row.print)" class="ms-shimmer block h-full w-full" />
+              <span v-else class="block h-full w-full bg-print-surface" />
+            </span>
+            <span class="min-w-0 flex-1">
+              <span class="block truncate text-[11.5px] text-ink-2" :title="row.print.prompt">
+                {{ modelLabel(row.print.model)
+                }}<template v-if="row.print.hostLabel"> · {{ row.print.hostLabel }}</template>
+              </span>
+              <span
+                class="block font-utility text-[9.5px]"
+                :class="
+                  row.print.status === 'error' && !row.print.outcomeUnknown
+                    ? 'text-stop'
+                    : 'text-safelight'
+                "
+              >
+                {{ developingLabel(row.print) }}
+              </span>
+            </span>
+          </a>
+        </template>
       </div>
       <p v-else class="px-3 text-caption text-ink-3">nothing developing</p>
     </div>

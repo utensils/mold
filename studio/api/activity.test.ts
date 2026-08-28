@@ -248,4 +248,34 @@ describe("active work reconciliation", () => {
       "host-b:generation:same",
     ]);
   });
+
+  it("keeps fleet work chronological instead of promoting running phases", () => {
+    const snapshot = reconcileActivityHost(route, undefined, {
+      instance_id: "instance-a",
+      observed_at_unix_ms: 10,
+      items: [
+        {
+          id: "older-queued",
+          kind: "generation",
+          phase: "queued",
+          created_at_unix_ms: 1,
+          updated_at_unix_ms: 9,
+          can_cancel: true,
+        },
+        {
+          id: "newer-running",
+          kind: "generation",
+          phase: "running",
+          created_at_unix_ms: 2,
+          updated_at_unix_ms: 9,
+          can_cancel: true,
+        },
+      ],
+    });
+
+    expect(mergeFleetActivity([snapshot]).map((row) => row.id)).toEqual([
+      "older-queued",
+      "newer-running",
+    ]);
+  });
 });

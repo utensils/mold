@@ -66,6 +66,45 @@ function makeSequenceVM(
 }
 
 describe("ActivityStrip", () => {
+  it("keeps an older queued print above newer running fleet work", () => {
+    const olderQueued = makeJob({
+      id: "older-queued",
+      startedAt: 1_000,
+      workStarted: false,
+      progress: {
+        stage: "Queued",
+        step: null,
+        totalSteps: null,
+        queuePosition: 0,
+        gpu: null,
+        elapsedMs: null,
+      },
+    });
+    const newerShared = {
+      key: "render:generation:newer-running",
+      id: "newer-running",
+      kind: "generation",
+      phase: "running",
+      model: "newer developing print",
+      hostId: "render",
+      hostLabel: "Render box",
+      routeUrl: "http://render:7680",
+      instanceId: "render-instance",
+      stale: false,
+      hostError: null,
+      created_at_unix_ms: 2_000,
+      updated_at_unix_ms: 3_000,
+      can_cancel: false,
+    };
+
+    const text = mount(ActivityStrip, {
+      props: { jobs: [olderQueued], shared: [newerShared] },
+    }).text();
+    expect(text.indexOf("a cat")).toBeLessThan(
+      text.indexOf("newer developing print"),
+    );
+  });
+
   it("keeps recovered shared work visible and actionable", async () => {
     const shared = {
       key: "render:download:pull-1",
@@ -222,6 +261,30 @@ describe("ActivityStrip", () => {
     expect(
       wrapper.get("[data-test='activity-queued-summary']").text(),
     ).toContain("9999 other queued prints");
+  });
+
+  it("does not promote a newer held print above an older queued print", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: {
+        jobs: [
+          makeJob({ id: "older-queued", startedAt: 1, workStarted: false }),
+          makeJob({
+            id: "newer-held",
+            startedAt: 2,
+            workStarted: false,
+            holdError: "Waiting for memory",
+          }),
+        ],
+      },
+    });
+
+    expect(
+      wrapper.find("[data-test='activity-queued-older-queued']").exists(),
+    ).toBe(true);
+    expect(
+      wrapper.find("[data-test='activity-queued-newer-held']").exists(),
+    ).toBe(false);
+    expect(wrapper.text()).toContain("1 other queued print");
   });
 
   it("reveals the next actionable queued print while an earlier cancel is pending", () => {
