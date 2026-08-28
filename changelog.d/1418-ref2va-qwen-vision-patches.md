@@ -17,4 +17,6 @@
   observer attributes the condition-VAE workspace to whichever encoder phase
   ran — Ref2VA's reference encode as well as FL2VA's endpoint encode — instead
   of failing a fully muxed Ref2VA print at the last step for lacking FL2VA's
-  phase ([#1418](https://github.com/utensils/mold/issues/1418)).
+  phase, and Ref2VA now reports its staged encoded-video and thumbnail
+  capacities to that observer as FL2VA does, whose zero-byte guard names the
+  offending field ([#1418](https://github.com/utensils/mold/issues/1418)).

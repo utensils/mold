@@ -662,6 +662,15 @@ pub(crate) fn execute_staged(
         completed: 1,
         total: 1,
     })?;
+    // The runtime-bound observer reads the staged host capacities from here,
+    // exactly as FL2VA's `run` reports them; without this call a Ref2VA
+    // observation carried zero encoded-video and thumbnail bytes and
+    // `build_observation` refused the fully muxed print (#1418 UAT).
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    super::super::private_runtime_observer::observe_staged_host_bytes(
+        encoded_video.mp4.capacity(),
+        encoded_video.thumbnail_png.capacity(),
+    )?;
     Ok(H3StagedAvOutput {
         video_only_mp4: encoded_video.mp4,
         thumbnail_png: encoded_video.thumbnail_png,
@@ -1363,6 +1372,23 @@ mod tests {
                 _ => None,
             }
         }
+    }
+
+    /// Both AV pipelines stage their encoded video through the same observer
+    /// hook; a Ref2VA print that skipped it reached the observer with zero
+    /// encoded-video and thumbnail bytes and was refused after the mux.
+    #[test]
+    fn ref2va_reports_staged_host_bytes_like_fl2va() {
+        let ref2va = include_str!("ref2va.rs");
+        let fl2va = include_str!("../pipeline.rs");
+        // Composed at run time so this test's own text is not a match.
+        let call = ["private_runtime_observer::observe_staged_", "host_bytes("].concat();
+        assert_eq!(
+            ref2va.matches(call.as_str()).count(),
+            1,
+            "Ref2VA must report its staged capacities exactly once"
+        );
+        assert_eq!(fl2va.matches(call.as_str()).count(), 1);
     }
 
     /// The conditioner's vision rows are the presentation builder's — merged

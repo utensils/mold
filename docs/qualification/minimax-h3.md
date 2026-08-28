@@ -863,9 +863,14 @@ generation" — and was then refused by the runtime-bound observer's `finish()`:
 The observer captured only FL2VA's endpoint-encode phase, while Ref2VA encodes
 its references under `ReferenceVisualEncode`, so no Ref2VA print could ever
 publish. The condition-VAE workspace observation now comes from whichever
-encoder phase ran. Four defects sat in series behind the #1418 hold, each
-reachable only after the previous one was fixed and each ~45 minutes deep on
-this host; no image reference had ever rendered through the public route.
+encoder phase ran. The fourth render completed the same way and was refused
+by the observer's zero-byte guard — `runtime-bound observation contains a zero
+byte count`, which named no field — because Ref2VA's staging never reported
+its encoded-video and thumbnail capacities the way FL2VA's `run` does
+(`observe_staged_host_bytes`); it does now, and the guard names the field.
+Five defects sat in series behind the #1418 hold, each reachable only after
+the previous one was fixed and each ~45 minutes deep on this host; no image
+reference had ever rendered through the public route.
 
 **The host, not the card, is the binding constraint.** The compact stack places
 its Qwen3-VL conditioner on the CPU for a CUDA route, so the host demand is its

@@ -605,7 +605,7 @@ fn build_observation(
         aac_mux_staging_host_bytes: state.aac_mux_staging_host_bytes,
     };
     let encoded = serde_json::to_value(&observation)?;
-    if encoded
+    let zero_fields = encoded
         .as_object()
         .into_iter()
         .flat_map(|object| object.iter())
@@ -615,9 +615,14 @@ fn build_observation(
                 "schema" | "vae_construction_device_workspace_bytes"
             )
         })
-        .any(|(_, value)| value.as_u64() == Some(0))
-    {
-        bail!("private H3 runtime-bound observation contains a zero byte count")
+        .filter(|(_, value)| value.as_u64() == Some(0))
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>();
+    if !zero_fields.is_empty() {
+        bail!(
+            "private H3 runtime-bound observation contains a zero byte count: {}",
+            zero_fields.join(", ")
+        )
     }
     Ok(observation)
 }
