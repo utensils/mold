@@ -1805,36 +1805,75 @@ impl LtxAttention {
                     scale,
                 )?
             } else {
-                let out_f32 = if should_chunk_attention(b, self.heads, q_len, k_len, dtype, device)
-                {
-                    let attn_mask_f32 = attn_mask
-                        .as_ref()
-                        .map(|mask| mask.to_dtype(DType::F32))
-                        .transpose()?;
-                    let q_t = q.transpose(1, 2)?;
-                    let k_t = k.transpose(1, 2)?;
-                    let v_t = v.transpose(1, 2)?;
-                    let key_chunk = attention_key_chunk_size(k_len);
-                    chunked_attention(
-                        &q_t,
-                        &k_t,
-                        &v_t,
-                        attn_mask_f32.as_ref(),
-                        scale,
-                        attention_query_chunk_size(b, self.heads, q_len, key_chunk),
-                        key_chunk,
-                    )?
-                } else {
-                    let attn_mask_f32 = attn_mask
-                        .as_ref()
-                        .map(|mask| mask.to_dtype(DType::F32))
-                        .transpose()?;
-                    let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-                    let k_f32 = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-                    let v_f32 = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-                    full_attention(&q_f32, &k_f32, &v_f32, attn_mask_f32.as_ref(), scale)?
-                };
-                out_f32.to_dtype(dtype)?
+                // `all_perturbed` returned above, so the route here is never
+                // `Passthrough`; the predicate still takes it so its table is
+                // total and testable in one place.
+                match ltx2_self_attention_route(
+                    device.is_cuda(),
+                    attn_mask.is_some(),
+                    perturbation_mask.is_some(),
+                    all_perturbed,
+                    ltx2_attention_f32_forced(),
+                ) {
+                    AttentionRoute::Bf16Dispatch => {
+                        // Upstream never upcasts: ComfyUI's `LTXV`/`LTXAV`
+                        // set no `attn_precision`, so SDPA runs in the weight
+                        // dtype (`comfy/supported_models.py:913-957`,
+                        // `comfy/ldm/modules/attention.py:80-86`), and
+                        // Lightricks' sm_89 path falls through to torch SDPA
+                        // (`ltx_core/model/transformer/attention.py:369-379`
+                        // @400fd31). The shared dispatcher takes head-major
+                        // `[B, H, N, D]` in the input dtype and applies the
+                        // `MOLD_ATTN` / `MOLD_ATTN_CHUNK` policy.
+                        crate::attention::attention(
+                            &q.transpose(1, 2)?,
+                            &k.transpose(1, 2)?,
+                            &v.transpose(1, 2)?,
+                            scale,
+                        )?
+                    }
+                    AttentionRoute::F32Chunked | AttentionRoute::Passthrough => {
+                        let out_f32 =
+                            if should_chunk_attention(b, self.heads, q_len, k_len, dtype, device) {
+                                let attn_mask_f32 = attn_mask
+                                    .as_ref()
+                                    .map(|mask| mask.to_dtype(DType::F32))
+                                    .transpose()?;
+                                let q_t = q.transpose(1, 2)?;
+                                let k_t = k.transpose(1, 2)?;
+                                let v_t = v.transpose(1, 2)?;
+                                let key_chunk = attention_key_chunk_size(k_len);
+                                chunked_attention(
+                                    &q_t,
+                                    &k_t,
+                                    &v_t,
+                                    attn_mask_f32.as_ref(),
+                                    scale,
+                                    attention_query_chunk_size(b, self.heads, q_len, key_chunk),
+                                    key_chunk,
+                                )?
+                            } else {
+                                let attn_mask_f32 = attn_mask
+                                    .as_ref()
+                                    .map(|mask| mask.to_dtype(DType::F32))
+                                    .transpose()?;
+                                let q_f32 =
+                                    q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                                let k_f32 =
+                                    k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                                let v_f32 =
+                                    v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                                full_attention(
+                                    &q_f32,
+                                    &k_f32,
+                                    &v_f32,
+                                    attn_mask_f32.as_ref(),
+                                    scale,
+                                )?
+                            };
+                        out_f32.to_dtype(dtype)?
+                    }
+                }
             };
             if let Some(mask) = perturbation_mask {
                 let mask = if mask.rank() == out.rank() {
@@ -1874,6 +1913,80 @@ impl LtxAttention {
         let out = self.to_out.forward(&out)?;
         self.dropout.forward(&out, false)
     }
+}
+
+/// Which arithmetic an [`LtxAttention`] call takes off the Metal path.
+///
+/// Metal keeps its fused SDPA (`metal_fused_attention`) and never reaches
+/// this table; every other device resolves through
+/// [`ltx2_self_attention_route`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttentionRoute {
+    /// Head-major tensors in their incoming dtype (BF16 on CUDA) through
+    /// `crate::attention` — the `MOLD_ATTN` math or flash backend, chunked
+    /// by `MOLD_ATTN_CHUNK`. Upstream's own arithmetic: neither ComfyUI nor
+    /// Lightricks upcasts LTX attention (#735).
+    Bf16Dispatch,
+    /// The hand-rolled F32 online-softmax tiles (or the F32 full pass for a
+    /// small shape). Kept byte-for-byte for masked cross-attention, the STG
+    /// perturbation blend, every non-CUDA device, and the
+    /// `MOLD_LTX2_ATTN_F32=1` control.
+    F32Chunked,
+    /// STG's all-perturbed value passthrough: no attention is computed at
+    /// all (`comfy/ldm/lightricks/model.py:471-474`).
+    Passthrough,
+}
+
+/// Pure routing table for [`LtxAttention::forward`]'s non-Metal branch.
+///
+/// Only an unmasked, unperturbed self-attention on CUDA takes the shared
+/// dispatcher. A mask means cross-attention (the additive text mask only
+/// ever feeds `attn2`; `comfy/ldm/lightricks/model.py:563`, `:939-945`),
+/// which the dispatcher's plain entry point cannot take; a perturbation mask
+/// means the STG value blend, whose numerics are pinned by the F32 path; and
+/// `f32_forced` is the explicit A/B control. CPU stays on the F32 path
+/// because that is its correctness tier, not a performance one.
+pub(crate) fn ltx2_self_attention_route(
+    is_cuda: bool,
+    masked: bool,
+    perturbed: bool,
+    all_perturbed: bool,
+    f32_forced: bool,
+) -> AttentionRoute {
+    if all_perturbed {
+        return AttentionRoute::Passthrough;
+    }
+    if !is_cuda || masked || perturbed || f32_forced {
+        return AttentionRoute::F32Chunked;
+    }
+    AttentionRoute::Bf16Dispatch
+}
+
+/// `MOLD_LTX2_ATTN_F32=1` pins every LTX-2 self-attention on the F32 chunked
+/// path. Output-changing, so it is an engine-shaping variable (a fingerprint
+/// input) and is read through the frozen runtime environment.
+pub(crate) fn ltx2_attention_f32_forced() -> bool {
+    #[cfg(test)]
+    {
+        parse_attention_f32_forced(crate::runtime_env::value("MOLD_LTX2_ATTN_F32").as_deref())
+    }
+    #[cfg(not(test))]
+    {
+        static CACHED: OnceLock<bool> = OnceLock::new();
+        *CACHED.get_or_init(|| {
+            parse_attention_f32_forced(crate::runtime_env::value("MOLD_LTX2_ATTN_F32").as_deref())
+        })
+    }
+}
+
+/// Truthy spelling shared with the other LTX-2 boolean knobs
+/// (`MOLD_LTX2_FORCE_STREAMING`): `1`, `true`, `yes`, `on`, case-insensitive.
+pub(crate) fn parse_attention_f32_forced(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
 }
 
 const CUDA_ATTENTION_CHUNK_THRESHOLD_BYTES: u64 = 1_048_576 * 4;
@@ -6023,6 +6136,125 @@ pub(crate) mod tests {
         let chunked = super::chunked_attention(&q, &k, &v, None, scale, 2, 3).unwrap();
 
         assert_tensors_close(&full, &chunked, 1e-3);
+    }
+
+    /// The dispatcher boundary, pinned as a table (#735). Only the plain
+    /// CUDA self-attention moves; every masked, perturbed, forced, or
+    /// off-CUDA call keeps the F32 path it always had, and STG's
+    /// all-perturbed passthrough never computes attention at all.
+    #[test]
+    fn ltx2_self_attention_route_pins_the_dispatcher_boundary() {
+        use super::{ltx2_self_attention_route as route, AttentionRoute};
+
+        assert_eq!(
+            route(true, false, false, false, false),
+            AttentionRoute::Bf16Dispatch,
+            "plain CUDA self-attention is the one call that moves"
+        );
+        // Each single guard alone is enough to keep the F32 path.
+        assert_eq!(
+            route(false, false, false, false, false),
+            AttentionRoute::F32Chunked
+        );
+        assert_eq!(
+            route(true, true, false, false, false),
+            AttentionRoute::F32Chunked
+        );
+        assert_eq!(
+            route(true, false, true, false, false),
+            AttentionRoute::F32Chunked
+        );
+        assert_eq!(
+            route(true, false, false, false, true),
+            AttentionRoute::F32Chunked
+        );
+        // All-perturbed wins over everything, including the forced control.
+        for is_cuda in [false, true] {
+            for masked in [false, true] {
+                for perturbed in [false, true] {
+                    for forced in [false, true] {
+                        assert_eq!(
+                            route(is_cuda, masked, perturbed, true, forced),
+                            AttentionRoute::Passthrough
+                        );
+                        let plain = route(is_cuda, masked, perturbed, false, forced);
+                        let expect_dispatch = is_cuda && !masked && !perturbed && !forced;
+                        assert_eq!(
+                            plain == AttentionRoute::Bf16Dispatch,
+                            expect_dispatch,
+                            "cuda={is_cuda} masked={masked} perturbed={perturbed} forced={forced}"
+                        );
+                        assert_ne!(plain, AttentionRoute::Passthrough);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `MOLD_LTX2_ATTN_F32` takes the same truthy spellings as the other
+    /// LTX-2 boolean knobs, and is an engine-shaping (fingerprint) input.
+    #[test]
+    fn ltx2_attention_f32_control_is_a_registered_truthy_knob() {
+        use super::parse_attention_f32_forced as parse;
+        for truthy in ["1", "true", "YES", " on "] {
+            assert!(parse(Some(truthy)), "{truthy:?} must force the F32 path");
+        }
+        for falsy in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("off"),
+            Some("no"),
+        ] {
+            assert!(!parse(falsy), "{falsy:?} must not force the F32 path");
+        }
+        assert!(
+            crate::runtime_env::ENGINE_SHAPING_VARIABLES.contains(&"MOLD_LTX2_ATTN_F32"),
+            "MOLD_LTX2_ATTN_F32 changes the rendered output and must be a frozen, \
+             fingerprinted runtime input"
+        );
+    }
+
+    /// The BF16 dispatcher and the F32 chunked path compute the same
+    /// attention; they differ only in accumulation precision. Small shape,
+    /// so the tolerance is BF16's, not the F32 path's 1e-5.
+    ///
+    /// Needs a CUDA device and so does not execute in CI; it is a
+    /// developer-machine guard for the route that changed every LTX-2 CUDA
+    /// seed (#735).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_bf16_dispatch_matches_f32_chunked_within_bf16_tolerance() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        let (b, h, n, d) = (1, 4, 96, 64);
+        let mk = |offset| {
+            Tensor::from_vec(
+                patterned_values(b * h * n * d, offset),
+                (b, h, n, d),
+                &device,
+            )
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap()
+        };
+        let (q, k, v) = (mk(41), mk(43), mk(47));
+        let scale = 1f32 / (d as f32).sqrt();
+
+        let dispatched = crate::attention::attention(&q, &k, &v, scale)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap();
+        let chunked = super::chunked_attention(&q, &k, &v, None, scale, 32, 32).unwrap();
+
+        assert_eq!(dispatched.dims(), chunked.dims());
+        assert_tensors_close(
+            &dispatched.to_device(&Device::Cpu).unwrap(),
+            &chunked.to_device(&Device::Cpu).unwrap(),
+            2e-2,
+        );
     }
 
     #[cfg(feature = "metal")]

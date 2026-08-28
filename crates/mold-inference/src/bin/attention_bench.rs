@@ -38,6 +38,12 @@ const SHAPES: &[(&str, usize, usize, usize, usize)] = &[
     ("Qwen-Image 1328^2    ", 1, 24, 7113, 128),
     ("LTX-2 stage2 default ", 1, 32, 10868, 128),
     ("LTX-2 stage2 1024^2  ", 1, 32, 13312, 128),
+    // LTX-2.5 default clip (1216x704x121): 16 latent frames x 22 x 38 tokens
+    // at stage 2, a quarter of that at the half-resolution stage 1, and the
+    // 126-token audio self-attention (32 heads x 64) that rides beside it.
+    ("LTX-2.5 stage2 1216x704x121", 1, 32, 13376, 128),
+    ("LTX-2.5 stage1 608x352x121", 1, 32, 3344, 128),
+    ("LTX-2.5 audio self", 1, 32, 126, 64),
 ];
 
 const WARMUP: usize = 3;
@@ -55,7 +61,7 @@ fn main() -> anyhow::Result<()> {
          chunk policy for the math column is the production default (auto)\n"
     );
     println!(
-        "{:<22} {:>12} {:>12} {:>9} {:>12}",
+        "{:<28} {:>12} {:>12} {:>9} {:>12}",
         "shape", "math (ms)", "flash (ms)", "speedup", "max |diff|"
     );
 
@@ -76,7 +82,7 @@ fn main() -> anyhow::Result<()> {
         let diff = (a - c)?.abs()?.max_all()?.to_scalar::<f32>()?;
 
         println!(
-            "{label:<22} {math_ms:>12.2} {flash_ms:>12.2} {:>8.2}x {diff:>12.2e}",
+            "{label:<28} {math_ms:>12.2} {flash_ms:>12.2} {:>8.2}x {diff:>12.2e}",
             math_ms / flash_ms
         );
     }

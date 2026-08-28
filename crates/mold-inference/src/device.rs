@@ -980,6 +980,38 @@ const LTX2_FIXED_WORKSPACE_BYTES: u64 = 1_073_741_824;
 /// feed-forward's residual copy).
 const LTX2_RESIDUAL_LIVE_BUFFERS: u64 = 5;
 
+/// Video self-attention heads for the 19B/22B presets (`num_attention_heads`
+/// in `ltx2/model/video_transformer.rs`; `inner_dim / head_dim` = 4096 / 128).
+const LTX2_ATTENTION_HEADS: u64 = 32;
+
+/// Score-matrix bytes one LTX-2 video self-attention holds on CUDA (#735).
+///
+/// The shared dispatcher (`crate::attention`) materializes the score tile in
+/// the input dtype: `[heads, query_chunk, tokens]` BF16, twice over — the
+/// raw scores and the softmax output both live while the second matmul runs.
+/// Its `Auto` policy chunks the query axis at
+/// [`crate::attention::CUDA_AUTO_QUERY_CHUNK`] rows once the sequence passes
+/// [`crate::attention::CUDA_AUTO_CHUNK_MIN_QUERY_ROWS`], and otherwise takes
+/// the whole matrix at once. At the 13,312-token stage-2 shape that is
+/// `32 x 512 x 13,312 x 2 B x 2` = 872 MB — far above the 128 MB F32 tiles the
+/// hand-rolled path budgeted, which is why this is its own term in the
+/// activation budget rather than a share of the flat workspace.
+/// `MOLD_ATTN=flash` holds no score matrix and `MOLD_ATTN_CHUNK` can move the
+/// chunk; both make this an upper bound, which is the right direction for an
+/// admission estimate.
+pub fn ltx2_attention_tile_bytes(tokens: u64, heads: u64) -> u64 {
+    let query_rows = if tokens > crate::attention::CUDA_AUTO_CHUNK_MIN_QUERY_ROWS as u64 {
+        crate::attention::CUDA_AUTO_QUERY_CHUNK as u64
+    } else {
+        tokens
+    };
+    heads
+        .saturating_mul(query_rows)
+        .saturating_mul(tokens)
+        .saturating_mul(BF16_BYTES)
+        .saturating_mul(2)
+}
+
 /// Token count for an LTX-2 render at `width × height × frames`.
 ///
 /// `frames` is in pixel space; the VAE groups them 8:1 after the ungrouped
@@ -1015,10 +1047,16 @@ pub fn ltx2_token_count(width: u32, height: u32, frames: u32) -> u64 {
 /// difference at the stage-2 shape. Pass `None` only when the header has not
 /// been read; it falls back to [`LTX2_ADALN_DEFAULT_DIM`].
 ///
+/// * self-attention score tile — the BF16 dispatcher's chunked `[heads,
+///   512, T]` scores plus their softmax, priced by
+///   [`ltx2_attention_tile_bytes`]; past 1,024 tokens that is a further
+///   64 KiB/token
+///
 /// That is 112 KiB/token unconditioned and 160 KiB/token conditioned at the
-/// six-component width, plus the flat workspace. Anchors: 1024² × 97 frames
-/// (13,312 tokens) → 2.60 GB unconditioned / 3.25 GB conditioned; the 512²
-/// stage-1 render of the same job (3,328 tokens) → 1.46 GB.
+/// six-component width, plus the attention tile and the flat workspace.
+/// Anchors: 1024² × 97 frames (13,312 tokens) → 3.47 GB unconditioned /
+/// 4.13 GB conditioned; the 512² stage-1 render of the same job (3,328
+/// tokens) → 1.68 GB.
 pub fn ltx2_activation_budget_bytes(
     width: u32,
     height: u32,
@@ -1039,8 +1077,10 @@ pub fn ltx2_activation_budget_bytes(
         0
     };
     let per_token = residual + attention + feed_forward + adaln;
-    ltx2_token_count(width, height, frames)
+    let tokens = ltx2_token_count(width, height, frames);
+    tokens
         .saturating_mul(per_token)
+        .saturating_add(ltx2_attention_tile_bytes(tokens, LTX2_ATTENTION_HEADS))
         .saturating_add(LTX2_FIXED_WORKSPACE_BYTES)
 }
 
@@ -3790,18 +3830,46 @@ mod tests {
         assert_eq!(ltx2_token_count(1024, 1024, 1), 1_024);
     }
 
-    /// Golden per-token slopes: 128 KiB/token unconditioned, 176 KiB/token
+    /// Golden per-token slopes: 112 KiB/token unconditioned, 160 KiB/token
     /// conditioned (the extra 48 KiB is the per-token AdaLN row), plus the
-    /// flat 1 GiB workspace.
+    /// BF16 attention tile (64 KiB/token past 1,024 tokens) and the flat
+    /// 1 GiB workspace.
     #[test]
     fn ltx2_activation_budget_models_ff_and_adaln() {
         let uncond = ltx2_activation_budget_bytes(1024, 1024, 97, false, None);
         let cond = ltx2_activation_budget_bytes(1024, 1024, 97, true, None);
-        assert_eq!(uncond, 13_312 * 114_688 + 1_073_741_824);
-        assert_eq!(cond, 13_312 * 163_840 + 1_073_741_824);
-        assert_eq!(uncond, 2_600_468_480);
-        assert_eq!(cond, 3_254_779_904);
+        let tile = ltx2_attention_tile_bytes(13_312, LTX2_ATTENTION_HEADS);
+        assert_eq!(tile, 32 * 512 * 13_312 * 2 * 2);
+        assert_eq!(uncond, 13_312 * 114_688 + tile + 1_073_741_824);
+        assert_eq!(cond, 13_312 * 163_840 + tile + 1_073_741_824);
+        assert_eq!(uncond, 3_472_883_712);
+        assert_eq!(cond, 4_127_195_136);
         assert_eq!(cond - uncond, 13_312 * LTX2_ADALN_DEFAULT_DIM * BF16_BYTES);
+    }
+
+    /// The tile follows the dispatcher's own CUDA chunk policy (#735): the
+    /// full `[heads, T, T]` matrix up to 1,024 tokens, then a 512-row query
+    /// chunk against the whole key axis, in BF16, twice (scores + softmax).
+    #[test]
+    fn ltx2_attention_tile_mirrors_the_dispatcher_chunk_policy() {
+        // Below the chunk threshold the whole matrix is one tile.
+        assert_eq!(
+            ltx2_attention_tile_bytes(1_024, 32),
+            32 * 1_024 * 1_024 * 2 * 2
+        );
+        assert_eq!(ltx2_attention_tile_bytes(100, 32), 32 * 100 * 100 * 2 * 2);
+        // Past it the query axis is chunked at 512 rows, so the tile grows
+        // linearly with the key axis: 64 KiB per token at 32 heads.
+        assert_eq!(
+            ltx2_attention_tile_bytes(1_025, 32),
+            32 * 512 * 1_025 * 2 * 2
+        );
+        assert_eq!(ltx2_attention_tile_bytes(13_376, 32), 13_376 * 65_536);
+        assert_eq!(ltx2_attention_tile_bytes(3_344, 32), 3_344 * 65_536);
+        // Stage-2 1216x704x121 (the LTX-2.5 default): 876 MB.
+        assert_eq!(ltx2_attention_tile_bytes(13_376, 32), 876_609_536);
+        assert_eq!(ltx2_attention_tile_bytes(0, 32), 0);
+        assert_eq!(ltx2_attention_tile_bytes(u64::MAX, 32), u64::MAX);
     }
 
     /// LTX-2.3's 22B checkpoint ships `adaln_single.linear.weight` at
@@ -3842,7 +3910,12 @@ mod tests {
     fn ltx2_activation_budget_scales_with_tokens_not_pixels() {
         let stage1 = ltx2_activation_budget_bytes(512, 512, 97, false, None);
         let stage2 = ltx2_activation_budget_bytes(1024, 1024, 97, false, None);
-        assert_eq!(stage1, 3_328 * 114_688 + 1_073_741_824);
+        assert_eq!(
+            stage1,
+            3_328 * 114_688 + ltx2_attention_tile_bytes(3_328, 32) + 1_073_741_824
+        );
+        // Both shapes sit past the 1,024-token chunk threshold, so the
+        // attention tile is linear in tokens there too.
         let stage1_tokens = stage1 - 1_073_741_824;
         let stage2_tokens = stage2 - 1_073_741_824;
         assert_eq!(stage2_tokens, stage1_tokens * 4);

@@ -44,6 +44,10 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_LTX2_DEBUG_DISABLE_TRANSFORMER_GATED_ATTENTION",
     "MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER",
     "MOLD_LTX2_DEBUG_LOAD_BLOCKS",
+    // #735: pins LTX-2 self-attention on the F32 chunked path instead of the
+    // BF16 dispatcher. Changes the rendered output, so it can never share an
+    // execution-equivalence class with the default route.
+    "MOLD_LTX2_ATTN_F32",
     "MOLD_LTX2_FORCE_EAGER",
     "MOLD_LTX2_FORCE_STREAMING",
     "MOLD_LTX2_FP8_INPUT_SCALE_MODE",
