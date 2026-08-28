@@ -99,6 +99,11 @@ describe("presentGenerationChild", () => {
       { kind: "waiting", reason: "queued", label: "Queued" },
     ],
     [
+      "paused",
+      tracker(snapshot("paused")),
+      { kind: "waiting", reason: "paused", label: "Paused after restart" },
+    ],
+    [
       "running",
       tracker(snapshot("running")),
       { kind: "running", label: "Developing" },

@@ -1247,7 +1247,7 @@ export interface ChainLimits {
 }
 
 export type ChainJobState =
-  "queued" | "running" | "interrupted" | "failed" | "completed" | "cancelled";
+  "queued" | "running" | "paused" | "interrupted" | "failed" | "completed" | "cancelled";
 
 export type StageState = "pending" | "running" | "completed" | "failed";
 

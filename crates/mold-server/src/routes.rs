@@ -5977,7 +5977,13 @@ async fn list_queue(
     let schedulable_in_page = durable_page
         .rows
         .iter()
-        .filter(|row| row.state != mold_db::generation_queue::QueueRowState::Held)
+        .filter(|row| {
+            matches!(
+                row.state,
+                mold_db::generation_queue::QueueRowState::Queued
+                    | mold_db::generation_queue::QueueRowState::Running
+            )
+        })
         .count();
     let next_schedulable_offset = schedulable_offset
         .checked_add(schedulable_in_page)
@@ -6397,10 +6403,18 @@ fn job_entry_from_durable_projection(
     position: usize,
 ) -> crate::job_registry::JobEntry {
     let state = match row.state {
+        mold_db::generation_queue::QueueRowState::Queued => {
+            crate::job_registry::JobLifecycle::Queued
+        }
+        mold_db::generation_queue::QueueRowState::Running => {
+            // A durable running row without a live registry owner belongs to a
+            // prior runtime and is awaiting startup reconciliation.
+            crate::job_registry::JobLifecycle::Queued
+        }
+        mold_db::generation_queue::QueueRowState::Paused => {
+            crate::job_registry::JobLifecycle::Paused
+        }
         mold_db::generation_queue::QueueRowState::Held => crate::job_registry::JobLifecycle::Held,
-        // A durable `running` row with no live registry owner is interrupted
-        // work awaiting the next boot and therefore projects as queued.
-        _ => crate::job_registry::JobLifecycle::Queued,
     };
     let error = row.held_reason.clone();
     crate::job_registry::JobEntry {
@@ -6819,8 +6833,9 @@ async fn pause_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRes
     Ok(Json(QueuePauseResponse { paused: true }))
 }
 
-/// Resume dispatch of new generation jobs. Idempotent — repeat resumes return
-/// `{"paused": false}` without re-emitting the `queue_resumed` event.
+/// Resume dispatch and return every restart-paused durable job to its queue.
+/// Idempotent — repeat resumes return `{"paused": false}` without duplicating
+/// work or re-emitting the global `queue_resumed` event.
 #[utoipa::path(
     post,
     path = "/api/queue/resume",
@@ -6844,14 +6859,25 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
     if changed && !v2_authoritative {
         state.events.publish(mold_core::ServerEvent::QueueResumed);
     }
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let journal = state.queue_journal.clone();
+    let resumed = spawn_queue_mutation(move || journal.resume_all_paused()).await?;
+    if resumed.generation_jobs > 0 {
+        state.queue_journal.wake_feeder();
+    }
+    if resumed.chain_jobs > 0 {
+        if let Some(handle) = state.chain_jobs.as_ref() {
+            handle.kick();
+        }
+    }
     Ok(Json(QueuePauseResponse { paused: false }))
 }
 
-/// Cancel every still-queued generation job on this host, settling each
-/// queued row's batch child as `cancelled`. Running jobs are left untouched —
+/// Cancel every queued or restart-paused generation job on this host, settling
+/// each row's batch child as `cancelled`. Running jobs are left untouched —
 /// use `DELETE /api/queue/{id}` for one running singleton, or `DELETE
 /// /api/generation-batches/{id}` for one batch's children. The returned count
-/// is the number of queued rows removed, preserving the established queue API
+/// is the number of queued or paused rows removed, preserving the queue API
 /// contract.
 #[utoipa::path(
     delete,

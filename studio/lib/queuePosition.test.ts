@@ -271,6 +271,13 @@ describe("resolveQueueWait", () => {
     });
   });
 
+  it("reads a restart-paused row as paused instead of in line", () => {
+    const wait = resolveQueueWait({ state: "paused", position: 0 });
+    expect(wait).toEqual({ kind: "paused" });
+    expect(queueWaitLabel(wait)).toBe("Paused after restart");
+    expect(queueWaitCode(wait)).toBe("PAUSED");
+  });
+
   it("names the head of the line rather than staying silent", () => {
     expect(resolveQueueWait({ position: 0 })).toEqual({ kind: "next" });
     expect(queueWaitLabel(resolveQueueWait({ position: 0 }))).toBe("Next up");

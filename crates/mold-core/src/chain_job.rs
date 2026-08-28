@@ -43,6 +43,7 @@ pub const PREVIEW_FILE: &str = "preview.jpg";
 pub enum ChainJobState {
     Queued,
     Running,
+    Paused,
     Interrupted,
     Failed,
     Completed,
@@ -85,6 +86,7 @@ impl ChainJobState {
         match self {
             ChainJobState::Queued => "queued",
             ChainJobState::Running => "running",
+            ChainJobState::Paused => "paused",
             ChainJobState::Interrupted => "interrupted",
             ChainJobState::Failed => "failed",
             ChainJobState::Completed => "completed",
@@ -121,6 +123,7 @@ impl std::str::FromStr for ChainJobState {
         match s {
             "queued" => Ok(ChainJobState::Queued),
             "running" => Ok(ChainJobState::Running),
+            "paused" => Ok(ChainJobState::Paused),
             "interrupted" => Ok(ChainJobState::Interrupted),
             "failed" => Ok(ChainJobState::Failed),
             "completed" => Ok(ChainJobState::Completed),

@@ -2409,7 +2409,7 @@ function fleetQueueAuthority(row: FleetActiveWork): MobileQueueControlAuthority 
 
 function canPauseFleetActivity(row: FleetActiveWork): boolean {
   return (
-    row.phase === "queued" &&
+    (row.phase === "queued" || row.phase === "paused") &&
     serverCapabilities[row.hostId]?.queue?.can_pause === true &&
     fleetQueueAuthority(row) !== null
   );
@@ -2457,6 +2457,10 @@ async function setFleetHostQueuePaused(row: FleetActiveWork, paused: boolean): P
   const authority = fleetQueueAuthority(row);
   if (!authority || !canPauseFleetActivity(row)) return;
   await setQueuePaused(authority, paused);
+}
+
+function fleetQueueResumeNeeded(row: FleetActiveWork): boolean {
+  return row.phase === "paused" || hostTelemetry[row.hostId]?.queuePaused === true;
 }
 
 /**
@@ -11269,15 +11273,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       type="button"
                       data-test="mobile-fleet-queue-control"
                       :disabled="queueControlHostIds.has(row.hostId)"
-                      :aria-label="`${hostTelemetry[row.hostId]?.queuePaused ? 'Resume' : 'Pause'} ${row.hostLabel} queue`"
-                      @click.stop="
-                        setFleetHostQueuePaused(
-                          row,
-                          !(hostTelemetry[row.hostId]?.queuePaused === true),
-                        )
-                      "
+                      :aria-label="`${fleetQueueResumeNeeded(row) ? 'Resume' : 'Pause'} ${row.hostLabel} queue`"
+                      @click.stop="setFleetHostQueuePaused(row, !fleetQueueResumeNeeded(row))"
                     >
-                      {{ hostTelemetry[row.hostId]?.queuePaused ? "Resume" : "Pause" }}
+                      {{ fleetQueueResumeNeeded(row) ? "Resume" : "Pause" }}
                     </button>
                   </template>
                 </LiveActivityList>

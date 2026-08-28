@@ -397,6 +397,7 @@ pub async fn resume_chain_job(
         ));
     }
     if ![
+        ChainJobState::Paused,
         ChainJobState::Interrupted,
         ChainJobState::Failed,
         ChainJobState::Cancelled,
@@ -430,6 +431,7 @@ pub async fn resume_chain_job(
         db,
         &id,
         &[
+            ChainJobState::Paused,
             ChainJobState::Interrupted,
             ChainJobState::Failed,
             ChainJobState::Cancelled,
@@ -740,11 +742,11 @@ fn cancel_chain_job_locked(
             .map_err(|e| ApiError::internal(format!("failed to reload chain job: {e:#}")))?
             .ok_or_else(|| not_found(id))?;
         requested && row.state == ChainJobState::Running
-    } else if row.state == ChainJobState::Queued {
+    } else if matches!(row.state, ChainJobState::Queued | ChainJobState::Paused) {
         let changed = chain_jobs::try_transition(
             db,
             id,
-            &[ChainJobState::Queued],
+            &[ChainJobState::Queued, ChainJobState::Paused],
             ChainJobState::Cancelled,
             None,
             now_ms(),

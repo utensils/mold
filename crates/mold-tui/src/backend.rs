@@ -716,6 +716,7 @@ fn build_batch_requests(
 fn batch_child_state_label(state: &GenerationBatchChildState) -> &'static str {
     match state {
         GenerationBatchChildState::Accepted => "accepted",
+        GenerationBatchChildState::Paused => "paused",
         GenerationBatchChildState::Cancelling => "cancelling",
         GenerationBatchChildState::Running => "running",
         GenerationBatchChildState::Complete => "complete",

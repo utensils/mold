@@ -67,13 +67,14 @@ pub(crate) async fn recover_runtime(
         .await
         .map_err(|error| anyhow::anyhow!("durable feeder recovery task failed: {error}"))??;
     if report.claims_cleared > 0
-        || report.running_requeued > 0
+        || report.jobs_paused > 0
         || report.replays_charged > 0
         || report.replays_held > 0
     {
         tracing::info!(
             claims_cleared = report.claims_cleared,
-            running_requeued = report.running_requeued,
+            jobs_paused = report.jobs_paused,
+            running_paused = report.running_paused,
             replays_charged = report.replays_charged,
             replays_held = report.replays_held,
             "durable feeder recovered prior runtime claims"
@@ -1480,6 +1481,13 @@ mod tests {
         ids
     }
 
+    fn resume_recovered(state: &AppState) {
+        state
+            .queue_journal
+            .resume_all_paused()
+            .expect("test operator resumes restart-paused work");
+    }
+
     fn archive_output_without_db(
         state: &AppState,
         output_dir: &std::path::Path,
@@ -2447,6 +2455,7 @@ mod tests {
                 .claims_cleared,
             1
         );
+        resume_recovered(&state);
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let handle = spawn(state.clone(), shutdown.clone());
@@ -2512,6 +2521,7 @@ mod tests {
             "the test must stop in the archive-before-generations-upsert crash window"
         );
         state.queue_journal.recover_feeder_runtime().unwrap();
+        resume_recovered(&state);
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let handle = spawn(state.clone(), shutdown.clone());
@@ -2558,6 +2568,7 @@ mod tests {
             "the test must stop before either best-effort generations upsert"
         );
         state.queue_journal.recover_feeder_runtime().unwrap();
+        resume_recovered(&state);
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let handle = spawn(state.clone(), shutdown.clone());
@@ -2606,6 +2617,7 @@ mod tests {
             "the crash window is after archive publication but before the DB upsert"
         );
         recover_runtime(&state).await.unwrap();
+        resume_recovered(&state);
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let handle = spawn(state.clone(), shutdown.clone());
@@ -2735,6 +2747,7 @@ mod tests {
                 .claims_cleared,
             1
         );
+        resume_recovered(&state);
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let handle = spawn(state.clone(), shutdown.clone());
@@ -2769,6 +2782,9 @@ mod tests {
                 .find(|row| row.id == "job-0")
                 .unwrap();
             assert_eq!(recovered.replay_seen, boot);
+            if boot <= cap {
+                resume_recovered(&state);
+            }
         }
 
         let rows = state.queue_journal.list_all();
@@ -2784,6 +2800,7 @@ mod tests {
         let untouched = rows.iter().find(|row| row.id == "job-1").unwrap();
         assert_eq!(untouched.replay_seen, 0);
 
+        resume_recovered(&state);
         let next = state.queue_journal.claim_next_feeder().unwrap().unwrap();
         assert_eq!(next.row.id, "job-1");
         let batch = state.queue_journal.generation_batch("batch").unwrap();
@@ -2813,6 +2830,7 @@ mod tests {
 
         let recovered = recover_runtime(&state).await.unwrap();
         assert_eq!(recovered.claims_cleared, 1);
+        resume_recovered(&state);
 
         // This admission represents an HTTP request accepted only after the
         // startup barrier has completed. The feeder must never run recovery
@@ -2932,6 +2950,7 @@ mod tests {
         assert_eq!(claimed.row.id, "job-0");
         state.queue_journal.cancel_id("job-0").unwrap();
         recover_runtime(&state).await.unwrap();
+        resume_recovered(&state);
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let handle = spawn(state.clone(), shutdown.clone());
@@ -3231,7 +3250,8 @@ mod tests {
         assert_eq!(state.queue_journal.list_all().len(), 3);
         let report = state.queue_journal.recover_feeder_runtime().unwrap();
         assert_eq!(report.claims_cleared, 1);
-        assert_eq!(report.running_requeued, 0);
+        assert_eq!(report.running_paused, 0);
+        assert_eq!(report.jobs_paused, 3);
         let ids = state
             .queue_journal
             .list_all()

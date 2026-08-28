@@ -585,7 +585,7 @@ export interface HostDiskUsage {
 /** `held` is additive: a journalled job the host parked after it exhausted its
  * replay or dispatch budget. It exists only in the durable queue, never starts
  * on its own, and is listed so it is not invisible. Absent on older servers. */
-export type QueueJobState = "queued" | "running" | "held";
+export type QueueJobState = "queued" | "running" | "paused" | "held";
 
 export interface QueueEntry {
   id: string;
@@ -823,7 +823,13 @@ export interface ChainJobSummary {
 }
 
 export type ChainJobState =
-  "queued" | "running" | "interrupted" | "failed" | "completed" | "cancelled";
+  | "queued"
+  | "running"
+  | "paused"
+  | "interrupted"
+  | "failed"
+  | "completed"
+  | "cancelled";
 
 export type StageState = "pending" | "running" | "completed" | "failed";
 

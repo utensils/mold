@@ -126,6 +126,7 @@ describe("held rows", () => {
     const wrapper = mount(QueueCard, {
       props: {
         gpuOrdinals: [],
+        canCancelAll: true,
         entries: [
           {
             id: "srv-held",
@@ -142,6 +143,51 @@ describe("held rows", () => {
     expect(wrapper.text()).toContain("held");
     expect(wrapper.text()).toContain("dispatch attempts exhausted");
     expect(wrapper.find("[data-test='queue-cancel']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='cancel-all']").exists()).toBe(false);
+  });
+});
+
+describe("cancel all", () => {
+  it("is hidden when every visible job is already running", () => {
+    const wrapper = mount(QueueCard, {
+      props: {
+        canCancelAll: true,
+        gpuOrdinals: [],
+        entries: [listing()[0]!],
+      },
+    });
+
+    expect(wrapper.find("[data-test='cancel-all']").exists()).toBe(false);
+  });
+});
+
+describe("restart-paused rows", () => {
+  it("offers Resume even when the global pause flag is false", async () => {
+    const wrapper = mount(QueueCard, {
+      props: {
+        canPause: true,
+        canCancelAll: true,
+        paused: false,
+        gpuOrdinals: [],
+        entries: [
+          {
+            id: "srv-paused",
+            model: "flux2-klein",
+            state: "paused" as const,
+            started_at_unix_ms: 1,
+            position: 0,
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.get("[data-test='paused-chip']").text()).toContain(
+      "paused after restart",
+    );
+    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Resume");
+    expect(wrapper.find("[data-test='cancel-all']").exists()).toBe(true);
+    await wrapper.get("[data-test='pause-toggle']").trigger("click");
+    expect(wrapper.emitted("togglePause")).toHaveLength(1);
   });
 });
 

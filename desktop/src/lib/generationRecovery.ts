@@ -87,7 +87,7 @@ interface RecoveryQueueEntry {
   model?: string;
   /** `held` is additive: a journalled job the host parked and will not
    * auto-run. Absent on servers without the durable queue. */
-  state: "queued" | "running" | "held";
+  state: "queued" | "running" | "paused" | "held";
   seed_pinned?: boolean | null;
   started_at_unix_ms?: number;
   metadata?: OutputMetadata | null;
@@ -642,8 +642,14 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         });
         transportRetries = 0;
         if (settledExternally(job) || !isActive()) return;
-        if (detail && (detail.state === "queued" || detail.state === "running")) {
-          job.stage = `Developing on ${opts.hostLabel}`;
+        if (
+          detail &&
+          (detail.state === "queued" || detail.state === "running" || detail.state === "paused")
+        ) {
+          job.stage =
+            detail.state === "paused"
+              ? `Paused after restart on ${opts.hostLabel}`
+              : `Developing on ${opts.hostLabel}`;
           await sleep(interval);
           continue;
         }
@@ -719,6 +725,11 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         // Still developing server-side — re-attach by polling until it
         // leaves the queue, then collect the print from the gallery.
         job.stage = `Developing on ${opts.hostLabel}`;
+        await sleep(interval);
+        continue;
+      }
+      if (entry?.state === "paused") {
+        job.stage = `Paused after restart on ${opts.hostLabel}`;
         await sleep(interval);
         continue;
       }

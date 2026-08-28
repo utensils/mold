@@ -4118,10 +4118,10 @@ mod tests {
         let row = mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "stale")
             .unwrap()
             .unwrap();
-        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Queued);
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Paused);
         assert_eq!(
             journal.generation_batch("batch").unwrap().children[0].state,
-            "accepted"
+            "paused"
         );
     }
 

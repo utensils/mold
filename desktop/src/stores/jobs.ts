@@ -24,7 +24,7 @@ export interface QueueEntry {
   /** `held` is additive: a journalled job the host parked after it exhausted
    * its replay or dispatch budget. It exists only in the durable queue, will
    * never start on its own, and is listed precisely so it is not invisible. */
-  state: "queued" | "running" | "held";
+  state: "queued" | "running" | "paused" | "held";
   started_at_unix_ms: number;
   position: number;
   gpu?: number;
@@ -98,13 +98,18 @@ export interface QueueSurfaceRow {
  *  so it must never sort among rows that are actually waiting for a lane. */
 function queueSurfaceRank(entry: EnrichedQueueEntry): number {
   if (entry.state === "running") return 0;
-  return entry.state === "held" ? 2 : 1;
+  if (entry.state === "queued") return 1;
+  return entry.state === "paused" ? 2 : 3;
 }
 
 function visibleQueueEntries(entries: readonly import("@studio/api/queuePlan").QueueEntry[]) {
   return entries
     .filter(
-      (entry) => entry.state === "queued" || entry.state === "running" || entry.state === "held",
+      (entry) =>
+        entry.state === "queued" ||
+        entry.state === "running" ||
+        entry.state === "paused" ||
+        entry.state === "held",
     )
     .map((entry) => {
       const { target_gpu: targetGpu, ...rest } = entry;
@@ -386,6 +391,7 @@ export const useJobsStore = defineStore("jobs", {
       await this.queueControl(hostId, "/api/queue/resume", "POST");
       const q = this.queues[hostId];
       if (q) q.paused = false;
+      await this.refresh();
     },
     /** Cancel every queued job on the host (running jobs finish). */
     async cancelAll(hostId: string) {
