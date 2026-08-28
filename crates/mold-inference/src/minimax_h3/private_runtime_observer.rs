@@ -332,10 +332,37 @@ fn captured_phase(phase: H3PipelinePhase) -> bool {
         H3PipelinePhase::VaeLoad
             | H3PipelinePhase::QwenEncode
             | H3PipelinePhase::VisualConditionEncode
+            | H3PipelinePhase::ReferenceVisualEncode
             | H3PipelinePhase::VisualDecode
             | H3PipelinePhase::AudioDecode
             | H3PipelinePhase::Mux
     )
+}
+
+/// The two phases that run the visual VAE's ENCODER: FL2VA encodes its
+/// boundary endpoint under `VisualConditionEncode`, Ref2VA encodes every
+/// ordered visual reference under `ReferenceVisualEncode`, and no render runs
+/// both. The condition-VAE workspace observation is whichever ran (the larger
+/// if a future task ran both); requiring FL2VA's phase alone refused every
+/// completed Ref2VA render at `finish()`, after the print had been muxed
+/// ("phase VisualConditionEncode has no attributed workspace peak", #1418 UAT).
+const CONDITION_ENCODE_PHASES: [H3PipelinePhase; 2] = [
+    H3PipelinePhase::VisualConditionEncode,
+    H3PipelinePhase::ReferenceVisualEncode,
+];
+
+fn condition_encode_transient_bytes(state: &ObservationState) -> Result<u64> {
+    CONDITION_ENCODE_PHASES
+        .iter()
+        .filter_map(|phase| phase_transient_bytes(state, *phase).ok())
+        .max()
+        .ok_or_else(|| {
+            anyhow!(
+                "private H3 visual condition encode has no attributed workspace peak: neither {:?} nor {:?} ran",
+                CONDITION_ENCODE_PHASES[0],
+                CONDITION_ENCODE_PHASES[1]
+            )
+        })
 }
 
 pub(crate) fn observe_event(event: H3PipelineEvent) {
@@ -561,10 +588,7 @@ fn build_observation(
             &state,
             H3PipelinePhase::VaeLoad,
         )?,
-        condition_vae_workspace_device_bytes: phase_transient_bytes(
-            &state,
-            H3PipelinePhase::VisualConditionEncode,
-        )?,
+        condition_vae_workspace_device_bytes: condition_encode_transient_bytes(&state)?,
         attention_workspace_device_bytes: workspace.attention_workspace_device_bytes,
         ffn_workspace_device_bytes: workspace.ffn_workspace_device_bytes,
         decoder_tile_workspace_device_bytes: phase_transient_bytes(
@@ -619,6 +643,8 @@ mod tests {
     fn captured_phase_set_is_exact() {
         assert!(captured_phase(H3PipelinePhase::QwenEncode));
         assert!(captured_phase(H3PipelinePhase::VisualConditionEncode));
+        assert!(captured_phase(H3PipelinePhase::ReferenceVisualEncode));
+        assert!(!captured_phase(H3PipelinePhase::ReferenceVisualEncodeChunk));
         assert!(!captured_phase(H3PipelinePhase::Denoise));
         assert!(!captured_phase(H3PipelinePhase::Complete));
     }
@@ -665,5 +691,50 @@ mod tests {
             0
         );
         assert!(phase_transient_bytes(&state, H3PipelinePhase::VisualDecode).is_err());
+    }
+
+    fn report(phase: &str, peak: u64, entry: u64, exit_used: u64) -> PhaseVramReport {
+        PhaseVramReport {
+            phase: phase.into(),
+            peak_pool_used: Some(peak),
+            peak_pool_reserved: Some(peak),
+            entry_pool_used: Some(entry),
+            delta_pool_used: Some(exit_used as i64 - entry as i64),
+            global_free_entry: Some(1_000),
+            global_free_exit: Some(900),
+            global_total: Some(2_000),
+            predicted_bytes: None,
+            elapsed: std::time::Duration::from_millis(1),
+            attribution: crate::device::VramAttribution::Pool,
+        }
+    }
+
+    /// A Ref2VA render encodes its references under `ReferenceVisualEncode`
+    /// and never runs FL2VA's `VisualConditionEncode`; the condition-VAE
+    /// workspace has to come from the phase that ran, and only a render that
+    /// ran neither is refused.
+    #[test]
+    fn condition_encode_workspace_comes_from_whichever_encoder_phase_ran() {
+        let mut ref2va = ObservationState::default();
+        ref2va.reports.insert(
+            H3PipelinePhase::ReferenceVisualEncode,
+            report("h3.private.ReferenceVisualEncode", 40, 10, 10),
+        );
+        assert_eq!(condition_encode_transient_bytes(&ref2va).unwrap(), 30);
+
+        let mut fl2va = ObservationState::default();
+        fl2va.reports.insert(
+            H3PipelinePhase::VisualConditionEncode,
+            report("h3.private.VisualConditionEncode", 25, 5, 5),
+        );
+        assert_eq!(condition_encode_transient_bytes(&fl2va).unwrap(), 20);
+
+        let error = condition_encode_transient_bytes(&ObservationState::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("neither VisualConditionEncode nor ReferenceVisualEncode ran"),
+            "{error}"
+        );
     }
 }

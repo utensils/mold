@@ -819,6 +819,54 @@ reference canvas instead and packs one temporal block per two 2 fps cursor
 frames, so a 2.5 s clip is 12,096 tokens across three blocks. That ratio is the
 whole difference between the rows.
 
+Those 16,384 tokens are PRE-MERGE ViT patches on the conditioner's 16-px grid,
+and until #1418 admission counted the same reference on the 32-px merged-pad
+grid — 4,096 — while the runtime prepared 16,384 (`pixel_values.dim(0)`) and
+`validate_prepared_authority` refused the frozen authority: every image
+reference that reached execution was held with `prepared rows (4131 text,
+16384 vision) differ from frozen admission (4131, 4096)`. FL2VA's evidence had
+always read the count off its prepared conditioner (its reviewed 4,032 at
+1344x768 IS the patch grid), and the observed Qwen activation workspace above
+was measured over `2,033 text + 4,032 vision` rows on that same grid, so
+`h3_reference_charges` and the Ref2VA envelope now charge patches
+(`mold_core::minimax_h3::qwen_vision_patch_rows_per_block`, four per packed
+row) and the memory grant scales by text + patches exactly as the observation
+was composed. The merged pads survive as the TEXT-side count only: they are the
+part of the conditioner sequence the reference occupies beside the prompt and
+its labels. The host-headroom figure for one 2048-square still therefore rises
+by the ~12,288 rows the old charge omitted (see the `a` row below).
+
+The first render past that hold then failed 40 minutes later, after the whole
+conditioner encode, on `validate_text_vision_rows`: `conditioner returned 4098
+vision rows for 4096 presentation pads`. The conditioner's tags are the
+presentation builder's, and the builder tags `pads + 2` per vision span because
+upstream does (ComfyUI `comfy/text_encoders/minimax.py:75-82` widens every
+vision span's video-modality tag by one row on each side; `add_vision` at
+`:163-167` wraps every image and every 2-frame video block in its own
+`<|vision_start|>` / `<|vision_end|>` pair). The check compared against the
+bare pad count, so every visual reference — video too — was refused at that
+point; it now expects the markers.
+
+The second render then failed at the same depth on `validate_visual_condition`:
+`visual reference 1 encoded as F32 [1, 24, 1, 128, 128], expected F32 [1, 24,
+1, 128, 128] on the frozen device`. Same dtype, same shape — the disagreement
+was the device. The visual VAE's official seed-42 condition sample round-trips
+through FP16 ON THE HOST (`mold-candle` `visual_condition.rs`,
+`official_seed42_sample`), so the encoder returns a CPU tensor on every route;
+FL2VA's pipeline moves that onto the frozen device before use and never checks
+the encoder's placement, while Ref2VA's check demanded the device first.
+Ref2VA now moves the condition exactly as FL2VA does and validates the move.
+
+The third render decoded, muxed, and reached "Completing MiniMax H3
+generation" — and was then refused by the runtime-bound observer's `finish()`:
+`private H3 phase VisualConditionEncode has no attributed workspace peak`.
+The observer captured only FL2VA's endpoint-encode phase, while Ref2VA encodes
+its references under `ReferenceVisualEncode`, so no Ref2VA print could ever
+publish. The condition-VAE workspace observation now comes from whichever
+encoder phase ran. Four defects sat in series behind the #1418 hold, each
+reachable only after the previous one was fixed and each ~45 minutes deep on
+this host; no image reference had ever rendered through the public route.
+
 **The host, not the card, is the binding constraint.** The compact stack places
 its Qwen3-VL conditioner on the CPU for a CUDA route, so the host demand is its
 15.687 GB of parameters plus a request-derived activation workspace that scales

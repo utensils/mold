@@ -150,7 +150,9 @@ pub struct H3FactoryReferenceInput {
     /// Packed condition rows this reference contributes.
     pub visual_rows: u64,
     pub audio_rows: u64,
-    /// Qwen vision pads this reference contributes to `qwen_vision_rows`.
+    /// Pre-merge Qwen ViT patches (16-px grid, four per packed row) this
+    /// reference contributes to `qwen_vision_rows` — the count the runtime's
+    /// `pixel_values` carries, never the merged 32-px pads (#1418).
     pub qwen_vision_rows: u64,
     /// Host bytes the backend retains for this reference between preprocessing
     /// and its two encoders: normalized RGB8 frames plus the normalized f32
@@ -1534,7 +1536,7 @@ fn h3_reference_charges(reference: &H3FactoryReferenceInput) -> Result<H3Referen
                     reference.index
                 );
             }
-            Some((u64::from(width), u64::from(height)))
+            Some((width, height))
         }
         (None, None) => {
             if reference.kind != H3FactoryReferenceKind::Audio {
@@ -1552,11 +1554,20 @@ fn h3_reference_charges(reference: &H3FactoryReferenceInput) -> Result<H3Referen
     };
     let rows_per_latent_frame = visual_canvas
         .map(|(width, height)| {
-            (width / 32)
-                .checked_mul(height / 32)
+            u64::from(width / 32)
+                .checked_mul(u64::from(height / 32))
                 .ok_or_else(|| anyhow!("MiniMax H3 reference rows per latent frame overflow"))
         })
         .transpose()?
+        .unwrap_or(0);
+    // Qwen's vision rows are PRE-MERGE ViT patches on the 16-px grid — four
+    // per packed row — because that is what the runtime's `pixel_values`
+    // carries and what `validate_prepared_authority` compares the frozen
+    // authority against. Charging the merged 32-px pads here admitted a
+    // 2048-square image at 4,096 rows that the runtime prepared as 16,384,
+    // and held every Ref2VA image reference at execution (#1418).
+    let qwen_patch_rows_per_block = visual_canvas
+        .map(|(width, height)| contract::qwen_vision_patch_rows_per_block(width, height))
         .unwrap_or(0);
 
     // Frame geometry. Images occupy exactly one latent frame; videos take the
@@ -1631,7 +1642,7 @@ fn h3_reference_charges(reference: &H3FactoryReferenceInput) -> Result<H3Referen
         .checked_mul(rows_per_latent_frame)
         .ok_or_else(|| anyhow!("MiniMax H3 reference visual rows overflow"))?;
     let qwen_vision_rows = qwen_blocks
-        .checked_mul(rows_per_latent_frame)
+        .checked_mul(qwen_patch_rows_per_block)
         .ok_or_else(|| anyhow!("MiniMax H3 reference Qwen vision rows overflow"))?;
 
     // Audio. Present exactly for standalone audio and for a video carrying a
@@ -1660,8 +1671,8 @@ fn h3_reference_charges(reference: &H3FactoryReferenceInput) -> Result<H3Referen
     // that same prefix wherever they overlap and materialized beyond it.
     let frame_bytes = visual_canvas
         .map(|(width, height)| {
-            width
-                .checked_mul(height)
+            u64::from(width)
+                .checked_mul(u64::from(height))
                 .and_then(|pixels| pixels.checked_mul(3))
                 .ok_or_else(|| anyhow!("MiniMax H3 reference frame bytes overflow"))
         })
@@ -5105,6 +5116,10 @@ mod tests {
     fn ref2va_references() -> Vec<H3FactoryReferenceInput> {
         let image_rows = (2_048 / 32) * (2_048 / 32);
         let video_rows_per_frame = (768 / 32) * (768 / 32);
+        // Qwen vision rows are pre-merge ViT patches on the 16-px grid, four
+        // per packed row (#1418).
+        let image_qwen_rows = (2_048 / 16) * (2_048 / 16);
+        let video_qwen_rows_per_block = (768 / 16) * (768 / 16);
         // 39 visual-VAE frames land on 5n+2 causal latents over the family's
         // own 17n+5 grid: (39-5)/17*5+2 = 12.
         let video_latent_frames = 12;
@@ -5129,7 +5144,7 @@ mod tests {
                 native_audio_channels: None,
                 visual_rows: image_rows,
                 audio_rows: 0,
-                qwen_vision_rows: image_rows,
+                qwen_vision_rows: image_qwen_rows,
                 normalized_host_bytes: 2_048 * 2_048 * 3,
                 native_host_bytes: 6_000 * 4_000 * 3,
             },
@@ -5150,7 +5165,7 @@ mod tests {
                 native_audio_channels: Some(6),
                 visual_rows: video_latent_frames * video_rows_per_frame,
                 audio_rows: 64_000_u64.div_ceil(800) * 2,
-                qwen_vision_rows: video_qwen_blocks * video_rows_per_frame,
+                qwen_vision_rows: video_qwen_blocks * video_qwen_rows_per_block,
                 normalized_host_bytes: (39 + 4) * 768 * 768 * 3 + 64_000 * 2 * 4,
                 // Video frames are resized to the normalized canvas DURING
                 // decode, so what is retained between decode and preprocess is
@@ -5218,6 +5233,38 @@ mod tests {
         request
     }
 
+    /// The runtime counts `pixel_values.dim(0)` — pre-merge ViT patches on
+    /// the 16-px grid — and `validate_prepared_authority` refuses a frozen
+    /// authority that disagrees, so the charge has to be that count. FL2VA's
+    /// evidence already reads it off the prepared conditioner (4,032 at
+    /// 1344x768); this pins Ref2VA's derived charge to the same grid. Charging
+    /// merged pads held a 2048-square image reference with "prepared rows
+    /// (4131 text, 16384 vision) differ from frozen admission (4131, 4096)"
+    /// (#1418).
+    #[test]
+    fn reference_qwen_vision_rows_are_vit_patches_not_merged_pads() {
+        let references = ref2va_references();
+        let image = h3_reference_charges(&references[0]).unwrap();
+        assert_eq!(image.visual_rows, 4_096);
+        assert_eq!(image.qwen_vision_rows, 16_384);
+        assert_eq!(image.qwen_vision_rows, (2_048 / 16) * (2_048 / 16));
+        let video = h3_reference_charges(&references[1]).unwrap();
+        assert_eq!(video.qwen_vision_rows, 2 * (768 / 16) * (768 / 16));
+        assert_eq!(video.qwen_vision_rows, 4_608);
+        let audio = h3_reference_charges(&references[2]).unwrap();
+        assert_eq!(audio.qwen_vision_rows, 0);
+
+        // At FL2VA's own canvas the count is FL2VA's reviewed 4,032, which is
+        // what makes the observed per-row workspace cost (measured over
+        // 2,033 text + 4,032 vision rows) apply to both tasks alike.
+        let mut fl2va_canvas = references[0].clone();
+        fl2va_canvas.normalized_width = Some(contract::DEFAULT_WIDTH);
+        fl2va_canvas.normalized_height = Some(contract::DEFAULT_HEIGHT);
+        let charges = h3_reference_charges(&fl2va_canvas).unwrap();
+        assert_eq!(charges.qwen_vision_rows, 4_032);
+        assert_eq!(charges.visual_rows, 1_008);
+    }
+
     #[test]
     fn ref2va_prepared_request_prices_every_ordered_reference_modality() {
         let request = ref2va_prepared_request();
@@ -5228,7 +5275,10 @@ mod tests {
         // and mirror what mold-server's admission pricing already computes.
         assert_eq!(request.rows.condition_visual_rows, 4_096 + 12 * 576);
         assert_eq!(request.rows.condition_audio_rows, 80 * 2 + 40 * 2);
-        assert_eq!(request.rows.qwen_vision_rows, 4_096 + 2 * 576);
+        // Qwen vision rows are ViT patches: 16,384 for the 2048 still and
+        // 2,304 per temporal block of the 768 video — four per packed row.
+        assert_eq!(request.rows.qwen_vision_rows, 16_384 + 2 * 2_304);
+        assert_eq!(request.rows.qwen_vision_rows, 4 * (4_096 + 2 * 576));
         // Retained normalized media is the item-2 host charge: one 2048 RGB8
         // still, 43 768-square RGB8 frames, and two f32 stereo waveforms.
         let (_, _, _, media) = validate_prepared_references(&request.references).unwrap();
@@ -5557,7 +5607,7 @@ mod tests {
             native_audio_channels: None,
             visual_rows: 12 * (384 / 32) * (384 / 32),
             audio_rows: 0,
-            qwen_vision_rows: 2 * (384 / 32) * (384 / 32),
+            qwen_vision_rows: 2 * (384 / 16) * (384 / 16),
             normalized_host_bytes: (39 + 4) * 384 * 384 * 3,
             native_host_bytes: (39 + 4) * 384 * 384 * 3,
         });

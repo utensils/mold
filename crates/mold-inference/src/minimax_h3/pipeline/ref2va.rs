@@ -410,6 +410,15 @@ pub(crate) fn execute_staged(
             &mut control,
         )?;
         ensure_ref_identity(backend, &frozen_identity, &device)?;
+        // The official seed-42 sample round-trips through FP16 ON THE HOST
+        // (`mold-candle` `visual_condition.rs`, `official_seed42_sample`), so
+        // the encoder hands back a CPU tensor on every route — exactly as it
+        // does for FL2VA's endpoint, which `pipeline.rs` moves onto the frozen
+        // device before use. Move it here and let the validation below prove
+        // the move; validating the encoder's own placement refused every
+        // visual reference on a CUDA route ("encoded as F32 [..], expected
+        // F32 [..] on the frozen device", #1418 UAT).
+        let condition = condition.to_device(&device)?;
         validate_visual_condition(reference, &condition, &device)?;
         visual_conditions.push(condition);
         control.checkpoint(H3PipelineEvent {
@@ -831,6 +840,25 @@ fn validate_reference_presentation(
     Ok(())
 }
 
+/// The two `<|vision_start|>` / `<|vision_end|>` rows that flank every vision
+/// span and carry the VISION tag with it.
+///
+/// Upstream tags the WHOLE span video-modality, markers included: ComfyUI
+/// `comfy/text_encoders/minimax.py:75-82` (`token_tags_from_embeds_info`
+/// widens each vision span by one row on each side) and `:163-167`
+/// (`add_vision` wraps every image and every 2-frame video block in its own
+/// marker pair, `:188-191`). `PresentationBuilder::vision` in
+/// `mold-candle/src/minimax_h3/presentation.rs` tags `count + 2` for exactly
+/// that reason, so the conditioner returns pads plus two per span.
+const VISION_SPAN_MARKER_ROWS: usize = 2;
+
+/// Refuse a conditioner whose vision rows disagree with the presentation it
+/// was handed. The expected count is the merged pads PLUS the two marker rows
+/// of every span — an image is one span, a video is one span per temporal
+/// block — because those markers are vision rows on both sides
+/// ([`VISION_SPAN_MARKER_ROWS`]). Comparing against the bare pad count refused
+/// every visual reference at execution ("returned 4098 vision rows for 4096
+/// presentation pads") the moment #1418 let one reach this check.
 fn validate_text_vision_rows(
     text: &H3TextConditioning,
     references: &[H3ReferencePresentation],
@@ -839,10 +867,13 @@ fn validate_text_vision_rows(
         .iter()
         .map(|reference| match &reference.presentation.kind {
             RefPresentationKind::Audio => 0,
-            RefPresentationKind::Image { vision_tokens } => *vision_tokens,
-            RefPresentationKind::Video { blocks } => {
-                blocks.iter().map(|block| block.vision_tokens).sum()
+            RefPresentationKind::Image { vision_tokens } => {
+                *vision_tokens + VISION_SPAN_MARKER_ROWS
             }
+            RefPresentationKind::Video { blocks } => blocks
+                .iter()
+                .map(|block| block.vision_tokens + VISION_SPAN_MARKER_ROWS)
+                .sum(),
         })
         .sum::<usize>();
     let actual = text
@@ -852,7 +883,7 @@ fn validate_text_vision_rows(
         .count();
     if actual != expected {
         bail!(
-            "MiniMax H3 conditioner returned {actual} vision rows for {expected} presentation pads"
+            "MiniMax H3 conditioner returned {actual} vision rows for {expected} presentation vision rows (merged pads plus the two flanking markers of every span)"
         );
     }
     Ok(())
@@ -1313,6 +1344,108 @@ mod tests {
     use super::*;
     use crate::progress::{is_inference_cancelled, InferenceCancellationToken, ProgressReporter};
 
+    struct MarkerTokenizer;
+
+    impl mold_candle::minimax_h3::H3RawTokenizer for MarkerTokenizer {
+        fn encode_raw(
+            &self,
+            text: &str,
+        ) -> std::result::Result<Vec<u32>, mold_candle::minimax_h3::PresentationError> {
+            Ok(text.split_whitespace().map(|_| 42).collect())
+        }
+
+        fn token_id(&self, token: &str) -> Option<u32> {
+            match token {
+                "<|vision_start|>" => Some(151_652),
+                "<|vision_end|>" => Some(151_653),
+                "<|image_pad|>" => Some(151_655),
+                "<|video_pad|>" => Some(151_656),
+                _ => None,
+            }
+        }
+    }
+
+    /// The conditioner's vision rows are the presentation builder's — merged
+    /// pads PLUS the `<|vision_start|>` / `<|vision_end|>` markers of every
+    /// span (one per image, one per video block), which upstream tags
+    /// video-modality too. Comparing against the bare pad count refused every
+    /// visual reference at execution once #1418 let one reach the check
+    /// ("returned 4098 vision rows for 4096 presentation pads").
+    #[test]
+    fn text_vision_rows_count_the_markers_of_every_span() {
+        use mold_candle::minimax_h3::build_ref2va_presentation;
+        let references = vec![
+            H3ReferencePresentation {
+                index: 1,
+                presentation: RefPresentation {
+                    kind: RefPresentationKind::Image {
+                        vision_tokens: 4_096,
+                    },
+                    has_audio: false,
+                },
+            },
+            H3ReferencePresentation {
+                index: 2,
+                presentation: RefPresentation {
+                    kind: RefPresentationKind::Video {
+                        blocks: vec![
+                            VideoPresentationBlock {
+                                timestamp_seconds: 0.5,
+                                vision_tokens: 576,
+                            },
+                            VideoPresentationBlock {
+                                timestamp_seconds: 1.5,
+                                vision_tokens: 576,
+                            },
+                        ],
+                    },
+                    has_audio: true,
+                },
+            },
+            H3ReferencePresentation {
+                index: 3,
+                presentation: RefPresentation {
+                    kind: RefPresentationKind::Audio,
+                    has_audio: true,
+                },
+            },
+        ];
+        let presentations = references
+            .iter()
+            .map(|reference| reference.presentation.clone())
+            .collect::<Vec<_>>();
+        let built =
+            build_ref2va_presentation(&MarkerTokenizer, "a prompt", &presentations, 1 << 20)
+                .unwrap();
+        let conditioning = |tags: Vec<H3ModalityTag>| H3TextConditioning {
+            states: Tensor::zeros((1, tags.len(), 8), DType::F32, &Device::Cpu).unwrap(),
+            tags,
+            lifetime_probe: None,
+        };
+
+        // The real builder's tags: 4,096 + 2 for the still, (576 + 2) x 2 for
+        // the two video blocks, nothing for the standalone audio.
+        let vision_rows = built
+            .h3_tags
+            .iter()
+            .filter(|tag| **tag == H3ModalityTag::Vision)
+            .count();
+        assert_eq!(vision_rows, 4_098 + 2 * 578);
+        validate_text_vision_rows(&conditioning(built.h3_tags.clone()), &references)
+            .expect("the builder's own tags must validate");
+
+        // The bare pad count is what #1418 surfaced: a conditioner that lost
+        // its markers (or a check that never expected them) is refused with
+        // both numbers.
+        let bare = std::iter::repeat_n(H3ModalityTag::Vision, 4_096 + 2 * 576)
+            .chain(std::iter::repeat_n(H3ModalityTag::Text, 4))
+            .collect::<Vec<_>>();
+        let error = validate_text_vision_rows(&conditioning(bare), &references)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("5248 vision rows for 5254"), "{error}");
+    }
+
     fn request() -> GenerateRequest {
         GenerateRequest {
             collection: None,
@@ -1648,14 +1781,19 @@ mod tests {
                 tags.push(H3ModalityTag::Text);
                 match &reference.presentation.kind {
                     RefPresentationKind::Audio => {}
+                    // Mirror `PresentationBuilder::vision`: the two flanking
+                    // markers of every span are vision rows too.
                     RefPresentationKind::Image { vision_tokens } => {
-                        tags.extend(std::iter::repeat_n(H3ModalityTag::Vision, *vision_tokens));
+                        tags.extend(std::iter::repeat_n(
+                            H3ModalityTag::Vision,
+                            *vision_tokens + VISION_SPAN_MARKER_ROWS,
+                        ));
                     }
                     RefPresentationKind::Video { blocks } => {
                         for block in blocks {
                             tags.extend(std::iter::repeat_n(
                                 H3ModalityTag::Vision,
-                                block.vision_tokens,
+                                block.vision_tokens + VISION_SPAN_MARKER_ROWS,
                             ));
                         }
                     }

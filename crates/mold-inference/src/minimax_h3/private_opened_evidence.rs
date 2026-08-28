@@ -2701,34 +2701,41 @@ mod tests {
             FL2VA_PUBLIC_CEILING
         );
 
-        // The scripted campaign request: one 2048-square still (4,096 vision
-        // pads). Its 5,154-row sequence is SHORTER than the 6,065 rows the
-        // observation was taken over — since #1245 raised FL2VA's own prompt
-        // budget — so it charges proportionally less and sits well inside the
-        // capture grant.
-        let campaign = ref2va_shape(4_096);
-        let campaign_demand =
-            qwen_activation_workspace_demand_bytes(&campaign, CAPTURE_GRANT).unwrap();
-        assert_eq!(campaign_demand, 4_093_640_704);
-        assert!(campaign_demand < FL2VA_PUBLIC_CEILING);
-        assert!(campaign_demand <= CAPTURE_GRANT);
+        // One 768-square video reference over two Qwen blocks: 2 x 2,304
+        // pre-merge patches. Its 5,666-row sequence is SHORTER than the 6,065
+        // rows the observation was taken over — since #1245 raised FL2VA's own
+        // prompt budget — so it charges proportionally less and sits well
+        // inside the capture grant.
+        let short_video = ref2va_shape(2 * 2_304);
+        let short_video_demand =
+            qwen_activation_workspace_demand_bytes(&short_video, CAPTURE_GRANT).unwrap();
+        assert!(
+            short_video_demand < FL2VA_PUBLIC_CEILING,
+            "{short_video_demand}"
+        );
+        assert!(short_video_demand <= CAPTURE_GRANT);
 
-        // Three maximum-canvas references: 1,058 + 3 x 4,096 = 13,346 rows =
-        // 2.2x the measured 6,065-row sequence. The derived demand exceeds
-        // the 2x grant, so the request is refused by name rather than
-        // admitted under insufficient authority.
-        let three_references = ref2va_shape(3 * 4_096);
-        let error = qwen_activation_workspace_demand_bytes(&three_references, CAPTURE_GRANT)
+        // The scripted campaign request: one 2048-square still, which the
+        // runtime prepares as 16,384 pre-merge ViT patches — not the 4,096
+        // merged pads #1418's admission charged. 1,058 + 16,384 = 17,442 rows
+        // = 2.9x the measured 6,065-row sequence, so the derived demand
+        // exceeds the flat 2x capture grant and is refused by name rather than
+        // admitted under insufficient authority. The PUBLIC Ref2VA grant is
+        // scaled by the same rows and never refuses here; only the
+        // capture-scope instrument keeps a flat ceiling.
+        let campaign = ref2va_shape(16_384);
+        let error = qwen_activation_workspace_demand_bytes(&campaign, CAPTURE_GRANT)
             .unwrap_err()
             .to_string();
         assert!(error.contains("Qwen activation workspace"), "{error}");
-        assert!(error.contains("10603200512"), "{error}");
         assert!(error.contains("9663676416"), "{error}");
         // And the derived figure really is beyond twice the FL2VA ceiling:
         // at an unbounded grant the same shape charges exactly that demand.
-        let unfenced = qwen_activation_workspace_demand_bytes(&three_references, u64::MAX).unwrap();
-        assert_eq!(unfenced, 10_603_200_512);
+        let unfenced = qwen_activation_workspace_demand_bytes(&campaign, u64::MAX).unwrap();
+        assert!(error.contains(&unfenced.to_string()), "{error}");
         assert!(unfenced > 2 * FL2VA_PUBLIC_CEILING);
+        // 4,168,069,120 x 17,442 / 6,065 x 1.15, on the 64 MiB grid.
+        assert_eq!(unfenced, 13_824_425_984);
 
         // A demand exactly at the grant is admitted — the fence refuses only
         // what the profile cannot cover.
