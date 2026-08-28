@@ -357,7 +357,7 @@ jq -e --argjson rows "$matrix_rows" --arg mold_home "$mold_home" --arg models_di
       and .metal_ab.identical == false
       and (.metal_ab.summary_sha256 | test("^[0-9a-f]{64}$")))
   and ([.rows[] | select(.status != "passed") | has("metal_ab")] | all(. == false))
-  and (.assets | length) == 45
+  and (.assets | length) == 94
   and ([.assets[].present] | all(. == true))
   and ([.assets[].actual_sha256] | all(. == null))
   and ([.assets[].path] | all(startswith($models_dir + "/")))
