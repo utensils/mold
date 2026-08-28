@@ -979,6 +979,7 @@
               pkgs.git
               pkgs.gh
               pkgs.jq
+              pkgs.tokei
               pkgs.lsof
               pkgs.curl
               pkgs.viu
@@ -1546,6 +1547,15 @@
                 name = "understand-dashboard";
                 help = "open the Understand Anything knowledge-graph dashboard";
                 command = "./scripts/understand-dashboard.sh \"$@\"";
+              }
+              {
+                category = "docs";
+                name = "code-report";
+                help = "generate the gitignored HTML code-metrics report";
+                command = ''
+                  repo_dir="''${PRJ_ROOT:-$(git rev-parse --show-toplevel)}"
+                  exec "$repo_dir/scripts/code-report.sh" "$@"
+                '';
               }
               {
                 category = "docs";
