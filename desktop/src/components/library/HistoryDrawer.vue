@@ -653,6 +653,7 @@ async function cleanUpDiskConfirmed() {
                 "
                 :target="gallery.targetOf(entry.sourceKey)"
                 :cache-key="entry.sourceKey"
+                :media-version="entry.item.media_version ?? null"
                 :alt="entry.item.metadata.prompt"
               />
             </div>

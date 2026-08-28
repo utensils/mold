@@ -1055,6 +1055,9 @@ export const useGalleryStore = defineStore("gallery", {
     async remove(sourceKey: string, filename: string, options: { permanent?: boolean } = {}) {
       const permanent = options.permanent === true;
       const target = this.targetOf(sourceKey);
+      // A print deleted forever leaves the persistent thumbnail cache too; a
+      // trashed one keeps its tile (the Trash grid still shows it).
+      if (permanent) this.forgetThumbnailFor(sourceKey, this.rowOf(sourceKey, filename));
       if (target) {
         const suffix = permanent ? "?permanent=true" : "";
         await apiFetchTo(target, `/api/gallery/image/${encodeURIComponent(filename)}${suffix}`, {
@@ -1067,6 +1070,25 @@ export const useGalleryStore = defineStore("gallery", {
         throw new Error("Host is not connected.");
       }
       this.applyRemovalToBuckets(sourceKey, filename, permanent);
+    },
+    /**
+     * Drop a permanently deleted print's tiles from the persistent native
+     * cache, keyed by the SAME effective version the tile was filed under
+     * (`media_version`, else the `timestamp:size` fallback older hosts get).
+     * Every permanent path — direct delete, bulk delete forever, Empty
+     * trash — must call this, or the bytes outlive the print until LRU.
+     */
+    forgetThumbnailFor(sourceKey: string, row: GalleryImage | null) {
+      if (!row) return;
+      const version = row.media_version ?? `${row.timestamp}:${row.size_bytes ?? "unknown"}`;
+      const target = this.targetOf(sourceKey);
+      // Deferred so a bridge that is absent (browser shell, older native
+      // build) fails inside the promise rather than out of the delete path.
+      void Promise.resolve()
+        .then(() =>
+          ipc.forgetGalleryThumbnail(sourceKey, target?.baseUrl ?? null, row.filename, version),
+        )
+        .catch(() => {});
     },
     applyRemovalToBuckets(sourceKey: string, filename: string, permanent: boolean) {
       const row = takeRow(this.buckets[sourceKey], filename);
@@ -1094,6 +1116,7 @@ export const useGalleryStore = defineStore("gallery", {
           if (permanent) await deleteManyForever(target, filenames);
           else await trashMany(target, filenames);
           for (const filename of filenames) {
+            if (permanent) this.forgetThumbnailFor(sourceKey, this.rowOf(sourceKey, filename));
             this.applyRemovalToBuckets(sourceKey, filename, permanent);
           }
           return { deleted: [...filenames], failed: [] as string[] };
@@ -2028,7 +2051,10 @@ export const useGalleryStore = defineStore("gallery", {
               purged += 1;
             }
           } else throw new Error("Host is not connected.");
-          for (const row of trash?.items ?? []) this.evictItemMedia(key, row.filename);
+          for (const row of trash?.items ?? []) {
+            this.evictItemMedia(key, row.filename);
+            this.forgetThumbnailFor(key, row);
+          }
           if (trash) trash.items = [];
         }),
       );

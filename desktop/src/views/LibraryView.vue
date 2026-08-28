@@ -11,7 +11,12 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
-import type { ThumbnailPriority } from "@studio/lib/thumbnailScheduler";
+import {
+  galleryThumbnailScheduler,
+  type ThumbnailHandle,
+  type ThumbnailPriority,
+} from "@studio/lib/thumbnailScheduler";
+import { chunkForProbe, planPrewarm, type PrewarmCandidate } from "../lib/gallery/thumbnailPrewarm";
 import Icon from "@ui/components/Icon.vue";
 import {
   loadGalleryThumbnailSize,
@@ -37,6 +42,8 @@ import {
   galleryMediaPath,
   isAudioItem,
   isVideoItem,
+  prepareNativeThumbnail,
+  thumbnailTier,
 } from "../lib/gallery/media";
 import { applySelectionClick } from "../lib/gallery/selection";
 import { suggestedSaveName } from "../lib/gallery/saveName";
@@ -770,7 +777,11 @@ function coverTile(entry: MergedPrint): CoverTile {
     path: galleryMediaPath(entry.item.filename, source, true),
     target: targetFor(entry),
     cacheKey: entry.sourceKey,
-    video: source === "local" && isVideo(entry.item),
+    mediaVersion:
+      entry.item.media_version ?? `${entry.item.timestamp}:${entry.item.size_bytes ?? "unknown"}`,
+    // A cover is a thumbnail now even for this device offline, so it never
+    // mounts a <video>.
+    video: false,
     alt: tileTitle(entry),
   };
 }
@@ -1535,7 +1546,9 @@ const tileModels = computed<TileModel[]>(() => {
       audio: isAudioItem(item),
       upscaled: isUpscaledImage(item),
       mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
-      localVideo: source === "local" && video,
+      // The tile is always a still thumbnail now; a local clip's poster comes
+      // from the native cache rather than a <video> element per tile.
+      localVideo: false,
       target: targetFor(entry),
       mediaVersion: item.media_version ?? `${item.timestamp}:${item.size_bytes ?? "unknown"}`,
       fresh: isFresh(entry),
@@ -1613,6 +1626,126 @@ const visibleTiles = computed(() => {
 // (container resize, entries arriving, row-height change) the cached offsets
 // go stale and rows render overlapping — re-measure on any re-flow.
 watch(rows, () => virtualizer.value?.measure?.());
+
+// ── Thumbnail pre-warm (desktop only) ────────────────────────────────────────
+// Once a listing has laid out, quietly prepare the tiles below and above the
+// viewport into the persistent native cache (`thumbnailPrewarm.ts` plans;
+// this runs). Requests share the scheduler key `AuthedMedia` uses, so a tile
+// that scrolls into view dedupes onto its in-flight prewarm and is promoted
+// rather than fetched twice. Everything is cancelled on unmount or when the
+// listing changes underneath.
+const PREWARM_SETTLE_MS = 500;
+let prewarmHandles: ThumbnailHandle<unknown>[] = [];
+let prewarmTimer: ReturnType<typeof setTimeout> | null = null;
+let prewarmEpoch = 0;
+
+function cancelPrewarm() {
+  prewarmEpoch += 1;
+  if (prewarmTimer) clearTimeout(prewarmTimer);
+  prewarmTimer = null;
+  for (const handle of prewarmHandles) handle.cancel();
+  prewarmHandles = [];
+}
+
+async function runPrewarm() {
+  if (!inTauri() || !scrollEl.value) return;
+  const epoch = ++prewarmEpoch;
+  const laid = rows.value;
+  const instance = unref(virtualizer);
+  const range = instance.range ?? { startIndex: 0, endIndex: 0 };
+  const rowsPerViewport = Math.max(
+    1,
+    Math.round(scrollEl.value.clientHeight / (rowHeight.value + GAP)),
+  );
+  const candidates: Array<PrewarmCandidate & { model: TileModel }> = [];
+  laid.forEach((row, rowIndex) => {
+    for (const tile of row.items) {
+      candidates.push({
+        sourceKey: tile.model.entry.sourceKey,
+        filename: tile.model.item.filename,
+        mediaVersion: tile.model.mediaVersion,
+        rowIndex,
+        model: tile.model,
+      });
+    }
+  });
+  const plan = planPrewarm(candidates, {
+    startRow: range.startIndex,
+    endRow: range.endIndex,
+    rowsPerViewport,
+  });
+  const byHost = new Map<string, typeof plan>();
+  for (const entry of plan) {
+    const list = byHost.get(entry.candidate.sourceKey) ?? [];
+    list.push(entry);
+    byHost.set(entry.candidate.sourceKey, list);
+  }
+  const tier = thumbnailTier();
+  for (const [sourceKey, entries] of byHost) {
+    const target = gallery.targetOf(sourceKey);
+    for (const batch of chunkForProbe(entries)) {
+      let cached: boolean[];
+      try {
+        cached = await ipc.probeGalleryThumbnails(
+          sourceKey,
+          target?.baseUrl ?? null,
+          tier,
+          batch.map((e) => ({
+            filename: e.candidate.filename,
+            mediaVersion: e.candidate.mediaVersion,
+          })),
+        );
+      } catch {
+        return;
+      }
+      if (epoch !== prewarmEpoch) return;
+      batch.forEach((entry, i) => {
+        if (cached[i]) return;
+        const model = (entry.candidate as PrewarmCandidate & { model: TileModel }).model;
+        const handle = galleryThumbnailScheduler.schedule({
+          key: `${sourceKey}|${model.mediaPath}|${model.mediaVersion}|${target?.baseUrl ?? "primary"}|${target?.apiKey ?? ""}`,
+          hostKey: sourceKey,
+          priority: entry.priority,
+          // A visible tile that arrives while this prewarm is queued dedupes
+          // onto this promise, so a native refusal must REJECT rather than
+          // resolve null: the tile's own retry then runs its fallback-capable
+          // load instead of settling on an empty source.
+          run: async (signal) => {
+            const url = await prepareNativeThumbnail({
+              path: model.mediaPath,
+              target,
+              cacheKey: sourceKey,
+              mediaVersion: model.mediaVersion,
+              signal,
+            });
+            if (url === null) throw new Error("Native thumbnail unavailable; tile will fall back.");
+            return url;
+          },
+        });
+        void handle.promise.catch(() => {});
+        prewarmHandles.push(handle);
+      });
+    }
+  }
+}
+
+function schedulePrewarm() {
+  cancelPrewarm();
+  prewarmTimer = setTimeout(() => {
+    prewarmTimer = null;
+    void runPrewarm();
+  }, PREWARM_SETTLE_MS);
+}
+
+// A new listing (or a scope switch) re-plans; a slider drag does not.
+watch(entries, schedulePrewarm);
+watch(
+  () => gallery.loaded && containerWidth.value > 0,
+  (ready) => {
+    if (ready) schedulePrewarm();
+  },
+  { immediate: true },
+);
 
 const showBadges = computed(
   () => !inTrash.value && gallery.filter === "all" && gallery.chipCounts.length > 1,
@@ -2101,6 +2234,7 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
   resizeObserver?.disconnect();
+  cancelPrewarm();
   // Finalize any deletes still inside their undo window — leaving Library
   // commits them rather than stranding a hidden-but-not-deleted print.
   for (const key of [...pendingDeletes.keys()]) {

@@ -781,9 +781,37 @@ pub(crate) fn strip_audio_track(input_mp4: &Path, out_path: &Path) -> Result<()>
     copy_video_only_mp4(input_mp4, out_path)
 }
 
+/// The first frame of a clip, decoded and nothing more: the bounded decoder
+/// stops after the first retained sample and never flushes the rest, so a
+/// 20-second 1080p poster costs one frame's worth of work instead of the
+/// whole clip's RGB buffer (which is what `decode_video` materializes).
+pub fn extract_first_frame(input_video: &Path) -> Result<RgbImage> {
+    extract_first_frame_with_checkpoint(input_video, &mut || Ok(()))
+}
+
+pub(crate) fn extract_first_frame_with_checkpoint(
+    input_video: &Path,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<RgbImage> {
+    let video = decode_video_bounded_with_checkpoint(
+        input_video,
+        None,
+        None,
+        None,
+        Some(&[0]),
+        None,
+        checkpoint,
+    )?;
+    video
+        .frames
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no frames for thumbnail"))
+}
+
 pub fn extract_thumbnail(input_video: &Path, output_png: &Path) -> Result<()> {
-    let video = decode_video(input_video)?;
-    let thumbnail = video_enc::first_frame_png(&video.frames)?;
+    let frame = extract_first_frame(input_video)?;
+    let thumbnail = video_enc::first_frame_png(std::slice::from_ref(&frame))?;
     fs::write(output_png, thumbnail)?;
     Ok(())
 }
@@ -1079,6 +1107,45 @@ mod tests {
         let path = dir.path().join("video.mp4");
         fs::write(&path, video_enc::encode_mp4(frames, fps)?)?;
         Ok((dir, path))
+    }
+
+    /// The poster path must not decode the clip: with 30 frames a full decode
+    /// checkpoints once per sample read plus once per decoded frame (≥ 60),
+    /// while the bounded first-frame path stops right after frame 0.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn first_frame_extraction_stops_after_frame_zero() {
+        let mut frames = Vec::new();
+        for i in 0..30u8 {
+            frames.push(ImageBuffer::from_pixel(
+                64,
+                64,
+                Rgb([i * 8, 40, 200 - i * 4]),
+            ));
+        }
+        let (_dir, path) = write_mp4(&frames, 12).unwrap();
+        let mut checkpoints = 0usize;
+        let frame = extract_first_frame_with_checkpoint(&path, &mut || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!((frame.width(), frame.height()), (64, 64));
+        // openh264 needs a few samples in flight before it emits frame 0, and
+        // the loop checkpoints once per sample read; eight is well under the
+        // thirty-plus a full decode costs.
+        assert!(
+            checkpoints <= 8,
+            "first-frame extraction checkpointed {checkpoints} times — it decoded past frame 0"
+        );
+        // The full decode is the yardstick the bound is measured against.
+        let mut full = 0usize;
+        decode_video_bounded_with_checkpoint(&path, None, None, None, None, None, &mut || {
+            full += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert!(full >= 30, "a full decode checkpoints per frame ({full})");
     }
 
     #[cfg(feature = "mp4")]
