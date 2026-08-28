@@ -63,7 +63,9 @@ use crate::vae_tiling::is_out_of_memory_error;
 use crate::weight_loader::{
     load_fp8_safetensors_with_callback, load_safetensors_with_progress_callback,
 };
-use mold_core::ltx2_weight_index::{Ltx2TransformerWeightIndex, Ltx2WeightFormat};
+use mold_core::ltx2_weight_index::{
+    Ltx2ResidentWeightForm, Ltx2TransformerWeightIndex, Ltx2WeightFormat,
+};
 use mold_core::{LoraWeight, Ltx2GuidanceOverrides, Ltx2SpatialUpscale, TimeRange};
 
 pub const LTX2_VIDEO_LATENT_CHANNELS: usize = 128;
@@ -6963,11 +6965,15 @@ fn load_ltx2_av_transformer_with_loras_inner(
     let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
     let checkpoint_is_convrot =
         !checkpoint_is_nvfp4 && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
-    // Comfy ConvRot stores either full-shape INT8 or packed INT4 rows, while
-    // the portable Candle compatibility backend reconstructs BF16 weights.
-    // Header byte sizes therefore cannot safely drive resident placement;
-    // stream blocks so compact bytes are never priced as BF16 GPU residency.
-    let force_streaming = ltx2_effective_force_streaming(force_streaming, checkpoint_is_convrot);
+    // ConvRot on CUDA stays resident in its packed form and is priced that
+    // way; on Metal/CPU the compatibility backend reconstructs BF16 weights,
+    // so blocks keep streaming there rather than pricing compact bytes as
+    // widened residency.
+    let force_streaming = ltx2_effective_force_streaming(
+        force_streaming,
+        checkpoint_is_convrot,
+        Ltx2Accelerator::of(device),
+    );
     // One header pass feeds both the fp8 probe and the residency sizing. The
     // index is the same authority admission priced this job with, so the
     // plan the engine builds cannot disagree with the grant it was given.
@@ -7019,7 +7025,12 @@ fn load_ltx2_av_transformer_with_loras_inner(
             .as_ref()
             .context("LTX-2 checkpoint header is required for adaptive residency")
             .and_then(|index| {
-                ltx2_transformer_weight_sizes(index, config.num_layers, compute_dtype(device))
+                ltx2_transformer_weight_sizes(
+                    index,
+                    config.num_layers,
+                    compute_dtype(device),
+                    Ltx2ResidentWeightForm::for_convrot_backend(device.is_cuda()),
+                )
             });
         match weights {
             Ok(weights)
@@ -7185,11 +7196,26 @@ fn ltx2_adaptive_transformer_plan(
     weights: &Ltx2TransformerWeightSizes,
     free_vram: u64,
 ) -> AdaptiveResidencyPlan {
+    // The per-forward transient (one dequantized linear) sits beside the
+    // resident weights for the whole denoise, and a packed-resident ConvRot
+    // forward additionally rotates and re-quantizes its activation — both are
+    // reserved here exactly as admission reserves them.
+    let activation = ltx2_video_activation_budget(stage, weights.adaln_dim).saturating_add(
+        if weights.int8_packed {
+            mold_core::ltx2_weight_index::ltx2_int8_w8a8_workspace_bytes(
+                crate::device::ltx2_token_count(stage.width, stage.height, stage.frames),
+            )
+        } else {
+            0
+        },
+    );
     plan_adaptive_residency(
         &weights.blocks,
         ltx2_transformer_vram_budget(plan.vram_grant_bytes, free_vram),
-        weights.non_block_bytes,
-        ltx2_video_activation_budget(stage, weights.adaln_dim),
+        weights
+            .non_block_bytes
+            .saturating_add(weights.transient_bytes),
+        activation,
         ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
     )
 }
@@ -7364,8 +7390,17 @@ fn ltx2_force_streaming_enabled() -> bool {
     )
 }
 
-fn ltx2_effective_force_streaming(configured: bool, checkpoint_is_convrot: bool) -> bool {
-    configured || checkpoint_is_convrot
+fn ltx2_effective_force_streaming(
+    configured: bool,
+    checkpoint_is_convrot: bool,
+    accelerator: Ltx2Accelerator,
+) -> bool {
+    // ConvRot forces streaming only where no packed-resident arm exists:
+    // CUDA holds packed U8 blocks resident (`LtxLinear::ConvRotPacked`),
+    // while Metal and CPU still widen every block to BF16 on materialize, so
+    // a resident block there would cost the widened figure — the exact 2x
+    // the old unconditional rule existed to avoid.
+    configured || (checkpoint_is_convrot && accelerator != Ltx2Accelerator::Cuda)
 }
 
 fn select_ltx2_transformer_residency_mode(
@@ -7722,6 +7757,10 @@ pub struct Ltx2TransformerWeightSizes {
     /// linear for a quantized checkpoint, zero for dense/float8). Carried so
     /// admission and the planner can reserve the same figure.
     pub transient_bytes: u64,
+    /// Blocks are resident in the packed INT8 ConvRot form, so each forward
+    /// also needs the token-scaled W8A8 workspace
+    /// (`mold_core::ltx2_weight_index::ltx2_int8_w8a8_workspace_bytes`).
+    pub int8_packed: bool,
 }
 
 /// Size a transformer for residency planning at the given compute dtype.
@@ -7738,13 +7777,17 @@ pub fn ltx2_transformer_weight_sizes(
     index: &Ltx2TransformerWeightIndex,
     num_layers: usize,
     compute_dtype: DType,
+    form: Ltx2ResidentWeightForm,
 ) -> Result<Ltx2TransformerWeightSizes> {
     if index.format() == Ltx2WeightFormat::Nvfp4 {
         bail!("adaptive residency is not modelled for NVFP4 checkpoints");
     }
     let elem_size = compute_dtype.size_in_bytes() as u64;
     let mut blocks = vec![0usize; num_layers];
-    for (slot, bytes) in blocks.iter_mut().zip(index.resident_block_bytes(elem_size)) {
+    for (slot, bytes) in blocks
+        .iter_mut()
+        .zip(index.resident_block_bytes_for(elem_size, form))
+    {
         *slot = usize::try_from(bytes).context("LTX-2 block size overflows usize")?;
     }
     Ok(Ltx2TransformerWeightSizes {
@@ -7752,6 +7795,7 @@ pub fn ltx2_transformer_weight_sizes(
         non_block_bytes: index.resident_non_block_bytes(elem_size),
         adaln_dim: index.adaln_dim(),
         transient_bytes: index.transient_bytes(),
+        int8_packed: index.is_convrot() && form == Ltx2ResidentWeightForm::Packed,
     })
 }
 
@@ -7764,7 +7808,12 @@ fn ltx2_transformer_block_sizes_from_safetensors(
     compute_dtype: DType,
 ) -> Result<Ltx2TransformerWeightSizes> {
     let index = Ltx2TransformerWeightIndex::read(path)?;
-    ltx2_transformer_weight_sizes(&index, num_layers, compute_dtype)
+    ltx2_transformer_weight_sizes(
+        &index,
+        num_layers,
+        compute_dtype,
+        Ltx2ResidentWeightForm::Widened,
+    )
 }
 
 fn denoised_from_velocity(sample: &Tensor, velocity: &Tensor, sigma: f32) -> Result<Tensor> {
@@ -10314,15 +10363,106 @@ mod tests {
         let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
         assert_eq!(index.block_bytes_at_rest()[0], 388_065_632);
 
-        let sizes = super::ltx2_transformer_weight_sizes(&index, 48, DType::BF16).unwrap();
+        let sizes = super::ltx2_transformer_weight_sizes(
+            &index,
+            48,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Widened,
+        )
+        .unwrap();
 
         assert_eq!(sizes.blocks.len(), 48);
+        assert!(!sizes.int8_packed);
         assert_eq!(sizes.blocks[0], 773_349_760);
         assert_eq!(sizes.blocks[47], 773_349_760);
         assert_eq!(sizes.blocks[1], 0);
         assert_eq!(sizes.non_block_bytes, 4_887_262_720);
         assert_eq!(sizes.adaln_dim, Some(36_864));
         assert_eq!(sizes.transient_bytes, 134_217_728);
+    }
+
+    /// On CUDA the ConvRot blocks stay packed (`LtxLinear::ConvRotPacked`):
+    /// a resident block costs its at-rest bytes, roughly half the widened
+    /// figure, and the sizes flag the token-scaled W8A8 workspace.
+    #[test]
+    fn ltx2_int8_convrot_blocks_are_sized_packed_on_cuda() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mold-core/testdata/ltx25/distilled-int8-convrot.header.safetensors");
+        let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
+        let packed = super::ltx2_transformer_weight_sizes(
+            &index,
+            48,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Packed,
+        )
+        .unwrap();
+        let widened = super::ltx2_transformer_weight_sizes(
+            &index,
+            48,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Widened,
+        )
+        .unwrap();
+
+        assert!(packed.int8_packed);
+        assert_eq!(
+            packed.blocks[0] as u64,
+            index.block_bytes_packed(2)[0],
+            "packed residency prices the at-rest form"
+        );
+        assert!(
+            (packed.blocks[0] as f64) < 0.55 * widened.blocks[0] as f64,
+            "packed ({}) must be roughly half of widened ({})",
+            packed.blocks[0],
+            widened.blocks[0]
+        );
+        // Non-block weights widen on every backend (the quantized ones are
+        // the prompt encoder's connectors).
+        assert_eq!(packed.non_block_bytes, widened.non_block_bytes);
+        assert_eq!(packed.transient_bytes, widened.transient_bytes);
+    }
+
+    /// The adaptive plan reserves the per-forward transient beside the fixed
+    /// weights, and the W8A8 workspace beside the activations — packed
+    /// ConvRot only.
+    #[test]
+    fn ltx2_adaptive_plan_reserves_transient_and_w8a8_workspace() {
+        let stage = super::Ltx2StageShape {
+            width: 1216,
+            height: 704,
+            frames: 121,
+            conditioned: false,
+        };
+        let weights = |int8_packed| super::Ltx2TransformerWeightSizes {
+            blocks: vec![400_000_000; 4],
+            non_block_bytes: 1_000_000_000,
+            adaln_dim: Some(36_864),
+            transient_bytes: 134_217_728,
+            int8_packed,
+        };
+        let plan = |int8_packed| {
+            super::ltx2_adaptive_transformer_plan(
+                &ltx2_plan_at(1216, 704, 121),
+                stage,
+                &weights(int8_packed),
+                24_000_000_000,
+            )
+        };
+        let dense = plan(false);
+        let packed = plan(true);
+        assert_eq!(
+            dense.fixed_resident_bytes,
+            1_000_000_000 + 134_217_728,
+            "transient is reserved with the fixed weights"
+        );
+        let workspace = mold_core::ltx2_weight_index::ltx2_int8_w8a8_workspace_bytes(
+            crate::device::ltx2_token_count(1216, 704, 121),
+        );
+        assert_eq!(
+            packed.reserved_bytes(),
+            dense.reserved_bytes() + workspace,
+            "packed ConvRot additionally reserves the W8A8 forward workspace"
+        );
     }
 
     /// GGUF blocks stay at their packed ggml size; NVFP4 keeps refusing so it
@@ -10332,7 +10472,13 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../mold-core/testdata/ltx25/distilled-q4-k-m.header.gguf");
         let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
-        let sizes = super::ltx2_transformer_weight_sizes(&index, 48, DType::BF16).unwrap();
+        let sizes = super::ltx2_transformer_weight_sizes(
+            &index,
+            48,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Packed,
+        )
+        .unwrap();
         assert_eq!(index.block_bytes_at_rest()[0], 249_582_336);
         assert_eq!(sizes.blocks[0], 249_164_160);
         assert_eq!(sizes.blocks.iter().sum::<usize>(), 12_603_951_104);
@@ -10345,7 +10491,13 @@ mod tests {
 
         let nvfp4 = br#"{"model.diffusion_model.transformer_blocks.0.attn1.to_q.weight":{"dtype":"U8","shape":[4096,2048],"data_offsets":[0,8388608]},"model.diffusion_model.transformer_blocks.0.attn1.to_q.weight_scale_2":{"dtype":"F32","shape":[],"data_offsets":[8388608,8388612]}}"#;
         let index = Ltx2TransformerWeightIndex::from_safetensors_header(nvfp4).unwrap();
-        assert!(super::ltx2_transformer_weight_sizes(&index, 1, DType::BF16).is_err());
+        assert!(super::ltx2_transformer_weight_sizes(
+            &index,
+            1,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Widened,
+        )
+        .is_err());
     }
 
     /// The residency planner must reserve those non-block weights instead of
@@ -10355,6 +10507,7 @@ mod tests {
         let plan = ltx2_plan_at(1024, 1024, 97);
         let stage = stage_shape(&plan, 1024, 1024, 97);
         let weights = super::Ltx2TransformerWeightSizes {
+            int8_packed: false,
             blocks: ltx2_19b_fp8_blocks(),
             non_block_bytes: 2_107_091_456,
             adaln_dim: Some(24_576),
@@ -10418,6 +10571,7 @@ mod tests {
     fn ltx2_grant_produces_fewer_resident_blocks_than_free_vram() {
         const FREE_VRAM: u64 = 25_339_395_072;
         let weights = super::Ltx2TransformerWeightSizes {
+            int8_packed: false,
             blocks: ltx2_19b_fp8_blocks(),
             non_block_bytes: 2_107_091_456,
             adaln_dim: Some(24_576),
@@ -10618,9 +10772,33 @@ mod tests {
 
     #[test]
     fn ltx2_convrot_forces_streaming_for_reconstructed_bf16_weights() {
-        assert!(super::ltx2_effective_force_streaming(false, true));
-        assert!(super::ltx2_effective_force_streaming(true, false));
-        assert!(!super::ltx2_effective_force_streaming(false, false));
+        // ConvRot no longer forces streaming on CUDA — packed residency
+        // exists there — but still does on Metal and CPU, which widen.
+        assert!(!super::ltx2_effective_force_streaming(
+            false,
+            true,
+            super::Ltx2Accelerator::Cuda
+        ));
+        assert!(super::ltx2_effective_force_streaming(
+            false,
+            true,
+            super::Ltx2Accelerator::Metal
+        ));
+        assert!(super::ltx2_effective_force_streaming(
+            false,
+            true,
+            super::Ltx2Accelerator::Other
+        ));
+        assert!(super::ltx2_effective_force_streaming(
+            true,
+            false,
+            super::Ltx2Accelerator::Cuda
+        ));
+        assert!(!super::ltx2_effective_force_streaming(
+            false,
+            false,
+            super::Ltx2Accelerator::Cuda
+        ));
     }
 
     #[test]

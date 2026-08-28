@@ -1558,7 +1558,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
         });
     let (peak, activation) = match &ltx2 {
         Some((facts, shape, available)) => {
-            let activation = crate::ltx2_admission::ltx2_activation_bytes(*shape, facts.adaln_dim);
+            let activation = facts.activation_bytes(*shape);
             let estimate = crate::ltx2_admission::ltx2_peak_estimate(facts, activation, *available);
             (estimate.peak_bytes, activation)
         }

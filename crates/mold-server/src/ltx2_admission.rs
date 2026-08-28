@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use mold_core::ltx2_weight_index::Ltx2TransformerWeightIndex;
+use mold_core::ltx2_weight_index::{Ltx2ResidentWeightForm, Ltx2TransformerWeightIndex};
 
 /// Mirrors `mold_inference::adaptive_offload::ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM`;
 /// the engine reserves it inside every residency plan.
@@ -155,6 +155,9 @@ pub(crate) struct Ltx2CheckpointFacts {
     /// linear for a quantized checkpoint, zero for dense/float8. Carried from
     /// the shared index so the engine and admission reserve one figure.
     pub(crate) transient_bytes: u64,
+    /// Blocks are resident packed (INT8 ConvRot on CUDA), so every forward
+    /// also needs the token-scaled W8A8 workspace beside the activations.
+    pub(crate) int8_packed: bool,
 }
 
 impl Ltx2CheckpointFacts {
@@ -162,12 +165,40 @@ impl Ltx2CheckpointFacts {
     /// The same index feeds `mold_inference::ltx2::ltx2_transformer_weight_sizes`,
     /// and a parity test pins the two projections to each other.
     pub(crate) fn from_weight_index(index: &Ltx2TransformerWeightIndex) -> Self {
+        // This estimator models the CUDA adaptive planner — the only backend
+        // that pages blocks against a measured budget — so ConvRot blocks
+        // are priced in the packed form CUDA actually keeps resident
+        // (`LtxLinear::ConvRotPacked`). Metal admission rides the unified
+        // single gate and never reaches this prefix search.
+        let form = Ltx2ResidentWeightForm::for_convrot_backend(true);
         Self {
-            block_sizes: index.resident_block_bytes(LTX2_ADMISSION_ELEMENT_BYTES),
+            block_sizes: index.resident_block_bytes_for(LTX2_ADMISSION_ELEMENT_BYTES, form),
             fixed_resident_bytes: index.resident_non_block_bytes(LTX2_ADMISSION_ELEMENT_BYTES),
             vae_bytes: index.vae_bytes_at_rest(),
             adaln_dim: index.adaln_dim(),
             transient_bytes: index.transient_bytes(),
+            int8_packed: index.is_convrot() && form == Ltx2ResidentWeightForm::Packed,
+        }
+    }
+
+    /// The activation-side reserve for one shape: the shared per-token budget
+    /// plus, for packed-resident INT8 ConvRot, the W8A8 forward workspace.
+    /// One method so `ltx2_shape_fits` and the preflight estimate cannot
+    /// diverge on what "activation" includes.
+    pub(crate) fn activation_bytes(&self, shape: Ltx2ShapeHint) -> u64 {
+        let base = ltx2_activation_bytes(shape, self.adaln_dim);
+        if self.int8_packed {
+            base.saturating_add(
+                mold_core::ltx2_weight_index::ltx2_int8_w8a8_workspace_bytes(
+                    mold_inference::device::ltx2_token_count(
+                        shape.width,
+                        shape.height,
+                        shape.frames,
+                    ),
+                ),
+            )
+        } else {
+            base
         }
     }
 
@@ -295,6 +326,7 @@ pub(crate) fn ltx2_peak_estimate(
     let reserve_bytes = facts
         .fixed_resident_bytes
         .saturating_add(facts.vae_bytes)
+        .saturating_add(facts.transient_bytes)
         .saturating_add(activation_bytes)
         .saturating_add(LTX2_RUNTIME_HEADROOM_BYTES)
         .saturating_add(fragmentation_margin_bytes);
@@ -367,11 +399,7 @@ pub(crate) fn ltx2_shape_fits(
     shape: Ltx2ShapeHint,
     available_bytes: u64,
 ) -> bool {
-    let estimate = ltx2_peak_estimate(
-        facts,
-        ltx2_activation_bytes(shape, facts.adaln_dim),
-        available_bytes,
-    );
+    let estimate = ltx2_peak_estimate(facts, facts.activation_bytes(shape), available_bytes);
     estimate.viable && estimate.peak_bytes <= available_bytes / 100 * LTX2_ADMISSION_BUDGET_PERCENT
 }
 
@@ -524,6 +552,7 @@ pub(crate) mod test_support {
             vae_bytes: 2_444_960_482,
             adaln_dim: Some(24_576),
             transient_bytes: 0,
+            int8_packed: false,
         }
     }
 
@@ -727,10 +756,13 @@ mod tests {
             let path = golden(name);
             let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
             let admission = parse_checkpoint_facts(&path).unwrap();
+            // Admission prices for the CUDA planner, so parity is against
+            // the same packed-for-CUDA form the engine selects there.
             let runtime = mold_inference::ltx2::ltx2_transformer_weight_sizes(
                 &index,
                 index.num_layers(),
                 candle_core::DType::BF16,
+                Ltx2ResidentWeightForm::for_convrot_backend(true),
             )
             .unwrap();
 
@@ -759,16 +791,25 @@ mod tests {
     }
 
     /// The int8-conv pack widens every I8 linear to BF16 on the device, so
-    /// admission must charge the widened figure — the raw span is half of it
+    /// Admission models the CUDA adaptive planner, and CUDA keeps ConvRot
+    /// blocks packed — the widened figure is what the old rule double-charged.
     /// and admitted plans that OOMed at the first denoise step.
     #[test]
-    fn checkpoint_facts_price_int8_convrot_widened() {
+    fn checkpoint_facts_price_int8_convrot_packed_for_cuda() {
         let facts =
             parse_checkpoint_facts(&golden("distilled-int8-convrot.header.safetensors")).unwrap();
-        assert_eq!(facts.block_sizes[0], 773_349_760);
-        assert_eq!(facts.block_sizes[47], 773_349_760);
+        // Blocks are priced in the packed form the CUDA planner keeps
+        // resident (`LtxLinear::ConvRotPacked`): the U8 weight plus its F32
+        // row scales, with dense block tensors at BF16. The widened figure
+        // (773,349,760) survives as Metal's streaming transient, not as
+        // residency.
+        assert_eq!(facts.block_sizes[0], 387_867_008);
+        assert_eq!(facts.block_sizes[47], 387_867_008);
+        // Non-block weights widen on every backend — the quantized ones are
+        // the prompt encoder's connectors.
         assert_eq!(facts.fixed_resident_bytes, 4_887_262_720);
         assert_eq!(facts.transient_bytes, 134_217_728);
+        assert!(facts.int8_packed);
         assert!(facts.is_usable());
 
         let gguf = parse_checkpoint_facts(&golden("distilled-q4-k-m.header.gguf")).unwrap();

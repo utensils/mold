@@ -162,6 +162,46 @@ impl Ltx2TensorFact {
     }
 }
 
+/// How INT8 ConvRot transformer BLOCKS sit on the device while resident.
+///
+/// CUDA keeps them packed (`LtxLinear::ConvRotPacked`: the U8 weight and its
+/// F32 row scales, W8A8 forward), so a resident block costs its at-rest
+/// bytes. Metal and CPU widen each block to the compute dtype as they always
+/// did. Non-block tensors are unaffected by the form: the quantized ones (the
+/// embeddings connectors) belong to the prompt encoder, which widens on every
+/// backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ltx2ResidentWeightForm {
+    Widened,
+    Packed,
+}
+
+impl Ltx2ResidentWeightForm {
+    /// The form the loader actually uses for an INT8 ConvRot checkpoint on
+    /// the given backend. One rule for admission and the engine, so the plan
+    /// the engine builds cannot disagree with the grant it was given.
+    pub fn for_convrot_backend(backend_is_cuda: bool) -> Self {
+        if backend_is_cuda {
+            Self::Packed
+        } else {
+            Self::Widened
+        }
+    }
+}
+
+/// Per-token device workspace of one W8A8 ConvRot linear forward at the
+/// widest transformer linear (`ff.net.2`, in = 16,384): the Hadamard-rotated
+/// copy of the activation in its own dtype (2 B/element), the dynamically
+/// quantized INT8 copy (1 B/element), and one F32 row scale.
+pub const LTX2_INT8_W8A8_WORKSPACE_BYTES_PER_TOKEN: u64 = 16_384 * 3 + 4;
+
+/// Token-scaled W8A8 forward workspace, reserved beside the activations by
+/// both admission and the adaptive planner when ConvRot blocks are resident
+/// packed.
+pub fn ltx2_int8_w8a8_workspace_bytes(tokens: u64) -> u64 {
+    tokens.saturating_mul(LTX2_INT8_W8A8_WORKSPACE_BYTES_PER_TOKEN)
+}
+
 /// Header-derived facts about one LTX-2 transformer checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ltx2TransformerWeightIndex {
@@ -586,6 +626,23 @@ impl Ltx2TransformerWeightIndex {
             | Ltx2WeightFormat::Fp8
             | Ltx2WeightFormat::Nvfp4
             | Ltx2WeightFormat::Gguf => self.block_bytes_packed(elem_size),
+        }
+    }
+
+    /// Arm-aware counterpart of [`Self::resident_block_bytes`]: the packed
+    /// form prices INT8 ConvRot blocks at rest (CUDA's
+    /// `LtxLinear::ConvRotPacked` keeps the U8 weight and F32 scales on the
+    /// device); every other format already resides in its one true form.
+    pub fn resident_block_bytes_for(
+        &self,
+        elem_size: u64,
+        form: Ltx2ResidentWeightForm,
+    ) -> Vec<u64> {
+        match (self.format, form) {
+            (Ltx2WeightFormat::Int8ConvRot, Ltx2ResidentWeightForm::Packed) => {
+                self.block_bytes_packed(elem_size)
+            }
+            _ => self.resident_block_bytes(elem_size),
         }
     }
 
