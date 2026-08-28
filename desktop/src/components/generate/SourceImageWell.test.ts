@@ -89,7 +89,7 @@ describe("SourceImageWell", () => {
       form.sourceImage = "SRC";
       await flushPromises();
       const select = wrapper.get("[data-test='source-fit-policy']").element as HTMLSelectElement;
-      expect(select.value).toBe("pad-repaint");
+      expect(select.value).toBe("crop-fill");
       expect(Array.from(select.options).map((o) => o.value)).toEqual([
         "pad-repaint",
         "crop-fill",
@@ -131,7 +131,7 @@ describe("SourceImageWell", () => {
       expect(form.sourceFit).toEqual({
         mode: "upscale-then-fit",
         upscalerModel: "real-esrgan-x2plus:fp16",
-        fit: { mode: "pad-repaint" },
+        fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
       });
     });
 
@@ -148,7 +148,7 @@ describe("SourceImageWell", () => {
       expect(form.sourceFit).toEqual({
         mode: "upscale-then-fit",
         upscalerModel: "real-esrgan-x4plus:fp16",
-        fit: { mode: "pad-repaint" },
+        fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
       });
     });
   });
@@ -206,6 +206,7 @@ describe("SourceImageWell", () => {
 
     it("appends picks from the multi-select picker in order", async () => {
       const form = formFor("qwen-image-edit");
+      form.sourceFit = { mode: "pad-fit" };
       const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
       await wrapper.get("[data-test='add-edit-image']").trigger("click");
       const picker = wrapper
@@ -218,6 +219,7 @@ describe("SourceImageWell", () => {
       ]);
       await flushPromises();
       expect(form.imageAttachments).toEqual(["A", "B"]);
+      expect(form.sourceFit).toEqual({ mode: "crop-fill" });
     });
 
     it("removes a tile", async () => {

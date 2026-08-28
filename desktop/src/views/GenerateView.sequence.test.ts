@@ -281,7 +281,7 @@ describe("GenerateView — sequence output", () => {
     useContextMenuStore().activate(useAsSource!);
     expect(useGenerateFormStore().form.sourceImage).toBe("aW1hZ2U=");
     expect(useGenerateFormStore().form.sourceImageName).toBe("remote-print.png");
-    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "lanczos-resize" });
+    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "crop-fill" });
   });
 
   it.each([

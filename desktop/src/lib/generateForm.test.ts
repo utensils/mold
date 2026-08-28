@@ -1664,8 +1664,8 @@ describe("buildRequest prompt provenance", () => {
 });
 
 describe("newGenerateForm source-fit default", () => {
-  it("starts on pad-repaint, matching the web SPA's default policy", () => {
-    expect(newGenerateForm().sourceFit).toEqual({ mode: "pad-repaint" });
+  it("starts on crop-fill, matching every source-image surface", () => {
+    expect(newGenerateForm().sourceFit).toEqual({ mode: "crop-fill" });
   });
 
   it("keeps the chosen policy across a model change (web parity)", () => {
@@ -2305,6 +2305,7 @@ describe("LTX-2 img2img (image-to-video)", () => {
   it("coerces a mask-dependent source-fit policy to crop-fill on entry", () => {
     const form = newGenerateForm();
     form.sourceImage = "SRC";
+    form.sourceFit = { mode: "pad-repaint" };
     expect(form.sourceFit).toEqual({ mode: "pad-repaint" });
     applyModelDefaults(form, ltx2Model());
     expect(form.sourceFit).toEqual({ mode: "crop-fill", alignX: "center", alignY: "center" });

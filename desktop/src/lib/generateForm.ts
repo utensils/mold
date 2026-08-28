@@ -26,6 +26,7 @@ import {
 } from "./capabilities";
 import {
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   parseSourceFitPolicy,
   type SourceFitPolicy,
 } from "@studio/lib/sourceFit";
@@ -322,7 +323,7 @@ export function newGenerateForm(): GenerateForm {
     identityStartStep: null,
     identitySupported: null,
     imageAttachments: [],
-    sourceFit: { mode: "pad-repaint" },
+    sourceFit: defaultSourceFitPolicy(),
     maskImage: null,
     controlImage: null,
     controlModel: "",

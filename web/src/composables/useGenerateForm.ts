@@ -27,7 +27,10 @@ import {
   supportsScheduler,
 } from "../lib/generateCapabilities";
 import { composeStyle } from "../lib/stylePresets";
-import { parseSourceFitPolicy } from "@studio/lib/sourceFit";
+import {
+  defaultSourceFitPolicy,
+  parseSourceFitPolicy,
+} from "@studio/lib/sourceFit";
 import {
   effectiveNegativeDefault,
   negativePromptOnDefaultChange,
@@ -164,7 +167,7 @@ function defaultForm(): GenerateFormState {
     cfgPlus: false,
     outputFormat: "png",
     expand: { enabled: false, variations: 1, familyOverride: null },
-    sourceFitPolicy: { mode: "pad-repaint" },
+    sourceFitPolicy: defaultSourceFitPolicy(),
     imageAttachments: [],
     maskImage: null,
     controlImage: null,
@@ -1422,7 +1425,7 @@ export function useGenerateForm(): UseGenerateForm {
         finalized.edit_images?.length ||
         finalized.keyframes?.length
       ) {
-        finalized.source_fit = s.sourceFitPolicy ?? { mode: "pad-repaint" };
+        finalized.source_fit = s.sourceFitPolicy ?? defaultSourceFitPolicy();
       }
       return finalized;
     },

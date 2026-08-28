@@ -428,6 +428,7 @@ describe("SourceMediaPanel — direct file uploads", () => {
       width: 7,
       height: 4,
     });
+    expect(next.sourceFitPolicy).toEqual({ mode: "crop-fill" });
   });
 
   it("refuses a dropped non-PNG/JPEG file with a visible error", async () => {

@@ -25,7 +25,7 @@ describe("sequenceParams", () => {
       steps: 8,
       guidance: 3,
       strength: 0.9,
-      sourceFitPolicy: { mode: "pad-repaint" },
+      sourceFitPolicy: { mode: "crop-fill" },
       upscalerModel: "",
       seed: "42",
     });

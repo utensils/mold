@@ -21,6 +21,7 @@
 import type { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import {
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   maskPaddingRectangles,
   resolveSourceFitTransform,
   type Size,
@@ -52,13 +53,10 @@ export interface SourceFitResult {
 
 /**
  * The policy actually used for the canvas draw. A missing policy falls back
- * to pad-repaint (web parity); `upscale-then-fit` draws its inner `fit` —
- * the UI defaults that inner fit to pad-repaint for image families, and
- * maskless (video) img2img coerces it away so no unrepaintable pad bands
- * are ever drawn.
+ * to the shared crop-fill default; `upscale-then-fit` draws its inner `fit`.
  */
 export function drawableFitPolicy(policy: SourceFitPolicy | undefined): SourceFitPolicy {
-  if (!policy) return { mode: "pad-repaint" };
+  if (!policy) return defaultSourceFitPolicy();
   if (policy.mode === "upscale-then-fit") return policy.fit;
   return policy;
 }

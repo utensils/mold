@@ -58,7 +58,7 @@ describe("applyDesktopImageDrop", () => {
     });
     expect(form.sourceImage).toBe("IMAGE_BYTES");
     expect(form.sourceImageName).toBe("reference.png");
-    expect(form.sourceFit).toEqual({ mode: "lanczos-resize" });
+    expect(form.sourceFit).toEqual({ mode: "crop-fill" });
     expect(form.sourceImageWidth).toBe(896);
     expect(form.sourceImageHeight).toBe(1152);
   });
@@ -88,6 +88,7 @@ describe("applyDesktopImageDrop", () => {
     expect(applyDesktopImageDrop(form, dropped(), [qwenEdit]).attached).toBe(true);
     expect(form.imageAttachments).toEqual(["IMAGE_BYTES"]);
     expect(form.sourceImage).toBeNull();
+    expect(form.sourceFit).toEqual({ mode: "crop-fill" });
   });
 
   it("still loads metadata when that model cannot accept a source image", () => {

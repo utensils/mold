@@ -256,7 +256,7 @@ describe("LibraryView delete keyboard handling", () => {
     );
     expect(useGenerateFormStore().form.sourceImage).toBe("QUJD");
     expect(useGenerateFormStore().form.sourceImageName).toBe("remote-source.png");
-    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "lanczos-resize" });
+    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "crop-fill" });
     expect(router.currentRoute.value.path).toBe("/create");
     expect(useToastStore().items.at(-1)?.message).toBe("Loaded as source");
     wrapper.unmount();
@@ -492,7 +492,7 @@ describe("LibraryView source reuse", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("mold-local://localhost/first.png");
     expect(useGenerateFormStore().form.sourceImage).toBe("QUJD");
-    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "lanczos-resize" });
+    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "crop-fill" });
     expect(router.currentRoute.value.path).toBe("/create");
     wrapper.unmount();
   });

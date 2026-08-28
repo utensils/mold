@@ -45,7 +45,7 @@ describe("SequenceOpeningImageWell", () => {
     expect(wrapper.text()).toContain("Applied to the opening image before clip 1 renders.");
   });
 
-  it("attaches a gallery pick and coerces the maskless source fit", async () => {
+  it("attaches a gallery pick with the shared crop-fill default", async () => {
     const draft = useSequenceDraftStore();
     const form = reactive(newGenerateForm());
     form.sourceFit = { mode: "pad-repaint" };
@@ -58,7 +58,7 @@ describe("SequenceOpeningImageWell", () => {
     await flushPromises();
 
     expect(draft.openingImage).toEqual({ filename: "opening.jpg", base64: "wire-bytes" });
-    expect(form.sourceFit).toEqual({ mode: "crop-fill", alignX: "center", alignY: "center" });
+    expect(form.sourceFit).toEqual({ mode: "crop-fill" });
     expect(wrapper.get(".image-well__preview img").attributes("src")).toBe(
       "data:image/jpeg;base64,wire-bytes",
     );

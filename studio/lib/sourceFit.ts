@@ -23,6 +23,11 @@ export type SourceFitPolicy =
 
 export type SourceFitMode = SourceFitPolicy["mode"];
 
+/** Intentional default for every newly attached source image on every surface. */
+export function defaultSourceFitPolicy(): SourceFitPolicy {
+  return { mode: "crop-fill" };
+}
+
 /**
  * Source-fit choices shared by every source-image surface. Sequence video is
  * maskless, so callers omit Pad + repaint and use the remaining four modes.
@@ -127,9 +132,7 @@ export function sourceFitPolicyForMode(
     return {
       mode,
       upscalerModel: options.upscalerModel ?? "",
-      fit: options.supportsMask
-        ? { mode: "pad-repaint" }
-        : { mode: "crop-fill", alignX: "center", alignY: "center" },
+      fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
     };
   }
   if (mode === "pad-repaint" && !options.supportsMask) {

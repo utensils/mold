@@ -7,6 +7,7 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import {
   SOURCE_FIT_OPTIONS,
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   sourceFitPolicyForMode,
   type SourceFitMode,
 } from "@studio/lib/sourceFit";
@@ -57,9 +58,7 @@ async function onFile(file: File) {
     height: dimensions.height,
   };
   patch({
-    sourceFitPolicy: coerceSourceFitForMaskless(
-      props.modelValue.sourceFitPolicy ?? { mode: "crop-fill" },
-    ),
+    sourceFitPolicy: defaultSourceFitPolicy(),
   });
 }
 

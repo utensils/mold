@@ -780,6 +780,7 @@ describe("LibraryPage multi-host identity", () => {
   });
 
   it("fetches Use as source from the host that owns the print", async () => {
+    useGenerateForm().state.value.sourceFitPolicy = { mode: "lanczos-resize" };
     const wrapper = mountPage();
     await flushPromises();
 
@@ -796,6 +797,9 @@ describe("LibraryPage multi-host identity", () => {
       expect.objectContaining({ id: "studio-7680", apiKey: "studio-key" }),
       "twin.png",
     );
+    expect(useGenerateForm().state.value.sourceFitPolicy).toEqual({
+      mode: "crop-fill",
+    });
     expect(pushMock).toHaveBeenCalledWith({ name: "create" });
   });
 

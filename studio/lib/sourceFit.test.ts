@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   describeSourceFit,
   maskPaddingRectangles,
   parseSourceFitPolicy,
@@ -8,7 +9,24 @@ import {
   sourceFitPolicyForMode,
 } from "./sourceFit";
 
+it("keeps crop fill as the cross-surface source-image default", () => {
+  expect(defaultSourceFitPolicy()).toEqual({ mode: "crop-fill" });
+});
+
 describe("sourceFitPolicyForMode", () => {
+  it("seeds upscale-then-fit with crop fill even when repaint is supported", () => {
+    expect(
+      sourceFitPolicyForMode("upscale-then-fit", {
+        supportsMask: true,
+        upscalerModel: "real-esrgan-x4plus:fp16",
+      }),
+    ).toEqual({
+      mode: "upscale-then-fit",
+      upscalerModel: "real-esrgan-x4plus:fp16",
+      fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
+    });
+  });
+
   it("builds maskless sequence policies without unrepaintable padding", () => {
     expect(
       sourceFitPolicyForMode("upscale-then-fit", {

@@ -16,6 +16,7 @@ import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { submitsExtend } from "@studio/lib/extend";
 import {
   coerceSourceFitForMaskless,
+  defaultSourceFitPolicy,
   MASKLESS_SOURCE_FIT_OPTIONS,
   SOURCE_FIT_OPTIONS,
   sourceFitHelp,
@@ -166,14 +167,13 @@ async function onWellFile(slot: SourceMediaSlot, file: File) {
   const image = await fileToSourceImage(file);
   if (!image) return;
   if (slot === "source") {
-    // A source-matched canvas differs only by the model's pixel grid or a
-    // safe downscale — resize exactly instead of manufacturing repaint bands.
+    // Every newly selected source starts from the shared crop-fill policy.
     patch({
       imageAttachments:
         plan.value.kind === "attachments"
           ? [image, ...props.modelValue.imageAttachments.slice(1)]
           : [image],
-      sourceFitPolicy: { mode: "lanczos-resize" },
+      sourceFitPolicy: defaultSourceFitPolicy(),
     });
   } else {
     patch({ endFrame: image });
@@ -237,7 +237,7 @@ function setH3Authoring(value: typeof h3Authoring.value) {
 // ── Fit / strength / mask (single-source refinement) ──────────────────
 const fitOptions = SOURCE_FIT_OPTIONS;
 const fitMode = computed(
-  () => props.modelValue.sourceFitPolicy?.mode ?? "pad-repaint",
+  () => props.modelValue.sourceFitPolicy?.mode ?? defaultSourceFitPolicy().mode,
 );
 /** H3 has no repaint mask; pad-repaint is never offered for its boundaries. */
 const masklessFitOptions = MASKLESS_SOURCE_FIT_OPTIONS;

@@ -47,7 +47,7 @@ describe("SequenceOpeningImagePanel — the primary-form opening frame", () => {
     ).toBe(true);
   });
 
-  it("stores a dropped PNG on the shared draft and coerces the maskless fit", async () => {
+  it("stores a dropped PNG with the shared crop-fill default", async () => {
     const wrapper = factory({ sourceFitPolicy: { mode: "pad-repaint" } });
     await wrapper
       .get("[data-test='sequence-opening-image-well']")
