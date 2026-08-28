@@ -21,6 +21,44 @@ enum QuantizedFormat {
     Int8Tensorwise { convrot: bool, group_size: usize },
 }
 
+/// The device classes the ConvRot backend distinguishes when it decides where
+/// a packed weight is decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceKind {
+    Cpu,
+    Cuda,
+    Metal,
+}
+
+fn device_kind(dev: &Device) -> DeviceKind {
+    if dev.is_cuda() {
+        DeviceKind::Cuda
+    } else if dev.is_metal() {
+        DeviceKind::Metal
+    } else {
+        DeviceKind::Cpu
+    }
+}
+
+/// Whether one quantized weight is decoded by
+/// `candle_core::convrot::dequantize_int8_convrot_256` on the device rather
+/// than by the host loop.
+///
+/// The op exists for exactly one layout — tensorwise INT8 with a regular
+/// 256-wide ConvRot — and has a CUDA and a Metal arm; every other layout, and
+/// every CPU decode, takes the host rayon path. A pure function of the format
+/// and the device class so a machine with neither accelerator can still pin
+/// both answers.
+fn uses_device_kernel(format: QuantizedFormat, kind: DeviceKind) -> bool {
+    matches!(
+        format,
+        QuantizedFormat::Int8Tensorwise {
+            convrot: true,
+            group_size: CONVROT_GROUP_SIZE
+        }
+    ) && matches!(kind, DeviceKind::Cuda | DeviceKind::Metal)
+}
+
 fn parse_quantized_format(config: &serde_json::Value) -> Result<QuantizedFormat> {
     let params = config.get("params");
     let integer = |name: &str, default: usize| {
@@ -146,9 +184,11 @@ impl Ltx2ConvRotBackend {
             candle_core::Error::Msg(format!("ConvRot source is not a weight: {source_key}"))
         })?;
         // Candle does not expose an I8 tensor dtype, so preserve the raw
-        // two's-complement bytes from the safetensors view and decode them on
-        // the host. The row loop is parallel and bounded to one dense weight;
-        // never queue whole-model Metal reconstructions from this backend.
+        // two's-complement bytes from the safetensors view. The tensorwise
+        // INT8 ConvRot layout decodes on the device (CUDA and Metal share one
+        // candle op); every other layout, and every CPU decode, runs the host
+        // row loop below. Either way the work is bounded to one dense weight;
+        // never queue whole-model reconstructions from this backend.
         let packed_view = self.st.get(source_key)?;
         if format!("{:?}", packed_view.dtype()) != "I8" {
             return Err(candle_core::Error::Msg(format!(
@@ -181,23 +221,22 @@ impl Ltx2ConvRotBackend {
                 "missing Comfy quantization format for {source_key}"
             ))
         })?;
-        if matches!(
-            format,
-            QuantizedFormat::Int8Tensorwise {
-                convrot: true,
-                group_size: CONVROT_GROUP_SIZE
-            }
-        ) && dev.is_metal()
-        {
-            let packed = Tensor::from_vec(packed_view.data().to_vec(), (rows, *packed_cols), dev)?;
+        if uses_device_kernel(*format, device_kind(dev)) {
+            // Upload straight from the mmap'd view: the packed bytes are the
+            // exact device input, so there is no host copy to make first.
+            let packed = Tensor::from_slice(packed_view.data(), (rows, *packed_cols), dev)?;
             let scale_count = scales.len();
             let scales = Tensor::from_vec(scales, scale_count, dev)?;
             let output = candle_core::convrot::dequantize_int8_convrot_256(&packed, &scales)?;
-            // Bound residency to this packed input plus its BF16 output. In
-            // particular, do not let streaming layer loads queue packed input
+            // On Metal, bound residency to this packed input plus its BF16
+            // output: do not let streaming layer loads queue packed input
             // buffers behind later command buffers after the local tensor is
-            // dropped.
-            dev.synchronize()?;
+            // dropped. CUDA needs no barrier here — the streaming loop already
+            // synchronizes every `streaming_prefetch_count` blocks, and the
+            // caching allocator retires the packed buffer in stream order.
+            if dev.is_metal() {
+                dev.synchronize()?;
+            }
             return Ok(output);
         }
         let packed = packed_view
@@ -436,6 +475,104 @@ mod tests {
         assert_eq!(values, vec![1.0, 1.0, 1.0, -1.0]);
         let plain = dequantize_int8_rows(&[vec![0xff, 0x02]], &[0.5], false, 256).unwrap();
         assert_eq!(plain, vec![-0.5, 1.0]);
+    }
+
+    #[test]
+    fn device_kernel_is_selected_for_int8_convrot_256_on_cuda_and_metal_only() {
+        let int8_convrot = QuantizedFormat::Int8Tensorwise {
+            convrot: true,
+            group_size: CONVROT_GROUP_SIZE,
+        };
+        let int8_plain = QuantizedFormat::Int8Tensorwise {
+            convrot: false,
+            group_size: CONVROT_GROUP_SIZE,
+        };
+        let int8_other_group = QuantizedFormat::Int8Tensorwise {
+            convrot: true,
+            group_size: 64,
+        };
+        let w4a4 = QuantizedFormat::ConvRotW4A4 {
+            group_size: CONVROT_GROUP_SIZE,
+        };
+        let table = [
+            (int8_convrot, DeviceKind::Cuda, true),
+            (int8_convrot, DeviceKind::Metal, true),
+            (int8_convrot, DeviceKind::Cpu, false),
+            (int8_plain, DeviceKind::Cuda, false),
+            (int8_plain, DeviceKind::Metal, false),
+            (int8_other_group, DeviceKind::Cuda, false),
+            (int8_other_group, DeviceKind::Metal, false),
+            (w4a4, DeviceKind::Cuda, false),
+            (w4a4, DeviceKind::Metal, false),
+            (w4a4, DeviceKind::Cpu, false),
+        ];
+        for (format, kind, expected) in table {
+            assert_eq!(
+                uses_device_kernel(format, kind),
+                expected,
+                "{format:?} on {kind:?}"
+            );
+        }
+        assert_eq!(device_kind(&Device::Cpu), DeviceKind::Cpu);
+    }
+
+    /// The candle op applies `scale / 16` once after an exact integer
+    /// butterfly; the host loop scales every element first and runs the
+    /// butterfly over rounded `f32` products, so a value that is exactly zero
+    /// on the device can be a ~1e-8 rounding residue on the host. Both narrow
+    /// to BF16 with round-to-nearest-even, so they agree to one BF16 ulp
+    /// (`|x| / 128`) plus that residue rather than bit-for-bit.
+    fn assert_within_one_bf16_ulp(device: &Device) {
+        use half::bf16;
+        let rows = 3;
+        let cols = 2 * CONVROT_GROUP_SIZE;
+        let packed = (0..rows * cols)
+            .map(|index| ((index as i32 * 37 + 11) % 251 - 125) as i8 as u8)
+            .collect::<Vec<_>>();
+        let scales = vec![0.003f32, 0.0125, 0.7];
+        let host_rows = packed
+            .chunks_exact(cols)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        let expected = dequantize_int8_rows(&host_rows, &scales, true, CONVROT_GROUP_SIZE)
+            .unwrap()
+            .into_iter()
+            .map(bf16::from_f32)
+            .collect::<Vec<_>>();
+        let packed = Tensor::from_slice(&packed, (rows, cols), device).unwrap();
+        let scales = Tensor::from_vec(scales, rows, device).unwrap();
+        let actual = candle_core::convrot::dequantize_int8_convrot_256(&packed, &scales)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<bf16>()
+            .unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            let (actual, expected) = (actual.to_f32(), expected.to_f32());
+            let tolerance = expected.abs() / 128.0 + 1e-5;
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "element {index}: device {actual} vs host {expected} (tolerance {tolerance})"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_op_matches_host_rows_within_bf16() {
+        assert_within_one_bf16_ulp(&Device::Cpu);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "needs the candle fork's CUDA DequantizeInt8ConvRot256 arm (pin bump to the PR 0 revision)"]
+    fn cuda_dequant_matches_host_rows_within_bf16() {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return;
+        };
+        assert_within_one_bf16_ulp(&cuda);
     }
 
     #[test]
