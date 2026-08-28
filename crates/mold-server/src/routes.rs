@@ -3244,6 +3244,22 @@ pub(crate) fn apply_media_headers(
                 }
             }
         }
+        // Runtime provenance is output authority (CLAUDE.md): the client-side
+        // save must record what actually ran, so these ride the response like
+        // `pipeline` does.
+        if let Some(path) = video.attention_path.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(path) {
+                headers.insert("x-mold-video-attention-path", v);
+            }
+        }
+        if let Some(arm) = video.int8_arm.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(arm) {
+                headers.insert("x-mold-video-int8-arm", v);
+            }
+        }
+        if video.video_only == Some(true) {
+            headers.insert("x-mold-video-video-only", HeaderValue::from_static("1"));
+        }
         if video.has_audio {
             headers.insert("x-mold-video-has-audio", HeaderValue::from_static("1"));
         }
