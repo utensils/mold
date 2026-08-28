@@ -1035,13 +1035,19 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     req.fps = form.fps;
     if (caps.supportsAudio) {
       req.enable_audio = form.enableAudio;
-      const videoOnly = requestVideoOnly(form.videoOnly, {
-        audioEnabled: form.enableAudio,
-        audioOnlyPipeline: isAudioOnlyPipeline(form.pipeline),
-        hasConditioningAudio: form.audioFile !== null,
-        isExtend: form.extendVideo !== null,
-      });
-      if (videoOnly) req.video_only = videoOnly;
+      // `video_only` is an LTX-2 request field (server validation refuses it
+      // elsewhere), so a flag parked from an earlier LTX-2 selection must not
+      // ride a MiniMax H3 request just because H3 also supports audio —
+      // matching the web builder's family gate.
+      if (caps.supportsAdvancedVideo) {
+        const videoOnly = requestVideoOnly(form.videoOnly, {
+          audioEnabled: form.enableAudio,
+          audioOnlyPipeline: isAudioOnlyPipeline(form.pipeline),
+          hasConditioningAudio: form.audioFile !== null,
+          isExtend: form.extendVideo !== null,
+        });
+        if (videoOnly) req.video_only = videoOnly;
+      }
     }
   }
 

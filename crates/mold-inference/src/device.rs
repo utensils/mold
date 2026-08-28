@@ -996,15 +996,20 @@ const LTX2_ATTENTION_HEADS: u64 = 32;
 /// `32 x 512 x 13,312 x 2 B x 2` = 872 MB — far above the 128 MB F32 tiles the
 /// hand-rolled path budgeted, which is why this is its own term in the
 /// activation budget rather than a share of the flat workspace.
-/// `MOLD_ATTN=flash` holds no score matrix and `MOLD_ATTN_CHUNK` can move the
-/// chunk; both make this an upper bound, which is the right direction for an
-/// admission estimate.
+/// The estimate follows the RESOLVED policy, not the default: a raised
+/// `MOLD_ATTN_CHUNK`, or `off`, grows the tile the dispatcher actually
+/// allocates (at 13,312 tokens `off` is a 22.7 GB full matrix that a
+/// 512-row estimate would under-charge 26x), and a resolved `MOLD_ATTN=flash`
+/// holds no score matrix at all, so charging one would refuse renders that
+/// fit. Both envs are engine-shaping fingerprint inputs, so admission and
+/// the dispatcher read the same frozen decision.
 pub fn ltx2_attention_tile_bytes(tokens: u64, heads: u64) -> u64 {
-    let query_rows = if tokens > crate::attention::CUDA_AUTO_CHUNK_MIN_QUERY_ROWS as u64 {
-        crate::attention::CUDA_AUTO_QUERY_CHUNK as u64
-    } else {
-        tokens
-    };
+    if crate::attention::AttentionBackend::resolve() == crate::attention::AttentionBackend::Flash {
+        return 0;
+    }
+    let query_rows = crate::attention::cuda_query_chunk_rows(tokens as usize)
+        .map(|rows| rows as u64)
+        .unwrap_or(tokens);
     heads
         .saturating_mul(query_rows)
         .saturating_mul(tokens)

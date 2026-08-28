@@ -1170,6 +1170,19 @@ pub async fn run(
                 let total_frames = effective_frames
                     .expect("decide_chain_routing only returns Chain when frames is Some");
 
+                // The chain wire carries no `video_only`, so an auto-chained
+                // long video would silently run the multimodal audio branch
+                // the user asked to skip (#1037). Refuse rather than ignore
+                // an explicit output-changing request.
+                if video_only == Some(true) {
+                    anyhow::bail!(
+                        "--video-only is not supported for a --frames value that auto-chains \
+                         ({total_frames} frames exceeds one clip): the sequence wire does not \
+                         carry the flag yet. Reduce --frames to a single clip or drop \
+                         --video-only.",
+                    );
+                }
+
                 // Chain path doesn't use batch/edit_images/mask/control/loras —
                 // those are single-clip concepts. If the user set them, warn and
                 // continue (we don't hard-error to keep the UX lenient).
