@@ -1,18 +1,13 @@
 # Desktop App
 
-::: tip Looking for Mold on iPhone?
-The remote-only companion has its own [iPhone App guide](/guide/iphone),
-including LAN/Tailscale setup, Create, Library, Models, Machines, themes, and
-TestFlight distribution.
+::: tip Looking for Mold on mobile?
+The remote-only companions have dedicated [iPhone](/guide/iphone) and
+[Android](/guide/android) guides with download, pairing, and setup instructions.
 :::
 
-mold ships a native macOS, Linux, and Windows desktop app -- a Tauri 2 shell
-around a Vue 3 + TypeScript frontend built on the **Mold Studio** design
-system. Its Mold
-and Safelight theme families create a disciplined "digital darkroom" that treats
-every generation as a print being developed without recoloring the media itself.
-The workspace rail collapses between 210 px and 62 px, and a StatusPopover at
-its foot summarizes engine and queue activity.
+Mold Studio is the native desktop app for macOS, Linux, and Windows. It puts
+generation, your Library, models, machines, and settings in one focused
+workspace, with light and dark themes that keep attention on your work.
 
 ::: info
 The desktop app lives in `desktop/`. Local generation uses Metal on Apple
@@ -33,13 +28,13 @@ machine status, and live generation progress in one native window._
     <img src="/icons/apple.svg" alt="" />
     <span><strong>macOS Desktop</strong><small>Signed and notarized · Apple Silicon</small></span>
   </a>
-  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe">
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe">
     <img src="/icons/windows.svg" alt="" />
-    <span><strong>Windows Desktop</strong><small>Self-signed NSIS installer · x64</small></span>
+    <span><strong>Windows Desktop (Nightly)</strong><small>Self-signed NSIS installer · x64</small></span>
   </a>
-  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/mold-x86_64-pc-windows-msvc-cpu.zip">
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/download/latest/mold-x86_64-pc-windows-msvc-cpu.zip">
     <img src="/icons/terminal.svg" alt="" />
-    <span><strong>Windows CLI</strong><small>Self-signed CPU / remote client · x64</small></span>
+    <span><strong>Windows CLI (Nightly)</strong><small>Self-signed CPU / remote client · x64</small></span>
   </a>
 </div>
 
@@ -48,7 +43,7 @@ drag **Mold** to Applications -- no quarantine dance needed. Version-pinned
 downloads and `SHA256SUMS` are on the
 [releases page](https://github.com/utensils/mold/releases).
 
-The published Windows downloads are self-signed CPU/remote-client builds.
+The current Windows downloads are nightly, self-signed CPU/remote-client builds.
 Follow the [Windows trust instructions](#windows) before running them. The
 [Windows CLI installation steps](/guide/installation#windows-cli) cover PATH
 setup and connecting to a GPU host. You can also build from source with the
@@ -61,9 +56,9 @@ Linux builds are currently source/CI distributions: `nix build
 `desktop-build` produces the native package on NixOS and a CUDA AppImage on
 conventional Linux. Tagged releases do not publish the AppImage yet.
 
-Windows ships through tagged releases and CI: `scripts\windows.ps1 build`
-produces an NSIS installer locally, and the `Desktop` workflow also attaches a
-self-signed x64 installer and its public certificate to every `main` run.
+Windows currently ships through the rolling nightly release. The `Desktop`
+workflow attaches a self-signed x64 installer and its public certificate to
+successful `main` runs.
 There is not yet a publicly trusted Windows installer -- see [Windows](#windows)
 below for the toolchain, trust steps, and the capabilities that are still
 absent.

@@ -3,19 +3,18 @@
 Mold for Android is the remote-only Mold Studio client. It connects to Mold
 servers over LAN, Tailscale, or HTTPS and shares the same Create, Library,
 Models, Machines, and Settings surface as the iPhone app. Model execution stays
-on the remote machine; per-host API keys are encrypted by an app-owned,
-non-exportable Android Keystore key.
+on the remote machine, and Android stores each machine's sign-in key securely
+on the device.
 
 ## Download and install
 
-- **[Stable APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)** -- the newest tagged release.
-- **[Nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)** -- the newest build from `main`.
+- **[Download the nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)** -- the newest Android build from `main`.
 
-Both links download the signed universal `Mold-android.apk` file directly, not
-a compressed archive. Open the downloaded APK on an Android 7.0 or newer
+The link downloads the signed universal `Mold-android.apk` file directly, not a
+compressed archive. Open the downloaded APK on an Android 7.0 or newer
 device and approve installation from your browser or file manager when Android
-asks. Later APKs from either channel use the same signing identity, so they can
-upgrade the installed app in place.
+asks. Later nightly APKs use the same signing identity, so they can upgrade the
+installed app in place.
 
 Mold is not yet published through Google Play. Android may therefore ask you to
 allow **Install unknown apps** for the app that opened the download. Keep that

@@ -1,8 +1,7 @@
 # Models
 
-mold supports a broad range of model families spanning different architectures,
-quality levels, and VRAM requirements -- including both image and video
-generation.
+Mold supports image and video model families across a range of quality levels,
+hardware requirements, and creative workflows.
 
 ::: tip Community models from Civitai
 The models documented here are not the limit. Open **Models → Discover** in
@@ -21,7 +20,7 @@ community checkpoints and LoRAs. See the
 | Classic ecosystem   | `sd15:fp16` or `dreamshaper-v8`       | Huge model library, ControlNet                        |
 | Fast + great        | `z-image-turbo:q8`                    | 9 steps, excellent quality                            |
 | SDXL                | `sdxl-turbo:fp16`                     | 4 steps, 1024x1024                                    |
-| **LTX video**       | `ltx-video-0.9.6-distilled:bf16`      | Broad text-to-video default; LTX-2.x adds joint audio |
+| **LTX Video**       | `ltx-video-0.9.6-distilled:bf16`      | Broad text-to-video default; LTX-2.x adds joint audio |
 | **Wan video**       | `wan22-ti2v-5b:q8`                    | Text/image-to-video with broad Wan workflow support   |
 | **Reference AV**    | `minimax-h3-ref2va:comfy-pruned-int8` | Ordered image/video/audio references; SM89 CUDA build |
 

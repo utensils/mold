@@ -9,9 +9,8 @@
 [![Agent ready](https://img.shields.io/badge/agents-ready-0891b2.svg)](https://utensils.io/mold/guide/openclaw)
 [![REST + SSE](https://img.shields.io/badge/API-REST_%2B_SSE-16a34a.svg)](https://utensils.io/mold/api/)
 
-Local AI image and video generation on your own GPU -- NVIDIA CUDA and Apple
-Silicon Metal, no Python, no cloud account, no usage fees. CLI-native and
-pipe-friendly, with a native desktop app, web studio, TUI, iPhone and Android
+Local AI image and video generation on your own GPU. Mold supports NVIDIA CUDA
+and Apple Silicon Metal, with a CLI, native desktop app, web studio, TUI, mobile
 companions, Discord bot, and REST/SSE API built on the same engine.
 
 **[Documentation](https://utensils.io/mold/)** ·
@@ -35,13 +34,9 @@ Nightly CLI from the latest published `main` build:
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | MOLD_CHANNEL=nightly sh
 ```
 
-The installer picks the right prebuilt binary for your GPU and verifies its
-checksum. Use `mold update` to stay on stable or `mold update --nightly` to
-install the newest nightly. Nix (`nix run github:utensils/mold`), Arch
-(`paru -S mold-ai-bin`), and source builds are covered in the
-[installation guide](https://utensils.io/mold/guide/installation);
-binaries and checksums are on the
-[releases page](https://github.com/utensils/mold/releases/latest).
+The installer selects a compatible build and verifies its checksum. See the
+[installation guide](https://utensils.io/mold/guide/installation) for Nix,
+Arch, Windows, Android, and source builds.
 GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
 
 ## Quick start
@@ -66,86 +61,37 @@ mold serve
 Models download automatically on first use. Generated media is saved locally
 with prompt, model, seed, and generation metadata.
 
-LTX-2.5 uses a gated split pack. Its bare distilled alias defaults to the
-smaller INT8 model; BF16 and both video VAE choices remain available. See the
-[LTX-2.5 guide](docs/ltx-2.5.md) for model sizes, duration prediction,
-multishot, license terms, and deferred features.
-
 ## What it supports
 
-- **Models**: FLUX.1, Flux.2 Klein/Dev, SD 1.5, SDXL, SD 3.5, Z-Image,
-  Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3 / LTX-2.5,
-  Wan 2.1/2.2, and MiniMax H3 -- see the
-  [model catalog](https://utensils.io/mold/models/) for sizes, VRAM needs, and
-  settings
-- **Images**: text-to-image, img2img, multimodal editing, inpainting,
-  ControlNet, LoRA, prompt expansion, and Real-ESRGAN upscaling
-- **Face identity (PuLID)**: keep one person's face across arbitrary prompts
-  with `--id-image` (repeatable up to 4, averaged into one identity), across all
-  FLUX.1 models (the `pulid-flux` bundle) and all SDXL models except SDXL Turbo
-  (the `pulid-sdxl` bundle) -- pure Rust SCRFD, ArcFace, a
-  BiSeNet face mask, EVA02-CLIP, and IDFormer shared by both adapters, feeding
-  twenty cross-attention modules inside the FLUX transformer or seventy inside
-  the SDXL UNet, plus `--true-cfg` on FLUX for a real negative branch on an
-  otherwise guidance-distilled model (SDXL's own `--guidance` is already the
-  classifier-free scale)
-- **Video and audio**: text/image-to-video, multi-prompt sequences, clip
-  continuation (`--extend`), lip dub (`--pipeline lip-dub`), text-to-audio
-  (`--pipeline t2a`), native MP4 with generated audio, and LTX-2 output up to
-  4K via [tiled composition](https://utensils.io/mold/models/ltx2#resolution)
-- **Fits your hardware**: quantized variants, encoder fallback, smart VRAM
-  placement, block offloading, and spatial tiling (`--spatial-tile`)
-- **Multi-machine**: connect LAN/Tailscale hosts and RunPod, route jobs by
-  capability, and browse every machine's gallery in one place
-- **Library organization**: title (`--title`), favorite, tag, and collect
-  prints -- or file them at creation with `--tag` / `--collection` so they
-  arrive organized -- with a per-host trash and configurable retention
-  (`gallery.trash_retention_days`, `mold trash`) instead of permanent
-  delete -- merged across machines in the web and desktop Library
-  (Prints | Collections | Trash)
+- **Models:** FLUX.1, Flux.2, Stable Diffusion, Z-Image, Qwen-Image,
+  Wuerstchen, LTX Video, Wan, and MiniMax H3. See the
+  [model catalog](https://utensils.io/mold/models/) for variants and hardware
+  requirements.
+- **Images:** text-to-image, image editing, inpainting, ControlNet, LoRA,
+  identity photos, prompt expansion, and upscaling.
+- **Video and audio:** text/image-to-video, sequences, clip continuation,
+  lip dub, text-to-audio, and MP4 output with generated audio.
+- **Multiple machines:** connect local, LAN, Tailscale, and RunPod hosts, then
+  route work and browse one combined Library.
+- **Organization:** title, favorite, tag, collect, restore, and manage prints
+  across the desktop and web apps.
 
-MiniMax H3 weights use the
-[MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE),
-not Mold's MIT license. H3 may be used through Mold in every territory and
-workflow -- local, remote, shared, hosted, output distribution, and
-redistribution -- with no separate acceptance step; review the linked terms for
-your use. The reviewed Turbo distillations are ordinary model tags
-(`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `…-turbo-4step-768p`, and
-`minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`) that pull their own task's
-compact stack plus one pinned LoRA adapter and render at their tier's fixed
-step count. The compact tags render
-any 32-aligned canvas up to `1344x768`'s pixel count, 107-345 frames at 24 fps,
-and 2-50 sampler steps; the memory estimate -- not a pinned list of shapes --
-decides what a given card can hold. The compact NVFP4
-transformer tags (`minimax-h3-fl2va:comfy-pruned-nvfp4` and
-`minimax-h3-ref2va:comfy-pruned-nvfp4`) download and verify but have no
-runtime yet. Which H3 models a given build can actually _run_ is advertised
-per row: `GET /api/models` carries `runtime_available` plus a
-`runtime_unavailable_reason` naming the obstacle, and Mold Studio shows that
-on Discover before the 21-42 GB pull rather than after it. The macOS and Linux
-sm89 releases carry the H3 engine; sm86, sm100, sm120, and Windows do not.
-`minimax-h3-ref2va:comfy-pruned-int8` renders too, from an ordered set of up
-to twelve image, video, and audio references, and every H3 model still
-downloads, verifies, inventories, and removes everywhere.
-Current capability limits (SM89 CUDA; the Apple Metal route is
-shipped but not yet hardware-qualified) are documented in the
-[H3 model guide](https://utensils.io/mold/models/minimax-h3).
+Model weights keep their own licenses. See each model page for terms and
+current platform support.
 
 ## Mold Studio
 
-One native desktop app for macOS, Linux, and Windows with five workspaces --
-Create, Library, Models, Machines, and Settings -- spanning local and remote
-generation, a merged multi-machine gallery, model discovery from Hugging Face
-and Civitai, GPU telemetry, and QR pairing for the iPhone companion.
+The desktop app brings Create, Library, Models, Machines, and Settings into one
+workspace for local and remote generation. It also pairs with the iPhone and
+Android companions.
 
 **[Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
 · [Explore the desktop app](https://utensils.io/mold/guide/desktop)
 
 Android uses the same remote-only Mold Studio mobile interface. Download the
-signed universal APK directly--there is no zip to unpack:
+signed universal nightly APK directly; there is no zip to unpack:
 
-**[Download stable Android APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)**
-· **[Download nightly Android APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)**
+**[Download nightly Android APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)**
 · [Android installation guide](https://utensils.io/mold/guide/android)
 
 ## More ways to create
@@ -170,7 +116,7 @@ Or open the keyboard-first terminal interface with `mold tui`:
   <em>The TUI Create workspace with a native terminal image preview</em>
 </p>
 
-Run the engine where the GPU lives and point any client at it:
+Run the engine where the GPU lives and connect from another machine:
 
 ```bash
 mold serve                                      # GPU machine
@@ -178,35 +124,14 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
 ```
 
 See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
-[RunPod](https://utensils.io/mold/deployment/runpod-cli) guides.
-
-Watch and steer that host's queue from the terminal with `mold queue`:
-
-```bash
-mold queue list                 # queued, running, and held jobs with their place in line
-mold queue retry --held         # resume every retryable hold
-mold queue cancel --all --yes   # clear the backlog; running work finishes
-```
-
-Browse and organize that host's existing prints with `mold library`:
-
-```bash
-mold library list --tag portrait --favorite
-mold library show print.png --preview
-mold library tag add print.png --tag selected
-mold library collection add Portfolio print.png
-mold library grid
-```
-
-Install Mold's embedded Agent Skill for your coding agent:
+[RunPod](https://utensils.io/mold/deployment/runpod-cli) guides. Use
+`mold queue` to manage remote work and `mold library` to browse and organize
+the host's prints. To install Mold's Agent Skill for supported coding agents,
+run:
 
 ```bash
 mold skill install --detected
 ```
-
-`mold skill list` shows all supported agents and paths; explicit targets such
-as `mold skill install claude codex` and project installs with `--project` are
-also supported.
 
 ## Project
 
@@ -221,27 +146,8 @@ Core contributors:
 [James Brink](https://jamesbrink.online/) and
 [Jeffrey Dilley](mailto:jeff.dilley@gmail.com).
 
-Licensed under the [MIT License](LICENSE).
-
-**Third-party code.** The LTX-Video transformer, 3D causal VAE, and flow-match
-scheduler (`crates/mold-candle/src/ltx_video/`), and the LTX-2 video
-transformer and VAE derived from them, were ported from
-[candle-video](https://github.com/FerrisMind/candle-video) by FerrisMind
-(Copyright 2025 FerrisMind), licensed under the
-[Apache License 2.0](https://github.com/FerrisMind/candle-video/blob/main/LICENSE)
--- itself a Rust port of Hugging Face
-[diffusers](https://github.com/huggingface/diffusers). Those files remain
-Apache-2.0; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for this and
-every other third-party notice.
-
-**Face-identity weights.** Face identity additionally downloads two InsightFace
-**pretrained models** (`scrfd_10g_bnkps`, `glintr100`), which are licensed for
-**non-commercial research purposes only** -- the InsightFace _code_ is MIT, the
-_weights_ are not. Mold ships neither and refuses to download them until you
-record acceptance with `mold pull pulid-flux --accept-license insightface-antelopev2`
-(or `pulid-sdxl` -- the acceptance covers both bundles);
-`mold licenses` lists what has been accepted. The PuLID adapters are
-Apache-2.0, the EVA02-CLIP tower is MIT, and facexlib's BiSeNet face parser
-(`parsing_bisenet.pth`, masking the aligned crop before the tower sees it) is
-also MIT with no acceptance step of its own -- each bundle is five artifacts in
-total: about 2.3 GB for `pulid-flux`, about 2.2 GB for `pulid-sdxl`.
+Licensed under the [MIT License](LICENSE). Third-party components and model
+licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the
+[model documentation](https://utensils.io/mold/models/). InsightFace identity
+weights require separate acceptance and are limited to non-commercial research
+use.

@@ -946,7 +946,7 @@ Examples:
         #[arg(short, long, help_heading = "Output", value_hint = ValueHint::FilePath)]
         output: Option<String>,
 
-        /// Output format (default: PNG; MiniMax H3 always emits MP4)
+        /// Output format (defaults to PNG for images and MP4 for video)
         #[arg(long, help_heading = "Output",
               value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav"]))]
         format: Option<OutputFormat>,
@@ -1005,7 +1005,7 @@ Examples:
         batch: u32,
 
         /// Number of video frames to generate (video models only, e.g. ltx-video).
-        /// Implies video output mode; output defaults to .gif format.
+        /// Implies video output mode; release builds default to MP4.
         ///
         /// For LTX-2 distilled, values above 97 automatically chain multiple
         /// clips at render time (see `--clip-frames` / `--motion-tail`).
@@ -1017,8 +1017,8 @@ Examples:
         #[arg(long, conflicts_with_all = ["frames", "duration"], help_heading = "Video")]
         predict_duration: bool,
 
-        /// Video frames per second for output encoding (default: 24).
-        /// Only used with --frames or video model families.
+        /// Video frames per second for output encoding.
+        /// Defaults to the selected model's frame rate.
         #[arg(long, help_heading = "Video")]
         fps: Option<u32>,
 
@@ -1043,11 +1043,11 @@ Examples:
         #[arg(long, value_name = "N", default_value_t = 17, help_heading = "Video")]
         motion_tail: u32,
 
-        /// Enable synchronized audio for LTX-2 / LTX-2.3 generation.
+        /// Enable synchronized audio for LTX-2 family generation.
         #[arg(long, help_heading = "Video", conflicts_with = "no_audio")]
         audio: bool,
 
-        /// Disable synchronized audio for LTX-2 / LTX-2.3 generation.
+        /// Disable synchronized audio for LTX-2 family generation.
         #[arg(long, help_heading = "Video", conflicts_with = "audio")]
         no_audio: bool,
 

@@ -4,10 +4,9 @@ layout: home
 hero:
   name: mold
   text: Local AI Image & Video Generation on Your GPU
-  tagline:
-    'CLI-native and built for people, scripts, and agents. CUDA on Linux, Metal
-    on macOS, with one engine and wire contract behind desktop, web, TUI, REST,
-    SSE, and MCP; iPhone and Android are remote-only clients.'
+  tagline: 'Create locally with NVIDIA CUDA or Apple Silicon Metal. Use the CLI,
+    desktop app, web studio, or terminal interface, and connect from iPhone or
+    Android when you are away from the GPU.'
   image:
     src: /logo-transparent.png
     alt: mold logo
@@ -19,8 +18,8 @@ hero:
       text: Download for Mac (Apple Silicon)
       link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
     - theme: alt
-      text: Download for Windows
-      link: https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe
+      text: Windows Nightly
+      link: https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe
     - theme: alt
       text: View Models
       link: /models/
@@ -40,11 +39,9 @@ features:
       src: /icons/grid.svg
     title: Broad Model Support
     details: FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image,
-      Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3 / LTX-2.5,
-      Wan 2.1/2.2,
-      and MiniMax H3 (compact FL2VA + Ref2VA on SM89 CUDA; Metal
-      correctness-only). Images, native joint audio-video, and quantized
-      variants that fit a wide range of GPUs.
+      Qwen-Image-Edit, Wuerstchen v2, LTX Video (0.9.x, 2, 2.3, and 2.5),
+      Wan 2.1/2.2, and MiniMax H3. Create images, video, and generated audio
+      with model variants suited to a wide range of GPUs.
   - icon:
       src: /icons/rust.svg
     title: Native GPU engine
@@ -58,8 +55,8 @@ features:
     title: Windows Desktop + CLI
     details: Self-signed x64 Desktop and CPU/remote-client CLI builds ship with
       a pinned public certificate and explicit trust instructions.
-    link: https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe
-    linkText: Download the Windows installer
+    link: https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe
+    linkText: Download the Windows nightly
   - icon:
       src: /icons/server.svg
     title: Client-Server
@@ -130,13 +127,13 @@ and RunPod in one focused workspace.
     <img src="/icons/apple.svg" alt="" />
     <span><strong>macOS Desktop</strong><small>Signed and notarized · Apple Silicon</small></span>
   </a>
-  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe">
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe">
     <img src="/icons/windows.svg" alt="" />
-    <span><strong>Windows Desktop</strong><small>Self-signed NSIS installer · x64</small></span>
+    <span><strong>Windows Desktop (Nightly)</strong><small>Self-signed NSIS installer · x64</small></span>
   </a>
-  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/mold-x86_64-pc-windows-msvc-cpu.zip">
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/download/latest/mold-x86_64-pc-windows-msvc-cpu.zip">
     <img src="/icons/terminal.svg" alt="" />
-    <span><strong>Windows CLI</strong><small>Self-signed CPU / remote client · x64</small></span>
+    <span><strong>Windows CLI (Nightly)</strong><small>Self-signed CPU / remote client · x64</small></span>
   </a>
 </div>
 

@@ -5,17 +5,16 @@
 - **macOS desktop:** download the signed and notarized
   [Mold DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg),
   then follow the [Desktop App guide](/guide/desktop).
-- **Windows desktop:** download the self-signed
-  [NSIS installer](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe)
-  and its [public certificate](https://github.com/utensils/mold/releases/latest/download/mold-windows-self-signing.cert.cer),
+- **Windows desktop (nightly):** download the self-signed
+  [NSIS installer](https://github.com/utensils/mold/releases/download/latest/Mold-windows-x64-self-signed.exe)
+  and its [public certificate](https://github.com/utensils/mold/releases/download/latest/mold-windows-self-signing.cert.cer),
   then follow the [Windows desktop trust instructions](/guide/desktop#windows).
 - **iPhone:** the current remote-only app is distributed through the project's
   invited internal and external TestFlight groups; there is not yet a public
   App Store listing. See the [iPhone App guide](/guide/iphone) for supported
   workflows and host setup.
-- **Android:** download the raw signed
-  [stable APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)
-  or [nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)
+- **Android (nightly):** download the raw signed
+  [APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)
   directly to an Android 7.0 or newer device. No archive extraction is needed;
   follow the [Android App guide](/guide/android#download-and-install) for the
   one-time sideload permission.
@@ -31,11 +30,11 @@ agents, and custom API clients.
 
 ## Windows CLI
 
-The prebuilt x64 Windows CLI is a self-signed CPU inference and remote-client
-build. Download and unpack it with PowerShell:
+The current prebuilt x64 Windows CLI is a self-signed nightly CPU inference and
+remote-client build. Download and unpack it with PowerShell:
 
 ```powershell
-$release = 'https://github.com/utensils/mold/releases/latest/download'
+$release = 'https://github.com/utensils/mold/releases/download/latest'
 Invoke-WebRequest "$release/mold-x86_64-pc-windows-msvc-cpu.zip" `
   -OutFile mold-windows.zip
 Expand-Archive .\mold-windows.zip `
