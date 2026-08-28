@@ -387,6 +387,52 @@
       "notes": "derive_stage1_render_shape halves the stage-1 frame count and fps; the output doubles it back to 17 @ 24 fps."
     },
     {
+      "id": "ltx-2.5-22b-distilled-int8-conv--residency_adaptive",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "residency_adaptive",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25034,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "1216",
+        "--height",
+        "704",
+        "--frames",
+        "121",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 1216,
+        "height": 704,
+        "frames": 121,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 residency mode=adaptive",
+          "ltx2 int8 arm=native-w8a8",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "After cuda-core the INT8 ConvRot pack stays packed-resident W8A8 on CUDA, so the planner reaches Adaptive instead of the pre-#1398 forced Streaming."
+    },
+    {
       "id": "ltx-2.5-22b-distilled-int8-conv--video_only",
       "model": "ltx-2.5-22b-distilled:int8-conv",
       "case": "video_only",
