@@ -409,7 +409,7 @@ run_mode() {
     command -v "$command" >/dev/null 2>&1 || fail "missing command: $command"
   done
   [[ -f "$server_log" ]] || fail "server log does not exist: $server_log"
-  kill -0 "$server_pid" 2>/dev/null || fail "LTX25_SERVER_PID $server_pid is not running"
+  ps -p "$server_pid" >/dev/null 2>&1 || fail "LTX25_SERVER_PID $server_pid is not running"
 
   local models_json="$evidence_dir/models-$profile.json"
   curl --fail --silent --show-error -H "x-api-key: $MOLD_API_KEY" "$host_url/api/models" >"$models_json" \
