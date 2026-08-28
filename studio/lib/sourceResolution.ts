@@ -41,6 +41,11 @@ export interface SourceCanvasTransition {
   preserveReplacement?: boolean;
 }
 
+/** A preset outside this log-ratio distance is a different shape, not a
+ * source-following canvas. This matches the canonical family tolerance used
+ * by the shared output-shape resolver without importing it circularly. */
+export const SOURCE_PRESET_ASPECT_LOG_TOLERANCE = 0.06;
+
 /**
  * Preserve authored/restored canvases while keeping source-driven defaults
  * live across model changes. All Create controllers use this transition so a
@@ -120,6 +125,19 @@ export function resolveDefaultSourceResolution(
       : Math.abs(leftArea - defaultArea) - Math.abs(rightArea - defaultArea);
   });
   const selected = ranked[0];
+  const sourceIsSquare =
+    Math.abs(Math.log(sourceRatio)) <= SOURCE_PRESET_ASPECT_LOG_TOLERANCE;
+  if (
+    sourceIsSquare &&
+    selected &&
+    Math.abs(Math.log(selected.width / selected.height / sourceRatio)) >
+      SOURCE_PRESET_ASPECT_LOG_TOLERANCE
+  ) {
+    // Wan checkpoints commonly advertise only landscape and portrait tiers.
+    // A square source is not either shape: keep its aspect on the model's
+    // aligned custom-canvas contract instead of silently cropping it to 16:9.
+    return resolveSourceResolution(source, model, pipeline).output;
+  }
   return selected
     ? { width: selected.width, height: selected.height }
     : resolveSourceResolution(source, model, pipeline).output;
