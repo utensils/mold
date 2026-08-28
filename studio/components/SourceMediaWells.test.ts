@@ -77,11 +77,29 @@ describe("SourceMediaWells", () => {
     );
     await wrapper.get("[data-test='source-remove']").trigger("click");
     expect(wrapper.emitted("clear")).toEqual([["source"]]);
+    await wrapper.get("[data-test='source-replace']").trigger("click");
+    expect(wrapper.emitted("gallery")).toEqual([["source"]]);
     const file = new File(["png"], "closing.png", { type: "image/png" });
     await wrapper
       .get("[data-test='end-frame-well']")
       .trigger("drop", { dataTransfer: { files: [file] } });
     expect(wrapper.emitted("file")).toEqual([["end", file]]);
+  });
+
+  it("prefixes surface hooks without duplicating the well implementation", () => {
+    const wrapper = factory(
+      { kind: "single", required: false, endFrame: false, video: false },
+      { source: { data: "QUJD" }, testIdPrefix: "mobile-" },
+    );
+    expect(wrapper.find("[data-test='mobile-source-preview']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.find("[data-test='mobile-source-replace']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.find("[data-test='mobile-source-remove']").exists()).toBe(
+      true,
+    );
   });
 
   it("renders H3 boundaries with frame wording and hides the empty last frame when only first is reviewed", () => {
@@ -107,8 +125,8 @@ describe("SourceMediaWells", () => {
     );
     expect(wrapper.text()).toContain("Incompatible");
     expect(wrapper.text()).toContain("first frame only");
-    const gallery = wrapper.get("[data-test='end-frame-gallery']");
-    expect(gallery.attributes("disabled")).toBeDefined();
+    const replace = wrapper.get("[data-test='end-frame-replace']");
+    expect(replace.attributes("disabled")).toBeDefined();
     await wrapper.get("[data-test='end-frame-remove']").trigger("click");
     expect(wrapper.emitted("clear")).toEqual([["end"]]);
   });

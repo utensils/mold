@@ -102,6 +102,8 @@ export interface ServerStatus {
   gpus?: GpuWorkerStatus[] | null;
   queue_depth?: number | null;
   queue_capacity?: number | null;
+  /** Whether this host is currently holding queued work from dispatch. */
+  queue_paused?: boolean | null;
   /** Stable server-installation UUID; absent on older servers. */
   instance_id?: string | null;
   /** Disk stats for the filesystem holding the models dir; absent on older servers. */

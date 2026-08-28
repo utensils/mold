@@ -52,7 +52,7 @@ describe("MobileSequenceOpeningImage", () => {
     mountOpeningImage();
     expect(wrapper!.find("[data-test='mobile-sequence-source-strength']").exists()).toBe(false);
 
-    await wrapper!.get("[data-test='mobile-sequence-source-pick']").trigger("click");
+    await wrapper!.get("[data-test='mobile-sequence-source-well']").trigger("click");
     const picker = wrapper!.getComponent({ name: "MobileImagePickerSheet" });
     expect(picker.props("open")).toBe(true);
     picker.vm.$emit("pick", { filename: "opening.jpg", base64: "wire-bytes" });
@@ -63,7 +63,7 @@ describe("MobileSequenceOpeningImage", () => {
       "data:image/jpeg;base64,wire-bytes",
     );
 
-    await wrapper!.get("[data-test='mobile-sequence-source-clear']").trigger("click");
+    await wrapper!.get("[data-test='mobile-sequence-source-remove']").trigger("click");
     expect(draft.openingImage).toBeNull();
   });
 
@@ -81,7 +81,7 @@ describe("MobileSequenceOpeningImage", () => {
       },
     ];
     mountOpeningImage({ gallerySources });
-    await wrapper!.get("[data-test='mobile-sequence-source-pick']").trigger("click");
+    await wrapper!.get("[data-test='mobile-sequence-source-well']").trigger("click");
     expect(
       wrapper!.getComponent({ name: "MobileImagePickerSheet" }).props("gallerySources"),
     ).toEqual(gallerySources);
@@ -110,8 +110,8 @@ describe("MobileSequenceOpeningImage", () => {
     await wrapper!.vm.$nextTick();
 
     for (const id of [
-      "mobile-sequence-source-pick",
-      "mobile-sequence-source-clear",
+      "mobile-sequence-source-replace",
+      "mobile-sequence-source-remove",
       "mobile-sequence-source-strength",
       "mobile-sequence-source-fit",
     ]) {
@@ -126,8 +126,9 @@ describe("MobileSequenceOpeningImage", () => {
     draft.openingImage = { filename: "opening.png", base64: "QUJD" };
     mountOpeningImage();
 
-    for (const id of ["mobile-sequence-source-pick", "mobile-sequence-source-clear"]) {
-      expect(wrapper!.get(`[data-test='${id}']`).classes(), id).toContain("secondary-button");
+    expect(wrapper!.get(".image-well").classes()).toContain("image-well--touch");
+    for (const id of ["mobile-sequence-source-replace", "mobile-sequence-source-remove"]) {
+      expect(wrapper!.get(`[data-test='${id}']`).classes(), id).toContain("image-well__action");
     }
     expect(wrapper!.get("[data-test='mobile-sequence-source-fit']").classes()).toContain("control");
     expect(

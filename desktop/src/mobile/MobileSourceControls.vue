@@ -393,6 +393,41 @@ function clearEditTarget(): void {
   props.form.imageAttachments = props.form.imageAttachments.slice(1);
 }
 
+async function onSingleSourceFile(slot: SourceMediaSlot, file: File): Promise<void> {
+  if (!isAcceptedImage(file)) {
+    error.value = "Only PNG or JPEG photos can be used here.";
+    return;
+  }
+  const maxBytes = slot === "source" ? sourcePickerMaxBytes.value : endFramePickerMaxBytes.value;
+  if (file.size > maxBytes) {
+    error.value = MOBILE_MEDIA_BUDGET_ERROR;
+    return;
+  }
+  try {
+    const base64 = await fileToBase64(file);
+    error.value = "";
+    if (slot === "source") {
+      props.form.sourceImage = base64;
+      props.form.sourceImageName = file.name;
+      props.form.sourceFit = { mode: "lanczos-resize" };
+    } else {
+      props.form.endFrame = { filename: file.name, base64 };
+    }
+  } catch {
+    error.value = "Couldn’t read that photo. Try choosing it again.";
+  }
+}
+
+function openSingleSourcePicker(slot: SourceMediaSlot): void {
+  if (slot === "source") sourcePickerOpen.value = true;
+  else endFramePickerOpen.value = true;
+}
+
+function clearSingleSource(slot: SourceMediaSlot): void {
+  if (slot === "source") removeSource();
+  else removeEndFrame();
+}
+
 /** The closing still of a wan first/last-frame render (#779). It keeps its own
  * name because that name — with the digest — is all saved metadata will ever
  * hold of it. */
@@ -703,51 +738,22 @@ function applyMask(mask: string): void {
     </fieldset>
 
     <fieldset v-else class="mobile-source-controls" data-test="mobile-source-controls">
-      <legend class="mobile-source-legend">
-        Source<span v-if="caps.requiresSourceImage" data-test="mobile-source-required">
-          · Required</span
-        >
-      </legend>
-
-      <button
-        v-if="!form.sourceImage"
-        type="button"
-        class="secondary-button mobile-source-pick"
-        :aria-required="caps.requiresSourceImage ? 'true' : undefined"
-        data-test="mobile-source-add"
-        @click="sourcePickerOpen = true"
-      >
-        Choose source image
-      </button>
-      <template v-else>
-        <figure class="mobile-source-preview-wrap">
-          <img
-            class="mobile-source-preview"
-            data-test="mobile-source-preview"
-            :src="base64ToDataUrl(form.sourceImage)"
-            :alt="form.sourceImageName || 'Source photo'"
-          />
-          <figcaption v-if="form.sourceImageName">{{ form.sourceImageName }}</figcaption>
-        </figure>
-        <div class="mobile-media-actions">
-          <button
-            type="button"
-            class="secondary-button"
-            data-test="mobile-source-replace"
-            @click="sourcePickerOpen = true"
-          >
-            Replace photo
-          </button>
-          <button
-            type="button"
-            class="secondary-button"
-            data-test="mobile-source-remove"
-            @click="removeSource"
-          >
-            Remove
-          </button>
-        </div>
-
+      <SourceMediaWells
+        :plan="plan"
+        touch-friendly
+        test-id-prefix="mobile-"
+        :source="
+          form.sourceImage ? { data: form.sourceImage, filename: form.sourceImageName } : null
+        "
+        :end-frame="
+          form.endFrame ? { data: form.endFrame.base64, filename: form.endFrame.filename } : null
+        "
+        :error="conditioningError"
+        @file="onSingleSourceFile"
+        @gallery="openSingleSourcePicker"
+        @clear="clearSingleSource"
+      />
+      <template v-if="form.sourceImage">
         <!-- Wan pins the first frame exactly and never reads strength. -->
         <label v-if="caps.supportsStrength" class="mobile-range-field">
           <span
@@ -788,70 +794,6 @@ function applyMask(mask: string): void {
           }}
         </p>
       </template>
-
-      <!-- One message at a time, in the order admission checks them. The same
-           text is repeated beside Develop so a disabled button is never a dead
-           end while this sheet is closed. -->
-      <p
-        v-if="conditioningError"
-        class="mobile-source-error"
-        role="alert"
-        data-test="mobile-source-conditioning-error"
-      >
-        {{ conditioningError }}
-      </p>
-
-      <!-- End frame (wan first/last-frame conditioning). Offered only when the
-           server advertised a source-image contract for this checkpoint — an
-           older server rejects wan keyframes outright. -->
-      <fieldset
-        v-if="caps.supportsEndFrame"
-        class="mobile-source-subsection"
-        data-test="mobile-end-frame-controls"
-      >
-        <legend>End frame</legend>
-        <p class="mobile-source-note">
-          Optional. The source opens the clip and this photo closes it.
-        </p>
-        <button
-          v-if="!form.endFrame"
-          type="button"
-          class="secondary-button mobile-source-pick"
-          data-test="mobile-end-frame-add"
-          @click="endFramePickerOpen = true"
-        >
-          Choose end frame
-        </button>
-        <template v-else>
-          <figure class="mobile-source-preview-wrap">
-            <img
-              class="mobile-source-preview"
-              data-test="mobile-end-frame-preview"
-              :src="base64ToDataUrl(form.endFrame.base64)"
-              :alt="form.endFrame.filename || 'End frame photo'"
-            />
-            <figcaption v-if="form.endFrame.filename">{{ form.endFrame.filename }}</figcaption>
-          </figure>
-          <div class="mobile-media-actions">
-            <button
-              type="button"
-              class="secondary-button"
-              data-test="mobile-end-frame-replace"
-              @click="endFramePickerOpen = true"
-            >
-              Replace photo
-            </button>
-            <button
-              type="button"
-              class="secondary-button"
-              data-test="mobile-end-frame-remove"
-              @click="removeEndFrame"
-            >
-              Remove
-            </button>
-          </div>
-        </template>
-      </fieldset>
 
       <fieldset v-if="caps.supportsMask && form.sourceImage" class="mobile-source-subsection">
         <legend>Mask</legend>

@@ -727,7 +727,11 @@ const chainLimits = ref<ChainLimits | null>(null);
  * proxy and every `sequenceRoute.value !== route` check would fire against a
  * live watch, silently dropping its own events.
  */
-const sequenceRoute = shallowRef<{ hostId: string; target: ApiTarget } | null>(null);
+const sequenceRoute = shallowRef<{
+  hostId: string;
+  target: ApiTarget;
+  instanceId: string;
+} | null>(null);
 let sequenceWatch: SequenceWatchHandle | null = null;
 const expandCapabilities = reactive<Record<string, ExpandCapabilities | null | undefined>>({});
 const serverCapabilities = reactive<Record<string, ServerCapabilities | null | undefined>>({});
@@ -965,6 +969,13 @@ const gallery = ref<GalleryPrint[]>([]);
 const galleryByThumbnailKey = new Map<string, GalleryPrint>();
 const galleryLoading = ref(false);
 const galleryError = ref("");
+const galleryPullDistance = ref(0);
+const galleryPullRefreshing = ref(false);
+const GALLERY_PULL_THRESHOLD = 72;
+const GALLERY_PULL_MAX = 112;
+let galleryPullTouchId: number | null = null;
+let galleryPullStartX = 0;
+let galleryPullStartY = 0;
 const gallerySelectMode = ref(false);
 let nativeGalleryContextKey: string | null = null;
 const gallerySelection = ref<Set<string>>(new Set());
@@ -1154,6 +1165,8 @@ interface HostTelemetry {
    * `null` means a legacy status response; an absent telemetry row means the
    * host has not answered status yet and queue polling must wait. */
   queueCapacity: number | null;
+  /** Whether this host has paused dispatching its queued work. */
+  queuePaused: boolean | null;
   /** `gpu_info.backend` as this machine reported it; null on servers ≤ 0.16,
    *  where the routing ladder falls back to inferring it from the GPU name. */
   gpuBackend: string | null;
@@ -1184,6 +1197,7 @@ function captureHostTelemetry(hostId: string, status: ServerStatus): void {
     vramTotalMb: memory?.totalMb ?? null,
     queueDepth: status.queue_depth ?? null,
     queueCapacity: status.queue_capacity ?? null,
+    queuePaused: status.queue_paused ?? null,
     gpuBackend: status.gpu_info?.backend ?? null,
     gpuName: status.gpu_info?.name ?? null,
   };
@@ -2288,6 +2302,118 @@ const activityRows = computed<ActivityRow[]>(() =>
       : [];
   }),
 );
+
+const queueControlHostIds = ref(new Set<string>());
+
+function activityRowHostId(row: ActivityRow): string {
+  return row.print?.hostId ?? row.sequence?.hostId ?? selectedHostId.value;
+}
+
+function activityRowIsQueued(row: ActivityRow): boolean {
+  return row.print ? row.print.status === "queued" : row.sequence?.state === "queued";
+}
+
+function canPauseActivityRow(row: ActivityRow): boolean {
+  const hostId = activityRowHostId(row);
+  return (
+    activityRowIsQueued(row) &&
+    serverCapabilities[hostId]?.queue?.can_pause === true &&
+    activityRowQueueAuthority(row) !== null
+  );
+}
+
+function activityRowQueuePaused(row: ActivityRow): boolean {
+  return hostTelemetry[activityRowHostId(row)]?.queuePaused === true;
+}
+
+interface MobileQueueControlAuthority {
+  host: MobileHost;
+  target: ApiTarget;
+  expectedInstanceId: string;
+}
+
+function activityRowQueueAuthority(row: ActivityRow): MobileQueueControlAuthority | null {
+  const hostId = activityRowHostId(row);
+  const host = connectedHosts.value.find((candidate) => candidate.id === hostId);
+  if (!host) return null;
+  if (row.sequence && sequenceRoute.value?.hostId === hostId) {
+    const expectedInstanceId = sequenceRoute.value.instanceId;
+    if (!expectedInstanceId) return null;
+    return { host, target: sequenceRoute.value.target, expectedInstanceId };
+  }
+  if (row.print) {
+    const durable = durableRecoveryForJob(row.print);
+    if (durable) {
+      return {
+        host,
+        target: mobileHostTarget(host),
+        expectedInstanceId: durable.recovery.tracker.expectedInstanceId,
+      };
+    }
+  }
+  const snapshot = liveActivityHosts.value[hostId];
+  const expectedInstanceId = snapshot?.instanceId?.trim() ?? "";
+  if (!snapshot || !expectedInstanceId || snapshot.routeUrl !== host.baseUrl) return null;
+  return { host, target: mobileHostTarget(host), expectedInstanceId };
+}
+
+function fleetQueueAuthority(row: FleetActiveWork): MobileQueueControlAuthority | null {
+  const host = connectedHosts.value.find((candidate) => candidate.id === row.hostId);
+  if (!host || row.stale || !row.instanceId || row.routeUrl !== host.baseUrl) return null;
+  return { host, target: mobileHostTarget(host), expectedInstanceId: row.instanceId };
+}
+
+function canPauseFleetActivity(row: FleetActiveWork): boolean {
+  return (
+    row.phase === "queued" &&
+    serverCapabilities[row.hostId]?.queue?.can_pause === true &&
+    fleetQueueAuthority(row) !== null
+  );
+}
+
+async function setQueuePaused(
+  authority: MobileQueueControlAuthority,
+  paused: boolean,
+): Promise<void> {
+  const { host, target, expectedInstanceId } = authority;
+  const hostId = host.id;
+  if (queueControlHostIds.value.has(hostId)) return;
+  queueControlHostIds.value = new Set(queueControlHostIds.value).add(hostId);
+  try {
+    const status = await apiJsonTo<ServerStatus>(target, "/api/status");
+    if (status.instance_id !== expectedInstanceId) {
+      throw new Error(`${host.name} now reaches a different Mold server instance.`);
+    }
+    captureHostTelemetry(hostId, status);
+    await apiFetchTo(target, paused ? "/api/queue/pause" : "/api/queue/resume", {
+      method: "POST",
+    });
+    if (hostTelemetry[hostId]) hostTelemetry[hostId]!.queuePaused = paused;
+    setGenerationStatus(
+      paused
+        ? `Paused ${host.name}'s queue. Running work continues.`
+        : `Resumed ${host.name}'s queue.`,
+    );
+  } catch (caught) {
+    setGenerationStatus(describeTransportError(caught, host.name), true);
+  } finally {
+    const next = new Set(queueControlHostIds.value);
+    next.delete(hostId);
+    queueControlHostIds.value = next;
+  }
+}
+
+async function setActivityHostQueuePaused(row: ActivityRow, paused: boolean): Promise<void> {
+  const authority = activityRowQueueAuthority(row);
+  if (!authority || !canPauseActivityRow(row)) return;
+  await setQueuePaused(authority, paused);
+}
+
+async function setFleetHostQueuePaused(row: FleetActiveWork, paused: boolean): Promise<void> {
+  const authority = fleetQueueAuthority(row);
+  if (!authority || !canPauseFleetActivity(row)) return;
+  await setQueuePaused(authority, paused);
+}
 
 /**
  * Status code for one queue row, in this list's compact uppercase idiom. A
@@ -4126,9 +4252,14 @@ function watchSequenceJob(
   target: ApiTarget,
   jobId: string,
   seed?: { model: string; stageCount: number },
+  expectedInstanceId?: string | null,
 ): void {
   stopSequenceTransport();
-  const route = { hostId, target: { ...target } };
+  const instanceId =
+    expectedInstanceId?.trim() ||
+    connectedHosts.value.find((candidate) => candidate.id === hostId)?.instanceId?.trim() ||
+    "";
+  const route = { hostId, target: { ...target }, instanceId };
   sequenceRoute.value = route;
   sequenceProgress.value = null;
   sequenceJob.value = pendingSequenceJob(jobId, seed?.model ?? "", seed?.stageCount ?? 0);
@@ -4701,10 +4832,16 @@ async function submitMobileSequence(): Promise<void> {
       return;
     }
     persistSequenceRecovery(host, response.job_id);
-    watchSequenceJob(host.id, target, response.job_id, {
-      model: requestForm.model,
-      stageCount: clips.length,
-    });
+    watchSequenceJob(
+      host.id,
+      target,
+      response.job_id,
+      {
+        model: requestForm.model,
+        stageCount: clips.length,
+      },
+      frozenRoute.instanceId,
+    );
   } catch (error) {
     if (!isCurrent()) return;
     sequenceError.value = describeTransportError(error, host.name);
@@ -4763,10 +4900,16 @@ async function resumeMobileSequence(): Promise<void> {
     });
     const host = hosts.value.find((candidate) => candidate.id === route.hostId);
     if (host) persistSequenceRecovery(host, job.id);
-    watchSequenceJob(route.hostId, route.target, job.id, {
-      model: job.model,
-      stageCount: job.stage_count,
-    });
+    watchSequenceJob(
+      route.hostId,
+      route.target,
+      job.id,
+      {
+        model: job.model,
+        stageCount: job.stage_count,
+      },
+      route.instanceId,
+    );
   } catch (error) {
     sequenceError.value = describeTransportError(error, sequenceHostName(route.hostId));
   }
@@ -4814,7 +4957,7 @@ function recoverMobileSequence(): void {
     sequenceError.value = "The exact machine for this saved sequence is no longer available.";
     return;
   }
-  watchSequenceJob(host.id, mobileHostTarget(host), saved.jobId);
+  watchSequenceJob(host.id, mobileHostTarget(host), saved.jobId, undefined, saved.instanceId);
 }
 
 /**
@@ -9778,6 +9921,60 @@ function handleForegroundResume(): void {
   }
 }
 
+function beginLibraryPull(event: TouchEvent): void {
+  const scroller = mobileContent.value;
+  if (
+    tab.value !== "gallery" ||
+    galleryPullRefreshing.value ||
+    !scroller ||
+    scroller.scrollTop > 0 ||
+    event.touches.length !== 1
+  ) {
+    galleryPullTouchId = null;
+    return;
+  }
+  const touch = event.touches[0];
+  if (!touch) return;
+  galleryPullTouchId = touch.identifier;
+  galleryPullStartX = touch.clientX;
+  galleryPullStartY = touch.clientY;
+}
+
+function moveLibraryPull(event: TouchEvent): void {
+  if (galleryPullTouchId === null || event.touches.length !== 1) return;
+  const touch = [...event.touches].find((candidate) => candidate.identifier === galleryPullTouchId);
+  if (!touch) return;
+  const deltaX = touch.clientX - galleryPullStartX;
+  const deltaY = touch.clientY - galleryPullStartY;
+  if (deltaY <= 0 || Math.abs(deltaX) >= deltaY) {
+    galleryPullDistance.value = 0;
+    return;
+  }
+  // Resist the drag like a native refresh control while keeping the threshold
+  // reachable with one ordinary thumb pull.
+  galleryPullDistance.value = Math.min(GALLERY_PULL_MAX, deltaY * 0.62);
+  event.preventDefault();
+}
+
+function finishLibraryPull(): void {
+  if (galleryPullTouchId === null) return;
+  galleryPullTouchId = null;
+  const shouldRefresh = galleryPullDistance.value >= GALLERY_PULL_THRESHOLD;
+  galleryPullDistance.value = 0;
+  if (!shouldRefresh || galleryPullRefreshing.value) return;
+  galleryPullRefreshing.value = true;
+  galleryPullDistance.value = 48;
+  void refreshGallery().finally(() => {
+    galleryPullRefreshing.value = false;
+    galleryPullDistance.value = 0;
+  });
+}
+
+function cancelLibraryPull(): void {
+  galleryPullTouchId = null;
+  galleryPullDistance.value = 0;
+}
+
 function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement {
   if (!(target instanceof HTMLElement)) return false;
   if (target.matches("textarea, select, [contenteditable='true']")) return true;
@@ -10030,6 +10227,12 @@ type MobileActivityRow = (typeof activityRows.value)[number];
  */
 function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
   const actions: SwipeRowAction[] = [];
+  if (canPauseActivityRow(row)) {
+    actions.push({
+      id: activityRowQueuePaused(row) ? "queue-resume" : "queue-pause",
+      label: activityRowQueuePaused(row) ? "Resume" : "Pause",
+    });
+  }
   if (row.print) {
     if (durableHold(row.print)?.retryable && !durableHeldIsRetrying(row.print)) {
       actions.push({ id: "retry", label: "Retry" });
@@ -10053,6 +10256,10 @@ function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
 }
 
 function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
+  if (action === "queue-pause" || action === "queue-resume") {
+    void setActivityHostQueuePaused(row, action === "queue-pause");
+    return;
+  }
   if (row.print) {
     if (action === "retry") void retryHeldGeneration(row.print);
     if (action === "cancel") void cancelGeneration(row.print);
@@ -10152,6 +10359,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       ref="mobileContent"
       class="mobile-content"
       :class="{ 'is-library': !settingsOpen && tab === 'gallery' }"
+      @touchstart="beginLibraryPull"
+      @touchmove="moveLibraryPull"
+      @touchend="finishLibraryPull"
+      @touchcancel="cancelLibraryPull"
     >
       <MobileSettingsView
         v-if="settingsOpen"
@@ -10871,7 +11082,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 <SwipeActionRow
                   :actions="mobileQueueRowActions(row)"
                   :label="row.print ? row.print.prompt : modelLabel(row.sequence?.model ?? '')"
-                  :disabled="row.print?.cancelling === true"
+                  :disabled="
+                    row.print?.cancelling === true ||
+                    queueControlHostIds.has(activityRowHostId(row))
+                  "
                   :data-test="row.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
                   @act="onMobileQueueRowAction(row, $event)"
                 >
@@ -10952,8 +11166,24 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             <LiveActivityList
               :rows="sharedMobileActivity"
               interactive
+              swipe-actions
+              :can-swipe="canPauseFleetActivity"
               @select="openMobileLiveWork"
-            />
+            >
+              <template #actions="{ row }">
+                <button
+                  type="button"
+                  data-test="mobile-fleet-queue-control"
+                  :disabled="queueControlHostIds.has(row.hostId)"
+                  :aria-label="`${hostTelemetry[row.hostId]?.queuePaused ? 'Resume' : 'Pause'} ${row.hostLabel} queue`"
+                  @click.stop="
+                    setFleetHostQueuePaused(row, !(hostTelemetry[row.hostId]?.queuePaused === true))
+                  "
+                >
+                  {{ hostTelemetry[row.hostId]?.queuePaused ? "Resume" : "Pause" }}
+                </button>
+              </template>
+            </LiveActivityList>
           </section>
           <p
             v-if="sequenceError && sequenceRoute && !isSequence"
@@ -10967,6 +11197,18 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </template>
 
       <template v-else-if="tab === 'gallery'">
+        <div
+          class="mobile-library-pull"
+          :class="{ 'is-refreshing': galleryPullRefreshing }"
+          :style="{ height: `${galleryPullDistance}px` }"
+          role="status"
+          aria-live="polite"
+          data-test="mobile-library-pull"
+        >
+          <span v-if="galleryPullRefreshing">Refreshing…</span>
+          <span v-else-if="galleryPullDistance >= GALLERY_PULL_THRESHOLD">Release to refresh</span>
+          <span v-else-if="galleryPullDistance > 0">Pull to refresh</span>
+        </div>
         <div class="mobile-library-heading">
           <div>
             <h1 class="section-title">Library</h1>

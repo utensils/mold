@@ -31,6 +31,8 @@ const props = withDefaults(
     error?: string | null;
     /** The engine takes only PNG/JPEG as source/keyframe conditioning. */
     accept?: string;
+    /** Prefix for surface-specific test hooks while keeping one component. */
+    testIdPrefix?: string;
   }>(),
   {
     source: null,
@@ -39,6 +41,7 @@ const props = withDefaults(
     touchFriendly: false,
     error: null,
     accept: "image/png,image/jpeg",
+    testIdPrefix: "",
   },
 );
 
@@ -81,6 +84,11 @@ const sourcePlaceholder = computed(() =>
       ? "Drop the opening frame or click to pick"
       : "Drop an image or click to pick",
 );
+const sourceAlt = computed(
+  () =>
+    props.source?.filename ||
+    (h3.value ? "First frame" : target.value ? "Edit target" : "Source image"),
+);
 /** H3's reviewed first-frame-only runtime refuses a closing frame; a restored
  * one stays visible so it can be removed, but never re-acquired. */
 const endIncompatible = computed(
@@ -93,6 +101,7 @@ const showEndWell = computed(() => {
   return false;
 });
 const endLabel = computed(() => (h3.value ? "Last frame" : "End frame"));
+const endAlt = computed(() => props.endFrame?.filename || endLabel.value);
 const endHint = computed(() =>
   endIncompatible.value
     ? "This runtime accepts a first frame only — remove the closing frame."
@@ -127,8 +136,8 @@ const endHint = computed(() =>
       :required="required"
       gallery
       :touch-friendly="touchFriendly"
-      :alt="h3 ? 'First frame' : target ? 'Edit target' : 'Source image'"
-      test-id="source"
+      :alt="sourceAlt"
+      :test-id="`${testIdPrefix}source`"
       @file="emit('file', 'source', $event)"
       @gallery="emit('gallery', 'source')"
       @clear="emit('clear', 'source')"
@@ -161,8 +170,8 @@ const endHint = computed(() =>
         :pick-disabled="endIncompatible"
         gallery
         :touch-friendly="touchFriendly"
-        :alt="h3 ? 'Last frame' : 'End frame'"
-        test-id="end-frame"
+        :alt="endAlt"
+        :test-id="`${testIdPrefix}end-frame`"
         @file="emit('file', 'end', $event)"
         @gallery="emit('gallery', 'end')"
         @clear="emit('clear', 'end')"

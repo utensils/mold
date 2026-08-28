@@ -1,15 +1,22 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import type { FleetActiveWork } from "@studio/api/activity";
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     rows: FleetActiveWork[];
     compact?: boolean;
     interactive?: boolean;
+    swipeActions?: boolean;
+    actionWidth?: number;
+    canSwipe?: (row: FleetActiveWork) => boolean;
   }>(),
   {
     compact: false,
     interactive: false,
+    swipeActions: false,
+    actionWidth: 72,
+    canSwipe: () => true,
   },
 );
 
@@ -17,6 +24,56 @@ const emit = defineEmits<{
   select: [row: FleetActiveWork];
   contextmenu: [row: FleetActiveWork, event: MouseEvent];
 }>();
+
+const openActionKey = ref<string | null>(null);
+let swipe: { key: string; x: number; y: number; horizontal: boolean } | null =
+  null;
+
+function beginSwipe(row: FleetActiveWork, event: TouchEvent): void {
+  if (!props.swipeActions || !props.canSwipe(row) || event.touches.length !== 1)
+    return;
+  const touch = event.touches[0];
+  if (touch)
+    swipe = {
+      key: row.key,
+      x: touch.clientX,
+      y: touch.clientY,
+      horizontal: false,
+    };
+}
+
+function moveSwipe(event: TouchEvent): void {
+  const touch = event.touches[0];
+  if (!swipe || !touch) return;
+  const dx = touch.clientX - swipe.x;
+  const dy = touch.clientY - swipe.y;
+  if (!swipe.horizontal && Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
+    swipe.horizontal = true;
+  }
+  if (swipe.horizontal) event.preventDefault();
+}
+
+function finishSwipe(event: TouchEvent): void {
+  const gesture = swipe;
+  swipe = null;
+  const touch = event.changedTouches[0];
+  if (!gesture || !gesture.horizontal || !touch) return;
+  const dx = touch.clientX - gesture.x;
+  if (dx <= -36) openActionKey.value = gesture.key;
+  else if (dx >= 36) openActionKey.value = null;
+}
+
+function cancelSwipe(): void {
+  swipe = null;
+}
+
+function select(row: FleetActiveWork): void {
+  if (openActionKey.value === row.key) {
+    openActionKey.value = null;
+    return;
+  }
+  if (props.interactive) emit("select", row);
+}
 
 function title(row: FleetActiveWork): string {
   if (row.kind === "download")
@@ -47,14 +104,27 @@ function progress(row: FleetActiveWork): number | null {
       v-for="row in rows"
       :key="row.key"
       class="live-activity-row"
+      :class="{
+        'live-activity-row--has-actions': swipeActions && canSwipe(row),
+        'live-activity-row--actions-open': openActionKey === row.key,
+      }"
+      :style="
+        swipeActions && canSwipe(row)
+          ? { '--live-activity-action-width': `${actionWidth}px` }
+          : undefined
+      "
       :data-stale="row.stale"
+      @touchstart="beginSwipe(row, $event)"
+      @touchmove="moveSwipe"
+      @touchend="finishSwipe"
+      @touchcancel="cancelSwipe"
     >
       <component
         :is="interactive ? 'button' : 'div'"
         :type="interactive ? 'button' : undefined"
         class="live-activity-surface"
         :data-test="interactive ? `live-activity-select-${row.key}` : undefined"
-        @click="interactive && emit('select', row)"
+        @click="select(row)"
         @contextmenu="interactive && emit('contextmenu', row, $event)"
       >
         <span
@@ -76,6 +146,13 @@ function progress(row: FleetActiveWork): number | null {
           </span>
         </span>
       </component>
+      <div
+        v-if="swipeActions && canSwipe(row)"
+        class="live-activity-actions"
+        @click.stop
+      >
+        <slot name="actions" :row="row" />
+      </div>
     </li>
   </ol>
 </template>
@@ -89,9 +166,16 @@ function progress(row: FleetActiveWork): number | null {
   list-style: none;
 }
 .live-activity-row {
+  position: relative;
   min-width: 0;
 }
+.live-activity-row--has-actions {
+  overflow: hidden;
+  touch-action: pan-y;
+}
 .live-activity-surface {
+  position: relative;
+  z-index: 1;
   display: flex;
   width: 100%;
   align-items: center;
@@ -102,6 +186,28 @@ function progress(row: FleetActiveWork): number | null {
   border: 1px solid var(--edge);
   border-radius: 9px;
   background: var(--surface);
+  color: inherit;
+  font: inherit;
+  transition: transform 180ms ease;
+}
+.live-activity-row--actions-open .live-activity-surface {
+  transform: translateX(calc(var(--live-activity-action-width) * -1));
+}
+.live-activity-actions {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--live-activity-action-width);
+}
+.live-activity-actions :deep(button) {
+  width: 100%;
+  height: 100%;
+  min-height: 44px;
+  border: 1px solid var(--edge);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--safelight) 18%, var(--surface));
   color: inherit;
   font: inherit;
 }

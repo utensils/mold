@@ -1086,6 +1086,56 @@ describe("MobileApp sequence generation", () => {
     expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(target.apiKey);
   });
 
+  it("swipes a queued item from another client to exact-host pause and resume", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status")
+        return Promise.resolve({ ...status, queue_paused: false, queue_capacity: 2 });
+      if (path === "/api/capabilities")
+        return Promise.resolve({
+          queue: { can_pause: true, heterogeneous_batch_max_outputs: 8 },
+        });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/queue?limit=2") return Promise.resolve({ entries: [] });
+      if (path === "/api/activity")
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "foreign-queued",
+              kind: "generation",
+              phase: "queued",
+              model: model.name,
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              can_cancel: true,
+            },
+          ],
+        });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const row = wrapper.get(".live-activity-row");
+    const touch = (type: string, x: number, ended = false) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      const point = { clientX: x, clientY: 100 };
+      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
+      Object.defineProperty(event, "changedTouches", { value: [point] });
+      return event;
+    };
+    row.element.dispatchEvent(touch("touchstart", 260));
+    row.element.dispatchEvent(touch("touchmove", 160));
+    row.element.dispatchEvent(touch("touchend", 160, true));
+    await flushPromises();
+
+    expect(row.classes()).toContain("live-activity-row--actions-open");
+    await row.get("[data-test='mobile-fleet-queue-control']").trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/pause", { method: "POST" });
+  });
+
   it("loads a tapped server-owned generation into Create like desktop", async () => {
     const pagedStatus = { ...status, queue_capacity: 3 };
     const metadata = {
@@ -4014,7 +4064,7 @@ describe("MobileApp generation queue", () => {
 
     wrapper = mountMobileApp();
     await flushPromises();
-    await wrapper.get("[data-test='mobile-source-add']").trigger("click");
+    await wrapper.get("[data-test='mobile-source-gallery']").trigger("click");
     wrapper
       .getComponent(MobileImagePickerSheet)
       .vm.$emit("pick", { filename: "source.png", base64: btoa("source") });
@@ -5573,6 +5623,48 @@ describe("MobileApp generation queue", () => {
     expect(untouched?.text()).not.toContain("Cancelling");
   });
 
+  it("reveals exact-host pause, resume, and cancel actions with a natural queue swipe", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status")
+        return Promise.resolve({ ...status, queue_paused: false, queue_capacity: 2 });
+      if (path === "/api/capabilities")
+        return Promise.resolve({
+          queue: { can_pause: true, heterogeneous_batch_max_outputs: 8 },
+        });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      if (path === "/api/queue?limit=2") return Promise.resolve({ entries: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("pause this queued print");
+    openStreams[0]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 0, id: "job-pause" }),
+    );
+    await flushPromises();
+
+    const row = wrapper.get("[data-test='mobile-generation-job']");
+    const control = row.get("[data-test='swipe-action-queue-pause']");
+    expect(control.text()).toBe("Pause");
+    expect(row.get("[data-test='swipe-action-cancel']").text()).toBe("Cancel");
+
+    await control.trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/pause", { method: "POST" });
+    const resume = row.get("[data-test='swipe-action-queue-resume']");
+    expect(resume.text()).toBe("Resume");
+
+    await resume.trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/resume", { method: "POST" });
+    expect(row.get("[data-test='swipe-action-queue-pause']").text()).toBe("Pause");
+  });
+
   it("counts a queued print's live place in line rather than its submit slot", async () => {
     // A print carries no held stream, so its place in line comes from the
     // machine's own queue listing keyed on the durable child's job id.
@@ -6743,8 +6835,8 @@ describe("MobileApp wan source conditioning", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    expect(wrapper.find("[data-test='mobile-source-add']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='mobile-end-frame-add']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-source-well']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mobile-end-frame-well']").exists()).toBe(false);
     await fieldControl("Prompt").setValue("a lantern drifting downriver");
     expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
       "disabled",
@@ -6757,8 +6849,8 @@ describe("MobileApp wan source conditioning", () => {
     await flushPromises();
 
     expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='mobile-source-add']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='mobile-end-frame-add']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-source-well']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-end-frame-well']").exists()).toBe(false);
     await fieldControl("Prompt").setValue("a lantern drifting downriver");
     expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
       "disabled",
@@ -10945,6 +11037,55 @@ describe("MobileApp Library organization", () => {
       [unknown, string, RequestInit | undefined]
     >;
   }
+
+  function libraryTouch(type: string, clientY?: number): Event {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "touches", {
+      configurable: true,
+      value: clientY === undefined ? [] : [{ identifier: 7, clientX: 120, clientY }],
+    });
+    return event;
+  }
+
+  it("refreshes the Library after a natural pull from the top", async () => {
+    installLibraryApi();
+    await openLibrary();
+    const content = wrapper!.get(".mobile-content").element;
+    const before = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery").length;
+
+    content.dispatchEvent(libraryTouch("touchstart", 100));
+    const move = libraryTouch("touchmove", 230);
+    content.dispatchEvent(move);
+    await flushPromises();
+    expect(move.defaultPrevented).toBe(true);
+    expect(wrapper!.get("[data-test='mobile-library-pull']").text()).toContain(
+      "Release to refresh",
+    );
+    content.dispatchEvent(libraryTouch("touchend"));
+
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery").length,
+      ).toBeGreaterThan(before),
+    );
+  });
+
+  it("resets a cancelled Library pull without refreshing", async () => {
+    installLibraryApi();
+    await openLibrary();
+    const content = wrapper!.get(".mobile-content").element;
+    const before = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery").length;
+
+    content.dispatchEvent(libraryTouch("touchstart", 100));
+    content.dispatchEvent(libraryTouch("touchmove", 230));
+    content.dispatchEvent(libraryTouch("touchcancel"));
+    await flushPromises();
+
+    expect(wrapper!.get("[data-test='mobile-library-pull']").text()).not.toContain(
+      "Release to refresh",
+    );
+    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery")).toHaveLength(before);
+  });
 
   it("hides every organization affordance when no host advertises it", async () => {
     await openLibrary();

@@ -46,19 +46,24 @@ describe("ImageDropWell", () => {
     expect(wrapper.emitted("file")).toEqual([[file]]);
   });
 
-  it("renders a preview with a working remove control once attached", async () => {
+  it("renders one shared preview with replace, filename, and remove actions", async () => {
     const wrapper = mount(ImageDropWell, {
       props: {
         testId: "t",
         image: "QUJD",
         mimeType: "image/jpeg",
+        filename: "first-frame.jpg",
         alt: "First frame",
+        gallery: true,
       },
     });
     expect(wrapper.find("[data-test='t-well']").exists()).toBe(false);
     expect(wrapper.get("img").attributes("src")).toBe(
       "data:image/jpeg;base64,QUJD",
     );
+    expect(wrapper.get("figcaption").text()).toBe("first-frame.jpg");
+    await wrapper.get("[data-test='t-replace']").trigger("click");
+    expect(wrapper.emitted("gallery")).toHaveLength(1);
     await wrapper.get("[data-test='t-remove']").trigger("click");
     expect(wrapper.emitted("clear")).toHaveLength(1);
   });
@@ -119,5 +124,6 @@ describe("ImageDropWell", () => {
     expect(
       wrapper.get("[data-test='t-remove']").attributes("aria-label"),
     ).toContain("Remove");
+    expect(wrapper.get("[data-test='t-replace']").text()).toBe("Replace photo");
   });
 });

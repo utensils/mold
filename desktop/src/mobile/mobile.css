@@ -303,13 +303,31 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: none;
-  touch-action: manipulation;
+  /* This element owns vertical scrolling. Android WebView needs the pan axis
+     stated explicitly when descendants also listen for pointer gestures. */
+  touch-action: pan-y;
   padding: 16px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
 }
 
 .mobile-content.is-library {
   display: flex;
   flex-direction: column;
+}
+
+.mobile-library-pull {
+  display: grid;
+  flex: none;
+  place-items: center;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--halide);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  transition: height 140ms ease-out;
+}
+
+.mobile-library-pull:not(.is-refreshing) {
+  transition: none;
 }
 
 /*
@@ -2684,6 +2702,7 @@ button:disabled {
 
 .gallery-grid-window {
   position: relative;
+  z-index: 0;
   width: 100%;
 }
 
@@ -2748,7 +2767,9 @@ button:disabled {
       transparent 38%
     );
   border-radius: 9px;
-  touch-action: manipulation;
+  /* Every pixel of a tile must remain a native vertical-scroll handle. The
+     scoped pinch surface claims two fingers only after both have landed. */
+  touch-action: pan-y;
   -webkit-touch-callout: default;
 }
 
@@ -4797,12 +4818,16 @@ button:disabled {
 
 /* Horizontally scrolling filter chips (♥ Favorites, tags, hosts). */
 .mobile-library-chips {
+  position: relative;
+  z-index: 2;
   display: flex;
   margin-top: 10px;
   gap: 7px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
-  touch-action: manipulation;
+  /* Preserve horizontal chip browsing without sacrificing a vertical Library
+     swipe that begins over a tag. */
+  touch-action: pan-x pan-y;
   scrollbar-width: none;
   padding-bottom: 2px;
 }
