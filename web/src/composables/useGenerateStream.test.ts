@@ -626,6 +626,32 @@ describe("workStarted tracking", () => {
     expect(job.progress.stage).toBe("Stitching 241 frames…");
   });
 
+  it("restores active work when the opening chain snapshot is already running", async () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 241 }), chainDecision());
+    await vi.waitFor(() =>
+      expect(
+        (fetchEventSource.mock.calls as unknown[][]).some((entry) =>
+          String(entry[0]).includes("/api/chain-jobs/"),
+        ),
+      ).toBe(true),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const snapshot = chainJobDetail();
+    snapshot.execution_phase = "running";
+    snapshot.current_stage = 1;
+    snapshot.stages = [
+      { idx: 0, state: "completed" },
+      { idx: 1, state: "running" },
+      { idx: 2, state: "pending" },
+    ];
+
+    emitChainJobEvent({ type: "snapshot", job: snapshot });
+
+    expect(job.workStarted).toBe(true);
+    expect(job.progress.stage).toBe("Preparing clip 2/3");
+  });
+
   it("returns to automatic canvas selection when new work is submitted", async () => {
     const stream = useGenerateStream();
     const inspected = await submitDurable(

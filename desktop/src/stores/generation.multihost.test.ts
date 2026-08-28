@@ -38,7 +38,7 @@ const primary = vi.hoisted(() => ({
 const apiFetchTo = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
 
 /** The opening snapshot a chain job's own event stream sends. */
-function chainSnapshot(): Record<string, unknown> {
+function chainSnapshot(activeStage: number | null = null): Record<string, unknown> {
   return {
     id: "chain-job-1",
     state: "running",
@@ -49,7 +49,11 @@ function chainSnapshot(): Record<string, unknown> {
     updated_at_unix_ms: 2,
     error: null,
     ephemeral: true,
-    stages: [0, 1, 2].map((idx) => ({ idx, state: "pending" })),
+    execution_phase: activeStage === null ? "queued" : "running",
+    stages: [0, 1, 2].map((idx) => ({
+      idx,
+      state: idx === activeStage ? "running" : "pending",
+    })),
     script: { chain: {}, stages: [{ frames: 97 }, { frames: 97 }, { frames: 47 }] },
   };
 }
@@ -507,6 +511,33 @@ describe("generation store multi-host routing", () => {
       method: "POST",
     });
     expect(jobs[0]).toMatchObject({ status: "error", error: "Cancelled" });
+  });
+
+  it("restores a running automatic chain from its opening snapshot", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { signal: AbortSignal; onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("chain_job", JSON.stringify({ type: "snapshot", job: chainSnapshot(1) }));
+        return new Promise<void>((resolve) => {
+          opts.signal.addEventListener("abort", () => resolve());
+        });
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs } = store.submitBatch(
+      { ...request(), model: "ltx-2.3-22b-distilled:fp8", frames: 241, fps: 24 },
+      1,
+      halRoute,
+      chainDecision,
+    );
+
+    await flushPromises();
+
+    expect(jobs[0]).toMatchObject({
+      status: "loading",
+      chainStageIndex: 1,
+      stage: "Preparing clip 2 of 3",
+    });
+    await store.cancel(jobs[0]!.clientId);
   });
 
   it("rejects a defensive reject decision before creating jobs", () => {

@@ -51,6 +51,45 @@ function run(events: ChainJobEvent[]): {
 }
 
 describe("reduceChainJobFrame", () => {
+  it("replays an already-running stage from the opening snapshot", () => {
+    const job = detail();
+    job.state = "running";
+    job.execution_phase = "running";
+    job.current_stage = 1;
+    job.stages[1] = { ...job.stages[1]!, state: "running" };
+
+    const result = reduceChainJobFrame(emptyChainJobLive(), {
+      type: "snapshot",
+      job,
+    });
+
+    expect(result.progress).toEqual([
+      { type: "chain_start", stage_count: 2, estimated_total_frames: 194 },
+      { type: "stage_start", stage_idx: 1 },
+    ]);
+  });
+
+  it("replays finalization from the opening snapshot", () => {
+    const job = detail();
+    job.state = "running";
+    job.execution_phase = "finalizing";
+    job.current_stage = 1;
+    job.stages = job.stages.map((stage) => ({
+      ...stage,
+      state: "completed",
+    }));
+
+    const result = reduceChainJobFrame(emptyChainJobLive(), {
+      type: "snapshot",
+      job,
+    });
+
+    expect(result.progress).toEqual([
+      { type: "chain_start", stage_count: 2, estimated_total_frames: 194 },
+      { type: "stitching", total_frames: 194 },
+    ]);
+  });
+
   it("opens with chain_start built from the snapshot, not a synthesized frame", () => {
     const { progress } = run([{ type: "snapshot", job: detail() }]);
     expect(progress).toEqual([
