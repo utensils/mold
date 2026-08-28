@@ -5711,22 +5711,43 @@ struct Ref2VaReferenceRows {
     visual: u64,
     /// Conditioning latent rows the audio VAE produces for every soundtrack.
     audio: u64,
-    /// Merged Qwen vision pads every reference contributes to the conditioner
-    /// sequence — the part of `qwen_output_text_rows` that is not the prompt.
+    /// Pre-merge Qwen ViT patches every reference packs — the
+    /// `qwen_vision_rows` charge, on the 16-px grid the runtime's
+    /// `pixel_values` carries (four per packed row).
     qwen_vision: u64,
+    /// Merged Qwen vision pads every reference contributes to the conditioner
+    /// TEXT sequence — the part of `qwen_output_text_rows` that is not the
+    /// prompt, on the 32-px grid. Exactly a quarter of `qwen_vision`; kept
+    /// apart because the two ceilings they feed are different axes (#1418).
+    qwen_vision_pads: u64,
     /// The largest single normalized reference canvas, in pixels. The
     /// condition-VAE transient is a per-encode workspace, so the peak is the
     /// biggest one encoded, never their sum.
     largest_canvas_pixels: u64,
 }
 
-/// Merged Qwen vision pads for one prepared reference shape.
+/// Qwen temporal blocks one prepared reference shape occupies: an image is
+/// one block, a video one block per two 2 fps cursor frames, audio none.
+#[cfg(feature = "h3")]
+fn reference_qwen_blocks(shape: &contract::GenerationReferencePreparedShape) -> u64 {
+    if shape.normalized_width.is_none() || shape.normalized_height.is_none() {
+        return 0;
+    }
+    match shape.qwen_video_frames {
+        Some(frames) => u64::from(frames).div_ceil(2),
+        None => 1,
+    }
+}
+
+/// Pre-merge Qwen ViT patches for one prepared reference shape — the
+/// `qwen_vision_rows` charge.
 ///
-/// One packed row is a 32x32 cell for the visual VAE *and* one merged Qwen
-/// vision token for the conditioner (patch 16, spatial merge 2), which is why
-/// both counts read the same `(w / 32) * (h / 32)` grid. An image occupies one
-/// block; a video occupies one block per two 2 fps cursor frames; audio has no
-/// visual pads at all.
+/// The conditioner patchifies on a 16-px grid and only THEN merges 2x2 patches
+/// into one token of its text sequence, so the vision rows the runtime
+/// prepares (`pixel_values.dim(0)`) and compares against the frozen authority
+/// are four per packed row, never the merged pads
+/// [`reference_qwen_vision_pads`] counts. FL2VA's reviewed 4,032 at 1344x768
+/// is this grid; #1418 held every image reference by charging the other one.
 ///
 /// `ref2va_qwen_vision_rows_match_the_factory_charges` pins this against
 /// `expected_h3_factory_reference_charges`, the authority the frozen plan's
@@ -5736,11 +5757,21 @@ fn reference_qwen_vision_rows(shape: &contract::GenerationReferencePreparedShape
     let (Some(width), Some(height)) = (shape.normalized_width, shape.normalized_height) else {
         return 0;
     };
-    let rows_per_frame = u64::from(width / 32) * u64::from(height / 32);
-    match shape.qwen_video_frames {
-        Some(frames) => u64::from(frames).div_ceil(2) * rows_per_frame,
-        None => rows_per_frame,
-    }
+    reference_qwen_blocks(shape) * contract::qwen_vision_patch_rows_per_block(width, height)
+}
+
+/// Merged Qwen vision pads for one prepared reference shape — the part of the
+/// conditioner's TEXT sequence the reference occupies.
+///
+/// One packed row is a 32x32 cell for the visual VAE *and* one merged Qwen
+/// vision token for the conditioner (patch 16, spatial merge 2), which is why
+/// this count reads the same `(w / 32) * (h / 32)` grid as the condition rows.
+#[cfg(feature = "h3")]
+fn reference_qwen_vision_pads(shape: &contract::GenerationReferencePreparedShape) -> u64 {
+    let (Some(width), Some(height)) = (shape.normalized_width, shape.normalized_height) else {
+        return 0;
+    };
+    reference_qwen_blocks(shape) * contract::qwen_vision_pad_rows_per_block(width, height)
 }
 
 /// Derive one request's reference conditioning quantities.
@@ -5776,6 +5807,10 @@ fn ref2va_reference_rows(
             .qwen_vision
             .checked_add(reference_qwen_vision_rows(shape))
             .ok_or_else(|| anyhow!("public H3 Ref2VA conditioning rows overflow"))?;
+        rows.qwen_vision_pads = rows
+            .qwen_vision_pads
+            .checked_add(reference_qwen_vision_pads(shape))
+            .ok_or_else(|| anyhow!("public H3 Ref2VA conditioning rows overflow"))?;
         if let (Some(width), Some(height)) = (shape.normalized_width, shape.normalized_height) {
             rows.largest_canvas_pixels = rows
                 .largest_canvas_pixels
@@ -5801,8 +5836,10 @@ fn public_ref2va_runtime_envelope_for_shape(
     references: &Ref2VaReferenceRows,
 ) -> H3PrivateRuntimeEnvelopeRecord {
     let generated = compact_envelope_rows(canvas, frames);
+    // The text sequence carries the MERGED pads; the vision axis below carries
+    // the pre-merge patches the runtime prepares. They are different grids.
     let text = references
-        .qwen_vision
+        .qwen_vision_pads
         .saturating_add(REVIEWED_REF2VA_PROMPT_AND_LABEL_ROWS);
     // One audio ceiling covers both sides. A reference soundtrack and the
     // generated track are 32 kHz stereo latents over the same duration, and
@@ -5891,6 +5928,9 @@ fn public_ref2va_runtime_bounds_for_shape(
     };
     let request_pixels = u64::from(canvas.0) * u64::from(canvas.1);
     let measured_pixels = u64::from(MEASURED_CANVAS.0) * u64::from(MEASURED_CANVAS.1);
+    // Text rows plus pre-merge vision patches, the same composition as the
+    // observation's own `2,033 + 4,032` denominator — so an image reference
+    // is priced on the grid it was measured on (#1418).
     let qwen_rows = envelope
         .max_qwen_output_text_rows
         .saturating_add(envelope.max_qwen_vision_rows);
@@ -5971,10 +6011,12 @@ const CAPTURE_RUNTIME_PROFILE_DECISION: &str =
 #[cfg(feature = "h3-private-uat")]
 fn capture_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
     let public = public_style_generated_caps();
-    // One 2048-square still is 4,096 rows and 4,096 vision pads — the largest
-    // single reference the contract admits. Twelve of them is the ceiling the
-    // reference count itself imposes.
+    // One 2048-square still is 4,096 condition rows and 16,384 pre-merge Qwen
+    // vision patches (#1418) — the largest single reference the contract
+    // admits. Twelve of them is the ceiling the reference count itself
+    // imposes.
     let max_reference_rows = 4_096 * contract::MAX_REFERENCE_FILES as u64;
+    let max_reference_vision_rows = 16_384 * contract::MAX_REFERENCE_FILES as u64;
     H3PrivateRuntimeEnvelopeRecord {
         width: contract::DEFAULT_WIDTH,
         height: contract::DEFAULT_HEIGHT,
@@ -5986,7 +6028,7 @@ fn capture_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
         endpoint_count: 0,
         endpoint_anchor: "none".into(),
         max_qwen_output_text_rows: public.0,
-        max_qwen_vision_rows: max_reference_rows,
+        max_qwen_vision_rows: max_reference_vision_rows,
         max_condition_visual_rows: max_reference_rows,
         max_target_video_rows: public.1,
         max_target_audio_rows: public.2,
@@ -7688,7 +7730,8 @@ mod tests {
             contract::DEFAULT_COMPACT_FRAMES,
         )
         .unwrap();
-        let (mut visual, mut audio, mut qwen_vision) = (0_u64, 0_u64, 0_u64);
+        let (mut visual, mut audio, mut qwen_vision, mut qwen_vision_pads) =
+            (0_u64, 0_u64, 0_u64, 0_u64);
         for (index, shape) in shapes.iter().enumerate() {
             use crate::h3_factory::{H3FactoryReferenceInput, H3FactoryReferenceKind};
             let kind = match &references[index] {
@@ -7722,20 +7765,37 @@ mod tests {
                 },
             )
             .unwrap();
-            // The one authority: the derived pads must equal the factory's.
+            // The one authority: the derived patches must equal the factory's,
+            // and they are pre-merge ViT patches — four per merged pad.
             assert_eq!(
                 reference_qwen_vision_rows(shape),
                 charges.qwen_vision_rows,
                 "reference {}",
                 index + 1
             );
+            assert_eq!(
+                reference_qwen_vision_rows(shape),
+                4 * reference_qwen_vision_pads(shape),
+                "reference {}",
+                index + 1
+            );
             visual += charges.visual_rows;
             audio += charges.audio_rows;
             qwen_vision += charges.qwen_vision_rows;
+            qwen_vision_pads += reference_qwen_vision_pads(shape);
         }
         assert_eq!(rows.visual, visual);
         assert_eq!(rows.audio, audio);
         assert_eq!(rows.qwen_vision, qwen_vision);
+        assert_eq!(rows.qwen_vision_pads, qwen_vision_pads);
+        assert_eq!(qwen_vision, 4 * qwen_vision_pads);
+        // The vision ceiling is the patch count; the text ceiling budgets the
+        // merged pads plus the prompt-and-label allowance — two grids.
+        assert_eq!(envelope.max_qwen_vision_rows, qwen_vision);
+        assert_eq!(
+            envelope.max_qwen_output_text_rows,
+            qwen_vision_pads + REVIEWED_REF2VA_PROMPT_AND_LABEL_ROWS
+        );
 
         // A 1920x1080 still alone packs more than the 4,096 rows a fixed
         // per-reference ceiling would have allowed, which is why the caps are
@@ -7751,15 +7811,16 @@ mod tests {
         let generated_audio =
             contract::target_audio_rows(contract::DEFAULT_COMPACT_FRAMES).unwrap();
         let packed = H3FactoryPreparedRowsInput {
-            // The presentation is the pads plus labels plus the prompt; the
-            // cap budgets `REVIEWED_REF2VA_PROMPT_AND_LABEL_ROWS` above them.
-            qwen_output_text_rows: qwen_vision + 512,
+            // The presentation is the merged pads plus labels plus the prompt;
+            // the cap budgets `REVIEWED_REF2VA_PROMPT_AND_LABEL_ROWS` above
+            // them. The vision axis is the pre-merge patch count.
+            qwen_output_text_rows: qwen_vision_pads + 512,
             qwen_vision_rows: qwen_vision,
             condition_visual_rows: visual,
             condition_audio_rows: audio,
             target_video_rows: video,
             target_audio_rows: generated_audio,
-            total_packed_rows: qwen_vision + 512 + visual + audio + video + generated_audio,
+            total_packed_rows: qwen_vision_pads + 512 + visual + audio + video + generated_audio,
         };
         assert!(
             envelope.row_cap_mismatches(&packed).is_empty(),

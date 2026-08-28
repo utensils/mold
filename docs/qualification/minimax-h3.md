@@ -794,7 +794,8 @@ artifact pass and so overstates the anonymous working set.
 
 | Case | References (in order) | Steps | Wall | VRAM peak | Result |
 | --- | --- | --- | --- | --- | --- |
-| a | image | 21 | 124 s | — | **Refused at admission**: 34,330,890,090 host bytes needed against a 34,294,289,818 byte sample |
+| a | image | 21 | 124 s | — | **Refused at admission** (#825, pre-#1418 pad-grid charge): 34,330,890,090 host bytes needed against a 34,294,289,818 byte sample |
+| a′ | image | 4 | 2,708 s | 9,104 MiB | H.264 768x768 x124 + AAC (#1418, 2026-08-27: base tag, seed 770021, one 768x768 PNG normalized to 2048x2048) |
 | b | video (with soundtrack) | 8 | 1,604 s | 15,024 MiB | H.264 1344x768 x124 + AAC |
 | c | image, audio | 8 | 3,100 s | 12,594 MiB | H.264 1344x768 x124 + AAC |
 | g | video (with soundtrack), audio, audio | 8 | 1,575 s | 15,138 MiB | H.264 + AAC, seed 825825 |
@@ -819,6 +820,79 @@ reference canvas instead and packs one temporal block per two 2 fps cursor
 frames, so a 2.5 s clip is 12,096 tokens across three blocks. That ratio is the
 whole difference between the rows.
 
+Those 16,384 tokens are PRE-MERGE ViT patches on the conditioner's 16-px grid,
+and until #1418 admission counted the same reference on the 32-px merged-pad
+grid — 4,096 — while the runtime prepared 16,384 (`pixel_values.dim(0)`) and
+`validate_prepared_authority` refused the frozen authority: every image
+reference that reached execution was held with `prepared rows (4131 text,
+16384 vision) differ from frozen admission (4131, 4096)`. FL2VA's evidence had
+always read the count off its prepared conditioner (its reviewed 4,032 at
+1344x768 IS the patch grid), and the observed Qwen activation workspace above
+was measured over `2,033 text + 4,032 vision` rows on that same grid, so
+`h3_reference_charges` and the Ref2VA envelope now charge patches
+(`mold_core::minimax_h3::qwen_vision_patch_rows_per_block`, four per packed
+row) and the memory grant scales by text + patches exactly as the observation
+was composed. The merged pads survive as the TEXT-side count only: they are the
+part of the conditioner sequence the reference occupies beside the prompt and
+its labels. The host-headroom figure for one 2048-square still therefore rises
+by the ~12,288 rows the old charge omitted (see the `a` row below).
+
+The first render past that hold then failed 40 minutes later, after the whole
+conditioner encode, on `validate_text_vision_rows`: `conditioner returned 4098
+vision rows for 4096 presentation pads`. The conditioner's tags are the
+presentation builder's, and the builder tags `pads + 2` per vision span because
+upstream does (ComfyUI `comfy/text_encoders/minimax.py:75-82` widens every
+vision span's video-modality tag by one row on each side; `add_vision` at
+`:163-167` wraps every image and every 2-frame video block in its own
+`<|vision_start|>` / `<|vision_end|>` pair). The check compared against the
+bare pad count, so every visual reference — video too — was refused at that
+point; it now expects the markers.
+
+The second render then failed at the same depth on `validate_visual_condition`:
+`visual reference 1 encoded as F32 [1, 24, 1, 128, 128], expected F32 [1, 24,
+1, 128, 128] on the frozen device`. Same dtype, same shape — the disagreement
+was the device. The visual VAE's official seed-42 condition sample round-trips
+through FP16 ON THE HOST (`mold-candle` `visual_condition.rs`,
+`official_seed42_sample`), so the encoder returns a CPU tensor on every route;
+FL2VA's pipeline moves that onto the frozen device before use and never checks
+the encoder's placement, while Ref2VA's check demanded the device first.
+Ref2VA now moves the condition exactly as FL2VA does and validates the move.
+
+The third render decoded, muxed, and reached "Completing MiniMax H3
+generation" — and was then refused by the runtime-bound observer's `finish()`:
+`private H3 phase VisualConditionEncode has no attributed workspace peak`.
+The observer captured only FL2VA's endpoint-encode phase, while Ref2VA encodes
+its references under `ReferenceVisualEncode`, so no Ref2VA print could ever
+publish. The condition-VAE workspace observation now comes from whichever
+encoder phase ran. The fourth render completed the same way and was refused
+by the observer's zero-byte guard — `runtime-bound observation contains a zero
+byte count`, which named no field — because Ref2VA's staging never reported
+its encoded-video and thumbnail capacities the way FL2VA's `run` does
+(`observe_staged_host_bytes`); it does now, and the guard names the field.
+Five defects sat in series behind the #1418 hold, each reachable only after
+the previous one was fixed and each ~45 minutes deep on this host; no image
+reference had ever rendered through the public route.
+
+**Row `a′` is the first public-route image-reference render, and it is the
+measured image row this document lacked.** hal9000, `mold-r5` built from this
+branch, run as the `mold` user against the production home with the ZFS ARC
+capped at 4 GiB (the artifact hash pass otherwise parks ~16 GB in ARC that
+`MemAvailable` does not count as reclaimable, and the 32.8 GB charge was
+refused against a 26.2 GB sample). Frozen rows: 4,128 text, 16,384 vision
+(patches), 4,096 condition, 29,950 packed. Admission charged
+32,775,178,178 host bytes. Phases: open checkpoints 69.5 s, Qwen conditioner
+load 44.3 s, **Qwen encode 2,405.6 s** (the CPU-placed conditioner over one
+2048-square still — #1423), VAE load 27.9 s, reference visual encode 5.7 s,
+denoise 123.8 s at 4 steps, video decode 23.6 s, H.264 encode 19.9 s. VRAM
+high water 9,104 MiB (1 Hz `nvidia-smi`); process anonymous RSS peaked at
+51.1 GB, above the 32.8 GB host charge — the DiT phases, not the conditioner,
+own that excess (the conditioner-only rounds peaked at 29.6 GB) and it is an
+open accounting question folded into #1423. The observer's own record for the
+render: Qwen activation workspace 36,013,621,248 B (the CPU route's `VmHWM`
+growth, file-backed pages included), condition-VAE workspace 404,685,888 B
+for the single 2048-square still, attention 4,658,918,392 B, FFN
+5,794,354,680 B, decoder 764,965,012 B, audio decode 204,867,120 B.
+
 **The host, not the card, is the binding constraint.** The compact stack places
 its Qwen3-VL conditioner on the CPU for a CUDA route, so the host demand is its
 15.687 GB of parameters plus a request-derived activation workspace that scales
@@ -827,6 +901,10 @@ with the conditioner sequence. One 2048-square image reference asks for
 row. A shortfall is refused with both numbers before the artifact pass, which
 is the behaviour to expect rather than an OOM — case `a` is that refusal, 36 MB
 short on a 62 GB host, and it is recorded as a result rather than worked around.
+(Row `a′` below, after #1418, is the same request admitted and rendered once
+the host headroom was real; the charge that admitted it was 32.8 GB on the
+patch grid, lower than the 34.3 GB the pad-grid build asked for because the
+#1289-era host corrections landed in between.)
 
 Not yet measured: an image + video + audio set (case `d`/`e` of the planned
 matrix) estimates ~46 GB of host headroom and cannot run on a 62 GB host at

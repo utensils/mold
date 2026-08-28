@@ -232,6 +232,43 @@ pub const DEFAULT_HEIGHT: u32 = 768;
 pub const VIDEO_ROW_STRIDE: u32 = 32;
 const _: () = assert!(VIDEO_ROW_STRIDE == DIMENSION_ALIGNMENT);
 
+/// The Qwen3-VL conditioner's vision patch, in pixels, and the spatial merge
+/// that folds a 2x2 block of those patches into ONE token of its language
+/// sequence.
+///
+/// Two row counts follow from this pair, and they are named apart on purpose:
+///
+/// * [`qwen_vision_patch_rows_per_block`] — pre-merge ViT patches on the
+///   16-px grid. This is what the processor's `pixel_values.dim(0)` counts,
+///   what the runtime compares its frozen admission against, and what
+///   `qwen_vision_rows` means on every H3 authority: FL2VA's reviewed 4,032 at
+///   1344x768 is this count, and the observed Qwen activation workspace was
+///   measured over it.
+/// * [`qwen_vision_pad_rows_per_block`] — merged pads on the 32-px grid, the
+///   part of the conditioner's TEXT sequence a visual occupies beside the
+///   prompt and its labels. One pad is one packed video row, which is why
+///   both read [`VIDEO_ROW_STRIDE`].
+///
+/// Counting the first on the second's grid charged a 2048-square image
+/// reference 4,096 vision rows at admission while the runtime prepared
+/// 16,384, and held every Ref2VA image reference at execution (#1418).
+pub const QWEN_VISION_PATCH_PIXELS: u32 = 16;
+pub const QWEN_VISION_SPATIAL_MERGE: u32 = 2;
+const _: () = assert!(QWEN_VISION_PATCH_PIXELS * QWEN_VISION_SPATIAL_MERGE == VIDEO_ROW_STRIDE);
+
+/// Merged Qwen vision pads one normalized visual canvas occupies in the
+/// conditioner's text sequence per temporal block.
+pub const fn qwen_vision_pad_rows_per_block(width: u32, height: u32) -> u64 {
+    (width / VIDEO_ROW_STRIDE) as u64 * (height / VIDEO_ROW_STRIDE) as u64
+}
+
+/// Pre-merge Qwen ViT patches one normalized visual canvas packs per temporal
+/// block — the `qwen_vision_rows` charge. Exactly
+/// `QWEN_VISION_SPATIAL_MERGE^2` times the pads for every 32-aligned canvas.
+pub const fn qwen_vision_patch_rows_per_block(width: u32, height: u32) -> u64 {
+    (width / QWEN_VISION_PATCH_PIXELS) as u64 * (height / QWEN_VISION_PATCH_PIXELS) as u64
+}
+
 /// The pixel ceiling a compact canvas must stay inside.
 ///
 /// This is the qualifying campaign's own canvas area (1344x768). It is a real
@@ -4331,6 +4368,40 @@ mod tests {
                         "{width}x{height}"
                     );
                 }
+                height += VIDEO_ROW_STRIDE;
+            }
+            width += VIDEO_ROW_STRIDE;
+        }
+    }
+
+    /// `qwen_vision_rows` is the pre-merge patch count on the 16-px grid, and
+    /// it is exactly four merged pads on every 32-aligned canvas. FL2VA's
+    /// reviewed 4,032 vision rows and 1,008 pads at 1344x768 are these two
+    /// functions, and a 2048-square image reference is 16,384 patches — the
+    /// count the runtime prepares, which #1418's admission charged as 4,096.
+    #[test]
+    fn qwen_vision_patch_rows_are_four_per_merged_pad() {
+        assert_eq!(
+            qwen_vision_pad_rows_per_block(DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            1_008
+        );
+        assert_eq!(
+            qwen_vision_patch_rows_per_block(DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            4_032
+        );
+        assert_eq!(qwen_vision_pad_rows_per_block(2_048, 2_048), 4_096);
+        assert_eq!(qwen_vision_patch_rows_per_block(2_048, 2_048), 16_384);
+        let per_pad = u64::from(QWEN_VISION_SPATIAL_MERGE * QWEN_VISION_SPATIAL_MERGE);
+        assert_eq!(per_pad, 4);
+        let mut width = VIDEO_ROW_STRIDE;
+        while width <= 4_096 {
+            let mut height = VIDEO_ROW_STRIDE;
+            while height <= 4_096 {
+                assert_eq!(
+                    qwen_vision_patch_rows_per_block(width, height),
+                    per_pad * qwen_vision_pad_rows_per_block(width, height),
+                    "{width}x{height}"
+                );
                 height += VIDEO_ROW_STRIDE;
             }
             width += VIDEO_ROW_STRIDE;

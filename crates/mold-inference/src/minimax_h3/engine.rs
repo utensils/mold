@@ -2386,9 +2386,13 @@ mod tests {
             self.trace.lock().unwrap().push("encode-text");
             assert!(!prompt.is_empty());
             assert_eq!(references.len(), 1);
+            // Two merged pads plus the two flanking markers, which are vision
+            // rows too (`PresentationBuilder::vision`).
             let tags = vec![
                 H3ModalityTag::Text,
                 H3ModalityTag::Text,
+                H3ModalityTag::Vision,
+                H3ModalityTag::Vision,
                 H3ModalityTag::Vision,
                 H3ModalityTag::Vision,
             ];
@@ -2597,18 +2601,25 @@ mod tests {
             assert!(!prompt.is_empty());
             let mut tags = vec![H3ModalityTag::Text];
             for reference in references {
-                let vision = match &reference.presentation.kind {
-                    RefPresentationKind::Audio => 0,
-                    RefPresentationKind::Image { vision_tokens } => *vision_tokens,
-                    RefPresentationKind::Video { blocks } => {
-                        blocks.iter().map(|block| block.vision_tokens).sum()
-                    }
+                // The trace records the presentation's merged pads; the tags
+                // add the two flanking markers of every span, exactly as
+                // `PresentationBuilder::vision` tags them.
+                let (vision, spans) = match &reference.presentation.kind {
+                    RefPresentationKind::Audio => (0, 0),
+                    RefPresentationKind::Image { vision_tokens } => (*vision_tokens, 1),
+                    RefPresentationKind::Video { blocks } => (
+                        blocks.iter().map(|block| block.vision_tokens).sum(),
+                        blocks.len(),
+                    ),
                 };
                 self.trace
                     .lock()
                     .unwrap()
                     .push(format!("vision:{}:{vision}", reference.index));
-                tags.extend(std::iter::repeat_n(H3ModalityTag::Vision, vision));
+                tags.extend(std::iter::repeat_n(
+                    H3ModalityTag::Vision,
+                    vision + 2 * spans,
+                ));
             }
             tags.push(H3ModalityTag::Text);
             Ok(H3TextConditioning {
