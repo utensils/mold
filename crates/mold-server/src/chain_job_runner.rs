@@ -3495,6 +3495,7 @@ pub(crate) fn build_stage_generate_request(
     idx: usize,
 ) -> GenerateRequest {
     GenerateRequest {
+        video_only: None,
         collection: None,
         tags: None,
         title: None,
@@ -4344,6 +4345,7 @@ mod tests {
             audio: None,
             hdr_frames_written: None,
             generation_time_ms: 10,
+            attention_path: None,
         }
     }
 

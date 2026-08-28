@@ -104,6 +104,8 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         .unwrap_or_else(|| "unknown".to_string());
 
     OutputMetadata {
+        video_only: None,
+        attention_path: None,
         collection: None,
         tags: None,
         title: None,

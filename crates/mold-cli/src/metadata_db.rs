@@ -192,6 +192,8 @@ mod tests {
     #[test]
     fn local_video_metadata_uses_the_runtime_resolved_pipeline() {
         let video = mold_core::VideoData {
+            video_only: None,
+            attention_path: None,
             data: Vec::new(),
             format: OutputFormat::Mp4,
             width: 1216,

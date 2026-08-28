@@ -140,6 +140,8 @@ export interface OutputMetadata {
   upscale_model?: string | null;
   gif_preview?: boolean | null;
   enable_audio?: boolean | null;
+  /** LTX-2 video-only opt-in as recorded at creation (#1037). */
+  video_only?: boolean | null;
   audio_file_path?: string | null;
   source_video_path?: string | null;
   extend_video_path?: string | null;
@@ -149,6 +151,10 @@ export interface OutputMetadata {
   duration_prediction_requested?: boolean | null;
   /** LTX-2 source-image preprocessing actually applied (newer servers). */
   source_preprocessing?: Ltx2SourcePreprocessing | null;
+  /** LTX-2 attention arithmetic the print was rendered with (newer servers):
+   * `ltx2-bf16-math` | `ltx2-bf16-flash` | `ltx2-f32-chunked` |
+   * `ltx2-metal-sdpa`. Output-changing, so it is recorded, never inferred. */
+  attention_path?: string | null;
   ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;
@@ -407,6 +413,8 @@ export interface GenerateRequestWire {
    * `false` skips audio decode; omit for "no preference" (server defaults
    * to on for MP4 output). The server rejects `true` for non-AV families. */
   enable_audio?: boolean | null;
+  /** LTX-2 video-only opt-in (#1037): true skips the audio branch. */
+  video_only?: boolean | null;
   audio_file?: string | null;
   audio_file_path?: string | null;
   source_video?: string | null;
@@ -1156,6 +1164,10 @@ export interface GenerateFormState {
    * selected model's family supports audio (LTX-2 / LTX-2.3); otherwise
    * forced to `null` so the wire stays clean. */
   enableAudio: boolean | null;
+  /** LTX-2 video-only opt-in (#1037): skips the audio branch structurally.
+   * Output-changing, never a default; sent as `video_only: true` only when
+   * conflict-free (see `@studio/lib/videoOnly`). */
+  videoOnly?: boolean;
   /** MiniMax H3 first/last endpoints or ordered heterogeneous references.
    * Kept separate from legacy edit/source fields so no surface can flatten
    * Ref2VA into image-only editing. */

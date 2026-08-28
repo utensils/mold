@@ -42,6 +42,7 @@ use super::model::{
 };
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use super::preprocess;
+use super::provenance;
 use super::sampler::sampler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
@@ -101,6 +102,10 @@ pub struct NativeRenderedVideo {
     pub has_audio: bool,
     pub audio_sample_rate: Option<u32>,
     pub audio_channels: Option<u32>,
+    /// Which attention arithmetic the transformer ran — one of
+    /// `provenance::ATTENTION_PATHS`. `None` only for the synthetic
+    /// placeholder path, which runs no transformer at all.
+    pub attention_path: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -936,16 +941,23 @@ impl Ltx2RuntimeSession {
         // silent exports. Keep the internal audio branch active whenever the
         // prompt encoder emitted audio conditioning so the denoiser stays on the
         // same multimodal path as upstream; export semantics remain silent
-        // unless the request explicitly wants audio output.
+        // unless the request explicitly wants audio output. An explicit
+        // `video_only` request (#1037) is the one structural off switch —
+        // the graph's `run_audio_branch` is false only for it.
         let prompt_has_audio_conditioning = prompt.conditional.audio_encoding.is_some()
             || prompt.unconditional.audio_encoding.is_some();
-        let wants_audio_latents = if ltx_debug_disable_audio_branch_enabled() {
+        let wants_audio_latents = if !plan.execution_graph.run_audio_branch {
             false
         } else {
             plan.execution_graph.wants_audio_output
                 || plan.execution_graph.uses_audio_conditioning
                 || prompt_has_audio_conditioning
         };
+        tracing::info!(
+            target: provenance::LOG_TARGET,
+            "{}",
+            provenance::audio_branch_line(wants_audio_latents)
+        );
         let (audio_latent_shape, audio_positions, cross_modal_temporal_positions) =
             if wants_audio_latents {
                 let audio_shape = AudioLatentShape::from_video_pixel_shape(
@@ -1049,9 +1061,20 @@ impl Ltx2RuntimeSession {
             .device
             .as_ref()
             .context("native LTX-2 compute device was not initialized")?;
-        if let Some(rendered) =
+        if let Some(mut rendered) =
             self.try_render_real_video(plan, prepared, device, progress, cancellation)?
         {
+            let attention_path = ltx2_attention_path(
+                device,
+                compute_dtype(device),
+                plan.preset.transformer.attention_head_dim,
+            );
+            rendered.attention_path = Some(attention_path);
+            tracing::info!(
+                target: provenance::LOG_TARGET,
+                "{}",
+                provenance::attention_path_line(attention_path)
+            );
             if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
                 eprintln!(
                     "[ltx2-debug] render_native_video using real path pipeline={:?}",
@@ -1114,6 +1137,7 @@ impl Ltx2RuntimeSession {
         }
 
         Ok(NativeRenderedVideo {
+            attention_path: None,
             frames,
             hdr_frames_written: None,
             audio_track: None,
@@ -1205,6 +1229,39 @@ impl Ltx2RuntimeSession {
         // reported it as a successful save while hiding the corruption.
         render.map(Some)
     }
+}
+
+/// The attention provenance value for a real render on `device`.
+///
+/// Mirrors the routing `LtxAttention::forward` performs — Metal takes the
+/// fused SDPA, CUDA takes `crate::attention` unless `MOLD_LTX2_ATTN_F32=1`
+/// pins the F32 tiles, and everything else is the F32 chunked path — and asks
+/// the dispatcher which backend it would actually run at the video head dim,
+/// so a `MOLD_ATTN=flash` request on a build without the kernel, or at a head
+/// dim the kernel refuses, is recorded as the math it was.
+fn ltx2_attention_path(
+    device: &candle_core::Device,
+    dtype: DType,
+    head_dim: usize,
+) -> &'static str {
+    if device.is_metal() {
+        return provenance::ATTENTION_PATH_METAL_SDPA;
+    }
+    if !device.is_cuda() || super::model::video_transformer::ltx2_attention_f32_forced() {
+        return provenance::ATTENTION_PATH_F32_CHUNKED;
+    }
+    match crate::attention::effective_backend(device, dtype, head_dim) {
+        crate::attention::AttentionBackend::Flash => provenance::ATTENTION_PATH_BF16_FLASH,
+        crate::attention::AttentionBackend::Math => provenance::ATTENTION_PATH_BF16_MATH,
+    }
+}
+
+fn log_ltx2_residency_mode(mode: &str, resident: usize, streamed: usize) {
+    tracing::info!(
+        target: provenance::LOG_TARGET,
+        "{}",
+        provenance::residency_mode_line(mode, resident, streamed)
+    );
 }
 
 fn move_prompt_encoding_to_device(
@@ -2723,10 +2780,12 @@ fn maybe_apply_temporal_upsampler(
     latents: &Tensor,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Tensor> {
     if plan.temporal_upscale.is_none() {
         return Ok(latents.clone());
     }
+    let upscale_start = Instant::now();
     let temporal_upsampler_path = plan
         .temporal_upsampler_path
         .as_ref()
@@ -2740,6 +2799,12 @@ fn maybe_apply_temporal_upsampler(
     if device.is_cuda() {
         device.synchronize()?;
     }
+    emit_phase_done(
+        progress,
+        ProgressPhase::Upscale,
+        "Temporal latent upscale",
+        upscale_start.elapsed(),
+    );
     Ok(upsampled)
 }
 
@@ -3053,6 +3118,12 @@ fn render_real_distilled_av(
     drop(upsampler);
     device.synchronize()?;
     log_timing("distilled.stage1.spatial_upsample", stage1_upsample_start);
+    emit_phase_done(
+        progress,
+        ProgressPhase::Upscale,
+        "Spatial latent upscale",
+        stage1_upsample_start.elapsed(),
+    );
     if debug_enabled {
         log_debug_vram("after_stage1_upsample");
     }
@@ -3242,7 +3313,7 @@ fn render_real_distilled_av(
     if debug_enabled {
         log_debug_vram("after_stage2_transformer_drop");
     }
-    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
+    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype, progress)?;
     if debug_enabled && plan.temporal_upscale.is_some() {
         log_debug_vram("after_temporal_upsample");
     }
@@ -3275,7 +3346,8 @@ fn render_real_distilled_av(
     let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_render_start = Instant::now();
-    let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
+    let audio_track =
+        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype, progress)?;
     log_timing("distilled.render_audio", audio_render_start);
     drop(latents);
     drop(audio_latents);
@@ -3301,6 +3373,7 @@ fn render_real_distilled_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -3995,6 +4068,12 @@ fn render_real_two_stage_av(
     drop(upsampler);
     device.synchronize()?;
     log_timing("two_stage.stage1.spatial_upsample", stage1_upsample_start);
+    emit_phase_done(
+        progress,
+        ProgressPhase::Upscale,
+        "Spatial latent upscale",
+        stage1_upsample_start.elapsed(),
+    );
 
     let requested_pixel_shape = VideoPixelShape {
         batch: 1,
@@ -4221,7 +4300,7 @@ fn render_real_two_stage_av(
     log_timing("two_stage.stage2.denoise", stage2_denoise_start);
     drop(stage2_transformer);
     device.synchronize()?;
-    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
+    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype, progress)?;
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     let decoded = decode_video_frames_with_telemetry(
@@ -4246,9 +4325,15 @@ fn render_real_two_stage_av(
         // that went in. Upstream decodes `s1_audio_latent` (`lipdub.py:293`);
         // decoding stage 2's would round-trip the same samples through an
         // extra blend for nothing.
-        maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?
+        maybe_render_native_audio_track(
+            plan,
+            stage1_audio_latents.as_ref(),
+            device,
+            dtype,
+            progress,
+        )?
     } else {
-        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?
+        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype, progress)?
     };
     log_timing("two_stage.render_audio", audio_render_start);
     drop(latents);
@@ -4280,6 +4365,7 @@ fn render_real_two_stage_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4460,8 +4546,13 @@ fn render_real_one_stage_av(
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
-    let audio_track =
-        maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?;
+    let audio_track = maybe_render_native_audio_track(
+        plan,
+        stage1_audio_latents.as_ref(),
+        device,
+        dtype,
+        progress,
+    )?;
     drop(latents);
     drop(stage1_audio_latents);
     drop(stage1_audio_noise);
@@ -4479,6 +4570,7 @@ fn render_real_one_stage_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4656,7 +4748,8 @@ fn render_real_retake_av(
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
-    let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
+    let audio_track =
+        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype, progress)?;
     drop(latents);
     drop(audio_latents);
     drop(stage1_audio_noise);
@@ -4676,6 +4769,7 @@ fn render_real_retake_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -5819,7 +5913,7 @@ pub(crate) fn render_real_t2a_audio(
         log_tensor_stats("final_audio_latents", &audio_latents)?;
     }
 
-    let track = render_native_audio_track(plan, &audio_latents, device, dtype)?.context(
+    let track = render_native_audio_track(plan, &audio_latents, device, dtype, progress)?.context(
         "LTX-2 text-to-audio produced an empty waveform; the checkpoint's vocoder returned no \
          samples",
     )?;
@@ -5997,6 +6091,7 @@ fn maybe_render_native_audio_track(
     audio_latents: Option<&Tensor>,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Option<NativeAudioTrack>> {
     if !plan.execution_graph.wants_audio_output {
         return Ok(None);
@@ -6004,7 +6099,7 @@ fn maybe_render_native_audio_track(
     let audio_latents = audio_latents.context(
         "native LTX-2 audio output requested but the denoiser produced no audio latents",
     )?;
-    render_native_audio_track(plan, audio_latents, device, dtype)
+    render_native_audio_track(plan, audio_latents, device, dtype, progress)
 }
 
 /// Audio VAE → vocoder → interleaved f32 samples. Shared by the joint AV
@@ -6015,7 +6110,9 @@ fn render_native_audio_track(
     audio_latents: &Tensor,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Option<NativeAudioTrack>> {
+    let decode_start = Instant::now();
     let audio_checkpoint = plan
         .audio_components_path
         .as_deref()
@@ -6036,7 +6133,16 @@ fn render_native_audio_track(
     if device.is_cuda() {
         device.synchronize()?;
     }
-    waveform_to_audio_track(&waveform, output_sample_rate)
+    let track = waveform_to_audio_track(&waveform, output_sample_rate)?;
+    if track.is_some() {
+        emit_phase_done(
+            progress,
+            ProgressPhase::AudioDecode,
+            "Decoding audio track",
+            decode_start.elapsed(),
+        );
+    }
+    Ok(track)
 }
 
 /// Resize `tail_rgb_frames` to the current stage's `pixel_shape` so the
@@ -7014,6 +7120,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
         0,
     ) == Ltx2TransformerResidencyMode::Eager
     {
+        log_ltx2_residency_mode(provenance::RESIDENCY_MODE_EAGER, config.num_layers, 0);
         Ok(Ltx2AvTransformer3DModel::new(&config, vb, lora_registry)?)
     } else if device.is_cuda() && !force_streaming {
         let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
@@ -7068,7 +7175,17 @@ fn load_ltx2_av_transformer_with_loras_inner(
                         lora_registry.clone(),
                         residency_plan.clone(),
                     ) {
-                        Ok(transformer) => break Ok(transformer),
+                        Ok(transformer) => {
+                            // Logged from the plan that actually allocated,
+                            // after every demotion rung, so the line names
+                            // the split that renders.
+                            log_ltx2_residency_mode(
+                                provenance::RESIDENCY_MODE_ADAPTIVE,
+                                residency_plan.resident_count(),
+                                residency_plan.streamed_count(),
+                            );
+                            break Ok(transformer);
+                        }
                         Err(err)
                             if device.is_cuda()
                                 && residency_plan.resident_count() > 0
@@ -7091,13 +7208,17 @@ fn load_ltx2_av_transformer_with_loras_inner(
                     }
                 }
             }
-            Ok(_) | Err(_) => Ok(Ltx2AvTransformer3DModel::new_streaming(
-                &config,
-                vb,
-                lora_registry,
-            )?),
+            Ok(_) | Err(_) => {
+                log_ltx2_residency_mode(provenance::RESIDENCY_MODE_STREAMING, 0, config.num_layers);
+                Ok(Ltx2AvTransformer3DModel::new_streaming(
+                    &config,
+                    vb,
+                    lora_registry,
+                )?)
+            }
         }
     } else {
+        log_ltx2_residency_mode(provenance::RESIDENCY_MODE_STREAMING, 0, config.num_layers);
         Ok(Ltx2AvTransformer3DModel::new_streaming(
             &config,
             vb,
@@ -7114,7 +7235,7 @@ fn emit_info(progress: Option<&ProgressCallback>, message: String) {
     }
 }
 
-fn emit_phase_done(
+pub(crate) fn emit_phase_done(
     progress: Option<&ProgressCallback>,
     phase: ProgressPhase,
     name: &str,
@@ -7960,10 +8081,6 @@ fn ltx_debug_alt_prompt() -> Option<String> {
         .filter(|prompt| !prompt.is_empty())
 }
 
-fn ltx_debug_disable_audio_branch_enabled() -> bool {
-    crate::runtime_env::value("MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH").is_some()
-}
-
 fn ltx_debug_disable_cross_attention_adaln_enabled() -> bool {
     crate::runtime_env::value("MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN").is_some()
 }
@@ -8510,6 +8627,7 @@ mod tests {
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -9597,16 +9715,76 @@ mod tests {
             !events.iter().any(|event| matches!(
                 event,
                 ProgressEvent::PhaseDone {
-                    phase: ProgressPhase::Vae,
+                    phase: ProgressPhase::Vae
+                        | ProgressPhase::Upscale
+                        | ProgressPhase::AudioDecode
+                        | ProgressPhase::Mux,
                     ..
                 }
             )),
-            "placeholder rendering must not invent a VAE timing sample"
+            "placeholder rendering must not invent decode, upscale, audio, or mux timings"
         );
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
         assert!(rendered.has_audio);
         assert_eq!(rendered.audio_sample_rate, Some(48_000));
         assert_eq!(rendered.audio_channels, Some(2));
+    }
+
+    /// The stamp is the device's route, narrowed by the dispatcher's own
+    /// answer — never a `cfg!` guess. CPU is the F32 tier on every build; a
+    /// CUDA device reports the math dispatcher under the default policy; and
+    /// the synthetic placeholder path, which runs no transformer, stamps
+    /// nothing rather than inventing a route.
+    #[test]
+    fn attention_path_follows_the_device_and_the_effective_backend() {
+        use super::provenance;
+        assert_eq!(
+            super::ltx2_attention_path(&candle_core::Device::Cpu, DType::F32, 128),
+            provenance::ATTENTION_PATH_F32_CHUNKED
+        );
+        #[cfg(feature = "cuda")]
+        if let Ok(device) = candle_core::Device::new_cuda(0) {
+            let expected = if super::super::model::video_transformer::ltx2_attention_f32_forced() {
+                provenance::ATTENTION_PATH_F32_CHUNKED
+            } else if crate::attention::effective_backend(&device, DType::BF16, 128)
+                == crate::attention::AttentionBackend::Flash
+            {
+                provenance::ATTENTION_PATH_BF16_FLASH
+            } else {
+                provenance::ATTENTION_PATH_BF16_MATH
+            };
+            assert_eq!(
+                super::ltx2_attention_path(&device, DType::BF16, 128),
+                expected
+            );
+            // A head dim the kernel refuses can only ever be the math path.
+            assert_ne!(
+                super::ltx2_attention_path(&device, DType::BF16, 100),
+                provenance::ATTENTION_PATH_BF16_FLASH
+            );
+        }
+        #[cfg(feature = "metal")]
+        if let Ok(device) = candle_core::Device::new_metal(0) {
+            assert_eq!(
+                super::ltx2_attention_path(&device, DType::BF16, 128),
+                provenance::ATTENTION_PATH_METAL_SDPA
+            );
+        }
+
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+        let rendered = session
+            .render_native_video(&plan, &prepared, None, None)
+            .unwrap();
+        assert!(
+            rendered.attention_path.is_none(),
+            "placeholder rendering must not invent an attention path"
+        );
     }
 
     #[test]
@@ -10745,12 +10923,16 @@ mod tests {
             super::ltx2_video_activation_budget(stage_shape(&plan, 1024, 1024, frames), None)
         };
 
-        // 1 pixel frame → 1 latent frame; 9 → 2; 97 → 13.
-        let one_latent_frame = budget(9) - budget(1);
+        // 9 pixel frames → 2 latent frames; 17 → 3; 97 → 13. The spans are
+        // measured from 2 latent frames up because the attention-tile term
+        // (#735) is deliberately piecewise: at one latent frame (1,024
+        // tokens) the dispatcher takes the whole score matrix, past that it
+        // chunks the query axis, so only the chunked regime is linear.
+        let one_latent_frame = budget(17) - budget(9);
         assert!(one_latent_frame > 0);
         assert_eq!(
-            budget(97) - budget(1),
-            one_latent_frame * 12,
+            budget(97) - budget(9),
+            one_latent_frame * 11,
             "97 pixel frames produce 13 simultaneously live latent frames"
         );
     }
@@ -12104,9 +12286,9 @@ mod tests {
     fn lip_dub_exports_the_stage_one_audio_not_the_frozen_stage_two_copy() {
         let render = runtime_function_source("fn render_real_two_stage_av(");
         assert!(render.contains("} else if stage2_audio_is_frozen {"));
-        assert!(render.contains(
-            "maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?"
-        ));
+        // rustfmt wraps the widened call, so the pin is the argument that
+        // distinguishes the frozen arm: stage 1's latents, not stage 2's.
+        assert!(render.contains("stage1_audio_latents.as_ref(),"));
     }
 
     /// The deviation that is easiest to miss because generic IC-LoRA does the
@@ -13242,6 +13424,47 @@ mod tests {
             runtime_function_source("fn log_ltx2_phase_vram_result(")
                 .contains("ltx2_residency_summary("),
             "the OOM branch must attach the residency plan"
+        );
+    }
+
+    /// #1398's learner coverage: the latent upsamplers, the audio decode,
+    /// and the container mux each report their typed phase, so
+    /// `ewma_upscale_ms` / `ewma_audio_decode_ms` / `ewma_mux_ms` stop being
+    /// dead columns for this family. `ModelLoad` stays unemitted on purpose —
+    /// the scheduler measures cold load from the lease.
+    #[test]
+    fn ltx2_phase_events_cover_upscale_audio_decode_and_mux() {
+        assert!(
+            runtime_function_source("fn maybe_apply_temporal_upsampler(")
+                .contains("ProgressPhase::Upscale"),
+            "the temporal upsampler must report the Upscale phase"
+        );
+        for renderer in [
+            "fn render_real_distilled_av(",
+            "fn render_real_two_stage_av(",
+        ] {
+            assert!(
+                runtime_function_source(renderer).contains("ProgressPhase::Upscale"),
+                "{renderer} must report its spatial upsample as the Upscale phase"
+            );
+        }
+        assert!(
+            runtime_function_source("fn render_native_audio_track(")
+                .contains("ProgressPhase::AudioDecode"),
+            "the audio VAE + vocoder must report the AudioDecode phase"
+        );
+        let pipeline_source = include_str!("pipeline.rs");
+        assert!(
+            pipeline_source.contains("ProgressPhase::Mux"),
+            "the AAC mux must report the Mux phase"
+        );
+        // ModelLoad stays unemitted: the scheduler measures cold load from
+        // the lease (`gpu_worker.rs:105` discards the event), so wiring it
+        // here would double-count. Pinned on pipeline.rs only — a whole-file
+        // pin on runtime.rs would match this very test's own source.
+        assert!(
+            !pipeline_source.contains("ProgressPhase::ModelLoad"),
+            "LTX-2 must never emit ModelLoad; cold load is measured from the lease"
         );
     }
 

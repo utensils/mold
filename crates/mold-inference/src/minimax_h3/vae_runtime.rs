@@ -27,6 +27,30 @@ use mold_core::minimax_h3::{self as contract, ArtifactRole as ContractArtifactRo
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+/// Which attention backend the H3 visual VAE runs, as a pure function of the
+/// device class and the env-resolved `MOLD_ATTN` policy — never `cfg!` alone.
+///
+/// Since #735 the sm89 `h3-cuda` release edge compiles the global
+/// `flash-attn` feature, and `VisualAttentionBackend::Auto`'s CUDA arm
+/// dispatches FlashAttention automatically whenever the kernel is compiled
+/// (`mold-candle/src/minimax_h3/visual_vae.rs:1153`). Passing `Auto`
+/// unconditionally would therefore have silently moved every shipped sm89 H3
+/// render's visual decode from bounded math onto flash — the exact #736
+/// class of seed change compiling a kernel must never cause. So CUDA keeps
+/// `Math` (byte-identical to what the sm89 artifact always did) unless
+/// `MOLD_ATTN=flash` opts in, while Metal keeps `Auto`, whose Metal arm is
+/// the fused SDPA it has always used.
+fn visual_attention_backend_for(
+    is_metal: bool,
+    resolved: crate::attention::AttentionBackend,
+) -> VisualAttentionBackend {
+    if is_metal || resolved == crate::attention::AttentionBackend::Flash {
+        VisualAttentionBackend::Auto
+    } else {
+        VisualAttentionBackend::Math
+    }
+}
+
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
@@ -1419,7 +1443,10 @@ impl VaeFactory for ProductionVaeFactory {
             &validated,
             device,
             decode_policy,
-            VisualAttentionBackend::Auto,
+            visual_attention_backend_for(
+                device.is_metal(),
+                crate::attention::AttentionBackend::resolve(),
+            ),
             &mut visual_observer,
         );
         let model = match model {
@@ -2929,6 +2956,37 @@ fn valid_sha256(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// #735/#736 guard: the H3 visual VAE's backend is the device class × the
+    /// env-resolved `MOLD_ATTN` answer. Metal is always `Auto` (fused SDPA);
+    /// CUDA and CPU stay on bounded math unless `MOLD_ATTN=flash` opted in —
+    /// compiling the flash kernel into the sm89 artifact must not move a
+    /// single shipped H3 pixel by itself.
+    #[test]
+    fn visual_vae_backend_is_auto_on_cuda_only_under_flash_opt_in() {
+        use crate::attention::AttentionBackend::{Flash, Math};
+        use mold_candle::minimax_h3::VisualAttentionBackend;
+
+        assert_eq!(
+            super::visual_attention_backend_for(true, Math),
+            VisualAttentionBackend::Auto,
+            "Metal keeps its fused SDPA"
+        );
+        assert_eq!(
+            super::visual_attention_backend_for(true, Flash),
+            VisualAttentionBackend::Auto
+        );
+        assert_eq!(
+            super::visual_attention_backend_for(false, Math),
+            VisualAttentionBackend::Math,
+            "CUDA/CPU default must stay the bounded math the sm89 artifact shipped"
+        );
+        assert_eq!(
+            super::visual_attention_backend_for(false, Flash),
+            VisualAttentionBackend::Auto,
+            "MOLD_ATTN=flash is the one opt-in"
+        );
+    }
+
     use std::sync::{Arc, Mutex};
 
     use super::*;

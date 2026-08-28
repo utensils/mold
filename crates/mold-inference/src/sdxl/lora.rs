@@ -1234,6 +1234,7 @@ mod tests {
         loras: Option<Vec<mold_core::LoraWeight>>,
     ) -> mold_core::GenerateRequest {
         mold_core::GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

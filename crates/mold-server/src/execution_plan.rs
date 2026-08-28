@@ -313,11 +313,11 @@ pub enum RuntimeSemanticVariable {
     LoraBypass,
     LtxDebugAltPrompt,
     LtxDebugCompareUncond,
-    LtxDebugDisableAudioBranch,
     LtxDebugDisableCrossAttentionAdaLn,
     Ltx2DebugDisableTransformerGatedAttention,
     Ltx2DebugForceCpuPromptEncoder,
     Ltx2DebugLoadBlocks,
+    Ltx2AttnF32,
     Ltx2ForceEager,
     Ltx2ForceStreaming,
     Ltx2Fp8InputScaleMode,
@@ -662,9 +662,6 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_LORA_BYPASS" => RuntimeSemanticVariable::LoraBypass,
         "MOLD_LTX_DEBUG_ALT_PROMPT" => RuntimeSemanticVariable::LtxDebugAltPrompt,
         "MOLD_LTX_DEBUG_COMPARE_UNCOND" => RuntimeSemanticVariable::LtxDebugCompareUncond,
-        "MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH" => {
-            RuntimeSemanticVariable::LtxDebugDisableAudioBranch
-        }
         "MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN" => {
             RuntimeSemanticVariable::LtxDebugDisableCrossAttentionAdaLn
         }
@@ -675,6 +672,10 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
             RuntimeSemanticVariable::Ltx2DebugForceCpuPromptEncoder
         }
         "MOLD_LTX2_DEBUG_LOAD_BLOCKS" => RuntimeSemanticVariable::Ltx2DebugLoadBlocks,
+        // #735: forces the F32 chunked LTX-2 attention path in place of the
+        // BF16 dispatcher, which changes the rendered output — its own
+        // execution-equivalence and timing class.
+        "MOLD_LTX2_ATTN_F32" => RuntimeSemanticVariable::Ltx2AttnF32,
         "MOLD_LTX2_FORCE_EAGER" => RuntimeSemanticVariable::Ltx2ForceEager,
         "MOLD_LTX2_FORCE_STREAMING" => RuntimeSemanticVariable::Ltx2ForceStreaming,
         "MOLD_LTX2_FP8_INPUT_SCALE_MODE" => RuntimeSemanticVariable::Ltx2Fp8InputScaleMode,
@@ -743,7 +744,6 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
             if matches!(
                 variable,
                 RuntimeSemanticVariable::LtxDebugCompareUncond
-                    | RuntimeSemanticVariable::LtxDebugDisableAudioBranch
                     | RuntimeSemanticVariable::LtxDebugDisableCrossAttentionAdaLn
                     | RuntimeSemanticVariable::Ltx2DebugDisableTransformerGatedAttention
                     | RuntimeSemanticVariable::Ltx2DebugLoadBlocks
@@ -803,6 +803,14 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
         // selects the widening arm, every other spelling is the default.
         Some(value) if variable == RuntimeSemanticVariable::Ltx2Int8 => {
             CanonicalRuntimeValue::Boolean(value.trim().eq_ignore_ascii_case("dequant"))
+        }
+        // Mirrors the engine's `parse_attention_f32_forced` exactly: the LTX-2
+        // F32 attention control shares the family's truthy spellings.
+        Some(value) if variable == RuntimeSemanticVariable::Ltx2AttnF32 => {
+            CanonicalRuntimeValue::Boolean(matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            ))
         }
         // Mirrors the engine's `parse_zimage_qmatmul` exactly.
         Some(value) if variable == RuntimeSemanticVariable::ZimageQMatMul => {

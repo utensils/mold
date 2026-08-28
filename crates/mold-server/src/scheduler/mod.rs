@@ -13724,6 +13724,7 @@ mod tests {
                             audio: None,
                             hdr_frames_written: None,
                             generation_time_ms: 1,
+                            attention_path: None,
                         },
                     ),
                     device_ordinal: Some(0),

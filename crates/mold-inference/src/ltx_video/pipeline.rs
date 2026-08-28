@@ -927,6 +927,7 @@ impl crate::chain::ChainStageRenderer for LtxVideoEngine {
             audio: None,
             hdr_frames_written: None,
             generation_time_ms,
+            attention_path: None,
         })
     }
 }
@@ -1707,6 +1708,8 @@ impl LtxVideoEngine {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                video_only: None,
+                attention_path: None,
                 data: video_bytes,
                 format: output_format,
                 width,

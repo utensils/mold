@@ -1502,6 +1502,17 @@ pub struct GenerateRequest {
     /// Defaults to the model family's preferred behavior when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_audio: Option<bool>,
+    /// Opt-in LTX-2 video-only rendering (#1037): `Some(true)` skips the
+    /// audio-video transformer's audio branch entirely, mirroring upstream's
+    /// `LTXVideoOnlyModelConfigurator`, which omits the branch structurally
+    /// (`packages/ltx-core/.../model_configurator.py:56-101` @400fd31).
+    /// Output-changing for the video (the branch feeds the video stream
+    /// through the a2v cross-attention), so it is never a default; it
+    /// conflicts with `enable_audio=true`, audio conditioning, the
+    /// audio-only pipeline, and `extend_video`. Absent means today's
+    /// multimodal behavior, exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_only: Option<bool>,
     /// Optional conditioning audio file for audio-to-video generation.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
     pub audio_file: Option<Vec<u8>>,
@@ -2160,12 +2171,26 @@ pub struct VideoData {
     /// Absent for T2V, other families, and older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_preprocessing: Option<Ltx2SourcePreprocessing>,
+    /// Which attention arithmetic the LTX-2 transformer actually ran
+    /// (`ltx2-bf16-math`, `ltx2-bf16-flash`, `ltx2-f32-chunked`,
+    /// `ltx2-metal-sdpa`; the literals live in
+    /// `mold_inference::ltx2::provenance`). Output-changing, so it is
+    /// recorded rather than inferred. Absent for other families, for a
+    /// synthetic placeholder render, and for older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_path: Option<String>,
     /// First frame as PNG thumbnail for gallery grid.
     pub thumbnail: Vec<u8>,
     /// Animated GIF preview for gallery detail view / TUI playback.
     /// Always generated regardless of primary output format.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gif_preview: Vec<u8>,
+    /// `Some(true)` when the audio branch was structurally skipped for this
+    /// render (#1037 `video_only`). Distinct from `has_audio: false`, which
+    /// also covers silent exports whose branch still ran on the multimodal
+    /// path. Absent for other families and older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_only: Option<bool>,
     /// Whether this video includes a synchronized audio track.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_audio: bool,
@@ -2398,6 +2423,11 @@ pub struct OutputMetadata {
     pub gif_preview: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_audio: Option<bool>,
+    /// Whether the request opted into LTX-2 video-only rendering (#1037).
+    /// Recorded verbatim, like `enable_audio`; the executed skip is
+    /// re-stamped from the response (`VideoData::video_only`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_only: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_file_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2432,6 +2462,10 @@ pub struct OutputMetadata {
     /// (recorded from the response, like `pipeline`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_preprocessing: Option<Ltx2SourcePreprocessing>,
+    /// LTX-2 attention arithmetic actually run (recorded from the response,
+    /// like `pipeline`; see `VideoData::attention_path`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ic_lora_control: Option<String>,
     /// Where the HDR EXR sidecar was written. The gallery holds the tonemapped
@@ -2641,6 +2675,7 @@ impl OutputMetadata {
             upscale_model: req.upscale_model.clone(),
             gif_preview: req.gif_preview.then_some(true),
             enable_audio: req.enable_audio,
+            video_only: req.video_only,
             audio_file_path: req.audio_file_path.clone(),
             source_video_path: req.source_video_path.clone(),
             extend_video_path: req.extend_video_path.clone(),
@@ -2657,6 +2692,7 @@ impl OutputMetadata {
                 .then_some(req.frames.is_none()),
             pipeline_provenance_sha256: None,
             source_preprocessing: None,
+            attention_path: None,
             ic_lora_control: req.ic_lora_control.clone(),
             hdr_exr_dir: req.hdr_exr_dir.clone(),
             hdr_exr_full_float: req.hdr_exr_full_float,
@@ -2693,6 +2729,12 @@ impl OutputMetadata {
         self.pipeline_provenance_sha256 = video.pipeline_provenance_sha256.clone();
         if let Some(preprocessing) = &video.source_preprocessing {
             self.source_preprocessing = Some(preprocessing.clone());
+        }
+        if let Some(attention_path) = &video.attention_path {
+            self.attention_path = Some(attention_path.clone());
+        }
+        if let Some(video_only) = video.video_only {
+            self.video_only = Some(video_only);
         }
     }
 }
@@ -5003,6 +5045,8 @@ mod tests {
         .unwrap();
         let provenance = std::iter::repeat_n('a', 64).collect::<String>();
         let video = VideoData {
+            video_only: None,
+            attention_path: None,
             data: vec![1],
             format: OutputFormat::Mp4,
             width: 768,
@@ -5052,6 +5096,8 @@ mod tests {
         )
         .unwrap();
         let video = VideoData {
+            video_only: None,
+            attention_path: None,
             data: vec![1],
             format: OutputFormat::Mp4,
             width: 768,
@@ -5236,6 +5282,7 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -5477,6 +5524,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -5555,6 +5603,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -5652,6 +5701,107 @@ mod tests {
         assert_eq!(round.source_preprocessing, Some(preprocessing));
     }
 
+    /// `attention_path` is additive on both the response and the metadata:
+    /// older rows/servers deserialize to `None`, `None` serializes to nothing,
+    /// and every vocabulary value round-trips verbatim — the Metal one
+    /// included, so a Metal print can never be mis-stamped as a CUDA one.
+    #[test]
+    fn attention_path_serde_is_additive_and_round_trips_every_value() {
+        let metadata: OutputMetadata =
+            serde_json::from_str(r#"{"version":"1","prompt":"p","model":"m","seed":1,"steps":8,"guidance":3.0,"width":8,"height":8}"#)
+                .unwrap();
+        assert!(metadata.attention_path.is_none());
+        assert!(!serde_json::to_string(&metadata)
+            .unwrap()
+            .contains("attention_path"));
+
+        for value in [
+            "ltx2-bf16-math",
+            "ltx2-bf16-flash",
+            "ltx2-f32-chunked",
+            "ltx2-metal-sdpa",
+        ] {
+            let video: VideoData = serde_json::from_value(serde_json::json!({
+                "data": [], "format": "mp4", "width": 8, "height": 8,
+                "frames": 9, "fps": 24, "thumbnail": [],
+                "attention_path": value,
+            }))
+            .unwrap();
+            assert_eq!(video.attention_path.as_deref(), Some(value));
+            let round: VideoData =
+                serde_json::from_str(&serde_json::to_string(&video).unwrap()).unwrap();
+            assert_eq!(round.attention_path.as_deref(), Some(value));
+
+            let mut stamped = metadata.clone();
+            stamped.apply_video_output(&video);
+            assert_eq!(stamped.attention_path.as_deref(), Some(value));
+            let round: OutputMetadata =
+                serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
+            assert_eq!(round.attention_path.as_deref(), Some(value));
+        }
+
+        // A response without the field (older server, other family) must not
+        // erase a recorded value.
+        let mut stamped = metadata.clone();
+        stamped.attention_path = Some("ltx2-bf16-math".to_string());
+        let bare: VideoData = serde_json::from_value(serde_json::json!({
+            "data": [], "format": "mp4", "width": 8, "height": 8,
+            "frames": 9, "fps": 24, "thumbnail": [],
+        }))
+        .unwrap();
+        assert!(bare.attention_path.is_none());
+        stamped.apply_video_output(&bare);
+        assert_eq!(stamped.attention_path.as_deref(), Some("ltx2-bf16-math"));
+    }
+
+    /// `video_only` is additive on the request, the response, and the
+    /// metadata: absent deserializes to `None`, `None` serializes to
+    /// nothing, values round-trip, and the executed skip recorded on the
+    /// response wins over the request echo in the metadata.
+    #[test]
+    fn video_only_serde_is_additive_and_round_trips() {
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"p","model":"ltx-2-19b-distilled:fp8","width":960,"height":576,"steps":8,"batch_size":1,"output_format":"mp4"}"#,
+        )
+        .unwrap();
+        assert!(request.video_only.is_none());
+        assert!(!serde_json::to_string(&request)
+            .unwrap()
+            .contains("video_only"));
+        let opted: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"p","model":"ltx-2-19b-distilled:fp8","width":960,"height":576,"steps":8,"batch_size":1,"output_format":"mp4","video_only":true}"#,
+        )
+        .unwrap();
+        assert_eq!(opted.video_only, Some(true));
+        let round: GenerateRequest =
+            serde_json::from_str(&serde_json::to_string(&opted).unwrap()).unwrap();
+        assert_eq!(round.video_only, Some(true));
+
+        let mut metadata: OutputMetadata =
+            serde_json::from_str(r#"{"version":"1","prompt":"p","model":"m","seed":1,"steps":8,"guidance":3.0,"width":8,"height":8}"#)
+                .unwrap();
+        assert!(metadata.video_only.is_none());
+        let video: VideoData = serde_json::from_value(serde_json::json!({
+            "data": [], "format": "mp4", "width": 8, "height": 8,
+            "frames": 9, "fps": 24, "thumbnail": [],
+            "video_only": true,
+        }))
+        .unwrap();
+        metadata.apply_video_output(&video);
+        assert_eq!(metadata.video_only, Some(true));
+        let round: OutputMetadata =
+            serde_json::from_str(&serde_json::to_string(&metadata).unwrap()).unwrap();
+        assert_eq!(round.video_only, Some(true));
+        // A response without the field must not erase the recorded value.
+        let bare: VideoData = serde_json::from_value(serde_json::json!({
+            "data": [], "format": "mp4", "width": 8, "height": 8,
+            "frames": 9, "fps": 24, "thumbnail": [],
+        }))
+        .unwrap();
+        metadata.apply_video_output(&bare);
+        assert_eq!(metadata.video_only, Some(true));
+    }
+
     #[test]
     fn apply_video_output_records_source_preprocessing_from_the_response() {
         let mut metadata: OutputMetadata =
@@ -5685,6 +5835,7 @@ mod tests {
     #[test]
     fn output_metadata_omits_strength_without_source_image() {
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -5983,6 +6134,7 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -6228,6 +6380,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -6303,6 +6456,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -6381,6 +6535,7 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -7052,6 +7207,7 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -7133,6 +7289,7 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -7227,6 +7384,7 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -7306,6 +7464,7 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -7406,6 +7565,7 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

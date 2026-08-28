@@ -7,6 +7,7 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 pub(crate) fn minimal_generate_request(model: &str) -> crate::types::GenerateRequest {
     crate::types::GenerateRequest {
+        video_only: None,
         title: None,
         tags: None,
         collection: None,
