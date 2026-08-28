@@ -65,6 +65,14 @@ describe("QueueColumn", () => {
     expect(rows[0]!.text()).toContain("queued · This device");
   });
 
+  it("updates queued row status when the host-wide queue is paused", async () => {
+    const { wrapper, jobs } = await mountColumn();
+    jobs.queues.local!.paused = true;
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='queue-surface-row']").text()).toContain("paused · This device");
+  });
+
   it("labels a running print as finalizing after denoising completes", async () => {
     setActivePinia(createPinia());
     const conn = useConnectionStore();

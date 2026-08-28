@@ -168,6 +168,7 @@ import {
   mergeQueueEntries,
   queuePageRequestForCapacity,
   retryQueueJobRecoveringAmbiguity,
+  setQueuePaused as setQueueDispatchPaused,
   type QueueListing,
 } from "@studio/api/queuePlan";
 import {
@@ -523,6 +524,8 @@ type ActivityRow =
       print: Job;
       /** Live dispatch order from `/api/queue`; absent on older hosts. */
       queuePosition: number | null;
+      /** Effective lifecycle after applying the host-wide queue pause. */
+      queueState: string | null;
       blockedReason: string | null;
       sequence: null;
     }
@@ -2293,6 +2296,7 @@ const queueStatusIndex = computed(() =>
       hostId,
       entries: listing.entries,
       plan: listing.plan,
+      paused: hostTelemetry[hostId]?.queuePaused,
     })),
   ),
 );
@@ -2344,6 +2348,7 @@ const activityRows = computed<ActivityRow[]>(() =>
             sequence: null,
             print,
             queuePosition: vm.queuePosition ?? null,
+            queueState: vm.queueState ?? null,
             blockedReason: vm.blockedReason ?? null,
           },
         ]
@@ -2433,9 +2438,7 @@ async function setQueuePaused(
       throw new Error(`${host.name} now reaches a different Mold server instance.`);
     }
     captureHostTelemetry(hostId, status);
-    await apiFetchTo(target, paused ? "/api/queue/pause" : "/api/queue/resume", {
-      method: "POST",
-    });
+    await setQueueDispatchPaused(target, paused);
     if (hostTelemetry[hostId]) hostTelemetry[hostId]!.queuePaused = paused;
     setGenerationStatus(
       paused
@@ -2478,8 +2481,11 @@ function fleetQueueResumeNeeded(row: FleetActiveWork): boolean {
 function activityRowStatus(row: ActivityRow): string {
   if (!row.print) return "";
   if (row.print.status !== "queued") return jobStatusCode(row.print);
+  if (durableHold(row.print)) return "HELD";
+  if (activityRowQueuePaused(row)) return "QUEUE PAUSED";
   return queueWaitCode(
     resolveQueueWait({
+      state: row.queueState,
       position: row.queuePosition ?? row.print.queuePosition,
       blockedReason: row.blockedReason,
     }),

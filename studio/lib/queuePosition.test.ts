@@ -43,6 +43,30 @@ function plan(blocked: Record<string, string>): QueuePlan {
 }
 
 describe("buildQueueStatusIndex", () => {
+  it("projects a host-wide pause onto queued rows without hiding held work", () => {
+    const index = buildQueueStatusIndex([
+      {
+        hostId: "alpha",
+        paused: true,
+        entries: [
+          { id: "waiting", state: "queued", position: 0 } as QueueEntry,
+          { id: "parked", state: "held", position: 1 } as QueueEntry,
+        ],
+      },
+    ]);
+
+    expect(
+      queueWaitLabel(
+        resolveQueueWait(queueStatusFor(index, "alpha", "waiting")),
+      ),
+    ).toBe("Queue paused");
+    expect(
+      queueWaitLabel(
+        resolveQueueWait(queueStatusFor(index, "alpha", "parked")),
+      ),
+    ).toBe("Held");
+  });
+
   it("carries the row's lifecycle so a held row resolves as held", () => {
     const index = buildQueueStatusIndex([
       {

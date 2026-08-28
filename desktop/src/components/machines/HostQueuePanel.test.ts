@@ -78,6 +78,14 @@ beforeEach(() => {
 });
 
 describe("HostQueuePanel", () => {
+  it("updates queued row status when the host-wide queue is paused", async () => {
+    const { wrapper, jobs } = await mountPanel([], [queued("srv-queued", 0, 0)]);
+    jobs.queues.local!.paused = true;
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='queue-row']").text()).toContain("PAUSED");
+  });
+
   it("offers Resume for restart-paused work while the global gate is open", async () => {
     const entry = { ...queued("srv-paused", 0, 0), state: "paused" as const };
     const { wrapper, jobs } = await mountPanel([], [entry]);
@@ -89,6 +97,19 @@ describe("HostQueuePanel", () => {
     await wrapper.get("[data-test='pause-toggle']").trigger("click");
     await flushPromises();
     expect(resume).toHaveBeenCalledWith("local");
+  });
+
+  it("does not label other queued work paused when only one row is restart-paused", async () => {
+    const pausedEntry = { ...queued("srv-paused", 0, 0), state: "paused" as const };
+    const waitingEntry = { ...queued("srv-queued", 1, 0), model: "z-image" };
+    const { wrapper } = await mountPanel([], [pausedEntry, waitingEntry]);
+
+    const waitingRow = wrapper
+      .findAll("[data-test='queue-row']")
+      .find((row) => row.text().includes("z-image"));
+    expect(waitingRow?.text()).toContain("QUEUED #1");
+    expect(waitingRow?.text()).not.toContain("PAUSED");
+    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Resume");
   });
 
   it("splits a multi-GPU host into per-GPU lanes", async () => {

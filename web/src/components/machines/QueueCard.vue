@@ -17,6 +17,7 @@ import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
 import type { QueuePlan } from "@studio/api/queuePlan";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
+import { queueWaitLabel, resolveQueueWait } from "@studio/lib/queuePosition";
 
 const props = withDefaults(
   defineProps<{
@@ -80,6 +81,17 @@ const visibleWorkCount = computed(
 function laneValue(entry: QueueEntry): string {
   const lane = entry.target_gpu ?? null;
   return lane == null ? "" : String(lane);
+}
+
+function entryStateLabel(entry: QueueEntry): string {
+  return queueWaitLabel(
+    resolveQueueWait({
+      state: entry.state,
+      position: entry.position,
+      blockedReason:
+        props.paused && entry.state === "queued" ? "queue_paused" : null,
+    }),
+  );
 }
 
 function onLane(entry: QueueEntry, event: Event) {
@@ -169,7 +181,7 @@ function queuedIndexOf(id: string): number {
             :tone="entry.state === 'running' ? 'accent' : 'neutral'"
             outline
           >
-            {{ entry.state }}
+            {{ entryStateLabel(entry) }}
           </BadgePill>
           <button
             type="button"

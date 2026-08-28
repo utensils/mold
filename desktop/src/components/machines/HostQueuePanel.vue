@@ -72,7 +72,8 @@ const snapshot = computed(() => jobs.queues[props.host.id] ?? null);
 const restartPaused = computed(
   () => snapshot.value?.entries.some((entry) => entry.state === "paused") === true,
 );
-const paused = computed(() => snapshot.value?.paused === true || restartPaused.value);
+const dispatchPaused = computed(() => snapshot.value?.paused === true);
+const resumeNeeded = computed(() => dispatchPaused.value || restartPaused.value);
 const caps = computed(() => snapshot.value?.caps ?? null);
 
 const lanes = computed(() => {
@@ -105,6 +106,7 @@ function entryCode(entry: EnrichedQueueEntry): string {
     if (job && job.total > 0 && job.status === "denoising") return `${job.step}/${job.total}`;
     return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
   }
+  if (dispatchPaused.value && entry.state === "queued") return "PAUSED";
   // Same waiting vocabulary as Create and iPhone, resolved once in studio —
   // including "held", which is parked rather than in line.
   return queueWaitCode(resolveQueueWait({ state: entry.state, position: entry.position }));
@@ -213,7 +215,7 @@ async function cancelAll() {
 
 async function togglePause() {
   try {
-    if (paused.value) {
+    if (resumeNeeded.value) {
       await jobs.resume(props.host.id);
       toasts.push(`Queue resumed on ${props.host.label}`);
     } else {
@@ -385,10 +387,10 @@ async function retryFromDrawer(): Promise<void> {
   <div>
     <!-- Management controls -->
     <div
-      v-if="controls && (caps?.canPause || (caps?.canCancelAll && hasEntries) || paused)"
+      v-if="controls && (caps?.canPause || (caps?.canCancelAll && hasEntries) || resumeNeeded)"
       class="mb-2 flex items-center gap-2"
     >
-      <span v-if="paused" data-test="paused-chip" class="edge-code text-safelight">
+      <span v-if="resumeNeeded" data-test="paused-chip" class="edge-code text-safelight">
         {{ restartPaused && snapshot?.paused !== true ? "PAUSED AFTER RESTART" : "PAUSED" }}
       </span>
       <div class="flex-1" />
@@ -399,7 +401,7 @@ async function retryFromDrawer(): Promise<void> {
         class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
         @click="togglePause"
       >
-        {{ paused ? "Resume" : "Pause" }}
+        {{ resumeNeeded ? "Resume" : "Pause" }}
       </button>
       <button
         v-if="caps?.canCancelAll && hasEntries"

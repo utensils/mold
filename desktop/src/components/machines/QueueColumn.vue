@@ -45,6 +45,9 @@ function statusLine(row: QueueSurfaceRow): string {
     return `held${reason ? ` (${reason})` : ""} · ${row.hostLabel}`;
   }
   if (row.entry.state === "paused") return `paused after restart · ${row.hostLabel}`;
+  if (row.entry.state === "queued" && jobs.queues[row.hostId]?.paused === true) {
+    return `paused · ${row.hostLabel}`;
+  }
   const state =
     row.entry.state === "running"
       ? job?.status === "finishing"

@@ -75,6 +75,10 @@ export interface QueueStatusSource {
   hostId: string;
   entries?: readonly QueueEntry[] | null | undefined;
   plan?: QueuePlan | null | undefined;
+  /** Host-wide dispatch gate from `/api/status.queue_paused`. A queued row
+   * remains `queued` on the wire while this gate is closed, so surfaces must
+   * project the pause into its visible waiting state. */
+  paused?: boolean | null | undefined;
 }
 
 export type QueueStatusIndex = ReadonlyMap<string, QueueStatus>;
@@ -245,10 +249,16 @@ export function buildQueueStatusIndex(
     for (const entry of source.entries ?? []) {
       if (!entry || typeof entry.id !== "string" || entry.id.length === 0)
         continue;
+      const state = typeof entry.state === "string" ? entry.state : null;
       index.set(queueStatusKey(source.hostId, entry.id), {
-        state: typeof entry.state === "string" ? entry.state : null,
+        state,
         position: finitePosition(entry.position),
-        blockedReason: planBlockedReason(source.plan, entry.id),
+        // Held is an operator-action state and running work continues through
+        // a queue pause. Only ordinary queued work inherits the global gate.
+        blockedReason:
+          source.paused === true && state === "queued"
+            ? "queue_paused"
+            : planBlockedReason(source.plan, entry.id),
         preparation: planPreparation(source.plan, entry.id),
       });
     }
