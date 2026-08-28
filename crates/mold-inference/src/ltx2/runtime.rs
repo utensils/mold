@@ -12,8 +12,6 @@ use mold_candle::ltx_video::sampling::{
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::collections::HashMap;
 use std::env;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -65,6 +63,7 @@ use crate::vae_tiling::is_out_of_memory_error;
 use crate::weight_loader::{
     load_fp8_safetensors_with_callback, load_safetensors_with_progress_callback,
 };
+use mold_core::ltx2_weight_index::{Ltx2TransformerWeightIndex, Ltx2WeightFormat};
 use mold_core::{LoraWeight, Ltx2GuidanceOverrides, Ltx2SpatialUpscale, TimeRange};
 
 pub const LTX2_VIDEO_LATENT_CHANNELS: usize = 128;
@@ -5681,11 +5680,9 @@ fn load_ltx2_audio_transformer(
         let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
         let checkpoint_is_convrot =
             !checkpoint_is_nvfp4 && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
-        let header = (!checkpoint_is_nvfp4 && !checkpoint_is_convrot)
-            .then(|| Ltx2CheckpointHeader::read(checkpoint_path).ok())
-            .flatten();
+        let weight_index = Ltx2TransformerWeightIndex::read(checkpoint_path).ok();
         let checkpoint_is_fp8 =
-            !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, header.as_ref());
+            !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, weight_index.as_ref());
         let vb = if checkpoint_is_nvfp4 {
             let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
             VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
@@ -6969,12 +6966,12 @@ fn load_ltx2_av_transformer_with_loras_inner(
     // Header byte sizes therefore cannot safely drive resident placement;
     // stream blocks so compact bytes are never priced as BF16 GPU residency.
     let force_streaming = ltx2_effective_force_streaming(force_streaming, checkpoint_is_convrot);
-    // One header pass feeds both the fp8 probe and the residency sizing; the
-    // packed backends read their own layout and don't consult it.
-    let header = (!checkpoint_is_nvfp4 && !checkpoint_is_convrot)
-        .then(|| Ltx2CheckpointHeader::read(checkpoint_path).ok())
-        .flatten();
-    let checkpoint_is_fp8 = !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, header.as_ref());
+    // One header pass feeds both the fp8 probe and the residency sizing. The
+    // index is the same authority admission priced this job with, so the
+    // plan the engine builds cannot disagree with the grant it was given.
+    let weight_index = Ltx2TransformerWeightIndex::read(checkpoint_path).ok();
+    let checkpoint_is_fp8 =
+        !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, weight_index.as_ref());
     // `candle` re-exports the `safetensors` error transparently, so a corrupt
     // or truncated checkpoint arrives as bare text ("header too small") with
     // nothing identifying the file. Name it here: this is the error the user
@@ -7016,10 +7013,12 @@ fn load_ltx2_av_transformer_with_loras_inner(
             Some(budget) => budget,
             None => usable_free_vram_bytes(gpu_ordinal).unwrap_or(0),
         };
-        let weights = header
+        let weights = weight_index
             .as_ref()
             .context("LTX-2 checkpoint header is required for adaptive residency")
-            .and_then(|header| header.transformer_weight_sizes(config.num_layers));
+            .and_then(|index| {
+                ltx2_transformer_weight_sizes(index, config.num_layers, compute_dtype(device))
+            });
         match weights {
             Ok(weights)
                 if select_ltx2_transformer_residency_mode(
@@ -7655,11 +7654,14 @@ fn transformer_weight_dtype(_plan: &Ltx2GeneratePlan, device: &candle_core::Devi
     compute_dtype(device)
 }
 
-fn ltx2_checkpoint_is_fp8(plan: &Ltx2GeneratePlan, header: Option<&Ltx2CheckpointHeader>) -> bool {
+fn ltx2_checkpoint_is_fp8(
+    plan: &Ltx2GeneratePlan,
+    weight_index: Option<&Ltx2TransformerWeightIndex>,
+) -> bool {
     if plan.checkpoint_path.to_ascii_lowercase().contains("fp8") {
         return true;
     }
-    header.is_some_and(|header| header.transformer_is_fp8())
+    weight_index.is_some_and(Ltx2TransformerWeightIndex::is_fp8)
 }
 
 fn ltx2_video_vae_config(plan: &Ltx2GeneratePlan) -> AutoencoderKLLtx2VideoConfig {
@@ -7693,200 +7695,74 @@ fn remap_ltx2_transformer_key(name: &str) -> String {
     super::nvfp4::remap_ltx2_transformer_key(name)
 }
 
-fn ltx2_transformer_block_index(name: &str) -> Option<usize> {
-    let mut components = name.split('.');
-    while let Some(component) = components.next() {
-        if component == "transformer_blocks" || component == "blocks" {
-            return components.next()?.parse().ok();
-        }
-    }
-    None
-}
-
-#[derive(serde::Deserialize)]
-struct SafetensorsHeaderTensor {
-    dtype: safetensors::Dtype,
-    shape: Vec<usize>,
-    data_offsets: (usize, usize),
-}
-
-/// Top-level prefixes inside an LTX-2 single-file checkpoint that are *not*
-/// transformer weights. A combined 19B export carries ~2.4 GB of `vae.*` next
-/// to the transformer; charging those to the transformer's GPU residency would
-/// be as wrong as charging its non-block tensors nothing.
-const LTX2_NON_TRANSFORMER_PREFIXES: &[&str] = &[
-    "vae",
-    "audio_vae",
-    "vocoder",
-    "text_encoders",
-    "conditioner",
-    "first_stage_model",
-    "cond_stage_model",
-    "latent_upsampler",
-    "spatial_upsampler",
-    "temporal_upsampler",
-];
-
-fn ltx2_tensor_is_non_transformer(name: &str) -> bool {
-    let core = name.strip_prefix("model.diffusion_model.").unwrap_or(name);
-    let head = core.split('.').next().unwrap_or_default();
-    LTX2_NON_TRANSFORMER_PREFIXES.contains(&head)
-}
-
-/// Transformer weight byte totals read from one safetensors header pass.
+/// Transformer weight byte totals the residency planner works from.
+///
+/// Derived from [`Ltx2TransformerWeightIndex`] — the same header index
+/// admission prices the job with — through
+/// [`ltx2_transformer_weight_sizes`], so the engine's plan and the
+/// scheduler's grant read one set of numbers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Ltx2TransformerWeightSizes {
-    /// Per-block totals, indexed by transformer block.
-    blocks: Vec<usize>,
+pub struct Ltx2TransformerWeightSizes {
+    /// Per-block device bytes while resident, indexed by transformer block.
+    pub blocks: Vec<usize>,
     /// Transformer tensors outside every block — `patchify_proj`,
     /// `adaln_single.linear`, `caption_projection`, the audio/video
     /// connectors, and `proj_out`. `new_with_block_source` allocates these on
     /// the GPU *after* every resident block, so they are unconditionally
     /// resident and must be reserved, not discovered.
-    non_block_bytes: u64,
+    pub non_block_bytes: u64,
     /// The checkpoint's `adaln_single.linear` output width, which sets the
     /// per-token AdaLN cost of a conditioned render. Not a constant across
     /// LTX-2: the 19B ships six components (24,576) and LTX-2.3's 22B ships
     /// nine (36,864). `None` when the tensor is absent from the header.
-    adaln_dim: Option<u64>,
+    pub adaln_dim: Option<u64>,
+    /// Per-forward scratch beside the resident weights (one dequantized
+    /// linear for a quantized checkpoint, zero for dense/float8). Carried so
+    /// admission and the planner can reserve the same figure.
+    pub transient_bytes: u64,
 }
 
-/// The parsed safetensors header of an LTX-2 checkpoint.
+/// Size a transformer for residency planning at the given compute dtype.
 ///
-/// The load path used to mmap and enumerate this 27 GB file three to four
-/// times per transformer load (fp8 probe, block sizing, and the loaders
-/// themselves). One header read now feeds every predicate that only needs
-/// tensor metadata.
-struct Ltx2CheckpointHeader {
-    tensors: HashMap<String, SafetensorsHeaderTensor>,
+/// `num_layers` is the model config's block count: blocks the header does
+/// not carry are reported as zero bytes, blocks beyond it are ignored. INT8
+/// ConvRot is priced fully widened (every ConvRot arm reconstructs BF16
+/// weights on the device), float8 and GGUF at their packed bytes, dense
+/// checkpoints at the compute dtype — the index owns that rule. NVFP4 is
+/// refused here on purpose: its packed streaming path is not modelled by the
+/// adaptive planner, and refusing keeps it on the streaming fallback it has
+/// always taken.
+pub fn ltx2_transformer_weight_sizes(
+    index: &Ltx2TransformerWeightIndex,
+    num_layers: usize,
+    compute_dtype: DType,
+) -> Result<Ltx2TransformerWeightSizes> {
+    if index.format() == Ltx2WeightFormat::Nvfp4 {
+        bail!("adaptive residency is not modelled for NVFP4 checkpoints");
+    }
+    let elem_size = compute_dtype.size_in_bytes() as u64;
+    let mut blocks = vec![0usize; num_layers];
+    for (slot, bytes) in blocks.iter_mut().zip(index.resident_block_bytes(elem_size)) {
+        *slot = usize::try_from(bytes).context("LTX-2 block size overflows usize")?;
+    }
+    Ok(Ltx2TransformerWeightSizes {
+        blocks,
+        non_block_bytes: index.resident_non_block_bytes(elem_size),
+        adaln_dim: index.adaln_dim(),
+        transient_bytes: index.transient_bytes(),
+    })
 }
 
-impl Ltx2CheckpointHeader {
-    fn read(path: &Path) -> Result<Self> {
-        let mut file = File::open(path)
-            .with_context(|| format!("failed to open LTX-2 checkpoint {}", path.display()))?;
-        let mut header_len_bytes = [0u8; 8];
-        file.read_exact(&mut header_len_bytes).with_context(|| {
-            format!(
-                "failed to read safetensors header length from {}",
-                path.display()
-            )
-        })?;
-        let header_len = u64::from_le_bytes(header_len_bytes) as usize;
-        let mut header = vec![0u8; header_len];
-        file.read_exact(&mut header).with_context(|| {
-            format!(
-                "failed to read safetensors metadata header from {}",
-                path.display()
-            )
-        })?;
-        let raw: HashMap<String, serde_json::Value> = serde_json::from_slice(&header)
-            .with_context(|| {
-                format!(
-                    "failed to parse safetensors metadata header from {}",
-                    path.display()
-                )
-            })?;
-        let mut tensors = HashMap::with_capacity(raw.len());
-        for (name, value) in raw {
-            if name == "__metadata__" {
-                continue;
-            }
-            let tensor: SafetensorsHeaderTensor =
-                serde_json::from_value(value).with_context(|| {
-                    format!("failed to parse safetensors tensor metadata for {name}")
-                })?;
-            tensors.insert(name, tensor);
-        }
-        Ok(Self { tensors })
-    }
-
-    fn tensor_bytes(name: &str, tensor: &SafetensorsHeaderTensor) -> Result<usize> {
-        let tensor_bytes = tensor
-            .data_offsets
-            .1
-            .checked_sub(tensor.data_offsets.0)
-            .with_context(|| format!("invalid safetensors data offsets for tensor {name}"))?;
-        let expected_bytes = tensor
-            .shape
-            .iter()
-            .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
-            .and_then(|elements| elements.checked_mul(tensor.dtype.size()))
-            .with_context(|| format!("safetensors tensor shape overflows for {name}"))?;
-        if expected_bytes != tensor_bytes {
-            anyhow::bail!(
-                "safetensors tensor {name} reports {tensor_bytes} bytes but shape/dtype imply {expected_bytes}"
-            );
-        }
-        Ok(tensor_bytes)
-    }
-
-    /// Whether the transformer weights are stored as float8.
-    ///
-    /// Probes the same two block tensors the old mmap-based check loaded, but
-    /// from header metadata — no 27 GB mapping just to read a dtype.
-    fn transformer_is_fp8(&self) -> bool {
-        for key in [
-            "transformer_blocks.1.attn1.to_q.weight",
-            "transformer_blocks.1.ff.net.0.proj.weight",
-        ] {
-            let prefixed = format!("model.diffusion_model.{key}");
-            if let Some(tensor) = self
-                .tensors
-                .get(&prefixed)
-                .or_else(|| self.tensors.get(key))
-            {
-                return tensor.dtype == safetensors::Dtype::F8_E4M3;
-            }
-        }
-        false
-    }
-
-    fn transformer_weight_sizes(&self, num_layers: usize) -> Result<Ltx2TransformerWeightSizes> {
-        let mut blocks = vec![0usize; num_layers];
-        let mut non_block_bytes = 0u64;
-        let mut adaln_dim = None;
-        for (name, tensor) in &self.tensors {
-            if ltx2_tensor_is_non_transformer(name) {
-                continue;
-            }
-            let tensor_bytes = Self::tensor_bytes(name, tensor)?;
-            let remapped = remap_ltx2_transformer_key(name);
-            // The video branch's own modulation table. `audio_adaln_single`
-            // and the `av_ca_*` gates share the suffix, so match the exact key
-            // rather than a contains().
-            if remapped.ends_with("adaln_single.linear.weight")
-                && !remapped.contains("audio")
-                && !remapped.contains("av_ca_")
-            {
-                adaln_dim = tensor.shape.first().map(|dim| *dim as u64);
-            }
-            match ltx2_transformer_block_index(&remapped) {
-                Some(index) => {
-                    if let Some(size) = blocks.get_mut(index) {
-                        *size = size.saturating_add(tensor_bytes);
-                    }
-                }
-                None => non_block_bytes = non_block_bytes.saturating_add(tensor_bytes as u64),
-            }
-        }
-        Ok(Ltx2TransformerWeightSizes {
-            blocks,
-            non_block_bytes,
-            adaln_dim,
-        })
-    }
-}
-
-/// Read-and-size in one call. The load path holds a
-/// [`Ltx2CheckpointHeader`] and reuses it for every predicate, so this exists
-/// for tests that only care about the sizing result.
+/// Read-and-size in one call for tests that only care about the sizing
+/// result; the load path reads the index once and reuses it.
 #[cfg(test)]
 fn ltx2_transformer_block_sizes_from_safetensors(
     path: &Path,
     num_layers: usize,
+    compute_dtype: DType,
 ) -> Result<Ltx2TransformerWeightSizes> {
-    Ltx2CheckpointHeader::read(path)?.transformer_weight_sizes(num_layers)
+    let index = Ltx2TransformerWeightIndex::read(path)?;
+    ltx2_transformer_weight_sizes(&index, num_layers, compute_dtype)
 }
 
 fn denoised_from_velocity(sample: &Tensor, velocity: &Tensor, sigma: f32) -> Result<Tensor> {
@@ -8450,6 +8326,7 @@ mod tests {
     use crate::ltx2::model::VideoLatentShape;
     use crate::ltx2::model::VideoPixelShape;
     use crate::ltx2::plan::{Ltx2GeneratePlan, PipelineKind};
+    use mold_core::ltx2_weight_index::Ltx2TransformerWeightIndex;
 
     /// `[1, 3, frames, 2, 2]` CPU tensor whose every sample in frame `f` is
     /// `values[f]`, so a written EXR identifies which decoded frame it came
@@ -10365,9 +10242,15 @@ mod tests {
         );
         serialize_to_file(&tensors, &None, &path).unwrap();
 
-        let sizes = super::ltx2_transformer_block_sizes_from_safetensors(&path, 3).unwrap();
+        let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
+        let sizes =
+            super::ltx2_transformer_block_sizes_from_safetensors(&path, 3, DType::F32).unwrap();
 
-        assert_eq!(sizes.blocks, vec![16, 20, 0]);
+        assert_eq!(index.block_bytes_at_rest(), vec![16, 20]);
+        // Resident bytes are priced at the compute dtype: block 1's F16
+        // tensor widens to F32 on a CPU device (6 × 4 + 2 × 4).
+        assert_eq!(sizes.blocks, vec![16, 32, 0]);
+        assert_eq!(sizes.transient_bytes, 0);
     }
 
     /// Everything under the transformer that isn't a block — `patchify_proj`,
@@ -10404,7 +10287,8 @@ mod tests {
         );
         serialize_to_file(&tensors, &None, &path).unwrap();
 
-        let sizes = super::ltx2_transformer_block_sizes_from_safetensors(&path, 1).unwrap();
+        let sizes =
+            super::ltx2_transformer_block_sizes_from_safetensors(&path, 1, DType::F32).unwrap();
 
         assert_eq!(sizes.blocks, vec![16]);
         assert_eq!(
@@ -10412,6 +10296,54 @@ mod tests {
             24 + 32,
             "patchify_proj + adaln_single must be reported, vae must not"
         );
+    }
+
+    /// INT8 ConvRot is priced at the BF16 size the loader actually
+    /// materializes on the device — the raw I8 span is exactly half of it,
+    /// which is how the 2.5 int8-conv pack was under-counted by 2×. The
+    /// figures come from the golden 2.5 distilled int8-convrot header
+    /// (`crates/mold-core/testdata/ltx25`): blocks 0 and 47 are complete,
+    /// 1..46 were cut, and the AdaLN width is the exact video key, not the
+    /// `prompt_adaln_single` look-alike.
+    #[test]
+    fn ltx2_int8_convrot_blocks_are_sized_widened_from_the_shared_index() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mold-core/testdata/ltx25/distilled-int8-convrot.header.safetensors");
+        let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
+        assert_eq!(index.block_bytes_at_rest()[0], 388_065_632);
+
+        let sizes = super::ltx2_transformer_weight_sizes(&index, 48, DType::BF16).unwrap();
+
+        assert_eq!(sizes.blocks.len(), 48);
+        assert_eq!(sizes.blocks[0], 773_349_760);
+        assert_eq!(sizes.blocks[47], 773_349_760);
+        assert_eq!(sizes.blocks[1], 0);
+        assert_eq!(sizes.non_block_bytes, 4_887_262_720);
+        assert_eq!(sizes.adaln_dim, Some(36_864));
+        assert_eq!(sizes.transient_bytes, 134_217_728);
+    }
+
+    /// GGUF blocks stay at their packed ggml size; NVFP4 keeps refusing so it
+    /// stays on the streaming path it always took.
+    #[test]
+    fn ltx2_gguf_blocks_are_sized_packed_and_nvfp4_stays_unmodelled() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mold-core/testdata/ltx25/distilled-q4-k-m.header.gguf");
+        let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
+        let sizes = super::ltx2_transformer_weight_sizes(&index, 48, DType::BF16).unwrap();
+        assert_eq!(index.block_bytes_at_rest()[0], 249_582_336);
+        assert_eq!(sizes.blocks[0], 249_164_160);
+        assert_eq!(sizes.blocks.iter().sum::<usize>(), 12_603_951_104);
+        assert_eq!(sizes.adaln_dim, Some(36_864));
+        assert_eq!(sizes.transient_bytes, 402_653_184);
+        assert!(!super::ltx2_checkpoint_is_fp8(
+            &ltx2_plan_at(512, 512, 9),
+            Some(&index)
+        ));
+
+        let nvfp4 = br#"{"model.diffusion_model.transformer_blocks.0.attn1.to_q.weight":{"dtype":"U8","shape":[4096,2048],"data_offsets":[0,8388608]},"model.diffusion_model.transformer_blocks.0.attn1.to_q.weight_scale_2":{"dtype":"F32","shape":[],"data_offsets":[8388608,8388612]}}"#;
+        let index = Ltx2TransformerWeightIndex::from_safetensors_header(nvfp4).unwrap();
+        assert!(super::ltx2_transformer_weight_sizes(&index, 1, DType::BF16).is_err());
     }
 
     /// The residency planner must reserve those non-block weights instead of
@@ -10424,6 +10356,7 @@ mod tests {
             blocks: ltx2_19b_fp8_blocks(),
             non_block_bytes: 2_107_091_456,
             adaln_dim: Some(24_576),
+            transient_bytes: 0,
         };
         const FREE_VRAM: u64 = 25_339_395_072;
 
@@ -10486,6 +10419,7 @@ mod tests {
             blocks: ltx2_19b_fp8_blocks(),
             non_block_bytes: 2_107_091_456,
             adaln_dim: Some(24_576),
+            transient_bytes: 0,
         };
         let ungranted = ltx2_plan_at(1024, 1024, 97);
         let stage = stage_shape(&ungranted, 1024, 1024, 97);

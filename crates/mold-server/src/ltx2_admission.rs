@@ -12,12 +12,11 @@
 //! actually reach, rejects a shape that cannot be run before two minutes of
 //! loading, and can name a shape that does fit.
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+
+use mold_core::ltx2_weight_index::Ltx2TransformerWeightIndex;
 
 /// Mirrors `mold_inference::adaptive_offload::ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM`;
 /// the engine reserves it inside every residency plan.
@@ -31,6 +30,11 @@ const LTX2_MIN_FRAGMENTATION_MARGIN_BYTES: u64 = 1_000_000_000;
 /// Share of the sampled reading used as the fragmentation margin when that is
 /// larger than the floor (5%).
 const LTX2_FRAGMENTATION_MARGIN_PERCENT: u64 = 5;
+
+/// Bytes per element admission prices GPU residency at. Every accelerator
+/// backend runs LTX-2 in BF16 (`ltx2::backend::Ltx2Backend::compute_dtype`),
+/// so a dense or narrowed tensor costs two bytes per element on the device.
+const LTX2_ADMISSION_ELEMENT_BYTES: u64 = 2;
 
 /// The same 90% safety cap `check_model_memory_budget` enforces. Admission
 /// plans residency against the budget it is willing to grant, never against
@@ -147,9 +151,26 @@ pub(crate) struct Ltx2CheckpointFacts {
     /// per-token AdaLN cost of a conditioned render. The 19B ships six
     /// components (24,576); LTX-2.3's 22B ships nine (36,864).
     pub(crate) adaln_dim: Option<u64>,
+    /// Per-forward scratch beside the resident weights: one dequantized
+    /// linear for a quantized checkpoint, zero for dense/float8. Carried from
+    /// the shared index so the engine and admission reserve one figure.
+    pub(crate) transient_bytes: u64,
 }
 
 impl Ltx2CheckpointFacts {
+    /// Project the shared header index onto admission's residency model.
+    /// The same index feeds `mold_inference::ltx2::ltx2_transformer_weight_sizes`,
+    /// and a parity test pins the two projections to each other.
+    pub(crate) fn from_weight_index(index: &Ltx2TransformerWeightIndex) -> Self {
+        Self {
+            block_sizes: index.resident_block_bytes(LTX2_ADMISSION_ELEMENT_BYTES),
+            fixed_resident_bytes: index.resident_non_block_bytes(LTX2_ADMISSION_ELEMENT_BYTES),
+            vae_bytes: index.vae_bytes_at_rest(),
+            adaln_dim: index.adaln_dim(),
+            transient_bytes: index.transient_bytes(),
+        }
+    }
+
     pub(crate) fn total_block_bytes(&self) -> u64 {
         self.block_sizes.iter().copied().sum()
     }
@@ -225,105 +246,13 @@ pub(crate) fn warm_checkpoint_facts(path: &Path) -> Option<Arc<Ltx2CheckpointFac
     Some(facts)
 }
 
-#[derive(serde::Deserialize)]
-struct HeaderTensor {
-    data_offsets: (u64, u64),
-    #[serde(default)]
-    shape: Vec<u64>,
-}
-
-/// Read the safetensors metadata header and classify every tensor into
-/// per-block transformer weights, always-resident transformer weights, and
-/// VAE weights. Only the header is read — the tensor bodies are never touched.
+/// Read the checkpoint header (safetensors or GGUF) through the shared
+/// weight index and project it onto per-block transformer weights,
+/// always-resident transformer weights, and VAE weights. Only the header is
+/// read — the tensor bodies are never touched.
 pub(crate) fn parse_checkpoint_facts(path: &Path) -> anyhow::Result<Ltx2CheckpointFacts> {
-    let mut file = File::open(path)?;
-    let mut header_len_bytes = [0u8; 8];
-    file.read_exact(&mut header_len_bytes)?;
-    let header_len = u64::from_le_bytes(header_len_bytes);
-    anyhow::ensure!(
-        header_len > 0 && header_len <= 512 * 1024 * 1024,
-        "implausible safetensors header length {header_len}"
-    );
-    let mut header = vec![0u8; header_len as usize];
-    file.read_exact(&mut header)?;
-    let tensors: HashMap<String, serde_json::Value> = serde_json::from_slice(&header)?;
-
-    let mut blocks: BTreeMap<usize, u64> = BTreeMap::new();
-    let mut fixed_resident_bytes = 0u64;
-    let mut vae_bytes = 0u64;
-    let mut adaln_dim = None;
-    for (name, value) in tensors {
-        if name == "__metadata__" {
-            continue;
-        }
-        let Ok(tensor) = serde_json::from_value::<HeaderTensor>(value) else {
-            continue;
-        };
-        let bytes = tensor.data_offsets.1.saturating_sub(tensor.data_offsets.0);
-        // The video branch's own modulation table — `audio_adaln_single` and
-        // the `av_ca_*` gates share the suffix.
-        if name.ends_with("adaln_single.linear.weight")
-            && !name.contains("audio")
-            && !name.contains("av_ca_")
-        {
-            adaln_dim = tensor.shape.first().copied();
-        }
-        match classify_tensor(&name) {
-            TensorRole::Block(index) => {
-                let entry = blocks.entry(index).or_default();
-                *entry = entry.saturating_add(bytes);
-            }
-            TensorRole::FixedTransformer => {
-                fixed_resident_bytes = fixed_resident_bytes.saturating_add(bytes);
-            }
-            TensorRole::Vae => vae_bytes = vae_bytes.saturating_add(bytes),
-            TensorRole::Other => {}
-        }
-    }
-
-    let block_sizes = blocks.into_values().collect();
-    Ok(Ltx2CheckpointFacts {
-        block_sizes,
-        fixed_resident_bytes,
-        vae_bytes,
-        adaln_dim,
-    })
-}
-
-enum TensorRole {
-    Block(usize),
-    FixedTransformer,
-    Vae,
-    Other,
-}
-
-fn classify_tensor(name: &str) -> TensorRole {
-    let stripped = name.strip_prefix("model.").unwrap_or(name);
-    if name.starts_with("vae.") || stripped.starts_with("vae.") {
-        return TensorRole::Vae;
-    }
-    // Prompt encoders and tokenizer-side weights are separate phases with
-    // their own placement policy; they never co-reside with the denoise peak.
-    if stripped.starts_with("text_encoder")
-        || stripped.starts_with("prompt_encoder")
-        || stripped.starts_with("tokenizer")
-    {
-        return TensorRole::Other;
-    }
-    match block_index(stripped) {
-        Some(index) => TensorRole::Block(index),
-        None => TensorRole::FixedTransformer,
-    }
-}
-
-fn block_index(name: &str) -> Option<usize> {
-    let mut components = name.split('.');
-    while let Some(component) = components.next() {
-        if component == "transformer_blocks" || component == "blocks" {
-            return components.next()?.parse().ok();
-        }
-    }
-    None
+    let index = Ltx2TransformerWeightIndex::read(path)?;
+    Ok(Ltx2CheckpointFacts::from_weight_index(&index))
 }
 
 // ── Peak estimate ───────────────────────────────────────────────────────────
@@ -579,6 +508,7 @@ pub(crate) fn supported_shape_advice(
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
 
     /// Measured `ltx-2-19b-distilled:fp8` layout (issue #641): 6 BF16 blocks
@@ -593,6 +523,7 @@ pub(crate) mod test_support {
             fixed_resident_bytes: 2_107_091_456,
             vae_bytes: 2_444_960_482,
             adaln_dim: Some(24_576),
+            transient_bytes: 0,
         }
     }
 
@@ -775,6 +706,76 @@ mod tests {
             mold_inference::device::ltx2_token_count(512, 512, 97),
             3_328
         );
+    }
+
+    fn golden(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mold-core/testdata/ltx25")
+            .join(name)
+    }
+
+    /// Admission and the engine must price one checkpoint identically:
+    /// block sizes, the fixed reserve, the AdaLN width, and the per-forward
+    /// transient all come from the same header index, and this pins the two
+    /// projections to each other on both golden 2.5 headers.
+    #[test]
+    fn admission_and_runtime_derive_identical_facts_from_one_header() {
+        for name in [
+            "distilled-int8-convrot.header.safetensors",
+            "distilled-q4-k-m.header.gguf",
+        ] {
+            let path = golden(name);
+            let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
+            let admission = parse_checkpoint_facts(&path).unwrap();
+            let runtime = mold_inference::ltx2::ltx2_transformer_weight_sizes(
+                &index,
+                index.num_layers(),
+                candle_core::DType::BF16,
+            )
+            .unwrap();
+
+            assert_eq!(
+                admission.block_sizes,
+                runtime
+                    .blocks
+                    .iter()
+                    .map(|bytes| *bytes as u64)
+                    .collect::<Vec<_>>(),
+                "{name}: block sizes"
+            );
+            assert_eq!(
+                admission.fixed_resident_bytes, runtime.non_block_bytes,
+                "{name}: fixed reserve"
+            );
+            assert_eq!(admission.adaln_dim, runtime.adaln_dim, "{name}: adaln");
+            assert_eq!(
+                admission.transient_bytes, runtime.transient_bytes,
+                "{name}: transient"
+            );
+            assert_eq!(admission.adaln_dim, Some(36_864), "{name}");
+            assert_eq!(admission.block_sizes.len(), 48, "{name}");
+            assert_eq!(admission.vae_bytes, 0, "{name}: split packs bundle no VAE");
+        }
+    }
+
+    /// The int8-conv pack widens every I8 linear to BF16 on the device, so
+    /// admission must charge the widened figure — the raw span is half of it
+    /// and admitted plans that OOMed at the first denoise step.
+    #[test]
+    fn checkpoint_facts_price_int8_convrot_widened() {
+        let facts =
+            parse_checkpoint_facts(&golden("distilled-int8-convrot.header.safetensors")).unwrap();
+        assert_eq!(facts.block_sizes[0], 773_349_760);
+        assert_eq!(facts.block_sizes[47], 773_349_760);
+        assert_eq!(facts.fixed_resident_bytes, 4_887_262_720);
+        assert_eq!(facts.transient_bytes, 134_217_728);
+        assert!(facts.is_usable());
+
+        let gguf = parse_checkpoint_facts(&golden("distilled-q4-k-m.header.gguf")).unwrap();
+        assert_eq!(gguf.block_sizes[0], 249_164_160);
+        assert_eq!(gguf.total_block_bytes(), 12_603_951_104);
+        assert_eq!(gguf.transient_bytes, 402_653_184);
+        assert!(gguf.is_usable());
     }
 
     #[test]

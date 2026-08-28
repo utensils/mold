@@ -22,19 +22,15 @@ pub(super) fn checkpoint_is_nvfp4(path: &Path) -> bool {
         .any(|(key, _)| key.ends_with(".weight_scale_2"))
 }
 
+/// Map a model-side logical name onto the single-file source key. The
+/// segment table (`proj_in` → `patchify_proj`, …) is
+/// `mold_core::ltx2_weight_index::canonical_tensor_name`, so the loaders and
+/// the admission/runtime weight index can never disagree about a name.
 pub(super) fn remap_ltx2_transformer_key(name: &str) -> String {
-    let mapped = name
-        .split('.')
-        .map(|component| match component {
-            "proj_in" => "patchify_proj",
-            "time_embed" => "adaln_single",
-            "norm_q" => "q_norm",
-            "norm_k" => "k_norm",
-            _ => component,
-        })
-        .collect::<Vec<_>>()
-        .join(".");
-    format!("{DIFFUSION_PREFIX}{mapped}")
+    format!(
+        "{DIFFUSION_PREFIX}{}",
+        mold_core::ltx2_weight_index::canonical_tensor_name(name)
+    )
 }
 
 pub(super) struct Ltx2Nvfp4Backend {
