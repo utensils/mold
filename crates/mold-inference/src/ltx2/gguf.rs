@@ -49,9 +49,7 @@ pub(crate) fn log_linear_kind_once(kind: &'static str) {
     let mut logged = LOGGED.lock().unwrap_or_else(|error| error.into_inner());
     if !logged.contains(&kind) {
         logged.push(kind);
-        // Matches ltx2::provenance::LOG_TARGET on the cuda-core branch;
-        // unified to the const at merge.
-        tracing::info!(target: "mold::ltx2", "{kind}");
+        tracing::info!(target: crate::ltx2::provenance::LOG_TARGET, "{kind}");
     }
 }
 
