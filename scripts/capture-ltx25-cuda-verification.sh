@@ -557,7 +557,7 @@ sample_gpu_and_host() {
 # `<status>\t<reason_source>\t<reason>` (status ok|not_run|blocked).
 model_readiness() {
   local model="$1" models_json="$2" entry
-  entry="$(jq -c --arg model "$model" '(.models // .) | .[] | select(.name == $model)' "$models_json")"
+  entry="$(jq -c --arg model "$model" '(.models? // .) | .[] | select(.name == $model)' "$models_json")"
   if [[ -z "$entry" ]]; then
     printf 'not_run\t\tmodel %s is not registered by this server build\n' "$model"
     return 0
