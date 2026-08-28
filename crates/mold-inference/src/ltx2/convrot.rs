@@ -104,7 +104,10 @@ pub(crate) fn log_int8_arm_once(arm: &'static str) {
     let mut logged = LOGGED.lock().unwrap_or_else(|error| error.into_inner());
     if !logged.contains(&arm) {
         logged.push(arm);
-        tracing::info!("ltx2 int8 arm={arm}");
+        tracing::info!(
+            target: crate::ltx2::provenance::LOG_TARGET,
+            "ltx2 int8 arm={arm}"
+        );
     }
 }
 
