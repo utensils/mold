@@ -12,10 +12,10 @@ the family natively in Rust.
 
 > **Note**: Video output defaults to MP4. Also supports GIF, WebP, and APNG
 > via `--format`. Frame count must be 4n+1 (77, 81, 121, ...) due to the
-> VAE's 4x temporal compression. Width and height must be multiples of 16 --
+> VAE's 4x temporal compression. Width and height must be multiples of 16,
 > except `wan22-ti2v-5b`, whose 2.2 VAE requires multiples of 32. Wan is
 > performance-qualified on CUDA; Apple Metal and CPU runs are
-> correctness-only. fp8-scaled checkpoints stay CUDA-only -- Metal has no
+> correctness-only. fp8-scaled checkpoints stay CUDA-only; Metal has no
 > fp8 widening kernel; use the bf16 or GGUF tier there.
 
 ## Variants
@@ -45,7 +45,7 @@ The encoder is also selectable: set the `umt5_variant` config key or the
 `MOLD_UMT5_VARIANT` env var to `q8`, `q6`, or `q5` (there is no dedicated CLI
 flag) to swap the 11.4 GB FP16 encoder for
 city96's GGUF export at 6.0, 4.7, or 4.1 GB. `auto` (the default) prefers FP16
-on GPU when it fits and otherwise the largest GGUF that does -- the encoder is
+on GPU when it fits and otherwise the largest GGUF that does; the encoder is
 the floor of a wan render's memory estimate, so this is the lever that moves
 every tier at once. Nothing below the publisher's Q5_K_M floor ships.
 `MOLD_KEEP_TE_RAM=1` additionally parks the FP16 encoder in host RAM between
@@ -57,13 +57,13 @@ Wan 2.2 A14B is a mixture of experts along the _noise_ axis: two complete 14B
 transformers, one trained for the early, structural part of the schedule and
 one for the late, detail part. mold loads the high-noise expert first, switches
 once when the schedule crosses the boundary (timestep 875 for T2V, 900 for
-I2V), and drops each expert before loading its partner -- so **VRAM is the
+I2V), and drops each expert before loading its partner. As a result, **VRAM is the
 larger of the two experts, not their sum** (~10.8 GB at `:q5`, ~15.4 GB at
 `:q8`). Disk is the sum, which is why the pull totals are large.
 
 Admission prices a wan render from its frame count, not just its resolution.
-Video memory is dominated by the token count -- `((frames − 1) / 4 + 1)` latent
-frames times the patch grid -- so the same 832×480 shape costs several times
+Video memory is dominated by the token count (`((frames − 1) / 4 + 1)` latent
+frames times the patch grid) so the same 832×480 shape costs several times
 more at 81 frames than at 17. The server predicts that peak from the
 checkpoint's own header before the UMT5 encode and the expert load, and refuses
 a shape that cannot fit rather than failing part-way through the denoise. The
@@ -72,19 +72,19 @@ second checkpoint it was not fitted to. A rejection names frames first, because
 that is the most effective lever, and suggests the next quantized tier down
 rather than the one that just failed.
 
-The swap itself is a cold read: the outgoing expert is still in the page cache, but the incoming 10.8-15.4 GB file has not been read this run and on a 32-64 GB host has been evicted behind UMT5 and the resident expert. mold warms it in the background while the first expert denoises -- host I/O only, so no VRAM is touched and the max-of-pair invariant holds. Measured on an RTX 4090 with a cold cache (`wan22-t2v-a14b:q5`, 33f): the swap load falls from 8.7-22.2 s, varying with what survived in cache, to a consistent 5.6 s. `MOLD_WAN_PREFETCH=0` turns it off.
+The swap itself is a cold read: the outgoing expert is still in the page cache, but the incoming 10.8-15.4 GB file has not been read this run and on a 32-64 GB host has been evicted behind UMT5 and the resident expert. mold warms it in the background while the first expert denoises; host I/O only, so no VRAM is touched and the max-of-pair invariant holds. Measured on an RTX 4090 with a cold cache (`wan22-t2v-a14b:q5`, 33f): the swap load falls from 8.7-22.2 s, varying with what survived in cache, to a consistent 5.6 s. `MOLD_WAN_PREFETCH=0` turns it off.
 
 Community A14B adapters are published the same way: a high-noise file and a
 low-noise file, distilled together and explicitly not interchangeable. Bind one
 to its expert with `--lora file.safetensors@high` (or `@low`), or the additive
 per-entry `expert` field on the API. mold infers the binding from the dominant
 filename conventions (`high_noise`, `HighNoise`, `HIGH`) when the field is
-absent and says so in the progress output -- an adapter with no expert marker
+absent and says so in the progress output; an adapter with no expert marker
 still applies to both experts, which is right for a genuinely unpaired one. A
 single-expert checkpoint refuses an explicit `expert` rather than ignoring it.
 
-The `:q5` tier additionally pulls lightx2v's 4-step distill -- a separate
-adapter for each expert -- and defaults to guidance 1.0. That is not a weak
+The `:q5` tier additionally pulls lightx2v's 4-step distill (a separate
+adapter for each expert) and defaults to guidance 1.0. That is not a weak
 setting: at guidance ≤ 1 mold skips the unconditional pass entirely, so each
 step is one forward instead of two. Four steps at one forward each is where
 the tier's speed comes from.
@@ -95,7 +95,7 @@ the tier's speed comes from.
 # 480p, 81 frames @ 16 fps (defaults)
 mold run wan21-t2v-1.3b "a red fox trotting through fresh snow, golden hour"
 
-# 720p24, 121 frames -- Wan 2.2 5B
+# 720p24, 121 frames: Wan 2.2 5B
 mold run wan22-ti2v-5b "aerial view of waves breaking on a black sand beach" \
   --width 1280 --height 704 --frames 121 --fps 24
 
@@ -109,7 +109,7 @@ mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
 # A14B image-to-video from a still
 mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
 
-# Single-frame text-to-image -- Wan 2.2 as a still-image model
+# Single-frame text-to-image: Wan 2.2 as a still-image model
 mold run wan22-t2v-a14b:q5 "a lighthouse at dusk, volumetric fog" \
   --frames 1 --output still.png
 
@@ -117,36 +117,36 @@ mold run wan22-t2v-a14b:q5 "a lighthouse at dusk, volumetric fog" \
 mold run wan22-i2v-a14b:q5 "the sapling grows into an oak" \
   --image sapling.png --last-image oak.png
 
-# The fp8-scaled quality tier -- the 20-step recipe with ~2.6 GB more VRAM headroom
+# The fp8-scaled quality tier: the 20-step recipe with ~2.6 GB more VRAM headroom
 mold run wan22-t2v-a14b:fp8 "storm waves crash over the lighthouse"
 ```
 
-The `:fp8` tier is not faster than `:q8` -- measured on an RTX 4090 at
+The `:fp8` tier is not faster than `:q8` (measured on an RTX 4090 at
 33f/832x480 under identical settings, both run ~28 s/step (the denoise is
-compute-bound, not weight-decode-bound) -- but its peak VRAM is 17,646 MiB
+compute-bound, not weight-decode-bound)) but its peak VRAM is 17,646 MiB
 against `:q8`'s 20,278 MiB. The trade-off: fp8-scaled weights refuse LoRA
 stacks (merging would re-round every targeted weight to three mantissa
-bits), so adapters -- the Lightning distills included -- need the GGUF or
+bits), so adapters (the Lightning distills included) need the GGUF or
 bf16 tiers.
 
 ## Where an A14B step actually goes
 
-A kernel-level audit (RTX 4090, 33f/832x480 -- 14,040 video tokens) attributes
+A kernel-level audit (RTX 4090, 33f/832x480; 14,040 video tokens) attributes
 the quality-tier step. Under the device-synced profiler the step measures
 ~42.5 s, of which **dense self-attention SDPA is ~21 s**, the quantized
-matmuls ~7 s -- the GGUF fast path (MMQ) engages for every shipped quant mix,
+matmuls ~7 s (the GGUF fast path (MMQ) engages for every shipped quant mix,
 and forcing the dequantize-per-forward fallback triples that bucket to ~21 s
-while leaving attention untouched -- and the BF16↔F32 boundary casts are
+while leaving attention untouched) and the BF16↔F32 boundary casts are
 ~1.5 s. Per-phase syncs inflate the many small ops far more than the 80
 large attention kernels, so against the real ~28 s step SDPA's share sits
 between half and roughly three quarters: attention dominates. Weight
 size barely matters: measured denoise time is **28.2 s/step at `:q8`
 quality, 30.2 at `:q5` quality** (its Lightning adapter runs as a per-step
 parallel branch on GGUF), and **15.9 at `:q5` fast** (guidance 1 skips the
-uncond forward -- exactly half a CFG step). Two diagnostic env knobs ship for
+uncond forward; exactly half a CFG step). Two diagnostic env knobs ship for
 re-running the audit: `MOLD_WAN_STEP_PROFILE=1` prints a per-phase,
 device-synced timing line per denoise step, and `MOLD_WAN_FORCE_DMMV=1`
-forces the quantized-matmul fallback for A/B comparison -- neither belongs in
+forces the quantized-matmul fallback for A/B comparison; neither belongs in
 production use.
 
 ### 81 frames on a 24 GB card
@@ -173,14 +173,14 @@ clips are unchanged. `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the block count and `0`
 disables it; `--offload` (`MOLD_OFFLOAD=1`) parks every block, which is the
 lowest-VRAM execution the family has and the slowest.
 
-Two caveats worth knowing. Parking is only available for **GGUF** checkpoints --
-the move is a raw-byte round trip that the plain and fp8 weight sources have no
-equivalent of -- and parked blocks cost wall clock, roughly doubling the render
-above, because each is rebuilt on the device once per step.
+Two caveats are worth knowing. Parking is available only for **GGUF**
+checkpoints because the plain and fp8 weight sources have no equivalent of its
+raw-byte round trip. Parked blocks also cost wall clock, roughly doubling the
+render above because each block is rebuilt on the device once per step.
 
 The Q8 and fp8 tiers carry a larger resident expert, so parking does not reach
 81 for them. Their envelopes are measured now, on the same card and by the same
-protocol -- the largest 4n+1 count admission accepts on an idle 4090, then a
+protocol; the largest 4n+1 count admission accepts on an idle 4090, then a
 real render:
 
 | Tier   | Expert   | Parks | Default frames | Wall clock |       Peak | First refused |
@@ -191,7 +191,7 @@ real render:
 | `:fp8` | ~14.3 GB | no    |         **45** |    996.4 s | 19,082 MiB |     49 frames |
 
 Both raised defaults sit at the edge of what admission accepts with the card
-otherwise idle -- 77 frames on `:q8` is refused at ~25.3 GB against ~24.8 GB
+otherwise idle; 77 frames on `:q8` is refused at ~25.3 GB against ~24.8 GB
 usable, and 49 on `:fp8` at ~25.2 GB. That is the same posture the pre-offload
 53-frame default held (23,975 MiB of 24,564). On a card sharing VRAM with a
 desktop session, pass a smaller `--frames` rather than meet a refusal at the
@@ -223,20 +223,20 @@ and names the 5B TI2V as the 24 GB path. mold agrees: `wan22-ti2v-5b:fp16`
 renders **81 frames at 1280x704 in 470.7 s at a 19,402 MiB peak**, and its own
 121-frame default at 160.7 s / 18,986 MiB. The 5B's single expert and 2.2 VAE
 (a 16x spatial stride against the 2.1 VAE's 8x) make its 720p token grid a
-fraction of A14B's -- that, not the quantization, is why it reaches the
+fraction of A14B's. That, not the quantization, is why it reaches the
 resolution.
 
 ### The LoRA branch runs at the activation dtype
 
 The Q5/Q4 tiers are Lightning distills, and a quantized checkpoint cannot take
-a LoRA merge -- that means dequantize, add, requantize, which is minutes per
+a LoRA merge. That would mean dequantizing, adding, and requantizing, which takes minutes per
 expert with most of the delta rounded away. Mold hangs the adapter off each
 projection as a parallel branch instead, ~400 of them per expert.
 
 Where that branch sits decides what it costs. A quantized projection computes
 in F32 while the model carries BF16 between ops, so each one casts on both
-sides. Running the branch on the activation the model already holds -- rather
-than on the projection's F32 interior -- lets the adapter be staged at BF16 for
+sides. Running the branch on the activation the model already holds (rather
+than on the projection's F32 interior) lets the adapter be staged at BF16 for
 no extra casts at all.
 
 Measured on an RTX 4090, `wan22-t2v-a14b:q5` at 832x480 x 53 frames:
@@ -248,7 +248,7 @@ Measured on an RTX 4090, `wan22-t2v-a14b:q5` at 832x480 x 53 frames:
 
 The saving is larger than the adapter's own ~0.6 GB because the branch's
 intermediates are BF16 now too. Renders are deterministic per build but not
-identical across this change -- the same seed returns the same shot, not the
+identical across this change; the same seed returns the same shot, not the
 same bytes. BF16 keeps 8 mantissa bits against Q5_K's ~5 per 32-value block, so
 the adapter stays well inside the accuracy of the checkpoint it patches.
 
@@ -272,7 +272,7 @@ decoder's convolutions are doing real work at full output resolution. Batching
 the per-frame 2-D stages into one launch and widening the decode chunk were
 both built and measured; neither moved the number, and the wider chunk only
 added an OOM at 8 latent frames, so neither shipped. There is no knob that
-makes this phase cheaper -- the levers that matter are resolution and frame
+makes this phase cheaper; the levers that matter are resolution and frame
 count.
 
 The decode is also _not_ where this family runs out of memory. Its transient is
@@ -288,7 +288,7 @@ A `--features cuda,flash-attn` build can route the Wan DiT's self- and cross-att
 | `flash` | 21,354 MiB | 75.3 s     |
 | `math`  | 22,250 MiB | 158.4 s    |
 
-So flash is worth **2.1x on speed** and only ~900 MiB on peak. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB -- not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that `flash-attn` ships in no release artifact, so this is a source-build configuration.
+So flash is worth **2.1x on speed** and only ~900 MiB on peak. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB; not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that `flash-attn` ships in no release artifact, so this is a source-build configuration.
 
 At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
 the default there), the image embeds the same `mold:parameters` provenance as
@@ -314,24 +314,24 @@ Wan checkpoints split three ways, and `/api/models` advertises which through
 the additive per-model `source_image` field so every surface offers exactly
 what the checkpoint accepts:
 
-- **`unsupported`** -- `wan21-t2v-1.3b`, `wan21-t2v-14b:*`, `wan22-t2v-a14b:*`:
+- **`unsupported`**: `wan21-t2v-1.3b`, `wan21-t2v-14b:*`, `wan22-t2v-a14b:*`:
   pure text-to-video; a supplied image is rejected at admission.
-- **`optional`** -- `wan22-ti2v-5b:*`: text-to-video, or the source pinned as
+- **`optional`**: `wan22-ti2v-5b:*`: text-to-video, or the source pinned as
   frame 0 through latent inpainting.
-- **`required`** -- `wan22-i2v-a14b:*`: the image is half the model input;
+- **`required`**: `wan22-i2v-a14b:*`: the image is half the model input;
   admission rejects a request without one.
 
-Installed `cv:`/`hf:` wan checkpoints classify from their own tensor shapes --
-the same read the engine performs -- never from their names.
+Installed `cv:`/`hf:` wan checkpoints classify from their own tensor shapes;
+the same read the engine performs, never from their names.
 
 ## First/last-frame interpolation
 
 `--image` + `--last-image` (wire: a two-entry `keyframes` list anchoring
-pixel frames 0 and F-1) renders motion between two stills -- upstream's FLF2V
+pixel frames 0 and F-1) renders motion between two stills; upstream's FLF2V
 task, ComfyUI's `WanFirstLastFrameToVideo`. A14B I2V drives the 36-channel
 mask contract with the endpoint flag in mask channel 3; TI2V-5B pins both
 endpoint latent frames through the same inpaint path diffusers' `last_image`
-uses. Any other keyframe layout is refused at admission -- the family has no
+uses. Any other keyframe layout is refused at admission; the family has no
 mid-clip keyframe path.
 
 ## Sequences
@@ -350,19 +350,19 @@ image-conditioned checkpoint accepts.
 
 That classification is exactly the `source_image` contract `/api/models`
 already advertises, so a picker can never offer a seam the checkpoint would
-reject. A text-to-video checkpoint is still sequence-capable -- it simply
+reject. A text-to-video checkpoint is still sequence-capable; it simply
 concatenates independent clips, the same honest behaviour LTX-Video has.
 
 The continuation is seeded with the previous clip's final frame, so it
 re-renders exactly that one frame and the stitch trims exactly one. This is
 deliberately **not** LTX-2's 17-frame motion tail, which is the pixel window
-its VAE turns into three latent slots of carryover -- wan has no equivalent,
+its VAE turns into three latent slots of carryover; wan has no equivalent,
 and reusing the number would discard sixteen good frames at every seam.
 
 Clip lengths sit on wan's `4k+1` grid. The auto-chaining default is a VRAM
 envelope rather than a ceiling, and it is the selected tier's own default frame
-count -- 81 on the Q5/Q4 A14B tiers, 73 on `:q8`, 45 on `:fp8`, 121 on the
-single-expert 5B -- with a family floor of 53 for A14B and 121 for everything
+count (81 on the Q5/Q4 A14B tiers, 73 on `:q8`, 45 on `:fp8`, 121 on the
+single-expert 5B) with a family floor of 53 for A14B and 121 for everything
 else, which is what an opaque `cv:` / `hf:` ID with no manifest gets.
 `--clip-frames` overrides it, clamped to the real 257-frame request cap.
 
@@ -373,7 +373,7 @@ mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
 ```
 
 Authored sequences work through the same `mold.chain.v1` script the LTX
-families use -- per-stage prompts, frames, and transitions -- with `mold chain
+families use (per-stage prompts, frames, and transitions) with `mold chain
 validate shot.toml` reporting the normalized stage list and stitched length
 before anything is submitted:
 
@@ -412,7 +412,7 @@ gutter, and railing persist across both seams.
 `--extend` continues an existing video in one request. It is the same seam as
 a sequence boundary with the carryover coming from a file: the source clip's
 final frame becomes the continuation's conditioning, so `--extend-overlap` is
-always **1** on wan -- the multi-frame overlap LTX-2 accepts is a latent motion
+always **1** on wan; the multi-frame overlap LTX-2 accepts is a latent motion
 tail wan does not have, and a larger value is refused rather than silently
 trimming good frames. That is also the default: `/api/models` advertises
 `extend_default_overlap_frames: 1` for wan checkpoints, so the flag can be
@@ -421,7 +421,7 @@ omitted.
 Resolution and fps are locked to the source clip; a mismatch is refused rather
 than rescaled, because the stitched result is one video. `/api/models`
 advertises `supports_extend` per checkpoint, from the same `source_image`
-contract the seam reads -- a text-to-video checkpoint cannot extend, and its
+contract the seam reads; a text-to-video checkpoint cannot extend, and its
 continuation is refused at admission rather than after the model load. The
 resolved overlap is written into the request before the job is queued, so the
 saved metadata records the 1 that rendered even for an installed `cv:` / `hf:`
@@ -433,7 +433,7 @@ continue and offers the single 1-frame overlap wan accepts. A continuation on
 an I2V checkpoint needs no attached source image: the clip you are continuing
 supplies the first frame, and both the server and every Studio surface count it
 as satisfying the checkpoint's image requirement. Attaching an image alongside
-the clip is still refused -- the first frames are pinned by the source tail.
+the clip is still refused; the first frames are pinned by the source tail.
 
 ```bash
 mold run wan22-ti2v-5b:q8 "the paper boat drifts on past a storm drain" \
@@ -461,14 +461,14 @@ upstream's **per-expert** scales, switching at the same boundary as the expert
 swap: T2V runs 4.0 while the high-noise expert is resident and 3.0 after the
 boundary; I2V runs 3.5 throughout (`wan_{t2v,i2v}_A14B.py`
 `sample_guide_scale`). Passing an explicit `--guidance` pins that one scale
-for the whole schedule -- except an explicit 3.5 on the quality tier, which is
+for the whole schedule; except an explicit 3.5 on the quality tier, which is
 indistinguishable from the default on the wire and selects the per-expert
 pair. The Lightning tiers (default 1.0) treat every value, 3.5 included, as
 an explicit uniform choice.
 
 ² Each A14B frame default is that tier's measured 24 GB envelope: Q5/Q4 reach
 the checkpoint's trained 81 through block offload, `:q8` reaches 73, and
-`:fp8` -- which cannot park -- reaches 45. See
+`:fp8` (which cannot park) reaches 45. See
 [81 frames on a 24 GB card](#_81-frames-on-a-24-gb-card).
 
 ### The Turbo tier on 24 GB
@@ -483,7 +483,7 @@ Measured on an RTX 4090 at the tier's own defaults (1280x704, 24 fps,
 | Image-to-video, 121f | refused | ~24.9 GB estimated against ~24.8 GB usable |
 
 Image-to-video at the full 121-frame default does not fit a 24 GB card at this
-weight class -- `wan22-ti2v-5b:fp16` is refused at the identical estimate, so
+weight class; `wan22-ti2v-5b:fp16` is refused at the identical estimate, so
 this is the fp16-weight envelope rather than anything the distill changes. Use
 `--frames 81`, or the `:q8` tier, which carries ~4.5 GB less of transformer.
 
@@ -505,7 +505,7 @@ by default so the tier defaults above remain authoritative. A fourth,
 env-scoped knob trades denoise steps for time on the quality tiers.
 
 **Flow shift** (`--sample-shift`, env fallback `MOLD_WAN_SHIFT`) is the
-family's primary quality/character knob -- upstream ships per-task values from
+family's primary quality/character knob; upstream ships per-task values from
 3.0 to 16, diffusers documents 2.0–5.0 for low resolutions and 7.0–12.0 for
 high, Lightning wants 5, upstream's 720p quality A14B T2V wants 12, and
 ComfyUI templates ship 8. Precedence is request > env > per-tier default, so
@@ -514,14 +514,14 @@ two queued jobs can run different shifts on one server.
 **Sample solver** (`--sample-solver unipc|euler|dpm++`, env fallback
 `MOLD_WAN_SOLVER`, wire slot `scheduler`) selects the denoise algorithm:
 
-- `unipc` (default) -- FlowUniPC order-2 predictor-corrector, the UAT'd
+- `unipc` (default); FlowUniPC order-2 predictor-corrector, the UAT'd
   recipe every existing seed reproduces.
-- `euler` -- plain flow Euler over the same grid; the solver the lightx2v
+- `euler`: plain flow Euler over the same grid; the solver the lightx2v
   4-step Lightning distills were tuned for. At 4 steps, order 2 vs order 1
   is a real output difference.
-- `dpm++` -- upstream's `FlowDPMSolverMultistepScheduler` (order 2,
+- `dpm++` (upstream's `FlowDPMSolverMultistepScheduler` (order 2,
   dpmsolver++ midpoint) over its own sigma grid, which starts at exactly 1.0
-  (first DiT timestep 1000) -- useful for A/B-ing quality-tier renders
+  (first DiT timestep 1000)) useful for A/B-ing quality-tier renders
   against upstream, golden-pinned to `fm_solvers.py`.
 
 **Distill strength** (`--distill-strength high=X,low=Y`, or one number for
@@ -538,11 +538,11 @@ its residual moves less than the relative-L1 threshold, the remaining blocks
 are skipped and their previous contribution replayed. `auto` uses threshold
 0.10, measured at 1.85× on `wan22-t2v-a14b:q8` (605.6 s → 327.4 s at
 33f/832x480) with no visible artifacting. A cached run is a different sample of
-comparable quality, not the same frames faster -- skipping steps changes the
+comparable quality, not the same frames faster; skipping steps changes the
 trajectory. The conditional and unconditional passes keep independent caches
 and the cache resets at the A14B expert swap. It refuses (with a message rather
 than a silent no-op) on the 4-step Lightning distill tiers and on schedules
-under 12 steps -- neither has redundant steps to skip. `off` (the default) is
+under 12 steps; neither has redundant steps to skip. `off` (the default) is
 bit-identical to the uncached engine.
 
 ## Quantized checkpoints and adapters
@@ -551,15 +551,15 @@ A14B ships as GGUF. Quantized weights stay quantized in memory and dequantize
 inside the matmul, which is what keeps a 14B expert at ~10.8 GB rather than
 ~28 GB. A LoRA cannot be merged into a weight in that state without
 requantizing it, so on GGUF mold applies adapters as a parallel branch
-instead -- low-rank for A/B pairs, dense for full-weight `.diff` deltas -- the
+instead (low-rank for A/B pairs, dense for full-weight `.diff` deltas) the
 same arithmetic, applied at full precision, with no load cost. On bf16
 safetensors the adapter is merged as the weights are read; fp8-scaled
 checkpoints refuse adapter stacks rather than re-round their weights.
 
 Community adapters that carry `.diff` (full weight delta) and `.diff_b`
-(bias delta) tensors alongside or instead of their low-rank pairs -- Kijai's
+(bias delta) tensors alongside or instead of their low-rank pairs (Kijai's
 Wan 2.1 lightx2v extractions, lightx2v's distill pairs, musubi-tuner-trained
-Civitai LoRAs -- load fully: `W' = W + strength·diff`, `b' = b +
+Civitai LoRAs) load fully: `W' = W + strength·diff`, `b' = b +
 strength·diff_b`, matching ComfyUI. The kohya alpha never rescales a
 full-weight delta (a delta has no rank), and a delta naming a tensor the
 checkpoint does not have still refuses the whole adapter rather than
@@ -567,19 +567,19 @@ applying the part that matches.
 
 `*_fp8_e4m3fn_scaled` safetensors also load: the weights stay 1 byte per
 parameter and dequantize per call against their per-module scale. The `e5m2`
-variants some repositories publish beside them are refused by name -- mold
+variants some repositories publish beside them are refused by name; mold
 reads the e4m3 flavour only.
 
 ### Checkpoint key layouts
 
 Three safetensors key layouts load, and mold picks between them by reading the
-file's own header -- never its filename:
+file's own header, never its filename:
 
 - **Upstream / ComfyUI** names at the file root (`blocks.0.self_attn.q.*`).
 - **Comfy-Org repacks**, the same names under a `model.diffusion_model.` prefix.
 - **diffusers** `WanTransformer3DModel` exports (`blocks.0.attn1.to_q.*`,
   `condition_embedder.*`, `ffn.net.0.proj`), translated at load through the
-  same rename table the golden parity test uses -- including diffusers'
+  same rename table the golden parity test uses, including diffusers'
   `norm2`/`norm3` swap.
 
 `patch_embedding.weight` is spelled identically in all three, so the
@@ -588,8 +588,8 @@ checkpoint matching none of the layouts is refused by name at load rather than
 constructing a transformer from default weights and rendering noise.
 
 A layout that loads is not a promise that every checkpoint in it runs. Wan 2.1
-image-to-video is refused in **either** spelling -- original `cross_attn.k_img`
-or diffusers `attn2.add_k_proj` / `condition_embedder.image_embedder.*` -- since
+image-to-video is refused in **either** spelling (original `cross_attn.k_img`
+or diffusers `attn2.add_k_proj` / `condition_embedder.image_embedder.*`) since
 its CLIP-vision cross-attention branch is not implemented; use `wan22-i2v-a14b`
 or `wan22-ti2v-5b` for image conditioning. A diffusers-layout file is
 additionally scanned whole and refused by name when it carries tensors the
@@ -602,19 +602,19 @@ diffusers-keyed fp8 file is refused rather than half-loaded.
 ## Discovery
 
 The models in the table above install by name. Community Wan fine-tunes are
-additionally discoverable in the catalog -- open **Models → Discover** in Mold
+additionally discoverable in the catalog; open **Models → Discover** in Mold
 Studio and search for `wan`, then install the row, or pull a Civitai version id
 directly:
 
 ```bash
-mold pull wan22-t2v-a14b:q5   # manifest name -- the A14B fast tier
+mold pull wan22-t2v-a14b:q5   # manifest name for the A14B fast tier
 mold pull wan21-t2v-1.3b      # bare names resolve their default tag
 mold pull cv:<version-id>     # a catalog row
 ```
 
 `mold pull` takes manifest names and catalog ids (`cv:…`, `hf:…`). A catalog id
 has to name a row the catalog actually supports, which is not the same as any
-Hugging Face repository -- `hf:Wan-AI/Wan2.2-T2V-A14B`, for instance, is the
+Hugging Face repository; `hf:Wan-AI/Wan2.2-T2V-A14B`, for instance, is the
 upstream aggregate repository, not a single runnable checkpoint; the A14B
 manifest tiers above are its supported route. When in doubt, install from
 **Models → Discover**, which only lists rows this build can run.
@@ -631,8 +631,8 @@ low-noise sibling into one install: the catalog shows one row per pair, either
 expert's `cv:` id resolves to the same two-file download, and the installed
 model denoises with both experts exactly like the manifest tiers (switching at
 timestep 875 for T2V, 900 for I2V). A version whose counterpart cannot be
-identified with confidence -- merged "all-in-one" republications, a
-high-noise-only upload, ambiguous naming -- stays visible but is refused with
+identified with confidence (merged "all-in-one" republications, a
+high-noise-only upload, ambiguous naming) stays visible but is refused with
 the reason rather than installed as a single expert, which would render
 silently wrong. If one half of an installed pair goes missing, the row reports
 not-installed and re-running the install resumes just the missing half.
@@ -643,9 +643,9 @@ What the catalog deliberately does not offer:
   branch mold's transformer does not implement, so the download would install
   and then fail to generate.
 - **Wan 2.5 and 2.7** are later architectures with no mold engine.
-- **GGUF Civitai rows** -- the Civitai path is safetensors-only; the GGUF A14B
+- **GGUF Civitai rows**: the Civitai path is safetensors-only; the GGUF A14B
   tiers ship through the manifest names above.
-- **4-bit (NF4/NVFP4) safetensors** -- the Wan loader reads dense, scaled-FP8,
+- **4-bit (NF4/NVFP4) safetensors**: the Wan loader reads dense, scaled-FP8,
   and GGUF weights only, so these versions are dropped rather than offered as
   multi-gigabyte downloads that fail at load.
 
@@ -657,7 +657,7 @@ install from the catalog normally.
 Remaining Wan work is tracked in the
 [Wan Video milestone](https://github.com/utensils/mold/milestone/4).
 
-The Wan ecosystem is much wider than text-to-video and image-to-video --
+The Wan ecosystem is much wider than text-to-video and image-to-video;
 VACE, Fun-Control, camera, Phantom, track, audio-driven (S2V, HuMo,
 InfiniteTalk, WanDancer), and character animation (Animate, SCAIL) all exist
 upstream. Every one of them carries an explicit decision in the

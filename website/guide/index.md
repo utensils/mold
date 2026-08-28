@@ -6,7 +6,7 @@ environment, or heavyweight runtime is required.
 
 The command line is the stable product foundation: core workflows accept
 predictable arguments, stdin, files, and environment variables; return useful
-stdout, stderr, exit status, and machine-readable output; and work the same for
+stdout, stderr, exit status, and machine-readable output, and work the same for
 a person, shell script, CI job, or agent. Desktop, web, TUI, iPhone, REST/SSE,
 and MCP clients extend that engine rather than hiding it.
 
@@ -25,10 +25,10 @@ mold run "a cat"
 ```
 
 mold tries to connect to a running `mold serve` instance first. If no server is
-available, it falls back to local GPU inference -- auto-downloading the model if
+available, it falls back to local GPU inference; auto-downloading the model if
 needed.
 
-![Tea house -- generated with FLUX Dev Q4](/gallery/flux-dev-teahouse.png)
+![Tea house, generated with FLUX Dev Q4](/gallery/flux-dev-teahouse.png)
 
 ## Built for automation
 
@@ -57,7 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 # Generate your first image
 mold run "a sunset over mountains"
 
-# That's it -- mold shows the complete download before the first pull
+# That's it: mold shows the complete download before the first pull
 ```
 
 For the latest rolling CLI build from `main`, add `MOLD_CHANNEL=nightly` on
@@ -65,18 +65,18 @@ the `sh` side of the install pipe.
 
 ## What You Get
 
-- **Broad model support** -- FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein
+- **Broad model support**: FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein
   and Dev, Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video (0.9.x, 2,
   2.3, and 2.5), Wan 2.1/2.2, and MiniMax H3
-- **txt2img, img2img, multimodal edit, inpainting, ControlNet** -- all in one binary
-- **Image upscaling** -- Real-ESRGAN super-resolution (2x/4x) via CLI, server API, or TUI
-- **Pipe-friendly** -- `mold run "a cat" | viu -` just works
-- **Client-server** -- run the GPU part on one machine, generate from anywhere
-- **Native apps** -- a local/multi-host desktop studio plus remote-only iPhone
+- **txt2img, img2img, multimodal edit, inpainting, ControlNet**: all in one binary
+- **Image upscaling**: Real-ESRGAN super-resolution (2x/4x) via CLI, server API, or TUI
+- **Pipe-friendly**: `mold run "a cat" | viu -` just works
+- **Client-server**: run the GPU part on one machine, generate from anywhere
+- **Native apps**: a local/multi-host desktop studio plus remote-only iPhone
   and Android companions
-- **Prompt expansion** -- short prompts become detailed via local LLM
-- **LoRA adapters** -- apply fine-tuned styles across FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Qwen-Image-Edit, Wan, and Z-Image
-- **PNG metadata** -- generation parameters embedded for reproducibility
+- **Prompt expansion**: short prompts become detailed via local LLM
+- **LoRA adapters**: apply fine-tuned styles across FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Qwen-Image-Edit, Wan, and Z-Image
+- **PNG metadata**: generation parameters embedded for reproducibility
 
 ## Requirements
 
@@ -88,20 +88,20 @@ the `sh` side of the install pipe.
 
 ## Next Steps
 
-- [Installation](/guide/installation) -- all the ways to install mold
-- [Configuration](/guide/configuration) -- environment variables, config file
-- [Generating Images](/guide/generating) -- full usage guide
-- [Video Generation](/guide/video) -- LTX, Wan, and MiniMax H3 workflows
-- [Desktop App](/guide/desktop) -- local and multi-host native studio
-- [iPhone App](/guide/iphone) -- remote Create, Library, Models, Machines, and
+- [Installation](/guide/installation): all the ways to install mold
+- [Configuration](/guide/configuration): environment variables, config file
+- [Generating Images](/guide/generating): full usage guide
+- [Video Generation](/guide/video): LTX, Wan, and MiniMax H3 workflows
+- [Desktop App](/guide/desktop): local and multi-host native studio
+- [iPhone App](/guide/iphone): remote Create, Library, Models, Machines, and
   Settings
-- [Android App](/guide/android) -- the same remote Studio surface with native
+- [Android App](/guide/android): the same remote Studio surface with native
   secure credentials, pairing, discovery, and media actions
-- [Machines](/guide/machines) -- connect, discover, and monitor web hosts
-- [Feature Support](/guide/feature-matrix) -- which model families support which
+- [Machines](/guide/machines): connect, discover, and monitor web hosts
+- [Feature Support](/guide/feature-matrix): which model families support which
   features
-- [Remote Workflows](/guide/remote-workflows) -- laptop-to-GPU-server setups
-- [Performance](/guide/performance) -- speed and VRAM tuning
-- [Custom Models & LoRA](/guide/custom-models) -- manual config and adapter
+- [Remote Workflows](/guide/remote-workflows): laptop-to-GPU-server setups
+- [Performance](/guide/performance): speed and VRAM tuning
+- [Custom Models & LoRA](/guide/custom-models): manual config and adapter
   workflows
-- [Models](/models/) -- which model to pick for your use case
+- [Models](/models/): which model to pick for your use case

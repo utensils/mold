@@ -9,7 +9,7 @@ Mold supports generating video clips using LTX Video (including LTX-2.5), Wan
 checkpoint can chain multiple clips together for longer videos with
 scene-by-scene direction; H3 is single-clip only. A dev checkpoint
 renders its clips through the two-stage pipeline, so expect roughly twice the
-wall time per clip as a distilled one -- stage 1 runs classifier-free guidance
+wall time per clip as a distilled one; stage 1 runs classifier-free guidance
 as two sequential forward passes.
 
 ### Wan sequences
@@ -56,11 +56,11 @@ mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
 ```
 
 Wan's frame grid is 4n+1 (49, 53, 81, 121, ...) from its VAE's 4x temporal
-compression, and dimensions must be multiples of 16 -- except `wan22-ti2v-5b`,
+compression, and dimensions must be multiples of 16; except `wan22-ti2v-5b`,
 whose 2.2 VAE requires multiples of 32. A14B is a two-expert mixture: mold
 keeps one 14B expert resident at a time, so VRAM is the larger expert, not
 the sum. The `:q5`/`:q4` tiers default to the checkpoint's trained 81
-frames -- automatic partial block offload fits them on a 24 GB card -- while
+frames (automatic partial block offload fits them on a 24 GB card) while
 `:q8` defaults to 73 frames and `:fp8` to 45, their measured 24 GB
 envelopes. Wan checkpoints were tuned against a
 specific negative prompt that mold applies automatically when a request
@@ -94,8 +94,8 @@ outside the trained range even when the frame's area is small. A checkpoint
 that ships the spatial upsampler reaches past it by **composing**: stage 1
 renders at half the requested size, the learned upsampler doubles it, and
 stage 2 refines the result over tiles each brought back inside the span. That
-puts the generation ceiling at 4096px on the long edge -- exactly where a
-single halving stops landing stage 1 inside the span -- and gives an output
+puts the generation ceiling at 4096px on the long edge (exactly where a
+single halving stops landing stage 1 inside the span) and gives an output
 ladder of 1280x704, 1920x1088, 2560x1408 and 3840x2112. A checkpoint that
 renders in one pass stays capped at 2048px and 1920x1088.
 
@@ -113,13 +113,13 @@ the selected checkpoint would reject.
 `ltx-2-19b-distilled:fp8` at 25 frames: 1080p peaks at 18.4 GB, 1440p at
 18.1 GB, and 4K completes at 18.2 GB with the smaller tile. With the default
 1280px tile, 4K reaches the VAE decode and fails there with an out-of-memory
-error naming the phase -- it does not silently render something smaller. Those
+error naming the phase; it does not silently render something smaller. Those
 are single-configuration measurements at 25 frames, not a support matrix; see
 [LTX-2 → Resolution](/models/ltx2#resolution) for the full numbers and
 caveats.
 
 `--spatial-tile` (or `MOLD_LTX2_SPATIAL_TILE`, which `mold serve` reads) takes
-`auto` -- the default, which tiles only where it buys something -- `off`, or an
+`auto` (the default, which tiles only where it buys something) `off`, or an
 explicit `<px>` / `<px>:<overlap>` in multiples of 32. `auto` engages exactly
 at the span and no earlier, so every resolution up to 1080p renders as it
 always has; `off` past the span is refused rather than quietly degraded. See
@@ -153,7 +153,7 @@ Per-stage transitions or per-stage frames require `--script`.
 
 | Mode                 | Behavior                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------------------- |
-| `smooth` _(default)_ | Motion-tail carryover -- prompt change produces a visual morph between scenes.                    |
+| `smooth` _(default)_ | Motion-tail carryover; prompt change produces a visual morph between scenes.                      |
 | `cut`                | Fresh latent, no carryover. If the stage has `source_image`, it's used as an image-to-video seed. |
 | `fade`               | Cut + post-stitch alpha blend of `fade_frames` (default 8) on each side of the boundary.          |
 
@@ -199,8 +199,8 @@ fade_frames = 12
 On web, desktop, and iPhone, multi-clip video is a setting rather than a
 separate page. In Create, set **Output** (beside Model) to **Sequence** and the
 composer becomes a clip rail: clip pills carrying a prompt and frame count,
-joined by seam pills. Seams are named in words -- **Smooth**, **Cut**, and
-**Fade 8f** -- and a click opens the seam editor with its fade-length stepper.
+joined by seam pills. Seams are named in words (**Smooth**, **Cut**, and
+**Fade 8f**) and a click opens the seam editor with its fade-length stepper.
 LTX-Video has no motion tail, so its seams read **Join**. New clips
 default to the selected model's advertised frame count. Frame choices and
 timeline metadata include their duration at the live model FPS, such as
@@ -213,7 +213,7 @@ opens the raw scene in the main Create canvas while later stages continue
 rendering; **Return to live render** switches the canvas back to progress.
 Desktop and web can edit a finished sequence in place: its clips reload onto the
 rail, each pill shows cached (✓) versus re-render (↻), and **Update sequence**
-re-renders only from the earliest changed clip -- transition and fade-length
+re-renders only from the earliest changed clip; transition and fade-length
 edits re-stitch with no re-render at all. Every settled sequence job is listed
 in **Library ▸ History ▸ Sequences**, and a sequence print in the Library uses
 **Edit sequence** as its primary desktop/web action (re-enter the original job
@@ -256,13 +256,13 @@ Returns per-model caps used by every sequence UI:
 }
 ```
 
-`frames_per_clip_cap` is the model's own clip size -- what one generation
+`frames_per_clip_cap` is the model's own clip size (what one generation
 renders when a long one-shot request is chained automatically (97 for LTX-2;
 for Wan the checkpoint's own manifest default over a 53-frame A14B /
-121-frame floor, e.g. 121 for TI2V-5B) -- so a sequence clip can never be longer
+121-frame floor, e.g. 121 for TI2V-5B)) so a sequence clip can never be longer
 than the clips the Duration slider would have produced.
-`frames_per_clip_recommended` follows the model's own default frame count -- 97
-for LTX-2, 25 for LTX-Video -- so clients do not have to hardcode one.
+`frames_per_clip_recommended` follows the model's own default frame count (97
+for LTX-2, 25 for LTX-Video) so clients do not have to hardcode one.
 `supports_sequence` is model-specific and is also advertised per model on
 `GET /api/models`, so a picker never has to infer it from the checkpoint name.
 A family with no chain path reports `false` with a

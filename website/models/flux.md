@@ -61,7 +61,7 @@ multiples of 16.
 
 ## Examples
 
-**FLUX Schnell Q8** -- 4 steps, seed 42:
+**FLUX Schnell Q8**: 4 steps, seed 42:
 
 ```bash
 mold run flux-schnell:q8 \
@@ -70,9 +70,9 @@ mold run flux-schnell:q8 \
   --seed 42
 ```
 
-![Snow leopard -- FLUX Schnell](/gallery/flux-schnell-leopard.png)
+![Snow leopard, FLUX Schnell](/gallery/flux-schnell-leopard.png)
 
-**FLUX Dev Q4** -- 25 steps, seed 1337:
+**FLUX Dev Q4**: 25 steps, seed 1337:
 
 ```bash
 mold run flux-dev:q4 \
@@ -81,7 +81,7 @@ mold run flux-dev:q4 \
   --seed 1337
 ```
 
-![Tea house -- FLUX Dev](/gallery/flux-dev-teahouse.png)
+![Tea house, FLUX Dev](/gallery/flux-dev-teahouse.png)
 
 ## LoRA Support
 
@@ -94,7 +94,7 @@ mold run flux-dev:q4 "a portrait" --lora style.safetensors --lora-scale 0.8
 
 ## VRAM Notes
 
-- Full BF16 (23 GB) auto-offloads on 24 GB cards -- blocks stream CPU↔GPU
+- Full BF16 (23 GB) auto-offloads on 24 GB cards; blocks stream CPU↔GPU
 - GGUF quantized (Q4/Q8) fits without offloading
 - Use `--eager` to keep encoders loaded between generations (faster, more VRAM)
 - T5-XXL encoder auto-selects quantized variant when VRAM is tight

@@ -61,7 +61,7 @@ mold run flux-dev:q4 "portrait" --lora another-style.safetensors --lora-scale 1.
 ## Multi-LoRA Stacking
 
 Pass `--lora` more than once to stack adapters. The deltas merge additively
-into the base weights -- `W' = W + Σ scale_i · B_i @ A_i` -- so the result is
+into the base weights (`W' = W + Σ scale_i · B_i @ A_i`) so the result is
 the same as composing two style edits in series, but only one transformer
 build is required:
 
@@ -82,7 +82,7 @@ Wan 2.2 A14B adapters usually ship as a high-noise/low-noise pair; bind an
 adapter to one expert with `--lora file.safetensors@high` or `@low`. When the
 marker is omitted mold infers the binding from the adapter's filename and
 discloses the inference in progress output; an adapter with no expert affinity
-applies to both experts. The fp8-scaled A14B tiers refuse LoRA stacks -- use
+applies to both experts. The fp8-scaled A14B tiers refuse LoRA stacks; use
 the GGUF or bf16 tiers for adapters.
 
 ## Step-Distilled LoRAs
@@ -97,7 +97,7 @@ mold run qwen-image-2512:q8 "a snowy mountain cabin at twilight" \
   --steps 8 --guidance 1.0
 ```
 
-Set `--steps` to the adapter's step count and `--guidance 1.0` -- mold turns on
+Set `--steps` to the adapter's step count and `--guidance 1.0`; mold turns on
 classifier-free guidance above `1.0`, which costs a second forward pass per step
 that a CFG-free distilled adapter was not trained for. See
 [Qwen-Image](/models/qwen-image#lightning-loras-on-a-checkpoint-you-already-have)
@@ -111,7 +111,7 @@ live. Open **Models** (the Discover segment), choose a family and LoRA kind
 where available, then use **Install** on the web or **Pull** in a native app.
 Once installed, it appears in compatible Create LoRA pickers on that host.
 The web Installed shelf refreshes when the pull finishes. Model details mark
-each runtime component ready or missing; when the server supplies a repair
+each runtime component ready or missing. When the server supplies a repair
 target, **Repair** queues that exact component rather than reinstalling an
 ambiguous repository. Unload a model before deleting its on-disk files.
 
@@ -137,12 +137,12 @@ for the complete API surface.
 LoRAs trained with explicit trigger phrases (Civitai `trainedWords`) surface
 those phrases as click-to-insert chips next to the LoRA picker in the web UI.
 Clicking a chip appends the phrase to the active prompt with sensible
-comma-separation -- no more flipping back to the Civitai page to copy/paste.
+comma-separation; no more flipping back to the Civitai page to copy/paste.
 
 ## LoRA Rules
 
 - Supported families: **FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image
-  (+ Qwen-Image-Edit), Wan, Z-Image**. Wuerstchen and LTX-Video are not yet wired --
+  (+ Qwen-Image-Edit), Wan, Z-Image**. Wuerstchen and LTX-Video are not yet wired;
   attaching a LoRA there returns a 400 with the current supported-family list.
   (Source of truth: `mold-core::validation::require_lora_capable_family`.)
 - `.safetensors` only

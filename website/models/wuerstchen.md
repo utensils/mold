@@ -2,7 +2,7 @@
 
 A research model featuring a unique 3-stage cascade architecture with 42x
 latent compression. CLIP-G text encoder feeds into Prior → Decoder → VQ-GAN
-stages. Developed in 2023, Wuerstchen is no longer actively maintained -- its
+stages. Developed in 2023, Wuerstchen is no longer actively maintained; its
 authors went on to create Stable Cascade (also discontinued).
 
 - **Developer**: [Wuerstchen Team](https://huggingface.co/warp-ai)
@@ -42,7 +42,7 @@ multiples of 16.
 ## Notes
 
 Wuerstchen produces softer, painterly images compared to FLUX or SDXL. Output
-quality is lower than other model families -- expect less fine detail and
+quality is lower than other model families; expect less fine detail and
 occasional anatomical inconsistencies. There is no community ecosystem of
 LoRA adapters, fine-tunes, or ControlNet support for this model.
 
@@ -55,7 +55,7 @@ model.
 
 ## Example
 
-**Wuerstchen v2 FP16** -- 30 steps, seed 42:
+**Wuerstchen v2 FP16**: 30 steps, seed 42:
 
 ```bash
 mold run wuerstchen-v2:fp16 \
@@ -64,4 +64,4 @@ mold run wuerstchen-v2:fp16 \
   --seed 42
 ```
 
-![Lighthouse -- Wuerstchen v2](/gallery/wuerstchen-lighthouse.png)
+![Lighthouse, Wuerstchen v2](/gallery/wuerstchen-lighthouse.png)

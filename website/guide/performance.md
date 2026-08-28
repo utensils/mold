@@ -59,7 +59,7 @@ two 14B experts alternate with one resident at a time, so VRAM is the larger
 expert, and guidance 1.0 skips the unconditional pass so each of the four
 steps is one forward. The A14B GGUF tiers default to their measured RTX 4090
 envelopes: 81 frames for `:q5`/`:q4` (partial block offload parks trailing
-transformer blocks in host RAM automatically -- 81 frames at 832x480 measured
+transformer blocks in host RAM automatically; 81 frames at 832x480 measured
 at 316–318 s with a ~15.7–17.3 GiB peak), 73 frames for `:q8`, and 45 for
 `:fp8` (fp8 cannot park; the byte round-trip is GGUF-only).
 `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the parked-block count (0 disables). The
@@ -68,7 +68,7 @@ support matrix.
 
 CUDA and Apple Metal are both supported backends for local LTX-2 runs. Metal
 is performance-qualified on Apple Silicon for the 19B/22B distilled FP8 tiers,
-but remains slower than a comparable CUDA card -- streamed FP8 widening trades
+but remains slower than a comparable CUDA card; streamed FP8 widening trades
 speed for fitting a 19B–22B model in unified memory. CPU exists for
 correctness-oriented native coverage and can be extremely slow.
 
@@ -79,7 +79,7 @@ Qwen-Image, LTX-2, Wan, and SD3 paths where implemented. FLUX, Flux.2, Z-Image,
 and Qwen-Image keep the blocks that fit on GPU and stream only the remainder.
 LTX-2 and SD3 use full block streaming when offload is forced. Wan parks
 trailing transformer blocks in host RAM as raw quantized bytes (GGUF tiers
-only) -- it engages automatically when the render's activation budget exceeds
+only); it engages automatically when the render's activation budget exceeds
 free VRAM, `--offload`/`MOLD_OFFLOAD=1` parks every block, and
 `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the count exactly (0 disables).
 
@@ -98,7 +98,7 @@ You can also force the choice with `--device-text-encoders cpu` on `mold run`
 is often the single biggest VRAM win short of quantization: FLUX's T5 is ~10
 GB, SD3.5's triple-encoder stack is larger, and freeing that budget lets the
 transformer stay fully resident without triggering block-level offload. Encoding
-moves from ≈200 ms to ≈2 s on typical CPU -- negligible at 20+ denoising steps,
+moves from ≈200 ms to ≈2 s on typical CPU; negligible at 20+ denoising steps,
 painful at 4.
 
 For FLUX, Flux.2, Z-Image, and Qwen-Image specifically, you can also pin

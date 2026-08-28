@@ -70,7 +70,7 @@ system user, and manages the data directory at `/var/lib/mold`.
 ::: tip Web gallery is bundled
 
 Since v0.8.1 the Vue 3 gallery SPA is embedded directly into the `mold` binary
-at compile time -- visiting `http://<host>:7680/` opens the gallery with no
+at compile time; visiting `http://<host>:7680/` opens the gallery with no
 extra configuration. Earlier versions required staging `web/dist/` into
 `~/.mold/web` or pointing `MOLD_WEB_DIR` at a built SPA. That override still
 works for SPA hot-iteration without recompiling Rust.
@@ -85,13 +85,13 @@ works for SPA hot-iteration without recompiling Rust.
   services.mold = {
     enable = true;
 
-    # Package -- must match your GPU architecture
+    # Package: must match your GPU architecture
     package = inputs.mold.packages.${system}.default;     # Ada (RTX 4090, sm_89)
     # package = inputs.mold.packages.${system}.mold-sm86;  # RTX 3090/A40, sm_86
     # package = inputs.mold.packages.${system}.mold-sm100; # B200/B300, sm_100
     # package = inputs.mold.packages.${system}.mold-sm120; # RTX 5090, sm_120
 
-    # Advisory hint -- emits a build warning if package doesn't match
+    # Advisory hint: emits a build warning if package doesn't match
     # cudaArch = "blackwell";
 
     # Server
@@ -108,30 +108,30 @@ works for SPA hot-iteration without recompiling Rust.
     # Models
     defaultModel = "flux2-klein:q8";
 
-    # Multi-GPU -- pin the server to specific cards (null = use all visible)
+    # Multi-GPU: pin the server to specific cards (null = use all visible)
     # gpus = "0,1";
     # queueSize = 200; # max queued jobs; overflow returns HTTP 503
 
-    # Stop budget -- the running generation is aborted at its next checkpoint
+    # Stop budget: the running generation is aborted at its next checkpoint
     # and requeued; queued work is retained and replayed on the next start.
     # shutdown.abortSeconds = 45;
 
-    # Image persistence -- save copies of all server-generated images
+    # Image persistence: save copies of all server-generated images
     # outputDir = "/srv/mold/gallery";
 
-    # CORS -- restrict to specific origin (null = permissive)
+    # CORS: restrict to specific origin (null = permissive)
     # corsOrigin = "https://mysite.example.com";
 
-    # Catalog auth defaults -- users can override these in web Settings
+    # Catalog auth defaults: users can override these in web Settings
     # Points to files containing tokens (e.g. agenix secrets)
     hfTokenFile = config.age.secrets.hf-token.path;
     civitaiTokenFile = config.age.secrets.civitai-token.path;
 
-    # API key authentication -- file with one key per line (e.g. agenix secret)
+    # API key authentication: file with one key per line (e.g. agenix secret)
     # When set, all API requests require an X-Api-Key header
     # apiKeyFile = config.age.secrets.mold-api-key.path;
 
-    # Rate limiting -- per-IP, generation endpoints at configured rate, reads at 10x
+    # Rate limiting: per-IP, generation endpoints at configured rate, reads at 10x
     # rateLimit = "10/min";
     # rateLimitBurst = 20;
 
@@ -209,8 +209,8 @@ fatal CUDA error so `Restart=on-failure` brings it back). A cold model load is
 not interruptible, so without that the unit would sit until systemd SIGKILLed
 it.
 
-The unit's `TimeoutStopSec` is **derived** from that option -- `abortSeconds + 60`
--- so systemd is never the component that decides. Do not set
+The unit's `TimeoutStopSec` is **derived** from that option (`abortSeconds + 60`),
+so systemd is never the component that decides. Do not set
 `TimeoutStopSec=infinity` through `environment` or an override: with a durable
 queue the correct response to a wedged worker is to exit and replay, not to hang
 the deploy. Raising `abortSeconds` past a cold model load is likewise the wrong
@@ -247,19 +247,19 @@ so Prometheus/Grafana Agent can scrape it without an API key.
 
 - **System user** `mold:mold` with home at `homeDir`
 - **Directories** via tmpfiles: `homeDir`, `modelsDir`, and `outputDir` (if set)
-- **Systemd service** `mold.service` -- runs `mold serve` with:
+- **Systemd service** `mold.service`; runs `mold serve` with:
   - `video` and `render` supplementary groups for GPU access
   - Hardened: `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`,
     `PrivateTmp`
   - HuggingFace token loaded via `EnvironmentFile` (never in process env)
-- **Systemd service** `mold-discord.service` (if `discord.enable`) -- runs
+- **Systemd service** `mold-discord.service` (if `discord.enable`); runs
   `mold discord`, depends on `mold.service`, further hardened with
   `ProtectSystem=strict` and `PrivateDevices` (no GPU needed)
 - **Firewall rule** if `openFirewall = true`
 
 ## GPU Architecture
 
-The module **cannot auto-select** the flake package -- you must set `package` to
+The module **cannot auto-select** the flake package; you must set `package` to
 match your GPU:
 
 | GPU                                | Package                                     |

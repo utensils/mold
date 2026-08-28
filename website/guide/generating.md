@@ -9,7 +9,7 @@ installed video checkpoints and selects one when possible, remembering your
 one-shot model for the way back. If none are installed, **Browse video models**
 opens Models → Discover with the Video and Models filters already applied.
 Every LTX-2 checkpoint renders multi-clip sequences, two-stage dev checkpoints
-included -- a dev checkpoint renders each clip through the two-stage pipeline,
+included; a dev checkpoint renders each clip through the two-stage pipeline,
 so expect roughly twice the wall time per clip as a distilled one.
 
 On phone-sized web views, Create keeps every interactive target at least 44px
@@ -26,7 +26,7 @@ seed for the next generate.
 ## Basic Usage
 
 ```bash
-# Default model (flux2-klein:q8 -- fast 4-step, Apache 2.0, fully ungated)
+# Default model (flux2-klein:q8: fast 4-step, Apache 2.0, fully ungated)
 mold run "a red apple on a wooden table"
 
 # Explicit model selection
@@ -49,9 +49,9 @@ mold run "abstract art" --batch 4 --seed 100
 mold run "a sunset" --format jpeg -o sunset.jpg
 ```
 
-Here's what that looks like -- FLUX Schnell Q8, seed 42:
+Here's what that looks like: FLUX Schnell Q8, seed 42.
 
-![Snow leopard -- FLUX Schnell](/gallery/flux-schnell-leopard.png)
+![Snow leopard, FLUX Schnell](/gallery/flux-schnell-leopard.png)
 
 Need a quick answer on family capabilities or expected speed? See
 [Feature Support](/guide/feature-matrix) and [Performance](/guide/performance).
@@ -118,7 +118,7 @@ source-driven models on web, desktop, and iPhone. Its ordered picture strip
 still adds and reorders References, while the Target offers contain, crop,
 Lanczos resize, and upscale-and-fit controls and automatically follows the
 model's 1 MP source ceiling. Other source-image families also
-show a strength slider plus all five fit policies -- labelled **Denoise
+show a strength slider plus all five fit policies; labelled **Denoise
 strength** for SD-lineage img2img (higher = more change) and **Source
 strength** for LTX-2 image-to-video (higher keeps more of the source; 1.0
 pins the opening frame); SD1.5 also suggests installed
@@ -128,17 +128,17 @@ On a phone, Create follows one vertical workflow: prompt and style, model and
 core controls, Generate, the developing/result canvas, then recent prints.
 Advanced options remain in the mobile sheet so the primary flow stays compact.
 
-For a multi-prompt video, set **Output** -- the control beside Model in the
-Create settings column -- from **One shot** to **Sequence**. Multi-clip video is
+For a multi-prompt video, set **Output** (the control beside Model in the
+Create settings column) from **One shot** to **Sequence**. Multi-clip video is
 a setting, not a separate page: the composer becomes a clip rail. Mold starts
 with two clips, requires a description for each, and joins them with seam pills
-that name each transition in words -- **Smooth**, **Cut**, or **Fade 8f**, with
+that name each transition in words; **Smooth**, **Cut**, or **Fade 8f**, with
 LTX-Video's zero-overlap joins reading **Join**. Clicking a seam pill
 opens the seam editor with its three teaching rows and the fade-length stepper.
 New clips take their frame count from the selected model's own advertised
 default rather than a fixed constant, and the summary shows the stitched
 duration before you generate. Switching Output back to One shot keeps clip 1 as
-the prompt and parks the rest -- nothing is erased. **Sequence tools** contains
+the prompt and parks the rest; nothing is erased. **Sequence tools** contains
 TOML import/export and other script-oriented controls. On a multi-machine web
 setup, the durable job and its live progress stay on the machine selected by
 **Run on**.
@@ -146,13 +146,13 @@ setup, the durable job and its live progress stay on the machine selected by
 Sequences queue in the same activity strip as ordinary prints, with watch,
 cancel, and resume. Once one settles it leaves the strip: the video lands in the
 Create canvas with **Edit sequence** and **Show in library**, its print is in the
-Library, and its job record is in **Library ▸ History ▸ Sequences** -- which is
+Library, and its job record is in **Library ▸ History ▸ Sequences**, which is
 also where the host-scoped **Clear inactive** and **Clean up disk** actions live.
 
 A finished sequence can be edited in place. Its clips reload onto the rail and
 each pill shows whether that clip is cached (✓) or will re-render (↻) as you
 edit; **Update sequence** re-renders only from the earliest changed clip.
-Changing a transition type or a fade length re-renders nothing at all -- those
+Changing a transition type or a fade length re-renders nothing at all; those
 are applied when the video is stitched. From a sequence print in the Library,
 **Edit sequence** is the primary action and re-enters the original job on the
 machine that produced it so rendered clips stay cached. **Duplicate as new**
@@ -162,8 +162,8 @@ restored and naming anything a print does not record.
 ### Shape and Size
 
 Create's **Shape** row on web, desktop, and iPhone is the canonical family the
-selected model can express -- 1:1, 5:4, 4:3, 3:2, 16:9, 21:9 and their portrait
-twins -- plus **Source** while an image is attached. Model-specific buckets that
+selected model can express (1:1, 5:4, 4:3, 3:2, 16:9, 21:9 and their portrait
+twins) plus **Source** while an image is attached. Model-specific buckets that
 are widescreen by another name (LTX-2's 1216×704, 1920×1088 and 3840×2112, Wan's
 832×480, MiniMax H3's 1344×768) all live under 16:9 rather than as separate
 `19:11` / `30:17` / `20:11` chips. Picking a family never guesses pixels: the
@@ -171,15 +171,15 @@ are widescreen by another name (LTX-2's 1216×704, 1920×1088 and 3840×2112, Wa
 pills with megapixels and any model-authored mark (`Default`) as secondary text.
 
 One status sentence under the size row names the canvas and why it holds that
-size -- `Matches source`, `Follows source`, `Model default`, or `Manual` -- and the
+size (`Matches source`, `Follows source`, `Model default`, or `Manual`) and the
 badge beside the pixels is the same fact, so they can never disagree. Attaching a
 source image selects the closest model-valid size with the source's shape and
 keeps following it across model and pipeline changes until you pick a shape,
 size, or exact dimensions yourself.
 
 On every surface, a **↺ Reset** in the Create settings header restores the
-generation settings to the selected model's defaults -- shape, resolution,
-detail, prompt strength, seed, and the Advanced groups -- while keeping your
+generation settings to the selected model's defaults (shape, resolution,
+detail, prompt strength, seed, and the Advanced groups) while keeping your
 prompt, model choice, and batch. On the web it is undoable from the toast it
 raises.
 
@@ -188,7 +188,7 @@ raises.
 An identity photo conditions the render on a person's face: the print keeps
 that likeness while the prompt decides everything else. The photo itself is
 never composited into the output, and it is never cropped or resized to the
-canvas -- it is a reference, not a composition input.
+canvas; it is a reference, not a composition input.
 
 Identity conditioning is deliberately narrow today. It is offered only for
 **identity-qualified checkpoints** on a server built with the off-by-default
@@ -196,15 +196,15 @@ Identity conditioning is deliberately narrow today. It is offered only for
 source image. Every other model, and every server that was not built with the
 feature, refuses the request with a named reason rather than rendering a print
 with no face in it. The live, authoritative list is whatever the server
-advertises per model as `supports_identity` -- today that means FLUX's
+advertises per model as `supports_identity`. Today that means FLUX's
 `flux-dev:q4` / `flux-dev:q8` and SDXL's `sdxl-base:fp16`,
 `juggernaut-xl:fp16`, `realvis-xl:fp16`, and `dreamshaper-xl:fp16`; see the
 [Identity Photos guide](/guide/identity) for the full list and why an SDXL
 fine-tune isn't automatically included.
 
 The identity assets (an adapter, a shared vision tower, and the InsightFace
-face detector/recognizer) install as one of two hidden bundles -- `pulid-flux`
-for FLUX, `pulid-sdxl` for SDXL -- that share everything except the adapter
+face detector/recognizer) install as one of two hidden bundles (`pulid-flux`
+for FLUX, `pulid-sdxl` for SDXL) that share everything except the adapter
 itself, so a machine with one already installed pulls only the other's
 adapter. The InsightFace weights are licensed for non-commercial research
 only, so Mold will not download them until you accept that licence once per
@@ -220,7 +220,7 @@ for the full rule.
 
 In Mold Studio on web and desktop, Create shows an **Identity** well directly
 below the source-image wells whenever the selected model and the machine you
-are generating on both support it -- when they do not, the control is not there
+are generating on both support it. When they do not, the control is not there
 at all, rather than present and disabled. Drop or pick a PNG or JPEG (at most
 16 MiB, 8192 px per side, 32 MP) and the print takes that likeness.
 
@@ -232,15 +232,15 @@ select a qualified model again.
 Two knobs live in Advanced and stay absent from the request until you touch
 them, so the server's own defaults keep applying:
 
-- **Identity strength** -- how strongly the face is held, `0.0`–`3.0`
+- **Identity strength**: how strongly the face is held, `0.0`–`3.0`
   (default `1.0`). Higher preserves the likeness; lower lets the prompt reshape
   it. `0.0` is completely inert: no identity assets are loaded at all.
-- **Identity start step** -- the first denoise step the face is applied at
+- **Identity start step**: the first denoise step the face is applied at
   (default `0`, and always fewer than the print's step count). Delaying it lets
   the composition settle before the likeness is pinned.
 
-If the combination cannot be submitted -- a photo alongside a LoRA or a source
-image, a knob set with no photo, an oversized or unsupported file -- Create says
+If the combination cannot be submitted (a photo alongside a LoRA or a source
+image, a knob set with no photo, an oversized or unsupported file) Create says
 so inline beside the control and Generate stays blocked.
 
 Saved metadata records the reference's filename, its SHA-256, and the effective
@@ -298,14 +298,14 @@ defaults use 1216×704 at 30 FPS.
 ### Wan Video
 
 Wan 2.1/2.2 is a separate `wan` family: MP4 by default, frames on a 4n+1 grid
-(49, 53, 81, 121, ...), dimensions in multiples of 16 -- except
+(49, 53, 81, 121, ...), dimensions in multiples of 16; except
 `wan22-ti2v-5b`, whose 2.2 VAE requires multiples of 32.
 
 ```bash
 # 480p16 text-to-video (defaults: 81 frames @ 16 fps)
 mold run wan21-t2v-1.3b "a red fox trotting through fresh snow, golden hour"
 
-# 720p24 -- Wan 2.2 5B, text- or image-to-video
+# 720p24: Wan 2.2 5B, text- or image-to-video
 mold run wan22-ti2v-5b "waves breaking on a black sand beach" \
   --width 1280 --height 704 --frames 121 --fps 24
 
@@ -319,8 +319,8 @@ mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
 Wan checkpoints were tuned against a specific negative prompt; mold applies it
 automatically when `--negative` is not given. A14B is a two-expert mixture
 with one 14B expert resident at a time. The `:q5`/`:q4` tiers default to the
-checkpoint's trained 81 frames -- automatic partial block offload fits them on
-a 24 GB card -- while `:q8` defaults to 73 frames and `:fp8` to 45, their
+checkpoint's trained 81 frames (automatic partial block offload fits them on
+a 24 GB card) while `:q8` defaults to 73 frames and `:fp8` to 45, their
 measured 24 GB envelopes. See
 [Wan Video](/models/wan) for variants, defaults, and limits.
 
@@ -380,7 +380,7 @@ mold run ltx-2-19b-distilled:fp8 \
 mold run ltx-2-19b-distilled:fp8 --image ./still.png --frames 97 --format mp4
 ```
 
-The prompt is optional for `ltx2` and `ltx-video` -- and only for them -- when the
+The prompt is optional for `ltx2` and `ltx-video` (and only for them) when the
 request already carries visual conditioning (`--image`, `--keyframe`, `--video`,
 or `--extend`). It saves no VRAM and usually yields near-static motion; see
 [the LTX-2 page](/models/ltx2#the-prompt-is-optional-for-image-to-video).
@@ -425,9 +425,9 @@ upscale, and temporal upscale workflows.
 
 ::: warning Backend policy
 LTX-2 runs natively in Rust inside `mold-inference`. CUDA and Apple Metal are
-both supported backends for real local generation -- Metal is
+both supported backends for real local generation (Metal is
 performance-qualified on the 19B/22B distilled FP8 tiers, though slower than a
-comparable CUDA card -- and CPU is correctness-only.
+comparable CUDA card) and CPU is correctness-only.
 :::
 
 ## Negative Prompts
@@ -440,8 +440,8 @@ and Flux.2 Klein.
 mold run sd15:fp16 "a portrait" -n "blurry, watermark, ugly, bad anatomy"
 mold run sdxl:fp16 "a landscape" --negative-prompt "low quality, jpeg artifacts"
 
-# Disable every default negative -- config defaults and Wan's tuned model
-# default alike -- by sending an explicit empty negative
+# Disable every default negative: config defaults and Wan's tuned model
+# default alike: by sending an explicit empty negative
 mold run wan22-t2v-a14b:q5 "a cat" --no-negative
 ```
 
@@ -462,7 +462,7 @@ mold run sd15:fp16 "a cat" --scheduler euler-ancestral # Stochastic
 
 ## LoRA Adapters
 
-Apply fine-tuned style adapters across the supported families -- **FLUX, Flux.2,
+Apply fine-tuned style adapters across the supported families; **FLUX, Flux.2,
 LTX-2, SD1.5, SD3, SDXL, Qwen-Image (+ Qwen-Image-Edit), Wan, Z-Image**:
 
 ```bash
@@ -485,7 +485,7 @@ Requires `.safetensors` format. Z-Image / FLUX accept diffusers (PEFT canonical)
 Kohya/sd-scripts, OneTrainer, and PEFT default-adapter naming. BF16 FLUX on
 24 GB cards can adaptive-offload, keeping fitting blocks on GPU and streaming
 only overflow blocks; LTX-2 can use the conservative full-streaming offload path.
-Wuerstchen and legacy LTX-Video are not yet wired -- attaching a LoRA there
+Wuerstchen and legacy LTX-Video are not yet wired; attaching a LoRA there
 returns a 400 with the supported-family list.
 :::
 
@@ -527,7 +527,7 @@ on the serving host, and folded into the default filename as a lossy slug:
 `mold-{model}-{timestamp}[-{index}]~{slug}.{ext}`, where the slug is the
 title lowercased to `[a-z0-9-]` and capped at 40 characters (untitled prints
 keep the legacy `mold-{model}-{timestamp}.{ext}` name). The filename is never
-rewritten afterwards -- renaming a print in the Library edits the row title
+rewritten afterwards; renaming a print in the Library edits the row title
 only, and an explicit `--output` path is always used verbatim. `--title`
 applies to single-clip runs; chain scripts and multi-prompt sequences do not
 carry a title on the CLI, though the HTTP chain body does title the stitched
@@ -572,13 +572,13 @@ a script generated.
 Filing never costs you a render. If the serving host has no metadata database
 (`MOLD_DB_DISABLE=1`), or a collection was deleted between the moment you
 listed it and the moment you pressed Generate, the print is still generated
-and saved -- the filing is dropped and reported, never silently discarded.
+and saved; the filing is dropped and reported, never silently discarded.
 
 The Library organizes prints per host with titles, favorites, tags, and
 manual collections (`PATCH /api/gallery/image/:filename`,
 `POST /api/gallery/organize`, `/api/gallery/collections`,
 `/api/gallery/tags`), and deleting a print moves it to a per-host trash with
-configurable retention -- see [`mold trash`](/guide/cli-reference#mold-trash)
+configurable retention; see [`mold trash`](/guide/cli-reference#mold-trash)
 and [Library trash](/guide/configuration#library-trash).
 
 ## Piping
@@ -602,9 +602,9 @@ mold run "a cat" --output -
 
 ## Inference Modes
 
-1. **Remote** (default) -- connects to `mold serve` via HTTP
-2. **Local fallback** -- if server unreachable, auto-falls back to local GPU
-3. **Local forced** (`--local`) -- skip server, run on local GPU directly
+1. **Remote** (default): connects to `mold serve` via HTTP
+2. **Local fallback**: if server unreachable, auto-falls back to local GPU
+3. **Local forced** (`--local`): skip server, run on local GPU directly
 
 Models auto-pull if not downloaded.
 
@@ -632,11 +632,11 @@ such as `/generate` and `/catalog` render Page Not Found:
   guidance, scheduler, LoRAs, prompts, file details, and copyable prompt/seed.
   **Upscale...** returns the print to Create with the installed default
   upscaler selected.
-- Library organization (on hosts that advertise it -- see below): the Library
+- Library organization (on hosts that advertise it; see below): the Library
   header carries a **Prints | Collections | Trash** scope control with counts,
   synced to `?scope=` (plus `?c=<collection>`, `?tag=a,b`, `?fav=1`).
-  **Prints** is the grid plus a filter-chip row -- ♥ Favorites, tag chips with
-  counts (the long tail behind **More tags…**), and the host chips -- and its
+  **Prints** is the grid plus a filter-chip row (♥ Favorites, tag chips with
+  counts (the long tail behind **More tags…**), and the host chips) and its
   search also matches titles and tags. **Collections** is a shelf of cover
   cards merged across hosts by name, with a dashed **New collection** card and
   a breadcrumb drill-in whose **Edit** menu renames, sets the cover from a
@@ -653,11 +653,11 @@ such as `/generate` and `/catalog` render Page Not Found:
   (`{title-slug}__{model}__s{seed}.{ext}`; the file in the gallery is never
   renamed).
 - **File under** in Create (on hosts that advertise `gallery.organize`) files
-  a print as you make it, between the essentials and Advanced -- inside the
+  a print as you make it, between the essentials and Advanced; inside the
   controls sheet on phones. A titled print offers its own title slug as a
   dashed, removable tag chip; **Add tag…** suggests the tags your machines
-  already use with counts; and the collection row pre-selects -- never creates
-  -- the collection whose name matches the title, offering None, every merged
+  already use with counts, and the collection row pre-selects (never creates
+  ) the collection whose name matches the title, offering None, every merged
   collection, and an inline **New collection…**. A line beneath previews the
   filename the print will land as. The choice rides one shots, every batch
   sibling, every prepared variation, and the single print a sequence stitches,

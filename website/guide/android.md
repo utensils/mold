@@ -8,7 +8,7 @@ on the device.
 
 ## Download and install
 
-- **[Download the nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)** -- the newest Android build from `main`.
+- **[Download the nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)**: the newest Android build from `main`.
 
 The link downloads the signed universal `Mold-android.apk` file directly, not a
 compressed archive. Open the downloaded APK on an Android 7.0 or newer

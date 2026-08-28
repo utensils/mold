@@ -21,7 +21,7 @@ mold run z-image-turbo:q4 "a city at dusk" --width 768 --height 768
 
 For LTX-2 you usually do not have to guess. A video shape that cannot fit is
 rejected before the model loads, and both that rejection and any later CUDA OOM
-will name resolution/frame combinations that _do_ fit on the card -- use one of
+will name resolution/frame combinations that _do_ fit on the card; use one of
 those.
 Lower the resolution before the frame count: attention cost grows with the
 square of the token count, and tokens scale with area × latent frames. See
@@ -105,8 +105,8 @@ On multi-GPU servers, a model that OOMs on more than one worker can be marked
 temporarily unschedulable. Generation returns an error naming that state instead
 of repeatedly cycling every queued job through the same failing GPUs.
 
-A cooldown is also recorded per **shape** -- resolution, frames, batch size, and
-whether the request carries a source -- on the GPU that OOMed. That is what stops
+A cooldown is also recorded per **shape** (resolution, frames, batch size, and
+whether the request carries a source) on the GPU that OOMed. That is what stops
 a single-GPU host from re-admitting the identical failing request forever: the
 same shape is refused for the cooldown while a smaller one is still accepted
 immediately. Mold offers one conservative retry per shape at a reduced memory

@@ -47,7 +47,7 @@ multiples of 16.
 
 ## Example
 
-**SDXL Turbo** -- 4 steps, seed 88:
+**SDXL Turbo**: 4 steps, seed 88:
 
 ```bash
 mold run sdxl-turbo:fp16 \
@@ -56,11 +56,11 @@ mold run sdxl-turbo:fp16 \
   --seed 88
 ```
 
-![Street market -- SDXL Turbo](/gallery/sdxl-turbo-market.png)
+![Street market, SDXL Turbo](/gallery/sdxl-turbo-market.png)
 
 ## Negative Prompts
 
-SDXL uses classifier-free guidance -- negative prompts have a strong effect:
+SDXL uses classifier-free guidance; negative prompts have a strong effect:
 
 ```bash
 mold run sdxl-base:fp16 "a landscape" -n "low quality, blurry, watermark"

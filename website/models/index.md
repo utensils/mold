@@ -72,19 +72,19 @@ streaming (~4-5 GB peak, 2-4x slower).
 
 <div class="gallery-grid">
 
-![Flux.2 Klein -- 4 steps](/gallery/flux2-klein-owl.png)
+![Flux.2 Klein, 4 steps](/gallery/flux2-klein-owl.png)
 
-![FLUX Schnell -- 4 steps](/gallery/flux-schnell-leopard.png)
+![FLUX Schnell, 4 steps](/gallery/flux-schnell-leopard.png)
 
-![FLUX Dev Q4 -- 25 steps](/gallery/flux-dev-teahouse.png)
+![FLUX Dev Q4, 25 steps](/gallery/flux-dev-teahouse.png)
 
-![Z-Image Turbo -- 9 steps](/gallery/zimage-astronaut.png)
+![Z-Image Turbo, 9 steps](/gallery/zimage-astronaut.png)
 
-![SD 3.5 Large -- 28 steps](/gallery/sd35-clocktower.png)
+![SD 3.5 Large, 28 steps](/gallery/sd35-clocktower.png)
 
-![SDXL Turbo -- 4 steps](/gallery/sdxl-turbo-market.png)
+![SDXL Turbo, 4 steps](/gallery/sdxl-turbo-market.png)
 
-![DreamShaper v8 -- 25 steps](/gallery/sd15-castle.png)
+![DreamShaper v8, 25 steps](/gallery/sd15-castle.png)
 
 </div>
 
@@ -114,14 +114,14 @@ Some model repos (marked `[gated]`) require a
 [HuggingFace access token](https://huggingface.co/settings/tokens). You may
 need to accept the model's license on its HuggingFace page before downloading.
 
-**Option 1 -- Environment variable** (simplest):
+**Option 1: Environment variable** (simplest):
 
 ```bash
 export HF_TOKEN=hf_...
 mold pull flux-dev:q4
 ```
 
-**Option 2 -- HuggingFace CLI** (persists the token):
+**Option 2: HuggingFace CLI** (persists the token):
 
 ```bash
 # Install the HF CLI
@@ -131,7 +131,7 @@ curl -LsSf https://hf.co/cli/install.sh | bash
 hf auth login
 ```
 
-Once logged in, `mold pull` picks up the stored token automatically -- no
+Once logged in, `mold pull` picks up the stored token automatically; no
 `HF_TOKEN` export needed.
 
 See the [HuggingFace CLI docs](https://huggingface.co/docs/huggingface_hub/guides/cli)
@@ -174,9 +174,9 @@ being completed separately. The LTX-2 family CPU path stays
 correctness-oriented and can be extremely slow. Wan is
 performance-qualified on CUDA; its CPU and Apple
 Metal paths are correctness-oriented (fp8-scaled Wan checkpoints stay
-CUDA-only -- Metal has no fp8 widening kernel). MiniMax H3 compact checkpoints
-are downloadable everywhere, and both reviewed routes -- FL2VA's boundary frame
-and Ref2VA's ordered image/video/audio references -- execute on supported SM89
+CUDA-only; Metal has no fp8 widening kernel). MiniMax H3 compact checkpoints
+are downloadable everywhere, and both reviewed routes (FL2VA's boundary frame
+and Ref2VA's ordered image/video/audio references) execute on supported SM89
 CUDA builds; the CPU path is unsupported, and the Apple Metal route is admitted
 and shipped but correctness-only and not yet hardware-qualified.
 :::

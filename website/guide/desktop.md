@@ -12,7 +12,7 @@ workspace, with light and dark themes that keep attention on your work.
 ::: info
 The desktop app lives in `desktop/`. Local generation uses Metal on Apple
 Silicon and CUDA on x86_64 Linux and Windows. On a machine with no supported
-GPU -- an ARM64 Windows laptop, for instance -- the app still runs and connects
+GPU (an ARM64 Windows laptop, for instance) the app still runs and connects
 to a remote `mold serve` machine.
 :::
 
@@ -39,7 +39,7 @@ machine status, and live generation progress in one native window._
 </div>
 
 Every tagged release ships a signed, notarized, stapled macOS DMG. Open it and
-drag **Mold** to Applications -- no quarantine dance needed. Version-pinned
+drag **Mold** to Applications; no quarantine dance needed. Version-pinned
 downloads and `SHA256SUMS` are on the
 [releases page](https://github.com/utensils/mold/releases).
 
@@ -59,7 +59,7 @@ conventional Linux. Tagged releases do not publish the AppImage yet.
 Windows currently ships through the rolling nightly release. The `Desktop`
 workflow attaches a self-signed x64 installer and its public certificate to
 successful `main` runs.
-There is not yet a publicly trusted Windows installer -- see [Windows](#windows)
+There is not yet a publicly trusted Windows installer; see [Windows](#windows)
 below for the toolchain, trust steps, and the capabilities that are still
 absent.
 
@@ -71,7 +71,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
 
 ## Features
 
-- **Create** -- a capability-driven inspector that shows only the
+- **Create**: a capability-driven inspector that shows only the
   controls a model's family supports (negative prompt, scheduler, CFG++, LoRA
   stack, img2img source/mask/control, video frames/fps/audio). Models are
   selected and shown throughout queues, downloads, Library metadata, and
@@ -92,8 +92,8 @@ surface powers it, so anything the app does maps to a documented endpoint.
   with a compact first-eight review and bounded Review all pages. Mold shows
   and freezes the resolved host for expansion and every sibling. One reviewed
   set may contain up to 10,000 variations as a memory-safety boundary; the
-  number of sets you can queue is not limited. Every print -- Batch 1, Batch N,
-  and each prepared variation -- is admitted through one durable
+  number of sets you can queue is not limited. Every print (Batch 1, Batch N,
+  and each prepared variation) is admitted through one durable
   `/api/generation-batches` operation, chunked at the machine's advertised
   limit; held children remain visible and retryable. A machine that cannot
   carry a request refuses it by name and queues nothing. Once the host accepts a batch, the composer is immediately available to queue another
@@ -121,7 +121,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
   audio/video modality scale, and guidance skip stride. Empty fields preserve
   the selected pipeline's constants; invalid values block Develop inline, and
   templates plus Library **Reuse settings** restore recorded overrides.
-- **Library** -- a justified, virtualized contact-sheet grid (the renamed
+- **Library**: a justified, virtualized contact-sheet grid (the renamed
   gallery), with a Lightroom-style small-to-large slider in the top toolbar
   that resizes the contact sheet continuously and remembers its setting, NEW
   badges on fresh prints, a two-pane lightbox, and a History drawer holding
@@ -144,8 +144,8 @@ surface powers it, so anything the app does maps to a documented endpoint.
   a header **Empty trash** behind a plain confirm. Titles, ♥, tags, and
   collection membership are edited in the lightbox aside; the raw filename
   becomes a detail line. Everything lives on the machine that holds the print
-  (its `mold.db`) and is merged across machines -- collections by name, tags
-  case-insensitively -- and every change is applied to every copy of a print.
+  (its `mold.db`) and is merged across machines (collections by name, tags
+  case-insensitively) and every change is applied to every copy of a print.
   Deleting moves a print to that machine's trash (the 6 s Undo stays); prints
   are purged after **Settings ▸ Library ▸ Keep deleted prints for** on this
   device (1 day … 1 year, or Forever) and after each remote machine's own
@@ -154,11 +154,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   header's "Untitled print" is editable (click, Enter/blur commits, Escape
   reverts); the name travels with every sibling of that print, is restored by
   **Reuse settings**, and leads the name suggested when you save or export
-  (`{title-slug}__{model}__s{seed}.{ext}` -- the file in the Library is never
+  (`{title-slug}__{model}__s{seed}.{ext}`; the file in the Library is never
   renamed). Filing starts in Create too: a **File under** group sits in the
   inspector between the essentials and **Advanced**, offering the print's own
   title as a removable tag chip, typed tags with suggestions drawn from every
-  connected machine, and a collection row that pre-selects -- never creates --
+  connected machine, and a collection row that pre-selects, but never creates,
   the collection whose name matches the title, with a picker for the fleet's
   collections and an inline **New collection…**. A line beneath previews the
   filename the print will land as. The choice rides the one shot, every
@@ -168,7 +168,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
   chip off without touching prints you already made. Older servers without
   organization simply hide these controls and keep the previous delete
   wording.
-- **Models** -- one searchable model workspace split into **Installed** and
+- **Models**: one searchable model workspace split into **Installed** and
   **Discover** segments: installed models in the Installed segment, above
   the live Hugging Face/Civitai catalog in Discover, filtered by
   **All / Images / Video** media chips and a model-kind chip row (Models,
@@ -198,16 +198,16 @@ surface powers it, so anything the app does maps to a documented endpoint.
   pull without returning any queued job is reported as an error. The
   sequence and video Create empty states deep-link straight to the video
   catalog.
-- **Sequences** (inside Create) -- multi-clip video is a setting, not a place:
+- **Sequences** (inside Create): multi-clip video is a setting, not a place:
   switch the inspector's **Output** control to **Sequence** (File → New
   Sequence and the ⌘K palette land there too) and the composer becomes a clip
   rail. Clip pills carry per-clip prompts and frame counts (validated on the
-  family's own grid -- `8n+1`, or `4n+1` for Wan -- defaulted from the
+  family's own grid; `8n+1`, or `4n+1` for Wan; defaulted from the
   selected model, and capped at that model's own clip size, so a sequence
   clip is never longer than the clips a one-shot Duration would be split
   into), and the seam pills between them name
-  each transition in words -- **Smooth**, **Cut**, or **Fade 8f** (zero-tail
-  joins say **Join**) -- with a click opening the seam editor's teaching
+  each transition in words; **Smooth**, **Cut**, or **Fade 8f** (zero-tail
+  joins say **Join**); with a click opening the seam editor's teaching
   rows and fade-length stepper. Right-click a clip pill for Play (when a
   cached render exists), Duplicate, Insert before/after, Move, and Remove, or
   the rail background for Add clip, Validate plan, the TOML file tools, and
@@ -220,7 +220,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
   Sequences**. Editing a finished sequence reloads its clips onto
   the rail, marks which clips stay cached versus re-render as you change
   things, and **Update sequence** re-renders only from the earliest changed
-  clip -- changing a transition type or a fade length re-stitches with no
+  clip; changing a transition type or a fade length re-stitches with no
   re-render at all. From a sequence print in the Library, **Edit sequence**
   re-enters the original job with its cached clips and **Duplicate as new**
   starts a fresh sequence from the recorded clips. The picker shows
@@ -228,12 +228,12 @@ surface powers it, so anything the app does maps to a documented endpoint.
   host (choosing Sequence auto-picks one and remembers your single-mode model;
   with none installed the bench deep-links to Discover with Video + Models
   filters), and limits, creation, events, previews, and job actions stay
-  routed to the model's host. An optional **Opening image** well -- with its
-  source strength and fit-to-frame controls -- sits in the inspector's primary
+  routed to the model's host. An optional **Opening image** well (with its
+  source strength and fit-to-frame controls) sits in the inspector's primary
   form exactly where one-shot source media lives (the header ↺ Reset clears it;
   the Advanced reset does not), and Advanced keeps the per-clip negative
   prompt and camera motion. Job and action failures stay visible inline.
-- **History** (the Runs + Prompts + Sequences drawer inside Library) -- a fast,
+- **History** (the Runs + Prompts + Sequences drawer inside Library): a fast,
   searchable list of past prompts from every ready host; ↩ refills the
   composer, while Up/Down recalls the same merged history inline. The
   **Sequences** tab is the one place durable sequence jobs are listed: open,
@@ -241,7 +241,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
   host-scoped **Clear inactive** and **Clean up disk** maintenance that used to
   sit in the Create composer. It renders the 200 newest jobs and says so when
   there are more. Web has the same drawer at `?panel=history`.
-- **RunPod** (inside Machines) -- secure account setup, balance and live spend, GPU and
+- **RunPod** (inside Machines): secure account setup, balance and live spend, GPU and
   datacenter discovery, pod launch/lifecycle/connection, and persistent network
   volume create/select/rename/grow/delete. A selected volume is remembered,
   forces Secure Cloud in its datacenter, replaces the ordinary workspace disk,
@@ -255,10 +255,10 @@ surface powers it, so anything the app does maps to a documented endpoint.
   to datacenters that currently support persistent volumes. While Create is
   developing on a connected running pod, its activity strip shows the same
   live accrued-cost and hourly-rate meter as Machines.
-- **Queues** (inside each machine) -- running and waiting jobs, pause/resume,
+- **Queues** (inside each machine): running and waiting jobs, pause/resume,
   cancellation, and queue capacity live with the host that owns them. The old
   standalone `/jobs` URL redirects to Machines.
-- **Settings** -- a single-column preferences workspace. Appearance
+- **Settings**: a single-column preferences workspace. Appearance
   (the website-aligned Mold palette by default or the original Safelight,
   each with System/Dark/Light; media never inverts), Updates, and About sit up
   top; a **Hosts** link jumps to the **Machines** workspace, where host,
@@ -266,43 +266,43 @@ surface powers it, so anything the app does maps to a documented endpoint.
   collapse into accordion sections: Performance (the `MOLD_*` engine knobs as
   real controls, applied on engine restart), Generation defaults, a Prompt
   expansion form, Accounts & tokens (Hugging Face / Civitai keys in an
-  owner-only local file under the app's data directory -- no Keychain prompts --
+  owner-only local file under the app's data directory (no Keychain prompts;
   exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Profiles (switch or
-  create), and Advanced -- every remaining `/api/config` row with its provenance
+  create), and Advanced) every remaining `/api/config` row with its provenance
   tag (⌂ db / ⛁ file / ⚿ env); environment-overridden rows are locked with the
   variable that owns them.
   Settings also shows the effective **Mold home** (the shared root holding
   config, the SQLite DB, models, outputs, and logs) with a native folder picker
-  or typed path. Changing it offers a recommended copy-everything migration --
-  validated first, staged through a sibling directory without overwriting a
-  non-empty destination, preserving the old root, and relaunching only after
-  the new location is ready -- or an explicit use-as-is alternative; an
-  unavailable external drive shows as a recoverable offline state. The choice
+  or typed path. Changing it offers a recommended copy-everything migration.
+  Mold validates and stages the copy without overwriting a non-empty
+  destination, preserves the old root, and relaunches only after the new
+  location is ready. You can instead use the selected location as-is, and an
+  unavailable external drive appears as a recoverable offline state. The choice
   is stored outside the selected root, so the CLI, TUI, server, and desktop all
   resolve the same root (an explicit `MOLD_HOME` env override still wins).
   About credits core contributors James Brink and Jeffrey Dilley in both the
   Settings workspace and the native app menu.
-- **Command palette** -- **Cmd/Ctrl+K** for navigation, actions, model search, and
+- **Command palette**: **Cmd/Ctrl+K** for navigation, actions, model search, and
   prompt-history search in one field. Model search covers the whole fleet: a
   model this machine has reads **Use `<name>`**, one that only another machine
   has reads **Use `<name>` · on `<machine>`** and repins generation there when
   you pick it, and a model nobody has yet appears from the live catalog as
   **Install `<name>` · not installed** and queues the pull. The palette picks
-  the install target itself and names it in the toast -- open **Models** when you
+  the install target itself and names it in the toast; open **Models** when you
   want to choose the machine explicitly.
-- **Notifications bell** -- in the title bar next to Search, with an unread
+- **Notifications bell**: in the title bar next to Search, with an unread
   badge. Toasts stay transient, but the bell opens the durable session history
-  of every toast -- complete untruncated messages and error bodies, per-host
+  of every toast; complete untruncated messages and error bodies, per-host
   context where known, timestamps, and collapsed ×N repeats (newest first,
-  capped at 100). Severity is color-coded -- green for an ordinary notice or a
-  success, yellow for a warning, red for an error -- with the severity also named
+  capped at 100). Severity is color-coded (green for an ordinary notice or a
+  success, yellow for a warning, red for an error) with the severity also named
   for screen readers and carried by its own glyph, and the unread badge takes
   the worst unread entry's color, so a bell holding only notices reads green. Each row has a **Copy**
   button that puts the message, its full body, and the machine/time line on the
-  clipboard -- the app chrome is not selectable, so that button is how a long
+  clipboard; the app chrome is not selectable, so that button is how a long
   server error leaves the app. Opening the panel marks everything read; Clear
   empties it.
-- **Native desktop integration** -- platform menus and shortcuts, Linux and
+- **Native desktop integration**: platform menus and shortcuts, Linux and
   Windows native window decorations, macOS overlay chrome, and background
   notifications on generation, chain, and pull completion. macOS uses
   UserNotifications so a signed release inherits Mold's bundle identity and app
@@ -386,7 +386,7 @@ right-click menus. Choose 80–130% from **Settings → Appearance & app → Int
 use the View menu and keyboard shortcuts. The selected level is restored on
 the next launch.
 
-Appearance offers the Mold Studio theme families -- Mold and Safelight -- in
+Appearance offers the Mold Studio theme families (Mold and Safelight) in
 System, Light, or Dark mode. New iPhone installs start with Safelight and System;
 existing saved choices are preserved. All combinations keep text and interactive boundaries at WCAG AA
 contrast; an empty generation canvas follows the selected chrome, while actual
@@ -397,8 +397,8 @@ generated media remains on a color-stable viewing surface.
 Save the current Create form as a named, recallable preset. Open the
 **Templates** panel below the LoRA stack, give the current settings a name, and
 it is stored as a template you can load, rename, or delete later. Loading a
-template restores every parameter -- model, prompt, dimensions, steps, guidance,
-scheduler, LoRA stack, and the rest -- in one click.
+template restores every parameter (model, prompt, dimensions, steps, guidance,
+scheduler, LoRA stack, and the rest) in one click.
 
 Templates capture _parameters_, not media: source, mask, and control images
 (and LTX-2 source video / keyframes) are referenced but never stored, so after
@@ -415,7 +415,7 @@ the other.
 
 **Settings → Advanced → Device placement** saves a per-model default for _where_
 a model's components run. Pick an installed model, then set its **Text
-encoders** -- the Tier-1 group knob covering T5, CLIP, and Qwen encoders -- to
+encoders** (the Tier-1 group knob covering T5, CLIP, and Qwen encoders) to
 **Auto**, **CPU**, or a specific **GPU**. For Tier-2 families (FLUX, Flux.2,
 Z-Image, Qwen-Image) an **Advanced** disclosure exposes per-component overrides
 for the transformer, VAE, and each text encoder; any encoder can also be left to
@@ -426,7 +426,7 @@ Placement is applied the next time the model loads, so save it before you
 generate. GPU choices come from the connected engine's live device list.
 
 This is the desktop surface for the same mechanism the CLI's `--device-*` flags
-and `MOLD_PLACE_*` variables drive -- see
+and `MOLD_PLACE_*` variables drive; see
 [Configuration → Per-component device placement](./configuration.md#per-component-device-placement)
 for the full component list and semantics.
 
@@ -435,46 +435,46 @@ for the full component list and semantics.
 The app talks to a `mold-ai-server` over localhost HTTP + SSE using the same
 wire types as the CLI and web UI:
 
-- **Built-in engine and LAN server** -- embeds the server in-process and runs on
+- **Built-in engine and LAN server**: embeds the server in-process and runs on
   Metal on macOS or CUDA on Linux, so no separate `mold serve` is required. It
   listens on port 7680, advertises itself over mDNS, and is always the app's
-  own engine -- **This device** in the host list. The **Machines** workspace
+  own engine; **This device** in the host list. The **Machines** workspace
   exposes the persistent per-device API
   key that another Mold client needs to connect. If an unrelated process owns
   7680, Mold uses and advertises an ephemeral port instead.
-- **Existing server** -- auto-detects a running `mold serve` on
+- **Existing server**: auto-detects a running `mold serve` on
   `localhost:7680`.
-- **Machines** -- remote GPU boxes (e.g. a Linux CUDA machine for LTX-2) are
+- **Machines** (remote GPU boxes (e.g. a Linux CUDA machine for LTX-2) are
   added in the **Machines** workspace: an **Add host** row with Test connection, a
   **Connected** list, **Remembered** hosts for one-click reconnect (each with
   its own API key, stored in an owner-only file under the app's data
-  directory -- never the macOS Keychain, so connecting never triggers Keychain
+  directory) never the macOS Keychain, so connecting never triggers Keychain
   prompts), and an **On your network** list of discovered servers. A bare
   hostname is enough: `hal9000` expands to `http://hal9000:7680`. One
   physical server is one entry: hosts are deduplicated by the server's stable
   instance id, so a box reached by hostname, mDNS name, and IP address
   collapses into a single row whose name follows the server's hostname unless
-  you rename it. There is no separate remote "mode" -- installs that
+  you rename it. There is no separate remote "mode"; installs that
   previously used a remote primary migrate automatically: the old primary
   becomes a connected host, keeps its API key, and stays the generation
   target until you change it. The network list uses the operating
   system's native DNS-SD browser on macOS, so advertised `_mold._tcp` services
   share the same cache and interface handling as Finder and `dns-sd`.
-- **Generation controls** -- the Size block quick-selects common, per-family
+- **Generation controls** (the Size block quick-selects common, per-family
   model-native resolutions (with manual width/height for anything else) and a
   live aspect-ratio/orientation diagram; Seed is an explicit
   **Random | Fixed** toggle with one-click "lock last seed"; the model picker
   marks each model's source (Hugging Face / Civitai / local) and ends in
   **Browse all models →** straight into the catalog, installed models first;
-  the VRAM badge states plainly what fits ("VRAM · fits -- est. 2.3 GB of
+  the VRAM badge states plainly what fits ("VRAM · fits) est. 2.3 GB of
   64.0 GB").
-- **Upscaling** -- pick a Real-ESRGAN model in the Print panel to upscale every
+- **Upscaling**: pick a Real-ESRGAN model in the Print panel to upscale every
   print as it develops (the engine pulls the model on first use and retains
   both the original and `-upscaled` result), or
   right-click any Library image → **Upscale**; the result lands in this Mac's
   Library. **Reuse settings** always restores the generation canvas, not the
   upscaled file's physical dimensions.
-- **Queue (in Machines)** -- a queue console for every connected host: the full
+- **Queue (in Machines)**: a queue console for every connected host: the full
   server-side queue (other clients' jobs included), live thumbnails and step
   progress for this app's own jobs, per-job cancel, drag-to-reorder
   (`PATCH /api/queue/:id` with a new position), **Pause/Resume** of a
@@ -485,28 +485,28 @@ wire types as the CLI and web UI:
   controls. The same queue mirrors as an activity strip on Create.
   Click a job to open its detail panel: the prompt, the settings it was
   submitted with, where it sits in line, when it was submitted, whether it
-  survives a restart, and -- for a job the machine has parked -- the full reason
+  survives a restart, and (for a job the machine has parked) the full reason
   and error with a **Copy details** button. A running job shows its live
   denoise preview there too. From the panel you can **Reuse settings** (which
   opens Create with everything restored), **Cancel** the job, or **Retry** one
   this app submitted that the machine parked. A job that has only just been
-  accepted may not show its settings yet -- the machine lists it before it loads
-  the request -- and the panel says so rather than pretending they are missing.
-- **History (in Library)** -- three lenses: **Runs** (every finished generation
-  with its thumbnail, model, size, seed, and step count -- click to reuse the
+  accepted may not show its settings yet (the machine lists it before it loads
+  the request) and the panel says so rather than pretending they are missing.
+- **History (in Library)** (three lenses: **Runs** (every finished generation
+  with its thumbnail, model, size, seed, and step count) click to reuse the
   full settings including the seed), **Prompts** (the raw prompt log,
   searchable, for prompts whose outputs are gone), and **Sequences** (every
   durable sequence job on every connected host, with open / edit / resume /
   delete, a jump to the print it produced, and the host-scoped **Clear
   inactive** and **Clean up disk** maintenance). The tab is in the URL, so
   `?panel=history&tab=sequences` opens straight onto it.
-- **Remote prints saved locally** -- generations from remote hosts and RunPod
+- **Remote prints saved locally**: generations from remote hosts and RunPod
   are also written into this Mac's output directory (Settings → App → "Save
   remote prints locally", on by default), with embedded metadata intact, so
   your local Library stays the complete record even when the GPU lives
   elsewhere. The Library's right-click menu adds **Save to this Mac** for
   pulling any older remote print down on demand.
-- **Several hosts at once** -- alongside this device, any number of remote
+- **Several hosts at once**: alongside this device, any number of remote
   hosts can be live simultaneously (**Add host** in the Machines workspace, or
   the **+** next to a detected server in Machines). With more than one live
   host, the Create inspector grows a
@@ -515,9 +515,9 @@ wire types as the CLI and web UI:
   capable** to always target the strongest GPU (CUDA over Metal, then most
   VRAM, then shallowest queue). Both automatic modes prefer hosts that
   already have the selected model installed, and the model picker lists
-  every connected host's models -- one that only lives on a remote host is
+  every connected host's models; one that only lives on a remote host is
   tagged with the host that has it, and routing there just works. Jobs
-  stream progress from -- and cancel against -- the host they queued on, so a
+  stream progress from (and cancel against) the host they queued on, so a
   long LTX-2 render on a CUDA box never blocks quick local prints. Host
   connections are remembered and restored on the next launch.
 
@@ -527,7 +527,7 @@ wire types as the CLI and web UI:
   generation models; a remote-only model is selected and routed without a
   local download.
 
-- **Host detail** -- click a host in the Machines workspace to open its detail view:
+- **Host detail**: click a host in the Machines workspace to open its detail view:
   live GPU, CPU, and RAM telemetry, disk usage for the filesystem holding its
   models, every GPU's utilization, VRAM and lifecycle state, current queue
   state, active model-download progress, and a freshly fetched inventory of
@@ -535,12 +535,12 @@ wire types as the CLI and web UI:
   host detail. This device also exposes the same controls under **Settings →
   Advanced**. A busy disable drains its current stage before the owner thread
   exits; enabling starts a fresh owner thread.
-- **Launch reconnect** -- every remembered host is attempted immediately on
+- **Launch reconnect**: every remembered host is attempted immediately on
   every app launch, in parallel with This Mac. An unreachable host stays in
   the Machines workspace as an errored row marked _reconnecting…_, and the
   10-second status poll keeps probing it so it self-heals without any action
   from you. A machine that drops raises a yellow warning notification saying it
-  is retrying; when it answers again that warning is withdrawn and a green
+  is retrying. When it answers again that warning is withdrawn and a green
   **Reconnected to `<machine>`** notification confirms it. The web UI behaves
   the same way.
 
@@ -569,7 +569,7 @@ can. What it looks for:
 ### Commands
 
 `scripts\windows.ps1` is the Windows peer of the Nix devshell's `desktop-*`
-commands -- the devshell itself does not run on Windows:
+commands; the devshell itself does not run on Windows:
 
 ```powershell
 scripts\windows.ps1 doctor   # verify the toolchain, name what is missing
@@ -619,7 +619,7 @@ says so by name:
 
 - **Generated AAC audio tracks.** The `mp4` feature pulls `fdk-aac-sys`, whose
   `FDK_archdef.h` recognises only GCC/Clang architecture macros and falls
-  through to a `#warning` -- which MSVC raises as the fatal error C1021, on x64
+  through to a `#warning`, which MSVC raises as the fatal error C1021 on x64
   and ARM64 alike. Video renders and muxes normally through the pure-Rust
   writer; only an explicitly requested audio track is refused.
 - **In-app updates.** The updater's preflight is built around macOS bundle
@@ -629,7 +629,7 @@ says so by name:
   whose private evidence capture is written against unix ownership semantics
   (`/proc/self/statm`, uid/mode identity), so those features do not compile for
   Windows at all. Nothing in the Windows recipe enables them.
-- **`cargo test --workspace` is not the Windows gate** -- `scripts\windows.ps1
+- **`cargo test --workspace` is not the Windows gate**: `scripts\windows.ps1
 test` is. Besides the `h3` compile above, a handful of `mold-core` tests
   assert unix path separators (`should end with .mold/output`) and fail on
   Windows on `main` today, independently of any Windows work. The desktop
@@ -646,7 +646,7 @@ Publicly trusted Windows installers are still to come; current release and
 - On ARM64, `.cargo/config.toml` enables the `fullfp16` target feature for
   `aarch64-pc-windows-msvc`. `gemm-common`'s inline `fmla v.8h` requires it and
   it is not baseline on Windows, so without the flag the build type-checks and
-  then fails during codegen -- `cargo check` never sees it.
+  then fails during codegen; `cargo check` never sees it.
 - Enable Windows long-path support (`LongPathsEnabled`). Cargo target paths in
   this tree get deep enough to matter.
 
@@ -655,7 +655,7 @@ Publicly trusted Windows installers are still to come; current release and
 Run inside `nix develop` (the devshell wires up Metal or CUDA, Bun, Tauri, and
 Linux WebKitGTK/GStreamer dependencies):
 
-On Windows the devshell is not available; use `scripts\windows.ps1` instead --
+On Windows the devshell is not available; use `scripts\windows.ps1` instead;
 see [Windows](#windows) above.
 
 ```bash

@@ -3,14 +3,14 @@
 Qwen2.5-VL text encoder with a 3D causal VAE (2D temporal-slice) and
 flow-matching with classifier-free guidance.
 
-![Winter cabin -- Qwen-Image 2512 Q4](/gallery/qwen-image-cabin.png)
-_"A snowy mountain cabin at twilight, warm orange light pouring from the windows, aurora borealis in the sky above"_ -- **qwen-image-2512:q4**, 50 steps, seed 888
+![Winter cabin, Qwen-Image 2512 Q4](/gallery/qwen-image-cabin.png)
+_"A snowy mountain cabin at twilight, warm orange light pouring from the windows, aurora borealis in the sky above"_; **qwen-image-2512:q4**, 50 steps, seed 888
 
-![Overgrown greenhouse -- Qwen-Image 2512 Q4](/gallery/qwen-image-greenhouse.png)
-_"An abandoned greenhouse overgrown with exotic flowers and vines, cracked glass roof letting in shafts of golden light, butterflies and hummingbirds, lush and magical"_ -- **qwen-image-2512:q4**, 50 steps, seed 2024
+![Overgrown greenhouse, Qwen-Image 2512 Q4](/gallery/qwen-image-greenhouse.png)
+_"An abandoned greenhouse overgrown with exotic flowers and vines, cracked glass roof letting in shafts of golden light, butterflies and hummingbirds, lush and magical"_; **qwen-image-2512:q4**, 50 steps, seed 2024
 
-![Hot air balloon -- Qwen-Image 2512 Q4](/gallery/qwen-image-balloon.png)
-_"A colorful hot air balloon floating over a misty valley at sunrise, the balloon has the word MOLD written on the side"_ -- **qwen-image-2512:q4**, 50 steps, seed 314
+![Hot air balloon, Qwen-Image 2512 Q4](/gallery/qwen-image-balloon.png)
+_"A colorful hot air balloon floating over a misty valley at sunrise, the balloon has the word MOLD written on the side"_; **qwen-image-2512:q4**, 50 steps, seed 314
 
 - **Developer**: [Alibaba / Qwen Team](https://huggingface.co/Qwen)
 - **License**: Apache 2.0
@@ -93,9 +93,9 @@ roughly `1024x1024` area.
 These are step-distilled merges of the base transformers, so they reuse the
 same shared VAE / Qwen2.5-VL components and run CFG-free at guidance `1.0`.
 
-`qwen-image-flash:*` also runs its own packaged scheduler -- NVIDIA ships
+`qwen-image-flash:*` also runs its own packaged scheduler (NVIDIA ships
 `use_dynamic_shifting=false`, `shift=3.0`, `shift_terminal=null` for the
-four-step trajectory -- rather than base Qwen-Image's resolution-dependent
+four-step trajectory) rather than base Qwen-Image's resolution-dependent
 schedule. The Distill-Full and Lightning merges are transformer-only exports
 with no scheduler of their own, so they keep the base contract.
 
@@ -130,7 +130,7 @@ mold run qwen-image-edit-lightning:fp8 "make the sky stormy" --image input.png
 
 The merges above are whole transformers. The same distillation also ships as a
 LoRA, which applies the few-step schedule to any Qwen-Image checkpoint already
-on disk -- including a quality tier like `:q8` -- instead of downloading a second
+on disk (including a quality tier like `:q8`) instead of downloading a second
 ~20 GB transformer. Attach it with the ordinary repeatable `--lora` flag; there
 is no separate model entry to pull, because these are user-supplied adapter
 files rather than checkpoints.
@@ -157,7 +157,7 @@ mold run qwen-image:q8 "a hot air balloon over a misty valley" \
 The adapters are authored by
 [ModelTC](https://github.com/ModelTC/LightX2V-Qwen-Image-Lightning) and
 published on Hugging Face under `lightx2v`. Match the adapter's line to the
-checkpoint's -- a 2512 adapter belongs on `qwen-image-2512:*`, the base adapter on
+checkpoint's; a 2512 adapter belongs on `qwen-image-2512:*`, the base adapter on
 `qwen-image:*`. Use `--guidance 1.0`: upstream distils these adapters to run
 CFG-free, and mold enables classifier-free guidance for any `--guidance` above
 `1.0`, which runs a second forward pass per step that the adapter was not
@@ -176,7 +176,7 @@ every affected tensor across all 60 blocks. Mold fingerprints the merged stack
 (adapters, their order, and their scales), so a transformer that is still
 resident is reused when the next request asks for exactly that stack, and
 rebuilt whenever anything about it changes. Only paths that keep the
-transformer resident can reuse it -- a checkpoint loaded one component at a
+transformer resident can reuse it; a checkpoint loaded one component at a
 time, or a render whose VAE decode drops the transformer to free VRAM, pays the
 merge again on the next request. Block offloading (`--offload` /
 `MOLD_OFFLOAD=1`) refuses LoRAs on this family outright.
@@ -284,8 +284,8 @@ using it by default with `qwen-image:q2` through `qwen-image:q8` or
 `qwen-image-lightning:fp8-8step` (8 steps, 20.5 GB). Those are separate from the
 GGUF quantized matrix above and have different memory and scheduler behavior.
 
-The few-step GGUF distills -- `qwen-image-flash:{q8,q4}`,
-`qwen-image-distill:{q8,q4}`, and `qwen-image-edit-lightning:fp8` -- are listed with
+The few-step GGUF distills (`qwen-image-flash:{q8,q4}`,
+`qwen-image-distill:{q8,q4}`, and `qwen-image-edit-lightning:fp8`) are listed with
 their steps and sizes under
 [Few-step distilled variants](#few-step-distilled-variants) above.
 

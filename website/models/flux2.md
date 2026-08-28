@@ -15,7 +15,7 @@ storage requirements even when GPU residency is bounded.
 - **License**: FLUX Non-Commercial License
 - **HuggingFace**:
   [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev)
-  (gated -- accept the license and authenticate before pulling)
+  (gated; accept the license and authenticate before pulling)
 - **Conditioning**: text-to-image or up to four ordered PNG/JPEG references
 
 ```bash
@@ -67,7 +67,7 @@ vs Klein-4B's Qwen3-4B (hidden_size=2560).
 - **License**: Non-Commercial
 - **HuggingFace**:
   [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B)
-  (gated -- requires HuggingFace license acceptance)
+  (gated; requires HuggingFace license acceptance)
 
 ## Variants
 
@@ -105,7 +105,7 @@ multiples of 16.
 
 ## Example
 
-**Flux.2 Klein Q8** -- 4 steps, seed 100:
+**Flux.2 Klein Q8**: 4 steps, seed 100:
 
 ```bash
 mold run flux2-klein:q8 \
@@ -114,18 +114,18 @@ mold run flux2-klein:q8 \
   --seed 100
 ```
 
-![Zen garden -- Flux.2 Klein](/gallery/flux2-klein-zen.png)
+![Zen garden, Flux.2 Klein](/gallery/flux2-klein-zen.png)
 
-**Flux.2 Klein BF16** -- 4 steps:
+**Flux.2 Klein BF16**: 4 steps:
 
 ```bash
 mold run flux2-klein:bf16 \
   "a majestic owl perched on a mossy branch in a moonlit forest"
 ```
 
-![Owl -- Flux.2 Klein BF16](/gallery/flux2-klein-owl.png)
+![Owl, Flux.2 Klein BF16](/gallery/flux2-klein-owl.png)
 
-**Flux.2 Klein-9B Q4** -- 4 steps, seed 999:
+**Flux.2 Klein-9B Q4**: 4 steps, seed 999:
 
 ```bash
 mold run flux2-klein-9b:q4 \
@@ -134,7 +134,7 @@ mold run flux2-klein-9b:q4 \
   --seed 999
 ```
 
-![Bottle ship -- Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
+![Bottle ship, Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
 
 ## Architecture
 
