@@ -10833,12 +10833,16 @@ mod tests {
             super::ltx2_video_activation_budget(stage_shape(&plan, 1024, 1024, frames), None)
         };
 
-        // 1 pixel frame → 1 latent frame; 9 → 2; 97 → 13.
-        let one_latent_frame = budget(9) - budget(1);
+        // 9 pixel frames → 2 latent frames; 17 → 3; 97 → 13. The spans are
+        // measured from 2 latent frames up because the attention-tile term
+        // (#735) is deliberately piecewise: at one latent frame (1,024
+        // tokens) the dispatcher takes the whole score matrix, past that it
+        // chunks the query axis, so only the chunked regime is linear.
+        let one_latent_frame = budget(17) - budget(9);
         assert!(one_latent_frame > 0);
         assert_eq!(
-            budget(97) - budget(1),
-            one_latent_frame * 12,
+            budget(97) - budget(9),
+            one_latent_frame * 11,
             "97 pixel frames produce 13 simultaneously live latent frames"
         );
     }
