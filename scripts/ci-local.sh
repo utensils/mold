@@ -283,7 +283,8 @@ if wants contracts; then
                   regression-matrix-family-sizing regression-matrix-source-image \
                   regression-matrix-transient-retry wan-regression-matrix \
                   ltx25-comfy-metal-reference ltx25-metal-verification \
-                  ltx25-comfy-cuda-reference ltx25-cuda-verification; do
+                  ltx25-comfy-cuda-reference ltx25-cuda-verification \
+                  ltx25-comfy-oracle-provision; do
     script="scripts/tests/${contract}.sh"
     if [ -f "$script" ]; then
       step "contracts: ${contract}" bash "$script"
