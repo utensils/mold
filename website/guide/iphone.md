@@ -56,23 +56,23 @@ Choose where the print develops and one of the installed generation models. With
 a single connected machine the Host control works as it always has. Once two or
 more connected machines are reachable it also offers:
 
-- **Auto** — the least busy machine that already has the selected model.
-- **Most capable** — the strongest GPU that has it: CUDA before Metal, then
+- **Auto** -- the least busy machine that already has the selected model.
+- **Most capable** -- the strongest GPU that has it: CUDA before Metal, then
   VRAM, then queue depth.
 
 An optional **Title** above the prompt names the print: it is embedded in the
 saved metadata, folded into the output filename as a slug, and shown across
 every Library. Batch siblings and prepared variations inherit it, and **Use as
-prompt** restores it from a print. A sequence keeps the field too — it names
+prompt** restores it from a print. A sequence keeps the field too -- it names
 the single stitched print the sequence lands in the Library.
 
 Directly beneath it, **File under** files the print as you make it, as two
 rows:
 
-- **Tags** — a dashed chip offers the title's own slug (tap it away and it
+- **Tags** -- a dashed chip offers the title's own slug (tap it away and it
   stays away), and the sheet takes typed names and suggests the tags your
   machines already use, with counts.
-- **Collection** — the collection whose name matches the title is
+- **Collection** -- the collection whose name matches the title is
   pre-selected, never created; the sheet offers None, every collection merged
   across your machines, and an inline **New collection…** that only records
   the name until the print develops.
@@ -113,7 +113,7 @@ The mobile composer includes:
   upscaling where the selected family supports them;
 - validated video frames/FPS, audio, camera motion, source media, keyframes,
   retake, **Continue a video** (extending an existing clip on models that
-  advertise it, including capable Wan checkpoints — resolution and fps stay
+  advertise it, including capable Wan checkpoints -- resolution and fps stay
   locked to the source clip), LTX-2 pipeline/spatial/temporal controls, and
   optional STG, CFG-rescale, modality-scale, and guidance-skip overrides;
 - an **Output** field (One shot | Sequence) above the model field that turns
@@ -132,7 +132,7 @@ the same saved override state as desktop.
 
 An identity photo conditions the print on a person's face: the render keeps
 that likeness while the prompt decides everything else. The photo itself is
-never composited into the output, and — unlike a source image — it is never
+never composited into the output, and -- unlike a source image -- it is never
 cropped or fitted to the canvas. It is a reference, not a composition input.
 
 An **Identity** well sits in the Create form beside the source wells whenever
@@ -141,7 +141,7 @@ they do not, the control is not there at all rather than present and disabled.
 Tap it to pick a PNG or JPEG (at most 16 MiB, 8192 px per side, 32 MP) with the
 usual iOS photo/camera picker. Identity conditioning is offered only for the
 identity-qualified checkpoints on a server built with the feature, and it
-cannot be combined with a LoRA or an img2img source image — see
+cannot be combined with a LoRA or an img2img source image -- see
 [Identity Photos (PuLID)](/guide/generating#identity-photos-pulid) for the full
 rule and the one-time InsightFace licence acceptance.
 
@@ -154,30 +154,30 @@ Two knobs live in the Advanced sheet, count toward its badge, and clear with
 **Reset**. Both stay absent from the request until you touch them, so the
 server's own defaults keep applying:
 
-- **Identity strength** — how strongly the face is held, `0.0`–`3.0`
+- **Identity strength** -- how strongly the face is held, `0.0`–`3.0`
   (default `1.0`). Higher preserves the likeness; lower lets the prompt reshape
   it.
-- **Identity start step** — the first denoise step the face is applied at
+- **Identity start step** -- the first denoise step the face is applied at
   (default `0`, always fewer than the print's step count). Delaying it lets the
   composition settle before the likeness is pinned.
 
-If the combination cannot be submitted — a photo alongside a LoRA or a source
-image, a knob set with no photo, an oversized or unsupported file — the reason
+If the combination cannot be submitted -- a photo alongside a LoRA or a source
+image, a knob set with no photo, an oversized or unsupported file -- the reason
 reads inline beside the control and Develop stays blocked. Prepared Batch N
 siblings inherit the photo and both knobs (and the reviewed card names the same
 reason on its own Develop), and changing the photo stales reviewed prompt work
 exactly as changing a source image does.
 
 Under **Auto** or **Most capable**, an identity print is only ever sent to a
-machine that advertises identity support for that model itself — the model list
+machine that advertises identity support for that model itself -- the model list
 is merged across your machines, so the one you staged the photo against is not
 necessarily the one that develops it. If the machine that was chosen cannot
 hold the face, or is running a Mold old enough to ignore the photo, Mold says
 so and queues nothing rather than returning a print of someone else.
 
-Choose resolution through proportionally drawn shape tiles — the canonical
+Choose resolution through proportionally drawn shape tiles -- the canonical
 families (1:1, 4:3, 3:2, 16:9, 21:9 and their portrait twins) the selected
-model can actually express, plus **Source** when an image is attached — then a
+model can actually express, plus **Source** when an image is attached -- then a
 **Size** row that lists that family's authored sizes as exact pixels with
 their megapixels underneath. Explicit custom dimensions stay available. One
 status line names the canvas and why it holds that size (`Matches source`,
@@ -196,7 +196,7 @@ nothing is cancelled by a single flick. Every action is also on the **⋯**
 button at the end of the row, so VoiceOver and a hardware keyboard reach it
 without the gesture. Machines that support reordering also offer **To back**,
 which sends the job to the end of the line. Tap the row itself to see the whole
-job — its prompt, its settings, where it is in line, its live preview while it
+job -- its prompt, its settings, where it is in line, its live preview while it
 runs, and the full reason if the machine has parked it.
 
 For model families that stream live latent previews (FLUX.1, Flux.2,
@@ -288,7 +288,7 @@ iPhone and desktop.
 ### Collections, favorites, tags, and titles
 
 When a connected host supports Library organization, a **Prints | Collections |
-Trash** row appears under the Library header (each scope with its count — the
+Trash** row appears under the Library header (each scope with its count -- the
 row only appears when a host supports it). In **Prints**, a scrolling chip row
 filters the grid: ♥ Favorites, your most-used tags (the rest behind **More…**),
 and a chip per machine when several are connected. Favorite prints carry a ♥
@@ -300,8 +300,8 @@ host), and a ♥ toggle. Edits apply to every copy of the print on every
 reachable machine; if one machine cannot be updated, Library says so inline and
 keeps the rest.
 
-**Collections** lists your collections merged across machines — cover, name,
-count, and which machines hold them — with a **New collection** row. The **…**
+**Collections** lists your collections merged across machines -- cover, name,
+count, and which machines hold them -- with a **New collection** row. The **…**
 menu renames or deletes a collection (two taps; its prints stay in the
 Library). Tap a collection to browse it; Select there offers **Remove from
 collection**.
@@ -311,7 +311,7 @@ clears it), ♥, tags, and its collections. The viewer's title line shows the
 print's title, or its prompt while untitled.
 
 A print developed with an identity photo also lists that provenance in **Info**
-— the photo's filename, the first characters of its SHA-256, and the effective
+-- the photo's filename, the first characters of its SHA-256, and the effective
 strength and start step. Saved metadata records the digest, never the face
 bytes, so **Use as prompt** restores the two knobs and re-attaches the photo
 only when this device still holds it; when it does not, Mold says so instead of
@@ -331,8 +331,8 @@ Reusing settings switches to the print's host and restores the model when it is
 installed there. If the original model is unavailable, Mold clearly identifies
 the compatible fallback and removes non-portable adapter/component choices. On
 a print a sequence produced, **Use as prompt** instead reloads its recorded
-clips onto the Create clip rail as a new sequence — saying how many it restored
-and naming anything a print does not record — and substitutes a
+clips onto the Create clip rail as a new sequence -- saying how many it restored
+and naming anything a print does not record -- and substitutes a
 sequence-capable model when needed. Re-entering the original durable job
 (**Edit sequence**) is a desktop and web action.
 
@@ -355,7 +355,7 @@ shows variant chips with checkpoint sizes; the selected chip is the exact model
 the Pull action downloads.
 
 The family list comes from the browsed host. If that host is unreachable when
-Models opens — or its saved key has not been read from the Keychain yet — the
+Models opens -- or its saved key has not been read from the Keychain yet -- the
 list falls back to every family Mold has seen this session, from both catalog
 results and the installed models on your hosts. That set only grows, so
 choosing a family never shrinks the list to that one choice, and it can offer
@@ -393,7 +393,7 @@ Hosts with the server-side Library trash add a **Library** card: choose how
 long that machine keeps trashed prints (**Trash retention**, `0` keeps them
 forever; a value pinned by an environment variable is read-only and names the
 variable) and see **Prints in trash: N** with a two-step **Empty trash**. The
-setting lives on the host itself — it applies to every app that talks to it.
+setting lives on the host itself -- it applies to every app that talks to it.
 
 From the same screen you can rename or retry the host, select it for Create,
 unload a model, open it in Models, or forget it. Forgetting a host also deletes
@@ -410,7 +410,7 @@ cover:
 - **Appearance:** System, Dark, or Light
 - **Photos:** automatically save newly generated stills to the iPhone photo
   library (on by default)
-- **Library:** **Tag new prints with their title** — offer a titled print its
+- **Library:** **Tag new prints with their title** -- offer a titled print its
   own title slug as a tag in Create (on by default)
 - **Remote hosts:** saved-host count and a shortcut to manage them
 - **GPUs:** enable or disable each GPU on the selected host; a busy GPU
@@ -446,13 +446,13 @@ separate screen: set **Output** to **Sequence** and the composer becomes a clip
 list, narrowed to compatible installed video models and sharing one set of
 size, FPS, steps, guidance, and seed fields with One shot. Start with two
 clips, describe each shot, choose the duration, and generate while Mold keeps
-progress and cancellation attached to the exact host — sequences share one
+progress and cancellation attached to the exact host -- sequences share one
 queue list with single prints. Between clips, a seam control opens a sheet
 naming the transition in words (**Smooth**, **Cut**, **Fade**) with the
 fade-length stepper. New clips take their frame count from the selected model's
 own advertised default, and clip durations stop at that model's own clip size
 (the clip one generation renders), never at the family's longer single-request
-budget. An optional opening image — with its source strength and fit controls —
+budget. An optional opening image -- with its source strength and fit controls --
 is a disclosure in the primary Create stack, beside the other source media,
 rather than inside the Advanced sheet; the primary **↺ Reset** clears it while
 **Reset advanced** leaves it alone. An interrupted sequence can reconnect after relaunch

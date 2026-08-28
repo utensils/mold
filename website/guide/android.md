@@ -8,8 +8,8 @@ non-exportable Android Keystore key.
 
 ## Download and install
 
-- **[Stable APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)** — the newest tagged release.
-- **[Nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)** — the newest build from `main`.
+- **[Stable APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)** -- the newest tagged release.
+- **[Nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)** -- the newest build from `main`.
 
 Both links download the signed universal `Mold-android.apk` file directly, not
 a compressed archive. Open the downloaded APK on an Android 7.0 or newer

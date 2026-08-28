@@ -32,7 +32,7 @@ mold run "pencil sketch" --image photo.png --width 768 --height 512
 | -------- | ----------------------------------- |
 | `0.0`    | No change                           |
 | `0.3`    | Subtle adjustments                  |
-| `0.5`    | Balanced — noticeable but faithful  |
+| `0.5`    | Balanced -- noticeable but faithful |
 | `0.75`   | Strong transformation (default)     |
 | `1.0`    | Full txt2img (ignores source image) |
 

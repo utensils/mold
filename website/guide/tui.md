@@ -1,7 +1,7 @@
 # Terminal UI
 
 mold includes an interactive terminal UI for browsing models, tuning parameters,
-generating images with live progress, and previewing results — all without
+generating images with live progress, and previewing results -- all without
 leaving the terminal.
 
 Built on [ratatui](https://ratatui.rs) with Kitty graphics protocol support for
@@ -14,7 +14,7 @@ authoring, model management, gallery, settings, theming, and image preview
 work well.
 :::
 
-![mold TUI — Create view with image preview](/gallery/tui-generate.png)
+![mold TUI -- Create view with image preview](/gallery/tui-generate.png)
 
 ## Quick Start
 
@@ -37,9 +37,9 @@ By default, `mold tui` automatically starts a background `mold serve` process if
 no server is already running. This keeps models hot between generations for
 faster subsequent runs. The server is killed when you quit the TUI.
 
-- `mold tui` — auto-starts server on `localhost:7680`
-- `mold tui --local` — skip server, use local GPU only
-- `mold tui --host http://gpu:7680` — connect to an existing remote server
+- `mold tui` -- auto-starts server on `localhost:7680`
+- `mold tui --local` -- skip server, use local GPU only
+- `mold tui --host http://gpu:7680` -- connect to an existing remote server
 
 ### Server Logs
 
@@ -85,11 +85,11 @@ iPhone apps, shown as tabs at the top of the screen:
 Switch workspaces with **Esc** then **1**–**5**, or click the tabs.
 **Alt+1**–**Alt+5** works from anywhere, and **Esc** from any other
 workspace returns to Create. The chain composer opens with **c** from
-Create — it is a Create sub-mode, not a tab.
+Create -- it is a Create sub-mode, not a tab.
 
 ## Command Palette
 
-**Ctrl+K** opens the command palette from any workspace or focus — the
+**Ctrl+K** opens the command palette from any workspace or focus -- the
 TUI's version of the GUI surfaces' ⌘K launcher. Type to filter, **Up**/
 **Down** to select, **Enter** to run, **Esc** to close. It covers
 navigation (all five workspaces, the chain composer), actions (toggle
@@ -100,20 +100,20 @@ and switching between all eleven theme presets.
 
 The main workspace with four panels:
 
-- **Prompt** — Multi-line text area (Shift+Enter for newlines, emacs
+- **Prompt** -- Multi-line text area (Shift+Enter for newlines, emacs
   keybindings). Required, except for an LTX-2 / LTX-Video model that already has
   a source image attached, where an empty prompt is accepted and prompt
   expansion is skipped for that run
-- **Parameters** — six essentials rows plus the Advanced accordion
-- **Preview** — idle hint; while generating, the latest live latent preview
-  frame (for families that stream denoise previews — FLUX.1, Flux.2, Z-Image,
+- **Parameters** -- six essentials rows plus the Advanced accordion
+- **Preview** -- idle hint; while generating, the latest live latent preview
+  frame (for families that stream denoise previews -- FLUX.1, Flux.2, Z-Image,
   and Wan 2.1/2.2) with the denoise progress line beneath it; then the
   finished print with a `model · seed · time · host` caption
   (Kitty/sixel/halfblock rendering). `MOLD_STEP_PREVIEW=0` disables server
   preview streaming
-- **Timeline** — the glyph-styled session log (`•` info, `✓` done with
+- **Timeline** -- the glyph-styled session log (`•` info, `✓` done with
   stage timings, `!` warning, `✗` error, `★` model loaded), including a
-  `✓ Saved <file>` entry per print; shows "— idle. no runs this session."
+  `✓ Saved <file>` entry per print; shows "-- idle. no runs this session."
   until the first run. Hidden when `tui.show_timeline` is off or the
   terminal is too short.
 
@@ -124,16 +124,16 @@ memory telemetry live in the Machines workspace and the chrome host chip.
 
 | Row             | Shows                                   | ◀▶ / +/-             | Enter                |
 | --------------- | --------------------------------------- | -------------------- | -------------------- |
-| Model           | human-readable model name + description | —                    | fuzzy model selector |
+| Model           | human-readable model name + description | --                   | fuzzy model selector |
 | Size            | `1024 × 1024`                           | cycle aspect presets | type an exact `WxH`  |
-| Detail          | `●●●●○○○○ 28` step dots                 | adjust steps         | —                    |
-| Prompt strength | guidance                                | adjust               | —                    |
+| Detail          | `●●●●○○○○ 28` step dots                 | adjust steps         | --                   |
+| Prompt strength | guidance                                | adjust               | --                   |
 | Seed            | `random` / `fixed · 42`                 | cycle seed mode      | type an exact seed   |
-| Batch           | image count                             | adjust               | —                    |
+| Batch           | image count                             | adjust               | --                   |
 
 Size's `◀▶` cycles 1:1, 3:2, 2:3, 16:9, and 9:16 presets fitted to the
 model's default pixel area (64-aligned). Seed modes are `random` (new seed
-every run), `fixed` (reproducible), and `increment` (+1 per run) — **Ctrl+R**
+every run), `fixed` (reproducible), and `increment` (+1 per run) -- **Ctrl+R**
 still cycles them from anywhere.
 
 ### Advanced accordion
@@ -146,17 +146,17 @@ carries a count of advanced values that differ from their defaults. The
 open state and expanded section persist across sessions
 (`tui.advanced_open` / `tui.advanced_section`).
 
-| Section                | Rows                                                                                                                                                                                 |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                                                                                                                                       |
-| Negative prompt        | inline editor (CFG models; **Alt+N** jumps here). Wan models prefill their tuned default — leave it for the default, edit to replace it, clear it to send an explicit empty negative |
-| Source image           | Source, Strength, Mask, ControlNet (per model)                                                                                                                                       |
-| Identity photo         | Photo, Strength, Start step (only for a checkpoint the server advertises as identity-capable)                                                                                        |
-| LoRA                   | LoRA path + scale                                                                                                                                                                    |
-| Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                                                                                                                 |
-| Output format          | png / jpeg / gif / apng / webp / mp4                                                                                                                                                 |
-| Video                  | Frames, FPS; Wan Flow shift; LTX-2 Pipeline, Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2×, STG scale/blocks, CFG rescale, Modality scale, Guidance skip          |
-| File under             | Title, Tags, Collection — where the print lands in the Library                                                                                                                       |
+| Section                | Rows                                                                                                                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                                                                                                                                        |
+| Negative prompt        | inline editor (CFG models; **Alt+N** jumps here). Wan models prefill their tuned default -- leave it for the default, edit to replace it, clear it to send an explicit empty negative |
+| Source image           | Source, Strength, Mask, ControlNet (per model)                                                                                                                                        |
+| Identity photo         | Photo, Strength, Start step (only for a checkpoint the server advertises as identity-capable)                                                                                         |
+| LoRA                   | LoRA path + scale                                                                                                                                                                     |
+| Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                                                                                                                  |
+| Output format          | png / jpeg / gif / apng / webp / mp4                                                                                                                                                  |
+| Video                  | Frames, FPS; Wan Flow shift; LTX-2 Pipeline, Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2×, STG scale/blocks, CFG rescale, Modality scale, Guidance skip           |
+| File under             | Title, Tags, Collection -- where the print lands in the Library                                                                                                                       |
 
 The LTX-2 Pipeline row cycles through **Auto**, **one-stage**, **two-stage**,
 **two-stage-hq**, and **distilled**. Auto omits the request field so the server
@@ -164,7 +164,7 @@ keeps checkpoint selection authority; each explicit recipe selects MP4 and is
 shown in the collapsed Video summary and Advanced badge. Guidance and the
 Negative prompt section follow the selected recipe's CFG contract. Pipelines
 that require an audio file, source video, keyframes, a retake window, or an
-IC-LoRA—and the audio-only `t2a` output—remain intentionally absent until the
+IC-LoRA--and the audio-only `t2a` output--remain intentionally absent until the
 TUI can author and handle those inputs and outputs end to end.
 
 For Wan models the Video section instead exposes **Flow shift** (the family's
@@ -176,7 +176,7 @@ request fields absent until edited, so pipeline constants stay authoritative.
 #### Identity photo (PuLID)
 
 The **Identity photo** section appears only while the selected checkpoint's
-`/api/models[]` entry advertises `supports_identity` — face-identity
+`/api/models[]` entry advertises `supports_identity` -- face-identity
 conditioning is qualified for a fixed list of FLUX and SDXL checkpoints (see
 the [Identity Photos guide](/guide/identity)), on a server built with PuLID
 support. It is never inferred from the family or from how your local `mold` was
@@ -191,8 +191,8 @@ empty clears the photo. **Strength** moves in 0.1 steps across `0.0`–`3.0`
 form cannot express a value the server would reject; lowering the step count
 pulls Start step back with it.
 
-Switching to a model that cannot take the photo **keeps** it — the photo is
-your choice, and switching back must not have lost it — but shows the server's
+Switching to a model that cannot take the photo **keeps** it -- the photo is
+your choice, and switching back must not have lost it -- but shows the server's
 refusal on the Photo row and blocks Generate. That is deliberate: rendering
 silently without the face would produce a print that looks fine and is simply
 not the person you asked for. `↺ Reset to model defaults` clears the photo and
@@ -217,7 +217,7 @@ model changes to a family that cannot use them.
 
 The last section files the print as you make it, so it arrives in the Library
 already named and organized instead of needing a second pass through the
-gallery. It has no capability gate — every model produces a print.
+gallery. It has no capability gate -- every model produces a print.
 
 | Row            | What it takes                                                                     |
 | -------------- | --------------------------------------------------------------------------------- |
@@ -233,7 +233,7 @@ edit. Tags are trimmed and de-duplicated case-insensitively, and a collection
 name's whitespace is collapsed so the same name means the same collection on
 every machine.
 
-All three are absent until you touch them — an untouched form sends exactly the
+All three are absent until you touch them -- an untouched form sends exactly the
 request it always did.
 
 While **Tag by title** is on (Settings ▸ Library, on by default), a titled print
@@ -253,9 +253,9 @@ Filing is per-print intent rather than a preference: it is not restored on the
 next launch, it is not saved per model, and only **↺ Reset to model defaults**
 clears it. Generating keeps it, so a batch's siblings share the filing.
 
-If a host cannot apply what you filed — it is running without a metadata
+If a host cannot apply what you filed -- it is running without a metadata
 database, or the collection went away between listing it and pressing Generate
-— the print is still rendered and saved, and the TUI says what was dropped: a
+-- the print is still rendered and saved, and the TUI says what was dropped: a
 one-line `!` advisory on the Create view (several are joined with `·`) plus an
 entry per advisory in the Timeline. It is an advisory rather than an error
 because the render succeeded, and starting the next generation clears the line.
@@ -263,7 +263,7 @@ The same row carries any other adjustment a host reports about an accepted
 request, such as a lip-dub clip retimed to its reference.
 
 A titled print's file is named `mold-{model}-{ts}[-{idx}]~{title-slug}.{ext}`,
-the same shape the server's gallery writes — renaming the print later never
+the same shape the server's gallery writes -- renaming the print later never
 renames the file.
 
 The `↺ Reset to model defaults` action row at the bottom restores every
@@ -277,7 +277,7 @@ Press **Enter** on the Model field or **Ctrl+M** from anywhere:
 
 - Type to fuzzy-filter the model list
 - **j**/**k**, arrow keys, or scroll wheel to navigate
-- **Enter** to select — parameters update to model defaults
+- **Enter** to select -- parameters update to model defaults
 - **Esc** to cancel
 
 ### Prompt History
@@ -305,24 +305,24 @@ The prompt editor supports standard emacs/shell keybindings:
 ## Library View
 
 The Library merges prints from **every machine you know about** into one
-grid — the local output directory (`~/.mold/output/` or `MOLD_OUTPUT_DIR`),
+grid -- the local output directory (`~/.mold/output/` or `MOLD_OUTPUT_DIR`),
 the connected server, and every host registered in the Machines workspace
 (fetched with each host's saved API key). Cross-host copies of one print
-are collapsed by filename — the same identity rule the desktop's unified
-gallery uses — with the local copy preferred when one exists. The header
+are collapsed by filename -- the same identity rule the desktop's unified
+gallery uses -- with the local copy preferred when one exists. The header
 is honest about sources: `28 prints` for local-only, `28 prints · hal9000`
 when everything came from one remote machine, `28 prints · all machines`
 once prints span more than one, and a dim `· 1 host offline` suffix when a
-host didn't answer the scan. Offline hosts never break the merge — their
+host didn't answer the scan. Offline hosts never break the merge -- their
 prints just drop out until the next rescan (entering the Library rescans
 automatically when the last scan is stale or a host was added/removed).
-Only **live** prints are listed — a print moved to the trash keeps its row
+Only **live** prints are listed -- a print moved to the trash keeps its row
 and its bytes but leaves the Library until restored from a Trash view.
 
 On wide terminals a **Details side panel** shows the selected print: its
 thumbnail, the print's title when it has one (bold, above the prompt), the
 wrapped prompt (plus a dim `neg:` line), and Model / Seed /
-Size / optional video **Pipeline** / **Machine** rows — Pipeline is the recipe
+Size / optional video **Pipeline** / **Machine** rows -- Pipeline is the recipe
 the engine actually ran, including an Auto-selected LTX-2 recipe, while Machine
 names the host the print lives on ("This Mac", a host name, or `2 machines`
 when copies exist on several). The panel hides automatically on narrow
@@ -345,14 +345,14 @@ when recorded.
 
 Typing after **/** filters live (case-insensitive, matching prompt, model
 name, and filename); **Enter** keeps the filter applied, **Esc** clears
-it. `d` moves a print to the trash on **every** machine that holds it —
+it. `d` moves a print to the trash on **every** machine that holds it --
 the confirmation names the machine count before anything happens. The
 trash wording appears only when every owning machine can actually trash:
 the local move needs the metadata DB (the bytes land in
 `<output_dir>/.trash/` beside a tombstone, recoverable from any Trash
 view), and a server must advertise `gallery.trash` in its capabilities.
 Otherwise the hint and the confirmation fall back to honest
-permanent-delete wording — an older server or a DB-less local scan really
+permanent-delete wording -- an older server or a DB-less local scan really
 does delete. Recall, upscale, and removal work on remote prints exactly
 like local ones; requests route to the machine that owns the print.
 
@@ -378,13 +378,13 @@ regeneration.
 
 ## Chain Composer
 
-The chain composer authors `mold.chain.v1` TOML for multi-clip video chains —
+The chain composer authors `mold.chain.v1` TOML for multi-clip video chains --
 LTX-2, LTX-Video, and Wan 2.1/2.2. Frame counts validate on the selected
 family's own grid (`8n+1` for LTX-2, `4n+1` for Wan) and the seam carryover is
 per family: LTX-2 carries a 17-frame motion tail, Wan's image-conditioned
 checkpoints continue from a single seed frame, and text-to-video checkpoints
 join independent clips. Press
-**c** from Create's navigation mode to open it (Esc returns to composing —
+**c** from Create's navigation mode to open it (Esc returns to composing --
 a chain in progress survives switching workspaces). It lets you build
 per-stage prompts, frame counts, source images, and `smooth` / `cut` / `fade`
 transitions, then submit the normalised script through the same chain endpoint
@@ -404,14 +404,14 @@ See all installed and available models with family, size, defaults, and status.
 
 ## Machines View
 
-Manage every Mold server the TUI can generate on — the same multi-host
+Manage every Mold server the TUI can generate on -- the same multi-host
 Machines workspace as the desktop, web, and iPhone apps. The left pane
 lists machines with a status dot (green ready, yellow connecting, red
 offline), the machine name, and a dim hardware line (GPU, VRAM, backend,
 `host:port`); **This Mac** (or **This machine**) is always the first row.
 The right pane shows the selected machine's telemetry (GPU, VRAM,
 models-disk storage, loaded models, uptime, version) and its live queue
-lanes — `▶` running jobs with elapsed time and GPU ordinal, `●` queued
+lanes -- `▶` running jobs with elapsed time and GPU ordinal, `●` queued
 jobs with their position. Offline hosts stay listed and recover
 automatically when the server comes back. When a host has several GPUs,
 the detail pane lists every device with its stable ID, utilization, VRAM,
@@ -444,7 +444,7 @@ advertises `devices.restart_enable`.
 ### Connecting a machine
 
 Press **c** for the stepped connect flow: enter the server address (bare
-hostname, `host:port`, or full URL — bare names default to port 7680),
+hostname, `host:port`, or full URL -- bare names default to port 7680),
 then an optional API key (masked; **Enter** skips it), and the TUI tests
 the connection. On success the host is saved with its display name taken
 from the server's hostname; if the same server is already registered
@@ -453,7 +453,7 @@ from the server's hostname; if the same server is already registered
 **Enter** to retry or **e** to edit the address.
 
 Hosts persist in the settings DB (`mold.db`) under `tui.hosts.v1`, with
-each host's API key stored in its own `tui.host_key.<id>` settings row —
+each host's API key stored in its own `tui.host_key.<id>` settings row --
 keys are sent as the `x-api-key` header, never placed in URLs, and are
 deleted when the host is forgotten.
 
@@ -462,10 +462,10 @@ deleted when the host is forgotten.
 **Enter** on a machine row makes it the sticky generation target
 (persisted as `tui.generate_target`): **This Mac** forces the local
 engine, a remote host routes every Generate to that server with its API
-key — and never silently falls back to local. If a targeted host is
+key -- and never silently falls back to local. If a targeted host is
 unreachable the run fails with an error naming the host so you can fix
 it in Machines or press Enter on the target row again to return to
-**Auto** (remote when connected, local fallback — the default).
+**Auto** (remote when connected, local fallback -- the default).
 
 ## Settings View
 
@@ -484,7 +484,7 @@ per-model generation defaults persist to the SQLite settings DB at
 
 ### Appearance
 
-The Appearance panel renders the eleven theme presets as bordered cards —
+The Appearance panel renders the eleven theme presets as bordered cards --
 three swatch dots showing each preset's background, accent, and info hues,
 the preset name, and a short palette descriptor. The selected card carries
 the focus-colored border, and the panel header shows the active slug as
@@ -501,15 +501,15 @@ the grid scrolls by whole card rows to keep the selection visible.
 The Configuration list starts with a DB-backed Preferences section. Each
 toggle persists to `mold.db` the moment it flips.
 
-| Row           | Key                       | Default | Effect                                                                                                                                    |
-| ------------- | ------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Format        | `tui.default_format`      | `png`   | Seeds a fresh session's Format parameter (a saved session or per-model preference still wins)                                             |
-| Reduce Motion | `tui.reduce_motion`       | `off`   | Disables TUI motion effects (consumed by upcoming releases)                                                                               |
-| Show Timeline | `tui.show_timeline`       | `on`    | Shows the Timeline on the Create view (consumed by upcoming releases)                                                                     |
-| Confirmations | `tui.confirm_destructive` | `on`    | When off, destructive actions — deleting a print, removing a model, deleting a chain stage — run immediately without a confirmation popup |
+| Row           | Key                       | Default | Effect                                                                                                                                      |
+| ------------- | ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Format        | `tui.default_format`      | `png`   | Seeds a fresh session's Format parameter (a saved session or per-model preference still wins)                                               |
+| Reduce Motion | `tui.reduce_motion`       | `off`   | Disables TUI motion effects (consumed by upcoming releases)                                                                                 |
+| Show Timeline | `tui.show_timeline`       | `on`    | Shows the Timeline on the Create view (consumed by upcoming releases)                                                                       |
+| Confirmations | `tui.confirm_destructive` | `on`    | When off, destructive actions -- deleting a print, removing a model, deleting a chain stage -- run immediately without a confirmation popup |
 
 A **Library** section follows: **Trash (days)** edits the shared
-`gallery.trash_retention_days` key — how long trashed prints survive
+`gallery.trash_retention_days` key -- how long trashed prints survive
 before the server's retention sweeper purges them (`0` keeps them
 forever, max 3650, default 30). The value persists through the same
 settings-DB surface `mold config set` and the server's config API use,
@@ -518,19 +518,19 @@ overrides it with the usual **(env)** indicator.
 
 **Tag by title** sits beside it and edits `generate.auto_tag_title` (on by
 default): whether a titled print also picks up its own title slug as a tag.
-That is a client decision — the server never auto-tags, because it cannot
-tell a typed title from a scripted one — so the same key drives `mold run`
+That is a client decision -- the server never auto-tags, because it cannot
+tell a typed title from a scripted one -- so the same key drives `mold run`
 and Create ▸ Advanced ▸ [File under](#file-under), which discloses the derived
 tag before you generate. Turning it off changes nothing about prints you
 already made.
 
 ### Field Types
 
-- **Numeric** (port, width, steps, etc.) — adjust with +/- keys
-- **Boolean** (metadata, expand enabled, etc.) — toggle with Enter or +/-
-- **Toggle** (T5 variant, log level, scheduler) — cycle with +/- or Enter
-- **Text/Path** (model name, directories, prompts) — Enter opens edit popup
-- **Read-only** (model file paths) — displayed dimmed, not editable
+- **Numeric** (port, width, steps, etc.) -- adjust with +/- keys
+- **Boolean** (metadata, expand enabled, etc.) -- toggle with Enter or +/-
+- **Toggle** (T5 variant, log level, scheduler) -- cycle with +/- or Enter
+- **Text/Path** (model name, directories, prompts) -- Enter opens edit popup
+- **Read-only** (model file paths) -- displayed dimmed, not editable
 
 Environment variable overrides are shown with an **(env)** indicator in yellow.
 Per-model defaults show resolved values from the manifest (not raw config `None`
@@ -626,7 +626,7 @@ portable across machines.
 
 Where Generate runs is owned by the **Machines** workspace, not the Create
 form: press **Enter** on a machine row to pin it as the sticky generation
-target (persisted as `tui.generate_target`), or leave it on **Auto** — try
+target (persisted as `tui.generate_target`), or leave it on **Auto** -- try
 the connected server first, fall back to the local GPU. `mold tui --local`
 pins the session to the local engine. A pinned remote host never silently
 falls back to local; an unreachable target fails with an error naming the
@@ -668,7 +668,7 @@ The Nix flake, pre-built releases, and Docker images include the TUI by default.
 ## Motion
 
 Switching workspaces fades the new content in and a finished print sweeps
-its caption row — the TUI's only two animations, matching the design
+its caption row -- the TUI's only two animations, matching the design
 system's restraint budget. Turn them off with the **Reduce motion**
 preference in Settings (persisted as `tui.reduce_motion`) or the
 `MOLD_TUI_NO_MOTION=1` environment variable (useful for scripted terminal
@@ -677,27 +677,27 @@ captures).
 ## Theme
 
 The TUI ships eleven theme presets, selectable live from **Settings →
-Appearance** — a grid of theme cards navigated with the arrow keys
+Appearance** -- a grid of theme cards navigated with the arrow keys
 (Left/Right also cycle linearly), applying immediately; the choice persists
 in the metadata DB under `tui.theme`.
 
-The default is **Studio Dark** — the same Mold Studio look as the desktop,
-web, and iPhone apps — with its dual-accent role model: the warm _safelight_
+The default is **Studio Dark** -- the same Mold Studio look as the desktop,
+web, and iPhone apps -- with its dual-accent role model: the warm _safelight_
 accent marks focus, selection, and primary actions, while the cool _halide_
 accent marks info and live state.
 
-| Preset          | Slug              | Notes                                     |
-| --------------- | ----------------- | ----------------------------------------- |
-| Studio Dark     | `studio-dark`     | Default. Mold family, dual accent         |
-| Studio Light    | `studio-light`    | Mold family, dual accent                  |
-| Safelight Dark  | `safelight-dark`  | Warm darkroom family, dual accent         |
-| Safelight Light | `safelight-light` | Warm darkroom family, dual accent         |
-| Mocha           | `mocha`           | Catppuccin Mocha — the pre-Studio default |
-| Latte           | `latte`           | Catppuccin Latte (light)                  |
-| Ristretto       | `ristretto`       | Monokai Ristretto                         |
-| Gruvbox         | `gruvbox`         | Gruvbox Dark (hard)                       |
-| Tokyo           | `tokyo`           | Tokyo Night (storm)                       |
-| Nord            | `nord`            | Nord                                      |
-| Dracula         | `dracula`         | Dracula                                   |
+| Preset          | Slug              | Notes                                      |
+| --------------- | ----------------- | ------------------------------------------ |
+| Studio Dark     | `studio-dark`     | Default. Mold family, dual accent          |
+| Studio Light    | `studio-light`    | Mold family, dual accent                   |
+| Safelight Dark  | `safelight-dark`  | Warm darkroom family, dual accent          |
+| Safelight Light | `safelight-light` | Warm darkroom family, dual accent          |
+| Mocha           | `mocha`           | Catppuccin Mocha -- the pre-Studio default |
+| Latte           | `latte`           | Catppuccin Latte (light)                   |
+| Ristretto       | `ristretto`       | Monokai Ristretto                          |
+| Gruvbox         | `gruvbox`         | Gruvbox Dark (hard)                        |
+| Tokyo           | `tokyo`           | Tokyo Night (storm)                        |
+| Nord            | `nord`            | Nord                                       |
+| Dracula         | `dracula`         | Dracula                                    |
 
 `studio` and `safelight` are accepted as slug aliases for the dark variants.

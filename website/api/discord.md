@@ -25,24 +25,24 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 
 ## Slash Commands
 
-| Command              | Description                                                                                                                                                                                                                       |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes                                                                                                                          |
-| `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                                                                                                               |
-| `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable video sequence (LTX-2, LTX-Video — which joins independently rendered clips — or Wan, per the model's advertised sequence support), with per-clip progress and final MP4 delivery |
-| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                                                                            |
-| `/models`            | List available models with download/loaded status                                                                                                                                                                                 |
-| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds                                                                                                             |
-| `/quota`             | Check your remaining daily generation quota                                                                                                                                                                                       |
-| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                                                                                                               |
-| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                                                                                                 |
-| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                                                                                                        |
+| Command              | Description                                                                                                                                                                                                                         |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes                                                                                                                            |
+| `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                                                                                                                 |
+| `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable video sequence (LTX-2, LTX-Video -- which joins independently rendered clips -- or Wan, per the model's advertised sequence support), with per-clip progress and final MP4 delivery |
+| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                                                                              |
+| `/models`            | List available models with download/loaded status                                                                                                                                                                                   |
+| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds                                                                                                               |
+| `/quota`             | Check your remaining daily generation quota                                                                                                                                                                                         |
+| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                                                                                                                 |
+| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                                                                                                   |
+| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                                                                                                          |
 
 ### `/identity`
 
 Face-identity conditioning has its own command rather than options on
 `/generate`. Discord caps a chat-input command at **25 options** and
-`/generate` is already at exactly 25 — and identity is qualified only for a
+`/generate` is already at exactly 25 -- and identity is qualified only for a
 fixed list of FLUX and SDXL checkpoints (see the
 [Identity Photos guide](/guide/identity)), so none of `/generate`'s video and
 conditioning options apply to it anyway.
@@ -62,9 +62,9 @@ conditioning options apply to it anyway.
 Preconditions are checked in cost order, so an impossible request never takes a
 quota slot or a download: the declared attachment size and container and the
 strength range first, then the model gate against the server's advertised
-`/api/models[].supports_identity` — an absent field is read as "no", which
+`/api/models[].supports_identity` -- an absent field is read as "no", which
 covers both a server too old for identity conditioning and one whose binary
-cannot execute it — then the start step against the resolved step count, and
+cannot execute it -- then the start step against the resolved step count, and
 finally the downloaded bytes. A server advertising no identity-capable model at
 all says so instead of guessing a checkpoint. The result embed carries an
 **Identity** row naming the photo, the strength, and the start step.
@@ -73,11 +73,11 @@ all says so instead of guessing a checkpoint. The result embed carries an
 
 | Variable                     | Default                 | Description                                                             |
 | ---------------------------- | ----------------------- | ----------------------------------------------------------------------- |
-| `MOLD_DISCORD_TOKEN`         | —                       | Bot token (required; falls back to `DISCORD_TOKEN`)                     |
+| `MOLD_DISCORD_TOKEN`         | --                      | Bot token (required; falls back to `DISCORD_TOKEN`)                     |
 | `MOLD_HOST`                  | `http://localhost:7680` | mold server URL                                                         |
 | `MOLD_DISCORD_COOLDOWN`      | `10`                    | Per-user cooldown (s)                                                   |
-| `MOLD_DISCORD_ALLOWED_ROLES` | —                       | Comma-separated role names/IDs for access control (unset = all)         |
-| `MOLD_DISCORD_DAILY_QUOTA`   | —                       | Max generations per user per UTC day (unset = unlimited; 0 = block all) |
+| `MOLD_DISCORD_ALLOWED_ROLES` | --                      | Comma-separated role names/IDs for access control (unset = all)         |
+| `MOLD_DISCORD_DAILY_QUOTA`   | --                      | Max generations per user per UTC day (unset = unlimited; 0 = block all) |
 
 ::: tip Video generation
 Running `/generate` against a video model (`ltx-video-*`, `ltx-2-*`, `wan*`)
@@ -103,7 +103,7 @@ command and do not need the `pipeline` option.
 Negative prompts: leaving `negative_prompt` unset applies the model's
 advertised default negative (Wan ships a tuned one). To explicitly disable the
 negative prompt, pass `negative_prompt: none` (case-insensitive; `-` also
-accepted) — Discord's 25-option cap means the opt-out rides the existing
+accepted) -- Discord's 25-option cap means the opt-out rides the existing
 option as a sentinel rather than its own toggle.
 :::
 
@@ -138,7 +138,7 @@ restarts. For permanent restrictions, use role-based access via
 ```nix
 services.mold.discord = {
   enable = true;
-  # tokenFile is loaded via systemd EnvironmentFile —
+  # tokenFile is loaded via systemd EnvironmentFile --
   # the file must contain: MOLD_DISCORD_TOKEN=your-token-here
   tokenFile = config.age.secrets.discord-token.path;
   moldHost = "http://localhost:7680";

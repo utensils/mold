@@ -1,4 +1,4 @@
-# `mold lambda` — Lambda Cloud web UI
+# `mold lambda` -- Lambda Cloud web UI
 
 `mold lambda` deploys mold to Lambda Cloud as a private, Docker-first web UI.
 The local CLI creates or reuses Lambda resources, starts the mold container on

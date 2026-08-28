@@ -132,8 +132,17 @@ const modelIndex = readRel('models/index.md')
 const modelPages = readdirSync(join(websiteDir, 'models'))
   .filter((name) => name.endsWith('.md') && name !== 'index.md')
   .map((name) => `models/${name}`)
+const nestedModelPages = new Map([['models/ltx-video.md', 'models/ltx2.md']])
 for (const relPath of modelPages) {
   const route = routeForDoc(relPath)
+  const parentPath = nestedModelPages.get(relPath)
+  if (parentPath) {
+    const childLink = `./${relPath.split('/').at(-1)}`
+    if (!readRel(parentPath).includes(childLink)) {
+      fail(`nested model guide is not linked from ${parentPath}: ${route}`)
+    }
+    continue
+  }
   if (!visibleLinks.has(route)) {
     fail(`model guide is not linked from the sidebar: ${route}`)
   }
@@ -217,7 +226,7 @@ try {
   )
 } catch {
   console.warn(
-    'warning: ripgrep (rg) not found — skipping env-var coverage check'
+    'warning: ripgrep (rg) not found -- skipping env-var coverage check'
   )
   rustEnvVars = new Set()
 }
@@ -228,11 +237,11 @@ const ignoredEnvVars = new Set([
   'MOLD_GIT_SHA',
   'MOLD_GIT_SHA_SHORT',
   'MOLD_VERSION',
-  // Build-time only — consumed by crates/mold-server/build.rs to stage
+  // Build-time only -- consumed by crates/mold-server/build.rs to stage
   // the web SPA bundle for rust-embed. Not user-facing runtime config.
   'MOLD_EMBED_WEB_DIR',
   'MOLD_WEB_DIST',
-  // Debug / dev / test-only — intentionally not user-facing.
+  // Debug / dev / test-only -- intentionally not user-facing.
   // `MOLD_FLUX2_DUMP_LATENT` is a developer probe that dumps pre-VAE
   // latents to a path; `MOLD_NVFP4_PROBE_PATH` gates the NVFP4 single-file
   // load probe behind an external test fixture; `MOLD_TEST_CLIP_TOKENIZER`

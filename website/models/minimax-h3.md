@@ -19,20 +19,20 @@ licensing or authorization failure.
 :::
 
 ::: info Apple Metal is a correctness-only path in progress
-The Apple Silicon execution path exists as of #1164 — family-scoped BF16, a
+The Apple Silicon execution path exists as of #1164 -- family-scoped BF16, a
 folded audio-VAE reduction, chunked dense attention sized so the score matrix
 fits a Metal buffer, the portable INT8 ConvRot arm, and fp8-scaled weights
 refused by name because candle has no Metal fp8 widening kernel. It is
 advertised as **correctness-only**, the same tier Wan and LTX-2 landed on
 before their performance qualification. Admission now accepts a Metal device,
 the public runtime profile is `supported-compact-fl2va-cuda-sm89-or-metal`, and
-the released macOS builds carry the `h3` feature — so the route exists in a
+the released macOS builds carry the `h3` feature -- so the route exists in a
 shipped binary. What is still missing is hardware qualification:
 no H3 checkpoint has ever completed a render on Metal. A Metal attempt is
 refused below a unified-memory floor that the compact stack's ~42.5 GB working
 set puts out of reach of a 48 GB machine, so lifting this tier needs a
-64 GB-class Apple Silicon host. Expect Metal to be slow when it is qualified — the reference MLX
-port measures minutes per step at 5 s — so this is a portability path, not a
+64 GB-class Apple Silicon host. Expect Metal to be slow when it is qualified -- the reference MLX
+port measures minutes per step at 5 s -- so this is a portability path, not a
 speed one.
 :::
 
@@ -56,7 +56,7 @@ model rows report `runtime_available: false` before the pull.
 The two NVFP4 rows pin a pruned NVFP4 transformer in place of the INT8 one.
 Mold has no engine arm that reads that weight layout yet, so they download,
 verify, appear in **Models → Installed**, and remove like any other model,
-while generation is refused up front — before any weights are loaded — and
+while generation is refused up front -- before any weights are loaded -- and
 `GET /api/models` reports `"runtime_available": false` on the row. They share
 the whole rest of the compact stack with the INT8 variants, so if you already
 have one installed the pull is only the 12.529 GB transformer.
@@ -67,39 +67,39 @@ The H3 catalog rows ship on every release target; the H3 _engine_ does not.
 The macOS and Linux sm89 artifacts are built with it; on an RTX 3090/A40
 (sm86), a B200/B300 (sm100), an RTX 50-series card (sm120), or Windows, the H3
 models download and verify normally and generate nothing. Both compact task
-partitions — FL2VA and Ref2VA — run wherever the engine is built.
+partitions -- FL2VA and Ref2VA -- run wherever the engine is built.
 
 Rather than let you discover that after a 21–42 GB pull, every H3 row carries
 its answer. `GET /api/models` reports:
 
-- `runtime_available` — `false` when this server cannot execute the model,
+- `runtime_available` -- `false` when this server cannot execute the model,
   whatever the cause. Absent on servers that predate the field, which clients
   read as runnable.
-- `runtime_unavailable_reason` — one sentence naming the obstacle, present
+- `runtime_unavailable_reason` -- one sentence naming the obstacle, present
   exactly when `runtime_available` is `false`. There are three, and they have
   three different remedies:
-  - **no engine arm for this weight layout** — the `official-bf16`
+  - **no engine arm for this weight layout** -- the `official-bf16`
     qualification references and the pruned NVFP4 tags. No build runs these.
-  - **no runtime for this task partition** — the task, not the machine. A
+  - **no runtime for this task partition** -- the task, not the machine. A
     different artifact will not help. No released identity reports this today:
     both compact partitions execute, and the axis survives for a future task.
-  - **this build was compiled without the H3 engine** — use the macOS or
+  - **this build was compiled without the H3 engine** -- use the macOS or
     Linux sm89 release, or build with the `h3` feature.
 
 Mold Studio renders that on the model card _before_ the pull: web, desktop,
 and the iPhone app show a **Download only** badge on the Discover row and the
-full sentence in the detail pane, with the Pull action still enabled — the
+full sentence in the detail pane, with the Pull action still enabled -- the
 model genuinely is downloadable. `mold pull` prints the same sentence in place
 of the `mold run` hint, and `mold run --local` refuses before opening a single
 checkpoint.
 
 Submitting one anyway returns HTTP `501` with code
-`MINIMAX_H3_RUNTIME_UNAVAILABLE` and that same sentence — deliberately not the
+`MINIMAX_H3_RUNTIME_UNAVAILABLE` and that same sentence -- deliberately not the
 `451` licensing refusal, because none of these is a licensing problem.
 
 Every H3 render carries synchronized generated audio, and no request can turn
 it off. `GET /api/models` says so directly: each H3 entry reports
-`"supports_audio": true` — including variants that are not downloaded yet — so
+`"supports_audio": true` -- including variants that are not downloaded yet -- so
 a client reads the capability rather than inferring it from the family name.
 
 Pull a variant from the CLI, or install it from **Models → Discover** in Mold
@@ -119,18 +119,18 @@ catalog recipes cannot substitute for any registered graph.
 ## Reviewed Turbo tiers
 
 A Turbo tier is a reviewed LoRA adapter overlaid on the **same** compact INT8
-checkpoint of its own task — nothing about the base artifact contract relaxes,
+checkpoint of its own task -- nothing about the base artifact contract relaxes,
 and the only request axis a tier moves is its fixed step count. Each Turbo
 model tag pulls the complete base stack of its task plus one pinned adapter
 (1,956,193,000 bytes for FL2VA 8-step and Ref2VA 4-step, 1,956,192,992 bytes
 for FL2VA 4-step 768p, stored once under `shared/minimax-h3/loras/` and shared
 by every tag that names one):
 
-- `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` — 9 terminal-inclusive
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` -- 9 terminal-inclusive
   sampler grid points (8 model evaluations)
-- `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` — 5 terminal-inclusive
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` -- 5 terminal-inclusive
   sampler grid points (4 model evaluations)
-- `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step` — 5 terminal-inclusive
+- `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step` -- 5 terminal-inclusive
   sampler grid points (4 model evaluations)
 
 An adapter is reviewed for exactly one task partition, so a `ref2v` adapter
@@ -140,14 +140,14 @@ A Turbo tag stores its base stack in its own task's base checkpoint directory
 (`minimax-h3-fl2va-comfy-pruned-int8/` or `minimax-h3-ref2va-comfy-pruned-int8/`,
 plus the shared family bucket), so a machine that already has that base tag
 installed
-downloads only the ~1.96 GB adapter — and pulling a Turbo tag first means a
+downloads only the ~1.96 GB adapter -- and pulling a Turbo tag first means a
 later base pull downloads nothing. Because the shared bytes genuinely
 constitute a complete base install, a Turbo-only pull also makes the base tag
 read as installed. Removal ref-counts every complete install: removing a
 Turbo tag deletes only its adapter while the base stack has another owner,
 and removing the base keeps every file a fully installed Turbo tag still
 uses (a Turbo tag missing its adapter owns nothing). Freeing everything is
-two removals — the Turbo tag, then the base — and each removal reports the
+two removals -- the Turbo tag, then the base -- and each removal reports the
 kept files with the tags that still use them.
 
 Selecting a Turbo model resolves the base INT8 transformer, the tier's pinned
@@ -156,8 +156,8 @@ Create screen locks Steps at that count and prints the reason underneath it
 ("Fixed by the 8-step Turbo tier: 9 terminal-inclusive sampler grid points
 (8 denoise intervals)."), so the `9` is not a surprise; Guidance is locked the
 same way, because H3 has no classifier-free branch and pins the scale at 0.
-Both sentences come from the server's generation profile, so every surface —
-web, desktop, and the iPhone app — shows the same words. The
+Both sentences come from the server's generation profile, so every surface --
+web, desktop, and the iPhone app -- shows the same words. The
 `MOLD_H3_TURBO_ADAPTER` / `MOLD_H3_TURBO_TIER` environment pair is a
 capture-scope UAT override honored only by `h3-private-uat` builds; ordinary
 builds refuse a set pair rather than letting two selection authorities
@@ -188,8 +188,8 @@ A Turbo tag adds one adapter to this graph:
 
 The encoder, VAEs, and common support files are shared between every compact
 variant, INT8 and NVFP4 alike. After one complete variant is installed, adding
-another downloads only its transformer — 20.970 GB for an INT8 tag, 12.529 GB
-for an NVFP4 one — plus a 546-byte task config when the task differs. Removing
+another downloads only its transformer -- 20.970 GB for an INT8 tag, 12.529 GB
+for an NVFP4 one -- plus a 546-byte task config when the task differs. Removing
 one variant keeps the shared graph and names the variants still using it. Both variants together occupy 63.452
 GB (63,452,470,480 bytes) of model payloads, excluding filesystem and Hugging
 Face cache overhead.
@@ -203,10 +203,10 @@ full-file manifest identities rather than estimates from repository listings.
 The current compact implementation supports this request profile:
 
 - an SM89 CUDA GPU with sufficient VRAM and the H3 attention/runtime operators
-  enabled (an Apple Silicon Metal GPU is admitted but unqualified — see above)
-- any canvas the compact rule admits — both axes a multiple of 32, each at
+  enabled (an Apple Silicon Metal GPU is admitted but unqualified -- see above)
+- any canvas the compact rule admits -- both axes a multiple of 32, each at
   least 256 px, at most 1,032,192 pixels in total (the area of `1344x768`),
-  aspect between 1:4 and 4:1 — batch size 1
+  aspect between 1:4 and 4:1 -- batch size 1
 - 107 to 345 frames on the `17n+5` grid at 24 fps (124 is the default)
 - 2 to 50 terminal-inclusive sampler grid points for the base model (21 is the
   default); a reviewed Turbo tag instead requires exactly its tier's own count
@@ -237,7 +237,7 @@ The canvas rule is:
 
 - both axes a multiple of 32 (one packed row is a 32x32 pixel cell)
 - each axis at least 256 px
-- at most **1,032,192 pixels** in total — the area of `1344x768`, which is what
+- at most **1,032,192 pixels** in total -- the area of `1344x768`, which is what
   every memory measurement below was captured at, so a larger canvas would have
   to be priced by extrapolation
 - aspect between 1:4 and 4:1
@@ -253,9 +253,9 @@ clock from request to MP4 bytes on a cold process:
 
 Every other shape is priced by scaling those measurements: the denoise
 workspaces with the packed sequence, the audio decode with the clip length, and
-the video decode with the canvas area. A long clip therefore costs real VRAM —
+the video decode with the canvas area. A long clip therefore costs real VRAM --
 345 frames at `1344x768` asks for a device floor of about 24.3 GB against 9.7 GB
-at the default — and a host that cannot supply it is refused with those numbers
+at the default -- and a host that cannot supply it is refused with those numbers
 rather than by a rule.
 
 Note that a Turbo tag costs slightly _more_ VRAM than the base tier on the same
@@ -264,7 +264,7 @@ count it moves buys time, not memory.
 
 When a first-frame image is attached without explicit `--width`/`--height`, the
 CLI and Discord builders render the source's own aspect at the largest size the
-area ceiling allows — a 16:9 source gets `1312x736`, a square one `992x992` —
+area ceiling allows -- a 16:9 source gets `1312x736`, a square one `992x992` --
 and the engine fits the frame internally. The free-form aspect-derived
 short-edge canvas applies only to the hidden official BF16 reference.
 
@@ -283,8 +283,8 @@ it does not require private authorization or qualification-record files.
 
 `minimax-h3-ref2va:comfy-pruned-int8` conditions on an **ordered set of
 references** instead of a boundary frame. Everything about the generated side
-is FL2VA's — the same canvas rule, the same `17n+5` frame grid at 24 fps, the
-same 2-50 sampler grid points, MP4 with synchronized audio — and the
+is FL2VA's -- the same canvas rule, the same `17n+5` frame grid at 24 fps, the
+same 2-50 sampler grid points, MP4 with synchronized audio -- and the
 conditioning side is the set:
 
 - 1 to 12 references in total, at most 9 images, 3 videos, and 3 audio files
@@ -294,7 +294,7 @@ conditioning side is the set:
   reference canvas, and every soundtrack is resampled to 32 kHz stereo
 - **order is authority.** The set is presented to the conditioner as
   `<Picture n>`, `<Video n>`, and `<Audio n>` in the order you supply, and the
-  frozen plan carries a reference fingerprint over that order — so the same
+  frozen plan carries a reference fingerprint over that order -- so the same
   files in a different order are a different render, not the same one.
 
 An image reference can be **cropped** before it is sent: the reference row's
@@ -306,7 +306,7 @@ reference is digested and uploaded, so the server only ever sees the cropped
 image; it is recorded in the print's metadata as `references[].crop` and Reuse
 settings restores it when you reattach the same original. This is a choice of
 _which part of the photograph is the reference_, never a fit to the output
-canvas — Mold still normalizes the cropped image onto its own 2048-short-edge
+canvas -- Mold still normalizes the cropped image onto its own 2048-short-edge
 canvas, and the generated print's size is unchanged.
 
 There is no reviewed list of reference sets. The runtime qualification is
@@ -330,7 +330,7 @@ mold run minimax-h3-ref2va:comfy-pruned-int8 "a slow dolly through the scene" \
 
 References are uploaded through the authenticated streaming reference-upload
 endpoints, so `MOLD_API_KEY` must be configured; Mold never puts reference
-bytes in the request body, the queue journal, or saved metadata — only their
+bytes in the request body, the queue journal, or saved metadata -- only their
 redacted metadata and digests.
 
 ## License and support boundary

@@ -1,6 +1,6 @@
 # Deployment
 
-mold supports multiple deployment modes — from a single GPU machine to cloud GPU
+mold supports multiple deployment modes -- from a single GPU machine to cloud GPU
 providers.
 
 ## Remote Rendering

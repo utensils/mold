@@ -9,7 +9,7 @@
 [![Agent ready](https://img.shields.io/badge/agents-ready-0891b2.svg)](https://utensils.io/mold/guide/openclaw)
 [![REST + SSE](https://img.shields.io/badge/API-REST_%2B_SSE-16a34a.svg)](https://utensils.io/mold/api/)
 
-Local AI image and video generation on your own GPU — NVIDIA CUDA and Apple
+Local AI image and video generation on your own GPU -- NVIDIA CUDA and Apple
 Silicon Metal, no Python, no cloud account, no usage fees. CLI-native and
 pipe-friendly, with a native desktop app, web studio, TUI, iPhone and Android
 companions, Discord bot, and REST/SSE API built on the same engine.
@@ -75,7 +75,7 @@ multishot, license terms, and deferred features.
 
 - **Models**: FLUX.1, Flux.2 Klein/Dev, SD 1.5, SDXL, SD 3.5, Z-Image,
   Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3 / LTX-2.5,
-  Wan 2.1/2.2, and MiniMax H3 — see the
+  Wan 2.1/2.2, and MiniMax H3 -- see the
   [model catalog](https://utensils.io/mold/models/) for sizes, VRAM needs, and
   settings
 - **Images**: text-to-image, img2img, multimodal editing, inpainting,
@@ -83,7 +83,7 @@ multishot, license terms, and deferred features.
 - **Face identity (PuLID)**: keep one person's face across arbitrary prompts
   with `--id-image` (repeatable up to 4, averaged into one identity), across all
   FLUX.1 models (the `pulid-flux` bundle) and all SDXL models except SDXL Turbo
-  (the `pulid-sdxl` bundle) — pure Rust SCRFD, ArcFace, a
+  (the `pulid-sdxl` bundle) -- pure Rust SCRFD, ArcFace, a
   BiSeNet face mask, EVA02-CLIP, and IDFormer shared by both adapters, feeding
   twenty cross-attention modules inside the FLUX transformer or seventy inside
   the SDXL UNet, plus `--true-cfg` on FLUX for a real negative branch on an
@@ -98,28 +98,28 @@ multishot, license terms, and deferred features.
 - **Multi-machine**: connect LAN/Tailscale hosts and RunPod, route jobs by
   capability, and browse every machine's gallery in one place
 - **Library organization**: title (`--title`), favorite, tag, and collect
-  prints — or file them at creation with `--tag` / `--collection` so they
-  arrive organized — with a per-host trash and configurable retention
+  prints -- or file them at creation with `--tag` / `--collection` so they
+  arrive organized -- with a per-host trash and configurable retention
   (`gallery.trash_retention_days`, `mold trash`) instead of permanent
-  delete — merged across machines in the web and desktop Library
+  delete -- merged across machines in the web and desktop Library
   (Prints | Collections | Trash)
 
 MiniMax H3 weights use the
 [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE),
 not Mold's MIT license. H3 may be used through Mold in every territory and
-workflow — local, remote, shared, hosted, output distribution, and
-redistribution — with no separate acceptance step; review the linked terms for
+workflow -- local, remote, shared, hosted, output distribution, and
+redistribution -- with no separate acceptance step; review the linked terms for
 your use. The reviewed Turbo distillations are ordinary model tags
 (`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `…-turbo-4step-768p`, and
 `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`) that pull their own task's
 compact stack plus one pinned LoRA adapter and render at their tier's fixed
 step count. The compact tags render
 any 32-aligned canvas up to `1344x768`'s pixel count, 107-345 frames at 24 fps,
-and 2-50 sampler steps; the memory estimate — not a pinned list of shapes —
+and 2-50 sampler steps; the memory estimate -- not a pinned list of shapes --
 decides what a given card can hold. The compact NVFP4
 transformer tags (`minimax-h3-fl2va:comfy-pruned-nvfp4` and
 `minimax-h3-ref2va:comfy-pruned-nvfp4`) download and verify but have no
-runtime yet. Which H3 models a given build can actually *run* is advertised
+runtime yet. Which H3 models a given build can actually _run_ is advertised
 per row: `GET /api/models` carries `runtime_available` plus a
 `runtime_unavailable_reason` naming the obstacle, and Mold Studio shows that
 on Discover before the 21-42 GB pull rather than after it. The macOS and Linux
@@ -133,8 +133,8 @@ shipped but not yet hardware-qualified) are documented in the
 
 ## Mold Studio
 
-One native desktop app for macOS, Linux, and Windows with five workspaces —
-Create, Library, Models, Machines, and Settings — spanning local and remote
+One native desktop app for macOS, Linux, and Windows with five workspaces --
+Create, Library, Models, Machines, and Settings -- spanning local and remote
 generation, a merged multi-machine gallery, model discovery from Hugging Face
 and Civitai, GPU telemetry, and QR pairing for the iPhone companion.
 
@@ -142,7 +142,7 @@ and Civitai, GPU telemetry, and QR pairing for the iPhone companion.
 · [Explore the desktop app](https://utensils.io/mold/guide/desktop)
 
 Android uses the same remote-only Mold Studio mobile interface. Download the
-signed universal APK directly—there is no zip to unpack:
+signed universal APK directly--there is no zip to unpack:
 
 **[Download stable Android APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)**
 · **[Download nightly Android APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)**
@@ -229,19 +229,19 @@ transformer and VAE derived from them, were ported from
 [candle-video](https://github.com/FerrisMind/candle-video) by FerrisMind
 (Copyright 2025 FerrisMind), licensed under the
 [Apache License 2.0](https://github.com/FerrisMind/candle-video/blob/main/LICENSE)
-— itself a Rust port of Hugging Face
+-- itself a Rust port of Hugging Face
 [diffusers](https://github.com/huggingface/diffusers). Those files remain
 Apache-2.0; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for this and
 every other third-party notice.
 
 **Face-identity weights.** Face identity additionally downloads two InsightFace
 **pretrained models** (`scrfd_10g_bnkps`, `glintr100`), which are licensed for
-**non-commercial research purposes only** — the InsightFace _code_ is MIT, the
+**non-commercial research purposes only** -- the InsightFace _code_ is MIT, the
 _weights_ are not. Mold ships neither and refuses to download them until you
 record acceptance with `mold pull pulid-flux --accept-license insightface-antelopev2`
-(or `pulid-sdxl` — the acceptance covers both bundles);
+(or `pulid-sdxl` -- the acceptance covers both bundles);
 `mold licenses` lists what has been accepted. The PuLID adapters are
 Apache-2.0, the EVA02-CLIP tower is MIT, and facexlib's BiSeNet face parser
 (`parsing_bisenet.pth`, masking the aligned crop before the tower sees it) is
-also MIT with no acceptance step of its own — each bundle is five artifacts in
+also MIT with no acceptance step of its own -- each bundle is five artifacts in
 total: about 2.3 GB for `pulid-flux`, about 2.2 GB for `pulid-sdxl`.

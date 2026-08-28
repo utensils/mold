@@ -40,7 +40,7 @@ version tags publish immutable version aliases. `latest` is the Ada/SM89
 image, not a portable CUDA image, so select the tag matching the host GPU:
 
 ```bash
-# Ada (RTX 4090) — default
+# Ada (RTX 4090) -- default
 docker pull ghcr.io/utensils/mold:latest
 
 # Ampere (A100)
@@ -105,10 +105,10 @@ and statically checked in hosted CI; real 8×B200 qualification is deferred and
 is never provisioned by CI.
 GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
 
-### Option 1 — Web Console
+### Option 1 -- Web Console
 
 1. Go to [runpod.io/console/pods](https://www.runpod.io/console/pods) → **Deploy**.
-2. Pick a GPU (RTX 4090 is the sweet spot — see [GPUs](#recommended-gpus)).
+2. Pick a GPU (RTX 4090 is the sweet spot -- see [GPUs](#recommended-gpus)).
 3. **Container image**: `ghcr.io/utensils/mold:latest`.
 4. **HTTP ports**: `7680`.
 5. **Volume**: mount at `/workspace` (50 GB is plenty for a test; attach a
@@ -118,7 +118,7 @@ GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported
 7. Deploy. When the pod reaches `RUNNING` and the container starts, mold
    is reachable at `https://<pod-id>-7680.proxy.runpod.net`.
 
-### Option 2 — `runpodctl` CLI
+### Option 2 -- `runpodctl` CLI
 
 Install from [runpod.io docs](https://docs.runpod.io/runpodctl/install-runpodctl)
 (or use our Nix devshell, which ships it), then authenticate once:
@@ -143,10 +143,10 @@ runpodctl pod create \
   --env '{"MOLD_DEFAULT_MODEL":"flux2-klein:q8","MOLD_LOG":"info"}'
 ```
 
-The response is JSON — grab `.id` for subsequent commands.
+The response is JSON -- grab `.id` for subsequent commands.
 
 ::: tip Community vs Secure cloud
-`--cloud-type COMMUNITY` is ~30-50 % cheaper but 4090 stock is often "Low" —
+`--cloud-type COMMUNITY` is ~30-50 % cheaper but 4090 stock is often "Low" --
 you'll get a `This machine does not have the resources to deploy your pod`
 error. Retry with `SECURE` if that happens.
 :::
@@ -154,7 +154,7 @@ error. Retry with `SECURE` if that happens.
 ::: warning Pick a datacenter with stock
 `runpodctl gpu list` and `runpodctl datacenter list` both expose
 `stockStatus`. If it is empty or `Low`, the pod can be "Rented" but never
-actually schedule — `uptimeSeconds` stays at `0` and `runtime` is `null`.
+actually schedule -- `uptimeSeconds` stays at `0` and `runtime` is `null`.
 Pin to a `High`-stock datacenter with `--data-center-ids <id>`. The GraphQL
 backend only accepts a single datacenter id; if you pass more, `runpodctl`
 silently uses the first.
@@ -181,7 +181,7 @@ open "$MOLD_HOST/"   # macOS; use `xdg-open` on Linux
 ```
 
 ::: tip Web gallery is bundled
-The image includes a Vue 3 gallery SPA at `/opt/mold/web` — visiting
+The image includes a Vue 3 gallery SPA at `/opt/mold/web` -- visiting
 `https://${POD}-7680.proxy.runpod.net/` in a browser lists every output
 in the server's output directory with real thumbnails (MP4 first frames
 included), metadata panels, and download / copy-prompt / delete actions.
@@ -192,7 +192,7 @@ RunPod's Cloudflare proxy has a **100-second timeout**. `mold runpod generate`
 avoids holding that proxy request open: it durably admits work through
 `/api/generation-batches`, then polls and downloads the finished gallery
 output. `/api/generate/stream` holds the request open and is subject to the
-timeout — use it only for short renders.
+timeout -- use it only for short renders.
 :::
 
 ### Teardown
@@ -214,30 +214,30 @@ relocates:
 - HuggingFace cache: `/workspace/.cache/huggingface`
 - Config: `/workspace/.mold/config.toml`
 
-All data survives pod restarts — and pod **deletion**, so you can spin up a new
+All data survives pod restarts -- and pod **deletion**, so you can spin up a new
 pod on a different GPU without re-downloading 10+ GB of weights.
 
 ### Environment Variables
 
-| Variable                | Default         | Description                                                       |
-| ----------------------- | --------------- | ----------------------------------------------------------------- |
-| `MOLD_HOME`             | auto            | Base mold directory (auto-detected from `/workspace`)             |
-| `MOLD_PORT`             | `7680`          | Server port                                                       |
-| `MOLD_LOG`              | `info`          | Log level                                                         |
-| `MOLD_DEFAULT_MODEL`    | —               | Default model tag (**not pre-pulled** — fetched on first request) |
-| `MOLD_MODELS_DIR`       | —               | Override models path                                              |
-| `MOLD_API_KEY`          | —               | API key for authentication (`X-Api-Key` header required)          |
-| `MOLD_RATE_LIMIT`       | —               | Per-IP rate limit (e.g., `10/min`)                                |
-| `MOLD_RATE_LIMIT_BURST` | —               | Burst allowance override (defaults to 2x rate)                    |
-| `HF_TOKEN`              | —               | HuggingFace token for gated model repos                           |
-| `MOLD_WEB_DIR`          | `/opt/mold/web` | Path to the bundled web gallery SPA                               |
+| Variable                | Default         | Description                                                        |
+| ----------------------- | --------------- | ------------------------------------------------------------------ |
+| `MOLD_HOME`             | auto            | Base mold directory (auto-detected from `/workspace`)              |
+| `MOLD_PORT`             | `7680`          | Server port                                                        |
+| `MOLD_LOG`              | `info`          | Log level                                                          |
+| `MOLD_DEFAULT_MODEL`    | --              | Default model tag (**not pre-pulled** -- fetched on first request) |
+| `MOLD_MODELS_DIR`       | --              | Override models path                                               |
+| `MOLD_API_KEY`          | --              | API key for authentication (`X-Api-Key` header required)           |
+| `MOLD_RATE_LIMIT`       | --              | Per-IP rate limit (e.g., `10/min`)                                 |
+| `MOLD_RATE_LIMIT_BURST` | --              | Burst allowance override (defaults to 2x rate)                     |
+| `HF_TOKEN`              | --              | HuggingFace token for gated model repos                            |
+| `MOLD_WEB_DIR`          | `/opt/mold/web` | Path to the bundled web gallery SPA                                |
 
 ### HuggingFace Token (`HF_TOKEN`)
 
 Some models are gated on HuggingFace and require a token:
 
-- **LTX-2 / LTX-2.3** — Gemma 3 text encoder is gated
-- **FLUX.1-dev** — non-schnell FLUX weights are gated
+- **LTX-2 / LTX-2.3** -- Gemma 3 text encoder is gated
+- **FLUX.1-dev** -- non-schnell FLUX weights are gated
 - Any model whose manifest points at a gated HF repo
 
 Public models (`flux-schnell`, `flux2-klein`, `sd15`, `sdxl`, `qwen-image`,
@@ -245,7 +245,7 @@ Public models (`flux-schnell`, `flux2-klein`, `sd15`, `sdxl`, `qwen-image`,
 
 Generate a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
 Use a **fine-grained token** with `Read access to public gated repos you've been
-granted access to` — do not use a full-access token on cloud GPUs.
+granted access to` -- do not use a full-access token on cloud GPUs.
 
 Three ways to deliver the token into a RunPod pod, in order of preference:
 
@@ -271,7 +271,7 @@ reference it from the pod's env vars:
 HF_TOKEN={{ RUNPOD_SECRET_HF_TOKEN }}
 ```
 
-Works from `runpodctl pod create --env` as well — RunPod expands the
+Works from `runpodctl pod create --env` as well -- RunPod expands the
 <span v-pre>`{{ RUNPOD_SECRET_* }}`</span> template at container start. The
 token is redacted in pod listings.
 
@@ -297,7 +297,7 @@ inside an SSH session pick it up without re-exporting.
 
 ### Recommended GPUs
 
-Rates below are RunPod's published list prices and drift over time — always
+Rates below are RunPod's published list prices and drift over time -- always
 confirm with `runpodctl gpu list` or the console before deploying.
 
 | GPU       | VRAM  | Community $/hr | Secure $/hr | Image tag       | Notes                               |
@@ -352,9 +352,9 @@ GPU memory, uptime). The endpoint is excluded from auth and rate limiting.
 
 The Dockerfile uses a multi-stage build:
 
-1. **Builder** — `nvidia/cuda:12.8.1-devel-ubuntu22.04` with Rust and cargo
-2. **Runtime** — `nvidia/cuda:12.8.1-runtime-ubuntu22.04` (~3.4 GB image, 33 MB
+1. **Builder** -- `nvidia/cuda:12.8.1-devel-ubuntu22.04` with Rust and cargo
+2. **Runtime** -- `nvidia/cuda:12.8.1-runtime-ubuntu22.04` (~3.4 GB image, 33 MB
    binary)
 
 `libcuda.so.1` (the NVIDIA driver) is injected at runtime by the NVIDIA
-Container Toolkit — the image cannot run without GPU access.
+Container Toolkit -- the image cannot run without GPU access.

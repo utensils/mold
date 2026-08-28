@@ -33,7 +33,7 @@ features:
       src: /icons/terminal.svg
     title: CLI-Native
     details:
-      'mold run "a cat" — that''s it. Predictable stdin, stdout, files, exit
+      'mold run "a cat" -- that''s it. Predictable stdin, stdout, files, exit
       behavior, and machine-readable output make the same workflows natural for
       terminals, shell pipelines, CI, and agents.'
   - icon:
@@ -163,123 +163,123 @@ For the latest rolling CLI build from `main`, install with
 
 ## Gallery
 
-All images generated locally with mold — click any to see the model and prompt.
+All images generated locally with mold -- click any to see the model and prompt.
 
 <div class="gallery-grid">
 <figure>
 
-![Winter cabin — Qwen-Image 2512](/gallery/qwen-image-cabin.png)
+![Winter cabin -- Qwen-Image 2512](/gallery/qwen-image-cabin.png)
 
-**qwen-image-2512:q4** — 50 steps, seed 888 _"A snowy mountain cabin at twilight,
+**qwen-image-2512:q4** -- 50 steps, seed 888 _"A snowy mountain cabin at twilight,
 warm orange light pouring from the windows, aurora borealis in the sky above, tall
 pine trees covered in snow, peaceful winter scene"_
 
 </figure>
 <figure>
 
-![Overgrown greenhouse — Qwen-Image 2512](/gallery/qwen-image-greenhouse.png)
+![Overgrown greenhouse -- Qwen-Image 2512](/gallery/qwen-image-greenhouse.png)
 
-**qwen-image-2512:q4** — 50 steps, seed 2024 _"An abandoned greenhouse
+**qwen-image-2512:q4** -- 50 steps, seed 2024 _"An abandoned greenhouse
 overgrown with exotic flowers and vines, cracked glass roof letting in shafts
 of golden light, butterflies and hummingbirds, lush and magical"_
 
 </figure>
 <figure>
 
-![Bottle ship — Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
+![Bottle ship -- Flux.2 Klein-9B Q4](/gallery/flux2-klein-9b-bottle-ship.png)
 
-**flux2-klein-9b:q4** — 4 steps, seed 999 _"A glass bottle ship inside a stormy
+**flux2-klein-9b:q4** -- 4 steps, seed 999 _"A glass bottle ship inside a stormy
 ocean wave, dramatic lightning, hyperrealistic macro photography"_
 
 </figure>
 <figure>
 
-![Owl — Flux.2 Klein BF16](/gallery/flux2-klein-owl.png)
+![Owl -- Flux.2 Klein BF16](/gallery/flux2-klein-owl.png)
 
-**flux2-klein:bf16** — 4 steps _"a majestic owl perched on a mossy branch in a
+**flux2-klein:bf16** -- 4 steps _"a majestic owl perched on a mossy branch in a
 moonlit forest"_
 
 </figure>
 <figure>
 
-![Snow leopard — FLUX Schnell](/gallery/flux-schnell-leopard.png)
+![Snow leopard -- FLUX Schnell](/gallery/flux-schnell-leopard.png)
 
-**flux-schnell:q8** — 4 steps, seed 42 _"A majestic snow leopard perched on a
+**flux-schnell:q8** -- 4 steps, seed 42 _"A majestic snow leopard perched on a
 Himalayan cliff at golden hour, cinematic lighting, photorealistic"_
 
 </figure>
 <figure>
 
-![Tea house — FLUX Dev](/gallery/flux-dev-teahouse.png)
+![Tea house -- FLUX Dev](/gallery/flux-dev-teahouse.png)
 
-**flux-dev:q4** — 25 steps, seed 1337 _"A cozy Japanese tea house interior with
+**flux-dev:q4** -- 25 steps, seed 1337 _"A cozy Japanese tea house interior with
 warm lantern light, steam rising from ceramic cups, watercolor style"_
 
 </figure>
 <figure>
 
-![Astronaut — Z-Image Turbo](/gallery/zimage-astronaut.png)
+![Astronaut -- Z-Image Turbo](/gallery/zimage-astronaut.png)
 
-**z-image-turbo:q8** — 9 steps, seed 777 _"An astronaut floating through a
+**z-image-turbo:q8** -- 9 steps, seed 777 _"An astronaut floating through a
 bioluminescent underwater cave, reflections on the helmet visor, science fiction
 art"_
 
 </figure>
 <figure>
 
-![Clocktower — SD 3.5](/gallery/sd35-clocktower.png)
+![Clocktower -- SD 3.5](/gallery/sd35-clocktower.png)
 
-**sd3.5-large:q8** — 28 steps, seed 2024 _"A steampunk clocktower in a Victorian
+**sd3.5-large:q8** -- 28 steps, seed 2024 _"A steampunk clocktower in a Victorian
 city at sunset, gears and cogs visible through glass walls, dramatic clouds"_
 
 </figure>
 <figure>
 
-![Street market — SDXL Turbo](/gallery/sdxl-turbo-market.png)
+![Street market -- SDXL Turbo](/gallery/sdxl-turbo-market.png)
 
-**sdxl-turbo:fp16** — 4 steps, seed 88 _"A vibrant street food market in Bangkok
+**sdxl-turbo:fp16** -- 4 steps, seed 88 _"A vibrant street food market in Bangkok
 at night, neon signs, steam from woks, bustling crowd"_
 
 </figure>
 <figure>
 
-![Fantasy castle — DreamShaper v8](/gallery/sd15-castle.png)
+![Fantasy castle -- DreamShaper v8](/gallery/sd15-castle.png)
 
-**dreamshaper-v8:fp16** (SD 1.5) — 25 steps, seed 555 _"A fantasy castle perched
+**dreamshaper-v8:fp16** (SD 1.5) -- 25 steps, seed 555 _"A fantasy castle perched
 on floating islands above clouds, magical waterfalls, ethereal glow"_
 
 </figure>
 <figure>
 
-![Lighthouse — Wuerstchen v2](/gallery/wuerstchen-lighthouse.png)
+![Lighthouse -- Wuerstchen v2](/gallery/wuerstchen-lighthouse.png)
 
-**wuerstchen-v2:fp16** — 30 steps, seed 42 _"A lighthouse on a rocky coast during
+**wuerstchen-v2:fp16** -- 30 steps, seed 42 _"A lighthouse on a rocky coast during
 a dramatic sunset, oil painting style, vibrant orange and purple sky"_
 
 </figure>
 <figure>
 
-![Hot air balloon — Qwen-Image 2512](/gallery/qwen-image-balloon.png)
+![Hot air balloon -- Qwen-Image 2512](/gallery/qwen-image-balloon.png)
 
-**qwen-image-2512:q4** — 50 steps, seed 314 _"A colorful hot air balloon floating
+**qwen-image-2512:q4** -- 50 steps, seed 314 _"A colorful hot air balloon floating
 over a misty valley at sunrise, the balloon has the word MOLD written in bold white
 letters on the side, mountains in the background, dreamy atmosphere"_
 
 </figure>
 <figure>
 
-<video autoplay muted loop playsinline aria-label="Northern lights — LTX Video" src="/gallery/ltx-aurora.webm"></video>
+<video autoplay muted loop playsinline aria-label="Northern lights -- LTX Video" src="/gallery/ltx-aurora.webm"></video>
 
-**ltx-video-0.9.6-distilled:bf16** — 8 steps, 33 frames, seed 1234 _"Northern
+**ltx-video-0.9.6-distilled:bf16** -- 8 steps, 33 frames, seed 1234 _"Northern
 lights dancing over a frozen lake in Iceland, green and purple aurora ribbons
 reflected in the ice, stars visible, time-lapse photography"_
 
 </figure>
 <figure>
 
-<video autoplay muted loop playsinline aria-label="Jellyfish — LTX Video" src="/gallery/ltx-jellyfish.webm"></video>
+<video autoplay muted loop playsinline aria-label="Jellyfish -- LTX Video" src="/gallery/ltx-jellyfish.webm"></video>
 
-**ltx-video-0.9.6-distilled:bf16** — 8 steps, 33 frames, seed 707 _"Underwater
+**ltx-video-0.9.6-distilled:bf16** -- 8 steps, 33 frames, seed 707 _"Underwater
 footage of a jellyfish pulsing through deep blue water, bioluminescent glow,
 particles floating, ethereal slow motion"_
 

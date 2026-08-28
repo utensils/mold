@@ -85,7 +85,7 @@ They do not enable arbitrary request-time LoRA stacks.
 ¹ The currently advertised compact FL2VA profile requires a first frame.
 Ref2VA instead requires an ordered set of image, video, or audio references.
 
-LTX Video, LTX-2, and Wan all default to MP4 — LTX-2 so it can preserve
+LTX Video, LTX-2, and Wan all default to MP4 -- LTX-2 so it can preserve
 synchronized audio when requested; Wan renders video only and has no audio
 path. A build compiled without the `mp4` feature falls back to APNG. GIF and
 APNG remain available for all three families, plus feature-gated WebP. Use
@@ -93,14 +93,14 @@ APNG remain available for all three families, plus feature-gated WebP. Use
 only (`--image` + `--last-image`); other keyframe layouts are refused at
 admission. Frame grids are per family: LTX Video and LTX-2
 take 8n+1 frame counts (9, 17, 25, 33, ...) with dimensions in multiples of
-32 — 64 for LTX-2 lip dub, which always renders in two stages and takes its
+32 -- 64 for LTX-2 lip dub, which always renders in two stages and takes its
 frame count and rate from the reference clip. Wan takes 4n+1 frame counts
 (49, 53, 81, ...) with dimensions in multiples of 16, except `wan22-ti2v-5b`,
 whose 2.2 VAE requires multiples of 32.
 
 The `--output` extension outranks those family defaults: `mold run … -o clip.gif`
 writes a real GIF even where the family would have picked MP4. An extension this
-binary cannot encode — `.mp4` without the `mp4` feature, `.webp` without `webp` —
+binary cannot encode -- `.mp4` without the `mp4` feature, `.webp` without `webp` --
 is refused before any weight is read rather than filled with another container's
 bytes, and an explicit `--format` that disagrees with the filename is reported
 instead of silently overriding it. `--output -` writes to stdout and claims no
@@ -135,7 +135,7 @@ the full multiscale refinement path.
 LTX-2 / LTX-2.3's Apple Metal path is performance-qualified: BF16 transformer
 compute, fused attention, streamed FP8 lookup-table widening, and temporal VAE
 chunks, measured end-to-end on the 19B and 22B distilled FP8 tiers on Apple
-Silicon. Metal remains slower than a comparable CUDA card — streaming trades
+Silicon. Metal remains slower than a comparable CUDA card -- streaming trades
 speed for fitting the model in unified memory.
 :::
 
@@ -223,8 +223,8 @@ complete workflows.
   details show it when present; older and non-LTX prints simply omit the row.
 - LTX-2 is performance-qualified on CUDA and Apple Metal (19B/22B distilled
   FP8 tiers, checkpoint-backed); CPU stays correctness-only.
-- Library organization — titles, ♥ favorites, tags, collections, and a trash
-  with per-host retention (`gallery.trash_retention_days`) — is stored per
+- Library organization -- titles, ♥ favorites, tags, collections, and a trash
+  with per-host retention (`gallery.trash_retention_days`) -- is stored per
   host in that host's `mold.db` and merged across hosts by every client. The
   web Library exposes it as the **Prints | Collections | Trash** scope
   control, the filter-chip row, the print viewer's editable aside, and the
