@@ -10,10 +10,7 @@ import { useToastStore } from "../../stores/toasts";
 import { apiJson } from "../../lib/api/client";
 import { gpuSnapshotsFromWorkers } from "../../lib/api/gpuStatus";
 import { sseStream } from "../../lib/api/sse";
-import {
-  hostMemoryLevel,
-  hostMemoryScheduleLabel,
-} from "@studio/lib/hostMemory";
+import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
 import { formatGB, percent, vramLevel } from "../../lib/format";
 import { normalizeTargetHost, pickDisplayHost } from "../../lib/hosts";
 import { shouldRestartEmbeddedEngine } from "../../lib/connectionRecovery";

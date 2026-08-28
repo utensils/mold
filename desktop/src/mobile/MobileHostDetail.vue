@@ -22,10 +22,7 @@ import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
-import {
-  hostMemoryLevel,
-  hostMemoryScheduleLabel,
-} from "@studio/lib/hostMemory";
+import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { gpuSnapshotsFromStatus } from "../lib/api/gpuStatus";

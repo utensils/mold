@@ -31,7 +31,10 @@ describe("parseHostMemory", () => {
 
   it("reads the additive ZFS ARC credit and tolerates its absence or garbage", () => {
     expect(
-      parseHostMemory({ ...snapshot, reclaimable_zfs_arc_bytes: 14_000_000_000 }),
+      parseHostMemory({
+        ...snapshot,
+        reclaimable_zfs_arc_bytes: 14_000_000_000,
+      }),
     ).toEqual({ ...snapshot, reclaimable_zfs_arc_bytes: 14_000_000_000 });
     expect(
       parseHostMemory({ ...snapshot, reclaimable_zfs_arc_bytes: 0 }),
@@ -70,7 +73,9 @@ describe("hostMemoryScheduleLabel", () => {
         { ...snapshot, reclaimable_zfs_arc_bytes: 14_000_000_000 },
         fmt,
       ),
-    ).toBe("32.0 GB available to schedule (includes 14.0 GB evictable ZFS ARC)");
+    ).toBe(
+      "32.0 GB available to schedule (includes 14.0 GB evictable ZFS ARC)",
+    );
     expect(
       hostMemoryScheduleLabel(
         { ...snapshot, reclaimable_zfs_arc_bytes: 14_000_000_000 },

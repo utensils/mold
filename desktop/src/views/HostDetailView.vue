@@ -28,10 +28,7 @@ import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
-import {
-  hostMemoryLevel,
-  hostMemoryScheduleLabel,
-} from "@studio/lib/hostMemory";
+import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
