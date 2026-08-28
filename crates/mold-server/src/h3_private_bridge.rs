@@ -1660,7 +1660,10 @@ impl H3PreparedMediaContract {
 
     /// Re-derive the contract from the request now in hand and require it to
     /// match what the attempt was prepared with; a request whose descriptors
-    /// drifted since preparation derives a different contract.
+    /// drifted since preparation derives a different contract. Production
+    /// sites hold a scrubbed row and go through
+    /// [`Self::validate_for_request_with_media`] (#1427).
+    #[cfg(test)]
     pub(crate) fn validate_for_request(
         &self,
         request: &mold_core::GenerateRequest,
