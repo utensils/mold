@@ -54,7 +54,7 @@ export interface ChainJobTerminal {
 
 export interface ChainJobFrameResult {
   live: ChainJobLive;
-  /** Zero or one progress frame; `yielded` produces none. */
+  /** Ordered surface frames; a resumed snapshot can produce two. */
   progress: ChainJobProgressFrame[];
   finalized: ChainJobFinalized | null;
   terminal: ChainJobTerminal | null;
@@ -107,16 +107,37 @@ export function reduceChainJobFrame(
     terminal: null,
   };
   switch (event.type) {
-    case "snapshot":
+    case "snapshot": {
+      // Subscribe happens before the server reads this snapshot, but a stage
+      // may already have started before the HTTP event stream was opened.
+      // The snapshot's running stage is durable truth: replay that transition
+      // so every one-shot chain leaves its optimistic Queued state even when
+      // the original stage_start delta was published before this subscriber
+      // existed. A reconnect deliberately reasserts the snapshot's durable
+      // phase too: a brief Preparing label is more truthful than retaining a
+      // stale denoise step while the stream catches up. The same applies to a
+      // job already stitching its output.
+      const resumedProgress: ChainJobProgressFrame[] = [
+        {
+          type: "chain_start",
+          stage_count: event.job.stage_count,
+          estimated_total_frames: estimatedChainFrames(live),
+        },
+      ];
+      if (live.activeStage !== null) {
+        resumedProgress.push({
+          type: "stage_start",
+          stage_idx: live.activeStage,
+        });
+      } else if (event.job.execution_phase === "finalizing") {
+        resumedProgress.push({
+          type: "stitching",
+          total_frames: estimatedChainFrames(live),
+        });
+      }
       return {
         ...base,
-        progress: [
-          {
-            type: "chain_start",
-            stage_count: event.job.stage_count,
-            estimated_total_frames: estimatedChainFrames(live),
-          },
-        ],
+        progress: resumedProgress,
         // A job that is already terminal when we attach still has to settle,
         // and its print is then in the manifest's last finalize record — the
         // only place the gallery filename exists after the stream is gone.
@@ -127,6 +148,7 @@ export function reduceChainJobFrame(
           ? { state: event.job.state, error: event.job.error ?? null }
           : null,
       };
+    }
     case "stage_start":
       return {
         ...base,
