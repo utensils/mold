@@ -2779,10 +2779,12 @@ fn maybe_apply_temporal_upsampler(
     latents: &Tensor,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Tensor> {
     if plan.temporal_upscale.is_none() {
         return Ok(latents.clone());
     }
+    let upscale_start = Instant::now();
     let temporal_upsampler_path = plan
         .temporal_upsampler_path
         .as_ref()
@@ -2796,6 +2798,12 @@ fn maybe_apply_temporal_upsampler(
     if device.is_cuda() {
         device.synchronize()?;
     }
+    emit_phase_done(
+        progress,
+        ProgressPhase::Upscale,
+        "Temporal latent upscale",
+        upscale_start.elapsed(),
+    );
     Ok(upsampled)
 }
 
@@ -3109,6 +3117,12 @@ fn render_real_distilled_av(
     drop(upsampler);
     device.synchronize()?;
     log_timing("distilled.stage1.spatial_upsample", stage1_upsample_start);
+    emit_phase_done(
+        progress,
+        ProgressPhase::Upscale,
+        "Spatial latent upscale",
+        stage1_upsample_start.elapsed(),
+    );
     if debug_enabled {
         log_debug_vram("after_stage1_upsample");
     }
@@ -3298,7 +3312,7 @@ fn render_real_distilled_av(
     if debug_enabled {
         log_debug_vram("after_stage2_transformer_drop");
     }
-    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
+    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype, progress)?;
     if debug_enabled && plan.temporal_upscale.is_some() {
         log_debug_vram("after_temporal_upsample");
     }
@@ -3331,7 +3345,8 @@ fn render_real_distilled_av(
     let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_render_start = Instant::now();
-    let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
+    let audio_track =
+        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype, progress)?;
     log_timing("distilled.render_audio", audio_render_start);
     drop(latents);
     drop(audio_latents);
@@ -4052,6 +4067,12 @@ fn render_real_two_stage_av(
     drop(upsampler);
     device.synchronize()?;
     log_timing("two_stage.stage1.spatial_upsample", stage1_upsample_start);
+    emit_phase_done(
+        progress,
+        ProgressPhase::Upscale,
+        "Spatial latent upscale",
+        stage1_upsample_start.elapsed(),
+    );
 
     let requested_pixel_shape = VideoPixelShape {
         batch: 1,
@@ -4278,7 +4299,7 @@ fn render_real_two_stage_av(
     log_timing("two_stage.stage2.denoise", stage2_denoise_start);
     drop(stage2_transformer);
     device.synchronize()?;
-    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
+    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype, progress)?;
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     let decoded = decode_video_frames_with_telemetry(
@@ -4303,9 +4324,15 @@ fn render_real_two_stage_av(
         // that went in. Upstream decodes `s1_audio_latent` (`lipdub.py:293`);
         // decoding stage 2's would round-trip the same samples through an
         // extra blend for nothing.
-        maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?
+        maybe_render_native_audio_track(
+            plan,
+            stage1_audio_latents.as_ref(),
+            device,
+            dtype,
+            progress,
+        )?
     } else {
-        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?
+        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype, progress)?
     };
     log_timing("two_stage.render_audio", audio_render_start);
     drop(latents);
@@ -4518,8 +4545,13 @@ fn render_real_one_stage_av(
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
-    let audio_track =
-        maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?;
+    let audio_track = maybe_render_native_audio_track(
+        plan,
+        stage1_audio_latents.as_ref(),
+        device,
+        dtype,
+        progress,
+    )?;
     drop(latents);
     drop(stage1_audio_latents);
     drop(stage1_audio_noise);
@@ -4715,7 +4747,8 @@ fn render_real_retake_av(
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
-    let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
+    let audio_track =
+        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype, progress)?;
     drop(latents);
     drop(audio_latents);
     drop(stage1_audio_noise);
@@ -5880,7 +5913,7 @@ pub(crate) fn render_real_t2a_audio(
         log_tensor_stats("final_audio_latents", &audio_latents)?;
     }
 
-    let track = render_native_audio_track(plan, &audio_latents, device, dtype)?.context(
+    let track = render_native_audio_track(plan, &audio_latents, device, dtype, progress)?.context(
         "LTX-2 text-to-audio produced an empty waveform; the checkpoint's vocoder returned no \
          samples",
     )?;
@@ -6058,6 +6091,7 @@ fn maybe_render_native_audio_track(
     audio_latents: Option<&Tensor>,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Option<NativeAudioTrack>> {
     if !plan.execution_graph.wants_audio_output {
         return Ok(None);
@@ -6065,7 +6099,7 @@ fn maybe_render_native_audio_track(
     let audio_latents = audio_latents.context(
         "native LTX-2 audio output requested but the denoiser produced no audio latents",
     )?;
-    render_native_audio_track(plan, audio_latents, device, dtype)
+    render_native_audio_track(plan, audio_latents, device, dtype, progress)
 }
 
 /// Audio VAE → vocoder → interleaved f32 samples. Shared by the joint AV
@@ -6076,7 +6110,9 @@ fn render_native_audio_track(
     audio_latents: &Tensor,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Option<NativeAudioTrack>> {
+    let decode_start = Instant::now();
     let audio_checkpoint = plan
         .audio_components_path
         .as_deref()
@@ -6097,7 +6133,16 @@ fn render_native_audio_track(
     if device.is_cuda() {
         device.synchronize()?;
     }
-    waveform_to_audio_track(&waveform, output_sample_rate)
+    let track = waveform_to_audio_track(&waveform, output_sample_rate)?;
+    if track.is_some() {
+        emit_phase_done(
+            progress,
+            ProgressPhase::AudioDecode,
+            "Decoding audio track",
+            decode_start.elapsed(),
+        );
+    }
+    Ok(track)
 }
 
 /// Resize `tail_rgb_frames` to the current stage's `pixel_shape` so the
@@ -7178,7 +7223,7 @@ fn emit_info(progress: Option<&ProgressCallback>, message: String) {
     }
 }
 
-fn emit_phase_done(
+pub(crate) fn emit_phase_done(
     progress: Option<&ProgressCallback>,
     phase: ProgressPhase,
     name: &str,
@@ -9742,11 +9787,14 @@ mod tests {
             !events.iter().any(|event| matches!(
                 event,
                 ProgressEvent::PhaseDone {
-                    phase: ProgressPhase::Vae,
+                    phase: ProgressPhase::Vae
+                        | ProgressPhase::Upscale
+                        | ProgressPhase::AudioDecode
+                        | ProgressPhase::Mux,
                     ..
                 }
             )),
-            "placeholder rendering must not invent a VAE timing sample"
+            "placeholder rendering must not invent decode, upscale, audio, or mux timings"
         );
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
         assert!(rendered.has_audio);
@@ -12120,9 +12168,9 @@ mod tests {
     fn lip_dub_exports_the_stage_one_audio_not_the_frozen_stage_two_copy() {
         let render = runtime_function_source("fn render_real_two_stage_av(");
         assert!(render.contains("} else if stage2_audio_is_frozen {"));
-        assert!(render.contains(
-            "maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?"
-        ));
+        // rustfmt wraps the widened call, so the pin is the argument that
+        // distinguishes the frozen arm: stage 1's latents, not stage 2's.
+        assert!(render.contains("stage1_audio_latents.as_ref(),"));
     }
 
     /// The deviation that is easiest to miss because generic IC-LoRA does the
@@ -13258,6 +13306,47 @@ mod tests {
             runtime_function_source("fn log_ltx2_phase_vram_result(")
                 .contains("ltx2_residency_summary("),
             "the OOM branch must attach the residency plan"
+        );
+    }
+
+    /// #1398's learner coverage: the latent upsamplers, the audio decode,
+    /// and the container mux each report their typed phase, so
+    /// `ewma_upscale_ms` / `ewma_audio_decode_ms` / `ewma_mux_ms` stop being
+    /// dead columns for this family. `ModelLoad` stays unemitted on purpose —
+    /// the scheduler measures cold load from the lease.
+    #[test]
+    fn ltx2_phase_events_cover_upscale_audio_decode_and_mux() {
+        assert!(
+            runtime_function_source("fn maybe_apply_temporal_upsampler(")
+                .contains("ProgressPhase::Upscale"),
+            "the temporal upsampler must report the Upscale phase"
+        );
+        for renderer in [
+            "fn render_real_distilled_av(",
+            "fn render_real_two_stage_av(",
+        ] {
+            assert!(
+                runtime_function_source(renderer).contains("ProgressPhase::Upscale"),
+                "{renderer} must report its spatial upsample as the Upscale phase"
+            );
+        }
+        assert!(
+            runtime_function_source("fn render_native_audio_track(")
+                .contains("ProgressPhase::AudioDecode"),
+            "the audio VAE + vocoder must report the AudioDecode phase"
+        );
+        let pipeline_source = include_str!("pipeline.rs");
+        assert!(
+            pipeline_source.contains("ProgressPhase::Mux"),
+            "the AAC mux must report the Mux phase"
+        );
+        // ModelLoad stays unemitted: the scheduler measures cold load from
+        // the lease (`gpu_worker.rs:105` discards the event), so wiring it
+        // here would double-count. Pinned on pipeline.rs only — a whole-file
+        // pin on runtime.rs would match this very test's own source.
+        assert!(
+            !pipeline_source.contains("ProgressPhase::ModelLoad"),
+            "LTX-2 must never emit ModelLoad; cold load is measured from the lease"
         );
     }
 

@@ -884,6 +884,7 @@ impl Ltx2Engine {
                     let mp4_path = work_dir.join("native-video.mp4");
                     fs::write(&mp4_path, &video_only)?;
                     if let Some(audio_track) = rendered.audio_track.as_ref() {
+                        let mux_start = Instant::now();
                         let muxed_path = work_dir.join("native-video-audio.mp4");
                         crate::av_media::attach_aac_track_from_f32_interleaved(
                             &mp4_path,
@@ -892,7 +893,14 @@ impl Ltx2Engine {
                             audio_track.sample_rate,
                             audio_track.channels,
                         )?;
-                        fs::read(muxed_path)?
+                        let muxed = fs::read(muxed_path)?;
+                        super::runtime::emit_phase_done(
+                            self.on_progress.as_ref(),
+                            crate::progress::ProgressPhase::Mux,
+                            "Muxing audio track",
+                            mux_start.elapsed(),
+                        );
+                        muxed
                     } else {
                         video_only
                     }
