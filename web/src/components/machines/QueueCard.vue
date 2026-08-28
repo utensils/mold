@@ -59,6 +59,15 @@ const emit = defineEmits<{
 const queuedIds = computed(() =>
   props.entries.filter((e) => e.state === "queued").map((e) => e.id),
 );
+const cancellableIds = computed(() =>
+  props.entries
+    .filter((entry) => entry.state === "queued" || entry.state === "paused")
+    .map((entry) => entry.id),
+);
+const restartPaused = computed(() =>
+  props.entries.some((entry) => entry.state === "paused"),
+);
+const resumeNeeded = computed(() => props.paused || restartPaused.value);
 const entryIds = computed(() => props.entries.map((entry) => entry.id));
 const hasPlanOnlyWork = computed(
   () => queuePlanOnlyWork(props.plan, entryIds.value).length > 0,
@@ -103,11 +112,20 @@ function queuedIndexOf(id: string): number {
       </div>
 
       <div
-        v-if="canPause || (canCancelAll && queuedIds.length > 0) || paused"
+        v-if="
+          canPause ||
+          (canCancelAll && cancellableIds.length > 0) ||
+          resumeNeeded
+        "
         class="qc__controls"
       >
-        <BadgePill v-if="paused" tone="accent" outline data-test="paused-chip">
-          paused
+        <BadgePill
+          v-if="resumeNeeded"
+          tone="accent"
+          outline
+          data-test="paused-chip"
+        >
+          {{ restartPaused && !paused ? "paused after restart" : "paused" }}
         </BadgePill>
         <span class="qc__spacer" />
         <button
@@ -118,10 +136,10 @@ function queuedIndexOf(id: string): number {
           :disabled="dimmed"
           @click="emit('togglePause')"
         >
-          {{ paused ? "Resume" : "Pause" }}
+          {{ resumeNeeded ? "Resume" : "Pause" }}
         </button>
         <button
-          v-if="canCancelAll && queuedIds.length > 0"
+          v-if="canCancelAll && cancellableIds.length > 0"
           type="button"
           class="qc__control qc__control--danger"
           data-test="cancel-all"

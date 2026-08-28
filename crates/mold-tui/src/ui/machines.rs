@@ -485,6 +485,14 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                         &job.model,
                         &app.models.catalog,
                     ))
+                } else if job.state == "paused" {
+                    format!(
+                        "⏸ {} · paused after restart",
+                        mold_core::ModelInfoExtended::human_name_for(
+                            &job.model,
+                            &app.models.catalog,
+                        )
+                    )
                 } else {
                     queued_lane(
                         &mold_core::ModelInfoExtended::human_name_for(

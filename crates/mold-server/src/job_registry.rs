@@ -37,6 +37,9 @@ use tokio::sync::Notify;
 pub enum JobLifecycle {
     Queued,
     Running,
+    /// Durable work recovered after restart. It is listed but never hydrated
+    /// into this runtime registry until an operator resumes it.
+    Paused,
     /// Retained across a restart but parked: it exceeded an attempt cap, or
     /// its recorded request could not be reconciled. Listed so an operator can
     /// see it, never auto-run.
@@ -55,7 +58,7 @@ pub(crate) fn assign_positions(entries: &mut [JobEntry], offset: usize) {
     let mut next = offset;
     for entry in entries.iter_mut() {
         entry.position = next;
-        if entry.state != JobLifecycle::Held {
+        if matches!(entry.state, JobLifecycle::Queued | JobLifecycle::Running) {
             next += 1;
         }
     }

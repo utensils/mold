@@ -109,6 +109,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             || match entry.state {
                 crate::job_registry::JobLifecycle::Queued => "queued",
                 crate::job_registry::JobLifecycle::Running => "running",
+                crate::job_registry::JobLifecycle::Paused => "paused",
                 // Held work is parked, not in flight. The activity strip is
                 // present-tense only.
                 crate::job_registry::JobLifecycle::Held => "held",
@@ -132,11 +133,44 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                     entry.state,
                     crate::job_registry::JobLifecycle::Queued
                         | crate::job_registry::JobLifecycle::Running
+                        | crate::job_registry::JobLifecycle::Paused
                 ),
         });
     }
 
     if let Some(db) = state.metadata_db.as_ref().as_ref() {
+        if let Some(owner_uuid) = state.queue_journal.owner_uuid() {
+            match mold_db::generation_queue::projections_in_state(
+                db,
+                owner_uuid,
+                mold_db::generation_queue::QueueRowState::Paused,
+                state.queue_capacity,
+            ) {
+                Ok(rows) => {
+                    for row in rows {
+                        if !represented.insert(row.id.clone()) {
+                            continue;
+                        }
+                        items.push(ActiveWorkItem {
+                            id: row.id,
+                            kind: "generation".into(),
+                            phase: "paused".into(),
+                            model: Some(row.model),
+                            created_at_unix_ms: nonnegative_ms(row.created_at_ms),
+                            updated_at_unix_ms: observed_at_unix_ms,
+                            position: None,
+                            current: None,
+                            total: None,
+                            can_cancel: true,
+                        });
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to read restart-paused generation work");
+                    unavailable_kinds.push("generation".to_string());
+                }
+            }
+        }
         let rows = match mold_db::chain_jobs::list_jobs(db) {
             Ok(rows) => rows,
             Err(error) => {
@@ -150,6 +184,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 row.state,
                 mold_core::chain_job::ChainJobState::Queued
                     | mold_core::chain_job::ChainJobState::Running
+                    | mold_core::chain_job::ChainJobState::Paused
             ) && !crate::routes_chain_jobs::chain_job_is_ephemeral(row)
         }) {
             represented.insert(row.id.clone());
@@ -164,6 +199,8 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 activity.phase
             } else if row.state == mold_core::chain_job::ChainJobState::Queued {
                 "queued"
+            } else if row.state == mold_core::chain_job::ChainJobState::Paused {
+                "paused"
             } else {
                 "running"
             };

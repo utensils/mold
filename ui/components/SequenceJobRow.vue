@@ -52,6 +52,7 @@ const emit = defineEmits<{
 const STATE_CLASS: Record<ChainJobState, string> = {
   queued: "ms-seqrow__state--halide",
   running: "ms-seqrow__state--safelight",
+  paused: "ms-seqrow__state--halide",
   interrupted: "ms-seqrow__state--halide",
   failed: "ms-seqrow__state--stop",
   completed: "ms-seqrow__state--ink",

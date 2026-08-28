@@ -69,7 +69,10 @@ const contextMenu = useContextMenuStore();
 
 const primaryId = computed(() => hosts.primaryHost?.id ?? "local");
 const snapshot = computed(() => jobs.queues[props.host.id] ?? null);
-const paused = computed(() => snapshot.value?.paused === true);
+const restartPaused = computed(
+  () => snapshot.value?.entries.some((entry) => entry.state === "paused") === true,
+);
+const paused = computed(() => snapshot.value?.paused === true || restartPaused.value);
 const caps = computed(() => snapshot.value?.caps ?? null);
 
 const lanes = computed(() => {
@@ -385,7 +388,9 @@ async function retryFromDrawer(): Promise<void> {
       v-if="controls && (caps?.canPause || (caps?.canCancelAll && hasEntries) || paused)"
       class="mb-2 flex items-center gap-2"
     >
-      <span v-if="paused" data-test="paused-chip" class="edge-code text-safelight">PAUSED</span>
+      <span v-if="paused" data-test="paused-chip" class="edge-code text-safelight">
+        {{ restartPaused && snapshot?.paused !== true ? "PAUSED AFTER RESTART" : "PAUSED" }}
+      </span>
       <div class="flex-1" />
       <button
         v-if="caps?.canPause"
@@ -499,6 +504,7 @@ async function retryFromDrawer(): Promise<void> {
             <button
               v-if="
                 entry.state === 'queued' ||
+                entry.state === 'paused' ||
                 entry.state === 'held' ||
                 (entry.state === 'running' && caps?.canCancelRunning)
               "

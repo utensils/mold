@@ -23,7 +23,8 @@ import { friendlySequenceError } from "./sequence";
 export type ActivityAction =
   "cancel" | "watch" | "retake" | "edit" | "resume" | "delete";
 
-export type PrintPhase = "queued" | "running" | "done" | "failed" | "cancelled";
+export type PrintPhase =
+  "queued" | "running" | "paused" | "done" | "failed" | "cancelled";
 
 export type ActivityJobVM =
   | {
@@ -90,6 +91,7 @@ export function sequenceActions(state: ChainJobState): ActivityAction[] {
       return ["watch", "cancel"];
     case "completed":
       return ["watch", "edit", "delete"];
+    case "paused":
     case "interrupted":
     case "failed":
     case "cancelled":
@@ -220,8 +222,8 @@ export function activityAnnouncement(counts: ActivityCounts): string {
 
 function isActive(vm: ActivityJobVM): boolean {
   return vm.kind === "print"
-    ? vm.phase === "queued" || vm.phase === "running"
-    : vm.state === "queued" || vm.state === "running";
+    ? vm.phase === "queued" || vm.phase === "running" || vm.phase === "paused"
+    : vm.state === "queued" || vm.state === "running" || vm.state === "paused";
 }
 
 /** Settled work that still wants a decision: a failed print, a failed or
@@ -230,7 +232,9 @@ function isActive(vm: ActivityJobVM): boolean {
 export function needsAttention(vm: ActivityJobVM): boolean {
   return vm.kind === "print"
     ? vm.phase === "failed"
-    : vm.state === "failed" || vm.state === "interrupted";
+    : vm.state === "failed" ||
+        vm.state === "interrupted" ||
+        vm.state === "paused";
 }
 
 /** Merge prints and sequences into one list. Active work stays in chronological

@@ -806,7 +806,7 @@ pub async fn run_server(
         std::fs::create_dir_all(&jobs_root)?;
         let db_arc = state.metadata_db.clone();
         let reconcile_root = jobs_root.clone();
-        let (flipped, repaired) = tokio::task::spawn_blocking(move || {
+        let (paused, repaired) = tokio::task::spawn_blocking(move || {
             let Some(db) = db_arc.as_ref().as_ref() else {
                 anyhow::bail!("metadata DB disappeared before chain reconcile");
             };
@@ -814,7 +814,7 @@ pub async fn run_server(
         })
         .await??;
         tracing::info!(
-            flipped,
+            paused,
             repaired,
             jobs_root = %jobs_root.display(),
             "chain job startup reconcile complete"

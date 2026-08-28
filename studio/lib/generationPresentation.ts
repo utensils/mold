@@ -26,6 +26,7 @@ export const GENERATION_STAGE_LABELS = {
   confirming: "Confirming with host",
   resync: "Re-syncing with host",
   queued: queueWaitLabel({ kind: "queued" }),
+  paused: queueWaitLabel({ kind: "paused" }),
   running: "Developing",
   held: "Held by host — action required",
   cancelling: "Cancellation pending",
@@ -36,7 +37,7 @@ export const GENERATION_STAGE_LABELS = {
 export type GenerationChildPresentation =
   | {
       kind: "waiting";
-      reason: "submitting" | "confirming" | "queued" | "resync";
+      reason: "submitting" | "confirming" | "queued" | "paused" | "resync";
       label: string;
     }
   | {
@@ -147,7 +148,7 @@ export function generationFailureMessage(
 }
 
 function waiting(
-  reason: "submitting" | "confirming" | "queued" | "resync",
+  reason: "submitting" | "confirming" | "queued" | "paused" | "resync",
 ): GenerationChildPresentation {
   return { kind: "waiting", reason, label: GENERATION_STAGE_LABELS[reason] };
 }
@@ -234,6 +235,8 @@ export function presentGenerationChild({
     }
   }
   switch (child.phase) {
+    case "paused":
+      return waiting("paused");
     case "held":
       return {
         kind: "held",

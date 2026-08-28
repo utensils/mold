@@ -20,12 +20,10 @@ use crate::QueueAction;
 
 /// Wire value of the additive `held` lifecycle.
 const STATE_HELD: &str = "held";
+const STATE_PAUSED: &str = "paused";
 /// Wire value of the running lifecycle.
 const STATE_RUNNING: &str = "running";
-/// Wire value of the plain queued lifecycle — the ONLY state `DELETE
-/// /api/queue` removes. Running work is left alone by design, and a held row
-/// is parked rather than queued, so neither belongs in the count the
-/// confirmation prompt names.
+/// Wire value of the plain queued lifecycle.
 const STATE_QUEUED: &str = "queued";
 
 pub async fn run(action: QueueAction) -> Result<()> {
@@ -117,6 +115,7 @@ async fn build_row(
         plan,
         &entry.id,
         Some(entry.position),
+        entry.state == STATE_PAUSED,
         entry.state == STATE_HELD,
     );
     QueueRow {
@@ -179,6 +178,7 @@ async fn queue_show(client: &MoldClient, job_id: &str, json: bool) -> Result<()>
         plan.as_ref(),
         &detail.job.id,
         Some(detail.job.position),
+        detail.job.state == STATE_PAUSED,
         detail.job.state == STATE_HELD,
     );
     let row = QueueRow {
@@ -388,12 +388,11 @@ async fn queue_sweep(client: &MoldClient) -> Result<()> {
 
 /// How many rows `DELETE /api/queue` would actually remove.
 ///
-/// The endpoint cancels queued rows only. Counting held rows here promised to
-/// cancel work the call then left in place and reported `cancelled=0` for;
-/// counting running rows would promise something it deliberately never does.
+/// The endpoint cancels queued and restart-paused rows. Held and running work
+/// remain outside bulk cancellation.
 pub(crate) fn cancellable_by_cancel_all(rows: &[QueueRow]) -> usize {
     rows.iter()
-        .filter(|row| row.entry.state == STATE_QUEUED)
+        .filter(|row| matches!(row.entry.state.as_str(), STATE_QUEUED | STATE_PAUSED))
         .count()
 }
 
@@ -436,6 +435,9 @@ pub(crate) fn state_label(row: &QueueRow) -> String {
     }
     if row.entry.state == STATE_HELD {
         return "Held".to_string();
+    }
+    if row.entry.state == STATE_PAUSED {
+        return "Paused after restart".to_string();
     }
     queue_wait_label(&row.wait)
 }
@@ -768,9 +770,10 @@ mod tests {
         let rows = vec![
             row(entry("running", "running", 0), QueueWaitStatus::Next),
             row(entry("queued", "queued", 1), QueueWaitStatus::Position(1)),
+            row(entry("paused", "paused", 1), QueueWaitStatus::Paused),
             row(entry("held", "held", 2), QueueWaitStatus::Position(2)),
         ];
-        assert_eq!(cancellable_by_cancel_all(&rows), 1);
+        assert_eq!(cancellable_by_cancel_all(&rows), 2);
         // A queue of nothing but holds must not offer to cancel them: the
         // call would report `cancelled=0` and leave every row in place.
         let held_only = vec![row(entry("held", "held", 0), QueueWaitStatus::Position(0))];

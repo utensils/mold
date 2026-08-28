@@ -450,7 +450,7 @@ pub async fn sequence(
                             .unwrap_or_else(|| "no server detail".to_string())
                     );
                 }
-                ChainJobState::Queued | ChainJobState::Running => {}
+                ChainJobState::Queued | ChainJobState::Paused | ChainJobState::Running => {}
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }

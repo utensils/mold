@@ -1330,6 +1330,17 @@ impl QueueJournal {
         )
     }
 
+    pub(crate) fn resume_all_paused(&self) -> anyhow::Result<generation_queue::PausedWorkResume> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::PausedWorkResume::default());
+        };
+        let resumed = generation_queue::resume_all_paused(db, owner, now_ms())?;
+        if resumed.generation_jobs > 0 {
+            self.publish_states_committed();
+        }
+        Ok(resumed)
+    }
+
     pub(crate) fn completed_output(
         &self,
         id: &str,
@@ -2880,10 +2891,14 @@ mod tests {
 
         let recovered = journal.recover_feeder_runtime().unwrap();
         assert_eq!(recovered.claims_cleared, 1);
+        assert!(journal.claim_next_feeder().unwrap().is_none());
+        journal
+            .resume_all_paused()
+            .expect("operator resume makes restart-paused work replayable");
         let replay = journal
             .claim_next_feeder()
             .unwrap()
-            .expect("startup recovery makes the retained direct row replayable");
+            .expect("explicit resume makes the retained direct row replayable");
         assert_eq!(replay.row.id, "live-direct");
 
         drop(ticket);
@@ -3342,10 +3357,12 @@ mod tests {
 
         assert_eq!(first.claim_dispatch(), DispatchClaim::Granted);
         journal.recover_feeder_runtime().unwrap();
+        journal.resume_all_paused().unwrap();
         let second_claim = journal.claim_next_feeder().unwrap().unwrap();
         let second = journal.attach_claimed("job-1", second_claim.claim_token);
         assert_eq!(second.claim_dispatch(), DispatchClaim::Granted);
         journal.recover_feeder_runtime().unwrap();
+        journal.resume_all_paused().unwrap();
         let third_claim = journal.claim_next_feeder().unwrap().unwrap();
         let third = journal.attach_claimed("job-1", third_claim.claim_token);
         assert_eq!(

@@ -707,7 +707,7 @@ pub fn cancel_owned(
             return Ok(OwnedCancellation::NotOwned);
         };
 
-        let can_settle_now = state == "held" || state == "queued";
+        let can_settle_now = matches!(state.as_str(), "held" | "queued" | "paused");
         if can_settle_now || !has_child {
             if has_child {
                 update_terminal_child(conn, job_id, terminal)?;
@@ -1065,8 +1065,8 @@ pub fn cancel_all_queued(
                 "SELECT q.id, child.state
                    FROM generation_queue AS q
                    JOIN generation_batch_children AS child ON child.job_id = q.id
-                  WHERE q.owner_uuid = ?1 AND q.state = 'queued'
-                    AND child.state NOT IN ('accepted', 'running', 'held', 'cancelling')
+                  WHERE q.owner_uuid = ?1 AND q.state IN ('queued', 'paused')
+                    AND child.state NOT IN ('accepted', 'running', 'paused', 'held', 'cancelling')
                   LIMIT 1",
                 params![owner_uuid],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1094,14 +1094,14 @@ pub fn cancel_all_queued(
         }
 
         let eligible_sql = "SELECT COUNT(*) FROM generation_queue AS q
-             WHERE q.owner_uuid = ?1 AND q.state = 'queued'";
+             WHERE q.owner_uuid = ?1 AND q.state IN ('queued', 'paused')";
         let total: i64 = conn.query_row(eligible_sql, params![owner_uuid], |row| row.get(0))?;
 
         let mut live_overlap = 0usize;
         let mut seen = HashSet::with_capacity(already_counted_live.len());
         let mut overlap_stmt = conn.prepare(
             "SELECT 1 FROM generation_queue AS q
-              WHERE q.owner_uuid = ?1 AND q.id = ?2 AND q.state = 'queued'
+              WHERE q.owner_uuid = ?1 AND q.id = ?2 AND q.state IN ('queued', 'paused')
               LIMIT 1",
         )?;
         for id in already_counted_live {
@@ -1120,7 +1120,7 @@ pub fn cancel_all_queued(
             "SELECT COUNT(*)
                FROM generation_queue AS q
                JOIN generation_batch_children AS child ON child.job_id = q.id
-              WHERE q.owner_uuid = ?1 AND q.state = 'queued'",
+              WHERE q.owner_uuid = ?1 AND q.state IN ('queued', 'paused')",
             params![owner_uuid],
             |row| row.get(0),
         )?;
@@ -1131,7 +1131,7 @@ pub fn cancel_all_queued(
                     revision = revision + 1
               WHERE job_id IN (
                     SELECT q.id FROM generation_queue AS q
-                     WHERE q.owner_uuid = ?1 AND q.state = 'queued'
+                     WHERE q.owner_uuid = ?1 AND q.state IN ('queued', 'paused')
                 )",
             params![
                 owner_uuid,
@@ -1149,7 +1149,7 @@ pub fn cancel_all_queued(
         }
         let deleted_children = conn.execute(
             "DELETE FROM generation_queue
-              WHERE owner_uuid = ?1 AND state = 'queued'
+              WHERE owner_uuid = ?1 AND state IN ('queued', 'paused')
                 AND EXISTS (
                     SELECT 1 FROM generation_batch_children AS child
                      WHERE child.job_id = generation_queue.id
@@ -1165,7 +1165,7 @@ pub fn cancel_all_queued(
         }
         conn.execute(
             "DELETE FROM generation_queue
-              WHERE owner_uuid = ?1 AND state = 'queued'
+              WHERE owner_uuid = ?1 AND state IN ('queued', 'paused')
                 AND NOT EXISTS (
                     SELECT 1 FROM generation_batch_children AS child
                      WHERE child.job_id = generation_queue.id
@@ -1181,7 +1181,7 @@ pub fn cancel_all_queued(
             "SELECT COUNT(*)
                FROM generation_queue AS q
                JOIN generation_batch_children AS child ON child.job_id = q.id
-              WHERE q.owner_uuid = ?1 AND q.state = 'queued'
+              WHERE q.owner_uuid = ?1 AND q.state IN ('queued', 'paused')
                 AND (q.claim_token IS NULL OR child.state != 'cancelling')",
             params![owner_uuid],
             |row| row.get(0),
@@ -2159,6 +2159,84 @@ mod tests {
         let detail = get_durable(&db, "owner-1", "batch-1").unwrap().unwrap();
         assert_eq!(detail.children[0].state, "cancelled");
         assert_eq!(detail.children[0].completed_at_ms, Some(9));
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn restart_pause_and_resume_move_batch_child_with_queue_authority() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        let before_revision: i64 = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT revision FROM generation_batch_children WHERE job_id = 'job-0'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+
+        crate::generation_queue::recover_runtime_claims(&db, "owner-1", 5).unwrap();
+        assert_eq!(
+            get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0].state,
+            "paused"
+        );
+        let paused_revision: i64 = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT revision FROM generation_batch_children WHERE job_id = 'job-0'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(paused_revision, before_revision + 1);
+
+        crate::generation_queue::resume_all_paused(&db, "owner-1", 6).unwrap();
+        let detail = get(&db, "owner-1", "batch-1").unwrap().unwrap();
+        assert_eq!(detail.children[0].state, "accepted");
+        let resumed_revision: i64 = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT revision FROM generation_batch_children WHERE job_id = 'job-0'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(resumed_revision, paused_revision + 1);
+    }
+
+    #[test]
+    fn paused_child_cancellation_is_terminal_and_removes_execution_authority() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        crate::generation_queue::recover_runtime_claims(&db, "owner-1", 5).unwrap();
+
+        let outcome = cancel_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Cancelled,
+                error: Some("Cancelled"),
+                terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                result_json: None,
+                completed_at_ms: 9,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome, OwnedCancellation::Settled);
+        assert_eq!(
+            get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0].state,
+            "cancelled"
+        );
         assert!(crate::generation_queue::get(&db, "job-0")
             .unwrap()
             .is_none());

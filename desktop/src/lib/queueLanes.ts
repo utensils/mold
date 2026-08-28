@@ -11,7 +11,7 @@ export interface LaneEntryLike {
   id: string;
   /** `held` is additive: a journalled job the host parked after exhausting its
    * replay or dispatch budget. It occupies no lane and waits for no turn. */
-  state: "queued" | "running" | "held";
+  state: "queued" | "running" | "paused" | "held";
   position: number;
   /** GPU ordinal currently running this row (running rows only). */
   gpu?: number;
@@ -33,7 +33,7 @@ export function laneForEntry(entry: LaneEntryLike): number | null {
 
 /** Every state this comparator can see. A missing key yields `undefined`, and
  *  `undefined - n` is NaN, which silently stops the sort rather than failing. */
-const STATE_RANK = { running: 0, queued: 1, held: 2 } as const;
+const STATE_RANK = { running: 0, queued: 1, paused: 2, held: 3 } as const;
 
 function laneOrder<T extends LaneEntryLike>(a: T, b: T): number {
   return STATE_RANK[a.state] - STATE_RANK[b.state] || a.position - b.position;

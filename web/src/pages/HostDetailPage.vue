@@ -169,6 +169,9 @@ const gpuOrdinals = computed(() => {
 const canReorder = computed(() => !!caps.value?.queue?.can_reorder);
 const isTarget = computed(() => targetId.value === hostId.value);
 const paused = computed(() => poll.status.value?.queue_paused === true);
+const resumeNeeded = computed(
+  () => paused.value || queue.value.some((entry) => entry.state === "paused"),
+);
 
 const address = computed(() => {
   if (!host.value) return "";
@@ -684,13 +687,13 @@ async function onTogglePause() {
   const entry = host.value;
   if (!entry) return;
   try {
-    if (paused.value) await resumeHostQueue(entry);
+    if (resumeNeeded.value) await resumeHostQueue(entry);
     else await pauseHostQueue(entry);
     await poll.refresh();
   } catch (e) {
     toast(
       "error",
-      `Couldn't ${paused.value ? "resume" : "pause"} queue: ${errMsg(e)}`,
+      `Couldn't ${resumeNeeded.value ? "resume" : "pause"} queue: ${errMsg(e)}`,
     );
   }
 }
@@ -1173,7 +1176,7 @@ onBeforeUnmount(() => {
           :can-cancel-all="caps?.queue?.can_cancel_all === true"
           :can-cancel-running="caps?.queue?.cooperative_cancellation === true"
           :cancelling-ids="cancellingIds"
-          :paused="paused"
+          :paused="resumeNeeded"
           :dimmed="reconnecting"
           @cancel="onCancel"
           @inspect="inspectedId = $event"

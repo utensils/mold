@@ -423,7 +423,11 @@ const h3Host = computed(() => [
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
 const scheduledWorkCount = computed(() => queuePlanOnlyWork(queueSnapshot.value?.plan, []).length);
 const mutatingDeviceIds = ref(new Set<string>());
-const queuePaused = computed(() => queueSnapshot.value?.paused === true);
+const queuePaused = computed(
+  () =>
+    queueSnapshot.value?.paused === true ||
+    queueSnapshot.value?.entries.some((entry) => entry.state === "paused") === true,
+);
 
 async function toggleDeviceById(deviceId: string, enabled: boolean) {
   const target = hostTarget();

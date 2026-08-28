@@ -286,6 +286,8 @@ export function queuePositionLabel(
  * queued jobs three different ways.
  */
 export type QueueWaitStatus =
+  /** Recovered after restart and waiting for an explicit queue resume. */
+  | { kind: "paused" }
   /** Parked by the host: never dispatched on its own, so never "in line". */
   | { kind: "held" }
   /** An actionable reason outranks the position: say what to fix. */
@@ -314,6 +316,7 @@ export interface QueueWaitInput {
 export function resolveQueueWait(
   input: QueueWaitInput | null | undefined,
 ): QueueWaitStatus {
+  if (input?.state === "paused") return { kind: "paused" };
   if (input?.state === "held") return { kind: "held" };
   if (input?.blockedReason === "preparing") {
     return { kind: "blocked", label: preparationLabel(input.preparation) };
@@ -328,6 +331,8 @@ export function resolveQueueWait(
 /** Sentence-case copy — web and desktop pills, and the iPhone status line. */
 export function queueWaitLabel(wait: QueueWaitStatus): string {
   switch (wait.kind) {
+    case "paused":
+      return "Paused after restart";
     case "held":
       return "Held";
     case "blocked":
@@ -344,6 +349,8 @@ export function queueWaitLabel(wait: QueueWaitStatus): string {
 /** Compact uppercase code — the iPhone queue list's existing idiom. */
 export function queueWaitCode(wait: QueueWaitStatus): string {
   switch (wait.kind) {
+    case "paused":
+      return "PAUSED";
     case "held":
       return "HELD";
     case "blocked":

@@ -225,6 +225,7 @@ async fn finish_canonical_child(
         GenerationBatchChildState::Cancelled => AsyncJobStatus::Cancelled,
         GenerationBatchChildState::Failed => AsyncJobStatus::Failed,
         GenerationBatchChildState::Accepted
+        | GenerationBatchChildState::Paused
         | GenerationBatchChildState::Running
         | GenerationBatchChildState::Cancelling => AsyncJobStatus::Failed,
     };
@@ -1055,6 +1056,7 @@ struct GalleryFilter {
 enum AsyncJobStatus {
     Queued,
     Running,
+    Paused,
     Held,
     Cancelled,
     Succeeded,
@@ -1066,6 +1068,7 @@ impl AsyncJobStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Paused => "paused",
             Self::Held => "held",
             Self::Cancelled => "cancelled",
             Self::Succeeded => "succeeded",
@@ -1486,6 +1489,7 @@ impl AsyncJobRegistry {
                 } else if matches!(
                     child.state,
                     GenerationBatchChildState::Accepted
+                        | GenerationBatchChildState::Paused
                         | GenerationBatchChildState::Running
                         | GenerationBatchChildState::Cancelling
                 ) {
@@ -1723,6 +1727,7 @@ impl AsyncJobRegistry {
 fn async_status_from_child(state: &GenerationBatchChildState) -> AsyncJobStatus {
     match state {
         GenerationBatchChildState::Accepted => AsyncJobStatus::Queued,
+        GenerationBatchChildState::Paused => AsyncJobStatus::Paused,
         GenerationBatchChildState::Running | GenerationBatchChildState::Cancelling => {
             AsyncJobStatus::Running
         }
@@ -3659,6 +3664,51 @@ mod tests {
                 assert_eq!(job["retryable"], true);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn paused_retry_confirmation_remains_nonterminal_after_restart() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/durable-job-1/retry"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "batch-1",
+                "client_batch_id": "client-batch-1",
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "durable-job-1",
+                    "state": "paused",
+                    "retryable": false,
+                    "revision": 8
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_retryable_canonical_job_at_revision(&mcp.jobs, 7).await;
+
+        mcp.tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+        let status = mcp
+            .tool_generation_status(json!({ "job_id": local_id, "include_result": false }))
+            .await
+            .unwrap();
+
+        assert_eq!(status["structuredContent"]["status"], "paused");
+        assert_eq!(status["structuredContent"]["retryable"], false);
     }
 
     #[tokio::test]

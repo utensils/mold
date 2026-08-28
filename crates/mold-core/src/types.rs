@@ -8399,6 +8399,7 @@ pub struct GenerationBatchAdmissionRequest {
 #[serde(rename_all = "snake_case")]
 pub enum GenerationBatchChildState {
     Accepted,
+    Paused,
     Cancelling,
     Running,
     Complete,

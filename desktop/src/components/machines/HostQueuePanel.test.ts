@@ -78,6 +78,19 @@ beforeEach(() => {
 });
 
 describe("HostQueuePanel", () => {
+  it("offers Resume for restart-paused work while the global gate is open", async () => {
+    const entry = { ...queued("srv-paused", 0, 0), state: "paused" as const };
+    const { wrapper, jobs } = await mountPanel([], [entry]);
+    const resume = vi.spyOn(jobs, "resume").mockResolvedValue(undefined);
+
+    expect(wrapper.get("[data-test='paused-chip']").text()).toContain("RESTART");
+    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Resume");
+    expect(wrapper.get("[data-test='cancel-entry']").text()).toBe("Cancel");
+    await wrapper.get("[data-test='pause-toggle']").trigger("click");
+    await flushPromises();
+    expect(resume).toHaveBeenCalledWith("local");
+  });
+
   it("splits a multi-GPU host into per-GPU lanes", async () => {
     const { wrapper } = await mountPanel([0, 1], [queued("srv-0", 1, 0), queued("srv-1", 2, 1)]);
     expect(wrapper.find("[data-test='gpu-lane-0']").exists()).toBe(true);
