@@ -9149,15 +9149,40 @@ struct ThumbnailQuery {
     fmt: Option<String>,
 }
 
+/// Names the rendition the server UNDERSTOOD (`256-png`, `512-jpg`), so a
+/// client can tell "this server honours `?size`" from an older server that
+/// answered its 256 px PNG to every request — a small source legitimately
+/// comes back smaller than the tier it asked for, and without this signal a
+/// client would misread that as a legacy server.
+pub const THUMBNAIL_RENDITION_HEADER: &str = "x-mold-thumbnail-rendition";
+
 async fn get_gallery_thumbnail(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(filename): axum::extract::Path<String>,
-    query: Option<Query<ThumbnailQuery>>,
+    // Not `Option<Query<_>>`: that would swallow a malformed `?size=abc` as
+    // the default rendition. Both fields are optional, so an absent query
+    // still parses; a malformed one is axum's 400.
+    Query(query): Query<ThumbnailQuery>,
 ) -> Result<Response, ApiError> {
-    let query = query.map(|Query(q)| q).unwrap_or_default();
     let variant = crate::thumbnails::ThumbnailVariant::from_query(query.size, query.fmt.as_deref())
         .map_err(ApiError::validation)?;
+    let mut response = render_gallery_thumbnail(state, headers, filename, variant).await?;
+    if let Ok(value) = header::HeaderValue::from_str(&variant.rendition_label()) {
+        response.headers_mut().insert(
+            header::HeaderName::from_static(THUMBNAIL_RENDITION_HEADER),
+            value,
+        );
+    }
+    Ok(response)
+}
+
+async fn render_gallery_thumbnail(
+    state: AppState,
+    headers: HeaderMap,
+    filename: String,
+    variant: crate::thumbnails::ThumbnailVariant,
+) -> Result<Response, ApiError> {
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
@@ -9662,7 +9687,11 @@ pub fn spawn_thumbnail_warmup(
             let thumb_dir = server_thumbnail_dir();
             warm_gallery_thumbnails(&output_dir, &thumb_dir, &gallery_gate, &|_| {}, &|_| {});
             // Tiles of purged or re-rendered prints can only be identified
-            // against what is on disk now, so the sweep rides the warmup.
+            // against what is on disk now, so the sweep rides the warmup —
+            // under the publication read gate, so a restore moving a print
+            // between `.trash/` and the live dir cannot slip between the two
+            // directory walks and have its valid tiles swept.
+            let _gallery_reader = gallery_gate.blocking_read();
             match crate::thumbnails::sweep_orphans(
                 &output_dir,
                 &thumb_dir,

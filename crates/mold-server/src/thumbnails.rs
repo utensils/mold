@@ -234,6 +234,11 @@ impl ThumbnailVariant {
         thumb_dir.join(format!("{key:x}-{}.{}", self.max_dim, self.extension()))
     }
 
+    /// `256-png` / `512-jpg`: the `x-mold-thumbnail-rendition` header value.
+    pub fn rendition_label(self) -> String {
+        format!("{}-{}", self.max_dim, self.extension())
+    }
+
     /// ETag suffix: empty for the default so its tag is unchanged.
     pub fn etag_suffix(self) -> String {
         if self.is_default() {
@@ -428,6 +433,8 @@ mod tests {
         assert!(path.to_string_lossy().ends_with("-512.jpg"));
         assert_ne!(path, default);
         assert_eq!(retina.etag_suffix(), "-512-jpg");
+        assert_eq!(retina.rendition_label(), "512-jpg");
+        assert_eq!(ThumbnailVariant::DEFAULT.rendition_label(), "256-png");
         assert!(is_versioned_cache_name(
             path.file_name().unwrap().to_str().unwrap()
         ));

@@ -1031,7 +1031,7 @@ async fn fetch_gallery_bytes(
     max_bytes: usize,
     what: &str,
     cancellation: Option<&ThumbnailCancellation>,
-) -> Result<(Vec<u8>, String), String> {
+) -> Result<FetchedGalleryBytes, String> {
     if let Some(cancellation) = cancellation {
         cancellation.check()?;
     }
@@ -1059,6 +1059,13 @@ async fn fetch_gallery_bytes(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
+    // A current server names the rendition it understood; an older one
+    // omits the header (and ignores `?size`). See `should_downgrade_tier`.
+    let rendition = response
+        .headers()
+        .get(THUMBNAIL_RENDITION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let mut bytes = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -1071,7 +1078,36 @@ async fn fetch_gallery_bytes(
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok((bytes, content_type))
+    Ok(FetchedGalleryBytes {
+        bytes,
+        content_type,
+        rendition,
+    })
+}
+
+/// Mirror of the server's `THUMBNAIL_RENDITION_HEADER`.
+const THUMBNAIL_RENDITION_HEADER: &str = "x-mold-thumbnail-rendition";
+
+struct FetchedGalleryBytes {
+    bytes: Vec<u8>,
+    #[allow(dead_code)]
+    content_type: String,
+    /// `Some` when the server declared the rendition it served.
+    rendition: Option<String>,
+}
+
+/// Whether a 512-tier request came back from a server that IGNORED the
+/// tier. Only an undeclared rendition counts: a current server that answers
+/// a genuinely small print at its own size still names `512-jpg`, and must
+/// not have its whole origin demoted to 256 px for the session.
+pub(crate) fn should_downgrade_tier(
+    requested: SizeTier,
+    rendition_declared: bool,
+    bytes: &[u8],
+) -> bool {
+    requested == SizeTier::S512
+        && !rendition_declared
+        && probe_max_dimension(bytes).is_some_and(|dim| dim <= 256)
 }
 
 #[tauri::command]
@@ -1114,7 +1150,7 @@ pub async fn fetch_gallery_thumbnail(
         Some(&active.cancellation),
     );
     tokio::pin!(fetch);
-    let (bytes, _content_type) = tokio::select! {
+    let fetched = tokio::select! {
         result = &mut fetch => result?,
         _ = active.cancellation.notify.notified() => {
             active.cancellation.check()?;
@@ -1122,7 +1158,7 @@ pub async fn fetch_gallery_thumbnail(
         }
     };
     active.cancellation.check()?;
-    Ok(tauri::ipc::Response::new(bytes))
+    Ok(tauri::ipc::Response::new(fetched.bytes))
 }
 
 #[tauri::command]
@@ -1164,7 +1200,7 @@ pub async fn fetch_gallery_media(
             .build()
             .expect("static gallery HTTP client settings must be valid")
     });
-    let (bytes, _content_type) = fetch_gallery_bytes(
+    let fetched = fetch_gallery_bytes(
         client,
         &target,
         &format!("/api/gallery/image/{encoded}"),
@@ -1173,7 +1209,7 @@ pub async fn fetch_gallery_media(
         None,
     )
     .await?;
-    Ok(tauri::ipc::Response::new(bytes))
+    Ok(tauri::ipc::Response::new(fetched.bytes))
 }
 
 #[derive(Debug, Serialize)]
@@ -1814,7 +1850,7 @@ async fn fetch_local_thumbnail(
     size: SizeTier,
     from_trash: bool,
     cancellation: Option<&ThumbnailCancellation>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, bool), String> {
     match local_gallery_authority(state).await {
         LocalGalleryAuthority::Server(info) => {
             let target = MediaSaveTarget {
@@ -1828,7 +1864,7 @@ async fn fetch_local_thumbnail(
                 "/api/gallery/thumbnail/{encoded}?size={}&fmt=jpeg{trash}",
                 size.pixels()
             );
-            let (bytes, _) = fetch_gallery_bytes(
+            let fetched = fetch_gallery_bytes(
                 thumbnail_client(),
                 &target,
                 &api_path,
@@ -1837,7 +1873,8 @@ async fn fetch_local_thumbnail(
                 cancellation,
             )
             .await?;
-            Ok(bytes)
+            let declared = fetched.rendition.is_some();
+            Ok((fetched.bytes, declared))
         }
         LocalGalleryAuthority::Offline(_guard) => {
             let _permit = LOCAL_RENDER_PERMITS
@@ -1850,11 +1887,13 @@ async fn fetch_local_thumbnail(
             let filename = filename.to_string();
             // `_guard` stays held across this await: the render runs while
             // the lifecycle mutex still proves the server Off.
-            tokio::task::spawn_blocking(move || {
+            let bytes = tokio::task::spawn_blocking(move || {
                 render_offline_local_thumbnail(&filename, size, from_trash)
             })
             .await
-            .map_err(|error| format!("The thumbnail render was cancelled: {error}"))?
+            .map_err(|error| format!("The thumbnail render was cancelled: {error}"))??;
+            // An in-process render honours the tier by construction.
+            Ok((bytes, true))
         }
     }
 }
@@ -1952,7 +1991,7 @@ pub async fn prepare_gallery_thumbnail(
                     Some(&active.cancellation),
                 );
                 tokio::pin!(fetch);
-                let (bytes, _content_type) = tokio::select! {
+                let fetched = tokio::select! {
                     result = &mut fetch => result?,
                     _ = active.cancellation.notify.notified() => {
                         active.cancellation.check()?;
@@ -1960,7 +1999,8 @@ pub async fn prepare_gallery_thumbnail(
                     }
                 };
                 active.cancellation.check()?;
-                bytes
+                let declared = fetched.rendition.is_some();
+                (fetched.bytes, declared)
             }
             None => {
                 fetch_local_thumbnail(
@@ -1973,7 +2013,8 @@ pub async fn prepare_gallery_thumbnail(
                 .await?
             }
         };
-        if size == SizeTier::S512 && probe_max_dimension(&bytes).is_some_and(|dim| dim <= 256) {
+        let (bytes, rendition_declared) = bytes;
+        if should_downgrade_tier(size, rendition_declared, &bytes) {
             downgraded.store(true, Ordering::Release);
             if let Ok(mut set) = DOWNGRADED_TIER_ORIGINS.lock() {
                 set.insert(origin.clone());
@@ -2188,7 +2229,7 @@ pub fn thumb_protocol_response(
                     )
                 };
                 match rendered {
-                    Ok(Ok(bytes)) => {
+                    Ok(Ok((bytes, _rendition_declared))) => {
                         let content_type = crate::thumbnail_cache::sniff_content_type(&bytes)
                             .unwrap_or("application/octet-stream");
                         let put = {
@@ -2956,6 +2997,19 @@ mod tests {
         jpeg.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
         assert_eq!(probe_max_dimension(&buf.into_inner()), Some(512));
         assert_eq!(probe_max_dimension(b"<svg/>"), None);
+        // Only an UNDECLARED small answer to a 512 request means "older
+        // server": a current server naming its rendition never demotes the
+        // origin, however small the print.
+        let small = {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(200, 150))
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        assert!(should_downgrade_tier(SizeTier::S512, false, &small));
+        assert!(!should_downgrade_tier(SizeTier::S512, true, &small));
+        assert!(!should_downgrade_tier(SizeTier::S256, false, &small));
         assert_eq!(origin_tier("abc", SizeTier::S512), SizeTier::S512);
         DOWNGRADED_TIER_ORIGINS
             .lock()
