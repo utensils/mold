@@ -22,14 +22,10 @@ use mold_candle::quantized_nn::{self, Linear};
 
 // ==================== Quantized linear arm ====================
 
-/// Which implementation a quantized Z-Image linear resolves to.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ZImageLinearKind {
-    /// Weight stays quantized; candle's kernels consume it directly.
-    QMatMul,
-    /// Full per-forward dequantization to the activation dtype.
-    Dequant,
-}
+/// Which implementation a quantized Z-Image linear resolves to — the shared
+/// `crate::quantized_linear` kind; Z-Image keeps its own device policy and
+/// env name.
+pub(crate) use crate::quantized_linear::QuantizedLinearKind as ZImageLinearKind;
 
 /// `MOLD_ZIMAGE_QMATMUL`: a truthy value opts CUDA back into candle's
 /// quantized fast path. Unset — or a value we do not understand — keeps the
@@ -37,10 +33,7 @@ pub(crate) enum ZImageLinearKind {
 /// behavior rather than to the broken one. The falsey set mirrors
 /// `parse_qwen_qmatmul`.
 pub(crate) fn parse_zimage_qmatmul(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "on" | "yes")
-    )
+    crate::quantized_linear::parse_qmatmul_flag(value)
 }
 
 /// Process-frozen `MOLD_ZIMAGE_QMATMUL`, read once per process through the
@@ -96,9 +89,7 @@ enum ZImageLinear {
 
 /// Dequantize `weight` to the activation's dtype and apply it densely.
 fn dequant_forward(weight: &QTensor, bias: Option<&Tensor>, x: &Tensor) -> Result<Tensor> {
-    let w = weight.dequantize(x.device())?.to_dtype(x.dtype())?;
-    let bias = bias.map(|b| b.to_dtype(x.dtype())).transpose()?;
-    candle_nn::Linear::new(w, bias).forward(x)
+    crate::quantized_linear::dequant_forward(weight, bias, x, x.dtype())
 }
 
 impl Module for ZImageLinear {

@@ -325,6 +325,7 @@ pub enum RuntimeSemanticVariable {
     Ltx2GemmaDevice,
     Ltx2GemmaVariant,
     Ltx2Int8,
+    Ltx2QMatMul,
     Umt5Variant,
     Ltx2SpatialTile,
     Ltx2VaeDecodeChunkFrames,
@@ -685,6 +686,10 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         // per-forward widening), which changes pixels, transient memory, and
         // step latency — its own execution-equivalence and timing class.
         "MOLD_LTX2_INT8" => RuntimeSemanticVariable::Ltx2Int8,
+        // Swaps the LTX-2.5 GGUF linear arm (per-forward dequant vs candle's
+        // QMatMul fast path), which changes numerics, transient memory, and
+        // step latency — its own execution-equivalence and timing class.
+        "MOLD_LTX2_QMATMUL" => RuntimeSemanticVariable::Ltx2QMatMul,
         "MOLD_UMT5_VARIANT" => RuntimeSemanticVariable::Umt5Variant,
         "MOLD_LTX2_SPATIAL_TILE" => RuntimeSemanticVariable::Ltx2SpatialTile,
         "MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES" => RuntimeSemanticVariable::Ltx2VaeDecodeChunkFrames,
@@ -803,6 +808,13 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
         // selects the widening arm, every other spelling is the default.
         Some(value) if variable == RuntimeSemanticVariable::Ltx2Int8 => {
             CanonicalRuntimeValue::Boolean(value.trim().eq_ignore_ascii_case("dequant"))
+        }
+        // Mirrors the shared `parse_qmatmul_flag` the engine reads exactly.
+        Some(value) if variable == RuntimeSemanticVariable::Ltx2QMatMul => {
+            CanonicalRuntimeValue::Boolean(matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            ))
         }
         // Mirrors the engine's `parse_zimage_qmatmul` exactly.
         Some(value) if variable == RuntimeSemanticVariable::ZimageQMatMul => {
