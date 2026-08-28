@@ -242,6 +242,12 @@ const ignoredEnvVars = new Set([
   'MOLD_DIFF_BF16',
   'MOLD_DIFF_GGUF',
   'MOLD_NVFP4_PROBE_PATH',
+  // `MOLD_LTX25_GGUF_SMOKE` gates the ignored real-file GGUF smoke test
+  // behind an installed checkpoint path; `MOLD_STORE_ENV_VARS` is a Rust
+  // const NAME in mold-server's test_support (the hermetic-store guard),
+  // not an environment variable at all — the scan's regex cannot tell.
+  'MOLD_LTX25_GGUF_SMOKE',
+  'MOLD_STORE_ENV_VARS',
   // Batch transaction subprocess fixtures and their stdout marker. These are
   // compiled only for Rust tests and are not supported runtime configuration.
   'MOLD_RESERVATION_TEST',

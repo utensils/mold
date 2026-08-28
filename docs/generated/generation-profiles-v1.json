@@ -18634,6 +18634,41 @@
           "model": "ltx-2.5-22b-distilled:int8-conv",
           "family": "ltx2",
           "hidden": false
+        },
+        {
+          "model": "ltx-2.5-22b-distilled:q3",
+          "family": "ltx2",
+          "hidden": false
+        },
+        {
+          "model": "ltx-2.5-22b-distilled:q3-k-s",
+          "family": "ltx2",
+          "hidden": false
+        },
+        {
+          "model": "ltx-2.5-22b-distilled:q4",
+          "family": "ltx2",
+          "hidden": false
+        },
+        {
+          "model": "ltx-2.5-22b-distilled:q4-k-s",
+          "family": "ltx2",
+          "hidden": false
+        },
+        {
+          "model": "ltx-2.5-22b-distilled:q5",
+          "family": "ltx2",
+          "hidden": false
+        },
+        {
+          "model": "ltx-2.5-22b-distilled:q6",
+          "family": "ltx2",
+          "hidden": false
+        },
+        {
+          "model": "ltx-2.5-22b-distilled:q8",
+          "family": "ltx2",
+          "hidden": false
         }
       ],
       "profile": {

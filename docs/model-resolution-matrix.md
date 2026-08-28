@@ -1626,7 +1626,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 Schema 1 · hash `27455a2efaf8ecab2001bec1e9b0c45938d944a648ca9f21f5c1d411946426e4` · default recipe `auto`
 
-Models: `ltx-2.5-22b-distilled:bf16`, `ltx-2.5-22b-distilled:bf16-conv`, `ltx-2.5-22b-distilled:int8-conv`.
+Models: `ltx-2.5-22b-distilled:bf16`, `ltx-2.5-22b-distilled:bf16-conv`, `ltx-2.5-22b-distilled:int8-conv`, `ltx-2.5-22b-distilled:q3`, `ltx-2.5-22b-distilled:q3-k-s`, `ltx-2.5-22b-distilled:q4`, `ltx-2.5-22b-distilled:q4-k-s`, `ltx-2.5-22b-distilled:q5`, `ltx-2.5-22b-distilled:q6`, `ltx-2.5-22b-distilled:q8`.
 
 #### Auto (`auto`)
 

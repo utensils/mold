@@ -40,27 +40,27 @@ so those two files retain Apache-2.0 portions — see the repository's
 
 ## Supported Models
 
-| Model                                  | Path      | Notes                                         |
-| -------------------------------------- | --------- | --------------------------------------------- |
-| `ltx-2-19b-dev:fp8`                    | Two-stage | Highest-quality published 19B FP8 checkpoint  |
-| `ltx-2-19b-distilled:fp8`              | Distilled | Fastest 19B path, recommended default         |
-| `ltx-2.3-22b-dev:fp8`                  | Two-stage | High-quality 22B FP8 checkpoint               |
-| `ltx-2.3-22b-distilled:fp8`            | Distilled | Fastest 22B path                              |
-| `ltx-2.3-22b-dev:bf16`                 | Two-stage | Full-quality, trainable 22B reference weights |
-| `ltx-2.3-22b-distilled:bf16`           | Distilled | Full-precision eight-step 22B checkpoint      |
-| `ltx-2.5-22b-dev:int8-conv`            | Two-stage | Compact 22B dev split pack                    |
-| `ltx-2.5-22b-distilled:int8-conv`      | Distilled | Recommended compact LTX-2.5 Metal default     |
-| `ltx-2.5-22b-dev:bf16-conv`            | Two-stage | Full-precision Conv-VAE split pack; deferred  |
-| `ltx-2.5-22b-distilled:bf16-conv`      | Distilled | Full-precision Conv-VAE pack; deferred        |
-| `ltx-2.5-22b-dev:bf16`                 | Two-stage | Diffusion-VAE reference pack; deferred        |
-| `ltx-2.5-22b-distilled:bf16`           | Distilled | Diffusion-VAE reference; deferred             |
-| `ltx-2.5-22b-distilled:q3-k-s`         | Distilled | 11.78 GiB GGUF transformer, smallest tier     |
-| `ltx-2.5-22b-distilled:q3`             | Distilled | Q3_K_M GGUF transformer                       |
-| `ltx-2.5-22b-distilled:q4-k-s`         | Distilled | 14.27 GiB GGUF transformer                    |
-| `ltx-2.5-22b-distilled:q4`             | Distilled | Q4_K_M GGUF transformer, fits 24 GB resident  |
-| `ltx-2.5-22b-distilled:q5`             | Distilled | Q5_K_M GGUF transformer                       |
-| `ltx-2.5-22b-distilled:q6`             | Distilled | Q6_K GGUF transformer                         |
-| `ltx-2.5-22b-distilled:q8`             | Distilled | Q8_0 GGUF transformer, largest tier           |
+| Model                             | Path      | Notes                                         |
+| --------------------------------- | --------- | --------------------------------------------- |
+| `ltx-2-19b-dev:fp8`               | Two-stage | Highest-quality published 19B FP8 checkpoint  |
+| `ltx-2-19b-distilled:fp8`         | Distilled | Fastest 19B path, recommended default         |
+| `ltx-2.3-22b-dev:fp8`             | Two-stage | High-quality 22B FP8 checkpoint               |
+| `ltx-2.3-22b-distilled:fp8`       | Distilled | Fastest 22B path                              |
+| `ltx-2.3-22b-dev:bf16`            | Two-stage | Full-quality, trainable 22B reference weights |
+| `ltx-2.3-22b-distilled:bf16`      | Distilled | Full-precision eight-step 22B checkpoint      |
+| `ltx-2.5-22b-dev:int8-conv`       | Two-stage | Compact 22B dev split pack                    |
+| `ltx-2.5-22b-distilled:int8-conv` | Distilled | Recommended compact LTX-2.5 Metal default     |
+| `ltx-2.5-22b-dev:bf16-conv`       | Two-stage | Full-precision Conv-VAE split pack; deferred  |
+| `ltx-2.5-22b-distilled:bf16-conv` | Distilled | Full-precision Conv-VAE pack; deferred        |
+| `ltx-2.5-22b-dev:bf16`            | Two-stage | Diffusion-VAE reference pack; deferred        |
+| `ltx-2.5-22b-distilled:bf16`      | Distilled | Diffusion-VAE reference; deferred             |
+| `ltx-2.5-22b-distilled:q3-k-s`    | Distilled | 11.78 GiB GGUF transformer, smallest tier     |
+| `ltx-2.5-22b-distilled:q3`        | Distilled | Q3_K_M GGUF transformer                       |
+| `ltx-2.5-22b-distilled:q4-k-s`    | Distilled | 14.27 GiB GGUF transformer                    |
+| `ltx-2.5-22b-distilled:q4`        | Distilled | Q4_K_M GGUF transformer, fits 24 GB resident  |
+| `ltx-2.5-22b-distilled:q5`        | Distilled | Q5_K_M GGUF transformer                       |
+| `ltx-2.5-22b-distilled:q6`        | Distilled | Q6_K GGUF transformer                         |
+| `ltx-2.5-22b-distilled:q8`        | Distilled | Q8_0 GGUF transformer, largest tier           |
 
 Bare `ltx-2.3-22b-dev` and `ltx-2.3-22b-distilled` names continue to select
 FP8. Choose `:bf16` explicitly for the upstream reference precision used for
