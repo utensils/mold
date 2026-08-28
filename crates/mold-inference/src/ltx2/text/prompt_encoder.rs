@@ -300,6 +300,14 @@ fn embeddings_var_builder(
     dtype: DType,
     device: &Device,
 ) -> Result<VarBuilder<'static>> {
+    if crate::ltx2::gguf::checkpoint_is_gguf(path) {
+        let backend = crate::ltx2::gguf::Ltx2GgufBackend::from_path(path)?;
+        return Ok(VarBuilder::from_backend(
+            Box::new(backend),
+            dtype,
+            device.clone(),
+        ));
+    }
     if crate::ltx2::convrot::checkpoint_is_convrot_w4a4(path) {
         let backend = crate::ltx2::convrot::Ltx2ConvRotBackend::from_flattened_path(path)?;
         return Ok(VarBuilder::from_backend(
@@ -313,6 +321,27 @@ fn embeddings_var_builder(
 }
 
 fn connector_prefixes(checkpoint_path: &std::path::Path) -> Result<(&'static str, &'static str)> {
+    if crate::ltx2::gguf::checkpoint_is_gguf(checkpoint_path) {
+        // A GGUF header cannot be mmapped as safetensors; the weight index
+        // reads it bounded and hands back canonical (bare, ComfyUI-named)
+        // keys, which is also the namespace the GGUF backend resolves.
+        let index = mold_core::ltx2_weight_index::Ltx2TransformerWeightIndex::read(checkpoint_path)
+            .with_context(|| {
+                format!(
+                    "read LTX-2 GGUF connector index at {}",
+                    checkpoint_path.display()
+                )
+            })?;
+        return connector_prefixes_from_keys(
+            index.tensors().iter().map(|tensor| tensor.name.as_str()),
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "LTX-2 checkpoint {} contains no video/audio embeddings connector weights",
+                checkpoint_path.display()
+            )
+        });
+    }
     let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::new(checkpoint_path) }
         .with_context(|| {
             format!(

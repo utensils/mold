@@ -460,9 +460,6 @@ fn boxed_inference_engine(engine: impl InferenceEngine + 'static) -> Box<dyn Inf
 }
 
 fn validate_ltx25_runtime_paths(model_name: &str, paths: &ModelPaths) -> Result<()> {
-    if mold_core::ltx25_manifest::is_gguf_manifest(model_name) {
-        anyhow::bail!(mold_core::ltx25_manifest::GGUF_RUNTIME_UNAVAILABLE_REASON);
-    }
     match model_name {
         name if mold_core::ltx25_manifest::is_runtime_manifest(name) => {}
         _ => anyhow::bail!(

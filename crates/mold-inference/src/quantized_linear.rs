@@ -196,10 +196,6 @@ pub(crate) struct DequantFallback {
     pub(crate) bias: Option<Tensor>,
 }
 
-// The LTX-2.5 GGUF linear arm (the following commit) is the first
-// consumer of the assembled struct; the pure functions above are live
-// through Qwen-Image and Z-Image already.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone)]
 enum QuantizedLinearArm {
     /// Per-forward dequantization to the kernel dtype.
@@ -219,7 +215,6 @@ enum QuantizedLinearArm {
 /// kernels return the dtype they were fed, and the bias is materialized at
 /// `kernel_dtype`), and the output is cast back to the caller's dtype so the
 /// arm choice never leaks into the surrounding model's dtype flow.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone)]
 pub(crate) struct QuantizedLinear {
     arm: QuantizedLinearArm,
@@ -235,7 +230,6 @@ impl std::fmt::Debug for QuantizedLinear {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl QuantizedLinear {
     /// Build a linear over `weight`, choosing the arm through
     /// [`select_linear_kind`] for `device`. `bias` is expected dense

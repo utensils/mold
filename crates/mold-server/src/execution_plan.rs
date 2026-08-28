@@ -3346,15 +3346,16 @@ fn ltx2_cpu_gemma_streams_from_mmap(family: &str, role: &ComponentRole, path: &P
         && mold_inference::ltx2::cpu_gemma_allocates_anon_peak(path)
 }
 
-/// Whether LTX-2 block streaming keeps the checkpoint as a reclaimable file
-/// mapping instead of copying the full artifact into anonymous host memory.
+/// Whether LTX-2 block streaming keeps the checkpoint out of anonymous host
+/// memory, materializing one tensor at a time.
 ///
-/// Both the ordinary safetensors backend and the ConvRot backend retain an
-/// mmap and materialize one block/weight at a time. Charging the complete
-/// transformer again as concurrent host residency is especially wrong on
-/// Metal, where that charge is folded back into the same unified-memory gate.
-/// The real transient is bounded by `BASE_HOST_TRANSIENT` (the largest
-/// official LTX-2.5 packed weight is 64 MiB).
+/// The ordinary safetensors and ConvRot backends retain a reclaimable mmap;
+/// the GGUF backend seeks one tensor at a time through a buffered reader
+/// (`Ltx2GgufBackend`), so its transient is one raw tensor payload (≤ 67 MB
+/// at Q8_0). Charging the complete transformer again as concurrent host
+/// residency is especially wrong on Metal, where that charge is folded back
+/// into the same unified-memory gate. The real transient for every format is
+/// bounded by `BASE_HOST_TRANSIENT`.
 fn ltx2_transformer_streams_from_mmap(family: &str, role: &ComponentRole, path: &Path) -> bool {
     matches!(family, "ltx2" | "ltx-2" | "ltx2.3")
         && matches!(
@@ -3363,9 +3364,9 @@ fn ltx2_transformer_streams_from_mmap(family: &str, role: &ComponentRole, path: 
                 | ComponentRole::TransformerShard(_)
                 | ComponentRole::LowNoiseTransformer
         )
-        && path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+        && path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("safetensors") || extension.eq_ignore_ascii_case("gguf")
+        })
 }
 
 fn ltx2_cpu_gemma_anon_peak_anchor(
@@ -4293,9 +4294,10 @@ fn hash_equivalence_artifact_contents(path: &Path) -> std::io::Result<Equivalenc
 }
 
 fn verified_sha256_marker_digest(path: &Path) -> Option<String> {
-    let marker = mold_core::download::sha256_marker_path(path);
-    let digest = std::fs::read_to_string(marker).ok()?;
-    let digest = digest.trim();
+    // The marker's digest is its FIRST LINE: since the size-aware marker
+    // format landed, a second `len=` line records the attested byte length,
+    // so reading the whole file as the digest rejects every fresh marker.
+    let digest = mold_core::download::recorded_sha256_marker(path)?;
     (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| digest.to_ascii_lowercase())
 }
@@ -4646,6 +4648,35 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LTX-2 transformer streaming holds no anonymous whole-artifact host
+    /// copy for either container: safetensors backends stream from an mmap
+    /// and the GGUF backend seeks one tensor at a time, so both charge only
+    /// the base transient.
+    #[test]
+    fn ltx2_transformer_streaming_charges_no_anon_copy_for_safetensors_or_gguf() {
+        let role = ComponentRole::Transformer;
+        assert!(ltx2_transformer_streams_from_mmap(
+            "ltx2",
+            &role,
+            Path::new("/models/ltx-2.5/transformer.safetensors"),
+        ));
+        assert!(ltx2_transformer_streams_from_mmap(
+            "ltx2",
+            &role,
+            Path::new("/models/ltx-2.5/LTX-2.5-Distilled-Q4_K_M.gguf"),
+        ));
+        assert!(!ltx2_transformer_streams_from_mmap(
+            "ltx2",
+            &role,
+            Path::new("/models/ltx-2.5/transformer.bin"),
+        ));
+        assert!(!ltx2_transformer_streams_from_mmap(
+            "wan",
+            &role,
+            Path::new("/models/wan/transformer.gguf"),
+        ));
+    }
     use mold_core::{
         AdvancedPlacement, GenerationReference, GenerationReferenceAuthority,
         GenerationReferenceProvenance, ModelConfig,

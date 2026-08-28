@@ -1986,16 +1986,6 @@ fn validate_generate_request_after_activation_with(
 ) -> Result<(), String> {
     let family = resolved_family(&req.model, family_hint);
 
-    let has_lora = req.lora.is_some() || req.loras.as_ref().is_some_and(|loras| !loras.is_empty());
-    if has_lora
-        && crate::ltx25_manifest::is_gguf_manifest(&crate::manifest::resolve_model_name(&req.model))
-    {
-        return Err(format!(
-            "LoRAs are not supported with LTX-2.5 GGUF model {}; choose an official safetensors variant or remove the LoRA before queueing",
-            req.model
-        ));
-    }
-
     if req.references.is_some() && !family.is_some_and(crate::minimax_h3::is_family) {
         return Err(
             "references is only supported by MiniMax H3 Ref2VA; other families retain their existing source/edit fields"
@@ -7948,21 +7938,23 @@ mod tests {
         assert!(validate_generate_request(&req).is_ok());
     }
 
+    /// LoRAs on a GGUF tier are real support since #1414: adapters apply as
+    /// a parallel low-rank branch, never merged into the quantized weight,
+    /// so admission no longer refuses the pair.
     #[test]
-    fn ltx25_gguf_rejects_lora_before_model_loading() {
+    fn ltx25_gguf_admits_lora_requests() {
         let mut req = valid_req();
         req.model = crate::ltx25_manifest::DISTILLED_Q4.to_string();
+        // valid_req is image-shaped; LTX-2 requires a video container.
+        req.output_format = Some(OutputFormat::Mp4);
         req.lora = Some(LoraWeight {
             path: "adapter.safetensors".into(),
             scale: 1.0,
             expert: None,
         });
 
-        let admission_error = validate_generate_request(&req).unwrap_err();
-        assert!(admission_error.contains(crate::LTX25_GGUF_RUNTIME_UNAVAILABLE));
-
-        let error = validate_generate_request_after_activation(&req, None).unwrap_err();
-        assert!(error.contains("LoRAs are not supported with LTX-2.5 GGUF"));
-        assert!(error.contains("before queueing"));
+        validate_generate_request(&req).expect("GGUF + LoRA is admitted");
+        validate_generate_request_after_activation(&req, None)
+            .expect("GGUF + LoRA passes family validation");
     }
 }

@@ -1292,7 +1292,9 @@ fn materialize_gemma(
             );
         }
         frozen.ltx2_gemma_variant = Some(
-            if model_name.contains(":int8-conv") {
+            // The int8-conv packs and every GGUF tier ship the packed INT8
+            // ConvRot Gemma 4 companion; the manifest list is the authority.
+            if mold_core::ltx25_manifest::uses_int8_gemma(model_name) {
                 "int8"
             } else {
                 "bf16"
@@ -4299,6 +4301,50 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("Q4 Gemma 3 override is incompatible"));
+    }
+
+    /// Every GGUF tier reuses the int8-conv companion graph, so each
+    /// freezes the packed INT8 Gemma 4 encoder — never the BF16 one.
+    #[test]
+    fn ltx25_gguf_tiers_freeze_the_int8_gemma_variant() {
+        let root = TempDir::new().unwrap();
+        let packed = root
+            .path()
+            .join("gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors");
+        std::fs::write(&packed, b"packed weights and tokenizer").unwrap();
+        let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            transformer: root.path().join("transformer.gguf"),
+            transformer_shards: Vec::new(),
+            vae: root.path().join("vae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![packed.clone()],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        for tier in [
+            mold_core::ltx25_manifest::DISTILLED_Q3_K_S,
+            mold_core::ltx25_manifest::DISTILLED_Q3,
+            mold_core::ltx25_manifest::DISTILLED_Q4_K_S,
+            mold_core::ltx25_manifest::DISTILLED_Q4,
+            mold_core::ltx25_manifest::DISTILLED_Q5,
+            mold_core::ltx25_manifest::DISTILLED_Q6,
+            mold_core::ltx25_manifest::DISTILLED_Q8,
+        ] {
+            let mut frozen = mold_inference::FrozenEngineConfig::resolve(tier, &Config::default());
+            materialize_gemma(tier, None, &paths, &mut frozen).unwrap();
+            assert_eq!(frozen.ltx2_gemma_variant.as_deref(), Some("int8"), "{tier}");
+            assert_eq!(frozen.selected_gemma_paths, vec![packed.clone()], "{tier}");
+        }
     }
 
     #[test]

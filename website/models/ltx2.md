@@ -54,13 +54,13 @@ so those two files retain Apache-2.0 portions — see the repository's
 | `ltx-2.5-22b-distilled:bf16-conv`      | Distilled | Full-precision Conv-VAE pack; deferred        |
 | `ltx-2.5-22b-dev:bf16`                 | Two-stage | Diffusion-VAE reference pack; deferred        |
 | `ltx-2.5-22b-distilled:bf16`           | Distilled | Diffusion-VAE reference; deferred             |
-| `ltx-2.5-22b-distilled:q3-k-s`          | Distilled | 11.78 GiB GGUF transformer; download-only     |
-| `ltx-2.5-22b-distilled:q3`              | Distilled | Q3_K_M GGUF transformer; download-only        |
-| `ltx-2.5-22b-distilled:q4-k-s`          | Distilled | 14.27 GiB GGUF transformer; download-only     |
-| `ltx-2.5-22b-distilled:q4`              | Distilled | Q4_K_M GGUF transformer; download-only        |
-| `ltx-2.5-22b-distilled:q5`              | Distilled | Q5_K_M GGUF transformer; download-only        |
-| `ltx-2.5-22b-distilled:q6`              | Distilled | Q6_K GGUF transformer; download-only          |
-| `ltx-2.5-22b-distilled:q8`              | Distilled | Q8_0 GGUF transformer; download-only          |
+| `ltx-2.5-22b-distilled:q3-k-s`         | Distilled | 11.78 GiB GGUF transformer, smallest tier     |
+| `ltx-2.5-22b-distilled:q3`             | Distilled | Q3_K_M GGUF transformer                       |
+| `ltx-2.5-22b-distilled:q4-k-s`         | Distilled | 14.27 GiB GGUF transformer                    |
+| `ltx-2.5-22b-distilled:q4`             | Distilled | Q4_K_M GGUF transformer, fits 24 GB resident  |
+| `ltx-2.5-22b-distilled:q5`             | Distilled | Q5_K_M GGUF transformer                       |
+| `ltx-2.5-22b-distilled:q6`             | Distilled | Q6_K GGUF transformer                         |
+| `ltx-2.5-22b-distilled:q8`             | Distilled | Q8_0 GGUF transformer, largest tier           |
 
 Bare `ltx-2.3-22b-dev` and `ltx-2.3-22b-distilled` names continue to select
 FP8. Choose `:bf16` explicitly for the upstream reference precision used for
@@ -81,10 +81,13 @@ the repository terms and configure a Hugging Face token before pulling.
 
 The GGUF transformer files come from the public Abiray derivative at a pinned
 revision and reuse the official gated companion pack. Mold validates their
-GGUF v3 metadata, A/V tensors, shapes, and supported dtypes, but advertises
-them as download-only until native QTensor execution and quantized residency
-pricing are complete. `:q3` and `:q4` mean K_M; K_S uses explicit tags. LoRAs
-fail before queueing on these variants.
+GGUF v3 metadata, A/V tensors, shapes, and supported dtypes, and runs them
+natively: block linears stay quantized at rest and dequantize per forward on
+CUDA by default (`MOLD_LTX2_QMATMUL=1` opts into candle's quantized fast
+path; Metal keeps `QMatMul`), so the smaller tiers sit fully resident where
+the BF16 packs stream — Q4_K_M fits a 24 GB card. `:q3` and `:q4` mean K_M;
+K_S uses explicit tags. LoRAs apply as a parallel low-rank branch; full-weight
+`.diff` deltas are refused on GGUF tiers.
 
 ## LTX-2.5 Metal quick start
 
