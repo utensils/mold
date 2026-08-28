@@ -4381,6 +4381,23 @@ button:disabled {
   font: inherit;
 }
 
+.mobile-host-queue-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.mobile-host-queue-pause {
+  min-width: 72px;
+  min-height: 44px;
+  border: 0;
+  padding: 0 8px;
+  color: var(--safelight);
+  font: inherit;
+}
+
 .telemetry-panel {
   display: grid;
   gap: 11px;

@@ -140,10 +140,33 @@ describe("held rows", () => {
       },
     });
 
-    expect(wrapper.text()).toContain("held");
+    expect(wrapper.text()).toContain("Held");
     expect(wrapper.text()).toContain("dispatch attempts exhausted");
     expect(wrapper.find("[data-test='queue-cancel']").exists()).toBe(true);
     expect(wrapper.find("[data-test='cancel-all']").exists()).toBe(false);
+  });
+});
+
+describe("host-wide pause presentation", () => {
+  it("updates queued row status while preserving a held row", () => {
+    const wrapper = mount(QueueCard, {
+      props: {
+        paused: true,
+        gpuOrdinals: [],
+        entries: [
+          { ...listing()[1]!, position: 0 },
+          {
+            ...listing()[2]!,
+            state: "held" as const,
+            held_reason: "operator action",
+          },
+        ],
+      },
+    });
+
+    const rows = wrapper.findAll("[data-test='queue-row']");
+    expect(rows[0]!.text()).toContain("Queue paused");
+    expect(rows[1]!.text()).toContain("Held");
   });
 });
 
@@ -188,6 +211,32 @@ describe("restart-paused rows", () => {
     expect(wrapper.find("[data-test='cancel-all']").exists()).toBe(true);
     await wrapper.get("[data-test='pause-toggle']").trigger("click");
     expect(wrapper.emitted("togglePause")).toHaveLength(1);
+  });
+
+  it("keeps an ordinary queued row waiting when only another row is restart-paused", () => {
+    const wrapper = mount(QueueCard, {
+      props: {
+        canPause: true,
+        paused: false,
+        gpuOrdinals: [],
+        entries: [
+          {
+            id: "srv-paused",
+            model: "flux2-klein",
+            state: "paused" as const,
+            started_at_unix_ms: 1,
+            position: 0,
+          },
+          { ...listing()[1]!, position: 1 },
+        ],
+      },
+    });
+
+    const rows = wrapper.findAll("[data-test='queue-row']");
+    expect(rows[0]!.text()).toContain("Paused");
+    expect(rows[1]!.text()).toContain("#1 in line");
+    expect(rows[1]!.text()).not.toContain("Queue paused");
+    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Resume");
   });
 });
 

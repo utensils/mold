@@ -99,6 +99,7 @@ interface HostTelemetry {
   version: string | null;
   instanceId: string | null;
   queueDepth: number | null;
+  queuePaused: boolean | null;
   gpu: RoutableGpu | null;
   predictedCompletionMs: number | null;
   /** Last good `/api/queue` read, retained through a blip so a live queue
@@ -344,7 +345,14 @@ const queueStatus = computed<QueueStatusIndex>(() =>
   buildQueueStatusIndex(
     Object.entries(telemetry.value).flatMap(([hostId, live]) =>
       live.queue
-        ? [{ hostId, entries: live.queue.entries, plan: live.queue.plan }]
+        ? [
+            {
+              hostId,
+              entries: live.queue.entries,
+              plan: live.queue.plan,
+              paused: live.queuePaused,
+            },
+          ]
         : [],
     ),
   ),
@@ -531,6 +539,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
         version: null,
         instanceId: entry.instanceId ?? null,
         queueDepth: null,
+        queuePaused: null,
         gpu: null,
         predictedCompletionMs: null,
         queue: null,
@@ -571,6 +580,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
         version: status.value.version ?? null,
         instanceId: nextInstanceId,
         queueDepth: status.value.queue_depth ?? null,
+        queuePaused: status.value.queue_paused ?? null,
         gpu: gpuFromStatus(status.value, inventory),
         predictedCompletionMs: mergedQueue?.plan
           ? predictedCompletionUnixMs(mergedQueue.plan)
@@ -598,6 +608,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
             version: null,
             instanceId: entry.instanceId ?? null,
             queueDepth: null,
+            queuePaused: null,
             gpu: null,
             predictedCompletionMs: null,
             queue: null,

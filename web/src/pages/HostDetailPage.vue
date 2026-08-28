@@ -1176,7 +1176,7 @@ onBeforeUnmount(() => {
           :can-cancel-all="caps?.queue?.can_cancel_all === true"
           :can-cancel-running="caps?.queue?.cooperative_cancellation === true"
           :cancelling-ids="cancellingIds"
-          :paused="resumeNeeded"
+          :paused="paused"
           :dimmed="reconnecting"
           @cancel="onCancel"
           @inspect="inspectedId = $event"

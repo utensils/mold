@@ -5721,12 +5721,14 @@ describe("MobileApp generation queue", () => {
     await control.trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/pause", { method: "POST" });
+    expect(row.get("[data-test='mobile-generation-status']").text()).toBe("QUEUE PAUSED");
     const resume = row.get("[data-test='swipe-action-queue-resume']");
     expect(resume.text()).toBe("Resume");
 
     await resume.trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/resume", { method: "POST" });
+    expect(row.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED");
     expect(row.get("[data-test='swipe-action-queue-pause']").text()).toBe("Pause");
   });
 
