@@ -796,6 +796,8 @@ artifact pass and so overstates the anonymous working set.
 | --- | --- | --- | --- | --- | --- |
 | a | image | 21 | 124 s | — | **Refused at admission** (#825, pre-#1418 pad-grid charge): 34,330,890,090 host bytes needed against a 34,294,289,818 byte sample |
 | a′ | image | 4 | 2,708 s | 9,104 MiB | H.264 768x768 x124 + AAC (#1418, 2026-08-27: base tag, seed 770021, one 768x768 PNG normalized to 2048x2048) |
+| a″ | image | 4 | 302 s | 18,794 MiB | H.264 768x768 x124 + AAC (#1423, 2026-08-28: row a′'s exact request with the conditioner placed on the CUDA device; frame-for-frame the same print, PSNR 32.1 dB against a′) |
+| a‴ | image | 21 | 918 s | — | H.264 768x768 x124 + AAC (2026-08-28: row a″'s request at ComfyUI's 21-step default on the CUDA route — the QUALITY control; VRAM not sampled) |
 | b | video (with soundtrack) | 8 | 1,604 s | 15,024 MiB | H.264 1344x768 x124 + AAC |
 | c | image, audio | 8 | 3,100 s | 12,594 MiB | H.264 1344x768 x124 + AAC |
 | g | video (with soundtrack), audio, audio | 8 | 1,575 s | 15,138 MiB | H.264 + AAC, seed 825825 |
@@ -893,8 +895,48 @@ growth, file-backed pages included), condition-VAE workspace 404,685,888 B
 for the single 2048-square still, attention 4,658,918,392 B, FFN
 5,794,354,680 B, decoder 764,965,012 B, audio decode 204,867,120 B.
 
-**The host, not the card, is the binding constraint.** The compact stack places
-its Qwen3-VL conditioner on the CPU for a CUDA route, so the host demand is its
+**Row `a″` is row `a′` on the device route (#1423, 2026-08-28).** Same
+request, same seed, same reference, `mold-r8` built from the #1423 branch and
+run exactly as `a′` was (the `mold` user, the production home, ARC capped).
+Admission placed the conditioner on the CUDA device because the Qwen phase fit:
+predicted device peak 18,078,178,784 B against 25,229,524,992 B available.
+Phases: open checkpoints 92.2 s, Qwen conditioner load 53.6 s, **Qwen encode
+24.6 s** (was 2,405.6 s on the host route — 98x), reference visual encode
+5.6 s, denoise 91.1 s at 4 steps, video decode 23.4 s, H.264 encode 19.7 s;
+302 s POST to MP4 against 2,708 s. VRAM high water 18,794 MiB (1 Hz
+`nvidia-smi`), 5.5 GB under the card; process anonymous RSS peaked at 14.9 GB
+(`VmHWM` 15.1 GB) against `a′`'s 51.1 GB: the DiT phases run identically on
+both routes, so this route bounds their own anonymous demand at 14.9 GB and
+the 36 GB that `a′` carried above it belonged to the host-placed conditioner
+(its recorded activation workspace was 36,013,621,248 B), which narrows the
+accounting question that row left open to the CPU route. The vision tower's attention is query-chunked on this
+route (`vision_attention_query_chunk_rows`: a 16,384-patch reference runs
+1,024-row chunks), and the print is the same print: every sampled frame matches
+`a′` by eye and the H.264 streams compare at 32.1 dB PSNR, which is CUDA-vs-CPU
+conditioner arithmetic plus two independent encodes, not a change of content.
+
+**Row `a‴` is the quality control, and rows `a′`/`a″` are not.** The two
+4-step rows are the base (undistilled) tag at four terminal-inclusive grid
+points — THREE transformer forwards, sigmas 1.0 → 0.960 → 0.858 → 0 on the
+shift-12 schedule — so their print is close to the x0 estimate at 86% noise:
+the decoded clip flashes once per latent frame (frame-difference spikes on
+the `17n+5` latent boundaries) and the reference subject ghosts into the
+opening frames. Those rows are timing measurements and nothing else. `a‴` is
+the same request, seed, and reference at ComfyUI's 21-step default (mold's
+`COMFY_DEFAULT_STEPS`; the manifest default is 50): a coherent trotting fox
+with the camera tracking alongside and a smooth frame-difference ramp, 642 s
+of denoise inside 918 s. The 2026-08-28 audit against ComfyUI 0a33ed6 and the
+official diffusers modular pipeline found the reference-conditioning geometry
+(time positions, spatial grid, ref timestep 0.999, clean re-injection, token
+tags, labels, 2048 short-edge normalization — which is the official
+`reference_image_short_edge`, ComfyUI alone defaulting to down-only) matched
+on every axis; the confirmed divergences it did find are #1430–#1433 and
+none of them touches a PNG image reference. Only a Turbo tag's distilled
+schedule is a 4- or 8-step recipe.
+
+**On the host route the host, not the card, is the binding constraint.** Until
+#1423 the compact stack placed its Qwen3-VL conditioner on the CPU for every
+CUDA route (it still does when the Qwen phase does not fit), so the host demand is its
 15.687 GB of parameters plus a request-derived activation workspace that scales
 with the conditioner sequence. One 2048-square image reference asks for
 34,330,890,090 bytes of host headroom; the card never exceeded 15.2 GB in any

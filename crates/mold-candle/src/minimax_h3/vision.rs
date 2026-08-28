@@ -320,12 +320,25 @@ impl VisionAttention {
                 .unsqueeze(0)?
                 .contiguous()?;
             let key_transposed = key.transpose(2, 3)?.contiguous()?;
-            let scores = (matmul_with_cpu_bf16_fallback(&query, &key_transposed)?
-                / (self.head_dimension as f64).sqrt())?;
-            let probabilities = candle_nn::ops::softmax_last_dim(&scores.to_dtype(DType::F32)?)?
-                .to_dtype(value.dtype())?;
+            let query_chunk = vision_attention_query_chunk_rows(self.num_heads, length);
+            let mut chunk_outputs = Vec::with_capacity(length.div_ceil(query_chunk));
+            for chunk_start in (0..length).step_by(query_chunk) {
+                let rows = query_chunk.min(length - chunk_start);
+                let query = query.narrow(2, chunk_start, rows)?;
+                let scores = (matmul_with_cpu_bf16_fallback(&query, &key_transposed)?
+                    / (self.head_dimension as f64).sqrt())?;
+                let probabilities =
+                    candle_nn::ops::softmax_last_dim(&scores.to_dtype(DType::F32)?)?
+                        .to_dtype(value.dtype())?;
+                chunk_outputs.push(matmul_with_cpu_bf16_fallback(&probabilities, &value)?);
+            }
+            let attended = if chunk_outputs.len() == 1 {
+                chunk_outputs.pop().expect("one chunk")
+            } else {
+                Tensor::cat(&chunk_outputs, 2)?
+            };
             outputs.push(
-                matmul_with_cpu_bf16_fallback(&probabilities, &value)?
+                attended
                     .squeeze(0)?
                     .transpose(0, 1)?
                     .reshape((length, self.num_heads * self.head_dimension))?
@@ -335,6 +348,50 @@ impl VisionAttention {
         let refs = outputs.iter().collect::<Vec<_>>();
         linear_with_cpu_bf16_fallback(&self.projection, &Tensor::cat(&refs, 0)?)
     }
+}
+
+/// Score elements one attention chunk may materialize: `heads x Q x N`.
+///
+/// The vision tower attends densely within each image span and the released
+/// tower has no window: a 2048-square reference is N = 16,384 patches, so the
+/// unchunked `[1, 16, N, N]` scores plus their f32 softmax copy were ~34 GB
+/// per layer (#1423) — impossible on any device and the whole of the CPU
+/// route's host peak. Softmax is per query row, so chunking the QUERY axis is
+/// exact: every row's scores, softmax, and value product are the same numbers
+/// in the same order, only fewer rows at a time. 2^28 elements bounds one
+/// chunk's transient at ~2 GiB (bf16 scores + f32 softmax + bf16 probs), and
+/// is wide enough that FL2VA's 4,032-patch endpoint (16 x 4,032^2 = 2^28.0)
+/// and every video block stay single-chunk, so their arithmetic is untouched.
+const VISION_ATTENTION_SCORE_ELEMENT_BUDGET: usize = 1 << 28;
+
+/// Query rows per attention chunk for one span of `length` patches.
+pub fn vision_attention_query_chunk_rows(num_heads: usize, length: usize) -> usize {
+    vision_attention_query_chunk_rows_for_budget(num_heads, length, score_element_budget())
+}
+
+fn vision_attention_query_chunk_rows_for_budget(
+    num_heads: usize,
+    length: usize,
+    budget: usize,
+) -> usize {
+    let per_row = num_heads.max(1) * length.max(1);
+    (budget / per_row).clamp(1, length.max(1))
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCORE_ELEMENT_BUDGET_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn score_element_budget() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(budget) = SCORE_ELEMENT_BUDGET_OVERRIDE.with(|cell| cell.get()) {
+            return budget;
+        }
+    }
+    VISION_ATTENTION_SCORE_ELEMENT_BUDGET
 }
 
 struct VisionBlock {
@@ -827,6 +884,91 @@ mod tests {
         assert!(deepstack
             .iter()
             .all(|tensor| tensor.dims() == [1, 12] && tensor.dtype() == DType::BF16));
+    }
+
+    /// Chunking the query axis is exact: every row's scores, softmax, and
+    /// value product are the same numbers, only fewer rows at a time. A
+    /// forced budget that splits a 64-patch span into uneven chunks must
+    /// reproduce the single-chunk tower to f32 rounding.
+    #[test]
+    fn query_chunked_attention_matches_the_unchunked_tower() {
+        let config = Qwen3VlVisionDimensions::tiny();
+        let vars = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vars, DType::F32, &Device::Cpu);
+        let model = Qwen3VlVisionModel::new(&config, vb).unwrap();
+        // Deterministic non-trivial weights and pixels.
+        for (_, var) in vars.data().lock().unwrap().iter() {
+            let n = var.elem_count();
+            let values = (0..n)
+                .map(|i| ((i * 7919 % 1013) as f32 / 1013.0 - 0.5) * 0.2)
+                .collect::<Vec<_>>();
+            var.set(&Tensor::from_vec(values, var.shape(), &Device::Cpu).unwrap())
+                .unwrap();
+        }
+        let patches = 8 * 8;
+        let pixels = Tensor::from_vec(
+            (0..patches * 24)
+                .map(|i| ((i * 31 % 97) as f32 / 97.0) - 0.5)
+                .collect::<Vec<_>>(),
+            (patches, 24),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let grid = Tensor::new(&[[1_u32, 8, 8]], &Device::Cpu).unwrap();
+        let (single, single_deepstack) = model.forward(&pixels, &grid, &mut |_| Ok(())).unwrap();
+        // heads 2 x 64 patches = 128 elements per query row; a budget of 640
+        // forces 5-row chunks over a 64-row span (12 full chunks + 4 rows).
+        assert_eq!(vision_attention_query_chunk_rows_for_budget(2, 64, 640), 5);
+        SCORE_ELEMENT_BUDGET_OVERRIDE.with(|cell| cell.set(Some(640)));
+        let chunked = model.forward(&pixels, &grid, &mut |_| Ok(()));
+        SCORE_ELEMENT_BUDGET_OVERRIDE.with(|cell| cell.set(None));
+        let (chunked, chunked_deepstack) = chunked.unwrap();
+        let max_delta = |a: &Tensor, b: &Tensor| -> f32 {
+            (a - b)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+        };
+        assert!(
+            max_delta(&single, &chunked) < 1e-5,
+            "{}",
+            max_delta(&single, &chunked)
+        );
+        for (a, b) in single_deepstack.iter().zip(&chunked_deepstack) {
+            assert!(max_delta(a, b) < 1e-5);
+        }
+        assert!(
+            single
+                .flatten_all()
+                .unwrap()
+                .abs()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+                > 0.0
+        );
+    }
+
+    /// The released tower (16 heads) keeps FL2VA's 4,032-patch endpoint and
+    /// every video block single-chunk, and splits a 2048-square reference's
+    /// 16,384 patches into 1,024-row chunks — the shapes #1423 measured.
+    #[test]
+    fn query_chunk_policy_pins_the_released_shapes() {
+        assert_eq!(vision_attention_query_chunk_rows(16, 4_032), 4_032);
+        assert_eq!(vision_attention_query_chunk_rows(16, 2_304), 2_304);
+        assert_eq!(vision_attention_query_chunk_rows(16, 16_384), 1_024);
+        assert_eq!(vision_attention_query_chunk_rows(16, 7_296), 2_299);
+        assert_eq!(vision_attention_query_chunk_rows(16, 0), 1);
+        let budget = score_element_budget();
+        assert!(16 * 4_032 * 4_032 <= budget);
     }
 
     #[test]
