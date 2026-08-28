@@ -52,8 +52,8 @@ so those two files retain Apache-2.0 portions — see the repository's
 | `ltx-2.5-22b-distilled:int8-conv`      | Distilled | Recommended compact LTX-2.5 Metal default     |
 | `ltx-2.5-22b-dev:bf16-conv`            | Two-stage | Full-precision Conv-VAE split pack; deferred  |
 | `ltx-2.5-22b-distilled:bf16-conv`      | Distilled | Full-precision Conv-VAE pack; deferred        |
-| `ltx-2.5-22b-dev:bf16-diffusion`       | Two-stage | Diffusion-VAE reference pack; deferred        |
-| `ltx-2.5-22b-distilled:bf16-diffusion` | Distilled | Diffusion-VAE reference; deferred             |
+| `ltx-2.5-22b-dev:bf16`                 | Two-stage | Diffusion-VAE reference pack; deferred        |
+| `ltx-2.5-22b-distilled:bf16`           | Distilled | Diffusion-VAE reference; deferred             |
 | `ltx-2.5-22b-distilled:q3-k-s`          | Distilled | 11.78 GiB GGUF transformer; download-only     |
 | `ltx-2.5-22b-distilled:q3`              | Distilled | Q3_K_M GGUF transformer; download-only        |
 | `ltx-2.5-22b-distilled:q4-k-s`          | Distilled | 14.27 GiB GGUF transformer; download-only     |

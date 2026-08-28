@@ -6157,6 +6157,45 @@ mod tests {
         );
     }
 
+    /// A downloadable-but-not-runnable LTX-2.5 GGUF tier is refused BEFORE the
+    /// row is durably accepted, with the typed `501` a client can act on, and
+    /// leaves nothing in the journal to hold or replay. Flips to `202` once the
+    /// native quantized runtime lands (#1414).
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx25_gguf_batch_is_refused_with_501_before_the_journal_row_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let gguf = generate_body_for_model(
+            "a quantized transformer this build cannot run",
+            mold_core::ltx25_manifest::DISTILLED_Q4,
+            512,
+            512,
+        );
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [serde_json::from_str::<serde_json::Value>(&gguf).unwrap()],
+        });
+
+        let response = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let response_body = json_body(response).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{response_body}");
+        assert_eq!(
+            response_body["code"],
+            mold_core::LTX25_GGUF_RUNTIME_UNAVAILABLE
+        );
+        assert!(journal.list_all().is_empty(), "nothing was admitted");
+        assert_eq!(state.job_registry.len(), 0);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn direct_stream_uses_queue_first_admission_without_media_or_operation_header() {
         let root = tempfile::tempdir().unwrap();

@@ -37,8 +37,17 @@ pub(crate) fn resolve_spatial_upscaler_path(
     match mode {
         None | Some(Ltx2SpatialUpscale::X2) => Ok(paths.spatial_upscaler.clone()),
         Some(Ltx2SpatialUpscale::X1_5) => {
-            if !model_name.contains("ltx-2.3") {
-                bail!("x1.5 spatial upscaling is currently published for LTX-2.3 only");
+            // The preset owns the capability: LTX-2.3 publishes an x1.5
+            // upsampler, the 19B and the 2.5 split packs do not, and the
+            // refusal must come from the same flag `/api/models` advertises
+            // rather than a second substring rule that can disagree with it.
+            let preset = super::preset::preset_for_model_with_hint(model_name, None)?;
+            if !preset.supports_spatial_upscale_x1_5 {
+                bail!(
+                    "x1.5 spatial upscaling is not published for {} (preset {})",
+                    model_name,
+                    preset.name
+                );
             }
             resolve_manifest_file(
                 model_name,
@@ -150,14 +159,33 @@ mod tests {
     }
 
     #[test]
-    fn x1_5_spatial_upscaling_is_rejected_for_19b_models() {
-        let err = resolve_spatial_upscaler_path(
-            "ltx-2-19b-distilled:fp8",
+    fn x1_5_spatial_upscaling_follows_the_presets_flag() {
+        for model in ["ltx-2-19b-distilled:fp8", "ltx-2.5-22b-distilled:int8-conv"] {
+            let err = resolve_spatial_upscaler_path(
+                model,
+                &dummy_paths(),
+                Some(Ltx2SpatialUpscale::X1_5),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("x1.5 spatial upscaling is not published"),
+                "{model}: {err}"
+            );
+        }
+        // LTX-2.3 keeps its manifest asset: the answer is the resolved file
+        // on a host that has it, or an asset-resolution error — never the
+        // capability refusal.
+        if let Err(err) = resolve_spatial_upscaler_path(
+            "ltx-2.3-22b-distilled:fp8",
             &dummy_paths(),
             Some(Ltx2SpatialUpscale::X1_5),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("LTX-2.3 only"));
+        ) {
+            assert!(
+                !err.to_string().contains("not published"),
+                "2.3 must not be refused by the capability flag: {err}"
+            );
+        }
     }
 
     #[test]

@@ -276,3 +276,80 @@ fn h3_with_source_media_is_refused_explicitly_instead_of_losing_conditioning() {
         ))
     ));
 }
+
+/// A GGUF LTX-2.5 row that reached the journal — persisted by a build whose
+/// admission did not yet ask model activation — must be refused at deferred
+/// preparation with the same typed `501` code the routes answer with, and
+/// parked as a hold rather than replayed or silently run.
+///
+/// Flips to "admitted, plan frozen with the GGUF transformer path" once the
+/// native quantized runtime lands (#1414).
+#[test]
+fn ltx25_gguf_row_replayed_from_journal_is_refused_at_deferred_preparation() {
+    use crate::durable_admission_authority::preparation_disposition;
+    use crate::durable_disposition::DurableDisposition;
+    use crate::execution_plan::{eligible_devices_for_request, DeviceFact, ExecutionPlanError};
+
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("gallery");
+    std::fs::create_dir_all(&output).unwrap();
+    let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+    let journal = Arc::new(QueueJournal::new(
+        db,
+        Some(root.path()),
+        "ltx25-gguf-replay-instance",
+    ));
+    let mut request = request("replayed GGUF row");
+    request.model = mold_core::ltx25_manifest::DISTILLED_Q4.to_string();
+    journal
+        .record_batch(BatchJournalAdmission {
+            id: "gguf-batch",
+            client_batch_id: "client-gguf-batch",
+            request_sha256: "gguf-replay-fingerprint",
+            children: &[JournalAdmission {
+                id: "gguf-replay",
+                request: &request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::MetadataOnly,
+                batch_child: false,
+            }],
+        })
+        .unwrap();
+
+    let claimed = journal.claim_next_feeder().unwrap().unwrap();
+    let replayed: GenerateRequest = serde_json::from_str(&claimed.row.request_json).unwrap();
+    assert_eq!(replayed.model, mold_core::ltx25_manifest::DISTILLED_Q4);
+
+    let devices = vec![DeviceFact {
+        id: "cuda:0".to_string(),
+        ordinal: 0,
+        backend: mold_core::GpuBackend::Cuda,
+        compute_capability: Some((8, 9)),
+        available_vram_bytes: 24 * 1024 * 1024 * 1024,
+    }];
+    let error = eligible_devices_for_request(&mold_core::Config::default(), &replayed, &devices)
+        .unwrap_err();
+    let ExecutionPlanError::ModelActivation(message) = &error else {
+        panic!("expected a model-activation refusal, got {error:?}");
+    };
+    assert!(
+        message.contains(mold_core::LTX25_GGUF_RUNTIME_UNAVAILABLE),
+        "{message}"
+    );
+
+    // The feeder parks the row on the routes' own typed error. A `501` is a
+    // server-side absence — the same class as `MINIMAX_H3_RUNTIME_UNAVAILABLE`
+    // — so the hold stays retryable: a rebuilt binary that ships the runtime
+    // can take the row back unchanged, and nothing about the request is wrong.
+    let activation =
+        mold_core::require_model_activation(&replayed.model, Some("ltx2")).unwrap_err();
+    let api_error = crate::routes::ApiError::model_activation(activation);
+    assert_eq!(api_error.code, mold_core::LTX25_GGUF_RUNTIME_UNAVAILABLE);
+    assert_eq!(api_error.status(), axum::http::StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(
+        preparation_disposition(&api_error),
+        DurableDisposition::Hold { retryable: true }
+    );
+}

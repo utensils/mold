@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, BufReader, Read};
 use std::path::Path;
 
 const MAX_HEADER_BYTES: u64 = 64 * 1024 * 1024;
@@ -167,7 +167,7 @@ impl<R: Read> Reader<R> {
 pub fn read_gguf_header(path: &Path) -> io::Result<GgufHeader> {
     let file = File::open(path)?;
     let mut reader = Reader {
-        inner: file,
+        inner: BufReader::new(file),
         consumed: 0,
     };
     if &reader.read_exact::<4>()? != b"GGUF" {

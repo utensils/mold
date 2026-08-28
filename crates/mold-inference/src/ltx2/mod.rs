@@ -25,6 +25,7 @@ mod tiling;
 pub use chain::{extract_tail_latents, tail_latent_frame_count};
 pub(crate) use model::DecodedAudio;
 pub use pipeline::Ltx2Engine;
+pub use runtime::{ltx2_transformer_weight_sizes, Ltx2TransformerWeightSizes};
 // Wan continues a clip the same way at the stitch layer -- drop the duplicated
 // leading frames, append the rest -- so the two share one implementation
 // rather than keeping a second chance to be off by one.

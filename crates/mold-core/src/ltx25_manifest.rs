@@ -55,7 +55,10 @@ const ALL: &[&str] = &[
 const DEV_BF16_VARIANTS: &[&str] = &[DEV, DEV_CONV];
 const DISTILLED_BF16_VARIANTS: &[&str] = &[DISTILLED, DISTILLED_CONV];
 const BF16_VARIANTS: &[&str] = &[DEV, DEV_CONV, DISTILLED, DISTILLED_CONV];
-const INT8_VARIANTS: &[&str] = &[
+/// Manifests that ship the packed INT8 ConvRot Gemma 4 encoder rather than
+/// the BF16 one: the two official int8-conv packs and every GGUF tier, whose
+/// companion graph is the int8-conv pack's.
+const INT8_GEMMA_VARIANTS: &[&str] = &[
     DEV_INT8_CONV,
     DISTILLED_INT8_CONV,
     DISTILLED_Q3_K_S,
@@ -193,7 +196,7 @@ const ASSETS: &[Asset] = &[
         component: ModelComponent::TextEncoder,
         size_bytes: 15_372_969_374,
         sha256: "6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f",
-        manifests: INT8_VARIANTS,
+        manifests: INT8_GEMMA_VARIANTS,
     },
     Asset {
         filename: "vae/ltx-2.5-video-vae-conv-bf16.safetensors",
@@ -328,6 +331,12 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
 
 pub fn is_gguf_manifest(name: &str) -> bool {
     DISTILLED_GGUF_VARIANTS.contains(&name)
+}
+
+/// Whether a 2.5 manifest's Gemma 4 encoder is the packed INT8 ConvRot
+/// export. Exact manifest names only; resolve aliases before asking.
+pub fn uses_int8_gemma(model_name: &str) -> bool {
+    INT8_GEMMA_VARIANTS.contains(&model_name)
 }
 
 pub fn gguf_tier(name: &str) -> Option<&'static str> {
@@ -529,6 +538,20 @@ mod tests {
                 assert!(manifest.files.iter().all(|file| file.gated));
             }
         }
+    }
+
+    #[test]
+    fn int8_gemma_is_the_int8_conv_packs_and_every_gguf_tier() {
+        for name in [DEV_INT8_CONV, DISTILLED_INT8_CONV] {
+            assert!(uses_int8_gemma(name), "{name}");
+        }
+        for name in DISTILLED_GGUF_VARIANTS {
+            assert!(uses_int8_gemma(name), "{name}");
+        }
+        for name in BF16_VARIANTS {
+            assert!(!uses_int8_gemma(name), "{name}");
+        }
+        assert!(!uses_int8_gemma("ltx-2.3-22b-distilled:fp8"));
     }
 
     #[test]
