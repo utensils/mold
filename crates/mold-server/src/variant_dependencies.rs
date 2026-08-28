@@ -2417,7 +2417,11 @@ async fn prepare_h3_private_inputs_for_devices(
                 crate::host_reclaim::host_shortfall_message(
                     &reclaim,
                     shortfall.required_host_bytes,
-                    shortfall.available_host_headroom_bytes,
+                    // The post-reclaim figure, from the SAME sample as the
+                    // ARC credit beside it: `available_host_headroom_bytes`
+                    // is assigned wherever `host_sample` is, while the
+                    // shortfall still holds the pre-reclaim attempt's number.
+                    available_host_headroom_bytes,
                     host_sample.reclaimable_zfs_arc_bytes,
                 )
             )),
