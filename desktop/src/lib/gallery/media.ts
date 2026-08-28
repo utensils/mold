@@ -1,6 +1,7 @@
 import { ApiError, apiFetch, apiFetchTo, currentTarget, type ApiTarget } from "../api/client";
 import type { GalleryImage } from "../api/types";
 import { inTauri, ipc } from "../ipc";
+import { thumbnailRenditionQuery } from "@studio/lib/thumbnailPersistentCache";
 
 /**
  * Gallery media sits behind X-Api-Key auth, and <img>/<video> cannot send
@@ -517,7 +518,9 @@ export const galleryMediaPath = (
       ? localThumbnailPath(filename, fromTrash)
       : localMediaPath(filename, fromTrash)
     : thumbnail
-      ? thumbnailPath(filename)
+      ? // The shared rendition policy rides every host tile request (this is
+        // the phone's thumbnail path); an older server ignores the query.
+        `${thumbnailPath(filename)}?${thumbnailRenditionQuery()}`
       : mediaPath(filename);
 
 /**

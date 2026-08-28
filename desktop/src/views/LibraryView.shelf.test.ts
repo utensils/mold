@@ -1028,8 +1028,8 @@ describe("Trash-aware This-Mac media + file actions", () => {
     // Host-backed trash rows stay on the API path (their server resolves
     // trashed rows itself).
     const hostMedia = tileFor(wrapper, trashed.filename).get("[data-test='authed-media']");
-    expect(hostMedia.attributes("data-path")).toBe(
-      `/api/gallery/thumbnail/${encodeURIComponent(trashed.filename)}`,
+    expect(hostMedia.attributes("data-path")).toMatch(
+      new RegExp(`^/api/gallery/thumbnail/${encodeURIComponent(trashed.filename)}\\?size=`),
     );
     wrapper.unmount();
   });

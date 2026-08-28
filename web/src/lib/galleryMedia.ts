@@ -24,7 +24,16 @@ import {
   thumbnailTier,
   type PersistentThumbnailStore,
 } from "@studio/lib/thumbnailPersistentCache";
-import { ORIGIN_HOST_ID, type HostEntry } from "./hostRegistry";
+import {
+  HOSTS_CHANGED_EVENT,
+  ORIGIN_HOST_ID,
+  listStoredHosts,
+  type HostEntry,
+} from "./hostRegistry";
+
+/** Additive response header a current server sets to the rendition it
+ *  actually produced (`256-png` / `512-jpg`). An older server omits it. */
+export const THUMBNAIL_RENDITION_HEADER = "x-mold-thumbnail-rendition";
 
 /** Blob object-URL cache, keyed by `${hostId}|${path}`. Ticket URLs are not
  *  cached — they are cheap to mint and expire, and the lightbox renews on open. */
@@ -107,6 +116,7 @@ async function fetchAuthedObjectUrl(
   path: string,
   signal?: AbortSignal,
   persistentKey?: string,
+  tier: 256 | 512 = 256,
 ): Promise<{ url: string; bytes: number }> {
   const store = persistentKey ? persistentStore() : null;
   if (store && persistentKey) {
@@ -125,7 +135,13 @@ async function fetchAuthedObjectUrl(
   const blob = await res.blob();
   if (signal?.aborted)
     throw new DOMException("Thumbnail cancelled", "AbortError");
-  if (store && persistentKey) void store.put(persistentKey, blob);
+  // An older server ignores `?size=512` and answers its 256 px PNG without
+  // the rendition header. Persisting that under the 512 key would pin the
+  // low-resolution bytes past the host's upgrade, so only a confirmed
+  // rendition — or the 256 tier, which IS the legacy answer — is stored.
+  const confirmed =
+    tier === 256 || res.headers?.get(THUMBNAIL_RENDITION_HEADER) != null;
+  if (store && persistentKey && confirmed) void store.put(persistentKey, blob);
   return { url: URL.createObjectURL(blob), bytes: blob.size };
 }
 
@@ -185,19 +201,16 @@ export function resolveThumbnailSrc(
     };
     // Only a print with a content version may persist: a "legacy" key would
     // pin stale bytes across reloads forever.
+    const tier = thumbnailTier();
     const persistentKey = options.mediaVersion
-      ? persistentThumbnailKey(
-          host.id,
-          filename,
-          options.mediaVersion,
-          thumbnailTier(),
-        )
+      ? persistentThumbnailKey(host.id, filename, options.mediaVersion, tier)
       : undefined;
     entry.url = fetchAuthedObjectUrl(
       host,
       path,
       options.signal,
       persistentKey,
+      tier,
     ).then(({ url, bytes }) => {
       if (cache.get(key) !== entry) {
         entry.settled = true;
@@ -309,6 +322,35 @@ export function evictHostMedia(hostId: string): void {
     void cached.url.then((u) => revokeIfObjectUrl(u)).catch(() => {});
   }
   void persistentStore()?.evictPrefix(prefix);
+}
+
+/**
+ * Forgetting a machine removes its key from the registry; its tiles must
+ * leave with it, or a private thumbnail outlives the credential that
+ * fetched it and a re-added machine under the same id could paint the old
+ * machine's cached image. The registry announces every write, so the
+ * removed ids are the difference between two listings.
+ */
+let rememberedHostIds: Set<string> | null = null;
+
+function rememberedIds(): Set<string> {
+  try {
+    return new Set(listStoredHosts().map((h) => h.id));
+  } catch {
+    return new Set();
+  }
+}
+
+function evictForgottenHosts(): void {
+  const before = rememberedHostIds ?? rememberedIds();
+  const after = rememberedIds();
+  rememberedHostIds = after;
+  for (const id of before) if (!after.has(id)) evictHostMedia(id);
+}
+
+if (typeof window !== "undefined") {
+  rememberedHostIds = rememberedIds();
+  window.addEventListener(HOSTS_CHANGED_EVENT, evictForgottenHosts);
 }
 
 function revokeIfObjectUrl(url: string): void {

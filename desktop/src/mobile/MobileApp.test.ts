@@ -6488,7 +6488,9 @@ describe("MobileApp generation queue", () => {
       await vi.advanceTimersByTimeAsync(5_020);
 
       expect(stalledSignal?.aborted).toBe(true);
-      expect(requestedPaths).toContain("/api/gallery/thumbnail/stalled-pagination-print-39.mp4");
+      expect(requestedPaths).toContain(
+        "/api/gallery/thumbnail/stalled-pagination-print-39.mp4?size=256&fmt=jpeg",
+      );
       expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
       expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1);
       expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
@@ -6516,7 +6518,7 @@ describe("MobileApp generation queue", () => {
       apiFetchTo.mockImplementation((_target, path) => {
         const attempt = (attempts.get(path) ?? 0) + 1;
         attempts.set(path, attempt);
-        if (path.endsWith("retry-pagination-print-39.mp4") && attempt === 1) {
+        if (path.includes("retry-pagination-print-39.mp4") && attempt === 1) {
           return Promise.reject(new Error("temporary thumbnail failure"));
         }
         return Promise.resolve({
@@ -6538,7 +6540,9 @@ describe("MobileApp generation queue", () => {
       await vi.advanceTimersByTimeAsync(4_000);
 
       expect(wrapper.find("[data-test='gallery-thumbnail-pending']").exists()).toBe(false);
-      expect(attempts.get("/api/gallery/thumbnail/retry-pagination-print-39.mp4")).toBe(2);
+      expect(
+        attempts.get("/api/gallery/thumbnail/retry-pagination-print-39.mp4?size=256&fmt=jpeg"),
+      ).toBe(2);
     } finally {
       vi.useRealTimers();
     }
@@ -6559,7 +6563,7 @@ describe("MobileApp generation queue", () => {
     const lateThumbnail = deferred<Response>();
     let pendingSignal: AbortSignal | undefined;
     apiFetchTo.mockImplementation((_target, path, init) => {
-      if (path.endsWith("unmount-pagination-print-0.mp4")) {
+      if (path.includes("unmount-pagination-print-0.mp4")) {
         pendingSignal = init?.signal;
         return lateThumbnail.promise;
       }
