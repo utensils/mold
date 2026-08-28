@@ -132,6 +132,41 @@ describe("source resolution", () => {
     ).toEqual({ width: 1024, height: 1024 });
   });
 
+  it("preserves a square source when Wan advertises only landscape and portrait presets", () => {
+    const wan = {
+      family: "wan",
+      default_width: 832,
+      default_height: 480,
+      recommended_dimensions: [
+        { width: 832, height: 480 },
+        { width: 480, height: 832 },
+        { width: 1280, height: 720 },
+        { width: 720, height: 1280 },
+      ],
+      max_pixels: 1_800_000,
+      dimension_alignment: 16,
+    };
+
+    expect(
+      resolveDefaultSourceResolution({ width: 1024, height: 1024 }, wan),
+    ).toEqual({ width: 1024, height: 1024 });
+  });
+
+  it("keeps the closest authored preset for a non-square source", () => {
+    const qwen = {
+      family: "qwen-image-edit",
+      default_width: 1664,
+      default_height: 928,
+      recommended_dimensions: [{ width: 1664, height: 928 }],
+      max_pixels: 1_048_576,
+      dimension_alignment: 16,
+    };
+
+    expect(
+      resolveDefaultSourceResolution({ width: 2048, height: 1024 }, qwen),
+    ).toEqual({ width: 1664, height: 928 });
+  });
+
   it("falls back to the model-safe source canvas when no preset is advertised", () => {
     const model = {
       family: "custom",

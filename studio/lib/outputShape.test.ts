@@ -178,6 +178,44 @@ describe("resolveOutputShape", () => {
     expect(result.sizes.at(-1)!.mark).toBe("Source");
   });
 
+  it("keeps Source square for a Wan model whose authored presets are not square", () => {
+    const wan = {
+      family: "wan",
+      default_width: 832,
+      default_height: 480,
+      recommended_dimensions: [
+        { width: 832, height: 480 },
+        { width: 480, height: 832 },
+        { width: 1280, height: 720 },
+        { width: 720, height: 1280 },
+      ],
+      max_pixels: 1_800_000,
+      dimension_alignment: 16,
+    };
+    const source = { width: 1024, height: 1024 };
+
+    expect(
+      sizeForFamily(SOURCE_FAMILY_ID, {
+        model: wan,
+        width: 832,
+        height: 480,
+        source,
+        intent: "source",
+      }),
+    ).toEqual(source);
+
+    const result = resolveOutputShape({
+      model: wan,
+      width: 1024,
+      height: 1024,
+      source,
+      intent: "source",
+    });
+    expect(result.selectedFamilyId).toBe(SOURCE_FAMILY_ID);
+    expect(result.status).toBe("1024×1024 · Matches source");
+    expect(result.sizes.map((size) => size.label)).toEqual(["1024×1024"]);
+  });
+
   it("reports an exact source canvas as Matches source", () => {
     const { result } = shape({
       source: { width: 1024, height: 1024 },

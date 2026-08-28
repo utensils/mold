@@ -241,6 +241,38 @@ describe("MobileResolutionPicker", () => {
     expect(remounted.get("[data-shape='source']").attributes("aria-checked")).toBe("true");
   });
 
+  it("applies a square Source canvas for Wan instead of its landscape default", async () => {
+    const wan = {
+      name: "wan22-ti2v-5b:fp16",
+      family: "wan",
+      default_width: 832,
+      default_height: 480,
+      recommended_dimensions: [
+        { width: 832, height: 480 },
+        { width: 480, height: 832 },
+        { width: 1280, height: 720 },
+        { width: 720, height: 1280 },
+      ],
+      max_pixels: 1_800_000,
+      dimension_alignment: 16,
+    } as ModelEntry;
+    const { wrapper, state } = mountPicker(
+      832,
+      480,
+      "wan",
+      { width: 1024, height: 1024 },
+      wan,
+      "model-default",
+    );
+
+    await wrapper.get("[data-shape='source']").trigger("click");
+
+    expect(state).toMatchObject({ width: 1024, height: 1024 });
+    expect(wrapper.getComponent(MobileResolutionPicker).emitted("canvas-intent")?.at(-1)).toEqual([
+      "source",
+    ]);
+  });
+
   it("advises on custom sizes above the 1.8 MP guideline without blocking", async () => {
     // The server is the authority: an oversized custom size submits anyway
     // and its refusal (if any) comes back as the job's own error.
