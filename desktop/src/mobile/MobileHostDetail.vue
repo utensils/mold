@@ -12,6 +12,7 @@ import {
 } from "@studio/api/queuePlan";
 import { watchSelectedQueuePreview, type QueueJobProgress } from "@studio/api/generationSelection";
 import DevicePanel from "@studio/components/DevicePanel.vue";
+import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import SwipeActionRow from "@studio/components/SwipeActionRow.vue";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
@@ -20,6 +21,7 @@ import type { SwipeRowAction } from "@studio/lib/swipeAction";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
+import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
 import { hostMemoryLevel } from "@studio/lib/hostMemory";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
@@ -139,9 +141,13 @@ const runtimeWindow = computed(() => {
     ? capacity
     : null;
 });
-const queueSummary = computed(() =>
-  durableBacklog.value === null ? `${queue.value.length} loaded` : `${durableBacklog.value} total`,
-);
+const queueEntryIds = computed(() => queue.value.map((entry) => entry.id));
+const planOnlyWork = computed(() => queuePlanOnlyWork(queuePlan.value, queueEntryIds.value));
+const queueSummary = computed(() => {
+  const visibleWork = queue.value.length + planOnlyWork.value.length;
+  if (durableBacklog.value !== null) return `${Math.max(durableBacklog.value, visibleWork)} total`;
+  return `${visibleWork} loaded`;
+});
 const modelLabel = (name: string) => modelDisplayNameForId(name, installed.value);
 
 function downloadStatus(job: DownloadJob): string {
@@ -1110,7 +1116,12 @@ onBeforeUnmount(() => {
         >
           {{ queueRowError }}
         </p>
-        <p v-else class="mobile-empty-note">
+        <QueuePlanWorkList
+          :plan="queuePlan"
+          :exclude-ids="queueEntryIds"
+          data-test="host-detail-planned-work"
+        />
+        <p v-if="queue.length === 0 && planOnlyWork.length === 0" class="mobile-empty-note">
           {{ durableBacklog === 0 ? "Queue is empty." : "No queue rows are loaded." }}
         </p>
         <button

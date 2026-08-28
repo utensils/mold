@@ -3387,6 +3387,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let db = mold_db::MetadataDb::open_in_memory().unwrap();
         seed_chain_job(&db, home.path(), "sequence-c", ChainJobState::Running);
+        let ephemeral_dir =
+            seed_chain_job(&db, home.path(), "one-shot-chain", ChainJobState::Running);
+        let mut ephemeral = ChainJobManifest::read_from_dir(&ephemeral_dir).unwrap();
+        ephemeral.ephemeral = true;
+        ephemeral.write_atomic(&ephemeral_dir).unwrap();
         state.metadata_db = Arc::new(Some(db));
         let (download_id, _, _) = state
             .downloads
@@ -3451,6 +3456,10 @@ mod tests {
         assert_eq!(item("expand-parent")["phase"], "running");
         assert_eq!(item("sequence-c")["kind"], "sequence");
         assert_eq!(item("sequence-c")["phase"], "running");
+        assert!(
+            items.iter().all(|item| item["id"] != "one-shot-chain"),
+            "an auto-chained one-shot is represented by its generation row, not a second sequence"
+        );
         assert_eq!(item(&download_id)["kind"], "download");
         assert_eq!(item(&download_id)["phase"], "queued");
         assert_eq!(body["instance_id"], instance_id);
