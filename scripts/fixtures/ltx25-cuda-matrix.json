@@ -1,0 +1,2434 @@
+{
+  "schema_version": "mold.ltx25.cuda.matrix.v1",
+  "description": "LTX-2.5 CUDA qualification matrix (#1398, #1414). Every row is one `mold run` against a scratch server whose environment matches `profile`; `expect.provenance` strings are the exact INFO log lines pinned by crates/mold-inference/src/ltx2/provenance_vocabulary.rs and `expect.metadata` keys are the additive saved-metadata fields it names.",
+  "common": {
+    "smoke_args": [
+      "--width",
+      "256",
+      "--height",
+      "256",
+      "--frames",
+      "9",
+      "--fps",
+      "24"
+    ],
+    "placeholders": {
+      "{seed_image}": "PNG still extracted from the first frame of ltx-2.5-22b-distilled:int8-conv's passed smoke_silent_apng row (LTX25_SEED_IMAGE overrides)",
+      "{models_dir}": "MOLD_MODELS_DIR"
+    },
+    "profiles": {
+      "default": {},
+      "attn_f32": {
+        "MOLD_LTX2_ATTN_F32": "1"
+      },
+      "flash": {
+        "MOLD_ATTN": "flash"
+      },
+      "int8_dequant": {
+        "MOLD_LTX2_INT8": "dequant"
+      },
+      "qmatmul": {
+        "MOLD_LTX2_QMATMUL": "1"
+      }
+    },
+    "kinds": {
+      "render": "one bounded `mold run`; passed requires exit 0, decoded media matching `expect`, a Library row, and every `expect.provenance` line in the retained server log slice",
+      "perf": "a render at the production shape that additionally retains the scheduler_estimates row and the wall clock",
+      "cancellation": "submit, cancel through `mold queue cancel` once denoise progress is observed, expect a terminal cancel with no Library row and GPU memory back at baseline",
+      "fatal_cuda": "not_run unless LTX25_FATAL_CUDA_REPRO names a reproducer; evidence is the quarantine sentence in the server log",
+      "deferred": "never attempted on this host; emitted as not_run with deferred_reason"
+    }
+  },
+  "rows": [
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--smoke_silent_apng",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "smoke_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--smoke_audio_mp4",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "smoke_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--predict_duration",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "predict_duration",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "a complete product reveal",
+      "seed": 25027,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--predict-duration",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": {
+          "grid": 8,
+          "offset": 1,
+          "min": 25,
+          "max": 481
+        },
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "--predict-duration deliberately omits --frames (clap conflict); the duration head picks an 8k+1 count in [25, 481]."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--i2v",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "i2v",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "the still photograph comes alive",
+      "seed": 25028,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--image",
+        "{seed_image}",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "{seed_image} is the first frame of this model's passed smoke_silent_apng row, extracted by the runner."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--keyframe_conditioning",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "keyframe_conditioning",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "the still photograph comes alive",
+      "seed": 25029,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--pipeline",
+        "keyframe",
+        "--keyframe",
+        "0:{seed_image}",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "Explicit keyframe pipeline: one keyframe alone does not auto-select it (select_pipeline needs > 1)."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--v2v",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "v2v",
+      "profile": "default",
+      "kind": "deferred",
+      "deferred_reason": "Retake / IC-LoRA video conditioning fails closed for LTX-2.5 (#1398 deferred list)"
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--two_stage_spatial_x2",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "two_stage_spatial_x2",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25031,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--pipeline",
+        "two-stage",
+        "--spatial-upscale",
+        "x2",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 512,
+        "height": 512,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "Stage-2 audio is discarded per upstream ti2vid_two_stages.py:270,283-295; the exported track is stage 1's."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--two_stage_temporal_x2",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "two_stage_temporal_x2",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25032,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--pipeline",
+        "two-stage",
+        "--temporal-upscale",
+        "x2",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 17,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "derive_stage1_render_shape halves the stage-1 frame count and fps; the output doubles it back to 17 @ 24 fps."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--residency_adaptive",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "residency_adaptive",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25034,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "1216",
+        "--height",
+        "704",
+        "--frames",
+        "121",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 1216,
+        "height": 704,
+        "frames": 121,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 residency mode=adaptive",
+          "ltx2 int8 arm=native-w8a8",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "After cuda-core the INT8 ConvRot pack stays packed-resident W8A8 on CUDA, so the planner reaches Adaptive instead of the pre-#1398 forced Streaming."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--video_only",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "video_only",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25033,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--video-only",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=skipped"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": true,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "#1037 opt-in: the audio branch is skipped only when the request says video_only; a plain --no-audio still runs it."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--attn_f32_control",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "attn_f32_control",
+      "profile": "attn_f32",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-f32-chunked",
+          "ltx2 int8 arm=native-w8a8",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-f32-chunked",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "Same seed and prompt as smoke_silent_apng so the retained F32 chunked render is an A/B against the BF16 dispatcher."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--attn_flash",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "attn_flash",
+      "profile": "flash",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-flash",
+          "ltx2 int8 arm=native-w8a8",
+          "attention backend selected backend=Flash"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-flash",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "Needs a build that links the FlashAttention kernels (h3-cuda implies flash-attn after cuda-core)."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--int8_dequant_control",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "int8_dequant_control",
+      "profile": "int8_dequant",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=dequant-cuda",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "dequant-cuda"
+        }
+      },
+      "notes": "Same seed as smoke_silent_apng: the on-device dequant arm is the control for the native W8A8 kernel."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--cancellation",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "cancellation",
+      "profile": "default",
+      "kind": "cancellation",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25040,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "1216",
+        "--height",
+        "704",
+        "--frames",
+        "121",
+        "--fps",
+        "24",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "cancelled": true,
+        "no_generation_row": true,
+        "gpu_memory_returns_within_seconds": 30,
+        "provenance": []
+      },
+      "notes": "The runner submits, waits for denoise progress > 0, runs `mold queue cancel <id>`, and expects a terminal cancel with no Library row."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--perf_1216x704x121",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "perf_1216x704x121",
+      "profile": "default",
+      "kind": "perf",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25041,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "1216",
+        "--height",
+        "704",
+        "--frames",
+        "121",
+        "--fps",
+        "24",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 1216,
+        "height": 704,
+        "frames": 121,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        },
+        "scheduler_estimates": true
+      },
+      "notes": "Default step count (the manifest's 8). Retains wall clock, vram.csv peak, VmHWM, and the scheduler_estimates row (#1398 phase evidence)."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-int8-conv--fatal_cuda_quarantine",
+      "model": "ltx-2.5-22b-distilled:int8-conv",
+      "case": "fatal_cuda_quarantine",
+      "profile": "default",
+      "kind": "fatal_cuda",
+      "expect": {
+        "server_log": "process CUDA context is fatally poisoned",
+        "provenance": []
+      },
+      "deferred_reason": "no fatal-CUDA reproducer supplied (set LTX25_FATAL_CUDA_REPRO to a command that poisons the context)",
+      "notes": "Evidence is gpu_pool.rs's quarantine sentence in the server log plus the /api/status refusal; never induced by the harness itself."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16-conv--smoke_silent_apng",
+      "model": "ltx-2.5-22b-distilled:bf16-conv",
+      "case": "smoke_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16-conv--smoke_audio_mp4",
+      "model": "ltx-2.5-22b-distilled:bf16-conv",
+      "case": "smoke_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16-conv--two_stage_spatial_x2",
+      "model": "ltx-2.5-22b-distilled:bf16-conv",
+      "case": "two_stage_spatial_x2",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25031,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--pipeline",
+        "two-stage",
+        "--spatial-upscale",
+        "x2",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 512,
+        "height": 512,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16-conv--residency_adaptive",
+      "model": "ltx-2.5-22b-distilled:bf16-conv",
+      "case": "residency_adaptive",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25034,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "1216",
+        "--height",
+        "704",
+        "--frames",
+        "121",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 1216,
+        "height": 704,
+        "frames": 121,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 residency mode=adaptive",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "A 42 GB BF16 transformer cannot be resident on a 24 GB card: the adaptive planner must engage without --offload."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16-conv--residency_offload",
+      "model": "ltx-2.5-22b-distilled:bf16-conv",
+      "case": "residency_offload",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25035,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "1216",
+        "--height",
+        "704",
+        "--frames",
+        "121",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--offload",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 1216,
+        "height": 704,
+        "frames": 121,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 residency mode=streaming",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "--offload is the forced-streaming request; the retained vram.csv is the floor against residency_adaptive's peak."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16--smoke_silent_apng",
+      "model": "ltx-2.5-22b-distilled:bf16",
+      "case": "smoke_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16--smoke_audio_mp4",
+      "model": "ltx-2.5-22b-distilled:bf16",
+      "case": "smoke_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16--two_stage_spatial_x2",
+      "model": "ltx-2.5-22b-distilled:bf16",
+      "case": "two_stage_spatial_x2",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25031,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--pipeline",
+        "two-stage",
+        "--spatial-upscale",
+        "x2",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 512,
+        "height": 512,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16--residency_adaptive",
+      "model": "ltx-2.5-22b-distilled:bf16",
+      "case": "residency_adaptive",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25034,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "1216",
+        "--height",
+        "704",
+        "--frames",
+        "121",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 1216,
+        "height": 704,
+        "frames": 121,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 residency mode=adaptive",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "A 42 GB BF16 transformer cannot be resident on a 24 GB card: the adaptive planner must engage without --offload."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-bf16--diffusion_vae_decode",
+      "model": "ltx-2.5-22b-distilled:bf16",
+      "case": "diffusion_vae_decode",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25036,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "This manifest's only VAE is the diffusion decoder (ltx-2.5-video-vae-bf16); upstream decodes seed-0 deterministically (na_diffusion_decoder.py:516-520)."
+    },
+    {
+      "id": "ltx-2.5-22b-dev-int8-conv--smoke_silent_apng",
+      "model": "ltx-2.5-22b-dev:int8-conv",
+      "case": "smoke_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-dev-int8-conv--smoke_audio_mp4",
+      "model": "ltx-2.5-22b-dev:int8-conv",
+      "case": "smoke_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-dev-int8-conv--dev_two_stage",
+      "model": "ltx-2.5-22b-dev:int8-conv",
+      "case": "dev_two_stage",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25031,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--pipeline",
+        "two-stage",
+        "--spatial-upscale",
+        "x2",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 512,
+        "height": 512,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 int8 arm=native-w8a8",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false,
+          "int8_arm": "native-w8a8"
+        }
+      },
+      "notes": "Dev runs the dynamic-shift schedule (base_shift 0.95 / max_shift 2.05 / terminal 0.1) rather than the distilled literal sigma list."
+    },
+    {
+      "id": "ltx-2.5-22b-dev-bf16-conv--smoke_silent_apng",
+      "model": "ltx-2.5-22b-dev:bf16-conv",
+      "case": "smoke_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-dev-bf16-conv--smoke_audio_mp4",
+      "model": "ltx-2.5-22b-dev:bf16-conv",
+      "case": "smoke_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-dev-bf16-conv--dev_two_stage",
+      "model": "ltx-2.5-22b-dev:bf16-conv",
+      "case": "dev_two_stage",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25031,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--pipeline",
+        "two-stage",
+        "--spatial-upscale",
+        "x2",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 512,
+        "height": 512,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "Dev runs the dynamic-shift schedule (base_shift 0.95 / max_shift 2.05 / terminal 0.1) rather than the distilled literal sigma list."
+    },
+    {
+      "id": "ltx-2.5-22b-dev-bf16--smoke_silent_apng",
+      "model": "ltx-2.5-22b-dev:bf16",
+      "case": "smoke_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-dev-bf16--smoke_audio_mp4",
+      "model": "ltx-2.5-22b-dev:bf16",
+      "case": "smoke_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-dev-bf16--dev_two_stage",
+      "model": "ltx-2.5-22b-dev:bf16",
+      "case": "dev_two_stage",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25031,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--pipeline",
+        "two-stage",
+        "--spatial-upscale",
+        "x2",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 512,
+        "height": 512,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "Dev runs the dynamic-shift schedule (base_shift 0.95 / max_shift 2.05 / terminal 0.1) rather than the distilled literal sigma list."
+    },
+    {
+      "id": "ltx-2.5-22b-dev-bf16--residency_adaptive",
+      "model": "ltx-2.5-22b-dev:bf16",
+      "case": "residency_adaptive",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25034,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "1216",
+        "--height",
+        "704",
+        "--frames",
+        "121",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 1216,
+        "height": 704,
+        "frames": 121,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 residency mode=adaptive",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-dev-bf16--diffusion_vae_decode",
+      "model": "ltx-2.5-22b-dev:bf16",
+      "case": "diffusion_vae_decode",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25036,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "2",
+        "--guidance",
+        "3",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2-19b-distilled-fp8--regression_silent_apng",
+      "model": "ltx-2-19b-distilled:fp8",
+      "case": "regression_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2-19b-distilled-fp8--regression_audio_mp4",
+      "model": "ltx-2-19b-distilled:fp8",
+      "case": "regression_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.3-22b-distilled-fp8--regression_silent_apng",
+      "model": "ltx-2.3-22b-distilled:fp8",
+      "case": "regression_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.3-22b-distilled-fp8--regression_audio_mp4",
+      "model": "ltx-2.3-22b-distilled:fp8",
+      "case": "regression_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q4--t2v_silent_apng",
+      "model": "ltx-2.5-22b-distilled:q4",
+      "case": "t2v_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q4--t2v_audio_mp4",
+      "model": "ltx-2.5-22b-distilled:q4",
+      "case": "t2v_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q4--i2v",
+      "model": "ltx-2.5-22b-distilled:q4",
+      "case": "i2v",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "the still photograph comes alive",
+      "seed": 25028,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--image",
+        "{seed_image}",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q4--two_stage_spatial_x2",
+      "model": "ltx-2.5-22b-distilled:q4",
+      "case": "two_stage_spatial_x2",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25031,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--pipeline",
+        "two-stage",
+        "--spatial-upscale",
+        "x2",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 512,
+        "height": 512,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q4--t2a",
+      "model": "ltx-2.5-22b-distilled:q4",
+      "case": "t2a",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25037,
+      "format": "wav",
+      "args": [
+        "--pipeline",
+        "t2a",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--format",
+        "wav"
+      ],
+      "expect": {
+        "width": null,
+        "height": null,
+        "frames": null,
+        "fps": null,
+        "audio": "only",
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "Audio-only: 16-bit PCM WAV, 48 kHz stereo, no video stream. Steps below the non-distilled default are raised with a disclosed message."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q4--lora_gguf",
+      "model": "ltx-2.5-22b-distilled:q4",
+      "case": "lora_gguf",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25038,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--lora",
+        "{models_dir}/ltx-2.5-22b-dev-bf16/loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+        "--lora-scale",
+        "0.25",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "{models_dir} resolves to MOLD_MODELS_DIR. The GGUF LoRA runs as a parallel low-rank branch (never merged into the QTensor)."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q4--qmatmul_silent",
+      "model": "ltx-2.5-22b-distilled:q4",
+      "case": "qmatmul_silent",
+      "profile": "qmatmul",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=qmatmul",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "Same seed as t2v_silent_apng: both must decode with no NaN; hashes differ by kernel, which is the expected A/B."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q4--perf_1216x704x121",
+      "model": "ltx-2.5-22b-distilled:q4",
+      "case": "perf_1216x704x121",
+      "profile": "default",
+      "kind": "perf",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25041,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "1216",
+        "--height",
+        "704",
+        "--frames",
+        "121",
+        "--fps",
+        "24",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 1216,
+        "height": 704,
+        "frames": 121,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        },
+        "scheduler_estimates": true
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q3-k-s--t2v_silent_apng",
+      "model": "ltx-2.5-22b-distilled:q3-k-s",
+      "case": "t2v_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q3-k-s--t2v_audio_mp4",
+      "model": "ltx-2.5-22b-distilled:q3-k-s",
+      "case": "t2v_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q6--t2v_silent_apng",
+      "model": "ltx-2.5-22b-distilled:q6",
+      "case": "t2v_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q6--t2v_audio_mp4",
+      "model": "ltx-2.5-22b-distilled:q6",
+      "case": "t2v_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      }
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q8--t2v_silent_apng",
+      "model": "ltx-2.5-22b-distilled:q8",
+      "case": "t2v_silent_apng",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A red fox walking through sunlit desert grass, cinematic natural motion",
+      "seed": 25025,
+      "format": "apng",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--no-audio",
+        "--format",
+        "apng"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": false,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "Q8_0 is 23.6 GB against a 24 GB card: `blocked` with reason_source oom_envelope or `passed` with residency evidence are both valid; `failed` is not."
+    },
+    {
+      "id": "ltx-2.5-22b-distilled-q8--t2v_audio_mp4",
+      "model": "ltx-2.5-22b-distilled:q8",
+      "case": "t2v_audio_mp4",
+      "profile": "default",
+      "kind": "render",
+      "prompt": "A small brass automaton drummer performing in gentle rain, locked camera, cinematic reflections",
+      "seed": 25026,
+      "format": "mp4",
+      "args": [
+        "--width",
+        "256",
+        "--height",
+        "256",
+        "--frames",
+        "9",
+        "--fps",
+        "24",
+        "--steps",
+        "1",
+        "--guidance",
+        "1",
+        "--audio",
+        "--format",
+        "mp4"
+      ],
+      "expect": {
+        "width": 256,
+        "height": 256,
+        "frames": 9,
+        "fps": 24,
+        "audio": true,
+        "provenance": [
+          "ltx2 attention path=ltx2-bf16-math",
+          "ltx2 linear kind=dequant",
+          "ltx2 audio branch=run",
+          "attention backend selected backend=Math"
+        ],
+        "metadata": {
+          "attention_path": "ltx2-bf16-math",
+          "video_only": false
+        }
+      },
+      "notes": "Q8_0 is 23.6 GB against a 24 GB card: `blocked` with reason_source oom_envelope or `passed` with residency evidence are both valid; `failed` is not."
+    }
+  ]
+}

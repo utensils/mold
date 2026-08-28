@@ -290,6 +290,15 @@ const ignoredEnvVars = new Set([
   // Execution-plan classifier/error-display sentinels, not real settings.
   'MOLD_NOT_A_SHAPING_VARIABLE',
   'MOLD_X',
+  // LTX-2.5 CUDA qualification knobs whose names the UAT harness pins ahead
+  // of their emitters (crates/mold-inference/src/ltx2/provenance_vocabulary.rs,
+  // #1398/#1414). The cuda-core and gguf-runtime PRs ship the real readers
+  // together with their website/guide/configuration.md rows; these entries
+  // may be removed once those rows are on main (the check is one-directional,
+  // so leaving them is harmless).
+  'MOLD_LTX2_ATTN_F32',
+  'MOLD_LTX2_INT8',
+  'MOLD_LTX2_QMATMUL',
 ])
 const docsText = walk(websiteDir)
   .filter((file) => /\.(md|ts|css)$/u.test(file))

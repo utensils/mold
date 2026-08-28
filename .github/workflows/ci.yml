@@ -210,6 +210,18 @@ jobs:
               - 'scripts/fixtures/ltx25-comfy-metal-api-prompt.json'
               - 'scripts/tests/ltx25-comfy-metal-reference.sh'
               - 'scripts/tests/ltx25-metal-verification.sh'
+              - 'scripts/capture-ltx25-cuda-verification.sh'
+              - 'scripts/capture-ltx25-comfy-cuda-reference.sh'
+              - 'scripts/validate-ltx25-cuda-report.py'
+              - 'scripts/ltx25-metal-ab.py'
+              - 'scripts/fixtures/ltx25-assets.json'
+              - 'scripts/fixtures/ltx25-cuda-matrix.json'
+              - 'scripts/fixtures/ltx25-comfy-cuda-int8-api-prompt.json'
+              - 'scripts/fixtures/ltx25-comfy-cuda-gguf-q4-api-prompt.json'
+              - 'scripts/tests/ltx25-comfy-cuda-reference.sh'
+              - 'scripts/tests/ltx25-cuda-verification.sh'
+              - 'scripts/provision-ltx25-comfy-oracle.sh'
+              - 'scripts/tests/ltx25-comfy-oracle-provision.sh'
               - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
               - 'scripts/qualify-cuda-sm86.sh'
               - 'docs/qualification/**'
@@ -466,6 +478,9 @@ jobs:
           bash scripts/tests/wan-regression-matrix.sh
           bash scripts/tests/ltx25-comfy-metal-reference.sh
           bash scripts/tests/ltx25-metal-verification.sh
+          bash scripts/tests/ltx25-comfy-cuda-reference.sh
+          bash scripts/tests/ltx25-cuda-verification.sh
+          bash scripts/tests/ltx25-comfy-oracle-provision.sh
       - name: Test MiniMax H3 private-UAT release contract
         if: needs.changes.outputs.release == 'true'
         run: bash scripts/tests/minimax-h3-private-uat-release-contract.sh

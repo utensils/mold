@@ -680,6 +680,58 @@ mod tests {
         assert_eq!(conv.total_size_bytes(), 71_360_751_670);
     }
 
+    /// `scripts/fixtures/ltx25-assets.json` is the shell-side view of this
+    /// table: the CUDA verification harness (`scripts/capture-ltx25-cuda-verification.sh`)
+    /// reads storage-relative paths, sizes, and hashes from it so no script
+    /// carries a second copy of an official SHA. The fixture is generated from
+    /// `manifests()` plus `crate::manifest::storage_path`, the one storage
+    /// authority, and this test prints the regenerated JSON on mismatch so
+    /// the fix is copy-paste. Regenerate it whenever the manifest table
+    /// changes (adding the GGUF tiers, for example).
+    #[test]
+    fn asset_fixture_matches_manifest_table() {
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/fixtures/ltx25-assets.json"
+        );
+        let assets: Vec<serde_json::Value> = manifests()
+            .iter()
+            .flat_map(|manifest| {
+                manifest.files.iter().map(move |file| {
+                    serde_json::json!({
+                        "manifest": manifest.name,
+                        "hidden": manifest.hidden,
+                        "component": format!("{:?}", file.component),
+                        "hf_repo": file.hf_repo,
+                        "hf_filename": file.hf_filename,
+                        "storage_relative_path": crate::manifest::storage_path(manifest, file)
+                            .to_string_lossy()
+                            .into_owned(),
+                        "size_bytes": file.size_bytes,
+                        "sha256": file.sha256.expect("every LTX-2.5 asset is hash-pinned"),
+                        "gated": file.gated,
+                    })
+                })
+            })
+            .collect();
+        let expected = serde_json::json!({
+            "schema_version": "mold.ltx25.assets.v1",
+            "source": "crates/mold-core/src/ltx25_manifest.rs",
+            "manifests": manifests().iter().map(|manifest| manifest.name.clone()).collect::<Vec<_>>(),
+            "assets": assets,
+        });
+        let regenerated = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&expected).expect("fixture serializes")
+        );
+        let committed = std::fs::read_to_string(fixture_path).unwrap_or_default();
+        let committed_value: Option<serde_json::Value> = serde_json::from_str(&committed).ok();
+        assert!(
+            committed_value.as_ref() == Some(&expected),
+            "{fixture_path} does not match the manifest table; regenerate it with this content:\n{regenerated}"
+        );
+    }
+
     #[test]
     fn dedicated_split_paths_preserve_every_runtime_role() {
         let config = crate::Config {
