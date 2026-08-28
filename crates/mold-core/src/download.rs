@@ -505,14 +505,27 @@ pub fn has_sha256_marker(path: &Path) -> bool {
     sha256_marker_path(path).exists()
 }
 
+/// Second marker line: the byte length the digest was computed over.
+const SHA256_MARKER_LEN_PREFIX: &str = "len=";
+
 /// Atomically write the `.sha256-verified` marker for `path` recording the
-/// computed digest. Atomic via tempfile-then-rename so a crash mid-write
-/// never leaves a half-populated marker (which would otherwise read as a
+/// computed digest and, on a second `len=` line, the byte length of the file
+/// it attests to. Atomic via tempfile-then-rename so a crash mid-write never
+/// leaves a half-populated marker (which would otherwise read as a
 /// successfully-installed file).
+///
+/// The length is what lets `Config::file_is_complete` tell a marker that
+/// still describes the file from one left behind when the file was rewritten
+/// underneath it — hal9000's 364,866,540-byte audio VAE became a 194-byte
+/// stub under the download's sidecar and stayed "downloaded" for two days.
 pub fn write_sha256_marker(path: &Path, digest: &str) -> std::io::Result<()> {
     let marker = sha256_marker_path(path);
     let tmp = marker.with_extension(format!("sha256-verified.tmp.{}", std::process::id()));
-    std::fs::write(&tmp, format!("{digest}\n"))?;
+    let mut body = format!("{digest}\n");
+    if let Ok(metadata) = std::fs::metadata(path) {
+        body.push_str(&format!("{SHA256_MARKER_LEN_PREFIX}{}\n", metadata.len()));
+    }
+    std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, &marker)
 }
 
@@ -1158,12 +1171,27 @@ pub fn verify_pinned_file(
     Ok(())
 }
 
-/// The digest a `.sha256-verified` marker records, if one is readable.
+/// The digest a `.sha256-verified` marker records (its first line), if one
+/// is readable.
 pub fn recorded_sha256_marker(path: &Path) -> Option<String> {
     std::fs::read_to_string(sha256_marker_path(path))
         .ok()
-        .map(|recorded| recorded.trim().to_string())
+        .and_then(|recorded| recorded.lines().next().map(|line| line.trim().to_string()))
         .filter(|recorded| !recorded.is_empty())
+}
+
+/// The byte length a `.sha256-verified` marker says its digest covered.
+/// `None` for a marker written before the length was recorded.
+pub fn recorded_sha256_marker_len(path: &Path) -> Option<u64> {
+    std::fs::read_to_string(sha256_marker_path(path))
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix(SHA256_MARKER_LEN_PREFIX)?
+                .parse::<u64>()
+                .ok()
+        })
 }
 
 /// Truncate a string to fit within `max_len`, replacing the middle with "..." if needed.
@@ -4253,6 +4281,17 @@ mod tests {
             content.contains(digest),
             "marker content should contain the digest, got: {content:?}"
         );
+        assert_eq!(recorded_sha256_marker(&path).as_deref(), Some(digest));
+        assert_eq!(
+            recorded_sha256_marker_len(&path),
+            Some(11),
+            "the marker names the length it hashed: {content:?}"
+        );
+        // A marker written before lengths were recorded still yields its
+        // digest and no length.
+        std::fs::write(&marker, format!("{digest}\n")).unwrap();
+        assert_eq!(recorded_sha256_marker(&path).as_deref(), Some(digest));
+        assert_eq!(recorded_sha256_marker_len(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

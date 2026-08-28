@@ -1512,18 +1512,26 @@ impl Config {
     ///
     /// Two acceptance signals (a file is considered complete if **either** holds):
     ///
-    /// 1. A `.sha256-verified` sidecar exists. Written by the pull path on a
-    ///    successful download — positive proof the file finished writing and,
-    ///    when the manifest declared a hash, matches it.
+    /// 1. A `.sha256-verified` sidecar exists and still describes the file.
+    ///    Written by the pull path on a successful download — positive proof
+    ///    the file finished writing and, when the manifest declared a hash,
+    ///    matches it. A marker attests to the bytes that landed, not the
+    ///    bytes now, so it vouches only for the length it recorded
+    ///    (`len=` line); a marker written before lengths were recorded is
+    ///    trusted only while the manifest's declared `size_bytes` (when
+    ///    known) still holds. hal9000's 364,866,540-byte audio VAE was
+    ///    replaced by a 194-byte stub under the download's sidecar and stayed
+    ///    "downloaded" for two days while every LTX-2.5 pack failed
+    ///    qualification on it.
     /// 2. The on-disk size matches the manifest's declared `size_bytes`.
     ///    Covers two legitimate cases without forcing an upgrade-day rehash:
     ///    legacy installs created before markers were written, and HF cache
     ///    symlinks pointing at fully-downloaded blobs in `~/.cache/huggingface`.
     ///
-    /// Truncated / partial files reject under both signals — they have no
-    /// marker (because no successful verify ever ran) and their size does not
-    /// match. That's the load-bearing change for the "downloaded model
-    /// sometimes doesn't show up" gallery race.
+    /// Truncated / partial files reject under both signals — their size does
+    /// not match, and a marker left behind by an earlier download no longer
+    /// vouches for them. That's the load-bearing change for the "downloaded
+    /// model sometimes doesn't show up" gallery race.
     fn manifest_files_exist(&self, manifest: &crate::manifest::ModelManifest) -> bool {
         manifest
             .files
@@ -1555,18 +1563,24 @@ impl Config {
     /// downloaded artifact. See [`Self::manifest_files_exist`] for the
     /// acceptance rules.
     fn file_is_complete(path: &std::path::Path, expected_size: u64) -> bool {
-        if !path.exists() {
-            return false;
-        }
-        if crate::download::has_sha256_marker(path) {
-            return true;
-        }
-        // Marker missing — fall back to size match against the manifest.
         // Symlinks (HF cache) follow through to the target's metadata.
-        match path.metadata() {
-            Ok(meta) => meta.len() == expected_size,
-            Err(_) => false,
+        let Ok(meta) = path.metadata() else {
+            return false;
+        };
+        if crate::download::has_sha256_marker(path) {
+            return match crate::download::recorded_sha256_marker_len(path) {
+                // The marker names the length it hashed and vouches for
+                // exactly that — a file rewritten underneath it is not the
+                // file it verified, whatever the manifest declares.
+                Some(verified_len) => verified_len == meta.len(),
+                // A marker from before lengths were recorded is trusted only
+                // while the declared size (when the manifest has one) holds.
+                None => expected_size == 0 || meta.len() == expected_size,
+            };
         }
+        // Marker missing — the size match alone decides, and only when the
+        // manifest declared one.
+        expected_size != 0 && meta.len() == expected_size
     }
 
     /// Return true when an active `.pulling` marker should block manifest discovery.
@@ -2126,5 +2140,82 @@ mod scheduler_settings_tests {
             .to_string()
             .contains("replan_max_delay_ms must be greater than or equal"));
         assert!(toml::from_str::<SchedulerSettings>("warm_wait_max_ms = 30001").is_err());
+    }
+}
+
+#[cfg(test)]
+mod file_completeness_tests {
+    use super::Config;
+    use std::path::Path;
+
+    fn golden_stub() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ltx25/audio-vae-stub-194.safetensors")
+    }
+
+    const AUDIO_VAE_SIZE: u64 = 364_866_540;
+    const AUDIO_VAE_MARKER: &str =
+        "c52733d3000000000000000000000000000000000000000000000000000000000";
+
+    /// The exact hal9000 corruption: the real 364,866,540-byte audio VAE
+    /// replaced by a 194-byte stub, with the download's `.sha256-verified`
+    /// sidecar — written by a build that recorded no length — still beside
+    /// it. The marker must not outrank the declared size.
+    #[test]
+    fn a_legacy_marker_does_not_vouch_for_a_truncated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ltx-2.5-audio-vae-bf16.safetensors");
+        std::fs::copy(golden_stub(), &path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 194);
+        std::fs::write(
+            crate::download::sha256_marker_path(&path),
+            format!("{AUDIO_VAE_MARKER}\n"),
+        )
+        .unwrap();
+        assert_eq!(crate::download::recorded_sha256_marker_len(&path), None);
+
+        assert!(!Config::file_is_complete(&path, AUDIO_VAE_SIZE));
+        // A size-less manifest entry keeps the marker rule.
+        assert!(Config::file_is_complete(&path, 0));
+        // And a declared size the file does have keeps both signals.
+        assert!(Config::file_is_complete(&path, 194));
+    }
+
+    /// A marker written by this build names the length it hashed: it vouches
+    /// for that length whatever the manifest declares (test fixtures stamp
+    /// 4-byte stubs against GB-scale manifests on purpose) and for nothing
+    /// else once the file is rewritten.
+    #[test]
+    fn a_marker_vouches_only_for_the_length_it_hashed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ltx-2.5-audio-vae-bf16.safetensors");
+        std::fs::write(&path, b"verified").unwrap();
+        crate::download::write_sha256_marker(&path, AUDIO_VAE_MARKER).unwrap();
+        assert_eq!(crate::download::recorded_sha256_marker_len(&path), Some(8));
+        assert!(Config::file_is_complete(&path, AUDIO_VAE_SIZE));
+        assert!(Config::file_is_complete(&path, 0));
+
+        // The file is replaced underneath the marker.
+        std::fs::copy(golden_stub(), &path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 194);
+        assert!(!Config::file_is_complete(&path, AUDIO_VAE_SIZE));
+        assert!(!Config::file_is_complete(&path, 0));
+        assert!(
+            !Config::file_is_complete(&path, 194),
+            "a marker for other bytes must not vouch for a file that merely matches the manifest"
+        );
+
+        // Without any marker, only the declared size decides.
+        std::fs::remove_file(crate::download::sha256_marker_path(&path)).unwrap();
+        assert!(Config::file_is_complete(&path, 194));
+        assert!(!Config::file_is_complete(&path, 0));
+        assert!(!Config::file_is_complete(&path, AUDIO_VAE_SIZE));
+    }
+
+    #[test]
+    fn a_missing_file_is_never_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.safetensors");
+        assert!(!Config::file_is_complete(&path, 0));
+        assert!(!Config::file_is_complete(&path, 194));
     }
 }
