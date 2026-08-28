@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  onUnmounted,
+  ref,
+  unref,
+  watch,
+} from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import Icon from "@ui/components/Icon.vue";
@@ -99,7 +108,22 @@ const composer = useComposerStore();
 const generateForm = useGenerateFormStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
-const modelLabel = (name: string) => modelDisplayNameForId(name, models.all);
+/** `modelDisplayNameForId` scans the installed list; a grid of 2 000 tiles
+ *  would scan it 2 000 times per render. Memoize per name, dropping the memo
+ *  whenever the installed inventory changes. */
+const modelLabelMemo = computed(() => {
+  const inventory = models.all;
+  const cache = new Map<string, string>();
+  return (name: string) => {
+    let label = cache.get(name);
+    if (label === undefined) {
+      label = modelDisplayNameForId(name, inventory);
+      cache.set(name, label);
+    }
+    return label;
+  };
+});
+const modelLabel = (name: string) => modelLabelMemo.value(name);
 
 const primaryId = computed(() => hosts.primaryHost?.id ?? null);
 
@@ -1064,7 +1088,17 @@ const containerWidth = ref(0);
 const selected = ref<{ sourceKey: string; filename: string } | null>(null);
 const lightboxOpen = ref(false);
 const rowHeight = ref(loadGalleryThumbnailSize());
-watch(rowHeight, (value) => saveGalleryThumbnailSize(value));
+// A slider drag delivers one `input` event per pointer move; persisting on
+// each was a synchronous localStorage write per frame. Settle it instead.
+const SLIDER_PERSIST_MS = 250;
+let sliderPersistTimer: ReturnType<typeof setTimeout> | null = null;
+watch(rowHeight, (value) => {
+  if (sliderPersistTimer) clearTimeout(sliderPersistTimer);
+  sliderPersistTimer = setTimeout(() => {
+    sliderPersistTimer = null;
+    saveGalleryThumbnailSize(value);
+  }, SLIDER_PERSIST_MS);
+});
 
 // ── Delete: optimistic + undoable (§08 G12) ──────────────────────────────────
 // The tile leaves the grid instantly; a 6 s undo toast holds the print in limbo
@@ -1442,21 +1476,101 @@ function remeasureLibraryAfterResume() {
   });
 }
 
-/** Justified layout over the visible set; each laid tile keeps its merged
- *  entry so origin (badge, target, actions) travels with it. */
-const rows = computed(() => {
+/**
+ * Everything a tile renders, resolved ONCE per data change rather than per
+ * template expression per render: the old template called the store five or
+ * six times per tile (title, ♥ ×4, purge time, organize capability), each of
+ * which walked the whole gallery. Layout (`rows`) reads these by index and
+ * never touches the store, so a slider drag or a resize is pure arithmetic.
+ */
+interface TileModel {
+  entry: MergedPrint;
+  item: GalleryImage;
+  key: string;
+  title: string;
+  modelLabel: string;
+  favorite: boolean;
+  canOrganize: boolean;
+  availability: string;
+  purgeAt: number | null;
+  video: boolean;
+  audio: boolean;
+  upscaled: boolean;
+  /** Media bytes are addressed differently for a host bucket and this Mac. */
+  mediaPath: string;
+  localVideo: boolean;
+  target: ApiTarget | null;
+  mediaVersion: string;
+  fresh: boolean;
+}
+
+const tileModels = computed<TileModel[]>(() => {
   const list = entries.value;
+  const organizationOf = gallery.organizationOf;
+  const organizeCapable = gallery.organizeCapable;
+  const trash = inTrash.value;
+  const models: TileModel[] = new Array(list.length);
+  for (let i = 0; i < list.length; i++) {
+    const entry = list[i]!;
+    const item = entry.item;
+    const org = organizationOf(entry);
+    const source = gallery.mediaSourceOf(entry.sourceKey);
+    // Imported predicates, not the view's local aliases: `useVirtualizer`
+    // evaluates `rows` (and so this computed) synchronously during setup,
+    // before the aliases declared further down are initialized.
+    const video = isVideoItem(item);
+    models[i] = {
+      entry,
+      item,
+      key: `${entry.sourceKey}::${item.filename}`,
+      title: displayTitle({ ...item, title: org.title }),
+      modelLabel: modelLabel(item.metadata.model),
+      favorite: org.favorite,
+      canOrganize:
+        !trash && gallery.allLocationsOf(entry).some((l) => organizeCapable(l.sourceKey)),
+      availability: entry.availableOn.map((s) => s.label).join(" · "),
+      purgeAt: org.purgeAt,
+      video,
+      audio: isAudioItem(item),
+      upscaled: isUpscaledImage(item),
+      mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
+      localVideo: source === "local" && video,
+      target: targetFor(entry),
+      mediaVersion: item.media_version ?? `${item.timestamp}:${item.size_bytes ?? "unknown"}`,
+      fresh: isFresh(entry),
+    };
+  }
+  return models;
+});
+
+interface LaidTile {
+  model: TileModel;
+  x: number;
+  width: number;
+  height: number;
+}
+
+/** Justified layout over the visible set. Rows are the virtualizer's unit;
+ *  each laid tile carries its x offset so the tile layer below can place it
+ *  absolutely without a per-row wrapper. */
+const rows = computed(() => {
+  const list = tileModels.value;
   const laidRows = layoutJustifiedRows(
-    list.map((e) => e.item),
+    list.map((m) => m.item),
     Math.max(0, containerWidth.value - PAD * 2),
     rowHeight.value,
     GAP,
   );
   let cursor = 0;
-  return laidRows.map((r) => ({
-    height: r.height,
-    items: r.items.map((laid) => ({ ...laid, entry: list[cursor++]! })),
-  }));
+  return laidRows.map((r) => {
+    let x = PAD;
+    const items: LaidTile[] = r.items.map((laid) => {
+      const tile = { model: list[cursor++]!, x, width: laid.width, height: laid.height };
+      x += laid.width + GAP;
+      return tile;
+    });
+    return { height: r.height, items };
+  });
 });
 
 const virtualizer = useVirtualizer(
@@ -1468,14 +1582,30 @@ const virtualizer = useVirtualizer(
   })),
 );
 
+/**
+ * The tiles inside the virtual window as ONE flat list keyed by print. The
+ * old markup nested tiles under row elements keyed by row index, so a
+ * re-flow that moved a print across a row boundary destroyed and re-created
+ * its `AuthedMedia` — cancelling the thumbnail in flight and refetching it —
+ * on every slider tick and resize pixel. A flat keyed list lets Vue MOVE the
+ * element instead, so the decoded image survives the reflow.
+ */
+const visibleTiles = computed(() => {
+  const laid = rows.value;
+  const out: Array<LaidTile & { y: number }> = [];
+  for (const vrow of unref(virtualizer).getVirtualItems()) {
+    const row = laid[vrow.index];
+    if (!row) continue;
+    for (const tile of row.items) out.push({ ...tile, y: vrow.start });
+  }
+  return out;
+});
+
 // TanStack Virtual caches per-index measurements; a new estimateSize closure
 // alone does NOT invalidate that cache. When the justified layout re-flows
 // (container resize, entries arriving, row-height change) the cached offsets
-// go stale and rows render overlapping — re-measure on any height change.
-watch(
-  () => rows.value.map((r) => r.height).join(","),
-  () => virtualizer.value?.measure?.(),
-);
+// go stale and rows render overlapping — re-measure on any re-flow.
+watch(rows, () => virtualizer.value?.measure?.());
 
 const showBadges = computed(
   () => !inTrash.value && gallery.filter === "all" && gallery.chipCounts.length > 1,
@@ -1969,6 +2099,12 @@ onUnmounted(() => {
   for (const key of [...pendingDeletes.keys()]) {
     void commitDelete(key);
   }
+  // Flush a settling thumbnail-size write so the choice survives navigation.
+  if (sliderPersistTimer) {
+    clearTimeout(sliderPersistTimer);
+    sliderPersistTimer = null;
+    saveGalleryThumbnailSize(rowHeight.value);
+  }
   // Flush a pending debounced search so the store matches the input.
   if (searchTimer) {
     clearTimeout(searchTimer);
@@ -2127,145 +2263,130 @@ onUnmounted(() => {
         action="Go to Create"
         @action="router.push('/create')"
       />
-      <div v-else :style="{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }">
+      <div v-else class="ms-lib-tile-layer" :style="{ height: `${virtualizer.getTotalSize()}px` }">
+        <!-- One flat, print-keyed list of the tiles inside the virtual window
+             (see `visibleTiles`). A tile is a wrapper (click / context /
+             dblclick) around a focusable button carrying the media, badges,
+             and the rising edge code; the ♥ and trash actions are sibling
+             overlays so they never nest a button inside a button. Every
+             per-tile fact comes from its `TileModel` — the template calls
+             nothing that walks the gallery. -->
         <div
-          v-for="vrow in virtualizer.getVirtualItems()"
-          :key="vrow.key as number"
-          class="absolute right-0 left-0 flex"
+          v-for="tile in visibleTiles"
+          :key="tile.model.key"
+          class="ms-lib-tile group overflow-hidden rounded-[9px] border"
+          :class="
+            (selectMode ? bulkSelection.has(tile.model.item.filename) : isSelected(tile.model.entry))
+              ? 'border-transparent ring-2 ring-safelight'
+              : 'border-[color-mix(in_srgb,var(--rebate)_14%,transparent)]'
+          "
           :style="{
-            transform: `translateY(${vrow.start}px)`,
-            gap: `${GAP}px`,
-            padding: `0 ${PAD}px`,
+            width: `${tile.width}px`,
+            height: `${tile.height}px`,
+            '--tile-x': `${tile.x}px`,
+            '--tile-y': `${tile.y}px`,
           }"
+          :data-filename="tile.model.item.filename"
+          @pointerdown="beginSelectionDrag($event, tile.model.entry)"
+          @click="onTileClick(tile.model.entry, $event)"
+          @contextmenu="onTileContextMenu(tile.model.entry, $event)"
+          @dblclick="onTileDblclick(tile.model.entry)"
         >
-          <!-- A tile is a wrapper (click / context / dblclick) around a focusable
-               button carrying the media, badges, and the rising edge code; the
-               ♥ and trash actions are sibling overlays so they never nest a
-               button inside a button. -->
-          <div
-            v-for="laid in rows[vrow.index]?.items ?? []"
-            :key="`${laid.entry.sourceKey}::${laid.item.filename}`"
-            class="ms-lib-tile group relative shrink-0 overflow-hidden rounded-[9px] border"
-            :class="
-              (selectMode ? bulkSelection.has(laid.item.filename) : isSelected(laid.entry))
-                ? 'border-transparent ring-2 ring-safelight'
-                : 'border-[color-mix(in_srgb,var(--rebate)_14%,transparent)]'
-            "
-            :style="{ width: `${laid.width}px`, height: `${laid.height}px` }"
-            :data-filename="laid.item.filename"
-            @pointerdown="beginSelectionDrag($event, laid.entry)"
-            @click="onTileClick(laid.entry, $event)"
-            @contextmenu="onTileContextMenu(laid.entry, $event)"
-            @dblclick="onTileDblclick(laid.entry)"
+          <button
+            type="button"
+            class="absolute inset-0 block h-full w-full overflow-hidden text-left"
+            :aria-label="tile.model.title"
+            :aria-pressed="selectMode ? bulkSelection.has(tile.model.item.filename) : undefined"
           >
-            <button
-              type="button"
-              class="absolute inset-0 block h-full w-full overflow-hidden text-left"
-              :aria-label="tileTitle(laid.entry)"
-              :aria-pressed="selectMode ? bulkSelection.has(laid.item.filename) : undefined"
-            >
-              <AuthedMedia
-                :path="
-                  galleryMediaPath(
-                    laid.item.filename,
-                    gallery.mediaSourceOf(laid.entry.sourceKey),
-                    true,
-                    laid.item.trashed_at != null,
-                  )
-                "
-                :target="targetFor(laid.entry)"
-                :cache-key="laid.entry.sourceKey"
-                :media-version="
-                  laid.item.media_version ??
-                  `${laid.item.timestamp}:${laid.item.size_bytes ?? 'unknown'}`
-                "
-                :video="
-                  gallery.mediaSourceOf(laid.entry.sourceKey) === 'local' && isVideo(laid.item)
-                "
-                :alt="laid.item.metadata.prompt"
-              />
-              <!-- NEW badge (top-left) — hidden while selecting, where the
-                   checkbox owns that corner; never in the trash. -->
-              <span
-                v-if="!selectMode && !inTrash && isFresh(laid.entry)"
-                data-test="new-badge"
-                class="ms-lib-new absolute top-2 left-2"
-              >
-                New
-              </span>
-              <span
-                v-if="!selectMode && isUpscaledImage(laid.item)"
-                data-test="upscaled-badge"
-                class="ms-lib-upscaled absolute top-2 right-2"
-              >
-                Upscaled
-              </span>
-              <span
-                v-if="isVideo(laid.item) || isAudio(laid.item)"
-                class="absolute top-1.5 right-1.5 rounded-control bg-black/60 px-1 text-caption text-on-media"
-              >
-                {{ isAudio(laid.item) ? "♪" : "▶" }}
-              </span>
-              <span
-                v-if="selectMode"
-                data-test="select-indicator"
-                class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-full text-caption"
-                :class="
-                  bulkSelection.has(laid.item.filename)
-                    ? 'bg-safelight font-semibold text-on-accent'
-                    : 'border border-white/70 bg-black/40 text-on-media'
-                "
-              >
-                {{ bulkSelection.has(laid.item.filename) ? "✓" : "" }}
-              </span>
-              <!-- The badge yields to the rising edge code on hover — both live
-                   in the tile's bottom margin and must never overlap. -->
-              <span
-                v-if="showBadges"
-                data-test="host-badge"
-                class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
-                :title="`Available on ${availabilityLabel(laid.entry)}`"
-              >
-                {{ availabilityLabel(laid.entry) }}
-              </span>
-              <span
-                v-if="!inTrash"
-                data-test="edge-strip"
-                class="edge-code absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
-              >
-                {{ tileTitle(laid.entry) }} · {{ modelLabel(laid.item.metadata.model) }} · S
-                {{ laid.item.metadata.seed }}
-              </span>
-            </button>
-            <!-- ♥ (bottom-right): filled when favorite, faint on hover when not;
-                 click toggles without opening the print. -->
-            <button
-              v-if="!inTrash && organizeAvailable && canOrganizeEntry(laid.entry)"
-              type="button"
-              data-test="tile-favorite"
-              class="ms-lib-heart absolute right-1.5 bottom-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full text-on-media transition-opacity duration-100"
-              :class="
-                isFavorite(laid.entry)
-                  ? 'ms-lib-heart--on opacity-100'
-                  : 'opacity-0 group-hover:opacity-60 hover:!opacity-100'
-              "
-              :aria-pressed="isFavorite(laid.entry)"
-              :aria-label="isFavorite(laid.entry) ? 'Unfavorite' : 'Favorite'"
-              :title="isFavorite(laid.entry) ? 'Unfavorite' : 'Favorite'"
-              @click.stop="toggleFavorite(laid.entry)"
-              @dblclick.stop
-            >
-              <Icon name="heart" :size="14" />
-            </button>
-            <TrashTileActions
-              v-if="inTrash"
-              :purge-at="orgOf(laid.entry).purgeAt"
-              :show-actions="!selectMode"
-              :busy="organizeBusy"
-              @restore="restorePrints([laid.entry])"
-              @delete-forever="askDeleteForever([laid.entry])"
+            <AuthedMedia
+              :path="tile.model.mediaPath"
+              :target="tile.model.target"
+              :cache-key="tile.model.entry.sourceKey"
+              :media-version="tile.model.mediaVersion"
+              :video="tile.model.localVideo"
+              :alt="tile.model.item.metadata.prompt"
             />
-          </div>
+            <!-- NEW badge (top-left) — hidden while selecting, where the
+                 checkbox owns that corner; never in the trash. -->
+            <span
+              v-if="!selectMode && !inTrash && tile.model.fresh"
+              data-test="new-badge"
+              class="ms-lib-new absolute top-2 left-2"
+            >
+              New
+            </span>
+            <span
+              v-if="!selectMode && tile.model.upscaled"
+              data-test="upscaled-badge"
+              class="ms-lib-upscaled absolute top-2 right-2"
+            >
+              Upscaled
+            </span>
+            <span
+              v-if="tile.model.video || tile.model.audio"
+              class="absolute top-1.5 right-1.5 rounded-control bg-black/60 px-1 text-caption text-on-media"
+            >
+              {{ tile.model.audio ? "♪" : "▶" }}
+            </span>
+            <span
+              v-if="selectMode"
+              data-test="select-indicator"
+              class="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-full text-caption"
+              :class="
+                bulkSelection.has(tile.model.item.filename)
+                  ? 'bg-safelight font-semibold text-on-accent'
+                  : 'border border-white/70 bg-black/40 text-on-media'
+              "
+            >
+              {{ bulkSelection.has(tile.model.item.filename) ? "✓" : "" }}
+            </span>
+            <!-- The badge yields to the rising edge code on hover — both live
+                 in the tile's bottom margin and must never overlap. -->
+            <span
+              v-if="showBadges"
+              data-test="host-badge"
+              class="edge-code absolute bottom-1.5 left-1.5 max-w-[70%] truncate rounded-control bg-black/60 px-1 !text-on-media transition-opacity duration-100 group-hover:opacity-0"
+              :title="`Available on ${tile.model.availability}`"
+            >
+              {{ tile.model.availability }}
+            </span>
+            <span
+              v-if="!inTrash"
+              data-test="edge-strip"
+              class="edge-code absolute right-0 bottom-0 left-0 translate-y-full truncate bg-black/60 py-0.5 pr-7 pl-1.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
+            >
+              {{ tile.model.title }} · {{ tile.model.modelLabel }} · S
+              {{ tile.model.item.metadata.seed }}
+            </span>
+          </button>
+          <!-- ♥ (bottom-right): filled when favorite, faint on hover when not;
+               click toggles without opening the print. -->
+          <button
+            v-if="!inTrash && organizeAvailable && tile.model.canOrganize"
+            type="button"
+            data-test="tile-favorite"
+            class="ms-lib-heart absolute right-1.5 bottom-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full text-on-media transition-opacity duration-100"
+            :class="
+              tile.model.favorite
+                ? 'ms-lib-heart--on opacity-100'
+                : 'opacity-0 group-hover:opacity-60 hover:!opacity-100'
+            "
+            :aria-pressed="tile.model.favorite"
+            :aria-label="tile.model.favorite ? 'Unfavorite' : 'Favorite'"
+            :title="tile.model.favorite ? 'Unfavorite' : 'Favorite'"
+            @click.stop="toggleFavorite(tile.model.entry)"
+            @dblclick.stop
+          >
+            <Icon name="heart" :size="14" />
+          </button>
+          <TrashTileActions
+            v-if="inTrash"
+            :purge-at="tile.model.purgeAt"
+            :show-actions="!selectMode"
+            :busy="organizeBusy"
+            @restore="restorePrints([tile.model.entry])"
+            @delete-forever="askDeleteForever([tile.model.entry])"
+          />
         </div>
       </div>
     </div>
@@ -2409,15 +2530,28 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* Tiles are absolutely placed by the justified layout (`translate` carries
+   the row offset from the virtualizer plus the x offset within the row) and
+   contained, so a hover or a badge repaint never lays out its neighbours.
+   The hover lift transitions `transform` only — animating `box-shadow`
+   repainted a large blurred shadow every frame of the transition. */
 .ms-lib-tile {
-  transition:
-    transform var(--dur-quick) var(--ease),
-    box-shadow var(--dur-quick) var(--ease);
+  position: absolute;
+  top: 0;
+  left: 0;
+  contain: layout paint style;
+  transform: translate3d(var(--tile-x), var(--tile-y), 0);
+  transition: transform var(--dur-quick) var(--ease);
 }
 
 .ms-lib-tile:hover {
-  transform: translateY(-2px);
+  transform: translate3d(var(--tile-x), calc(var(--tile-y) - 2px), 0);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
+}
+
+.ms-lib-tile-layer {
+  position: relative;
+  will-change: transform;
 }
 
 .ms-lib-tile > button:focus-visible {

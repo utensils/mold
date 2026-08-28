@@ -549,10 +549,24 @@ describe("LibraryView header + NEW badges", () => {
     expect(slider.element.value).toBe("280");
     expect(wrapper.get(".ms-lib-tile").attributes("style")).toContain("height: 280px");
 
-    await slider.setValue("320");
-    expect(wrapper.get(".ms-lib-tile").attributes("style")).toContain("height: 320px");
-    expect(localStorage.getItem("mold.gallery.thumbnailSize.v1")).toBe("320");
-    wrapper.unmount();
+    // A drag delivers many ticks; the grid follows each one immediately while
+    // the localStorage write settles 250 ms after the last tick.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await slider.setValue("300");
+      await slider.setValue("320");
+      expect(wrapper.get(".ms-lib-tile").attributes("style")).toContain("height: 320px");
+      expect(localStorage.getItem("mold.gallery.thumbnailSize.v1")).toBe("280");
+      vi.advanceTimersByTime(250);
+      expect(localStorage.getItem("mold.gallery.thumbnailSize.v1")).toBe("320");
+
+      // Leaving mid-settle still persists the last value.
+      await slider.setValue("340");
+      wrapper.unmount();
+      expect(localStorage.getItem("mold.gallery.thumbnailSize.v1")).toBe("340");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("badges prints unseen since the last visit, then marks them seen", async () => {

@@ -16,7 +16,6 @@ import type { Collection, GalleryImage, ServerEvent, TagCount } from "../lib/api
 import {
   GALLERY_IDENTITY_WINDOW_SECS,
   galleryPrintIdentity,
-  sameLogicalGalleryPrint,
 } from "@studio/lib/galleryPrintIdentity";
 import {
   collectionSlug as slugOfCollection,
@@ -422,6 +421,43 @@ export const useGalleryStore = defineStore("gallery", {
     trashIndex(): Map<string, MergedPrint> {
       return indexCopies(this.trashMerged);
     },
+    /** Per-bucket filename + identity indexes over the live rows (pending
+     *  deletions included, exactly like the buckets themselves). Rebuilt once
+     *  per bucket change; read by every copy lookup so the grid never scans. */
+    bucketIndex(): Map<string, BucketIndex> {
+      return indexBuckets(this.buckets);
+    },
+    trashBucketIndex(): Map<string, BucketIndex> {
+      return indexBuckets(this.trashBuckets);
+    },
+    /**
+     * Every copy filename → its logical print's organization union, computed
+     * ONCE per logical print per data change. This is the single place
+     * `unionOrganization` runs over the grid: the filter chips, the shelf
+     * counts, the kind counts, `filtered`, and every tile read this map, so
+     * one gallery mutation costs one union pass rather than one per getter
+     * per tile. Live prints are indexed first so they win over trashed twins.
+     */
+    organizationIndex(): Map<string, OrganizationUnion> {
+      const resolve = this.collectionResolver;
+      const index = new Map<string, OrganizationUnion>();
+      const add = (prints: MergedPrint[]) => {
+        for (const print of prints) {
+          const copies = print.copies ?? [{ sourceKey: print.sourceKey, item: print.item }];
+          const org = unionOrganization(
+            copies.map((copy) => ({ hostId: copy.sourceKey, item: copy.item })),
+            { localHostId: "local", resolveCollectionSlug: resolve },
+          );
+          if (!index.has(print.item.filename)) index.set(print.item.filename, org);
+          for (const copy of copies) {
+            if (!index.has(copy.item.filename)) index.set(copy.item.filename, org);
+          }
+        }
+      };
+      add(this.merged);
+      add(this.trashMerged);
+      return index;
+    },
     /** Logical prints in the trash across every host. */
     trashCount(): number {
       return this.trashMerged.length;
@@ -534,12 +570,13 @@ export const useGalleryStore = defineStore("gallery", {
      */
     organizationOf(): (entry: MergedPrint) => OrganizationUnion {
       const resolve = this.collectionResolver;
-      const live = this.mergedIndex;
-      const trash = this.trashIndex;
+      const index = this.organizationIndex;
       return (entry) => {
-        const print = live.get(entry.item.filename) ?? trash.get(entry.item.filename);
-        const copies = print?.copies ??
-          entry.copies ?? [{ sourceKey: entry.sourceKey, item: entry.item }];
+        const indexed = index.get(entry.item.filename);
+        if (indexed) return indexed;
+        // Hand-built or mid-refetch entry that matches no merged print: read
+        // its own copies (the only path that still unions per call).
+        const copies = entry.copies ?? [{ sourceKey: entry.sourceKey, item: entry.item }];
         return unionOrganization(
           copies.map((copy) => ({ hostId: copy.sourceKey, item: copy.item })),
           { localHostId: "local", resolveCollectionSlug: resolve },
@@ -645,16 +682,16 @@ export const useGalleryStore = defineStore("gallery", {
      * bucket is probed directly.
      */
     existsLocally(): (entry: MergedPrint) => boolean {
+      const local = this.bucketIndex.get("local");
       return (entry) => {
         if (entry.sourceKey === "local") return true;
         if (entry.availableOn.some((s) => s.key === "local")) return true;
+        if (!local) return false;
+        if (local.byFilename.has(entry.item.filename)) return true;
         const identity = printIdentity(entry.item);
-        return (this.buckets["local"]?.items ?? []).some(
-          (item) =>
-            item.filename === entry.item.filename ||
-            (identity !== null &&
-              printIdentity(item) === identity &&
-              withinIdentityWindow(item, entry.item)),
+        if (identity === null) return false;
+        return (local.byIdentity.get(identity) ?? []).some((item) =>
+          withinIdentityWindow(item, entry.item),
         );
       };
     },
@@ -708,18 +745,21 @@ export const useGalleryStore = defineStore("gallery", {
     },
     /** Per-source chips for the gallery header (HostFilterChips adds All). */
     chipCounts(): GalleryChip[] {
+      const hiddenSlugs = new Set(
+        this.mergedCollections
+          .filter((collection) => collection.hidden)
+          .map((collection) => collection.slug),
+      );
+      const organization = this.organizationIndex;
+      const hidesInDefault = (item: GalleryImage) =>
+        (organization.get(item.filename)?.collections ?? []).some((slug) =>
+          hiddenSlugs.has(slug),
+        );
       return this.sources.map((source) => {
         const items = this.buckets[source.key]?.items ?? [];
         const count =
-          this.scope === "prints"
-            ? items.filter((item) =>
-                this.visibleInDefaultLibrary({
-                  item,
-                  sourceKey: source.key,
-                  hostLabel: source.label,
-                  availableOn: [source],
-                }),
-              ).length
+          this.scope === "prints" && hiddenSlugs.size > 0
+            ? items.filter((item) => !hidesInDefault(item)).length
             : items.length;
         return { key: source.key, label: source.label, count };
       });
@@ -901,11 +941,11 @@ export const useGalleryStore = defineStore("gallery", {
      * that minted a different filename.
      */
     locationsOf(entry: MergedPrint): GalleryLocation[] {
-      return locationsIn(this.buckets, entry);
+      return locationsIn(this.bucketIndex, entry);
     },
     /** Every loaded trashed copy of one logical print. */
     trashLocationsOf(entry: MergedPrint): GalleryLocation[] {
-      return locationsIn(this.trashBuckets, entry);
+      return locationsIn(this.trashBucketIndex, entry);
     },
     /** Live and trashed copies together — organization edits reach both. */
     allLocationsOf(entry: MergedPrint): GalleryLocation[] {
@@ -1400,8 +1440,8 @@ export const useGalleryStore = defineStore("gallery", {
     /** Find the bucket row (live or trash) a mutation should update. */
     rowOf(hostKey: string, filename: string): GalleryImage | null {
       return (
-        this.buckets[hostKey]?.items.find((i) => i.filename === filename) ??
-        this.trashBuckets[hostKey]?.items.find((i) => i.filename === filename) ??
+        this.bucketIndex.get(hostKey)?.byFilename.get(filename) ??
+        this.trashBucketIndex.get(hostKey)?.byFilename.get(filename) ??
         null
       );
     },
@@ -1972,17 +2012,60 @@ export const useGalleryStore = defineStore("gallery", {
   },
 });
 
-/** Every copy of a logical print inside one bucket map. */
-function locationsIn(
-  buckets: Record<string, GalleryBucket>,
-  entry: MergedPrint,
-): GalleryLocation[] {
-  const locations: GalleryLocation[] = [];
+/**
+ * One bucket's rows indexed for O(1) identity lookups. `byIdentity` holds
+ * every row sharing a seed:size:model identity so the caller can still apply
+ * the per-pair timestamp window (`sameLogicalGalleryPrint`'s contract).
+ */
+export interface BucketIndex {
+  byFilename: Map<string, GalleryImage>;
+  byIdentity: Map<string, GalleryImage[]>;
+}
+
+export function indexBucketRows(items: readonly GalleryImage[]): BucketIndex {
+  const byFilename = new Map<string, GalleryImage>();
+  const byIdentity = new Map<string, GalleryImage[]>();
+  for (const item of items) {
+    if (!byFilename.has(item.filename)) byFilename.set(item.filename, item);
+    const identity = printIdentity(item);
+    if (identity === null) continue;
+    const twins = byIdentity.get(identity);
+    if (twins) twins.push(item);
+    else byIdentity.set(identity, [item]);
+  }
+  return { byFilename, byIdentity };
+}
+
+function indexBuckets(buckets: Record<string, GalleryBucket>): Map<string, BucketIndex> {
+  const index = new Map<string, BucketIndex>();
   for (const [sourceKey, bucket] of Object.entries(buckets)) {
-    for (const item of bucket.items) {
-      if (sameLogicalGalleryPrint(entry.item, item)) {
-        locations.push({ sourceKey, filename: item.filename });
-      }
+    index.set(sourceKey, indexBucketRows(bucket.items));
+  }
+  return index;
+}
+
+/**
+ * Every copy of a logical print inside one bucket map — the same answer the
+ * old full scan gave (`sameLogicalGalleryPrint` per row: exact filename, or
+ * identity inside the timestamp window), read off the per-bucket index so a
+ * grid of N tiles costs O(N), never O(N²). Filename matches come first, then
+ * identity twins in bucket order, matching the scan's row order per bucket.
+ */
+function locationsIn(index: Map<string, BucketIndex>, entry: MergedPrint): GalleryLocation[] {
+  const locations: GalleryLocation[] = [];
+  const identity = printIdentity(entry.item);
+  for (const [sourceKey, bucket] of index) {
+    const seen = new Set<string>();
+    const exact = bucket.byFilename.get(entry.item.filename);
+    if (exact) {
+      seen.add(exact.filename);
+      locations.push({ sourceKey, filename: exact.filename });
+    }
+    if (identity === null) continue;
+    for (const twin of bucket.byIdentity.get(identity) ?? []) {
+      if (seen.has(twin.filename) || !withinIdentityWindow(twin, entry.item)) continue;
+      seen.add(twin.filename);
+      locations.push({ sourceKey, filename: twin.filename });
     }
   }
   return locations;
