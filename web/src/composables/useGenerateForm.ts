@@ -1349,8 +1349,7 @@ export function useGenerateForm(): UseGenerateForm {
                 audioOnlyPipeline: isAudioOnlyPipeline(s.pipeline),
                 hasConditioningAudio:
                   s.audioFile !== null || audioPath.length > 0,
-                isExtend:
-                  s.extendVideo !== null || extendVideoPath.length > 0,
+                isExtend: s.extendVideo !== null || extendVideoPath.length > 0,
               }),
               audio_file: s.audioFile?.base64 ?? undefined,
               audio_file_path: s.audioFile ? undefined : audioPath || undefined,

@@ -488,9 +488,8 @@ function removeKeyframe(index: number) {
         {{ videoOnlyBlocked }}
       </p>
       <p v-else class="ltx2__hint">
-        Skips the audio half of the transformer entirely. Output-changing:
-        the same seed renders different video than the default multimodal
-        path.
+        Skips the audio half of the transformer entirely. Output-changing: the
+        same seed renders different video than the default multimodal path.
       </p>
     </div>
 

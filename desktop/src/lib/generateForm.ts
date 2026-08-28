@@ -78,10 +78,7 @@ import {
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { effectiveGenerationGuidance, isWanFamily } from "@studio/lib/generationCapabilities";
-import {
-  isAudioOnlyPipeline,
-  stripAudioOnlyIncompatibleFields,
-} from "@studio/lib/ltx2Pipeline";
+import { isAudioOnlyPipeline, stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import { requestVideoOnly } from "@studio/lib/videoOnly";
 import {
   effectiveGenerationRecipe,

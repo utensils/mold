@@ -1037,17 +1037,12 @@ function reset() {
                 data-test="ltx2-video-only"
                 @update:model-value="form.videoOnly = $event"
               />
-              <p
-                v-if="videoOnlyBlocked"
-                class="ms-hint"
-                data-test="ltx2-video-only-blocked"
-              >
+              <p v-if="videoOnlyBlocked" class="ms-hint" data-test="ltx2-video-only-blocked">
                 {{ videoOnlyBlocked }}
               </p>
               <p v-else class="ms-hint">
-                Skips the audio half of the transformer entirely.
-                Output-changing: the same seed renders different video than
-                the default multimodal path.
+                Skips the audio half of the transformer entirely. Output-changing: the same seed
+                renders different video than the default multimodal path.
               </p>
             </div>
 
