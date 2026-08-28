@@ -794,7 +794,8 @@ artifact pass and so overstates the anonymous working set.
 
 | Case | References (in order) | Steps | Wall | VRAM peak | Result |
 | --- | --- | --- | --- | --- | --- |
-| a | image | 21 | 124 s | — | **Refused at admission**: 34,330,890,090 host bytes needed against a 34,294,289,818 byte sample |
+| a | image | 21 | 124 s | — | **Refused at admission** (#825, pre-#1418 pad-grid charge): 34,330,890,090 host bytes needed against a 34,294,289,818 byte sample |
+| a′ | image | 4 | 2,708 s | 9,104 MiB | H.264 768x768 x124 + AAC (#1418, 2026-08-27: base tag, seed 770021, one 768x768 PNG normalized to 2048x2048) |
 | b | video (with soundtrack) | 8 | 1,604 s | 15,024 MiB | H.264 1344x768 x124 + AAC |
 | c | image, audio | 8 | 3,100 s | 12,594 MiB | H.264 1344x768 x124 + AAC |
 | g | video (with soundtrack), audio, audio | 8 | 1,575 s | 15,138 MiB | H.264 + AAC, seed 825825 |
@@ -872,6 +873,26 @@ Five defects sat in series behind the #1418 hold, each reachable only after
 the previous one was fixed and each ~45 minutes deep on this host; no image
 reference had ever rendered through the public route.
 
+**Row `a′` is the first public-route image-reference render, and it is the
+measured image row this document lacked.** hal9000, `mold-r5` built from this
+branch, run as the `mold` user against the production home with the ZFS ARC
+capped at 4 GiB (the artifact hash pass otherwise parks ~16 GB in ARC that
+`MemAvailable` does not count as reclaimable, and the 32.8 GB charge was
+refused against a 26.2 GB sample). Frozen rows: 4,128 text, 16,384 vision
+(patches), 4,096 condition, 29,950 packed. Admission charged
+32,775,178,178 host bytes. Phases: open checkpoints 69.5 s, Qwen conditioner
+load 44.3 s, **Qwen encode 2,405.6 s** (the CPU-placed conditioner over one
+2048-square still — #1423), VAE load 27.9 s, reference visual encode 5.7 s,
+denoise 123.8 s at 4 steps, video decode 23.6 s, H.264 encode 19.9 s. VRAM
+high water 9,104 MiB (1 Hz `nvidia-smi`); process anonymous RSS peaked at
+51.1 GB, above the 32.8 GB host charge — the DiT phases, not the conditioner,
+own that excess (the conditioner-only rounds peaked at 29.6 GB) and it is an
+open accounting question folded into #1423. The observer's own record for the
+render: Qwen activation workspace 36,013,621,248 B (the CPU route's `VmHWM`
+growth, file-backed pages included), condition-VAE workspace 404,685,888 B
+for the single 2048-square still, attention 4,658,918,392 B, FFN
+5,794,354,680 B, decoder 764,965,012 B, audio decode 204,867,120 B.
+
 **The host, not the card, is the binding constraint.** The compact stack places
 its Qwen3-VL conditioner on the CPU for a CUDA route, so the host demand is its
 15.687 GB of parameters plus a request-derived activation workspace that scales
@@ -880,6 +901,10 @@ with the conditioner sequence. One 2048-square image reference asks for
 row. A shortfall is refused with both numbers before the artifact pass, which
 is the behaviour to expect rather than an OOM — case `a` is that refusal, 36 MB
 short on a 62 GB host, and it is recorded as a result rather than worked around.
+(Row `a′` below, after #1418, is the same request admitted and rendered once
+the host headroom was real; the charge that admitted it was 32.8 GB on the
+patch grid, lower than the 34.3 GB the pad-grid build asked for because the
+#1289-era host corrections landed in between.)
 
 Not yet measured: an image + video + audio set (case `d`/`e` of the planned
 matrix) estimates ~46 GB of host headroom and cannot run on a 62 GB host at
