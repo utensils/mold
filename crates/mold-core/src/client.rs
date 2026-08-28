@@ -1446,10 +1446,9 @@ impl MoldClient {
             listing = self.list_queue_page(limit, Some(&cursor)).await?;
         }
         // A walk of the durable order restates position per page, so the
-        // merged sequence is the authority for where each row sits.
-        for (position, entry) in entries.iter_mut().enumerate() {
-            entry.position = position;
-        }
+        // merged sequence is the authority for where each row sits — held
+        // rows included in the walk, excluded from the count.
+        crate::queue_wait::assign_listed_positions(&mut entries);
         Ok(QueueListingWire {
             entries,
             live_only_entries: Vec::new(),
@@ -3457,8 +3456,8 @@ mod tests {
                 .iter()
                 .map(|entry| entry.position)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2],
-            "the merged sequence is the authority for position"
+            vec![0, 0, 0],
+            "the merged sequence is the authority for position; every row in this fixture is held, so none takes a place in line"
         );
         assert!(all.plan.is_some(), "the first page's plan is retained");
         assert!(

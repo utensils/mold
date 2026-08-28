@@ -211,6 +211,23 @@ fn plan_reason_for_job(
     (reason, preparation)
 }
 
+/// Number a merged listing's rows in dispatch order, skipping held ones.
+///
+/// The server applies this rule per page; a client that walks every page and
+/// concatenates them must restate it, or a held row at the head of the walk
+/// puts the next runnable job at "#1 in line". A held row keeps the position
+/// of the next runnable row so the field stays a plain index; every renderer
+/// reads the state first.
+pub fn assign_listed_positions(entries: &mut [crate::QueueJobEntryWire]) {
+    let mut next = 0;
+    for entry in entries.iter_mut() {
+        entry.position = next;
+        if entry.state != "held" {
+            next += 1;
+        }
+    }
+}
+
 /// Resolve one listed row against the plan the same listing carried.
 ///
 /// `position` is the row's own 0-based dispatch order. A host that reported
@@ -260,6 +277,36 @@ pub fn queue_wait_code(wait: &QueueWaitStatus) -> String {
 mod tests {
     use super::*;
     use crate::types::QueueWorkItem;
+
+    #[test]
+    fn a_merged_walk_numbers_only_rows_that_can_run() {
+        let row = |id: &str, state: &str| crate::QueueJobEntryWire {
+            id: id.to_string(),
+            state: state.to_string(),
+            position: 99,
+            ..Default::default()
+        };
+        let mut entries = vec![
+            row("held-a", "held"),
+            row("queued-b", "queued"),
+            row("held-c", "held"),
+            row("queued-d", "queued"),
+        ];
+        assign_listed_positions(&mut entries);
+        let positions = entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.position))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            positions,
+            vec![
+                ("held-a", 0),
+                ("queued-b", 0),
+                ("held-c", 1),
+                ("queued-d", 1)
+            ]
+        );
+    }
 
     #[test]
     fn a_held_row_is_held_whatever_position_the_listing_gave_it() {

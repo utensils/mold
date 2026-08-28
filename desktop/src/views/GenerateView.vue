@@ -4341,11 +4341,10 @@ onBeforeUnmount(() => {
                      over it, so the print literally develops on the canvas. -->
                 <img
                   v-if="
-                    selectedQueuePreviewSrc ||
-                    (job && job.status !== 'complete' && job.previewUrl)
+                    selectedQueuePreviewSrc || (job && job.status !== 'complete' && job.previewUrl)
                   "
                   data-test="develop-preview"
-                  :src="selectedQueuePreviewSrc ?? (job?.previewUrl ?? '')"
+                  :src="selectedQueuePreviewSrc ?? job?.previewUrl ?? ''"
                   alt=""
                   class="absolute inset-0 h-full w-full object-contain"
                   :style="{
@@ -4358,9 +4357,7 @@ onBeforeUnmount(() => {
                 <DevelopCanvas
                   v-if="selectedQueueRender || (job && job.status !== 'complete')"
                   :seed="job?.visualSeed ?? 'selected-queue-render'"
-                  :progress="
-                    selectedQueuePreviewFraction ?? (job ? jobProgress(job) : 0)
-                  "
+                  :progress="selectedQueuePreviewFraction ?? (job ? jobProgress(job) : 0)"
                   :phase="job ? jobPhase(job) : 'developing'"
                   class="absolute inset-0"
                   :style="{
@@ -4370,8 +4367,7 @@ onBeforeUnmount(() => {
                             Math.max(
                               0.18,
                               1 -
-                                (selectedQueuePreviewFraction ??
-                                  (job ? jobProgress(job) : 0)) *
+                                (selectedQueuePreviewFraction ?? (job ? jobProgress(job) : 0)) *
                                   0.9,
                             ),
                           )

@@ -5823,10 +5823,39 @@ mod tests {
             "an unowned interrupted running row keeps the legacy queued projection"
         );
         assert_eq!(second["entries"][0]["replayed"], true);
+        assert_eq!(
+            second["entries"][0]["position"], 2,
+            "position continues from the runnable rows before this page"
+        );
         assert_eq!(second["entries"][1]["id"], "held");
         assert_eq!(second["entries"][1]["state"], "held");
         assert_eq!(second["entries"][1]["held_reason"], "held for review");
         assert_eq!(second["live_only_entries"][0]["id"], "h3-live-only");
+
+        // A held row on the previous page takes no place in line: the next
+        // page's first runnable row is #3 (after live-running, queued,
+        // retained-running), not #4 — the cursor carries the runnable count
+        // separately from the traversal offset.
+        let cursor = second["page"]["next_cursor"]
+            .as_str()
+            .expect("a third page follows the held row")
+            .to_string();
+        let third = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/queue?limit=2&cursor={cursor}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(third.status(), StatusCode::OK);
+        let third = json_body(third).await;
+        assert_eq!(third["page"]["offset"], 4);
+        assert_eq!(third["entries"][0]["id"], "tail-a");
+        assert_eq!(third["entries"][0]["position"], 3);
+        assert_eq!(third["entries"][1]["id"], "tail-b");
+        assert_eq!(third["entries"][1]["position"], 4);
     }
 
     #[tokio::test]

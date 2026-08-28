@@ -2818,6 +2818,7 @@ const generationStatus = computed(() => {
       );
       return queueWaitLabel(
         resolveQueueWait({
+          state: live?.state,
           position: live?.position ?? active.queuePosition,
           blockedReason: live?.blockedReason,
         }),
@@ -10776,9 +10777,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               <img
                 class="mobile-develop-preview"
                 data-test="mobile-develop-preview"
-                :src="
-                  selectedQueuePreviewSrc ?? (activeGeneration?.previewUrl ?? '')
-                "
+                :src="selectedQueuePreviewSrc ?? activeGeneration?.previewUrl ?? ''"
                 alt=""
                 :style="{
                   filter: `blur(${Math.max(2, 14 - 12 * (selectedQueuePreviewFraction ?? (activeGeneration ? jobProgress(activeGeneration) : 0)))}px)`,

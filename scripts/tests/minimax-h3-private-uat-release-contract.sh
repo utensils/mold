@@ -125,7 +125,7 @@ require_text crates/mold-core/src/validation.rs \
   '#[cfg(any(feature = "h3", feature = "h3-private-uat"))]' \
   "the H3 request-profile validator is not feature-gated"
 require_text crates/mold-server/src/routes.rs \
-  'validate_h3_private_uat_request(validation_request)' \
+  'validate_h3_private_uat_request_with(' \
   "authenticated private H3 ingress re-enters the public compliance validator"
 containment_rev=9b3b1bc276bc27c3e99343ee82db7f99705b9ed5
 containment_patch="cudarc = { git = \"https://github.com/utensils/cudarc\", rev = \"${containment_rev}\" }"

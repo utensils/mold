@@ -12,6 +12,8 @@
 import type { QueueEntry, QueuePlan, QueueWorkItem } from "../api/queuePlan";
 
 export interface QueueStatus {
+  /** The row's lifecycle as the host listed it (`queued`, `running`, `held`), or null. */
+  state: string | null;
   /** Live 0-based dispatch order, or null when the host did not list the job. */
   position: number | null;
   /** Raw scheduler reason this work is parked, or null when it is simply waiting. */
@@ -244,6 +246,7 @@ export function buildQueueStatusIndex(
       if (!entry || typeof entry.id !== "string" || entry.id.length === 0)
         continue;
       index.set(queueStatusKey(source.hostId, entry.id), {
+        state: typeof entry.state === "string" ? entry.state : null,
         position: finitePosition(entry.position),
         blockedReason: planBlockedReason(source.plan, entry.id),
         preparation: planPreparation(source.plan, entry.id),

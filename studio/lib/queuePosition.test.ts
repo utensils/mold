@@ -43,6 +43,27 @@ function plan(blocked: Record<string, string>): QueuePlan {
 }
 
 describe("buildQueueStatusIndex", () => {
+  it("carries the row's lifecycle so a held row resolves as held", () => {
+    const index = buildQueueStatusIndex([
+      {
+        hostId: "alpha",
+        entries: [
+          { id: "parked", state: "held", position: 0 } as QueueEntry,
+          { id: "waiting", state: "queued", position: 0 } as QueueEntry,
+        ],
+      },
+    ]);
+    expect(queueStatusFor(index, "alpha", "parked")?.state).toBe("held");
+    expect(resolveQueueWait(queueStatusFor(index, "alpha", "parked"))).toEqual({
+      kind: "held",
+    });
+    expect(resolveQueueWait(queueStatusFor(index, "alpha", "waiting"))).toEqual(
+      {
+        kind: "next",
+      },
+    );
+  });
+
   it("keys live positions per host so ids from different hosts never collide", () => {
     const index = buildQueueStatusIndex([
       { hostId: "alpha", entries: [entry("job-1", 0), entry("job-2", 1)] },
@@ -80,6 +101,7 @@ describe("buildQueueStatusIndex", () => {
       { hostId: "alpha", entries: [broken] },
     ]);
     expect(queueStatusFor(index, "alpha", "job-1")).toEqual({
+      state: "running",
       position: null,
       blockedReason: null,
       preparation: null,

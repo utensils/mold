@@ -5968,10 +5968,27 @@ async fn list_queue(
     let next_offset = offset.checked_add(durable_page.rows.len()).ok_or_else(|| {
         invalid_queue_page("queue cursor offset cannot represent the returned page")
     })?;
+    // Positions count only rows that can run, so the cursor carries that
+    // count separately from the traversal offset: a held row on page 1 must
+    // not push the first runnable row of page 2 to "#1 in line".
+    let schedulable_offset = requested_page
+        .cursor
+        .map_or(0, |cursor| cursor.schedulable_offset);
+    let schedulable_in_page = durable_page
+        .rows
+        .iter()
+        .filter(|row| row.state != mold_db::generation_queue::QueueRowState::Held)
+        .count();
+    let next_schedulable_offset = schedulable_offset
+        .checked_add(schedulable_in_page)
+        .ok_or_else(|| {
+            invalid_queue_page("queue cursor offset cannot represent the returned page")
+        })?;
     let next_cursor = durable_page.next_cursor.map(|durable| {
         encode_queue_cursor(QueuePageCursor {
             durable,
             offset: next_offset,
+            schedulable_offset: next_schedulable_offset,
         })
     });
     let returned = durable_page.rows.len();
@@ -5980,6 +5997,7 @@ async fn list_queue(
         listing.entries,
         &durable_live_ids,
         offset,
+        schedulable_offset,
     )?;
 
     let page = mold_core::QueuePage {
@@ -6157,7 +6175,10 @@ struct QueueListQuery {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueuePageCursor {
     durable: mold_db::generation_queue::QueueProjectionCursor,
+    /// Durable rows traversed before this page, held rows included.
     offset: usize,
+    /// Rows that can run before this page — what the public `position` counts.
+    schedulable_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6197,21 +6218,22 @@ fn invalid_queue_page(message: impl Into<String>) -> ApiError {
 /// keys and an unsigned traversal offset. URL-safe base64 keeps every cursor
 /// opaque and query-string safe; clients never construct or inspect it.
 fn encode_queue_cursor(cursor: QueuePageCursor) -> String {
-    const VERSION: u8 = 1;
-    let mut bytes = [0_u8; 25];
+    const VERSION: u8 = 2;
+    let mut bytes = [0_u8; 33];
     bytes[0] = VERSION;
     bytes[1..9].copy_from_slice(&cursor.durable.created_at_ms.to_be_bytes());
     bytes[9..17].copy_from_slice(&cursor.durable.rowid.to_be_bytes());
     bytes[17..25].copy_from_slice(&(cursor.offset as u64).to_be_bytes());
+    bytes[25..33].copy_from_slice(&(cursor.schedulable_offset as u64).to_be_bytes());
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 fn decode_queue_cursor(raw: &str) -> Result<QueuePageCursor, ApiError> {
-    const VERSION: u8 = 1;
+    const VERSION: u8 = 2;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(raw)
         .map_err(|_| invalid_queue_page("cursor is malformed"))?;
-    let bytes: [u8; 25] = bytes
+    let bytes: [u8; 33] = bytes
         .try_into()
         .map_err(|_| invalid_queue_page("cursor is malformed"))?;
     if bytes[0] != VERSION {
@@ -6226,12 +6248,20 @@ fn decode_queue_cursor(raw: &str) -> Result<QueuePageCursor, ApiError> {
         bytes[17..25].try_into().expect("fixed cursor slice"),
     ))
     .map_err(|_| invalid_queue_page("cursor offset is unsupported on this server"))?;
+    let schedulable_offset = usize::try_from(u64::from_be_bytes(
+        bytes[25..33].try_into().expect("fixed cursor slice"),
+    ))
+    .map_err(|_| invalid_queue_page("cursor offset is unsupported on this server"))?;
+    if schedulable_offset > offset {
+        return Err(invalid_queue_page("cursor is malformed"));
+    }
     Ok(QueuePageCursor {
         durable: mold_db::generation_queue::QueueProjectionCursor {
             created_at_ms,
             rowid,
         },
         offset,
+        schedulable_offset,
     })
 }
 
@@ -6314,6 +6344,7 @@ fn project_durable_queue_page(
     live_entries: Vec<crate::job_registry::JobEntry>,
     durable_live_ids: &std::collections::HashSet<String>,
     offset: usize,
+    schedulable_offset: usize,
 ) -> Result<
     (
         Vec<crate::job_registry::JobEntry>,
@@ -6355,8 +6386,9 @@ fn project_durable_queue_page(
         entries.push(job_entry_from_durable_projection(row, position));
     }
     // The durable page is traversed by `(created_at, rowid)`, held rows
-    // included; the public position only counts rows that can run.
-    crate::job_registry::assign_positions(&mut entries, offset);
+    // included; the public position only counts rows that can run, so it
+    // starts from the runnable rows before this page rather than `offset`.
+    crate::job_registry::assign_positions(&mut entries, schedulable_offset);
     Ok((entries, live_only_entries))
 }
 
