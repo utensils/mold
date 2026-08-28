@@ -333,6 +333,50 @@ export const ipc = {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("cancel_gallery_thumbnail", { requestId });
   },
+  /** Make sure one tile is in the persistent thumbnail cache and return its
+   * `mold-thumb://` URL. `target` null = this device with its server Off
+   * (rendered from the output dir). Cancellable through `requestId` exactly
+   * like `fetchGalleryThumbnail`. Rejects outside Tauri. */
+  prepareGalleryThumbnail(
+    target: ApiTarget | null,
+    cacheKey: string,
+    filename: string,
+    mediaVersion: string,
+    size: number,
+    requestId: string,
+    fromTrash = false,
+  ): Promise<string> {
+    if (!inTauri()) return Promise.reject(new Error("Native thumbnails require the desktop app."));
+    return invoke<string>("prepare_gallery_thumbnail", {
+      target,
+      cacheKey,
+      filename,
+      mediaVersion,
+      size,
+      requestId,
+      fromTrash,
+    });
+  },
+  /** Which of these tiles are already cached (a stat each, no I/O). */
+  probeGalleryThumbnails(
+    cacheKey: string,
+    baseUrl: string | null,
+    size: number,
+    refs: Array<{ filename: string; mediaVersion: string }>,
+  ): Promise<boolean[]> {
+    if (!inTauri()) return Promise.resolve(refs.map(() => false));
+    return invoke<boolean[]>("probe_gallery_thumbnails", { cacheKey, baseUrl, size, refs });
+  },
+  /** Drop a deleted-forever print's tiles from the persistent cache. */
+  forgetGalleryThumbnail(
+    cacheKey: string,
+    baseUrl: string | null,
+    filename: string,
+    mediaVersion: string,
+  ): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("forget_gallery_thumbnail", { cacheKey, baseUrl, filename, mediaVersion });
+  },
   /** Fetch one full-size gallery file through native HTTP as raw bytes —
    * the Library lightbox and source picker for host-backed prints. Same
    * rationale as the thumbnail route: a media element pointed straight at a

@@ -1055,6 +1055,14 @@ export const useGalleryStore = defineStore("gallery", {
     async remove(sourceKey: string, filename: string, options: { permanent?: boolean } = {}) {
       const permanent = options.permanent === true;
       const target = this.targetOf(sourceKey);
+      // A print deleted forever leaves the persistent thumbnail cache too; a
+      // trashed one keeps its tile (the Trash grid still shows it).
+      const row = permanent ? this.rowOf(sourceKey, filename) : null;
+      if (row?.media_version) {
+        void ipc
+          .forgetGalleryThumbnail(sourceKey, target?.baseUrl ?? null, filename, row.media_version)
+          .catch(() => {});
+      }
       if (target) {
         const suffix = permanent ? "?permanent=true" : "";
         await apiFetchTo(target, `/api/gallery/image/${encodeURIComponent(filename)}${suffix}`, {

@@ -770,7 +770,11 @@ function coverTile(entry: MergedPrint): CoverTile {
     path: galleryMediaPath(entry.item.filename, source, true),
     target: targetFor(entry),
     cacheKey: entry.sourceKey,
-    video: source === "local" && isVideo(entry.item),
+    mediaVersion:
+      entry.item.media_version ?? `${entry.item.timestamp}:${entry.item.size_bytes ?? "unknown"}`,
+    // A cover is a thumbnail now even for this device offline, so it never
+    // mounts a <video>.
+    video: false,
     alt: tileTitle(entry),
   };
 }
@@ -1535,7 +1539,9 @@ const tileModels = computed<TileModel[]>(() => {
       audio: isAudioItem(item),
       upscaled: isUpscaledImage(item),
       mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
-      localVideo: source === "local" && video,
+      // The tile is always a still thumbnail now; a local clip's poster comes
+      // from the native cache rather than a <video> element per tile.
+      localVideo: false,
       target: targetFor(entry),
       mediaVersion: item.media_version ?? `${item.timestamp}:${item.size_bytes ?? "unknown"}`,
       fresh: isFresh(entry),

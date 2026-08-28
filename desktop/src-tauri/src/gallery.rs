@@ -1103,16 +1103,7 @@ pub async fn fetch_gallery_thumbnail(
     active.cancellation.check()?;
     let encoded =
         percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
-    let client = GALLERY_THUMBNAIL_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(15))
-            // The per-host key must never follow a redirect off the host.
-            .redirect(reqwest::redirect::Policy::none())
-            .pool_max_idle_per_host(MAX_CONCURRENT_GALLERY_THUMBNAILS)
-            .build()
-            .expect("static gallery HTTP client settings must be valid")
-    });
+    let client = thumbnail_client();
     let thumbnail_path = format!("/api/gallery/thumbnail/{encoded}");
     let fetch = fetch_gallery_bytes(
         client,
@@ -1681,12 +1672,16 @@ where
 /// Render one of this device's prints while the local server is Off. The
 /// server's own cache under `MOLD_HOME` is consulted first (a tile the
 /// embedded engine warmed is free), then the file is decoded in-process.
-fn render_offline_local_thumbnail(filename: &str, size: SizeTier) -> Result<Vec<u8>, String> {
+fn render_offline_local_thumbnail(
+    filename: &str,
+    size: SizeTier,
+    from_trash: bool,
+) -> Result<Vec<u8>, String> {
     use mold_server::thumbnails as thumbs;
     let Some(dir) = output_dir() else {
         return Err("Local gallery is disabled.".into());
     };
-    let Some(path) = offline_media_path(&dir, filename, false)? else {
+    let Some(path) = offline_media_path(&dir, filename, from_trash)? else {
         return Err(format!("Gallery file not found: {filename}"));
     };
     let thumb_dir = thumbs::server_thumbnail_dir();
@@ -1743,7 +1738,9 @@ pub async fn prepare_gallery_thumbnail(
     media_version: String,
     size: u32,
     request_id: String,
+    from_trash: Option<bool>,
 ) -> Result<String, String> {
+    let from_trash = from_trash.unwrap_or(false);
     if !valid_filename(&filename) {
         return Err("Invalid gallery filename.".into());
     }
@@ -1819,9 +1816,11 @@ pub async fn prepare_gallery_thumbnail(
                     .map_err(|_| "The thumbnail renderer is unavailable.".to_string())?;
                 active.cancellation.check()?;
                 let filename = filename.clone();
-                tokio::task::spawn_blocking(move || render_offline_local_thumbnail(&filename, size))
-                    .await
-                    .map_err(|error| format!("The thumbnail render was cancelled: {error}"))?
+                tokio::task::spawn_blocking(move || {
+                    render_offline_local_thumbnail(&filename, size, from_trash)
+                })
+                .await
+                .map_err(|error| format!("The thumbnail render was cancelled: {error}"))?
             }
         }
     })
@@ -1987,8 +1986,12 @@ pub fn thumb_protocol_response(
             Ok(Ok(None)) if origin == "local" => {
                 let rendered = {
                     let filename = filename.clone();
-                    tokio::task::spawn_blocking(move || render_offline_local_thumbnail(&filename, size))
-                        .await
+                    // A protocol miss has no trash hint; a trashed print that
+                    // was never prepared reads live-first like `mold-local:`.
+                    tokio::task::spawn_blocking(move || {
+                        render_offline_local_thumbnail(&filename, size, false)
+                    })
+                    .await
                 };
                 match rendered {
                     Ok(Ok(bytes)) => {

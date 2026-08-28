@@ -3,9 +3,12 @@ import { flushPromises, mount } from "@vue/test-utils";
 import AuthedMedia from "./AuthedMedia.vue";
 import { authedMediaUrl, fullSizeMediaUrl } from "../../lib/gallery/media";
 
-vi.mock("../../lib/gallery/media", () => ({
+vi.mock("../../lib/gallery/media", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/gallery/media")>()),
   authedMediaUrl: vi.fn().mockResolvedValue("blob:video"),
   fullSizeMediaUrl: vi.fn().mockResolvedValue("http://remote/media?ticket=one-use"),
+  // Outside Tauri the native cache does not apply; the blob route answers.
+  prepareNativeThumbnail: vi.fn().mockResolvedValue(null),
 }));
 
 beforeEach(() => {

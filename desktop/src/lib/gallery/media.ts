@@ -101,6 +101,14 @@ const keyOf = (path: string, target: ApiTarget, cacheKey?: string, mediaVersion?
 
 export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Promise<string> {
   if (path.startsWith("mold-local:")) return Promise.resolve(path);
+  // A local thumbnail request that reached the blob route (no native cache
+  // available) degrades to the full-size local file, as it always did.
+  if (path.startsWith("mold-thumb:")) {
+    const filename = thumbnailFilenameOfPath(path);
+    return Promise.resolve(
+      filename === null ? path : localMediaPath(filename, isTrashThumbnailPath(path)),
+    );
+  }
   const target = opts.target;
   const effectiveTarget = target ?? currentTarget();
   // Target identity is part of the cache authority. A reconnect may retain
@@ -386,6 +394,102 @@ export const thumbnailPath = (filename: string) =>
   `/api/gallery/thumbnail/${encodeURIComponent(filename)}`;
 export const mediaPath = (filename: string) => `/api/gallery/image/${encodeURIComponent(filename)}`;
 
+// ── Persistent native thumbnails (`mold-thumb:`) ────────────────────────────
+//
+// In the desktop app a tile is PREPARED (cache-first; a miss fetches from the
+// host or renders this device's file, then lands on disk) and then DISPLAYED
+// through the `mold-thumb://` protocol, which only reads that cache. JS holds
+// no bytes, blobs, or object URLs for a tile: WebKit decodes off-thread and
+// keeps its own bitmap cache, and a cold launch paints the grid from local
+// files without touching any host. The blob route above stays as the
+// fallback outside Tauri and for a print with no `media_version` (nothing
+// safe to key a persistent entry on).
+
+const THUMBNAIL_PROTOCOL_PREFIX = "mold-thumb://localhost/";
+const THUMBNAIL_API_PREFIX = "/api/gallery/thumbnail/";
+
+/** Retina displays get the 512 px tier; everything else 256. Two tiers only,
+ *  so the cache never holds one entry per slider position. */
+export function thumbnailTier(devicePixelRatio = globalThis.devicePixelRatio ?? 1): 256 | 512 {
+  return devicePixelRatio >= 1.5 ? 512 : 256;
+}
+
+/** This device's tile REQUEST path while the server is Off. It names the
+ *  print, not a size or version — `prepareNativeThumbnail` resolves those. */
+export const localThumbnailPath = (filename: string, fromTrash = false) =>
+  `${THUMBNAIL_PROTOCOL_PREFIX}local/${encodeURIComponent(filename)}${fromTrash ? "?view=trash" : ""}`;
+
+/** A Trash-view local thumbnail request reads the `.trash/` copy first, like
+ *  the `mold-local:` full-size route, so a trashed print is never shadowed
+ *  by a NEW live file under the same name. */
+export const isTrashThumbnailPath = (path: string) =>
+  path.startsWith(THUMBNAIL_PROTOCOL_PREFIX) && path.endsWith("?view=trash");
+
+/** Whether a media path asks for a thumbnail (host API or native local). */
+export const isThumbnailPath = (path: string) =>
+  path.startsWith(THUMBNAIL_API_PREFIX) || path.startsWith(THUMBNAIL_PROTOCOL_PREFIX);
+
+/** The gallery filename behind either thumbnail path shape, or null. */
+export function thumbnailFilenameOfPath(path: string): string | null {
+  let encoded: string | null = null;
+  if (path.startsWith(THUMBNAIL_API_PREFIX)) encoded = path.slice(THUMBNAIL_API_PREFIX.length);
+  else if (path.startsWith(`${THUMBNAIL_PROTOCOL_PREFIX}local/`)) {
+    encoded = path.slice(`${THUMBNAIL_PROTOCOL_PREFIX}local/`.length);
+  }
+  if (!encoded || encoded.includes("/")) return null;
+  const query = encoded.indexOf("?");
+  if (query !== -1) encoded = encoded.slice(0, query);
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+}
+
+export interface NativeThumbnailRequest {
+  path: string;
+  /** Host to fetch from; null for this device with its server Off. */
+  target: ApiTarget | null;
+  cacheKey: string | null;
+  mediaVersion: string | null;
+  signal?: AbortSignal;
+}
+
+/**
+ * Resolve a tile to a `mold-thumb://` URL through the native cache, or null
+ * when this route does not apply (outside Tauri, or no content version to
+ * key on) so the caller takes the blob route. A native refusal other than
+ * cancellation also answers null — the fallback must keep the tile visible.
+ */
+export async function prepareNativeThumbnail(
+  request: NativeThumbnailRequest,
+): Promise<string | null> {
+  if (!inTauri()) return null;
+  const filename = thumbnailFilenameOfPath(request.path);
+  if (filename === null || !request.mediaVersion) return null;
+  const cacheKey = request.cacheKey ?? (request.target ? "primary" : "local");
+  if (request.signal?.aborted) throw new DOMException("Thumbnail cancelled", "AbortError");
+  const requestId = crypto.randomUUID();
+  const cancelNative = () => void ipc.cancelGalleryThumbnail(requestId).catch(() => {});
+  request.signal?.addEventListener("abort", cancelNative, { once: true });
+  try {
+    return await ipc.prepareGalleryThumbnail(
+      request.target,
+      cacheKey,
+      filename,
+      request.mediaVersion,
+      thumbnailTier(),
+      requestId,
+      isTrashThumbnailPath(request.path),
+    );
+  } catch {
+    if (request.signal?.aborted) throw new DOMException("Thumbnail cancelled", "AbortError");
+    return null;
+  } finally {
+    request.signal?.removeEventListener("abort", cancelNative);
+  }
+}
+
 /**
  * Where a gallery item's bytes live: a mold server ("host" — API paths,
  * fetched with that host's auth) or this Mac's output dir ("local" — served
@@ -399,6 +503,9 @@ export type GallerySource = "host" | "local";
 export const localMediaPath = (filename: string, fromTrash = false) =>
   `mold-local://localhost/${encodeURIComponent(filename)}${fromTrash ? "?view=trash" : ""}`;
 
+/** A local THUMBNAIL is a native-cache request, never the full-size file: a
+ *  grid of this device's prints with the server Off used to decode every
+ *  full-resolution PNG (and mount a `<video>` per clip) in its tiles. */
 export const galleryMediaPath = (
   filename: string,
   source: GallerySource,
@@ -406,7 +513,9 @@ export const galleryMediaPath = (
   fromTrash = false,
 ) =>
   source === "local"
-    ? localMediaPath(filename, fromTrash)
+    ? thumbnail
+      ? localThumbnailPath(filename, fromTrash)
+      : localMediaPath(filename, fromTrash)
     : thumbnail
       ? thumbnailPath(filename)
       : mediaPath(filename);
