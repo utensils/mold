@@ -250,6 +250,8 @@
         "keyframe",
         "--keyframe",
         "0:{seed_image}",
+        "--keyframe",
+        "8:{seed_image}",
         "--audio",
         "--format",
         "mp4"
