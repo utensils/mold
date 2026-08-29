@@ -77,6 +77,17 @@ impl PlaygroundEdmScheduler {
         original + (noise * self.sigmas[index])?
     }
 
+    /// Re-noise preserved inpaint pixels at the scheduler's current sigma.
+    /// Call after `step`: `step_index` has advanced to the destination sigma,
+    /// including the appended terminal zero.
+    pub(crate) fn add_noise_at_current_sigma(
+        &self,
+        original: &Tensor,
+        noise: &Tensor,
+    ) -> Result<Tensor> {
+        original + (noise * self.sigmas[self.step_index])?
+    }
+
     pub(crate) fn step(&mut self, model_output: &Tensor, sample: &Tensor) -> Result<Tensor> {
         let sigma_s0 = self.sigmas[self.step_index];
         let sigma_t = self.sigmas[self.step_index + 1];
@@ -151,5 +162,31 @@ mod tests {
         let denominator = 80.0f64.powi(2) + 0.5f64.powi(2);
         let expected = 2.0 * (0.25 / denominator) + 3.0 * (40.0 / denominator.sqrt());
         assert!((actual as f64 - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn inpaint_blend_uses_destination_sigma_and_clean_terminal_latents() {
+        let device = Device::Cpu;
+        let original = Tensor::new(&[2.0f32], &device).unwrap();
+        let noise = Tensor::new(&[3.0f32], &device).unwrap();
+        let model_output = Tensor::zeros(1, candle_core::DType::F32, &device).unwrap();
+        let mut sample = Tensor::zeros(1, candle_core::DType::F32, &device).unwrap();
+        let mut scheduler = PlaygroundEdmScheduler::new(2, 0).unwrap();
+
+        sample = scheduler.step(&model_output, &sample).unwrap();
+        let intermediate = scheduler
+            .add_noise_at_current_sigma(&original, &noise)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()[0];
+        assert!((intermediate - (2.0 + 3.0 * SIGMA_MIN as f32)).abs() < 1e-6);
+
+        scheduler.step(&model_output, &sample).unwrap();
+        let terminal = scheduler
+            .add_noise_at_current_sigma(&original, &noise)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()[0];
+        assert_eq!(terminal, 2.0);
     }
 }

@@ -1184,11 +1184,8 @@ impl SDXLEngine {
             *latents = scheduler.step(&noise_pred, &*latents)?;
 
             if let Some(ctx) = inpaint_ctx {
-                let noised_original = scheduler.add_noise_at(
-                    &ctx.original_latents,
-                    &ctx.noise,
-                    start_step + step_idx,
-                )?;
+                let noised_original =
+                    scheduler.add_noise_at_current_sigma(&ctx.original_latents, &ctx.noise)?;
                 *latents = crate::img2img::blend_inpaint_latents(&*latents, ctx, &noised_original)?;
             }
 
