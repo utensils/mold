@@ -416,7 +416,7 @@ async function runSearch(reset: boolean) {
   loading.value = true;
   error.value = null;
   try {
-    for (let fetched = 0; ; ) {
+    for (let fetched = 0; ;) {
       const { target, forward } = catalogTarget();
       const res = await searchCatalog(
         {

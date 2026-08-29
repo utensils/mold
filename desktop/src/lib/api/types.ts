@@ -436,13 +436,7 @@ export interface ExpandResponse {
 
 export type RemixSourceKind = "original" | "current" | "direct";
 export type RemixDimension =
-  | "composition"
-  | "camera"
-  | "lighting"
-  | "setting"
-  | "mood"
-  | "movement"
-  | "style";
+  "composition" | "camera" | "lighting" | "setting" | "mood" | "movement" | "style";
 
 export interface RemixRequest {
   source_prompt: string;
@@ -1259,13 +1253,7 @@ export interface ChainLimits {
 }
 
 export type ChainJobState =
-  | "queued"
-  | "running"
-  | "paused"
-  | "interrupted"
-  | "failed"
-  | "completed"
-  | "cancelled";
+  "queued" | "running" | "paused" | "interrupted" | "failed" | "completed" | "cancelled";
 
 export type StageState = "pending" | "running" | "completed" | "failed";
 
