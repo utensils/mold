@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Result};
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
-use candle_nn::{linear, linear_b, Linear, VarBuilder};
+use candle_nn::{linear_b, linear_no_bias, Linear, VarBuilder};
 
 const HEAD_DIM: usize = 64;
 const MLP_TOKEN_CHUNK: usize = 16_384;
@@ -43,6 +43,17 @@ impl LastDimRmsNorm {
     }
 }
 
+/// candle's `Linear` only matmuls rank <= 4 inputs, so every projection over
+/// the decoder's rank-5 (batch, time, height, width, channels) grids runs on
+/// a (batch, tokens, channels) flattening and is reshaped back.
+fn linear_5d(layer: &Linear, xs: &Tensor) -> Result<Tensor> {
+    let (batch, time, height, width, dim) = xs.dims5()?;
+    let flat = xs.reshape((batch, time * height * width, dim))?;
+    let projected = layer.forward(&flat)?;
+    let out = projected.dim(D::Minus1)?;
+    Ok(projected.reshape((batch, time, height, width, out))?)
+}
+
 #[derive(Debug, Clone)]
 struct SwiGlu {
     up: Linear,
@@ -54,21 +65,26 @@ impl SwiGlu {
     fn new(dim: usize, vb: VarBuilder<'_>) -> Result<Self> {
         let hidden = dim * 4;
         Ok(Self {
-            up: linear(dim, hidden, vb.pp("w_up"))?,
-            gate: linear(dim, hidden, vb.pp("w_gate"))?,
-            down: linear(hidden, dim, vb.pp("w_down"))?,
+            up: linear_no_bias(dim, hidden, vb.pp("w_up"))?,
+            gate: linear_no_bias(dim, hidden, vb.pp("w_gate"))?,
+            down: linear_no_bias(hidden, dim, vb.pp("w_down"))?,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (batch, time, height, width, dim) = xs.dims5()?;
         let tokens = time * height * width;
+        // candle's `Linear` only matmuls rank <= 4 inputs, so every branch
+        // runs on the (batch, tokens, dim) flattening of the rank-5 grid.
+        let flat = xs.reshape((batch, tokens, dim))?;
         if tokens <= MLP_TOKEN_CHUNK {
-            let gate = candle_nn::ops::silu(&self.gate.forward(xs)?)?;
-            return Ok(self.down.forward(&(gate * self.up.forward(xs)?)?)?);
+            let gate = candle_nn::ops::silu(&self.gate.forward(&flat)?)?;
+            return Ok(self
+                .down
+                .forward(&(gate * self.up.forward(&flat)?)?)?
+                .reshape(xs.shape())?);
         }
 
-        let flat = xs.reshape((batch, tokens, dim))?;
         let mut output = Vec::with_capacity(tokens.div_ceil(MLP_TOKEN_CHUNK));
         for start in (0..tokens).step_by(MLP_TOKEN_CHUNK) {
             let length = MLP_TOKEN_CHUNK.min(tokens - start);
@@ -115,7 +131,7 @@ impl NeighborhoodAttention {
         let mut v_tiles = Vec::with_capacity(q_tiles.capacity());
         for start in (0..time).step_by(time_chunk) {
             let length = time_chunk.min(time - start);
-            let qkv = self.qkv.forward(&xs.narrow(1, start, length)?)?;
+            let qkv = linear_5d(&self.qkv, &xs.narrow(1, start, length)?)?;
             let shape = (batch, length, height, width, self.heads, HEAD_DIM);
             let q = qkv.narrow(D::Minus1, 0, dim)?.reshape(shape)?;
             let k = qkv.narrow(D::Minus1, dim, dim)?.reshape(shape)?;
@@ -151,7 +167,7 @@ impl NeighborhoodAttention {
         let mut output = Vec::with_capacity(time.div_ceil(time_chunk));
         for start in (0..time).step_by(time_chunk) {
             let length = time_chunk.min(time - start);
-            output.push(self.proj.forward(&attended.narrow(1, start, length)?)?);
+            output.push(linear_5d(&self.proj, &attended.narrow(1, start, length)?)?);
         }
         let output = output.iter().collect::<Vec<_>>();
         Ok(Tensor::cat(&output, 1)?)
@@ -208,7 +224,7 @@ impl PixelShuffleUpsample {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (batch, time, height, width, _) = xs.dims5()?;
         let [pt, ph, pw] = self.stride;
-        let projected = self.proj.forward(xs)?.reshape(&[
+        let projected = linear_5d(&self.proj, xs)?.reshape(&[
             batch,
             time,
             height,
@@ -275,7 +291,7 @@ impl DiffusionBlock {
         let shift_msa = parameter(1)?;
         let scale_mlp = parameter(3)?;
         let shift_mlp = parameter(4)?;
-        let mut xs = (xs + self.context_proj.forward(context)?)?;
+        let mut xs = (xs + linear_5d(&self.context_proj, context)?)?;
         let normed = modulate(&self.norm1.forward(&xs)?, &scale_msa, &shift_msa)?;
         xs = (&xs + self.attention.forward(&normed)?)?;
         let normed = modulate(&self.norm2.forward(&xs)?, &scale_mlp, &shift_mlp)?;
@@ -352,7 +368,10 @@ impl Ltx2DiffusionVideoDecoder {
             latents.dim(4)?,
         ))?;
         let padded = Tensor::cat(&[latents, &trailing], 2)?;
-        let mut context = self.conv_in.forward(&padded.permute((0, 2, 3, 4, 1))?)?;
+        let mut context = linear_5d(
+            &self.conv_in,
+            &padded.permute((0, 2, 3, 4, 1))?.contiguous()?,
+        )?;
         for stage in &self.deterministic {
             for block in &stage.blocks {
                 context = block.forward(&context)?;
@@ -372,7 +391,7 @@ impl Ltx2DiffusionVideoDecoder {
         )?
         .to_dtype(latents.dtype())?;
         let patched = patchify_pixels(&noise, PATCH_SIZE)?.permute((0, 2, 3, 4, 1))?;
-        let mut xs = self.conv_in_x_t.forward(&patched)?;
+        let mut xs = linear_5d(&self.conv_in_x_t, &patched.contiguous()?)?;
         let timestep = timestep_embedding(1000.0, batch, latents.device(), latents.dtype())?;
         let timestep = self
             .timestep_2
@@ -394,10 +413,8 @@ impl Ltx2DiffusionVideoDecoder {
         for block in &self.diffusion {
             xs = block.forward(&xs, &context, &modulation)?;
         }
-        let pixels = self
-            .conv_out
-            .forward(&self.norm_out.forward(&xs)?)?
-            .permute((0, 4, 1, 2, 3))?;
+        let pixels =
+            linear_5d(&self.conv_out, &self.norm_out.forward(&xs)?)?.permute((0, 4, 1, 2, 3))?;
         unpatchify_pixels(&pixels, PATCH_SIZE)
     }
 }
@@ -532,6 +549,84 @@ mod tests {
                 .unwrap(),
             xs.flatten_all().unwrap().to_vec1::<f32>().unwrap()
         );
+    }
+
+    #[test]
+    fn swiglu_loads_from_bias_free_checkpoint_weights() {
+        // The shipped ltx-2.5 diffusion VAE stores its SwiGLU MLPs as
+        // weight-only tensors (w_up/w_gate/w_down have no `.bias` entries),
+        // so construction must not demand biases.
+        let dim = 4usize;
+        let hidden = dim * 4;
+        let mut tensors = std::collections::HashMap::new();
+        let dev = Device::Cpu;
+        tensors.insert(
+            "w_up.weight".to_string(),
+            Tensor::zeros((hidden, dim), DType::F32, &dev).unwrap(),
+        );
+        tensors.insert(
+            "w_gate.weight".to_string(),
+            Tensor::zeros((hidden, dim), DType::F32, &dev).unwrap(),
+        );
+        tensors.insert(
+            "w_down.weight".to_string(),
+            Tensor::zeros((dim, hidden), DType::F32, &dev).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &dev);
+        let mlp = SwiGlu::new(dim, vb).expect("bias-free SwiGLU weights must load");
+        let xs = Tensor::zeros((1, 1, 2, 2, dim), DType::F32, &dev).unwrap();
+        assert_eq!(mlp.forward(&xs).unwrap().dims(), &[1, 1, 2, 2, dim]);
+    }
+
+    #[test]
+    fn neighborhood_attention_forwards_a_rank5_grid() {
+        let dim = HEAD_DIM;
+        let dev = Device::Cpu;
+        let mut tensors = std::collections::HashMap::new();
+        for name in ["qkv", "proj"] {
+            let out = if name == "qkv" { dim * 3 } else { dim };
+            tensors.insert(
+                format!("{name}.weight"),
+                Tensor::zeros((out, dim), DType::F32, &dev).unwrap(),
+            );
+            tensors.insert(
+                format!("{name}.bias"),
+                Tensor::zeros(out, DType::F32, &dev).unwrap(),
+            );
+        }
+        for name in ["q_norm", "k_norm"] {
+            tensors.insert(
+                format!("{name}.weight"),
+                Tensor::ones(HEAD_DIM, DType::F32, &dev).unwrap(),
+            );
+        }
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &dev);
+        let attn = NeighborhoodAttention::new(dim, [1, 3, 3], vb).unwrap();
+        let xs = Tensor::zeros((1, 2, 4, 4, dim), DType::F32, &dev).unwrap();
+        assert_eq!(attn.forward(&xs).unwrap().dims(), &[1, 2, 4, 4, dim]);
+    }
+
+    #[test]
+    fn pixel_shuffle_upsample_forwards_a_rank5_grid() {
+        let channels = 8usize;
+        let stride = [1usize, 2, 2];
+        let reduction = 2usize;
+        let dev = Device::Cpu;
+        let projected = stride.iter().product::<usize>() * channels / reduction;
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            "proj.weight".to_string(),
+            Tensor::zeros((projected, channels), DType::F32, &dev).unwrap(),
+        );
+        tensors.insert(
+            "proj.bias".to_string(),
+            Tensor::zeros(projected, DType::F32, &dev).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &dev);
+        let upsample = PixelShuffleUpsample::new(channels, stride, reduction, vb).unwrap();
+        let xs = Tensor::zeros((1, 2, 4, 4, channels), DType::F32, &dev).unwrap();
+        let out = upsample.forward(&xs).unwrap();
+        assert_eq!(out.dims(), &[1, 2, 8, 8, channels / reduction]);
     }
 
     #[test]
