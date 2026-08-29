@@ -70,6 +70,30 @@ impl AttentionBackend {
             backend
         })
     }
+
+    /// Whether the FlashAttention kernels are compiled into this binary.
+    pub const fn flash_compiled() -> bool {
+        cfg!(feature = "flash-attn")
+    }
+
+    /// The backend that will actually execute for an eligible tensor.
+    ///
+    /// A resolved `Flash` in a build without the kernels downgrades to
+    /// `Math` — the dispatcher warns once and falls back — so any memory
+    /// estimate keyed on the requested backend would under-charge the math
+    /// score tile. Admission must read this, never `resolve()` alone.
+    pub fn resolve_effective() -> AttentionBackend {
+        Self::effective(Self::resolve())
+    }
+
+    /// Pure half of [`Self::resolve_effective`], testable without the env
+    /// `OnceLock`.
+    pub fn effective(resolved: AttentionBackend) -> AttentionBackend {
+        match resolved {
+            AttentionBackend::Flash if !Self::flash_compiled() => AttentionBackend::Math,
+            other => other,
+        }
+    }
 }
 
 /// Pure function used by `resolve()` and unit tests so we can exercise the env
@@ -524,6 +548,28 @@ mod tests {
 
     fn cpu() -> Device {
         Device::Cpu
+    }
+
+    /// A requested `Flash` in a build without the kernels executes as math,
+    /// so the effective backend — the one admission estimates from — must
+    /// say so (#735 review follow-up: charging zero score-tile bytes for a
+    /// flash request that falls back would under-count admission).
+    #[test]
+    fn effective_backend_downgrades_flash_without_the_kernels() {
+        #[cfg(not(feature = "flash-attn"))]
+        assert_eq!(
+            AttentionBackend::effective(AttentionBackend::Flash),
+            AttentionBackend::Math
+        );
+        #[cfg(feature = "flash-attn")]
+        assert_eq!(
+            AttentionBackend::effective(AttentionBackend::Flash),
+            AttentionBackend::Flash
+        );
+        assert_eq!(
+            AttentionBackend::effective(AttentionBackend::Math),
+            AttentionBackend::Math
+        );
     }
 
     /// Brute-force reference: explicit loops over (b, h, q, k) with f32.

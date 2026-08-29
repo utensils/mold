@@ -999,12 +999,19 @@ const LTX2_ATTENTION_HEADS: u64 = 32;
 /// The estimate follows the RESOLVED policy, not the default: a raised
 /// `MOLD_ATTN_CHUNK`, or `off`, grows the tile the dispatcher actually
 /// allocates (at 13,312 tokens `off` is a 22.7 GB full matrix that a
-/// 512-row estimate would under-charge 26x), and a resolved `MOLD_ATTN=flash`
-/// holds no score matrix at all, so charging one would refuse renders that
-/// fit. Both envs are engine-shaping fingerprint inputs, so admission and
-/// the dispatcher read the same frozen decision.
+/// 512-row estimate would under-charge 26x), and an EFFECTIVE `flash`
+/// backend holds no score matrix at all, so charging one would refuse
+/// renders that fit. "Effective" is load-bearing: a requested `flash` in a
+/// build without the kernels executes as math (the dispatcher warns once
+/// and falls back), so the zero-tile answer is keyed on
+/// `AttentionBackend::resolve_effective()`, never `resolve()` — estimating
+/// from the request under-charges the math tile that actually allocates.
+/// Both envs are engine-shaping fingerprint inputs, so admission and the
+/// dispatcher read the same frozen decision.
 pub fn ltx2_attention_tile_bytes(tokens: u64, heads: u64) -> u64 {
-    if crate::attention::AttentionBackend::resolve() == crate::attention::AttentionBackend::Flash {
+    if crate::attention::AttentionBackend::resolve_effective()
+        == crate::attention::AttentionBackend::Flash
+    {
         return 0;
     }
     let query_rows = crate::attention::cuda_query_chunk_rows(tokens as usize)
