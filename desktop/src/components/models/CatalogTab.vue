@@ -785,17 +785,29 @@ onUnmounted(() => {
     <div
       v-if="error || providerErrors.length"
       data-test="catalog-provider-warning"
-      class="border-stop/30 bg-stop/5 flex items-center gap-3 rounded-control border px-3 py-2 text-caption text-stop"
+      class="flex items-center gap-3 rounded-control border px-3 py-2 text-caption"
+      :class="
+        error
+          ? 'border-stop/30 bg-stop/5 text-stop'
+          : 'border-warning/30 bg-warning/10 text-warning'
+      "
       role="alert"
     >
-      <p class="min-w-0 flex-1">
-        {{ error ?? providerErrors.map((item) => item.message).join(" ") }}
-        <span v-if="providerErrors.length"> Showing available models.</span>
-      </p>
+      <div class="min-w-0 flex-1">
+        <p class="font-medium">
+          {{ error ? "Couldn’t refresh the catalog." : "The catalog is catching up." }}
+        </p>
+        <p class="opacity-80">
+          {{ error ?? providerErrors.map((item) => item.message).join(" ") }}
+          <span v-if="providerErrors.length && displayEntries.length">
+            Showing available models.</span
+          >
+        </p>
+      </div>
       <button
         type="button"
         data-test="catalog-retry"
-        class="border-stop/40 shrink-0 rounded-control border px-2 py-1 font-medium hover:bg-stop/10"
+        class="shrink-0 rounded-control border border-current/40 px-2 py-1 font-medium hover:bg-current/10"
         :disabled="loading"
         @click="retrySearch"
       >
@@ -851,7 +863,7 @@ onUnmounted(() => {
     <!-- Empty state — keyed on the FILTERED list so an all-image page under
          the Video chip explains itself instead of rendering a blank grid. -->
     <div
-      v-if="!loading && displayEntries.length === 0"
+      v-if="!loading && displayEntries.length === 0 && !error && providerErrors.length === 0"
       class="p-8 text-center text-body text-ink-2"
       data-test="catalog-empty"
     >

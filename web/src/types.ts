@@ -1391,6 +1391,8 @@ export interface CatalogListResponse {
 export interface CatalogProviderError {
   source: "hf" | "civitai";
   message: string;
+  code?: "overloaded" | "rate-limited" | string;
+  retry_after_seconds?: number;
 }
 
 export interface CatalogFamilyCount {

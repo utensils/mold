@@ -228,7 +228,14 @@ describe("CatalogTab media filter under pagination", () => {
       page: 1,
       page_size: PAGE_SIZE,
       total: 1,
-      provider_errors: [{ source: "civitai", message: "Civitai is temporarily unavailable." }],
+      provider_errors: [
+        {
+          source: "civitai",
+          code: "overloaded",
+          retry_after_seconds: 2,
+          message: "Civitai is busy right now. Try again in a few seconds.",
+        },
+      ],
     });
     const wrapper = await mountCatalog({
       installedEntries: [
@@ -242,6 +249,12 @@ describe("CatalogTab media filter under pagination", () => {
     });
 
     expect(wrapper.get("[data-test='catalog-provider-warning']").text()).toContain("Civitai");
+    expect(wrapper.get("[data-test='catalog-provider-warning']").text()).toContain(
+      "The catalog is catching up.",
+    );
+    expect(wrapper.get("[data-test='catalog-provider-warning']").classes()).toContain(
+      "text-warning",
+    );
     expect(wrapper.text()).toContain("Healthy HF model");
     expect(wrapper.text()).toContain("qwen-image-edit:q4");
 
@@ -254,6 +267,31 @@ describe("CatalogTab media filter under pagination", () => {
     expect(wrapper.get("[data-test='catalog-provider-warning']").text()).toContain(
       "still unavailable",
     );
+  });
+
+  it("does not claim an unavailable provider returned no matches", async () => {
+    searchCatalog.mockResolvedValue({
+      entries: [],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 0,
+      provider_errors: [
+        {
+          source: "civitai",
+          code: "overloaded",
+          retry_after_seconds: 60,
+          message: "Civitai is busy right now. Try again in a few seconds.",
+        },
+      ],
+    });
+
+    const wrapper = await mountCatalog({ query: "Alien" });
+
+    expect(wrapper.get("[data-test='catalog-provider-warning']").text()).toContain(
+      "The catalog is catching up.",
+    );
+    expect(wrapper.find("[data-test='catalog-empty']").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('Nothing on the shelf for "Alien"');
   });
 
   it("lists Qwen Image Edit models under the Qwen Image family", async () => {

@@ -1023,6 +1023,8 @@ export interface CatalogSearchResponse {
 export interface CatalogProviderError {
   source: "hf" | "civitai";
   message: string;
+  code?: "overloaded" | "rate-limited" | string;
+  retry_after_seconds?: number;
 }
 
 /** One family from `GET /api/catalog/families`. */

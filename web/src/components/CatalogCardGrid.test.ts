@@ -147,16 +147,50 @@ describe("CatalogCardGrid result count", () => {
 describe("CatalogCardGrid provider resilience", () => {
   it("keeps healthy rows visible beside a provider warning and retries", async () => {
     mockState.providerErrors = ref([
-      { source: "civitai", message: "Civitai is temporarily unavailable." },
+      {
+        source: "civitai",
+        code: "overloaded",
+        retry_after_seconds: 2,
+        message: "Civitai is busy right now. Try again in a few seconds.",
+      },
     ]);
     const w = mount(CatalogCardGrid);
 
     expect(w.get("[data-test='catalog-provider-warning']").text()).toContain(
       "Civitai",
     );
+    expect(w.get("[data-test='catalog-provider-warning']").text()).toContain(
+      "The catalog is catching up.",
+    );
+    expect(w.get("[data-test='catalog-provider-warning']").classes()).toContain(
+      "text-warning",
+    );
+    expect(
+      w.get("[data-test='catalog-provider-warning'] p").classes(),
+    ).not.toContain("text-rose-100");
     expect(w.findAllComponents({ name: "CatalogCard" })).toHaveLength(1);
     await w.get("[data-test='catalog-retry']").trigger("click");
     expect(mockState.refresh).toHaveBeenCalledOnce();
+  });
+
+  it("does not claim an unavailable provider returned no matches", () => {
+    mockState.entries = ref([]);
+    mockState.visibleEntries = ref([]);
+    mockState.resultCount = ref(0);
+    mockState.total = ref(0);
+    mockState.providerErrors = ref([
+      {
+        source: "civitai",
+        code: "overloaded",
+        retry_after_seconds: 60,
+        message: "Civitai is busy right now. Try again in a few seconds.",
+      },
+    ]);
+
+    const w = mount(CatalogCardGrid);
+
+    expect(w.text()).toContain("The catalog is catching up.");
+    expect(w.text()).not.toContain("No models found.");
   });
 });
 

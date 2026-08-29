@@ -145,6 +145,7 @@ const page = ref(1);
 const hasMore = ref(false);
 const loading = ref(false);
 const error = ref("");
+const providerWarning = ref(false);
 const announcement = ref("");
 const announcementIsError = ref(false);
 const modelsByHost = ref<Record<string, ModelEntry[]>>({});
@@ -654,6 +655,7 @@ function scheduleSearch(): void {
     ++searchEpoch;
     loading.value = false;
     error.value = "";
+    providerWarning.value = false;
     return;
   }
   debounce = setTimeout(() => void runSearch(true), 400);
@@ -669,6 +671,7 @@ async function runSearch(reset: boolean): Promise<void> {
   }
   loading.value = true;
   error.value = "";
+  providerWarning.value = false;
   try {
     for (let fetched = 0; ; fetched += 1) {
       const response = await searchCatalog(
@@ -686,7 +689,9 @@ async function runSearch(reset: boolean): Promise<void> {
         target,
       );
       if (epoch !== searchEpoch) return;
-      error.value = (response.provider_errors ?? []).map((item) => item.message).join(" ");
+      const issues = response.provider_errors ?? [];
+      providerWarning.value = issues.length > 0;
+      error.value = issues.map((item) => item.message).join(" ");
       nextEntries = [...nextEntries, ...response.entries];
       entries.value = nextEntries;
       recordFamilies(response.entries.map((row) => row.family));
@@ -709,6 +714,7 @@ async function runSearch(reset: boolean): Promise<void> {
     }
   } catch (cause) {
     if (epoch !== searchEpoch) return;
+    providerWarning.value = false;
     error.value = errorMessage(cause, selectedHost.value?.name);
     hasMore.value = false;
   } finally {
@@ -1424,10 +1430,22 @@ onBeforeUnmount(() => {
         </label>
       </div>
 
-      <div v-if="error" class="mobile-catalog-error error-text" role="alert">
+      <div
+        v-if="error"
+        class="mobile-catalog-error"
+        :class="providerWarning ? 'mobile-catalog-warning' : 'error-text'"
+        role="alert"
+      >
         <span>
-          {{ error }}
-          <template v-if="combinedEntries.length"> Showing available models.</template>
+          <strong>{{
+            providerWarning ? "The catalog is catching up." : "Couldn’t refresh the catalog."
+          }}</strong>
+          <span class="mobile-catalog-error-detail">
+            {{ error }}
+            <template v-if="providerWarning && combinedEntries.length">
+              Showing available models.</template
+            >
+          </span>
         </span>
         <button
           class="mobile-catalog-retry"
@@ -1442,7 +1460,7 @@ onBeforeUnmount(() => {
         Loading models…
       </div>
       <div
-        v-else-if="combinedEntries.length === 0"
+        v-else-if="combinedEntries.length === 0 && !error"
         class="mobile-catalog-empty empty-state"
         data-test="mobile-catalog-empty"
       >
@@ -1451,7 +1469,11 @@ onBeforeUnmount(() => {
         <template v-else>No catalog models found.</template>
       </div>
 
-      <ul v-else class="mobile-catalog-results" aria-label="Catalog models">
+      <ul
+        v-else-if="combinedEntries.length > 0"
+        class="mobile-catalog-results"
+        aria-label="Catalog models"
+      >
         <li
           v-for="entry in combinedEntries"
           :key="entry.id"

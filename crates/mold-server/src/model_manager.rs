@@ -5847,6 +5847,7 @@ mod tests {
             host: "civitai.com",
             status: 404,
             body: "{\"error\": \"not found\"}".to_string(),
+            retry_after: None,
         };
         let mapped = live_error_to_install_error("cv:42", &upstream);
         assert!(matches!(mapped, mold_core::InstallError::NotFound(_)));
@@ -5858,6 +5859,7 @@ mod tests {
             host: "civitai.com",
             status: 500,
             body: "internal".into(),
+            retry_after: None,
         };
         let mapped = live_error_to_install_error("cv:42", &upstream);
         assert!(matches!(

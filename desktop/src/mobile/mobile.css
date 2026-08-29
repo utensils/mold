@@ -3573,6 +3573,19 @@ button:disabled {
   margin: 14px 0;
 }
 
+.mobile-catalog-error > span {
+  display: grid;
+  gap: 3px;
+}
+
+.mobile-catalog-error-detail {
+  opacity: 0.82;
+}
+
+.mobile-catalog-warning {
+  color: var(--warning);
+}
+
 .mobile-catalog-retry {
   min-width: 72px;
   min-height: 44px;

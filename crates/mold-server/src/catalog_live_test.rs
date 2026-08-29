@@ -48,11 +48,13 @@ fn combined_search_replaces_each_rejected_server_credential() {
         host: "civitai.com",
         status: 401,
         body: "stale".into(),
+        retry_after: None,
     };
     let hf_error = mold_catalog::live::LiveSearchError::Upstream {
         host: "huggingface.co",
         status: 403,
         body: "stale".into(),
+        retry_after: None,
     };
 
     assert!(super::replace_failed_search_credential(
@@ -85,6 +87,7 @@ fn combined_search_retries_without_auth_when_the_server_credential_is_rejected()
         host: "huggingface.co",
         status: 401,
         body: "stale".into(),
+        retry_after: None,
     };
 
     assert!(super::replace_failed_search_credential(
@@ -204,7 +207,9 @@ async fn h3_search_identity_reaches_the_upstream_catalog() {
         "/api/catalog/search?q=MiniMax-H3&source=civitai",
     ] {
         let (status, body) = get(router.clone(), uri).await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json response");
+        assert_eq!(parsed["provider_errors"][0]["source"], "civitai");
     }
 
     assert_eq!(
@@ -807,6 +812,40 @@ async fn live_search_returns_normalized_civitai_rows() {
         entries[0]["page_url"], "https://civitai.com/models/9001?modelVersionId=8001",
         "wire rows carry the model page link"
     );
+}
+
+#[tokio::test]
+async fn civitai_overload_returns_a_graceful_provider_notice() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("Retry-After", "0")
+                .set_body_json(serde_json::json!({
+                    "error": "Model search is temporarily overloaded — please retry."
+                })),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    let router = create_router(state);
+    let (status, body) = get(
+        router,
+        "/api/catalog/search?q=alien&kind=lora&source=civitai",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("json response");
+    assert_eq!(parsed["entries"], serde_json::json!([]));
+    assert_eq!(parsed["provider_errors"][0]["source"], "civitai");
+    assert_eq!(parsed["provider_errors"][0]["code"], "overloaded");
+    assert!(parsed["provider_errors"][0]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("busy right now")));
 }
 
 #[tokio::test]

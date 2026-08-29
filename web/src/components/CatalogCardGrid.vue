@@ -187,24 +187,33 @@ async function startBatch(): Promise<void> {
     <div
       v-if="cat.errorMsg.value || cat.providerErrors.value.length"
       data-test="catalog-provider-warning"
-      class="bg-bench border border-edge flex items-start gap-3 rounded-2xl px-4 py-3 text-sm text-rose-200"
+      class="bg-bench flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm"
+      :class="
+        cat.errorMsg.value
+          ? 'border-rose-200/30 text-rose-200'
+          : 'border-warning/30 text-warning'
+      "
       role="alert"
     >
       <span class="mt-0.5">⚠</span>
       <div class="min-w-0 flex-1">
-        <p class="font-medium text-rose-100">
+        <p class="font-medium">
           {{
             cat.errorMsg.value
               ? "Couldn't refresh the catalog."
-              : "Part of the catalog is unavailable."
+              : "The catalog is catching up."
           }}
         </p>
-        <p class="text-rose-200/80">
+        <p class="opacity-80">
           {{
             cat.errorMsg.value ??
             cat.providerErrors.value.map((item) => item.message).join(" ")
           }}
-          <span v-if="cat.providerErrors.value.length">
+          <span
+            v-if="
+              cat.providerErrors.value.length && cat.visibleEntries.value.length
+            "
+          >
             Showing available models.</span
           >
         </p>
@@ -212,7 +221,7 @@ async function startBatch(): Promise<void> {
       <button
         type="button"
         data-test="catalog-retry"
-        class="border border-rose-200/40 shrink-0 rounded-lg px-3 py-1.5 font-medium text-rose-100 hover:bg-rose-100/10"
+        class="shrink-0 rounded-lg border border-current/40 px-3 py-1.5 font-medium hover:bg-current/10"
         :disabled="cat.loading.value"
         @click="cat.refresh()"
       >
@@ -222,7 +231,12 @@ async function startBatch(): Promise<void> {
 
     <!-- Empty state -->
     <div
-      v-if="!cat.loading.value && cat.visibleEntries.value.length === 0"
+      v-if="
+        !cat.loading.value &&
+        cat.visibleEntries.value.length === 0 &&
+        !cat.errorMsg.value &&
+        cat.providerErrors.value.length === 0
+      "
       class="flex flex-col items-center justify-center gap-2 py-16 text-ink-3"
     >
       <p class="text-sm">No models found.</p>
