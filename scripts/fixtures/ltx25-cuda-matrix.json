@@ -649,7 +649,7 @@
         "--height",
         "704",
         "--frames",
-        "121",
+        "97",
         "--fps",
         "24",
         "--audio",
@@ -659,7 +659,7 @@
       "expect": {
         "width": 1216,
         "height": 704,
-        "frames": 121,
+        "frames": 97,
         "fps": 24,
         "audio": true,
         "provenance": [
@@ -673,7 +673,7 @@
         },
         "scheduler_estimates": true
       },
-      "notes": "Default step count (the manifest's 8). Retains wall clock, vram.csv peak, VmHWM, and the scheduler_estimates row (#1398 phase evidence)."
+      "notes": "Default step count (the manifest's 8). Retains wall clock, vram.csv peak, VmHWM, and the scheduler_estimates row (#1398 phase evidence). 97 frames is the single-clip routing ceiling; a 121-frame request auto-chains and over-delivers 177 frames instead of exact-fitting (engine finding #2, engine-findings.md)."
     },
     {
       "id": "ltx-2.5-22b-distilled-int8-conv--fatal_cuda_quarantine",
@@ -2097,7 +2097,7 @@
         "--height",
         "704",
         "--frames",
-        "121",
+        "97",
         "--fps",
         "24",
         "--audio",
@@ -2107,7 +2107,7 @@
       "expect": {
         "width": 1216,
         "height": 704,
-        "frames": 121,
+        "frames": 97,
         "fps": 24,
         "audio": true,
         "provenance": [
@@ -2119,7 +2119,8 @@
           "attention_path": "ltx2-bf16-math"
         },
         "scheduler_estimates": true
-      }
+      },
+      "notes": "97 frames is the single-clip routing ceiling; a 121-frame request auto-chains and over-delivers 177 frames instead of exact-fitting (engine finding #2, engine-findings.md)."
     },
     {
       "id": "ltx-2.5-22b-distilled-q3-k-s--t2v_silent_apng",
