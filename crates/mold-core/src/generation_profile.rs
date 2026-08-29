@@ -1423,6 +1423,9 @@ fn recipe(
                     .then(|| "Wan sampler controls apply only to Wan models.".to_string()),
             },
             schedulers: match family {
+                "sdxl" if normalized_model.starts_with("playground-v2.5") => {
+                    vec![Scheduler::EdmDpmPp2m]
+                }
                 "sd15" | "sdxl" => {
                     vec![Scheduler::Ddim, Scheduler::EulerAncestral, Scheduler::UniPc]
                 }

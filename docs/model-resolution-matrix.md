@@ -2457,14 +2457,14 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `playground-v2.5:fp16`
 
-Schema 1 · hash `040f10f4eaf21b8a73af6eaa9bf8f827998278586b80eda6185af461709e4dbc` · default recipe `default`
+Schema 1 · hash `86e278946573501e9d6955d5c165aa89534322a649fde435fc682282546ebf9d` · default recipe `default`
 
 Models: `playground-v2.5:fp16`.
 
 #### Default (`default`)
 
 - Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
-- Defaults: `1024x1024`, 25 steps, guidance 3.
+- Defaults: `1024x1024`, 50 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
 
 | Exact ratio | Qualified presets |

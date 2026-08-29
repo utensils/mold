@@ -67,7 +67,8 @@ export type Scheduler =
   | GenerationScheduler
   | { ddim: unknown }
   | { "euler-ancestral": unknown }
-  | { "uni-pc": unknown };
+  | { "uni-pc": unknown }
+  | { "edm-dpm-pp-2m": unknown };
 
 export interface OutputMetadata {
   /** User-facing authoring mode; independent of internal auto-chaining. */
