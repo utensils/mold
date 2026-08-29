@@ -17,11 +17,11 @@ use half::{bf16, f16};
 use std::ffi::c_void;
 use std::{cell::RefCell, collections::HashMap};
 
-use super::comfy_quant::H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES;
+use super::NATIVE_INT8_CUBLAS_WORKSPACE_BYTES;
 
 #[rustfmt::skip]
 mod kernels {
-    include!(concat!(env!("OUT_DIR"), "/h3_int8_cuda.rs"));
+    include!(concat!(env!("OUT_DIR"), "/comfy_int8_cuda.rs"));
 }
 
 const THREADS: u32 = 256;
@@ -55,7 +55,7 @@ impl Drop for LtPlan {
 impl LtPlan {
     fn new(device: candle::CudaDevice, rows: usize, columns: usize, inner: usize) -> Result<Self> {
         fn err(context: &str, error: impl std::fmt::Debug) -> candle::Error {
-            candle::Error::Msg(format!("MiniMax H3 {context}: {error:?}"))
+            candle::Error::Msg(format!("Comfy INT8 {context}: {error:?}"))
         }
 
         let handle = lt::create_handle().map_err(|error| err("cuBLASLt handle", error))?;
@@ -121,7 +121,7 @@ impl LtPlan {
             .map_err(|error| err("cuBLASLt output layout", error))?;
             preference =
                 lt::create_matmul_pref().map_err(|error| err("cuBLASLt preference", error))?;
-            let workspace_bytes = H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES;
+            let workspace_bytes = NATIVE_INT8_CUBLAS_WORKSPACE_BYTES;
             // SAFETY: `preference` is live and the pointer is valid for this call.
             unsafe {
                 lt::set_matmul_pref_attribute(
@@ -199,14 +199,14 @@ fn with_lt_plan<T>(
 }
 
 #[derive(Debug)]
-struct H3Int8Linear {
+struct NativeInt8Linear {
     rows: usize,
     columns: usize,
     inner: usize,
     output_dtype: DType,
 }
 
-impl H3Int8Linear {
+impl NativeInt8Linear {
     fn cuda_fwd_t<I, O>(
         &self,
         input: &CudaStorage,
@@ -223,7 +223,7 @@ impl H3Int8Linear {
         let contiguous = |layout: &Layout, label: &str| -> Result<(usize, usize)> {
             layout
                 .contiguous_offsets()
-                .ok_or_else(|| candle::Error::Msg(format!("MiniMax H3 {label} must be contiguous")))
+                .ok_or_else(|| candle::Error::Msg(format!("Comfy INT8 {label} must be contiguous")))
         };
         let (input_start, input_end) = contiguous(input_layout, "INT8 activation")?;
         let (weight_start, weight_end) = contiguous(weight_layout, "INT8 weight")?;
@@ -232,7 +232,7 @@ impl H3Int8Linear {
             || weight_layout.shape().dims() != [self.columns, self.inner]
             || !matches!(scale_layout.shape().dims(), [columns, 1] if *columns == self.columns)
         {
-            candle::bail!("MiniMax H3 native INT8 CUDA operand shape mismatch")
+            candle::bail!("Comfy native INT8 CUDA operand shape mismatch")
         }
 
         let device = input.device();
@@ -248,7 +248,7 @@ impl H3Int8Linear {
         let input_scales = unsafe { stream.alloc::<f32>(self.rows) }.w()?;
         let mut accumulator = unsafe { stream.alloc::<i32>(self.rows * self.columns) }.w()?;
         let mut workspace =
-            unsafe { stream.alloc::<u8>(H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES) }.w()?;
+            unsafe { stream.alloc::<u8>(NATIVE_INT8_CUBLAS_WORKSPACE_BYTES) }.w()?;
         let output = unsafe { stream.alloc::<O>(self.rows * self.columns) }.w()?;
 
         let quantize_name = match I::DTYPE {
@@ -256,7 +256,7 @@ impl H3Int8Linear {
             DType::F16 => "h3_quantize_int8_rowwise_f16",
             DType::BF16 => "h3_quantize_int8_rowwise_bf16",
             dtype => {
-                candle::bail!("MiniMax H3 native INT8 CUDA input dtype {dtype:?} is unsupported")
+                candle::bail!("Comfy native INT8 CUDA input dtype {dtype:?} is unsupported")
             }
         };
         let quantize = device.get_or_load_custom_func(
@@ -303,12 +303,10 @@ impl H3Int8Linear {
                     plan.output,
                     &plan.algorithm,
                     workspace_ptr as *mut c_void,
-                    H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES,
+                    NATIVE_INT8_CUBLAS_WORKSPACE_BYTES,
                     stream.cu_stream().cast(),
                 )
-                .map_err(|error| {
-                    candle::Error::Msg(format!("MiniMax H3 INT8 cuBLASLt GEMM: {error:?}"))
-                })
+                .map_err(|error| candle::Error::Msg(format!("Comfy INT8 cuBLASLt GEMM: {error:?}")))
             }
         })?;
         drop(workspace_write);
@@ -321,7 +319,7 @@ impl H3Int8Linear {
             DType::F16 => "h3_dequantize_int8_linear_f16",
             DType::BF16 => "h3_dequantize_int8_linear_bf16",
             dtype => {
-                candle::bail!("MiniMax H3 native INT8 CUDA output dtype {dtype:?} is unsupported")
+                candle::bail!("Comfy native INT8 CUDA output dtype {dtype:?} is unsupported")
             }
         };
         let dequantize = device.get_or_load_custom_func(
@@ -350,9 +348,9 @@ impl H3Int8Linear {
     }
 }
 
-impl CustomOp3 for H3Int8Linear {
+impl CustomOp3 for NativeInt8Linear {
     fn name(&self) -> &'static str {
-        "minimax-h3-native-int8-linear"
+        "comfy-native-int8-linear"
     }
 
     fn cpu_fwd(
@@ -364,7 +362,7 @@ impl CustomOp3 for H3Int8Linear {
         _: &CpuStorage,
         _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        candle::bail!("MiniMax H3 native INT8 linear is CUDA-only")
+        candle::bail!("Comfy native INT8 linear is CUDA-only")
     }
 
     fn cuda_fwd(
@@ -404,7 +402,7 @@ impl CustomOp3 for H3Int8Linear {
                         scale_layout,
                     ),
                     dtype => candle::bail!(
-                        "MiniMax H3 native INT8 CUDA output dtype {dtype:?} is unsupported"
+                        "Comfy native INT8 CUDA output dtype {dtype:?} is unsupported"
                     ),
                 }
             };
@@ -414,13 +412,13 @@ impl CustomOp3 for H3Int8Linear {
             DType::F16 => output_dispatch!(f16),
             DType::BF16 => output_dispatch!(bf16),
             dtype => {
-                candle::bail!("MiniMax H3 native INT8 CUDA input dtype {dtype:?} is unsupported")
+                candle::bail!("Comfy native INT8 CUDA input dtype {dtype:?} is unsupported")
             }
         }
     }
 }
 
-pub(crate) fn native_int8_linear(
+pub fn native_int8_linear(
     input: &candle::Tensor,
     weight: &candle::Tensor,
     scales: &candle::Tensor,
@@ -429,25 +427,25 @@ pub(crate) fn native_int8_linear(
     let (rows, inner) = input.dims2()?;
     let (columns, weight_inner) = weight.dims2()?;
     validate_native_int8_dimensions(rows, columns, inner, weight_inner)?;
-    let activation_elements = rows.checked_mul(inner).ok_or_else(|| {
-        candle::Error::Msg("MiniMax H3 native INT8 activation size overflows".into())
-    })?;
+    let activation_elements = rows
+        .checked_mul(inner)
+        .ok_or_else(|| candle::Error::Msg("Comfy native INT8 activation size overflows".into()))?;
     let weight_elements = columns
         .checked_mul(inner)
-        .ok_or_else(|| candle::Error::Msg("MiniMax H3 native INT8 weight size overflows".into()))?;
+        .ok_or_else(|| candle::Error::Msg("Comfy native INT8 weight size overflows".into()))?;
     let output_elements = rows
         .checked_mul(columns)
-        .ok_or_else(|| candle::Error::Msg("MiniMax H3 native INT8 output size overflows".into()))?;
+        .ok_or_else(|| candle::Error::Msg("Comfy native INT8 output size overflows".into()))?;
     u32::try_from(output_elements).map_err(|_| {
-        candle::Error::Msg("MiniMax H3 native INT8 output element count exceeds u32".into())
+        candle::Error::Msg("Comfy native INT8 output element count exceeds u32".into())
     })?;
     if input.elem_count() != activation_elements || weight.elem_count() != weight_elements {
-        candle::bail!("MiniMax H3 native INT8 CUDA operand element count mismatch")
+        candle::bail!("Comfy native INT8 CUDA operand element count mismatch")
     }
     input.apply_op3_no_bwd(
         weight,
         scales,
-        &H3Int8Linear {
+        &NativeInt8Linear {
             rows,
             columns,
             inner,
@@ -463,24 +461,23 @@ fn validate_native_int8_dimensions(
     weight_inner: usize,
 ) -> Result<()> {
     if rows == 0 || columns == 0 || inner == 0 {
-        candle::bail!("MiniMax H3 native INT8 CUDA dimensions must be positive")
+        candle::bail!("Comfy native INT8 CUDA dimensions must be positive")
     }
     if inner != weight_inner {
-        candle::bail!("MiniMax H3 native INT8 CUDA inner dimension mismatch")
+        candle::bail!("Comfy native INT8 CUDA inner dimension mismatch")
     }
     if !inner.is_multiple_of(4) || !columns.is_multiple_of(4) {
-        candle::bail!("MiniMax H3 native INT8 CUDA dimensions must be multiples of four")
+        candle::bail!("Comfy native INT8 CUDA dimensions must be multiples of four")
     }
     i32::try_from(rows)
-        .map_err(|_| candle::Error::Msg("MiniMax H3 native INT8 row count exceeds i32".into()))?;
-    i32::try_from(columns).map_err(|_| {
-        candle::Error::Msg("MiniMax H3 native INT8 output width exceeds i32".into())
-    })?;
+        .map_err(|_| candle::Error::Msg("Comfy native INT8 row count exceeds i32".into()))?;
+    i32::try_from(columns)
+        .map_err(|_| candle::Error::Msg("Comfy native INT8 output width exceeds i32".into()))?;
     i32::try_from(inner)
-        .map_err(|_| candle::Error::Msg("MiniMax H3 native INT8 inner width exceeds i32".into()))?;
+        .map_err(|_| candle::Error::Msg("Comfy native INT8 inner width exceeds i32".into()))?;
     const MAX_SIGNED_INT8_PRODUCT: usize = 128 * 128;
     if inner > i32::MAX as usize / MAX_SIGNED_INT8_PRODUCT {
-        candle::bail!("MiniMax H3 native INT8 dot product can overflow i32")
+        candle::bail!("Comfy native INT8 dot product can overflow i32")
     }
     Ok(())
 }

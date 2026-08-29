@@ -313,17 +313,19 @@ pub enum RuntimeSemanticVariable {
     LoraBypass,
     LtxDebugAltPrompt,
     LtxDebugCompareUncond,
-    LtxDebugDisableAudioBranch,
     LtxDebugDisableCrossAttentionAdaLn,
     Ltx2DebugDisableTransformerGatedAttention,
     Ltx2DebugForceCpuPromptEncoder,
     Ltx2DebugLoadBlocks,
+    Ltx2AttnF32,
     Ltx2ForceEager,
     Ltx2ForceStreaming,
     Ltx2Fp8InputScaleMode,
     Ltx2Fp8WeightScaleMode,
     Ltx2GemmaDevice,
     Ltx2GemmaVariant,
+    Ltx2Int8,
+    Ltx2QMatMul,
     Umt5Variant,
     Ltx2SpatialTile,
     Ltx2VaeDecodeChunkFrames,
@@ -661,9 +663,6 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_LORA_BYPASS" => RuntimeSemanticVariable::LoraBypass,
         "MOLD_LTX_DEBUG_ALT_PROMPT" => RuntimeSemanticVariable::LtxDebugAltPrompt,
         "MOLD_LTX_DEBUG_COMPARE_UNCOND" => RuntimeSemanticVariable::LtxDebugCompareUncond,
-        "MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH" => {
-            RuntimeSemanticVariable::LtxDebugDisableAudioBranch
-        }
         "MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN" => {
             RuntimeSemanticVariable::LtxDebugDisableCrossAttentionAdaLn
         }
@@ -674,12 +673,24 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
             RuntimeSemanticVariable::Ltx2DebugForceCpuPromptEncoder
         }
         "MOLD_LTX2_DEBUG_LOAD_BLOCKS" => RuntimeSemanticVariable::Ltx2DebugLoadBlocks,
+        // #735: forces the F32 chunked LTX-2 attention path in place of the
+        // BF16 dispatcher, which changes the rendered output — its own
+        // execution-equivalence and timing class.
+        "MOLD_LTX2_ATTN_F32" => RuntimeSemanticVariable::Ltx2AttnF32,
         "MOLD_LTX2_FORCE_EAGER" => RuntimeSemanticVariable::Ltx2ForceEager,
         "MOLD_LTX2_FORCE_STREAMING" => RuntimeSemanticVariable::Ltx2ForceStreaming,
         "MOLD_LTX2_FP8_INPUT_SCALE_MODE" => RuntimeSemanticVariable::Ltx2Fp8InputScaleMode,
         "MOLD_LTX2_FP8_WEIGHT_SCALE_MODE" => RuntimeSemanticVariable::Ltx2Fp8WeightScaleMode,
         "MOLD_LTX2_GEMMA_DEVICE" => RuntimeSemanticVariable::Ltx2GemmaDevice,
         "MOLD_LTX2_GEMMA_VARIANT" => RuntimeSemanticVariable::Ltx2GemmaVariant,
+        // Swaps the LTX-2 INT8 ConvRot execution arm (W8A8 kernel vs
+        // per-forward widening), which changes pixels, transient memory, and
+        // step latency — its own execution-equivalence and timing class.
+        "MOLD_LTX2_INT8" => RuntimeSemanticVariable::Ltx2Int8,
+        // Swaps the LTX-2.5 GGUF linear arm (per-forward dequant vs candle's
+        // QMatMul fast path), which changes numerics, transient memory, and
+        // step latency — its own execution-equivalence and timing class.
+        "MOLD_LTX2_QMATMUL" => RuntimeSemanticVariable::Ltx2QMatMul,
         "MOLD_UMT5_VARIANT" => RuntimeSemanticVariable::Umt5Variant,
         "MOLD_LTX2_SPATIAL_TILE" => RuntimeSemanticVariable::Ltx2SpatialTile,
         "MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES" => RuntimeSemanticVariable::Ltx2VaeDecodeChunkFrames,
@@ -738,7 +749,6 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
             if matches!(
                 variable,
                 RuntimeSemanticVariable::LtxDebugCompareUncond
-                    | RuntimeSemanticVariable::LtxDebugDisableAudioBranch
                     | RuntimeSemanticVariable::LtxDebugDisableCrossAttentionAdaLn
                     | RuntimeSemanticVariable::Ltx2DebugDisableTransformerGatedAttention
                     | RuntimeSemanticVariable::Ltx2DebugLoadBlocks
@@ -793,6 +803,26 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
         }
         Some(value) if variable == RuntimeSemanticVariable::QwenFp8Cache => {
             CanonicalRuntimeValue::Boolean(value.trim() == "1")
+        }
+        // Mirrors the engine's `parse_ltx2_int8_arm` exactly: `dequant`
+        // selects the widening arm, every other spelling is the default.
+        Some(value) if variable == RuntimeSemanticVariable::Ltx2Int8 => {
+            CanonicalRuntimeValue::Boolean(value.trim().eq_ignore_ascii_case("dequant"))
+        }
+        // Mirrors the engine's `parse_attention_f32_forced` exactly: the LTX-2
+        // F32 attention control shares the family's truthy spellings.
+        Some(value) if variable == RuntimeSemanticVariable::Ltx2AttnF32 => {
+            CanonicalRuntimeValue::Boolean(matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            ))
+        }
+        // Mirrors the shared `parse_qmatmul_flag` the engine reads exactly.
+        Some(value) if variable == RuntimeSemanticVariable::Ltx2QMatMul => {
+            CanonicalRuntimeValue::Boolean(matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            ))
         }
         // Mirrors the engine's `parse_zimage_qmatmul` exactly.
         Some(value) if variable == RuntimeSemanticVariable::ZimageQMatMul => {
@@ -3356,15 +3386,16 @@ fn ltx2_cpu_gemma_streams_from_mmap(family: &str, role: &ComponentRole, path: &P
         && mold_inference::ltx2::cpu_gemma_allocates_anon_peak(path)
 }
 
-/// Whether LTX-2 block streaming keeps the checkpoint as a reclaimable file
-/// mapping instead of copying the full artifact into anonymous host memory.
+/// Whether LTX-2 block streaming keeps the checkpoint out of anonymous host
+/// memory, materializing one tensor at a time.
 ///
-/// Both the ordinary safetensors backend and the ConvRot backend retain an
-/// mmap and materialize one block/weight at a time. Charging the complete
-/// transformer again as concurrent host residency is especially wrong on
-/// Metal, where that charge is folded back into the same unified-memory gate.
-/// The real transient is bounded by `BASE_HOST_TRANSIENT` (the largest
-/// official LTX-2.5 packed weight is 64 MiB).
+/// The ordinary safetensors and ConvRot backends retain a reclaimable mmap;
+/// the GGUF backend seeks one tensor at a time through a buffered reader
+/// (`Ltx2GgufBackend`), so its transient is one raw tensor payload (≤ 67 MB
+/// at Q8_0). Charging the complete transformer again as concurrent host
+/// residency is especially wrong on Metal, where that charge is folded back
+/// into the same unified-memory gate. The real transient for every format is
+/// bounded by `BASE_HOST_TRANSIENT`.
 fn ltx2_transformer_streams_from_mmap(family: &str, role: &ComponentRole, path: &Path) -> bool {
     matches!(family, "ltx2" | "ltx-2" | "ltx2.3")
         && matches!(
@@ -3373,9 +3404,9 @@ fn ltx2_transformer_streams_from_mmap(family: &str, role: &ComponentRole, path: 
                 | ComponentRole::TransformerShard(_)
                 | ComponentRole::LowNoiseTransformer
         )
-        && path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+        && path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("safetensors") || extension.eq_ignore_ascii_case("gguf")
+        })
 }
 
 fn ltx2_cpu_gemma_anon_peak_anchor(
@@ -4303,9 +4334,10 @@ fn hash_equivalence_artifact_contents(path: &Path) -> std::io::Result<Equivalenc
 }
 
 fn verified_sha256_marker_digest(path: &Path) -> Option<String> {
-    let marker = mold_core::download::sha256_marker_path(path);
-    let digest = std::fs::read_to_string(marker).ok()?;
-    let digest = digest.trim();
+    // The marker's first line is the digest; a second `len=` line (added so
+    // `Config::file_is_complete` can tell a marker that still describes the
+    // file from a stale one) is read and discarded by the shared helper.
+    let digest = mold_core::download::recorded_sha256_marker(path)?;
     (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| digest.to_ascii_lowercase())
 }
@@ -4656,6 +4688,35 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LTX-2 transformer streaming holds no anonymous whole-artifact host
+    /// copy for either container: safetensors backends stream from an mmap
+    /// and the GGUF backend seeks one tensor at a time, so both charge only
+    /// the base transient.
+    #[test]
+    fn ltx2_transformer_streaming_charges_no_anon_copy_for_safetensors_or_gguf() {
+        let role = ComponentRole::Transformer;
+        assert!(ltx2_transformer_streams_from_mmap(
+            "ltx2",
+            &role,
+            Path::new("/models/ltx-2.5/transformer.safetensors"),
+        ));
+        assert!(ltx2_transformer_streams_from_mmap(
+            "ltx2",
+            &role,
+            Path::new("/models/ltx-2.5/LTX-2.5-Distilled-Q4_K_M.gguf"),
+        ));
+        assert!(!ltx2_transformer_streams_from_mmap(
+            "ltx2",
+            &role,
+            Path::new("/models/ltx-2.5/transformer.bin"),
+        ));
+        assert!(!ltx2_transformer_streams_from_mmap(
+            "wan",
+            &role,
+            Path::new("/models/wan/transformer.gguf"),
+        ));
+    }
     use mold_core::{
         AdvancedPlacement, GenerationReference, GenerationReferenceAuthority,
         GenerationReferenceProvenance, ModelConfig,

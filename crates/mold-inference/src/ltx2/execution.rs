@@ -47,6 +47,14 @@ pub(crate) struct Ltx2ExecutionGraph {
     pub(crate) preset_name: &'static str,
     pub(crate) feature_extractor: GemmaFeatureExtractorKind,
     pub(crate) wants_audio_output: bool,
+    /// Whether the audio-video transformer's audio branch may run at all.
+    /// `false` only for an explicit `video_only` request with no audio
+    /// output and no audio conditioning (#1037) — upstream's
+    /// `LTXVideoOnlyModelConfigurator` omits the branch structurally
+    /// (`model_configurator.py:56-101` @400fd31). When `true`, the runtime
+    /// still applies its own multimodal-path gate, so silent renders on
+    /// checkpoints without dual-AV prompt conditioning are unchanged.
+    pub(crate) run_audio_branch: bool,
     pub(crate) uses_reference_video_conditioning: bool,
     pub(crate) uses_audio_conditioning: bool,
     pub(crate) uses_keyframe_conditioning: bool,
@@ -65,6 +73,12 @@ pub(crate) fn wants_audio_output(req: &GenerateRequest) -> bool {
         .is_some_and(mold_core::Ltx2PipelineMode::is_audio_only)
     {
         return true;
+    }
+    // An explicit video-only request renders silent even for MP4 output —
+    // the validator already rejected it beside `enable_audio=true` and the
+    // audio-only pipeline, so only the MP4 default is being overridden here.
+    if req.video_only == Some(true) {
+        return false;
     }
     req.enable_audio
         .unwrap_or(req.resolved_output_format() == OutputFormat::Mp4)
@@ -86,6 +100,8 @@ pub(crate) fn build_execution_graph(
     let uses_reference_video_conditioning = conditioning.video_path.is_some();
     let uses_keyframe_conditioning = conditioning.images.len() > 1;
     let uses_retake_masking = req.retake_range.is_some();
+    let run_audio_branch =
+        wants_audio_output || uses_audio_conditioning || req.video_only != Some(true);
 
     let mut blocks = vec![
         ExecutionBlock::PromptEncoder,
@@ -115,6 +131,7 @@ pub(crate) fn build_execution_graph(
             preset_name: preset.name,
             feature_extractor: preset.feature_extractor,
             wants_audio_output: true,
+            run_audio_branch: true,
             uses_reference_video_conditioning: false,
             uses_audio_conditioning: false,
             uses_keyframe_conditioning: false,
@@ -195,6 +212,7 @@ pub(crate) fn build_execution_graph(
         preset_name: preset.name,
         feature_extractor: preset.feature_extractor,
         wants_audio_output,
+        run_audio_branch,
         uses_reference_video_conditioning,
         uses_audio_conditioning,
         uses_keyframe_conditioning,
@@ -220,6 +238,7 @@ mod tests {
 
     fn req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -472,6 +491,48 @@ mod tests {
         assert!(!graph.denoise_passes[0].uses_distilled_checkpoint);
         assert!(!graph.denoise_passes[0].apply_distilled_lora);
         assert!(graph.wants_audio_output);
+    }
+
+    /// The #1037 table: only an explicit `video_only` request with no audio
+    /// output and no audio conditioning switches the branch off; everything
+    /// else — the absent default included — keeps it available.
+    #[test]
+    fn video_only_disables_the_audio_branch_unless_audio_is_requested_or_conditioned() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let preset = preset_for_model("ltx-2.3-22b-distilled:fp8").unwrap();
+        let graph = |configure: &dyn Fn(&mut GenerateRequest)| {
+            let mut request = req("ltx-2.3-22b-distilled:fp8");
+            request.enable_audio = None;
+            configure(&mut request);
+            let conditioning = conditioning::stage_conditioning(&request, temp_dir.path()).unwrap();
+            build_execution_graph(&request, PipelineKind::Distilled, &conditioning, &preset, 0)
+        };
+
+        // Absent: today's behavior, branch available.
+        let default = graph(&|_| {});
+        assert!(default.run_audio_branch);
+        // Explicit false is the same as absent.
+        let explicit_false = graph(&|request| request.video_only = Some(false));
+        assert!(explicit_false.run_audio_branch);
+        // video_only with a silent export: the one skip.
+        let silent = graph(&|request| {
+            request.video_only = Some(true);
+            request.output_format = Some(OutputFormat::Gif);
+        });
+        assert!(!silent.run_audio_branch);
+        assert!(!silent.wants_audio_output);
+        assert!(!silent.blocks.contains(&ExecutionBlock::AudioDecoder));
+        // video_only overrides the MP4 default-on too.
+        let mp4 = graph(&|request| request.video_only = Some(true));
+        assert!(!mp4.run_audio_branch);
+        assert!(!mp4.wants_audio_output);
+        // Conditioning audio keeps the branch (the validator refuses the
+        // pair; the engine-side table stays safe independently).
+        let conditioned = graph(&|request| {
+            request.video_only = Some(true);
+            request.audio_file = Some(b"fake".to_vec());
+        });
+        assert!(conditioned.run_audio_branch);
     }
 
     /// `enable_audio=false` cannot silence an audio-only pipeline — there

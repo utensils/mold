@@ -893,6 +893,7 @@ pub async fn run(
     motion_tail: u32,
     audio: bool,
     no_audio: bool,
+    video_only: bool,
     audio_file: Option<String>,
     video: Option<String>,
     extend: Option<String>,
@@ -1517,6 +1518,7 @@ pub async fn run(
             } else {
                 None
             },
+            video_only: video_only.then_some(true),
             audio_file: audio_file_bytes,
             source_video: source_video_bytes,
             extend_video: extend_video_bytes,

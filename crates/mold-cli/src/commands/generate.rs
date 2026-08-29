@@ -814,6 +814,8 @@ pub struct Ltx2Options {
     /// Motion-tail overlap between chained clips (pixel frames).
     pub motion_tail: u32,
     pub enable_audio: Option<bool>,
+    /// #1037 opt-in: skip the audio branch structurally. Never a default.
+    pub video_only: Option<bool>,
     pub audio_file: Option<Vec<u8>>,
     pub source_video: Option<Vec<u8>>,
     /// Existing video to continue. Makes the request a continuation: the
@@ -963,6 +965,7 @@ pub async fn run(
         clip_frames,
         motion_tail,
         enable_audio,
+        video_only,
         audio_file,
         source_video,
         extend_video,
@@ -1167,6 +1170,19 @@ pub async fn run(
                 let total_frames = effective_frames
                     .expect("decide_chain_routing only returns Chain when frames is Some");
 
+                // The chain wire carries no `video_only`, so an auto-chained
+                // long video would silently run the multimodal audio branch
+                // the user asked to skip (#1037). Refuse rather than ignore
+                // an explicit output-changing request.
+                if video_only == Some(true) {
+                    anyhow::bail!(
+                        "--video-only is not supported for a --frames value that auto-chains \
+                         ({total_frames} frames exceeds one clip): the sequence wire does not \
+                         carry the flag yet. Reduce --frames to a single clip or drop \
+                         --video-only.",
+                    );
+                }
+
                 // Chain path doesn't use batch/edit_images/mask/control/loras —
                 // those are single-clip concepts. If the user set them, warn and
                 // continue (we don't hard-error to keep the UX lenient).
@@ -1244,6 +1260,7 @@ pub async fn run(
                     })?;
                     let control = ic_lora_control.clone().unwrap_or_else(|| "hdr".to_string());
                     let mut probe_req = GenerateRequest {
+                        video_only: None,
                         collection: None,
                         tags: None,
                         title: None,
@@ -1450,6 +1467,7 @@ pub async fn run(
         upscale_model: None,
         gif_preview: preview,
         enable_audio: if is_h3 { Some(true) } else { enable_audio },
+        video_only,
         audio_file,
         audio_file_path: None,
         source_video,
@@ -4674,6 +4692,7 @@ mod tests {
                 clip_frames: None,
                 motion_tail: 17,
                 enable_audio: None,
+                video_only: None,
                 audio_file: None,
                 source_video: None,
                 extend_video: None,
@@ -5026,6 +5045,9 @@ mod tests {
             audio: None,
             images: Vec::new(),
             video: Some(mold_core::VideoData {
+                video_only: None,
+                attention_path: None,
+                int8_arm: None,
                 data: b"successful-video".to_vec(),
                 format: OutputFormat::Mp4,
                 width: 512,

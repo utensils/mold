@@ -14,7 +14,12 @@
 //!   reference rotates activations in the input dtype, performs dynamic
 //!   per-row INT8 QDQ, and applies both F32 scales. CUDA uses the pinned
 //!   INT8-to-INT32 cuBLASLt boundary; CPU and Metal stream portable F32
-//!   output-row chunks without retaining a dense weight.
+//!   output-row chunks without retaining a dense weight. That linear is the
+//!   family-neutral [`crate::comfy_int8`] primitive (LTX-2.5's `int8-conv`
+//!   packs share the format); this module re-exports it under the `H3`
+//!   names its call sites and qualification tests use, with the H3 storage
+//!   contract (CPU-resident, staged per forward) and the H3 rule that a
+//!   biased linear takes the portable arm both unchanged.
 //! - The pruned DiT's scaled FP8 matrices retain E4M3 weights plus scalar F32
 //!   weight/input scales. Their reference path preserves the source QDQ order
 //!   and accumulates against bounded, reconstructed F32 weight chunks.
@@ -38,8 +43,25 @@ use candle::{DType, Device, Result, Tensor};
 use float8::F8E4M3 as f8e4m3;
 use std::sync::OnceLock;
 
+/// The family-neutral INT8 ConvRot linear under its H3 name; see
+/// [`crate::comfy_int8`].
+pub use crate::comfy_int8::ComfyInt8ConvRotLinear as H3ComfyInt8ConvRotLinear;
+/// The family-neutral INT8 arm selector's answer, under its H3 name.
+pub use crate::comfy_int8::Int8LinearKind as H3Int8LinearKind;
+#[cfg(all(test, any(feature = "h3", feature = "h3-private-uat")))]
+use crate::comfy_int8::{
+    accelerator_signed_widening_workspace_upper_bound,
+    NATIVE_INT8_CUBLAS_WORKSPACE_BYTES as H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES,
+};
+use crate::comfy_int8::{
+    checked_round_up, ensure_floating, ensure_output_dtype, finish_linear, flattened_input,
+    select_int8_linear_kind,
+};
+#[cfg(test)]
+use crate::comfy_int8::{regular_hadamard, regular_hadamard_values, round_ties_even};
+
 /// Comfy's released H3 INT8 checkpoints require this exact ConvRot group.
-pub const H3_COMFY_CONVROT_GROUP_SIZE: usize = 256;
+pub const H3_COMFY_CONVROT_GROUP_SIZE: usize = crate::comfy_int8::CONVROT_GROUP_SIZE;
 
 /// NVFP4 uses one FP8-E4M3 scale per 16 logical values.
 pub const H3_COMFY_NVFP4_BLOCK_SIZE: usize = 16;
@@ -49,43 +71,18 @@ pub const H3_COMFY_NVFP4_BLOCK_SIZE: usize = 16;
 const NVFP4_DEVICE_TABLE_BYTES: usize = (256 * 2 + 256 + 1) * std::mem::size_of::<f32>();
 
 /// Bounded default for portable dequantized weight staging.
-pub const H3_COMFY_PORTABLE_ROW_CHUNK: usize = 256;
+pub const H3_COMFY_PORTABLE_ROW_CHUNK: usize = crate::comfy_int8::PORTABLE_ROW_CHUNK;
 
-/// Workspace offered to the source-matched cuBLASLt INT8 heuristic.
+/// Resolve the INT8 ConvRot arm for one H3 linear.
 ///
-/// Compiled whenever the workspace accounting is, not only when the kernel is:
-/// `reference_workspace_upper_bound` has a `native_cuda` arm that a Metal or
-/// CPU H3 build still has to be able to name, even though it never takes it.
-#[cfg(any(feature = "cuda", feature = "h3", feature = "h3-private-uat"))]
-pub(crate) const H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES: usize = 4 * 1024 * 1024;
-
-/// Which arm executes one INT8 ConvRot linear.
-///
-/// The choice is a pure function of the device, the compiled feature set, and
-/// the weight's own shape — never of the calling surface — mirroring
-/// `zimage`/`qwen_image`'s `select_linear_kind`. Keeping it a function rather
-/// than an inline `cfg!` is what lets Metal's arm be pinned by a test on a
-/// machine that has no Metal device.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum H3Int8LinearKind {
-    /// cuBLASLt signed INT8 -> INT32 GEMM with a fused dequantize.
-    NativeCudaInt8,
-    /// Portable quantize/dequantize: rotate, dynamically quantize the
-    /// activation, accumulate against the packed signed bytes in F32 over
-    /// bounded output-row chunks, then apply both scales. This is the arm
-    /// Metal and CPU take, and it is exact against the same reference the
-    /// CUDA kernel matches.
-    PortableQuantizeDequantize,
-}
-
-/// Resolve the INT8 ConvRot arm for one linear.
-///
-/// Metal always takes the portable arm: `int8_cuda.rs`'s cuBLASLt kernel has
-/// no Metal twin, and unlike Qwen-Image's `QMatMul` there is no candle-side
-/// Metal quantized kernel to qualify — so this is a correctness fallback by
-/// construction, not a tuning choice. It is also why the H3 Metal tier is
-/// `CorrectnessOnly`: the portable arm re-uploads and widens the packed weight
-/// chunk on every forward.
+/// The H3 DiT's rule is the older, stricter one: a bias sends the whole
+/// linear to the portable arm, because the native kernel folds none and
+/// `forward_reference` adds a bias only on the portable path. Everything else
+/// is [`select_int8_linear_kind`]'s answer — Metal always takes the portable
+/// arm (the cuBLASLt kernel has no Metal twin, and unlike Qwen-Image's
+/// `QMatMul` there is no candle-side Metal quantized kernel to qualify), which
+/// is also why the H3 Metal tier is `CorrectnessOnly`: the portable arm
+/// re-uploads and widens the packed weight chunk on every forward.
 pub fn select_h3_int8_linear_kind(
     device: &Device,
     native_kernel_compiled: bool,
@@ -93,17 +90,10 @@ pub fn select_h3_int8_linear_kind(
     in_features: usize,
     out_features: usize,
 ) -> H3Int8LinearKind {
-    // The kernel folds no bias and its cuBLASLt layout descriptors require
-    // both extents to be a multiple of four.
-    if native_kernel_compiled
-        && device.is_cuda()
-        && !has_bias
-        && in_features.is_multiple_of(4)
-        && out_features.is_multiple_of(4)
-    {
-        H3Int8LinearKind::NativeCudaInt8
-    } else {
+    if has_bias {
         H3Int8LinearKind::PortableQuantizeDequantize
+    } else {
+        select_int8_linear_kind(device, native_kernel_compiled, in_features, out_features)
     }
 }
 
@@ -293,166 +283,6 @@ fn build_f8e4m3_widening_table() -> Result<[f32; 256]> {
     Ok(table)
 }
 
-fn ensure_floating(dtype: DType, role: &str) -> Result<()> {
-    match dtype {
-        DType::F32 | DType::F16 | DType::BF16 => Ok(()),
-        other => candle::bail!("MiniMax H3 {role} must be F32, F16, or BF16, got {other:?}"),
-    }
-}
-
-fn ensure_output_dtype(dtype: DType) -> Result<()> {
-    ensure_floating(dtype, "quantized linear output")
-}
-
-fn checked_round_up(value: usize, multiple: usize, role: &str) -> Result<usize> {
-    if multiple == 0 {
-        candle::bail!("MiniMax H3 {role} alignment must be positive")
-    }
-    value
-        .checked_add(multiple - 1)
-        .map(|value| value / multiple * multiple)
-        .ok_or_else(|| candle::Error::Msg(format!("MiniMax H3 {role} alignment overflows")))
-}
-
-fn flattened_input(input: &Tensor, in_features: usize) -> Result<(Tensor, Vec<usize>)> {
-    ensure_floating(input.dtype(), "quantized linear input")?;
-    let mut output_shape = input.dims().to_vec();
-    let Some(last) = output_shape.last_mut() else {
-        candle::bail!("MiniMax H3 quantized linear input must have rank at least one")
-    };
-    if *last != in_features {
-        candle::bail!(
-            "MiniMax H3 quantized linear expected {in_features} input features, got {}",
-            *last
-        )
-    }
-    *last = 0;
-    let rows = input.dims()[..input.rank() - 1]
-        .iter()
-        .try_fold(1usize, |product, value| product.checked_mul(*value))
-        .ok_or_else(|| candle::Error::Msg("MiniMax H3 input row count overflows".into()))?;
-    if rows == 0 {
-        candle::bail!("MiniMax H3 quantized linear input cannot be empty")
-    }
-    Ok((input.reshape((rows, in_features))?, output_shape))
-}
-
-#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-fn accelerator_signed_widening_workspace_upper_bound(elements: usize) -> Result<u64> {
-    let raw = elements
-        .checked_mul(std::mem::size_of::<u8>())
-        .ok_or_else(|| candle::Error::Msg("MiniMax H3 raw INT8 staging size overflows".into()))?;
-    let widened = elements
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| {
-            candle::Error::Msg("MiniMax H3 widened INT8 staging size overflows".into())
-        })?;
-    raw.checked_mul(2)
-        .and_then(|bytes| {
-            widened
-                .checked_mul(4)
-                .and_then(|wide| bytes.checked_add(wide))
-        })
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or_else(|| candle::Error::Msg("MiniMax H3 signed widening workspace overflows".into()))
-}
-
-fn finish_linear(
-    chunks: Vec<Tensor>,
-    bias: Option<&Tensor>,
-    output_dtype: DType,
-    mut output_shape: Vec<usize>,
-    out_features: usize,
-    device: &Device,
-) -> Result<Tensor> {
-    let mut output = Tensor::cat(&chunks, 1)?;
-    if let Some(bias) = bias {
-        ensure_floating(bias.dtype(), "quantized linear bias")?;
-        if bias.dims() != [out_features] {
-            candle::bail!(
-                "MiniMax H3 quantized linear bias must have shape [{out_features}], got {:?}",
-                bias.dims()
-            )
-        }
-        let bias = bias
-            .to_device(device)?
-            .to_dtype(DType::F32)?
-            .reshape((1, out_features))?;
-        output = output.broadcast_add(&bias)?;
-    }
-    ensure_output_dtype(output_dtype)?;
-    *output_shape
-        .last_mut()
-        .expect("flattened_input established a nonempty shape") = out_features;
-    output.to_dtype(output_dtype)?.reshape(&*output_shape)
-}
-
-fn regular_hadamard_values(size: usize) -> Result<Vec<f32>> {
-    if size < 4 || !size.is_power_of_two() || !size.trailing_zeros().is_multiple_of(2) {
-        candle::bail!(
-            "MiniMax H3 ConvRot group size must be a power of four at least four, got {size}"
-        )
-    }
-    const H4: [[f32; 4]; 4] = [
-        [1.0, 1.0, 1.0, -1.0],
-        [1.0, 1.0, -1.0, 1.0],
-        [1.0, -1.0, 1.0, 1.0],
-        [-1.0, 1.0, 1.0, 1.0],
-    ];
-    let mut matrix = H4.iter().flatten().copied().collect::<Vec<_>>();
-    let mut width = 4usize;
-    while width < size {
-        let next_width = width
-            .checked_mul(4)
-            .ok_or_else(|| candle::Error::Msg("MiniMax H3 Hadamard dimension overflows".into()))?;
-        let elements = next_width.checked_mul(next_width).ok_or_else(|| {
-            candle::Error::Msg("MiniMax H3 Hadamard element count overflows".into())
-        })?;
-        let mut next = vec![0.0; elements];
-        for row in 0..width {
-            for column in 0..width {
-                let value = matrix[row * width + column];
-                for h4_row in 0..4 {
-                    for h4_column in 0..4 {
-                        next[(row * 4 + h4_row) * next_width + column * 4 + h4_column] =
-                            value * H4[h4_row][h4_column];
-                    }
-                }
-            }
-        }
-        matrix = next;
-        width = next_width;
-    }
-    let normalization = 1.0 / (size as f32).sqrt();
-    matrix.iter_mut().for_each(|value| *value *= normalization);
-    Ok(matrix)
-}
-
-fn regular_hadamard(device: &Device) -> Result<Tensor> {
-    Tensor::from_vec(
-        regular_hadamard_values(H3_COMFY_CONVROT_GROUP_SIZE)?,
-        (H3_COMFY_CONVROT_GROUP_SIZE, H3_COMFY_CONVROT_GROUP_SIZE),
-        device,
-    )
-}
-
-/// Match `torch.round`: nearest integer with half-way values rounded to even.
-///
-/// Candle's built-in `round` follows Rust/C `round` and sends half-way values
-/// away from zero. Comfy's dynamic INT8 QDQ uses PyTorch's ties-to-even rule,
-/// so that primitive is not source-equivalent at exact half steps.
-fn round_ties_even(input: &Tensor) -> Result<Tensor> {
-    ensure_floating(input.dtype(), "ties-to-even input")?;
-    let lower = input.floor()?;
-    let fraction = input.broadcast_sub(&lower)?;
-    let greater_than_half = fraction.gt(0.5)?.to_dtype(input.dtype())?;
-    let exactly_half = fraction.eq(0.5)?.to_dtype(input.dtype())?;
-    let even_below = lower.affine(0.5, 0.0)?.floor()?.affine(2.0, 0.0)?;
-    let odd_lower = lower.broadcast_sub(&even_below)?;
-    let increment = greater_than_half.broadcast_add(&exactly_half.broadcast_mul(&odd_lower)?)?;
-    lower.broadcast_add(&increment)
-}
-
 /// CPU-backed per-tensor FP8-E4M3 linear used by Comfy's scaled H3 DiT.
 ///
 /// Both scales use the source convention, not its reciprocal:
@@ -604,528 +434,6 @@ impl H3ComfyFp8ScaledLinear {
             let rows = rows_per_chunk.min(self.out_features - start);
             let weight = self.dequantize_rows(start, rows, device)?;
             chunks.push(quantized_input.matmul(&weight.t()?.contiguous()?)?);
-        }
-        finish_linear(
-            chunks,
-            bias,
-            output_dtype,
-            output_shape,
-            self.out_features,
-            device,
-        )
-    }
-}
-
-/// CPU-backed INT8 ConvRot weight for the Comfy pruned H3 DiT or Qwen
-/// conditioner.
-///
-/// Candle does not expose a signed-I8 tensor dtype, so the checkpoint's exact
-/// two's-complement bytes are retained in a U8 tensor and widened explicitly
-/// when a row chunk is staged. No numeric U8 conversion is permitted.
-///
-/// `weight_scale` is deliberately strict: ConvRot quantization is per output
-/// channel in comfy-kitchen, so its only accepted shape is `[out_features, 1]`.
-/// A scalar scale is not source-equivalent and is rejected.
-#[derive(Clone, Debug)]
-pub struct H3ComfyInt8ConvRotLinear {
-    weight: Tensor,
-    weight_scale: Tensor,
-    out_features: usize,
-    in_features: usize,
-}
-
-impl H3ComfyInt8ConvRotLinear {
-    pub fn new(weight: Tensor, weight_scale: Tensor) -> Result<Self> {
-        if !weight.device().is_cpu() || !weight_scale.device().is_cpu() {
-            candle::bail!("MiniMax H3 portable INT8 ConvRot storage must remain on CPU")
-        }
-        if weight.dtype() != DType::U8 {
-            candle::bail!(
-                "MiniMax H3 INT8 ConvRot weight must use raw two's-complement U8 storage, got {:?}",
-                weight.dtype()
-            )
-        }
-        if weight_scale.dtype() != DType::F32 {
-            candle::bail!(
-                "MiniMax H3 INT8 ConvRot scale must use F32 storage, got {:?}",
-                weight_scale.dtype()
-            )
-        }
-        let (out_features, in_features) = weight.dims2()?;
-        if out_features == 0
-            || in_features == 0
-            || !in_features.is_multiple_of(H3_COMFY_CONVROT_GROUP_SIZE)
-        {
-            candle::bail!(
-                "MiniMax H3 INT8 ConvRot weight must be nonempty and its input width must be divisible by {}",
-                H3_COMFY_CONVROT_GROUP_SIZE
-            )
-        }
-        if weight_scale.dims() != [out_features, 1] {
-            candle::bail!(
-                "MiniMax H3 INT8 ConvRot scale must have source shape [{out_features}, 1], got {:?}",
-                weight_scale.dims()
-            )
-        }
-        let scales = weight_scale.flatten_all()?.to_vec1::<f32>()?;
-        if scales
-            .iter()
-            .any(|scale| !scale.is_finite() || *scale <= 0.0)
-        {
-            candle::bail!("MiniMax H3 INT8 ConvRot scales must be finite and positive")
-        }
-        Ok(Self {
-            weight,
-            weight_scale,
-            out_features,
-            in_features,
-        })
-    }
-
-    pub const fn in_features(&self) -> usize {
-        self.in_features
-    }
-
-    pub const fn out_features(&self) -> usize {
-        self.out_features
-    }
-
-    /// Source-encoded checkpoint bytes represented by this weight and row scale.
-    pub fn encoded_weight_bytes(&self) -> Result<usize> {
-        let weight = self
-            .out_features
-            .checked_mul(self.in_features)
-            .ok_or_else(|| candle::Error::Msg("MiniMax H3 INT8 byte count overflows".into()))?;
-        let scales = self
-            .out_features
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| candle::Error::Msg("MiniMax H3 INT8 scale bytes overflow".into()))?;
-        weight
-            .checked_add(scales)
-            .ok_or_else(|| candle::Error::Msg("MiniMax H3 INT8 byte count overflows".into()))
-    }
-
-    /// Dense F32 device-weight bytes staged for one output-row chunk.
-    ///
-    /// This deliberately excludes the already-resident compressed host tensor
-    /// and the final output tensor, which have separate lifetimes.
-    pub fn portable_weight_staging_bytes(&self, rows_per_chunk: usize) -> Result<usize> {
-        if rows_per_chunk == 0 {
-            candle::bail!("MiniMax H3 INT8 row chunk must be positive")
-        }
-        rows_per_chunk
-            .min(self.out_features)
-            .checked_mul(self.in_features)
-            .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| candle::Error::Msg("MiniMax H3 INT8 staging size overflows".into()))
-    }
-
-    /// Conservative peak bytes allocated by one production W8A8 reference
-    /// call, excluding its borrowed input. This mirrors the tensors and chunk
-    /// accumulation in `forward_reference` and is capture-only authority.
-    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-    pub(crate) fn reference_workspace_upper_bound(
-        &self,
-        input_rows: usize,
-        input_dtype: DType,
-        output_dtype: DType,
-        rows_per_chunk: usize,
-        has_bias: bool,
-        native_cuda: bool,
-    ) -> Result<u64> {
-        if input_rows == 0 || rows_per_chunk == 0 {
-            candle::bail!("MiniMax H3 reference workspace requires positive rows and chunk size")
-        }
-        let input_bytes = input_dtype.size_in_bytes();
-        let output_bytes = output_dtype.size_in_bytes();
-        let chunk = rows_per_chunk.min(self.out_features);
-        let checked = |values: &[usize]| -> Result<u64> {
-            let bytes = values.iter().try_fold(1usize, |total, value| {
-                total.checked_mul(*value).ok_or_else(|| {
-                    candle::Error::Msg("MiniMax H3 reference workspace size overflows".into())
-                })
-            })?;
-            u64::try_from(bytes)
-                .map_err(|_| candle::Error::Msg("MiniMax H3 workspace exceeds u64".into()))
-        };
-        let activation_input = checked(&[input_rows, self.in_features, input_bytes])?;
-        let activation_f32 = checked(&[input_rows, self.in_features, std::mem::size_of::<f32>()])?;
-        let row_input = checked(&[input_rows, input_bytes])?;
-        let row_f32 = checked(&[input_rows, std::mem::size_of::<f32>()])?;
-        let hadamard_f32 = checked(&[
-            H3_COMFY_CONVROT_GROUP_SIZE,
-            H3_COMFY_CONVROT_GROUP_SIZE,
-            std::mem::size_of::<f32>(),
-        ])?;
-        let hadamard_input = checked(&[
-            H3_COMFY_CONVROT_GROUP_SIZE,
-            H3_COMFY_CONVROT_GROUP_SIZE,
-            input_bytes,
-        ])?;
-        if native_cuda {
-            if has_bias {
-                candle::bail!("MiniMax H3 native INT8 CUDA workspace does not accept bias")
-            }
-            let rotated_input = activation_input;
-            let packed_weight = checked(&[
-                self.out_features,
-                self.in_features,
-                std::mem::size_of::<u8>(),
-            ])?;
-            let weight_scales = checked(&[self.out_features, std::mem::size_of::<f32>()])?;
-            let quantized_input =
-                checked(&[input_rows, self.in_features, std::mem::size_of::<i8>()])?;
-            let input_scales = checked(&[input_rows, std::mem::size_of::<f32>()])?;
-            let accumulator =
-                checked(&[input_rows, self.out_features, std::mem::size_of::<i32>()])?;
-            let output = checked(&[input_rows, self.out_features, output_bytes])?;
-            return [
-                hadamard_f32,
-                hadamard_input,
-                rotated_input,
-                packed_weight,
-                weight_scales,
-                quantized_input,
-                input_scales,
-                accumulator,
-                u64::try_from(H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES).map_err(|_| {
-                    candle::Error::Msg("MiniMax H3 cuBLAS workspace exceeds u64".into())
-                })?,
-                output,
-            ]
-            .into_iter()
-            .try_fold(0u64, |total, bytes| {
-                total.checked_add(bytes).ok_or_else(|| {
-                    candle::Error::Msg("MiniMax H3 native CUDA workspace sum overflows".into())
-                })
-            });
-        }
-        let signed_widening_workspace = accelerator_signed_widening_workspace_upper_bound(
-            chunk.checked_mul(self.in_features).ok_or_else(|| {
-                candle::Error::Msg("MiniMax H3 signed widening element count overflows".into())
-            })?,
-        )?;
-        let weight_scale = checked(&[chunk, std::mem::size_of::<f32>()])?;
-        let chunk_f32 = checked(&[input_rows, chunk, std::mem::size_of::<f32>()])?;
-        let chunk_output = checked(&[input_rows, chunk, output_bytes])?;
-        let output_chunks = checked(&[input_rows, self.out_features, output_bytes])?;
-        let concatenated_output = output_chunks;
-        let bias_workspace = if has_bias {
-            checked(&[self.out_features, std::mem::size_of::<f32>(), 2])?
-                .checked_add(output_chunks)
-                .ok_or_else(|| {
-                    candle::Error::Msg("MiniMax H3 bias workspace sum overflows".into())
-                })?
-        } else {
-            0
-        };
-        [
-            // regular_hadamard F32 plus its input-dtype cast.
-            hadamard_f32,
-            hadamard_input,
-            // Rotated input; abs; max(input); max(F32); affine; clamp; the
-            // input-dtype scale cast; and broadcast division.
-            activation_input,
-            activation_input,
-            row_input,
-            row_f32,
-            row_f32,
-            row_f32,
-            row_input,
-            activation_input,
-            // round -> clamp -> F32 conversion can retain every chained
-            // full-activation result through the statement.
-            activation_input,
-            activation_input,
-            activation_f32,
-            // Accelerator signed widening can retain the transferred raw U8,
-            // U8 comparison, F32 comparison cast, affine result, unsigned F32
-            // source, and returned F32 result. Charge that complete pipeline
-            // before the remaining linear intermediates.
-            signed_widening_workspace,
-            weight_scale,
-            chunk_f32,
-            chunk_f32,
-            chunk_f32,
-            chunk_output,
-            // Tensor::cat allocates a full result while every chunk lives.
-            output_chunks,
-            concatenated_output,
-            bias_workspace,
-        ]
-        .into_iter()
-        .try_fold(0u64, |total, bytes| {
-            total.checked_add(bytes).ok_or_else(|| {
-                candle::Error::Msg("MiniMax H3 reference workspace sum overflows".into())
-            })
-        })
-    }
-
-    fn signed_rows(&self, start: usize, rows: usize, device: &Device) -> Result<Tensor> {
-        let raw = self.weight.narrow(0, start, rows)?;
-        if device.is_cpu() {
-            let values = raw
-                .flatten_all()?
-                .to_vec1::<u8>()?
-                .into_iter()
-                .map(|byte| i8::from_ne_bytes([byte]) as f32)
-                .collect::<Vec<_>>();
-            return Tensor::from_vec(values, (rows, self.in_features), device);
-        }
-
-        // Preserve the checkpoint's exact two's-complement bytes during the
-        // host-to-device transfer, then widen on the execution device. The
-        // former path widened into a host Vec<f32> first, quadrupling PCIe
-        // traffic and doing one scalar CPU conversion for every weight byte
-        // on every H3 transformer evaluation.
-        let unsigned = raw.to_device(device)?.to_dtype(DType::F32)?;
-        let wrapped = unsigned
-            .gt(127.0)?
-            .to_dtype(DType::F32)?
-            .affine(-256.0, 0.0)?;
-        unsigned.broadcast_add(&wrapped)
-    }
-
-    fn dequantize_rows(
-        &self,
-        start: usize,
-        rows: usize,
-        output_dtype: DType,
-        device: &Device,
-        hadamard: &Tensor,
-    ) -> Result<Tensor> {
-        let groups = self.in_features / H3_COMFY_CONVROT_GROUP_SIZE;
-        let grouped_rows = rows.checked_mul(groups).ok_or_else(|| {
-            candle::Error::Msg("MiniMax H3 INT8 grouped weight rows overflow".into())
-        })?;
-        let quantized = self.signed_rows(start, rows, device)?;
-        let scales = self
-            .weight_scale
-            .narrow(0, start, rows)?
-            .to_device(device)?
-            .reshape((rows, 1))?;
-        quantized
-            .broadcast_mul(&scales)?
-            // Candle 0.11 materializes the broadcasted RHS for
-            // `broadcast_matmul`. Flatten groups into the row dimension so the
-            // fixed 256x256 Hadamard stays singular and the bounded staging
-            // calculation remains authoritative.
-            .reshape((grouped_rows, H3_COMFY_CONVROT_GROUP_SIZE))?
-            .matmul(hadamard)?
-            .reshape((rows, self.in_features))?
-            .to_dtype(output_dtype)
-    }
-
-    /// Reconstruct the dense weight in the original, unrotated basis.
-    pub fn dequantize_weight(
-        &self,
-        output_dtype: DType,
-        device: &Device,
-        rows_per_chunk: usize,
-    ) -> Result<Tensor> {
-        ensure_output_dtype(output_dtype)?;
-        if rows_per_chunk == 0 {
-            candle::bail!("MiniMax H3 INT8 row chunk must be positive")
-        }
-        let hadamard = regular_hadamard(device)?;
-        let mut chunks = Vec::new();
-        for start in (0..self.out_features).step_by(rows_per_chunk) {
-            let rows = rows_per_chunk.min(self.out_features - start);
-            chunks.push(self.dequantize_rows(start, rows, output_dtype, device, &hadamard)?);
-        }
-        Tensor::cat(&chunks, 0)
-    }
-
-    /// Comfy's Qwen INT8 layout is weight-only: each ConvRot row chunk is
-    /// reconstructed in the input dtype, then a normal floating-point linear
-    /// operation runs without dynamically quantizing the activation. This is
-    /// intentionally distinct from the DiT's optional fused W8A8 execution.
-    pub fn forward_weight_only(
-        &self,
-        input: &Tensor,
-        bias: Option<&Tensor>,
-        output_dtype: DType,
-        rows_per_chunk: usize,
-    ) -> Result<Tensor> {
-        ensure_output_dtype(output_dtype)?;
-        if rows_per_chunk == 0 {
-            candle::bail!("MiniMax H3 INT8 row chunk must be positive")
-        }
-        let compute_dtype = input.dtype();
-        ensure_floating(compute_dtype, "Qwen INT8 weight-only compute")?;
-        let device = input.device();
-        let (flat, mut output_shape) = flattened_input(input, self.in_features)?;
-        let flat = flat.to_dtype(compute_dtype)?;
-        let hadamard = regular_hadamard(device)?;
-        let mut chunks = Vec::new();
-        for start in (0..self.out_features).step_by(rows_per_chunk) {
-            let rows = rows_per_chunk.min(self.out_features - start);
-            let weight = self.dequantize_rows(start, rows, compute_dtype, device, &hadamard)?;
-            chunks.push(flat.matmul(&weight.t()?.contiguous()?)?);
-        }
-        let mut output = Tensor::cat(&chunks, 1)?;
-        if let Some(bias) = bias {
-            ensure_floating(bias.dtype(), "Qwen INT8 weight-only bias")?;
-            if bias.dims() != [self.out_features] {
-                candle::bail!(
-                    "MiniMax H3 Qwen INT8 weight-only bias must have shape [{}], got {:?}",
-                    self.out_features,
-                    bias.dims()
-                )
-            }
-            output = output.broadcast_add(
-                &bias
-                    .to_device(device)?
-                    .to_dtype(compute_dtype)?
-                    .reshape((1, self.out_features))?,
-            )?;
-        }
-        *output_shape
-            .last_mut()
-            .expect("flattened_input established a nonempty shape") = self.out_features;
-        output.to_dtype(output_dtype)?.reshape(&*output_shape)
-    }
-
-    /// Portable low-memory forward equivalent to multiplying by the exact
-    /// dequantized ConvRot weight. It does not claim parity with Comfy's lossy
-    /// dynamic activation quantizer or its fused CUDA kernel.
-    pub fn forward_dequantized(
-        &self,
-        input: &Tensor,
-        bias: Option<&Tensor>,
-        output_dtype: DType,
-        rows_per_chunk: usize,
-    ) -> Result<Tensor> {
-        if rows_per_chunk == 0 {
-            candle::bail!("MiniMax H3 INT8 row chunk must be positive")
-        }
-        let device = input.device();
-        let (flat, output_shape) = flattened_input(input, self.in_features)?;
-        let rows = flat.dim(0)?;
-        let groups = self.in_features / H3_COMFY_CONVROT_GROUP_SIZE;
-        let grouped_rows = rows.checked_mul(groups).ok_or_else(|| {
-            candle::Error::Msg("MiniMax H3 INT8 grouped activation rows overflow".into())
-        })?;
-        let hadamard = regular_hadamard(device)?;
-        let rotated = flat
-            .to_dtype(DType::F32)?
-            .reshape((grouped_rows, H3_COMFY_CONVROT_GROUP_SIZE))?
-            .matmul(&hadamard)?
-            .reshape((rows, self.in_features))?;
-        let mut chunks = Vec::new();
-        for start in (0..self.out_features).step_by(rows_per_chunk) {
-            let width = rows_per_chunk.min(self.out_features - start);
-            let quantized = self.signed_rows(start, width, device)?;
-            let scales = self
-                .weight_scale
-                .narrow(0, start, width)?
-                .to_device(device)?
-                .reshape((1, width))?;
-            chunks.push(
-                rotated
-                    .matmul(&quantized.t()?.contiguous()?)?
-                    .broadcast_mul(&scales)?,
-            );
-        }
-        finish_linear(
-            chunks,
-            bias,
-            output_dtype,
-            output_shape,
-            self.out_features,
-            device,
-        )
-    }
-
-    /// Execute Comfy's source-defined INT8 ConvRot W8A8 order.
-    ///
-    /// Activations are rotated in their input dtype, dynamically quantized
-    /// per row with `absmax / 127`, rounded and clamped to signed INT8, then
-    /// accumulated against the checkpoint's packed signed bytes. CUDA performs
-    /// native signed INT8-to-INT32 multiplication and applies both scales in
-    /// F32. CPU and Metal mirror the eager fallback with bounded output-row
-    /// chunks, retaining neither a dense block weight nor the full-width
-    /// accumulator.
-    pub fn forward_reference(
-        &self,
-        input: &Tensor,
-        bias: Option<&Tensor>,
-        output_dtype: DType,
-        rows_per_chunk: usize,
-    ) -> Result<Tensor> {
-        ensure_output_dtype(output_dtype)?;
-        if rows_per_chunk == 0 {
-            candle::bail!("MiniMax H3 INT8 row chunk must be positive")
-        }
-        let device = input.device();
-        let input_dtype = input.dtype();
-        ensure_floating(input_dtype, "INT8 ConvRot activation")?;
-        let (flat, output_shape) = flattened_input(input, self.in_features)?;
-        let rows = flat.dim(0)?;
-        let groups = self.in_features / H3_COMFY_CONVROT_GROUP_SIZE;
-        let grouped_rows = rows.checked_mul(groups).ok_or_else(|| {
-            candle::Error::Msg("MiniMax H3 INT8 grouped activation rows overflow".into())
-        })?;
-        let hadamard = regular_hadamard(device)?.to_dtype(input_dtype)?;
-        let rotated = flat
-            .to_dtype(input_dtype)?
-            .reshape((grouped_rows, H3_COMFY_CONVROT_GROUP_SIZE))?
-            .matmul(&hadamard)?
-            .reshape((rows, self.in_features))?;
-        let kind = select_h3_int8_linear_kind(
-            device,
-            cfg!(feature = "cuda"),
-            bias.is_some(),
-            self.in_features,
-            self.out_features,
-        );
-        #[cfg(not(feature = "cuda"))]
-        debug_assert_eq!(kind, H3Int8LinearKind::PortableQuantizeDequantize);
-        #[cfg(feature = "cuda")]
-        if kind == H3Int8LinearKind::NativeCudaInt8 {
-            let weight = self.weight.to_device(device)?;
-            let weight_scale = self.weight_scale.to_device(device)?;
-            let mut output_shape = output_shape;
-            *output_shape
-                .last_mut()
-                .expect("flattened_input established a nonempty shape") = self.out_features;
-            return super::int8_cuda::native_int8_linear(
-                &rotated,
-                &weight,
-                &weight_scale,
-                output_dtype,
-            )?
-            .reshape(&*output_shape);
-        }
-        let input_scale = rotated
-            .abs()?
-            .max_keepdim(1)?
-            .to_dtype(DType::F32)?
-            .affine(1.0 / 127.0, 0.0)?
-            .clamp(1e-30f32, f32::MAX)?;
-        // comfy-kitchen casts the F32 scale back to the activation dtype for
-        // the division before PyTorch's ties-to-even rounding and clamping to
-        // the signed-I8 interval.
-        let scaled_input = rotated.broadcast_div(&input_scale.to_dtype(input_dtype)?)?;
-        let quantized_input = round_ties_even(&scaled_input)?
-            .clamp(-128.0f32, 127.0f32)?
-            .to_dtype(DType::F32)?;
-        let mut chunks = Vec::new();
-        for start in (0..self.out_features).step_by(rows_per_chunk) {
-            let width = rows_per_chunk.min(self.out_features - start);
-            let quantized_weight = self.signed_rows(start, width, device)?;
-            let weight_scale = self
-                .weight_scale
-                .narrow(0, start, width)?
-                .to_device(device)?
-                .reshape((1, width))?;
-            let scale = input_scale.broadcast_mul(&weight_scale)?;
-            chunks.push(
-                quantized_input
-                    .matmul(&quantized_weight.t()?.contiguous()?)?
-                    .broadcast_mul(&scale)?
-                    .to_dtype(output_dtype)?,
-            );
         }
         finish_linear(
             chunks,

@@ -39,17 +39,32 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_LORA_BYPASS",
     "MOLD_LTX_DEBUG_ALT_PROMPT",
     "MOLD_LTX_DEBUG_COMPARE_UNCOND",
-    "MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH",
     "MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN",
     "MOLD_LTX2_DEBUG_DISABLE_TRANSFORMER_GATED_ATTENTION",
     "MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER",
     "MOLD_LTX2_DEBUG_LOAD_BLOCKS",
+    // #735: pins LTX-2 self-attention on the F32 chunked path instead of the
+    // BF16 dispatcher. Changes the rendered output, so it can never share an
+    // execution-equivalence class with the default route.
+    "MOLD_LTX2_ATTN_F32",
     "MOLD_LTX2_FORCE_EAGER",
     "MOLD_LTX2_FORCE_STREAMING",
     "MOLD_LTX2_FP8_INPUT_SCALE_MODE",
     "MOLD_LTX2_FP8_WEIGHT_SCALE_MODE",
     "MOLD_LTX2_GEMMA_DEVICE",
     "MOLD_LTX2_GEMMA_VARIANT",
+    // Selects how INT8 ConvRot transformer linears execute on CUDA: the
+    // default W8A8 kernel (upstream's own path for these checkpoints) or the
+    // per-forward widening (W8A16) escape hatch. The two arms produce
+    // different pixels and different transient memory, so a run on one must
+    // never share a fingerprint or a learned-timing bucket with the other.
+    "MOLD_LTX2_INT8",
+    // Selects the LTX-2.5 GGUF quantized-linear arm on CUDA: the default
+    // per-forward dequant (the Qwen #1048 / Z-Image NaN precedent) or
+    // candle's QMatMul fast path. The arms differ in numerics, transient
+    // memory, and step latency, so a run on one must never share a
+    // fingerprint or a learned-timing bucket with the other.
+    "MOLD_LTX2_QMATMUL",
     "MOLD_LTX2_SPATIAL_TILE",
     "MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES",
     "MOLD_LTX2_VAE_DECODE_CONTEXT_FRAMES",

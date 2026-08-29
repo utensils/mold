@@ -390,6 +390,9 @@ impl MoldClient {
         }
 
         let video = video_meta.map(|meta| VideoData {
+            video_only: meta.video_only,
+            attention_path: meta.attention_path,
+            int8_arm: meta.int8_arm,
             data: data.clone(),
             format,
             width: meta.width.unwrap_or(width),
@@ -694,6 +697,18 @@ impl MoldClient {
                                 .and_then(|s| b64.decode(s).ok())
                                 .unwrap_or_default();
                             let vd = VideoData {
+                                video_only: complete
+                                    .metadata
+                                    .as_ref()
+                                    .and_then(|metadata| metadata.video_only),
+                                attention_path: complete
+                                    .metadata
+                                    .as_ref()
+                                    .and_then(|metadata| metadata.attention_path.clone()),
+                                int8_arm: complete
+                                    .metadata
+                                    .as_ref()
+                                    .and_then(|metadata| metadata.int8_arm.clone()),
                                 data: payload,
                                 format: complete.format,
                                 width: complete.width,
@@ -2435,6 +2450,9 @@ struct VideoMeta {
     pipeline: Option<crate::Ltx2PipelineMode>,
     pipeline_provenance_sha256: Option<String>,
     source_preprocessing: Option<crate::Ltx2SourcePreprocessing>,
+    attention_path: Option<String>,
+    int8_arm: Option<String>,
+    video_only: Option<bool>,
     has_audio: bool,
     duration_ms: Option<u64>,
     audio_sample_rate: Option<u32>,
@@ -2532,6 +2550,19 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
         .get("x-mold-video-source-preprocessing")
         .and_then(|value| value.to_str().ok())
         .and_then(|json| serde_json::from_str(json).ok());
+    let attention_path = headers
+        .get("x-mold-video-attention-path")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let int8_arm = headers
+        .get("x-mold-video-int8-arm")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let video_only = headers
+        .get("x-mold-video-video-only")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s == "1")
+        .filter(|only| *only);
     let has_audio = headers
         .get("x-mold-video-has-audio")
         .and_then(|v| v.to_str().ok())
@@ -2558,6 +2589,9 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
         pipeline,
         pipeline_provenance_sha256,
         source_preprocessing,
+        attention_path,
+        int8_arm,
+        video_only,
         has_audio,
         duration_ms,
         audio_sample_rate,
@@ -3875,6 +3909,29 @@ mod tests {
         assert_eq!(meta.pipeline, Some(crate::Ltx2PipelineMode::TwoStage));
         assert!(!meta.has_audio);
         assert!(meta.duration_ms.is_none());
+        // Absent provenance headers (older server) read as unrecorded.
+        assert!(meta.attention_path.is_none());
+        assert!(meta.int8_arm.is_none());
+        assert!(meta.video_only.is_none());
+    }
+
+    /// Runtime provenance is output authority: the raw route carries what
+    /// actually ran as response headers, and the client save records them.
+    #[test]
+    fn parse_video_headers_reads_runtime_provenance() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-video-frames", "9".parse().unwrap());
+        headers.insert(
+            "x-mold-video-attention-path",
+            "ltx2-bf16-math".parse().unwrap(),
+        );
+        headers.insert("x-mold-video-int8-arm", "native-w8a8".parse().unwrap());
+        headers.insert("x-mold-video-video-only", "1".parse().unwrap());
+
+        let meta = parse_video_headers(&headers).expect("should detect video");
+        assert_eq!(meta.attention_path.as_deref(), Some("ltx2-bf16-math"));
+        assert_eq!(meta.int8_arm.as_deref(), Some("native-w8a8"));
+        assert_eq!(meta.video_only, Some(true));
     }
 
     #[test]

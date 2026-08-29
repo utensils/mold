@@ -165,6 +165,13 @@ pub struct StageOutcome {
     /// EXR frames this stage's decode wrote, when a sidecar was requested.
     pub hdr_frames_written: Option<usize>,
     pub generation_time_ms: u64,
+    /// Attention arithmetic the stage's transformer ran (LTX-2 provenance
+    /// vocabulary; see `ltx2::provenance`). `None` for families that do not
+    /// record one.
+    pub attention_path: Option<String>,
+    /// INT8 ConvRot execution arm the stage's quantized linears took (LTX-2
+    /// provenance vocabulary). `None` for every other checkpoint layout.
+    pub int8_arm: Option<String>,
 }
 
 /// Abstraction over "render one chain stage". Production impls: `Ltx2Engine`
@@ -460,6 +467,7 @@ fn build_stage_generate_request(
     idx: usize,
 ) -> GenerateRequest {
     GenerateRequest {
+        video_only: None,
         collection: None,
         tags: None,
         title: None,
@@ -718,6 +726,8 @@ mod tests {
                 audio,
                 hdr_frames_written,
                 generation_time_ms: 100,
+                attention_path: None,
+                int8_arm: None,
             })
         }
     }

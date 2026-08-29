@@ -8,8 +8,9 @@ Reviewed on 2026-08-25 against the official
 Mold's source code remains MIT licensed. LTX-2.5 model weights are separate
 third-party assets governed by the LTX-2.x Community License Agreement and its
 acceptable-use restrictions. Mold does not redistribute those weights: `mold
-pull` downloads the pinned files from Lightricks' Hugging Face repository, whose
-gated access remains authoritative.
+pull` downloads official components from Lightricks' gated Hugging Face
+repository. The optional transformer-only GGUF derivatives are downloaded from
+the public Abiray mirror, but public access does not waive the upstream license.
 
 The reviewed agreement requires an entity with at least USD 10 million in
 annual revenue to obtain a paid commercial-use license for uses outside the
@@ -20,8 +21,9 @@ redistribution comply with the current upstream terms.
 
 Release handling:
 
-- keep every LTX-2.5 manifest file marked `gated` and sourced from the official
-  `Lightricks/LTX-2.5` repository;
+- keep official LTX-2.5 components marked `gated` and sourced from
+  `Lightricks/LTX-2.5`; public derivative transformers must retain their exact
+  source revision and reuse the gated official companion graph;
 - link the current upstream terms from user-facing model documentation and keep
   model assets distinct from Mold's MIT license;
 - re-review this decision if Lightricks changes the license, model repository,

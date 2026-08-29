@@ -2047,6 +2047,9 @@ impl WanEngine {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                video_only: None,
+                attention_path: None,
+                int8_arm: None,
                 data: video_bytes,
                 format: output_format,
                 width,
@@ -2440,6 +2443,8 @@ impl crate::chain::ChainStageRenderer for WanEngine {
             audio: None,
             hdr_frames_written: None,
             generation_time_ms,
+            attention_path: None,
+            int8_arm: None,
         })
     }
 }
@@ -2762,6 +2767,7 @@ mod tests {
 
     fn request() -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

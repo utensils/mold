@@ -221,7 +221,10 @@ const PRESET_25_22B: Ltx2ModelPreset = Ltx2ModelPreset {
     gemma_architecture: GemmaArchitecture::Gemma4Unified,
     prompt_max_length: 1024,
     uses_ltx2_22b_video_vae: true,
-    supports_spatial_upscale_x1_5: true,
+    // Lightricks/LTX-2.5 ships `ltx-2.5-spatial-upscaler-x2` only; the x1.5
+    // upsampler is an LTX-2.3 asset and its manifest entry exists nowhere in
+    // the 2.5 split packs.
+    supports_spatial_upscale_x1_5: false,
     supports_spatial_upscale_x2: true,
     supports_temporal_upscale_x2: true,
     streaming_prefetch_count: 2,
@@ -421,6 +424,13 @@ mod tests {
         );
         assert!(preset_22b.supports_spatial_upscale_x1_5);
         assert!(preset_22b.uses_ltx2_22b_video_vae);
+        let preset_25 = preset_for_model("ltx-2.5-22b-distilled:int8-conv").unwrap();
+        assert_eq!(preset_25.name, "ltx-2.5-22b");
+        assert!(
+            !preset_25.supports_spatial_upscale_x1_5,
+            "the 2.5 split packs publish no x1.5 upsampler"
+        );
+        assert!(preset_25.supports_spatial_upscale_x2);
         assert_eq!(preset_22b.streaming_prefetch_count, 2);
         assert_eq!(preset_22b.video_connector_inner_dim(), 4096);
         assert_eq!(preset_22b.audio_connector_inner_dim(), 2048);

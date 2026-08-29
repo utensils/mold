@@ -66,7 +66,7 @@ mod tests {
 
     /// Parse response body as JSON and return the value.
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
@@ -1074,6 +1074,9 @@ mod tests {
 
     fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            video_only: None,
+            attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -1427,6 +1430,10 @@ mod tests {
 
     #[tokio::test]
     async fn ltx2_camera_capabilities_return_only_compatible_19b_presets() {
+        // `installed == false` assertions read the store through
+        // `resolved_models_dir()`; a direnv MOLD_MODELS_DIR points that at a
+        // real store and flips them.
+        let _env = crate::test_support::hermetic_store_env();
         let app = app_empty();
         for model in ["ltx-2-19b-distilled%3Afp8", "ltx-2-19b-dev%3Afp8"] {
             let response = app
@@ -6307,6 +6314,50 @@ mod tests {
         );
     }
 
+    /// An LTX-2.5 GGUF tier is an ordinary durable admission since the
+    /// native quantized runtime landed (#1414): the batch is accepted, the
+    /// row is journaled, and preparation starts only in the feeder.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx25_gguf_batch_is_admitted_to_the_durable_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let gguf = generate_body_for_model(
+            "a quantized transformer this build now runs",
+            mold_core::ltx25_manifest::DISTILLED_Q4,
+            512,
+            512,
+        );
+        let mut request_json = serde_json::from_str::<serde_json::Value>(&gguf).unwrap();
+        // The shared body builder is image-shaped; LTX-2 requires a video
+        // container.
+        request_json["output_format"] = serde_json::json!("mp4");
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [request_json],
+        });
+
+        let response = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let response_body = json_body(response).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response_body}");
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, mold_core::ltx25_manifest::DISTILLED_Q4);
+        assert_eq!(
+            state.job_registry.len(),
+            0,
+            "preparation starts only in the feeder"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn direct_stream_uses_queue_first_admission_without_media_or_operation_header() {
         let root = tempfile::tempdir().unwrap();
@@ -10558,7 +10609,7 @@ mod tests {
         // cancellation.
         let bytes = tokio::time::timeout(
             Duration::from_secs(5),
-            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+            axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024),
         )
         .await
         .expect("SSE stream must close after cancel")
@@ -11456,7 +11507,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -11488,7 +11539,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -11553,7 +11604,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let status: mold_core::ServerStatus = serde_json::from_slice(&body).unwrap();
@@ -11646,7 +11697,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
@@ -11689,7 +11740,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
@@ -11809,7 +11860,7 @@ mod tests {
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
@@ -11977,7 +12028,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
@@ -12022,7 +12073,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
@@ -12843,7 +12894,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let spec: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -13631,7 +13682,7 @@ mod tests {
 
         // With no payload-selection header, preserve the legacy full-media wire
         // contract for desktop and older clients.
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let text = String::from_utf8_lossy(&body);
@@ -13768,7 +13819,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let text = String::from_utf8_lossy(&body);
@@ -13843,7 +13894,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = tokio::time::timeout(
             Duration::from_secs(10),
-            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+            axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024),
         )
         .await
         .expect("an unresolvable model must close the stream")
@@ -13940,7 +13991,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = tokio::time::timeout(
             Duration::from_secs(10),
-            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+            axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024),
         )
         .await
         .expect("an undownloaded model must close the stream")
@@ -13972,7 +14023,7 @@ mod tests {
         // SSE stream starts with 200 — error is in the event stream
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let text = String::from_utf8_lossy(&body);
@@ -14001,7 +14052,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let text = String::from_utf8_lossy(&body);
@@ -14070,7 +14121,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("unloaded mock-model"));
@@ -14208,7 +14259,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("no model loaded"));
@@ -14260,7 +14311,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         let text = String::from_utf8_lossy(&body);
@@ -14309,7 +14360,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
                     .await
                     .unwrap();
                 String::from_utf8_lossy(&body).to_string()
@@ -14332,7 +14383,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
                     .await
                     .unwrap();
                 String::from_utf8_lossy(&body).to_string()
@@ -15754,6 +15805,9 @@ mod tests {
         let db_path = dir.path().join("mold.db");
         let db = MetadataDb::open(&db_path).unwrap();
         let metadata = mold_core::OutputMetadata {
+            video_only: None,
+            attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -16628,7 +16682,7 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("image/gif")
         );
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         assert_eq!(body.as_ref(), GIF);
@@ -16685,6 +16739,9 @@ mod tests {
 
         let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
         let metadata = mold_core::OutputMetadata {
+            video_only: None,
+            attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,
@@ -18256,6 +18313,7 @@ mod tests {
 
     #[tokio::test]
     async fn capabilities_chain_limits_accepts_installed_catalog_ltx2_sidecar() {
+        let _env = crate::test_support::hermetic_store_env();
         let models_dir = tempfile::tempdir().unwrap();
         let install_dir = models_dir.path().join("cv-3143864");
         std::fs::create_dir_all(&install_dir).unwrap();
@@ -18439,6 +18497,9 @@ mod tests {
             audio: None,
             images: Vec::new(),
             video: Some(mold_core::VideoData {
+                video_only: None,
+                attention_path: None,
+                int8_arm: None,
                 data: b"mp4-bytes".to_vec(),
                 format: OutputFormat::Mp4,
                 width: 960,
@@ -19896,7 +19957,7 @@ mod tests {
             StatusCode::OK,
             "a trashed print still streams"
         );
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         assert_eq!(body.as_ref(), bytes.as_slice());

@@ -70,6 +70,30 @@ impl AttentionBackend {
             backend
         })
     }
+
+    /// Whether the FlashAttention kernels are compiled into this binary.
+    pub const fn flash_compiled() -> bool {
+        cfg!(feature = "flash-attn")
+    }
+
+    /// The backend that will actually execute for an eligible tensor.
+    ///
+    /// A resolved `Flash` in a build without the kernels downgrades to
+    /// `Math` — the dispatcher warns once and falls back — so any memory
+    /// estimate keyed on the requested backend would under-charge the math
+    /// score tile. Admission must read this, never `resolve()` alone.
+    pub fn resolve_effective() -> AttentionBackend {
+        Self::effective(Self::resolve())
+    }
+
+    /// Pure half of [`Self::resolve_effective`], testable without the env
+    /// `OnceLock`.
+    pub fn effective(resolved: AttentionBackend) -> AttentionBackend {
+        match resolved {
+            AttentionBackend::Flash if !Self::flash_compiled() => AttentionBackend::Math,
+            other => other,
+        }
+    }
 }
 
 /// Pure function used by `resolve()` and unit tests so we can exercise the env
@@ -457,9 +481,50 @@ fn flash_attention_eligible(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> R
 /// Flash-attention 2 requires CUDA tensors in fp16 or bf16, at a head dim the
 /// kernel accepts.
 fn flash_is_eligible(q: &Tensor) -> bool {
-    matches!(q.device(), Device::Cuda(_))
-        && matches!(q.dtype(), DType::F16 | DType::BF16)
-        && q.dim(D::Minus1).is_ok_and(flash_supports_head_dim)
+    flash_eligible_for(q.device(), q.dtype(), q.dim(D::Minus1).unwrap_or(0))
+}
+
+/// The tensor-free half of [`flash_is_eligible`], so a caller can ask before
+/// it has a tensor to show.
+fn flash_eligible_for(device: &Device, dtype: DType, head_dim: usize) -> bool {
+    matches!(device, Device::Cuda(_))
+        && matches!(dtype, DType::F16 | DType::BF16)
+        && flash_supports_head_dim(head_dim)
+}
+
+/// Whether this binary compiled the FlashAttention kernel at all.
+const fn flash_compiled() -> bool {
+    cfg!(feature = "flash-attn")
+}
+
+/// The backend [`attention`] would actually run for a `[.., head_dim]` tensor
+/// of this dtype on this device — the resolved `MOLD_ATTN` policy, narrowed
+/// by kernel eligibility and by whether the kernel exists in this build.
+///
+/// This is the provenance question ("which arithmetic rendered this print"),
+/// so it must never answer from `cfg!` alone: a build that compiles the
+/// kernel still runs math unless `MOLD_ATTN=flash` asked for it (#736), and a
+/// build that asked for flash still runs math for a CPU tensor, an F32
+/// tensor, or a head dim the kernel refuses.
+pub fn effective_backend(device: &Device, dtype: DType, head_dim: usize) -> AttentionBackend {
+    effective_backend_for(
+        AttentionBackend::resolve(),
+        flash_compiled(),
+        flash_eligible_for(device, dtype, head_dim),
+    )
+}
+
+/// Pure composition behind [`effective_backend`], testable without touching
+/// the process-frozen `MOLD_ATTN` cache.
+fn effective_backend_for(
+    requested: AttentionBackend,
+    compiled: bool,
+    eligible: bool,
+) -> AttentionBackend {
+    match requested {
+        AttentionBackend::Flash if compiled && eligible => AttentionBackend::Flash,
+        AttentionBackend::Flash | AttentionBackend::Math => AttentionBackend::Math,
+    }
 }
 
 /// Head dims `candle_flash_attn::flash_attn` accepts: a multiple of 8, at most
@@ -483,6 +548,28 @@ mod tests {
 
     fn cpu() -> Device {
         Device::Cpu
+    }
+
+    /// A requested `Flash` in a build without the kernels executes as math,
+    /// so the effective backend — the one admission estimates from — must
+    /// say so (#735 review follow-up: charging zero score-tile bytes for a
+    /// flash request that falls back would under-count admission).
+    #[test]
+    fn effective_backend_downgrades_flash_without_the_kernels() {
+        #[cfg(not(feature = "flash-attn"))]
+        assert_eq!(
+            AttentionBackend::effective(AttentionBackend::Flash),
+            AttentionBackend::Math
+        );
+        #[cfg(feature = "flash-attn")]
+        assert_eq!(
+            AttentionBackend::effective(AttentionBackend::Flash),
+            AttentionBackend::Flash
+        );
+        assert_eq!(
+            AttentionBackend::effective(AttentionBackend::Math),
+            AttentionBackend::Math
+        );
     }
 
     /// Brute-force reference: explicit loops over (b, h, q, k) with f32.
@@ -879,6 +966,33 @@ mod tests {
         assert_eq!(parse_backend_env(None), AttentionBackend::Math);
         assert_eq!(parse_backend_env(Some("")), AttentionBackend::Math);
         assert_eq!(parse_backend_env(Some("xformers")), AttentionBackend::Math);
+    }
+
+    /// The provenance answer is the conjunction of request, build, and
+    /// eligibility. Requesting flash on a build without the kernel, or for a
+    /// tensor the kernel refuses, is math — and must be recorded as math.
+    #[test]
+    fn effective_backend_is_request_and_build_and_eligibility() {
+        use AttentionBackend::{Flash, Math};
+        assert_eq!(effective_backend_for(Flash, true, true), Flash);
+        assert_eq!(effective_backend_for(Flash, false, true), Math);
+        assert_eq!(effective_backend_for(Flash, true, false), Math);
+        assert_eq!(effective_backend_for(Flash, false, false), Math);
+        for compiled in [false, true] {
+            for eligible in [false, true] {
+                assert_eq!(effective_backend_for(Math, compiled, eligible), Math);
+            }
+        }
+        // A CPU tensor is never flash-eligible, whatever the build.
+        assert_eq!(
+            effective_backend(&Device::Cpu, DType::BF16, 128),
+            Math,
+            "CPU must report the math backend"
+        );
+        assert!(!flash_eligible_for(&Device::Cpu, DType::BF16, 128));
+        assert!(!flash_eligible_for(&Device::Cpu, DType::F32, 128));
+        // With the default policy the answer is math on every device.
+        assert_eq!(parse_backend_env(None), Math);
     }
 
     /// Opting in still works in both builds: the parser returns `Flash`, and

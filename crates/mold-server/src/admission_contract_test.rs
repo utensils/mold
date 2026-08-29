@@ -276,3 +276,68 @@ fn h3_with_source_media_is_refused_explicitly_instead_of_losing_conditioning() {
         ))
     ));
 }
+
+/// A GGUF LTX-2.5 row in the journal replays into ordinary deferred
+/// preparation: model activation admits it (the native quantized runtime
+/// shipped, #1414), and planning can only refuse it for real resource or
+/// artifact reasons — never with the retired `LTX25_GGUF_RUNTIME_UNAVAILABLE`
+/// policy code.
+#[test]
+fn ltx25_gguf_row_replayed_from_journal_is_admitted_at_deferred_preparation() {
+    use crate::execution_plan::{eligible_devices_for_request, DeviceFact, ExecutionPlanError};
+
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("gallery");
+    std::fs::create_dir_all(&output).unwrap();
+    let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+    let journal = Arc::new(QueueJournal::new(
+        db,
+        Some(root.path()),
+        "ltx25-gguf-replay-instance",
+    ));
+    let mut request = request("replayed GGUF row");
+    request.model = mold_core::ltx25_manifest::DISTILLED_Q4.to_string();
+    journal
+        .record_batch(BatchJournalAdmission {
+            id: "gguf-batch",
+            client_batch_id: "client-gguf-batch",
+            request_sha256: "gguf-replay-fingerprint",
+            children: &[JournalAdmission {
+                id: "gguf-replay",
+                request: &request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::MetadataOnly,
+                batch_child: false,
+            }],
+        })
+        .unwrap();
+
+    let claimed = journal.claim_next_feeder().unwrap().unwrap();
+    let replayed: GenerateRequest = serde_json::from_str(&claimed.row.request_json).unwrap();
+    assert_eq!(replayed.model, mold_core::ltx25_manifest::DISTILLED_Q4);
+
+    // Policy no longer refuses the identity anywhere in the pipeline.
+    mold_core::require_model_activation(&replayed.model, Some("ltx2"))
+        .expect("GGUF activation is admitted since the quantized runtime landed");
+
+    let devices = vec![DeviceFact {
+        id: "cuda:0".to_string(),
+        ordinal: 0,
+        backend: mold_core::GpuBackend::Cuda,
+        compute_capability: Some((8, 9)),
+        available_vram_bytes: 24 * 1024 * 1024 * 1024,
+    }];
+    // This test root installs no artifacts, so planning may refuse for
+    // missing components — an ordinary retryable plan failure the feeder
+    // retries — but never with a model-activation policy refusal.
+    if let Err(error) =
+        eligible_devices_for_request(&mold_core::Config::default(), &replayed, &devices)
+    {
+        assert!(
+            !matches!(error, ExecutionPlanError::ModelActivation(_)),
+            "policy must not refuse a GGUF row: {error:?}"
+        );
+    }
+}

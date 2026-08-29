@@ -243,8 +243,68 @@ pub fn gelu_approximate(x: &Tensor) -> Result<Tensor> {
 }
 
 // ---------------------------------------------------------------------------
-// FP8-aware linear
+// Quantization-aware linear
 // ---------------------------------------------------------------------------
+
+/// A quantized checkpoint's synthetic `weight.*` sub-keys, as exposed by the
+/// LTX-2 `SimpleBackend`s through `VarBuilder::contains_tensor`.
+///
+/// A packed weight cannot be handed to `vb.get("weight")` as a dense tensor,
+/// so each quantized backend answers for a family of synthetic sub-keys of
+/// the logical weight instead, and [`LtxLinear::load_with_nvfp4_cache`]
+/// probes them in [`SideChannel::PROBE_ORDER`] before falling back to the
+/// dense `weight` (which the FP8 and BF16 backends serve).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SideChannel {
+    /// NVFP4: `weight.nvfp4_packed` (U8 nibbles), `weight.nvfp4_block_scales`
+    /// (F8E4M3, swizzled), `weight.nvfp4_tensor_scale` (F32).
+    Nvfp4,
+    /// GGUF (#1414): `weight.gguf_blocks` (U8 raw ggml payload bytes) and
+    /// `weight.gguf_dtype` (U32 ggml dtype id), exposed by `Ltx2GgufBackend`
+    /// for the accepted quantized storage types only; float-stored GGUF
+    /// tensors take the plain dense arm.
+    Gguf,
+    /// Comfy INT8 ConvRot: `weight.convrot_packed` (U8 `[out, in]`) and
+    /// `weight.convrot_scales` (F32 `[out, 1]`). Exposed by
+    /// `Ltx2ConvRotBackend` on CUDA only; Metal keeps the widening arm.
+    ConvRot,
+}
+
+impl SideChannel {
+    /// The order a loader probes the side channels in.
+    pub(crate) const PROBE_ORDER: [SideChannel; 3] =
+        [SideChannel::Nvfp4, SideChannel::Gguf, SideChannel::ConvRot];
+
+    /// The one sub-key whose presence means the channel is live.
+    pub(crate) const fn probe_key(self) -> &'static str {
+        match self {
+            SideChannel::Nvfp4 => "weight.nvfp4_packed",
+            SideChannel::Gguf => "weight.gguf_blocks",
+            SideChannel::ConvRot => "weight.convrot_packed",
+        }
+    }
+}
+
+/// Which side channel a synthetic `weight.*` sub-key belongs to, or `None`
+/// for a dense key (`weight`, `bias`, `weight_scale`, ...) and for any
+/// channel this build does not know.
+#[cfg_attr(not(test), allow(dead_code))] // the GGUF backend (#1414) is its next consumer
+pub(crate) fn ltx2_side_channel_component(name: &str) -> Option<SideChannel> {
+    match name {
+        "weight.nvfp4_packed" | "weight.nvfp4_block_scales" | "weight.nvfp4_tensor_scale" => {
+            Some(SideChannel::Nvfp4)
+        }
+        "weight.gguf_blocks" | "weight.gguf_dtype" => Some(SideChannel::Gguf),
+        "weight.convrot_packed" | "weight.convrot_scales" => Some(SideChannel::ConvRot),
+        _ => None,
+    }
+}
+
+fn detect_side_channel(vb: &VarBuilder) -> Option<SideChannel> {
+    SideChannel::PROBE_ORDER
+        .into_iter()
+        .find(|channel| vb.contains_tensor(channel.probe_key()))
+}
 
 #[derive(Clone, Debug)]
 pub(crate) enum LtxLinear {
@@ -269,6 +329,28 @@ pub(crate) enum LtxLinear {
         bias: Option<Tensor>,
         adapters: Vec<LinearLoraAdapter>,
         cache: Arc<OnceLock<Tensor>>,
+    },
+    /// A GGUF quantized weight kept as a device-resident `QTensor`, executed
+    /// through the shared `crate::quantized_linear` dispatch: the per-forward
+    /// dequant arm by default on CUDA (the Qwen/Z-Image #1048 NaN precedent;
+    /// `MOLD_LTX2_QMATMUL=1` opts into candle's fast path), `QMatMul` on
+    /// Metal. LoRA adapters ride the same parallel low-rank branch as every
+    /// other arm and are never merged into the quantized weight.
+    Quantized {
+        inner: Arc<crate::quantized_linear::QuantizedLinear>,
+        adapters: Vec<LinearLoraAdapter>,
+    },
+    /// A Comfy INT8 ConvRot weight kept PACKED on the device: one byte per
+    /// parameter plus one F32 scale per output row, executed per
+    /// `MOLD_LTX2_INT8` — the W8A8 kernel (upstream's own path for this
+    /// checkpoint) by default, or widened per forward through the candle
+    /// ConvRot op and multiplied like `Standard`. The bias is applied after
+    /// either GEMM; LoRA adapters ride the same parallel low-rank branch as
+    /// every other arm and are never merged into the packed weight.
+    ConvRotPacked {
+        linear: mold_candle::comfy_int8::ComfyInt8ConvRotLinear,
+        bias: Option<Tensor>,
+        adapters: Vec<LinearLoraAdapter>,
     },
 }
 
@@ -330,7 +412,83 @@ impl LtxLinear {
         nvfp4_cache: Option<&Nvfp4LinearCache>,
         cache_key: Option<&str>,
     ) -> Result<Self> {
-        if vb.contains_tensor("weight.nvfp4_packed") {
+        let side_channel = detect_side_channel(&vb);
+        if side_channel == Some(SideChannel::Gguf) {
+            let blocks = vb.get_unchecked_dtype("weight.gguf_blocks", DType::U8)?;
+            let dtype_ids = vb
+                .get_unchecked_dtype("weight.gguf_dtype", DType::U32)?
+                .flatten_all()?
+                .to_vec1::<u32>()?;
+            let &[dtype_id] = dtype_ids.as_slice() else {
+                candle_core::bail!(
+                    "LTX-2 GGUF side channel returned {} dtype ids for one weight",
+                    dtype_ids.len(),
+                );
+            };
+            let weight = crate::ltx2::gguf::qtensor_from_side_channel(
+                &blocks,
+                dtype_id,
+                vec![out_dim, in_dim],
+                vb.device(),
+            )?;
+            let bias = if has_bias {
+                Some(vb.get(out_dim, "bias")?)
+            } else {
+                None
+            };
+            let inner = crate::quantized_linear::QuantizedLinear::new(
+                Arc::new(weight),
+                bias,
+                vb.device(),
+                crate::ltx2::backend::compute_dtype(vb.device()),
+                crate::ltx2::gguf::ltx2_qmatmul_enabled(),
+            )?;
+            crate::ltx2::gguf::log_linear_kind_once(match inner.kind() {
+                crate::quantized_linear::QuantizedLinearKind::QMatMul => {
+                    crate::ltx2::gguf::LINEAR_KIND_QMATMUL
+                }
+                crate::quantized_linear::QuantizedLinearKind::Dequant => {
+                    crate::ltx2::gguf::LINEAR_KIND_DEQUANT
+                }
+            });
+            return Ok(Self::Quantized {
+                inner: Arc::new(inner),
+                adapters,
+            });
+        }
+        if side_channel == Some(SideChannel::ConvRot) {
+            let packed = vb.get_unchecked_dtype("weight.convrot_packed", DType::U8)?;
+            let scales = vb.get_unchecked_dtype("weight.convrot_scales", DType::F32)?;
+            if packed.dims() != [out_dim, in_dim] {
+                candle_core::bail!(
+                    "LTX-2 ConvRot packed weight shape mismatch: checkpoint {:?}, module expected [{out_dim}, {in_dim}]",
+                    packed.dims(),
+                );
+            }
+            if scales.dims() != [out_dim, 1] {
+                candle_core::bail!(
+                    "LTX-2 ConvRot scale shape mismatch: checkpoint {:?}, expected [{out_dim}, 1]",
+                    scales.dims(),
+                );
+            }
+            let linear =
+                mold_candle::comfy_int8::ComfyInt8ConvRotLinear::new_on_device(packed, scales)?;
+            let bias = if has_bias {
+                Some(vb.get(out_dim, "bias")?)
+            } else {
+                None
+            };
+            crate::ltx2::convrot::log_int8_arm_once(crate::ltx2::convrot::int8_arm_provenance(
+                crate::ltx2::convrot::device_kind(vb.device()),
+                crate::ltx2::convrot::ltx2_int8_arm(),
+            ));
+            return Ok(Self::ConvRotPacked {
+                linear,
+                bias,
+                adapters,
+            });
+        }
+        if side_channel == Some(SideChannel::Nvfp4) {
             let cpu = Device::Cpu;
             let packed = vb
                 .get_unchecked_dtype("weight.nvfp4_packed", DType::U8)?
@@ -854,6 +1012,92 @@ impl Module for LtxLinear {
                 }?;
                 apply_linear_loras(out, &xs, adapters, dtype)
             }
+            Self::Quantized { inner, adapters } => {
+                let dtype = match xs.dtype() {
+                    DType::F8E4M3 => DType::BF16,
+                    other => other,
+                };
+                let xs = if xs.dtype() == dtype {
+                    xs.clone()
+                } else {
+                    xs.to_dtype(dtype)?
+                };
+                let out = inner.forward(&xs)?;
+                apply_linear_loras(out, &xs, adapters, dtype)
+            }
+            Self::ConvRotPacked {
+                linear,
+                bias,
+                adapters,
+            } => {
+                let dtype = match xs.dtype() {
+                    DType::F8E4M3 => DType::BF16,
+                    other => other,
+                };
+                let xs = if xs.dtype() == dtype {
+                    xs.clone()
+                } else {
+                    xs.to_dtype(dtype)?
+                };
+                let out = convrot_packed_forward(
+                    linear,
+                    bias.as_ref(),
+                    &xs,
+                    dtype,
+                    crate::ltx2::convrot::ltx2_int8_arm(),
+                )?;
+                apply_linear_loras(out, &xs, adapters, dtype)
+            }
+        }
+    }
+}
+
+/// One packed INT8 ConvRot linear, executed per `MOLD_LTX2_INT8`.
+///
+/// `Native` is Comfy's W8A8 order — the rotate / dynamic per-row INT8 /
+/// INT8 GEMM / F32 scales path `mold_candle::comfy_int8` runs for the H3
+/// DiT, with the bias added after the GEMM — which is what ComfyUI executes
+/// for this very checkpoint through comfy-kitchen's `int8_linear`. `Dequant`
+/// widens the packed weight to the activation dtype through the candle
+/// ConvRot op (one transient dense linear, never a block) and multiplies it
+/// exactly as `LtxLinear::Standard` would, so it is the W8A16 escape hatch
+/// for A/B work and the arm whose output the `Standard`-from-widened-weight
+/// parity test pins bit-for-bit.
+fn convrot_packed_forward(
+    linear: &mold_candle::comfy_int8::ComfyInt8ConvRotLinear,
+    bias: Option<&Tensor>,
+    xs: &Tensor,
+    dtype: DType,
+    arm: crate::ltx2::convrot::Ltx2Int8Arm,
+) -> Result<Tensor> {
+    match arm {
+        crate::ltx2::convrot::Ltx2Int8Arm::Native => linear.forward(xs, bias, dtype),
+        crate::ltx2::convrot::Ltx2Int8Arm::Dequant => {
+            let weight = candle_core::convrot::dequantize_int8_convrot_256(
+                linear.weight(),
+                linear.weight_scale(),
+            )?;
+            let weight = if weight.device().same_device(xs.device()) {
+                weight
+            } else {
+                weight.to_device(xs.device())?
+            };
+            let weight = if weight.dtype() == dtype {
+                weight
+            } else {
+                weight.to_dtype(dtype)?
+            };
+            let bias = bias
+                .map(|bias| {
+                    let bias = if bias.device().same_device(xs.device()) {
+                        bias.clone()
+                    } else {
+                        bias.to_device(xs.device())?
+                    };
+                    bias.to_dtype(dtype)
+                })
+                .transpose()?;
+            nn::Linear::new(weight, bias).forward(xs)
         }
     }
 }
@@ -1805,36 +2049,75 @@ impl LtxAttention {
                     scale,
                 )?
             } else {
-                let out_f32 = if should_chunk_attention(b, self.heads, q_len, k_len, dtype, device)
-                {
-                    let attn_mask_f32 = attn_mask
-                        .as_ref()
-                        .map(|mask| mask.to_dtype(DType::F32))
-                        .transpose()?;
-                    let q_t = q.transpose(1, 2)?;
-                    let k_t = k.transpose(1, 2)?;
-                    let v_t = v.transpose(1, 2)?;
-                    let key_chunk = attention_key_chunk_size(k_len);
-                    chunked_attention(
-                        &q_t,
-                        &k_t,
-                        &v_t,
-                        attn_mask_f32.as_ref(),
-                        scale,
-                        attention_query_chunk_size(b, self.heads, q_len, key_chunk),
-                        key_chunk,
-                    )?
-                } else {
-                    let attn_mask_f32 = attn_mask
-                        .as_ref()
-                        .map(|mask| mask.to_dtype(DType::F32))
-                        .transpose()?;
-                    let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-                    let k_f32 = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-                    let v_f32 = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-                    full_attention(&q_f32, &k_f32, &v_f32, attn_mask_f32.as_ref(), scale)?
-                };
-                out_f32.to_dtype(dtype)?
+                // `all_perturbed` returned above, so the route here is never
+                // `Passthrough`; the predicate still takes it so its table is
+                // total and testable in one place.
+                match ltx2_self_attention_route(
+                    device.is_cuda(),
+                    attn_mask.is_some(),
+                    perturbation_mask.is_some(),
+                    all_perturbed,
+                    ltx2_attention_f32_forced(),
+                ) {
+                    AttentionRoute::Bf16Dispatch => {
+                        // Upstream never upcasts: ComfyUI's `LTXV`/`LTXAV`
+                        // set no `attn_precision`, so SDPA runs in the weight
+                        // dtype (`comfy/supported_models.py:913-957`,
+                        // `comfy/ldm/modules/attention.py:80-86`), and
+                        // Lightricks' sm_89 path falls through to torch SDPA
+                        // (`ltx_core/model/transformer/attention.py:369-379`
+                        // @400fd31). The shared dispatcher takes head-major
+                        // `[B, H, N, D]` in the input dtype and applies the
+                        // `MOLD_ATTN` / `MOLD_ATTN_CHUNK` policy.
+                        crate::attention::attention(
+                            &q.transpose(1, 2)?,
+                            &k.transpose(1, 2)?,
+                            &v.transpose(1, 2)?,
+                            scale,
+                        )?
+                    }
+                    AttentionRoute::F32Chunked | AttentionRoute::Passthrough => {
+                        let out_f32 =
+                            if should_chunk_attention(b, self.heads, q_len, k_len, dtype, device) {
+                                let attn_mask_f32 = attn_mask
+                                    .as_ref()
+                                    .map(|mask| mask.to_dtype(DType::F32))
+                                    .transpose()?;
+                                let q_t = q.transpose(1, 2)?;
+                                let k_t = k.transpose(1, 2)?;
+                                let v_t = v.transpose(1, 2)?;
+                                let key_chunk = attention_key_chunk_size(k_len);
+                                chunked_attention(
+                                    &q_t,
+                                    &k_t,
+                                    &v_t,
+                                    attn_mask_f32.as_ref(),
+                                    scale,
+                                    attention_query_chunk_size(b, self.heads, q_len, key_chunk),
+                                    key_chunk,
+                                )?
+                            } else {
+                                let attn_mask_f32 = attn_mask
+                                    .as_ref()
+                                    .map(|mask| mask.to_dtype(DType::F32))
+                                    .transpose()?;
+                                let q_f32 =
+                                    q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                                let k_f32 =
+                                    k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                                let v_f32 =
+                                    v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+                                full_attention(
+                                    &q_f32,
+                                    &k_f32,
+                                    &v_f32,
+                                    attn_mask_f32.as_ref(),
+                                    scale,
+                                )?
+                            };
+                        out_f32.to_dtype(dtype)?
+                    }
+                }
             };
             if let Some(mask) = perturbation_mask {
                 let mask = if mask.rank() == out.rank() {
@@ -1874,6 +2157,80 @@ impl LtxAttention {
         let out = self.to_out.forward(&out)?;
         self.dropout.forward(&out, false)
     }
+}
+
+/// Which arithmetic an [`LtxAttention`] call takes off the Metal path.
+///
+/// Metal keeps its fused SDPA (`metal_fused_attention`) and never reaches
+/// this table; every other device resolves through
+/// [`ltx2_self_attention_route`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttentionRoute {
+    /// Head-major tensors in their incoming dtype (BF16 on CUDA) through
+    /// `crate::attention` — the `MOLD_ATTN` math or flash backend, chunked
+    /// by `MOLD_ATTN_CHUNK`. Upstream's own arithmetic: neither ComfyUI nor
+    /// Lightricks upcasts LTX attention (#735).
+    Bf16Dispatch,
+    /// The hand-rolled F32 online-softmax tiles (or the F32 full pass for a
+    /// small shape). Kept byte-for-byte for masked cross-attention, the STG
+    /// perturbation blend, every non-CUDA device, and the
+    /// `MOLD_LTX2_ATTN_F32=1` control.
+    F32Chunked,
+    /// STG's all-perturbed value passthrough: no attention is computed at
+    /// all (`comfy/ldm/lightricks/model.py:471-474`).
+    Passthrough,
+}
+
+/// Pure routing table for [`LtxAttention::forward`]'s non-Metal branch.
+///
+/// Only an unmasked, unperturbed self-attention on CUDA takes the shared
+/// dispatcher. A mask means cross-attention (the additive text mask only
+/// ever feeds `attn2`; `comfy/ldm/lightricks/model.py:563`, `:939-945`),
+/// which the dispatcher's plain entry point cannot take; a perturbation mask
+/// means the STG value blend, whose numerics are pinned by the F32 path; and
+/// `f32_forced` is the explicit A/B control. CPU stays on the F32 path
+/// because that is its correctness tier, not a performance one.
+pub(crate) fn ltx2_self_attention_route(
+    is_cuda: bool,
+    masked: bool,
+    perturbed: bool,
+    all_perturbed: bool,
+    f32_forced: bool,
+) -> AttentionRoute {
+    if all_perturbed {
+        return AttentionRoute::Passthrough;
+    }
+    if !is_cuda || masked || perturbed || f32_forced {
+        return AttentionRoute::F32Chunked;
+    }
+    AttentionRoute::Bf16Dispatch
+}
+
+/// `MOLD_LTX2_ATTN_F32=1` pins every LTX-2 self-attention on the F32 chunked
+/// path. Output-changing, so it is an engine-shaping variable (a fingerprint
+/// input) and is read through the frozen runtime environment.
+pub(crate) fn ltx2_attention_f32_forced() -> bool {
+    #[cfg(test)]
+    {
+        parse_attention_f32_forced(crate::runtime_env::value("MOLD_LTX2_ATTN_F32").as_deref())
+    }
+    #[cfg(not(test))]
+    {
+        static CACHED: OnceLock<bool> = OnceLock::new();
+        *CACHED.get_or_init(|| {
+            parse_attention_f32_forced(crate::runtime_env::value("MOLD_LTX2_ATTN_F32").as_deref())
+        })
+    }
+}
+
+/// Truthy spelling shared with the other LTX-2 boolean knobs
+/// (`MOLD_LTX2_FORCE_STREAMING`): `1`, `true`, `yes`, `on`, case-insensitive.
+pub(crate) fn parse_attention_f32_forced(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
 }
 
 const CUDA_ATTENTION_CHUNK_THRESHOLD_BYTES: u64 = 1_048_576 * 4;
@@ -4379,11 +4736,12 @@ pub(crate) mod tests {
     use candle_nn::{Linear, Module, VarBuilder};
 
     use super::{
-        cached_timestep_embedding_inv_freq, emulate_static_fp8_input_quantization, gate_tokens,
-        modulate_tokens, FeedForward, LayerNormNoParams, LinearLoraAdapter,
+        cached_timestep_embedding_inv_freq, convrot_packed_forward,
+        emulate_static_fp8_input_quantization, gate_tokens, ltx2_side_channel_component,
+        modulate_tokens, nn, FeedForward, LayerNormNoParams, LinearLoraAdapter,
         Ltx2AvTransformer3DModel, Ltx2VideoRotaryPosEmbed, Ltx2VideoTransformer3DModelConfig,
-        LtxAttention, LtxLinear, LtxRopeType, Nvfp4LinearCache, TimestepEmbeddingInvFreqCache,
-        TimestepEmbeddingInvFreqCacheKey,
+        LtxAttention, LtxLinear, LtxRopeType, Nvfp4LinearCache, SideChannel,
+        TimestepEmbeddingInvFreqCache, TimestepEmbeddingInvFreqCacheKey,
     };
 
     fn fp8_input_scale_env_lock() -> &'static Mutex<()> {
@@ -5407,7 +5765,10 @@ pub(crate) mod tests {
                 assert!(bias.is_some());
                 assert!(adapters.is_empty());
             }
-            LtxLinear::Standard { .. } | LtxLinear::Nvfp4Streaming { .. } => {
+            LtxLinear::Standard { .. }
+            | LtxLinear::Nvfp4Streaming { .. }
+            | LtxLinear::Quantized { .. }
+            | LtxLinear::ConvRotPacked { .. } => {
                 panic!("expected fp8 linear")
             }
         }
@@ -5451,6 +5812,407 @@ pub(crate) mod tests {
         assert_eq!(actual.len(), 2);
         assert!((actual[0] - 8.25).abs() < 1e-3, "{actual:?}");
         assert!((actual[1] - 15.5).abs() < 1e-3, "{actual:?}");
+    }
+
+    #[test]
+    fn ltx2_side_channel_components_map_each_synthetic_sub_key() {
+        let table = [
+            ("weight.nvfp4_packed", Some(SideChannel::Nvfp4)),
+            ("weight.nvfp4_block_scales", Some(SideChannel::Nvfp4)),
+            ("weight.nvfp4_tensor_scale", Some(SideChannel::Nvfp4)),
+            ("weight.convrot_packed", Some(SideChannel::ConvRot)),
+            ("weight.convrot_scales", Some(SideChannel::ConvRot)),
+            ("weight", None),
+            ("bias", None),
+            ("weight_scale", None),
+            ("weight.gguf_blocks", Some(SideChannel::Gguf)),
+            ("weight.gguf_dtype", Some(SideChannel::Gguf)),
+        ];
+        for (name, expected) in table {
+            assert_eq!(ltx2_side_channel_component(name), expected, "{name}");
+        }
+        assert_eq!(
+            SideChannel::PROBE_ORDER,
+            [SideChannel::Nvfp4, SideChannel::Gguf, SideChannel::ConvRot]
+        );
+    }
+
+    /// A synthetic GGUF quantized weight served through the side channel:
+    /// raw Q8_0 payload bytes plus the dtype id, exactly as `Ltx2GgufBackend`
+    /// exposes them. Returns the dequantized twin (the values the payload
+    /// actually stores) so references share the exact weight.
+    fn gguf_linear_fixture(with_bias: bool) -> (VarBuilder<'static>, Tensor, Option<Tensor>) {
+        let device = Device::Cpu;
+        let (out_dim, in_dim) = (4usize, 64usize);
+        let dense = Tensor::from_vec(
+            (0..out_dim * in_dim)
+                .map(|index| ((index % 23) as f32 - 11.0) * 0.0625)
+                .collect::<Vec<_>>(),
+            (out_dim, in_dim),
+            &device,
+        )
+        .unwrap();
+        let quantized = candle_core::quantized::QTensor::quantize(
+            &dense,
+            candle_core::quantized::GgmlDType::Q8_0,
+        )
+        .unwrap();
+        let dequantized = quantized.dequantize(&device).unwrap();
+        let raw = quantized.data().unwrap().to_vec();
+        let raw_len = raw.len();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight.gguf_blocks".to_string(),
+            Tensor::from_vec(raw, raw_len, &device).unwrap(),
+        );
+        tensors.insert(
+            "weight.gguf_dtype".to_string(),
+            Tensor::from_vec(vec![8u32], 1, &device).unwrap(),
+        );
+        let bias = with_bias
+            .then(|| Tensor::from_vec(vec![0.25f32, -0.5, 0.75, 0.0], out_dim, &device).unwrap());
+        if let Some(bias) = &bias {
+            tensors.insert("bias".to_string(), bias.clone());
+        }
+        (
+            VarBuilder::from_tensors(tensors, DType::F32, &device),
+            dequantized,
+            bias,
+        )
+    }
+
+    #[test]
+    fn ltx2_linear_resolves_quantized_iff_the_gguf_side_channel_is_live() {
+        let (vb, _dequantized, _bias) = gguf_linear_fixture(true);
+        let linear = LtxLinear::load(64, 4, true, vb, vec![]).unwrap();
+        assert!(matches!(linear, LtxLinear::Quantized { .. }), "{linear:?}");
+
+        // A dense map without the side channel stays Standard.
+        let device = Device::Cpu;
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            Tensor::zeros((4, 64), DType::F32, &device).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let linear = LtxLinear::load(64, 4, false, vb, vec![]).unwrap();
+        assert!(matches!(linear, LtxLinear::Standard { .. }), "{linear:?}");
+    }
+
+    #[test]
+    fn ltx2_quantized_linear_matches_standard_over_the_dequantized_weight() {
+        let (vb, dequantized, bias) = gguf_linear_fixture(true);
+        let quantized = LtxLinear::load(64, 4, true, vb, vec![]).unwrap();
+        let standard = LtxLinear::Standard {
+            linear: nn::Linear::new(dequantized, bias),
+            adapters: vec![],
+        };
+
+        let xs = Tensor::from_vec(
+            (0..2 * 64)
+                .map(|i| i as f32 * 0.01 - 0.4)
+                .collect::<Vec<_>>(),
+            (1, 2, 64),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let got = quantized.forward(&xs).unwrap();
+        let expected = standard.forward(&xs).unwrap();
+        assert_tensors_close(&got, &expected, 1e-6);
+    }
+
+    #[test]
+    fn ltx2_quantized_linear_applies_lora_adapters_like_standard() {
+        let adapter = LinearLoraAdapter {
+            a: Tensor::from_vec(
+                (0..2 * 64)
+                    .map(|i| ((i % 7) as f32 - 3.0) * 0.05)
+                    .collect::<Vec<_>>(),
+                (2, 64),
+                &Device::Cpu,
+            )
+            .unwrap(),
+            b: Tensor::from_vec(
+                (0..4 * 2)
+                    .map(|i| ((i % 5) as f32 - 2.0) * 0.1)
+                    .collect::<Vec<_>>(),
+                (4, 2),
+                &Device::Cpu,
+            )
+            .unwrap(),
+            scale: 0.5,
+        };
+        let (vb, dequantized, bias) = gguf_linear_fixture(true);
+        let quantized = LtxLinear::load(64, 4, true, vb, vec![adapter.clone()]).unwrap();
+        let standard = LtxLinear::Standard {
+            linear: nn::Linear::new(dequantized, bias),
+            adapters: vec![adapter],
+        };
+
+        let xs = Tensor::from_vec(
+            (0..2 * 64)
+                .map(|i| i as f32 * 0.02 - 0.6)
+                .collect::<Vec<_>>(),
+            (1, 2, 64),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let got = quantized.forward(&xs).unwrap();
+        let expected = standard.forward(&xs).unwrap();
+        assert_tensors_close(&got, &expected, 1e-6);
+    }
+
+    /// A synthetic INT8 ConvRot weight: one 256-wide group per row so the
+    /// packed side channel's smallest legal shape stays cheap. Values cycle
+    /// the full signed range and each row has its own scale.
+    fn convrot_linear_var_builder(with_bias: bool) -> VarBuilder<'static> {
+        let device = Device::Cpu;
+        let (out_dim, in_dim) = (4usize, 256usize);
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight.convrot_packed".to_string(),
+            Tensor::from_vec(
+                (0..out_dim * in_dim)
+                    .map(|index| (((index * 37 + 11) % 251) as i16 - 125) as i8 as u8)
+                    .collect::<Vec<_>>(),
+                (out_dim, in_dim),
+                &device,
+            )
+            .unwrap(),
+        );
+        tensors.insert(
+            "weight.convrot_scales".to_string(),
+            Tensor::from_vec(
+                (0..out_dim)
+                    .map(|row| (row + 1) as f32 / 256.0)
+                    .collect::<Vec<_>>(),
+                (out_dim, 1),
+                &device,
+            )
+            .unwrap(),
+        );
+        if with_bias {
+            tensors.insert(
+                "bias".to_string(),
+                Tensor::from_vec(vec![0.25f32, -0.5, 1.0, -1.25], out_dim, &device).unwrap(),
+            );
+        }
+        VarBuilder::from_tensors(tensors, DType::F32, &device)
+    }
+
+    #[test]
+    fn ltx2_convrot_packed_linear_loads_from_the_side_channel_and_standard_otherwise() {
+        let linear =
+            LtxLinear::load(256, 4, true, convrot_linear_var_builder(true), vec![]).unwrap();
+        match &linear {
+            LtxLinear::ConvRotPacked { linear, bias, .. } => {
+                assert_eq!(linear.weight().dtype(), DType::U8);
+                assert_eq!(linear.weight().dims(), &[4, 256]);
+                assert_eq!(linear.weight_scale().dims(), &[4, 1]);
+                assert!(bias.is_some());
+            }
+            other => panic!("expected ConvRotPacked, got {other:?}"),
+        }
+
+        // A dense weight keeps the Standard arm.
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            Tensor::zeros((4, 256), DType::F32, &Device::Cpu).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu);
+        let dense = LtxLinear::load(256, 4, false, vb, vec![]).unwrap();
+        assert!(matches!(dense, LtxLinear::Standard { .. }));
+    }
+
+    /// The dequant arm widens through the exact candle op and multiplies like
+    /// `Standard`, so against a `Standard` linear built from that same
+    /// widened tensor it is bit-identical — bias, LoRA, and rank-3 shapes
+    /// included.
+    #[test]
+    fn ltx2_convrot_packed_dequant_arm_matches_standard_from_the_widened_weight() {
+        let device = Device::Cpu;
+        let loaded =
+            LtxLinear::load(256, 4, true, convrot_linear_var_builder(true), vec![]).unwrap();
+        let LtxLinear::ConvRotPacked {
+            linear,
+            bias,
+            adapters: _,
+        } = &loaded
+        else {
+            panic!("expected ConvRotPacked, got {loaded:?}");
+        };
+        let widened = candle_core::convrot::dequantize_int8_convrot_256(
+            linear.weight(),
+            linear.weight_scale(),
+        )
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap();
+        let standard = LtxLinear::Standard {
+            linear: nn::Linear::new(widened, bias.clone()),
+            adapters: vec![],
+        };
+
+        let xs = Tensor::from_vec(
+            (0..2 * 3 * 256)
+                .map(|index| ((index * 17 % 257) as f32 - 128.0) / 37.0)
+                .collect::<Vec<_>>(),
+            (2, 3, 256),
+            &device,
+        )
+        .unwrap();
+        let expected = standard.forward(&xs).unwrap();
+        let actual = convrot_packed_forward(
+            linear,
+            bias.as_ref(),
+            &xs,
+            DType::F32,
+            crate::ltx2::convrot::Ltx2Int8Arm::Dequant,
+        )
+        .unwrap();
+        assert_eq!(actual.dims(), &[2, 3, 4]);
+        assert_eq!(
+            actual
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The native arm on CPU runs the portable W8A8 reference, so its output
+    /// is `forward_reference` plus the bias — pinned here so the arm switch
+    /// is observable without a GPU.
+    #[test]
+    fn ltx2_convrot_packed_native_arm_runs_w8a8_semantics_on_cpu() {
+        let device = Device::Cpu;
+        let loaded =
+            LtxLinear::load(256, 4, true, convrot_linear_var_builder(true), vec![]).unwrap();
+        let LtxLinear::ConvRotPacked { linear, bias, .. } = &loaded else {
+            panic!("expected ConvRotPacked, got {loaded:?}");
+        };
+        let xs = Tensor::from_vec(
+            (0..3 * 256)
+                .map(|index| ((index * 17 % 257) as f32 - 128.0) / 37.0)
+                .collect::<Vec<_>>(),
+            (3, 256),
+            &device,
+        )
+        .unwrap();
+        let expected = linear
+            .forward_reference(
+                &xs,
+                None,
+                DType::F32,
+                mold_candle::comfy_int8::PORTABLE_ROW_CHUNK,
+            )
+            .unwrap()
+            .broadcast_add(bias.as_ref().unwrap())
+            .unwrap();
+        let actual = convrot_packed_forward(
+            linear,
+            bias.as_ref(),
+            &xs,
+            DType::F32,
+            crate::ltx2::convrot::Ltx2Int8Arm::Native,
+        )
+        .unwrap();
+        let error = actual
+            .sub(&expected)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(error <= 1e-5, "{error}");
+    }
+
+    /// Native (W8A8) against dequant (W8A16) on CUDA: the two arms differ by
+    /// the activation quantizer, so the comparison is a loose relative bound
+    /// rather than parity — the point is that both render, on the GPU, from
+    /// one packed weight.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn ltx2_convrot_packed_native_and_dequant_agree_on_cuda_within_int8_tolerance() {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return;
+        };
+        let loaded =
+            LtxLinear::load(256, 4, true, convrot_linear_var_builder(true), vec![]).unwrap();
+        let LtxLinear::ConvRotPacked { linear, bias, .. } = &loaded else {
+            panic!("expected ConvRotPacked, got {loaded:?}");
+        };
+        let resident = mold_candle::comfy_int8::ComfyInt8ConvRotLinear::new_on_device(
+            linear.weight().to_device(&cuda).unwrap(),
+            linear.weight_scale().to_device(&cuda).unwrap(),
+        )
+        .unwrap();
+        let bias = bias.as_ref().map(|bias| bias.to_device(&cuda).unwrap());
+        let xs = Tensor::from_vec(
+            (0..3 * 256)
+                .map(|index| ((index * 17 % 257) as f32 - 128.0) / 37.0)
+                .collect::<Vec<_>>(),
+            (3, 256),
+            &cuda,
+        )
+        .unwrap();
+        let dequant = convrot_packed_forward(
+            &resident,
+            bias.as_ref(),
+            &xs,
+            DType::F32,
+            crate::ltx2::convrot::Ltx2Int8Arm::Dequant,
+        )
+        .unwrap()
+        .to_device(&Device::Cpu)
+        .unwrap();
+        let native = convrot_packed_forward(
+            &resident,
+            bias.as_ref(),
+            &xs,
+            DType::F32,
+            crate::ltx2::convrot::Ltx2Int8Arm::Native,
+        )
+        .unwrap()
+        .to_device(&Device::Cpu)
+        .unwrap();
+        let peak = dequant
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let error = native
+            .sub(&dequant)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(error <= 0.03 * peak + 1e-3, "error {error} vs peak {peak}");
     }
 
     fn nvfp4_linear_var_builder() -> VarBuilder<'static> {
@@ -6023,6 +6785,125 @@ pub(crate) mod tests {
         let chunked = super::chunked_attention(&q, &k, &v, None, scale, 2, 3).unwrap();
 
         assert_tensors_close(&full, &chunked, 1e-3);
+    }
+
+    /// The dispatcher boundary, pinned as a table (#735). Only the plain
+    /// CUDA self-attention moves; every masked, perturbed, forced, or
+    /// off-CUDA call keeps the F32 path it always had, and STG's
+    /// all-perturbed passthrough never computes attention at all.
+    #[test]
+    fn ltx2_self_attention_route_pins_the_dispatcher_boundary() {
+        use super::{ltx2_self_attention_route as route, AttentionRoute};
+
+        assert_eq!(
+            route(true, false, false, false, false),
+            AttentionRoute::Bf16Dispatch,
+            "plain CUDA self-attention is the one call that moves"
+        );
+        // Each single guard alone is enough to keep the F32 path.
+        assert_eq!(
+            route(false, false, false, false, false),
+            AttentionRoute::F32Chunked
+        );
+        assert_eq!(
+            route(true, true, false, false, false),
+            AttentionRoute::F32Chunked
+        );
+        assert_eq!(
+            route(true, false, true, false, false),
+            AttentionRoute::F32Chunked
+        );
+        assert_eq!(
+            route(true, false, false, false, true),
+            AttentionRoute::F32Chunked
+        );
+        // All-perturbed wins over everything, including the forced control.
+        for is_cuda in [false, true] {
+            for masked in [false, true] {
+                for perturbed in [false, true] {
+                    for forced in [false, true] {
+                        assert_eq!(
+                            route(is_cuda, masked, perturbed, true, forced),
+                            AttentionRoute::Passthrough
+                        );
+                        let plain = route(is_cuda, masked, perturbed, false, forced);
+                        let expect_dispatch = is_cuda && !masked && !perturbed && !forced;
+                        assert_eq!(
+                            plain == AttentionRoute::Bf16Dispatch,
+                            expect_dispatch,
+                            "cuda={is_cuda} masked={masked} perturbed={perturbed} forced={forced}"
+                        );
+                        assert_ne!(plain, AttentionRoute::Passthrough);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `MOLD_LTX2_ATTN_F32` takes the same truthy spellings as the other
+    /// LTX-2 boolean knobs, and is an engine-shaping (fingerprint) input.
+    #[test]
+    fn ltx2_attention_f32_control_is_a_registered_truthy_knob() {
+        use super::parse_attention_f32_forced as parse;
+        for truthy in ["1", "true", "YES", " on "] {
+            assert!(parse(Some(truthy)), "{truthy:?} must force the F32 path");
+        }
+        for falsy in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("off"),
+            Some("no"),
+        ] {
+            assert!(!parse(falsy), "{falsy:?} must not force the F32 path");
+        }
+        assert!(
+            crate::runtime_env::ENGINE_SHAPING_VARIABLES.contains(&"MOLD_LTX2_ATTN_F32"),
+            "MOLD_LTX2_ATTN_F32 changes the rendered output and must be a frozen, \
+             fingerprinted runtime input"
+        );
+    }
+
+    /// The BF16 dispatcher and the F32 chunked path compute the same
+    /// attention; they differ only in accumulation precision. Small shape,
+    /// so the tolerance is BF16's, not the F32 path's 1e-5.
+    ///
+    /// Needs a CUDA device and so does not execute in CI; it is a
+    /// developer-machine guard for the route that changed every LTX-2 CUDA
+    /// seed (#735).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_bf16_dispatch_matches_f32_chunked_within_bf16_tolerance() {
+        let Ok(device) = Device::new_cuda(0) else {
+            return;
+        };
+        let (b, h, n, d) = (1, 4, 96, 64);
+        let mk = |offset| {
+            Tensor::from_vec(
+                patterned_values(b * h * n * d, offset),
+                (b, h, n, d),
+                &device,
+            )
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap()
+        };
+        let (q, k, v) = (mk(41), mk(43), mk(47));
+        let scale = 1f32 / (d as f32).sqrt();
+
+        let dispatched = crate::attention::attention(&q, &k, &v, scale)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap();
+        let chunked = super::chunked_attention(&q, &k, &v, None, scale, 32, 32).unwrap();
+
+        assert_eq!(dispatched.dims(), chunked.dims());
+        assert_tensors_close(
+            &dispatched.to_device(&Device::Cpu).unwrap(),
+            &chunked.to_device(&Device::Cpu).unwrap(),
+            2e-2,
+        );
     }
 
     #[cfg(feature = "metal")]

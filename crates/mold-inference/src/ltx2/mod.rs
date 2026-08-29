@@ -6,6 +6,7 @@ pub(crate) mod convrot;
 mod execution;
 pub(crate) mod exr;
 pub(crate) mod fp8_widen;
+pub(crate) mod gguf;
 mod guidance;
 mod hdr;
 mod lora;
@@ -16,6 +17,8 @@ mod pipeline;
 mod plan;
 pub(crate) mod preprocess;
 mod preset;
+pub mod provenance;
+pub(crate) mod provenance_vocabulary;
 mod runtime;
 mod sampler;
 pub(crate) mod single_file;
@@ -25,6 +28,7 @@ mod tiling;
 pub use chain::{extract_tail_latents, tail_latent_frame_count};
 pub(crate) use model::DecodedAudio;
 pub use pipeline::Ltx2Engine;
+pub use runtime::{ltx2_transformer_weight_sizes, Ltx2TransformerWeightSizes};
 // Wan continues a clip the same way at the stitch layer -- drop the duplicated
 // leading frames, append the rest -- so the two share one implementation
 // rather than keeping a second chance to be off by one.

@@ -91,6 +91,7 @@ pub(crate) mod pulid_fixtures;
 pub(crate) mod test_support;
 
 pub(crate) mod quantized_dmmv;
+pub(crate) mod quantized_linear;
 pub mod qwen_image;
 pub(crate) mod reference_media;
 pub mod runtime_env;

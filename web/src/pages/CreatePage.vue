@@ -4916,6 +4916,7 @@ function openJob(job: Job) {
   form.state.value.frames = request.frames ?? null;
   form.state.value.fps = request.fps ?? null;
   form.state.value.enableAudio = request.enable_audio ?? null;
+  form.state.value.videoOnly = request.video_only === true;
   form.state.value.audioFile = request.audio_file
     ? image(request.audio_file, "Audio input")
     : null;

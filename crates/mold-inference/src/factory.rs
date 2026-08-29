@@ -475,7 +475,7 @@ fn validate_ltx25_runtime_paths(model_name: &str, paths: &ModelPaths) -> Result<
     let gemma = paths.text_encoder_files.first().ok_or_else(|| {
         anyhow::anyhow!("LTX-2.5 requires its matching packed Gemma 4 text encoder")
     })?;
-    mold_core::ltx25_probe::validate_ltx25_transformer_gemma(&paths.transformer, gemma)
+    mold_core::ltx25_probe::validate_ltx25_transformer_gemma_any(&paths.transformer, gemma)
         .map_err(anyhow::Error::from)?;
     mold_core::ltx25_probe::probe_ltx25_video_vae(&paths.vae)
         .map(|_| ())

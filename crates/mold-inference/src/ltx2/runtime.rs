@@ -12,8 +12,6 @@ use mold_candle::ltx_video::sampling::{
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::collections::HashMap;
 use std::env;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -44,6 +42,7 @@ use super::model::{
 };
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
 use super::preprocess;
+use super::provenance;
 use super::sampler::sampler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
@@ -64,6 +63,9 @@ use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressEven
 use crate::vae_tiling::is_out_of_memory_error;
 use crate::weight_loader::{
     load_fp8_safetensors_with_callback, load_safetensors_with_progress_callback,
+};
+use mold_core::ltx2_weight_index::{
+    Ltx2ResidentWeightForm, Ltx2TransformerWeightIndex, Ltx2WeightFormat,
 };
 use mold_core::{LoraWeight, Ltx2GuidanceOverrides, Ltx2SpatialUpscale, TimeRange};
 
@@ -100,6 +102,14 @@ pub struct NativeRenderedVideo {
     pub has_audio: bool,
     pub audio_sample_rate: Option<u32>,
     pub audio_channels: Option<u32>,
+    /// Which attention arithmetic the transformer ran — one of
+    /// `provenance::ATTENTION_PATHS`. `None` only for the synthetic
+    /// placeholder path, which runs no transformer at all.
+    pub attention_path: Option<&'static str>,
+    /// Which INT8 ConvRot execution arm the transformer's quantized linears
+    /// took — one of `convrot`'s `INT8_ARM_*` literals. `None` for every
+    /// checkpoint that is not tensorwise INT8 ConvRot.
+    pub int8_arm: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -935,16 +945,23 @@ impl Ltx2RuntimeSession {
         // silent exports. Keep the internal audio branch active whenever the
         // prompt encoder emitted audio conditioning so the denoiser stays on the
         // same multimodal path as upstream; export semantics remain silent
-        // unless the request explicitly wants audio output.
+        // unless the request explicitly wants audio output. An explicit
+        // `video_only` request (#1037) is the one structural off switch —
+        // the graph's `run_audio_branch` is false only for it.
         let prompt_has_audio_conditioning = prompt.conditional.audio_encoding.is_some()
             || prompt.unconditional.audio_encoding.is_some();
-        let wants_audio_latents = if ltx_debug_disable_audio_branch_enabled() {
+        let wants_audio_latents = if !plan.execution_graph.run_audio_branch {
             false
         } else {
             plan.execution_graph.wants_audio_output
                 || plan.execution_graph.uses_audio_conditioning
                 || prompt_has_audio_conditioning
         };
+        tracing::info!(
+            target: provenance::LOG_TARGET,
+            "{}",
+            provenance::audio_branch_line(wants_audio_latents)
+        );
         let (audio_latent_shape, audio_positions, cross_modal_temporal_positions) =
             if wants_audio_latents {
                 let audio_shape = AudioLatentShape::from_video_pixel_shape(
@@ -1048,9 +1065,25 @@ impl Ltx2RuntimeSession {
             .device
             .as_ref()
             .context("native LTX-2 compute device was not initialized")?;
-        if let Some(rendered) =
+        if let Some(mut rendered) =
             self.try_render_real_video(plan, prepared, device, progress, cancellation)?
         {
+            let attention_path = ltx2_attention_path(
+                device,
+                compute_dtype(device),
+                plan.preset.transformer.attention_head_dim,
+            );
+            rendered.attention_path = Some(attention_path);
+            tracing::info!(
+                target: provenance::LOG_TARGET,
+                "{}",
+                provenance::attention_path_line(attention_path)
+            );
+            if super::convrot::checkpoint_is_int8_convrot(Path::new(&plan.checkpoint_path)) {
+                rendered.int8_arm = Some(super::convrot::int8_arm_for_render(
+                    super::convrot::device_kind(device),
+                ));
+            }
             if ltx_debug_enabled() || env::var_os("MOLD_LTX2_DEBUG_STAGE_PREFIX").is_some() {
                 eprintln!(
                     "[ltx2-debug] render_native_video using real path pipeline={:?}",
@@ -1113,6 +1146,8 @@ impl Ltx2RuntimeSession {
         }
 
         Ok(NativeRenderedVideo {
+            attention_path: None,
+            int8_arm: None,
             frames,
             hdr_frames_written: None,
             audio_track: None,
@@ -1204,6 +1239,39 @@ impl Ltx2RuntimeSession {
         // reported it as a successful save while hiding the corruption.
         render.map(Some)
     }
+}
+
+/// The attention provenance value for a real render on `device`.
+///
+/// Mirrors the routing `LtxAttention::forward` performs — Metal takes the
+/// fused SDPA, CUDA takes `crate::attention` unless `MOLD_LTX2_ATTN_F32=1`
+/// pins the F32 tiles, and everything else is the F32 chunked path — and asks
+/// the dispatcher which backend it would actually run at the video head dim,
+/// so a `MOLD_ATTN=flash` request on a build without the kernel, or at a head
+/// dim the kernel refuses, is recorded as the math it was.
+fn ltx2_attention_path(
+    device: &candle_core::Device,
+    dtype: DType,
+    head_dim: usize,
+) -> &'static str {
+    if device.is_metal() {
+        return provenance::ATTENTION_PATH_METAL_SDPA;
+    }
+    if !device.is_cuda() || super::model::video_transformer::ltx2_attention_f32_forced() {
+        return provenance::ATTENTION_PATH_F32_CHUNKED;
+    }
+    match crate::attention::effective_backend(device, dtype, head_dim) {
+        crate::attention::AttentionBackend::Flash => provenance::ATTENTION_PATH_BF16_FLASH,
+        crate::attention::AttentionBackend::Math => provenance::ATTENTION_PATH_BF16_MATH,
+    }
+}
+
+fn log_ltx2_residency_mode(mode: &str, resident: usize, streamed: usize) {
+    tracing::info!(
+        target: provenance::LOG_TARGET,
+        "{}",
+        provenance::residency_mode_line(mode, resident, streamed)
+    );
 }
 
 fn move_prompt_encoding_to_device(
@@ -2722,10 +2790,12 @@ fn maybe_apply_temporal_upsampler(
     latents: &Tensor,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Tensor> {
     if plan.temporal_upscale.is_none() {
         return Ok(latents.clone());
     }
+    let upscale_start = Instant::now();
     let temporal_upsampler_path = plan
         .temporal_upsampler_path
         .as_ref()
@@ -2739,6 +2809,12 @@ fn maybe_apply_temporal_upsampler(
     if device.is_cuda() {
         device.synchronize()?;
     }
+    emit_phase_done(
+        progress,
+        ProgressPhase::Upscale,
+        "Temporal latent upscale",
+        upscale_start.elapsed(),
+    );
     Ok(upsampled)
 }
 
@@ -3052,6 +3128,12 @@ fn render_real_distilled_av(
     drop(upsampler);
     device.synchronize()?;
     log_timing("distilled.stage1.spatial_upsample", stage1_upsample_start);
+    emit_phase_done(
+        progress,
+        ProgressPhase::Upscale,
+        "Spatial latent upscale",
+        stage1_upsample_start.elapsed(),
+    );
     if debug_enabled {
         log_debug_vram("after_stage1_upsample");
     }
@@ -3241,7 +3323,7 @@ fn render_real_distilled_av(
     if debug_enabled {
         log_debug_vram("after_stage2_transformer_drop");
     }
-    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
+    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype, progress)?;
     if debug_enabled && plan.temporal_upscale.is_some() {
         log_debug_vram("after_temporal_upsample");
     }
@@ -3274,7 +3356,8 @@ fn render_real_distilled_av(
     let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
     let audio_render_start = Instant::now();
-    let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
+    let audio_track =
+        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype, progress)?;
     log_timing("distilled.render_audio", audio_render_start);
     drop(latents);
     drop(audio_latents);
@@ -3300,6 +3383,8 @@ fn render_real_distilled_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
+        int8_arm: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -3994,6 +4079,12 @@ fn render_real_two_stage_av(
     drop(upsampler);
     device.synchronize()?;
     log_timing("two_stage.stage1.spatial_upsample", stage1_upsample_start);
+    emit_phase_done(
+        progress,
+        ProgressPhase::Upscale,
+        "Spatial latent upscale",
+        stage1_upsample_start.elapsed(),
+    );
 
     let requested_pixel_shape = VideoPixelShape {
         batch: 1,
@@ -4220,7 +4311,7 @@ fn render_real_two_stage_av(
     log_timing("two_stage.stage2.denoise", stage2_denoise_start);
     drop(stage2_transformer);
     device.synchronize()?;
-    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype)?;
+    let latents = maybe_apply_temporal_upsampler(plan, &latents, device, dtype, progress)?;
 
     let mut vae = load_ltx2_video_vae(plan, device, dtype, progress)?;
     let decoded = decode_video_frames_with_telemetry(
@@ -4245,9 +4336,15 @@ fn render_real_two_stage_av(
         // that went in. Upstream decodes `s1_audio_latent` (`lipdub.py:293`);
         // decoding stage 2's would round-trip the same samples through an
         // extra blend for nothing.
-        maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?
+        maybe_render_native_audio_track(
+            plan,
+            stage1_audio_latents.as_ref(),
+            device,
+            dtype,
+            progress,
+        )?
     } else {
-        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?
+        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype, progress)?
     };
     log_timing("two_stage.render_audio", audio_render_start);
     drop(latents);
@@ -4279,6 +4376,8 @@ fn render_real_two_stage_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
+        int8_arm: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4459,8 +4558,13 @@ fn render_real_one_stage_av(
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
-    let audio_track =
-        maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?;
+    let audio_track = maybe_render_native_audio_track(
+        plan,
+        stage1_audio_latents.as_ref(),
+        device,
+        dtype,
+        progress,
+    )?;
     drop(latents);
     drop(stage1_audio_latents);
     drop(stage1_audio_noise);
@@ -4478,6 +4582,8 @@ fn render_real_one_stage_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
+        int8_arm: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4655,7 +4761,8 @@ fn render_real_retake_av(
     let frames = decoded.frames;
     let hdr_frames_written = decoded.hdr_frames_written;
     drop(vae);
-    let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
+    let audio_track =
+        maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype, progress)?;
     drop(latents);
     drop(audio_latents);
     drop(stage1_audio_noise);
@@ -4675,6 +4782,8 @@ fn render_real_retake_av(
     let audio_channels = audio_track.as_ref().map(|track| u32::from(track.channels));
 
     Ok(NativeRenderedVideo {
+        attention_path: None,
+        int8_arm: None,
         frames,
         hdr_frames_written,
         audio_track,
@@ -4720,6 +4829,17 @@ fn run_real_distilled_stage(
     progress: Option<&ProgressCallback>,
     cancellation: Option<&InferenceCancellationToken>,
 ) -> Result<(Tensor, Option<Tensor>)> {
+    // Audio context follows the AUDIO BRANCH, not the prompt: a video-only
+    // render (#1037) skips the branch structurally, so it has audio prompt
+    // encodings but no audio latents and therefore no audio positions.
+    // Passing the prompt-derived contexts on would hand the transformer a
+    // batched audio context with no positions — the exact Some/None mismatch
+    // `prepare_static_inputs` refuses. Positions are the branch's own
+    // authority, so every audio context is normalized against them here,
+    // once, rather than at each of the guidance-batch builders below.
+    let audio_context = audio_context.filter(|_| audio_positions.is_some());
+    let uncond_audio_context = uncond_audio_context.filter(|_| audio_positions.is_some());
+    let alt_audio_context = alt_audio_context.filter(|_| audio_positions.is_some());
     let device = video_start_latents.device().clone();
     let video_patchifier = VideoLatentPatchifier::new(1);
     let audio_patchifier = AudioPatchifier::new(
@@ -5676,21 +5796,28 @@ fn load_ltx2_audio_transformer(
     let probe = PhaseVramProbe::enter_if("audio_transformer_load".to_string(), device.is_cuda());
     let result = (|| -> Result<Ltx2AudioTransformerModel> {
         let config = ltx2_video_transformer_config(plan);
-        let lora_registry = super::lora::load_lora_registry(loras)?;
         let checkpoint_path = Path::new(&plan.checkpoint_path);
-        let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
-        let checkpoint_is_convrot =
-            !checkpoint_is_nvfp4 && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
-        let header = (!checkpoint_is_nvfp4 && !checkpoint_is_convrot)
-            .then(|| Ltx2CheckpointHeader::read(checkpoint_path).ok())
-            .flatten();
-        let checkpoint_is_fp8 =
-            !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, header.as_ref());
-        let vb = if checkpoint_is_nvfp4 {
+        let checkpoint_is_gguf = super::gguf::checkpoint_is_gguf(checkpoint_path);
+        let lora_registry =
+            super::lora::load_lora_registry_for_checkpoint(loras, checkpoint_is_gguf)?;
+        let checkpoint_is_nvfp4 =
+            !checkpoint_is_gguf && super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
+        let checkpoint_is_convrot = !checkpoint_is_gguf
+            && !checkpoint_is_nvfp4
+            && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
+        let weight_index = Ltx2TransformerWeightIndex::read(checkpoint_path).ok();
+        let checkpoint_is_fp8 = !checkpoint_is_gguf
+            && !checkpoint_is_nvfp4
+            && ltx2_checkpoint_is_fp8(plan, weight_index.as_ref());
+        let vb = if checkpoint_is_gguf {
+            let backend = super::gguf::Ltx2GgufBackend::from_path(checkpoint_path)?;
+            VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
+        } else if checkpoint_is_nvfp4 {
             let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
             VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
         } else if checkpoint_is_convrot {
-            let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
+            let backend =
+                super::convrot::Ltx2ConvRotBackend::from_path_for_device(checkpoint_path, device)?;
             VarBuilder::from_backend(Box::new(backend), compute_dtype(device), device.clone())
         } else if checkpoint_is_fp8 {
             load_fp8_safetensors_with_callback(
@@ -5709,7 +5836,7 @@ fn load_ltx2_audio_transformer(
                 progress,
             )?
         };
-        let vb = if checkpoint_is_nvfp4 || checkpoint_is_convrot {
+        let vb = if checkpoint_is_gguf || checkpoint_is_nvfp4 || checkpoint_is_convrot {
             vb
         } else {
             vb.rename_f(remap_ltx2_transformer_key)
@@ -5819,7 +5946,7 @@ pub(crate) fn render_real_t2a_audio(
         log_tensor_stats("final_audio_latents", &audio_latents)?;
     }
 
-    let track = render_native_audio_track(plan, &audio_latents, device, dtype)?.context(
+    let track = render_native_audio_track(plan, &audio_latents, device, dtype, progress)?.context(
         "LTX-2 text-to-audio produced an empty waveform; the checkpoint's vocoder returned no \
          samples",
     )?;
@@ -5997,6 +6124,7 @@ fn maybe_render_native_audio_track(
     audio_latents: Option<&Tensor>,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Option<NativeAudioTrack>> {
     if !plan.execution_graph.wants_audio_output {
         return Ok(None);
@@ -6004,7 +6132,7 @@ fn maybe_render_native_audio_track(
     let audio_latents = audio_latents.context(
         "native LTX-2 audio output requested but the denoiser produced no audio latents",
     )?;
-    render_native_audio_track(plan, audio_latents, device, dtype)
+    render_native_audio_track(plan, audio_latents, device, dtype, progress)
 }
 
 /// Audio VAE → vocoder → interleaved f32 samples. Shared by the joint AV
@@ -6015,7 +6143,9 @@ fn render_native_audio_track(
     audio_latents: &Tensor,
     device: &candle_core::Device,
     dtype: DType,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Option<NativeAudioTrack>> {
+    let decode_start = Instant::now();
     let audio_checkpoint = plan
         .audio_components_path
         .as_deref()
@@ -6036,7 +6166,16 @@ fn render_native_audio_track(
     if device.is_cuda() {
         device.synchronize()?;
     }
-    waveform_to_audio_track(&waveform, output_sample_rate)
+    let track = waveform_to_audio_track(&waveform, output_sample_rate)?;
+    if track.is_some() {
+        emit_phase_done(
+            progress,
+            ProgressPhase::AudioDecode,
+            "Decoding audio track",
+            decode_start.elapsed(),
+        );
+    }
+    Ok(track)
 }
 
 /// Resize `tail_rgb_frames` to the current stage's `pixel_shape` so the
@@ -6886,11 +7025,20 @@ fn ltx2_transformer_var_builder<'a>(
     plan: &Ltx2GeneratePlan,
     checkpoint_path: &Path,
     device: &candle_core::Device,
+    checkpoint_is_gguf: bool,
     checkpoint_is_nvfp4: bool,
     checkpoint_is_convrot: bool,
     checkpoint_is_fp8: bool,
     progress: Option<&ProgressCallback>,
 ) -> Result<VarBuilder<'a>> {
+    if checkpoint_is_gguf {
+        let backend = super::gguf::Ltx2GgufBackend::from_path(checkpoint_path)?;
+        return Ok(VarBuilder::from_backend(
+            Box::new(backend),
+            compute_dtype(device),
+            device.clone(),
+        ));
+    }
     if checkpoint_is_nvfp4 {
         let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
         return Ok(VarBuilder::from_backend(
@@ -6900,7 +7048,8 @@ fn ltx2_transformer_var_builder<'a>(
         ));
     }
     if checkpoint_is_convrot {
-        let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
+        let backend =
+            super::convrot::Ltx2ConvRotBackend::from_path_for_device(checkpoint_path, device)?;
         return Ok(VarBuilder::from_backend(
             Box::new(backend),
             compute_dtype(device),
@@ -6936,7 +7085,10 @@ fn load_ltx2_av_transformer_with_loras_inner(
     let force_streaming = ltx2_force_streaming_enabled();
     let force_eager = crate::runtime_env::value("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
-    let lora_registry = super::lora::load_lora_registry(loras)?;
+    let lora_registry = super::lora::load_lora_registry_for_checkpoint(
+        loras,
+        super::gguf::checkpoint_is_gguf(Path::new(&plan.checkpoint_path)),
+    )?;
     // Absence of the synthetic gradient is not proof a LoRA was applied, so say
     // what actually resolved: the ordered stack, each adapter's scale, and how
     // many transformer layers it landed on.
@@ -6961,20 +7113,28 @@ fn load_ltx2_av_transformer_with_loras_inner(
         }
     }
     let checkpoint_path = Path::new(&plan.checkpoint_path);
-    let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
-    let checkpoint_is_convrot =
-        !checkpoint_is_nvfp4 && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
-    // Comfy ConvRot stores either full-shape INT8 or packed INT4 rows, while
-    // the portable Candle compatibility backend reconstructs BF16 weights.
-    // Header byte sizes therefore cannot safely drive resident placement;
-    // stream blocks so compact bytes are never priced as BF16 GPU residency.
-    let force_streaming = ltx2_effective_force_streaming(force_streaming, checkpoint_is_convrot);
-    // One header pass feeds both the fp8 probe and the residency sizing; the
-    // packed backends read their own layout and don't consult it.
-    let header = (!checkpoint_is_nvfp4 && !checkpoint_is_convrot)
-        .then(|| Ltx2CheckpointHeader::read(checkpoint_path).ok())
-        .flatten();
-    let checkpoint_is_fp8 = !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan, header.as_ref());
+    let checkpoint_is_gguf = super::gguf::checkpoint_is_gguf(checkpoint_path);
+    let checkpoint_is_nvfp4 =
+        !checkpoint_is_gguf && super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
+    let checkpoint_is_convrot = !checkpoint_is_gguf
+        && !checkpoint_is_nvfp4
+        && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
+    // ConvRot on CUDA stays resident in its packed form and is priced that
+    // way; on Metal/CPU the compatibility backend reconstructs BF16 weights,
+    // so blocks keep streaming there rather than pricing compact bytes as
+    // widened residency.
+    let force_streaming = ltx2_effective_force_streaming(
+        force_streaming,
+        checkpoint_is_convrot,
+        Ltx2Accelerator::of(device),
+    );
+    // One header pass feeds both the fp8 probe and the residency sizing. The
+    // index is the same authority admission priced this job with, so the
+    // plan the engine builds cannot disagree with the grant it was given.
+    let weight_index = Ltx2TransformerWeightIndex::read(checkpoint_path).ok();
+    let checkpoint_is_fp8 = !checkpoint_is_gguf
+        && !checkpoint_is_nvfp4
+        && ltx2_checkpoint_is_fp8(plan, weight_index.as_ref());
     // `candle` re-exports the `safetensors` error transparently, so a corrupt
     // or truncated checkpoint arrives as bare text ("header too small") with
     // nothing identifying the file. Name it here: this is the error the user
@@ -6983,6 +7143,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
         plan,
         checkpoint_path,
         device,
+        checkpoint_is_gguf,
         checkpoint_is_nvfp4,
         checkpoint_is_convrot,
         checkpoint_is_fp8,
@@ -6995,7 +7156,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
             checkpoint_path.display()
         )
     })?;
-    let vb = if checkpoint_is_nvfp4 || checkpoint_is_convrot {
+    let vb = if checkpoint_is_gguf || checkpoint_is_nvfp4 || checkpoint_is_convrot {
         vb
     } else {
         vb.rename_f(remap_ltx2_transformer_key)
@@ -7009,6 +7170,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
         0,
     ) == Ltx2TransformerResidencyMode::Eager
     {
+        log_ltx2_residency_mode(provenance::RESIDENCY_MODE_EAGER, config.num_layers, 0);
         Ok(Ltx2AvTransformer3DModel::new(&config, vb, lora_registry)?)
     } else if device.is_cuda() && !force_streaming {
         let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
@@ -7016,10 +7178,17 @@ fn load_ltx2_av_transformer_with_loras_inner(
             Some(budget) => budget,
             None => usable_free_vram_bytes(gpu_ordinal).unwrap_or(0),
         };
-        let weights = header
+        let weights = weight_index
             .as_ref()
             .context("LTX-2 checkpoint header is required for adaptive residency")
-            .and_then(|header| header.transformer_weight_sizes(config.num_layers));
+            .and_then(|index| {
+                ltx2_transformer_weight_sizes(
+                    index,
+                    config.num_layers,
+                    compute_dtype(device),
+                    Ltx2ResidentWeightForm::for_convrot_backend(device.is_cuda()),
+                )
+            });
         match weights {
             Ok(weights)
                 if select_ltx2_transformer_residency_mode(
@@ -7056,7 +7225,17 @@ fn load_ltx2_av_transformer_with_loras_inner(
                         lora_registry.clone(),
                         residency_plan.clone(),
                     ) {
-                        Ok(transformer) => break Ok(transformer),
+                        Ok(transformer) => {
+                            // Logged from the plan that actually allocated,
+                            // after every demotion rung, so the line names
+                            // the split that renders.
+                            log_ltx2_residency_mode(
+                                provenance::RESIDENCY_MODE_ADAPTIVE,
+                                residency_plan.resident_count(),
+                                residency_plan.streamed_count(),
+                            );
+                            break Ok(transformer);
+                        }
                         Err(err)
                             if device.is_cuda()
                                 && residency_plan.resident_count() > 0
@@ -7079,13 +7258,17 @@ fn load_ltx2_av_transformer_with_loras_inner(
                     }
                 }
             }
-            Ok(_) | Err(_) => Ok(Ltx2AvTransformer3DModel::new_streaming(
-                &config,
-                vb,
-                lora_registry,
-            )?),
+            Ok(_) | Err(_) => {
+                log_ltx2_residency_mode(provenance::RESIDENCY_MODE_STREAMING, 0, config.num_layers);
+                Ok(Ltx2AvTransformer3DModel::new_streaming(
+                    &config,
+                    vb,
+                    lora_registry,
+                )?)
+            }
         }
     } else {
+        log_ltx2_residency_mode(provenance::RESIDENCY_MODE_STREAMING, 0, config.num_layers);
         Ok(Ltx2AvTransformer3DModel::new_streaming(
             &config,
             vb,
@@ -7102,7 +7285,7 @@ fn emit_info(progress: Option<&ProgressCallback>, message: String) {
     }
 }
 
-fn emit_phase_done(
+pub(crate) fn emit_phase_done(
     progress: Option<&ProgressCallback>,
     phase: ProgressPhase,
     name: &str,
@@ -7184,11 +7367,26 @@ fn ltx2_adaptive_transformer_plan(
     weights: &Ltx2TransformerWeightSizes,
     free_vram: u64,
 ) -> AdaptiveResidencyPlan {
+    // The per-forward transient (one dequantized linear) sits beside the
+    // resident weights for the whole denoise, and a packed-resident ConvRot
+    // forward additionally rotates and re-quantizes its activation — both are
+    // reserved here exactly as admission reserves them.
+    let activation = ltx2_video_activation_budget(stage, weights.adaln_dim).saturating_add(
+        if weights.int8_packed {
+            mold_core::ltx2_weight_index::ltx2_int8_w8a8_workspace_bytes(
+                crate::device::ltx2_token_count(stage.width, stage.height, stage.frames),
+            )
+        } else {
+            0
+        },
+    );
     plan_adaptive_residency(
         &weights.blocks,
         ltx2_transformer_vram_budget(plan.vram_grant_bytes, free_vram),
-        weights.non_block_bytes,
-        ltx2_video_activation_budget(stage, weights.adaln_dim),
+        weights
+            .non_block_bytes
+            .saturating_add(weights.transient_bytes),
+        activation,
         ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM,
     )
 }
@@ -7363,8 +7561,17 @@ fn ltx2_force_streaming_enabled() -> bool {
     )
 }
 
-fn ltx2_effective_force_streaming(configured: bool, checkpoint_is_convrot: bool) -> bool {
-    configured || checkpoint_is_convrot
+fn ltx2_effective_force_streaming(
+    configured: bool,
+    checkpoint_is_convrot: bool,
+    accelerator: Ltx2Accelerator,
+) -> bool {
+    // ConvRot forces streaming only where no packed-resident arm exists:
+    // CUDA holds packed U8 blocks resident (`LtxLinear::ConvRotPacked`),
+    // while Metal and CPU still widen every block to BF16 on materialize, so
+    // a resident block there would cost the widened figure — the exact 2x
+    // the old unconditional rule existed to avoid.
+    configured || (checkpoint_is_convrot && accelerator != Ltx2Accelerator::Cuda)
 }
 
 fn select_ltx2_transformer_residency_mode(
@@ -7655,11 +7862,14 @@ fn transformer_weight_dtype(_plan: &Ltx2GeneratePlan, device: &candle_core::Devi
     compute_dtype(device)
 }
 
-fn ltx2_checkpoint_is_fp8(plan: &Ltx2GeneratePlan, header: Option<&Ltx2CheckpointHeader>) -> bool {
+fn ltx2_checkpoint_is_fp8(
+    plan: &Ltx2GeneratePlan,
+    weight_index: Option<&Ltx2TransformerWeightIndex>,
+) -> bool {
     if plan.checkpoint_path.to_ascii_lowercase().contains("fp8") {
         return true;
     }
-    header.is_some_and(|header| header.transformer_is_fp8())
+    weight_index.is_some_and(Ltx2TransformerWeightIndex::is_fp8)
 }
 
 fn ltx2_video_vae_config(plan: &Ltx2GeneratePlan) -> AutoencoderKLLtx2VideoConfig {
@@ -7693,200 +7903,88 @@ fn remap_ltx2_transformer_key(name: &str) -> String {
     super::nvfp4::remap_ltx2_transformer_key(name)
 }
 
-fn ltx2_transformer_block_index(name: &str) -> Option<usize> {
-    let mut components = name.split('.');
-    while let Some(component) = components.next() {
-        if component == "transformer_blocks" || component == "blocks" {
-            return components.next()?.parse().ok();
-        }
-    }
-    None
-}
-
-#[derive(serde::Deserialize)]
-struct SafetensorsHeaderTensor {
-    dtype: safetensors::Dtype,
-    shape: Vec<usize>,
-    data_offsets: (usize, usize),
-}
-
-/// Top-level prefixes inside an LTX-2 single-file checkpoint that are *not*
-/// transformer weights. A combined 19B export carries ~2.4 GB of `vae.*` next
-/// to the transformer; charging those to the transformer's GPU residency would
-/// be as wrong as charging its non-block tensors nothing.
-const LTX2_NON_TRANSFORMER_PREFIXES: &[&str] = &[
-    "vae",
-    "audio_vae",
-    "vocoder",
-    "text_encoders",
-    "conditioner",
-    "first_stage_model",
-    "cond_stage_model",
-    "latent_upsampler",
-    "spatial_upsampler",
-    "temporal_upsampler",
-];
-
-fn ltx2_tensor_is_non_transformer(name: &str) -> bool {
-    let core = name.strip_prefix("model.diffusion_model.").unwrap_or(name);
-    let head = core.split('.').next().unwrap_or_default();
-    LTX2_NON_TRANSFORMER_PREFIXES.contains(&head)
-}
-
-/// Transformer weight byte totals read from one safetensors header pass.
+/// Transformer weight byte totals the residency planner works from.
+///
+/// Derived from [`Ltx2TransformerWeightIndex`] — the same header index
+/// admission prices the job with — through
+/// [`ltx2_transformer_weight_sizes`], so the engine's plan and the
+/// scheduler's grant read one set of numbers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Ltx2TransformerWeightSizes {
-    /// Per-block totals, indexed by transformer block.
-    blocks: Vec<usize>,
+pub struct Ltx2TransformerWeightSizes {
+    /// Per-block device bytes while resident, indexed by transformer block.
+    pub blocks: Vec<usize>,
     /// Transformer tensors outside every block — `patchify_proj`,
     /// `adaln_single.linear`, `caption_projection`, the audio/video
     /// connectors, and `proj_out`. `new_with_block_source` allocates these on
     /// the GPU *after* every resident block, so they are unconditionally
     /// resident and must be reserved, not discovered.
-    non_block_bytes: u64,
+    pub non_block_bytes: u64,
     /// The checkpoint's `adaln_single.linear` output width, which sets the
     /// per-token AdaLN cost of a conditioned render. Not a constant across
     /// LTX-2: the 19B ships six components (24,576) and LTX-2.3's 22B ships
     /// nine (36,864). `None` when the tensor is absent from the header.
-    adaln_dim: Option<u64>,
+    pub adaln_dim: Option<u64>,
+    /// Per-forward scratch beside the resident weights (one dequantized
+    /// linear for a quantized checkpoint, zero for dense/float8). Carried so
+    /// admission and the planner can reserve the same figure.
+    pub transient_bytes: u64,
+    /// Blocks are resident in the packed INT8 ConvRot form, so each forward
+    /// also needs the token-scaled W8A8 workspace
+    /// (`mold_core::ltx2_weight_index::ltx2_int8_w8a8_workspace_bytes`).
+    pub int8_packed: bool,
 }
 
-/// The parsed safetensors header of an LTX-2 checkpoint.
+/// Size a transformer for residency planning at the given compute dtype.
 ///
-/// The load path used to mmap and enumerate this 27 GB file three to four
-/// times per transformer load (fp8 probe, block sizing, and the loaders
-/// themselves). One header read now feeds every predicate that only needs
-/// tensor metadata.
-struct Ltx2CheckpointHeader {
-    tensors: HashMap<String, SafetensorsHeaderTensor>,
+/// `num_layers` is the model config's block count: blocks the header does
+/// not carry are reported as zero bytes, blocks beyond it are ignored. INT8
+/// ConvRot is priced fully widened (every ConvRot arm reconstructs BF16
+/// weights on the device), float8 and GGUF at their packed bytes, dense
+/// checkpoints at the compute dtype — the index owns that rule. NVFP4 is
+/// refused here on purpose: its packed streaming path is not modelled by the
+/// adaptive planner, and refusing keeps it on the streaming fallback it has
+/// always taken.
+pub fn ltx2_transformer_weight_sizes(
+    index: &Ltx2TransformerWeightIndex,
+    num_layers: usize,
+    compute_dtype: DType,
+    form: Ltx2ResidentWeightForm,
+) -> Result<Ltx2TransformerWeightSizes> {
+    if index.format() == Ltx2WeightFormat::Nvfp4 {
+        bail!("adaptive residency is not modelled for NVFP4 checkpoints");
+    }
+    let elem_size = compute_dtype.size_in_bytes() as u64;
+    let mut blocks = vec![0usize; num_layers];
+    for (slot, bytes) in blocks
+        .iter_mut()
+        .zip(index.resident_block_bytes_for(elem_size, form))
+    {
+        *slot = usize::try_from(bytes).context("LTX-2 block size overflows usize")?;
+    }
+    Ok(Ltx2TransformerWeightSizes {
+        blocks,
+        non_block_bytes: index.resident_non_block_bytes(elem_size),
+        adaln_dim: index.adaln_dim(),
+        transient_bytes: index.transient_bytes(),
+        int8_packed: index.is_convrot() && form == Ltx2ResidentWeightForm::Packed,
+    })
 }
 
-impl Ltx2CheckpointHeader {
-    fn read(path: &Path) -> Result<Self> {
-        let mut file = File::open(path)
-            .with_context(|| format!("failed to open LTX-2 checkpoint {}", path.display()))?;
-        let mut header_len_bytes = [0u8; 8];
-        file.read_exact(&mut header_len_bytes).with_context(|| {
-            format!(
-                "failed to read safetensors header length from {}",
-                path.display()
-            )
-        })?;
-        let header_len = u64::from_le_bytes(header_len_bytes) as usize;
-        let mut header = vec![0u8; header_len];
-        file.read_exact(&mut header).with_context(|| {
-            format!(
-                "failed to read safetensors metadata header from {}",
-                path.display()
-            )
-        })?;
-        let raw: HashMap<String, serde_json::Value> = serde_json::from_slice(&header)
-            .with_context(|| {
-                format!(
-                    "failed to parse safetensors metadata header from {}",
-                    path.display()
-                )
-            })?;
-        let mut tensors = HashMap::with_capacity(raw.len());
-        for (name, value) in raw {
-            if name == "__metadata__" {
-                continue;
-            }
-            let tensor: SafetensorsHeaderTensor =
-                serde_json::from_value(value).with_context(|| {
-                    format!("failed to parse safetensors tensor metadata for {name}")
-                })?;
-            tensors.insert(name, tensor);
-        }
-        Ok(Self { tensors })
-    }
-
-    fn tensor_bytes(name: &str, tensor: &SafetensorsHeaderTensor) -> Result<usize> {
-        let tensor_bytes = tensor
-            .data_offsets
-            .1
-            .checked_sub(tensor.data_offsets.0)
-            .with_context(|| format!("invalid safetensors data offsets for tensor {name}"))?;
-        let expected_bytes = tensor
-            .shape
-            .iter()
-            .try_fold(1usize, |acc, dim| acc.checked_mul(*dim))
-            .and_then(|elements| elements.checked_mul(tensor.dtype.size()))
-            .with_context(|| format!("safetensors tensor shape overflows for {name}"))?;
-        if expected_bytes != tensor_bytes {
-            anyhow::bail!(
-                "safetensors tensor {name} reports {tensor_bytes} bytes but shape/dtype imply {expected_bytes}"
-            );
-        }
-        Ok(tensor_bytes)
-    }
-
-    /// Whether the transformer weights are stored as float8.
-    ///
-    /// Probes the same two block tensors the old mmap-based check loaded, but
-    /// from header metadata — no 27 GB mapping just to read a dtype.
-    fn transformer_is_fp8(&self) -> bool {
-        for key in [
-            "transformer_blocks.1.attn1.to_q.weight",
-            "transformer_blocks.1.ff.net.0.proj.weight",
-        ] {
-            let prefixed = format!("model.diffusion_model.{key}");
-            if let Some(tensor) = self
-                .tensors
-                .get(&prefixed)
-                .or_else(|| self.tensors.get(key))
-            {
-                return tensor.dtype == safetensors::Dtype::F8_E4M3;
-            }
-        }
-        false
-    }
-
-    fn transformer_weight_sizes(&self, num_layers: usize) -> Result<Ltx2TransformerWeightSizes> {
-        let mut blocks = vec![0usize; num_layers];
-        let mut non_block_bytes = 0u64;
-        let mut adaln_dim = None;
-        for (name, tensor) in &self.tensors {
-            if ltx2_tensor_is_non_transformer(name) {
-                continue;
-            }
-            let tensor_bytes = Self::tensor_bytes(name, tensor)?;
-            let remapped = remap_ltx2_transformer_key(name);
-            // The video branch's own modulation table. `audio_adaln_single`
-            // and the `av_ca_*` gates share the suffix, so match the exact key
-            // rather than a contains().
-            if remapped.ends_with("adaln_single.linear.weight")
-                && !remapped.contains("audio")
-                && !remapped.contains("av_ca_")
-            {
-                adaln_dim = tensor.shape.first().map(|dim| *dim as u64);
-            }
-            match ltx2_transformer_block_index(&remapped) {
-                Some(index) => {
-                    if let Some(size) = blocks.get_mut(index) {
-                        *size = size.saturating_add(tensor_bytes);
-                    }
-                }
-                None => non_block_bytes = non_block_bytes.saturating_add(tensor_bytes as u64),
-            }
-        }
-        Ok(Ltx2TransformerWeightSizes {
-            blocks,
-            non_block_bytes,
-            adaln_dim,
-        })
-    }
-}
-
-/// Read-and-size in one call. The load path holds a
-/// [`Ltx2CheckpointHeader`] and reuses it for every predicate, so this exists
-/// for tests that only care about the sizing result.
+/// Read-and-size in one call for tests that only care about the sizing
+/// result; the load path reads the index once and reuses it.
 #[cfg(test)]
 fn ltx2_transformer_block_sizes_from_safetensors(
     path: &Path,
     num_layers: usize,
+    compute_dtype: DType,
 ) -> Result<Ltx2TransformerWeightSizes> {
-    Ltx2CheckpointHeader::read(path)?.transformer_weight_sizes(num_layers)
+    let index = Ltx2TransformerWeightIndex::read(path)?;
+    ltx2_transformer_weight_sizes(
+        &index,
+        num_layers,
+        compute_dtype,
+        Ltx2ResidentWeightForm::Widened,
+    )
 }
 
 fn denoised_from_velocity(sample: &Tensor, velocity: &Tensor, sigma: f32) -> Result<Tensor> {
@@ -8031,10 +8129,6 @@ fn ltx_debug_alt_prompt() -> Option<String> {
     crate::runtime_env::value("MOLD_LTX_DEBUG_ALT_PROMPT")
         .map(|prompt| prompt.trim().to_string())
         .filter(|prompt| !prompt.is_empty())
-}
-
-fn ltx_debug_disable_audio_branch_enabled() -> bool {
-    crate::runtime_env::value("MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH").is_some()
 }
 
 fn ltx_debug_disable_cross_attention_adaln_enabled() -> bool {
@@ -8450,6 +8544,7 @@ mod tests {
     use crate::ltx2::model::VideoLatentShape;
     use crate::ltx2::model::VideoPixelShape;
     use crate::ltx2::plan::{Ltx2GeneratePlan, PipelineKind};
+    use mold_core::ltx2_weight_index::Ltx2TransformerWeightIndex;
 
     /// `[1, 3, frames, 2, 2]` CPU tensor whose every sample in frame `f` is
     /// `values[f]`, so a written EXR identifies which decoded frame it came
@@ -8582,6 +8677,7 @@ mod tests {
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -9669,16 +9765,76 @@ mod tests {
             !events.iter().any(|event| matches!(
                 event,
                 ProgressEvent::PhaseDone {
-                    phase: ProgressPhase::Vae,
+                    phase: ProgressPhase::Vae
+                        | ProgressPhase::Upscale
+                        | ProgressPhase::AudioDecode
+                        | ProgressPhase::Mux,
                     ..
                 }
             )),
-            "placeholder rendering must not invent a VAE timing sample"
+            "placeholder rendering must not invent decode, upscale, audio, or mux timings"
         );
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
         assert!(rendered.has_audio);
         assert_eq!(rendered.audio_sample_rate, Some(48_000));
         assert_eq!(rendered.audio_channels, Some(2));
+    }
+
+    /// The stamp is the device's route, narrowed by the dispatcher's own
+    /// answer — never a `cfg!` guess. CPU is the F32 tier on every build; a
+    /// CUDA device reports the math dispatcher under the default policy; and
+    /// the synthetic placeholder path, which runs no transformer, stamps
+    /// nothing rather than inventing a route.
+    #[test]
+    fn attention_path_follows_the_device_and_the_effective_backend() {
+        use super::provenance;
+        assert_eq!(
+            super::ltx2_attention_path(&candle_core::Device::Cpu, DType::F32, 128),
+            provenance::ATTENTION_PATH_F32_CHUNKED
+        );
+        #[cfg(feature = "cuda")]
+        if let Ok(device) = candle_core::Device::new_cuda(0) {
+            let expected = if super::super::model::video_transformer::ltx2_attention_f32_forced() {
+                provenance::ATTENTION_PATH_F32_CHUNKED
+            } else if crate::attention::effective_backend(&device, DType::BF16, 128)
+                == crate::attention::AttentionBackend::Flash
+            {
+                provenance::ATTENTION_PATH_BF16_FLASH
+            } else {
+                provenance::ATTENTION_PATH_BF16_MATH
+            };
+            assert_eq!(
+                super::ltx2_attention_path(&device, DType::BF16, 128),
+                expected
+            );
+            // A head dim the kernel refuses can only ever be the math path.
+            assert_ne!(
+                super::ltx2_attention_path(&device, DType::BF16, 100),
+                provenance::ATTENTION_PATH_BF16_FLASH
+            );
+        }
+        #[cfg(feature = "metal")]
+        if let Ok(device) = candle_core::Device::new_metal(0) {
+            assert_eq!(
+                super::ltx2_attention_path(&device, DType::BF16, 128),
+                provenance::ATTENTION_PATH_METAL_SDPA
+            );
+        }
+
+        let req = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
+        let preset = preset_for_model(&req.model).unwrap();
+        let plan = build_plan(&req, preset, conditioning);
+        let mut session = runtime_session();
+        let prepared = session.prepare(&plan).unwrap();
+        let rendered = session
+            .render_native_video(&plan, &prepared, None, None)
+            .unwrap();
+        assert!(
+            rendered.attention_path.is_none(),
+            "placeholder rendering must not invent an attention path"
+        );
     }
 
     #[test]
@@ -10365,9 +10521,15 @@ mod tests {
         );
         serialize_to_file(&tensors, &None, &path).unwrap();
 
-        let sizes = super::ltx2_transformer_block_sizes_from_safetensors(&path, 3).unwrap();
+        let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
+        let sizes =
+            super::ltx2_transformer_block_sizes_from_safetensors(&path, 3, DType::F32).unwrap();
 
-        assert_eq!(sizes.blocks, vec![16, 20, 0]);
+        assert_eq!(index.block_bytes_at_rest(), vec![16, 20]);
+        // Resident bytes are priced at the compute dtype: block 1's F16
+        // tensor widens to F32 on a CPU device (6 × 4 + 2 × 4).
+        assert_eq!(sizes.blocks, vec![16, 32, 0]);
+        assert_eq!(sizes.transient_bytes, 0);
     }
 
     /// Everything under the transformer that isn't a block — `patchify_proj`,
@@ -10404,7 +10566,8 @@ mod tests {
         );
         serialize_to_file(&tensors, &None, &path).unwrap();
 
-        let sizes = super::ltx2_transformer_block_sizes_from_safetensors(&path, 1).unwrap();
+        let sizes =
+            super::ltx2_transformer_block_sizes_from_safetensors(&path, 1, DType::F32).unwrap();
 
         assert_eq!(sizes.blocks, vec![16]);
         assert_eq!(
@@ -10414,6 +10577,157 @@ mod tests {
         );
     }
 
+    /// INT8 ConvRot is priced at the BF16 size the loader actually
+    /// materializes on the device — the raw I8 span is exactly half of it,
+    /// which is how the 2.5 int8-conv pack was under-counted by 2×. The
+    /// figures come from the golden 2.5 distilled int8-convrot header
+    /// (`crates/mold-core/testdata/ltx25`): blocks 0 and 47 are complete,
+    /// 1..46 were cut, and the AdaLN width is the exact video key, not the
+    /// `prompt_adaln_single` look-alike.
+    #[test]
+    fn ltx2_int8_convrot_blocks_are_sized_widened_from_the_shared_index() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mold-core/testdata/ltx25/distilled-int8-convrot.header.safetensors");
+        let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
+        assert_eq!(index.block_bytes_at_rest()[0], 388_065_632);
+
+        let sizes = super::ltx2_transformer_weight_sizes(
+            &index,
+            48,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Widened,
+        )
+        .unwrap();
+
+        assert_eq!(sizes.blocks.len(), 48);
+        assert!(!sizes.int8_packed);
+        assert_eq!(sizes.blocks[0], 773_349_760);
+        assert_eq!(sizes.blocks[47], 773_349_760);
+        assert_eq!(sizes.blocks[1], 0);
+        assert_eq!(sizes.non_block_bytes, 4_887_262_720);
+        assert_eq!(sizes.adaln_dim, Some(36_864));
+        assert_eq!(sizes.transient_bytes, 134_217_728);
+    }
+
+    /// On CUDA the ConvRot blocks stay packed (`LtxLinear::ConvRotPacked`):
+    /// a resident block costs its at-rest bytes, roughly half the widened
+    /// figure, and the sizes flag the token-scaled W8A8 workspace.
+    #[test]
+    fn ltx2_int8_convrot_blocks_are_sized_packed_on_cuda() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mold-core/testdata/ltx25/distilled-int8-convrot.header.safetensors");
+        let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
+        let packed = super::ltx2_transformer_weight_sizes(
+            &index,
+            48,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Packed,
+        )
+        .unwrap();
+        let widened = super::ltx2_transformer_weight_sizes(
+            &index,
+            48,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Widened,
+        )
+        .unwrap();
+
+        assert!(packed.int8_packed);
+        assert_eq!(
+            packed.blocks[0] as u64,
+            index.block_bytes_packed(2)[0],
+            "packed residency prices the at-rest form"
+        );
+        assert!(
+            (packed.blocks[0] as f64) < 0.55 * widened.blocks[0] as f64,
+            "packed ({}) must be roughly half of widened ({})",
+            packed.blocks[0],
+            widened.blocks[0]
+        );
+        // Non-block weights widen on every backend (the quantized ones are
+        // the prompt encoder's connectors).
+        assert_eq!(packed.non_block_bytes, widened.non_block_bytes);
+        assert_eq!(packed.transient_bytes, widened.transient_bytes);
+    }
+
+    /// The adaptive plan reserves the per-forward transient beside the fixed
+    /// weights, and the W8A8 workspace beside the activations — packed
+    /// ConvRot only.
+    #[test]
+    fn ltx2_adaptive_plan_reserves_transient_and_w8a8_workspace() {
+        let stage = super::Ltx2StageShape {
+            width: 1216,
+            height: 704,
+            frames: 121,
+            conditioned: false,
+        };
+        let weights = |int8_packed| super::Ltx2TransformerWeightSizes {
+            blocks: vec![400_000_000; 4],
+            non_block_bytes: 1_000_000_000,
+            adaln_dim: Some(36_864),
+            transient_bytes: 134_217_728,
+            int8_packed,
+        };
+        let plan = |int8_packed| {
+            super::ltx2_adaptive_transformer_plan(
+                &ltx2_plan_at(1216, 704, 121),
+                stage,
+                &weights(int8_packed),
+                24_000_000_000,
+            )
+        };
+        let dense = plan(false);
+        let packed = plan(true);
+        assert_eq!(
+            dense.fixed_resident_bytes,
+            1_000_000_000 + 134_217_728,
+            "transient is reserved with the fixed weights"
+        );
+        let workspace = mold_core::ltx2_weight_index::ltx2_int8_w8a8_workspace_bytes(
+            crate::device::ltx2_token_count(1216, 704, 121),
+        );
+        assert_eq!(
+            packed.reserved_bytes(),
+            dense.reserved_bytes() + workspace,
+            "packed ConvRot additionally reserves the W8A8 forward workspace"
+        );
+    }
+
+    /// GGUF blocks stay at their packed ggml size; NVFP4 keeps refusing so it
+    /// stays on the streaming path it always took.
+    #[test]
+    fn ltx2_gguf_blocks_are_sized_packed_and_nvfp4_stays_unmodelled() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mold-core/testdata/ltx25/distilled-q4-k-m.header.gguf");
+        let index = Ltx2TransformerWeightIndex::read(&path).unwrap();
+        let sizes = super::ltx2_transformer_weight_sizes(
+            &index,
+            48,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Packed,
+        )
+        .unwrap();
+        assert_eq!(index.block_bytes_at_rest()[0], 249_582_336);
+        assert_eq!(sizes.blocks[0], 249_164_160);
+        assert_eq!(sizes.blocks.iter().sum::<usize>(), 12_603_951_104);
+        assert_eq!(sizes.adaln_dim, Some(36_864));
+        assert_eq!(sizes.transient_bytes, 402_653_184);
+        assert!(!super::ltx2_checkpoint_is_fp8(
+            &ltx2_plan_at(512, 512, 9),
+            Some(&index)
+        ));
+
+        let nvfp4 = br#"{"model.diffusion_model.transformer_blocks.0.attn1.to_q.weight":{"dtype":"U8","shape":[4096,2048],"data_offsets":[0,8388608]},"model.diffusion_model.transformer_blocks.0.attn1.to_q.weight_scale_2":{"dtype":"F32","shape":[],"data_offsets":[8388608,8388612]}}"#;
+        let index = Ltx2TransformerWeightIndex::from_safetensors_header(nvfp4).unwrap();
+        assert!(super::ltx2_transformer_weight_sizes(
+            &index,
+            1,
+            DType::BF16,
+            mold_core::ltx2_weight_index::Ltx2ResidentWeightForm::Widened,
+        )
+        .is_err());
+    }
+
     /// The residency planner must reserve those non-block weights instead of
     /// allocating them after a plan that already filled the card.
     #[test]
@@ -10421,9 +10735,11 @@ mod tests {
         let plan = ltx2_plan_at(1024, 1024, 97);
         let stage = stage_shape(&plan, 1024, 1024, 97);
         let weights = super::Ltx2TransformerWeightSizes {
+            int8_packed: false,
             blocks: ltx2_19b_fp8_blocks(),
             non_block_bytes: 2_107_091_456,
             adaln_dim: Some(24_576),
+            transient_bytes: 0,
         };
         const FREE_VRAM: u64 = 25_339_395_072;
 
@@ -10483,9 +10799,11 @@ mod tests {
     fn ltx2_grant_produces_fewer_resident_blocks_than_free_vram() {
         const FREE_VRAM: u64 = 25_339_395_072;
         let weights = super::Ltx2TransformerWeightSizes {
+            int8_packed: false,
             blocks: ltx2_19b_fp8_blocks(),
             non_block_bytes: 2_107_091_456,
             adaln_dim: Some(24_576),
+            transient_bytes: 0,
         };
         let ungranted = ltx2_plan_at(1024, 1024, 97);
         let stage = stage_shape(&ungranted, 1024, 1024, 97);
@@ -10655,12 +10973,16 @@ mod tests {
             super::ltx2_video_activation_budget(stage_shape(&plan, 1024, 1024, frames), None)
         };
 
-        // 1 pixel frame → 1 latent frame; 9 → 2; 97 → 13.
-        let one_latent_frame = budget(9) - budget(1);
+        // 9 pixel frames → 2 latent frames; 17 → 3; 97 → 13. The spans are
+        // measured from 2 latent frames up because the attention-tile term
+        // (#735) is deliberately piecewise: at one latent frame (1,024
+        // tokens) the dispatcher takes the whole score matrix, past that it
+        // chunks the query axis, so only the chunked regime is linear.
+        let one_latent_frame = budget(17) - budget(9);
         assert!(one_latent_frame > 0);
         assert_eq!(
-            budget(97) - budget(1),
-            one_latent_frame * 12,
+            budget(97) - budget(9),
+            one_latent_frame * 11,
             "97 pixel frames produce 13 simultaneously live latent frames"
         );
     }
@@ -10682,9 +11004,33 @@ mod tests {
 
     #[test]
     fn ltx2_convrot_forces_streaming_for_reconstructed_bf16_weights() {
-        assert!(super::ltx2_effective_force_streaming(false, true));
-        assert!(super::ltx2_effective_force_streaming(true, false));
-        assert!(!super::ltx2_effective_force_streaming(false, false));
+        // ConvRot no longer forces streaming on CUDA — packed residency
+        // exists there — but still does on Metal and CPU, which widen.
+        assert!(!super::ltx2_effective_force_streaming(
+            false,
+            true,
+            super::Ltx2Accelerator::Cuda
+        ));
+        assert!(super::ltx2_effective_force_streaming(
+            false,
+            true,
+            super::Ltx2Accelerator::Metal
+        ));
+        assert!(super::ltx2_effective_force_streaming(
+            false,
+            true,
+            super::Ltx2Accelerator::Other
+        ));
+        assert!(super::ltx2_effective_force_streaming(
+            true,
+            false,
+            super::Ltx2Accelerator::Cuda
+        ));
+        assert!(!super::ltx2_effective_force_streaming(
+            false,
+            false,
+            super::Ltx2Accelerator::Cuda
+        ));
     }
 
     #[test]
@@ -11990,9 +12336,9 @@ mod tests {
     fn lip_dub_exports_the_stage_one_audio_not_the_frozen_stage_two_copy() {
         let render = runtime_function_source("fn render_real_two_stage_av(");
         assert!(render.contains("} else if stage2_audio_is_frozen {"));
-        assert!(render.contains(
-            "maybe_render_native_audio_track(plan, stage1_audio_latents.as_ref(), device, dtype)?"
-        ));
+        // rustfmt wraps the widened call, so the pin is the argument that
+        // distinguishes the frozen arm: stage 1's latents, not stage 2's.
+        assert!(render.contains("stage1_audio_latents.as_ref(),"));
     }
 
     /// The deviation that is easiest to miss because generic IC-LoRA does the
@@ -13128,6 +13474,47 @@ mod tests {
             runtime_function_source("fn log_ltx2_phase_vram_result(")
                 .contains("ltx2_residency_summary("),
             "the OOM branch must attach the residency plan"
+        );
+    }
+
+    /// #1398's learner coverage: the latent upsamplers, the audio decode,
+    /// and the container mux each report their typed phase, so
+    /// `ewma_upscale_ms` / `ewma_audio_decode_ms` / `ewma_mux_ms` stop being
+    /// dead columns for this family. `ModelLoad` stays unemitted on purpose —
+    /// the scheduler measures cold load from the lease.
+    #[test]
+    fn ltx2_phase_events_cover_upscale_audio_decode_and_mux() {
+        assert!(
+            runtime_function_source("fn maybe_apply_temporal_upsampler(")
+                .contains("ProgressPhase::Upscale"),
+            "the temporal upsampler must report the Upscale phase"
+        );
+        for renderer in [
+            "fn render_real_distilled_av(",
+            "fn render_real_two_stage_av(",
+        ] {
+            assert!(
+                runtime_function_source(renderer).contains("ProgressPhase::Upscale"),
+                "{renderer} must report its spatial upsample as the Upscale phase"
+            );
+        }
+        assert!(
+            runtime_function_source("fn render_native_audio_track(")
+                .contains("ProgressPhase::AudioDecode"),
+            "the audio VAE + vocoder must report the AudioDecode phase"
+        );
+        let pipeline_source = include_str!("pipeline.rs");
+        assert!(
+            pipeline_source.contains("ProgressPhase::Mux"),
+            "the AAC mux must report the Mux phase"
+        );
+        // ModelLoad stays unemitted: the scheduler measures cold load from
+        // the lease (`gpu_worker.rs:105` discards the event), so wiring it
+        // here would double-count. Pinned on pipeline.rs only — a whole-file
+        // pin on runtime.rs would match this very test's own source.
+        assert!(
+            !pipeline_source.contains("ProgressPhase::ModelLoad"),
+            "LTX-2 must never emit ModelLoad; cold load is measured from the lease"
         );
     }
 

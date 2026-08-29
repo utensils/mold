@@ -52,8 +52,8 @@ pub const H3_FLASH_ATTN_PACKAGE_VERSION: &str = "0.11.0";
 /// record naming a payload that was not compiled is worse than none.
 pub const H3_FLASH_ATTN_SOURCE: &str = concat!(
     "git+https://github.com/utensils/candle.git",
-    "?rev=ad5fd432974913887f17b25c8ee863cfc54eb67c",
-    "#ad5fd432974913887f17b25c8ee863cfc54eb67c"
+    "?rev=5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4",
+    "#5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4"
 );
 pub const H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY: (u16, u16) = (8, 9);
 /// v2 (#1399): the archive-checksum field became the source-identity field.
@@ -88,8 +88,13 @@ const PLAN_SCHEMA_VERSION: u32 = 2;
 ///
 /// Exactly one marker is compiled from the same Cargo feature gates that make
 /// the H3 DiT and global FlashAttention code reachable. Published binaries
-/// deliberately retain this value and their verifier requires the omitted /
-/// omitted state; absence of evidence therefore fails closed.
+/// deliberately retain this value; absence of evidence fails closed. The
+/// verifier accepts `omitted:omitted` (ordinary builds),
+/// `compiled:omitted` (a public H3 build without the global dispatch), and —
+/// since the sm89 `h3-cuda` edge implies `flash-attn` (#735) —
+/// `compiled:compiled`, always beside the H3 kernel claim. Standalone
+/// `omitted:compiled` remains forbidden in published artifacts, and the
+/// default attention backend stays `Math` in every build (#736).
 pub const fn h3_attention_release_provenance_marker() -> &'static str {
     H3_ATTENTION_RELEASE_PROVENANCE_MARKER
 }

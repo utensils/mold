@@ -175,6 +175,9 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            video_only: None,
+            attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,

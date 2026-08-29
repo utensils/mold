@@ -1709,7 +1709,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn web_sequence_freezes_installed_ltx23_catalog_model_without_mutating_live_config() {
+        let _env = crate::test_support::hermetic_store_env();
         const MODEL: &str = "cv:3143864";
 
         let home = tempfile::tempdir().unwrap();
@@ -1737,13 +1739,16 @@ mod tests {
             references: vec![],
         });
 
-        let (status, _headers, Json(created)) = with_mold_home(home.path(), || {
-            futures::executor::block_on(create_chain_job(
-                State(state.clone()),
-                HeaderMap::new(),
-                Json(request),
-            ))
-        })
+        // `with_mold_home` takes the same process-wide env lock the hermetic
+        // guard above already holds (a non-reentrant mutex), so set MOLD_HOME
+        // directly under the held guard — its drop restores the original
+        // environment, panic included.
+        std::env::set_var("MOLD_HOME", home.path());
+        let (status, _headers, Json(created)) = futures::executor::block_on(create_chain_job(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(request),
+        ))
         .unwrap();
 
         assert_eq!(status, StatusCode::ACCEPTED);

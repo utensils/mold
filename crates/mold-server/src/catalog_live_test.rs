@@ -157,7 +157,7 @@ async fn get(router: axum::Router, uri: &str) -> (StatusCode, String) {
     let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
         .await
         .unwrap();
     (status, String::from_utf8(bytes.to_vec()).unwrap())
@@ -171,7 +171,7 @@ async fn post(router: axum::Router, uri: &str) -> (StatusCode, String) {
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
         .await
         .unwrap();
     (status, String::from_utf8(bytes.to_vec()).unwrap())
@@ -1379,7 +1379,9 @@ async fn live_search_marks_installed_when_sidecar_and_file_present() {
 /// can stop rendering opaque `cv:<id>` slugs. Manifest rows stay
 /// untouched — no `display_name` key at all.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn list_models_carries_display_name_for_catalog_rows() {
+    let _env = crate::test_support::hermetic_store_env();
     let (state, _server, tmp) = build_state().await;
 
     let ckpt_dir = tmp.path().join("cv-1759168");

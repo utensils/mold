@@ -2283,6 +2283,7 @@ fn build_generate_request(
     }
 
     Ok(GenerateRequest {
+        video_only: None,
         collection: None,
         tags: None,
         title: None,
@@ -4457,6 +4458,7 @@ mod tests {
     async fn async_job_registry_tracks_completed_image() {
         let jobs = AsyncJobRegistry::default();
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -4584,6 +4586,9 @@ mod tests {
         GalleryImage {
             filename: filename.into(),
             metadata: mold_core::OutputMetadata {
+                video_only: None,
+                attention_path: None,
+                int8_arm: None,
                 collection: None,
                 tags: None,
                 title: None,

@@ -328,7 +328,8 @@ impl ModelManifest {
 /// a family so that full-precision appears first and smaller quantizations
 /// appear last.
 ///
-/// Ordering: bf16 (0) > fp16 (1) > fp8 (2) > q8 (3) > q6 (4) > q5 (5) > q4 (6) > q3 (7) > q2 (8)
+/// Ordering: bf16 (0) > fp16 (1) > fp8 (2) > q8 (3) > q6 (4) > q5 (5) >
+/// q4/q4-k-s (6) > q3/q3-k-s (7) > q2 (8).
 ///
 /// Unknown tags get rank 100 (sorted last).
 pub fn variant_quality_rank(model_name: &str) -> u32 {
@@ -340,8 +341,8 @@ pub fn variant_quality_rank(model_name: &str) -> u32 {
         "q8" => 3,
         "q6" => 4,
         "q5" => 5,
-        "q4" => 6,
-        "q3" => 7,
+        "q4" | "q4-k-s" => 6,
+        "q3" | "q3-k-s" => 7,
         "q2" => 8,
         _ => 100,
     }
@@ -7849,6 +7850,19 @@ mod tests {
     }
 
     #[test]
+    fn variant_quality_rank_includes_explicit_k_s_tags() {
+        use super::variant_quality_rank;
+        assert_eq!(
+            variant_quality_rank("ltx-2.5-22b-distilled:q4-k-s"),
+            variant_quality_rank("ltx-2.5-22b-distilled:q4")
+        );
+        assert_eq!(
+            variant_quality_rank("ltx-2.5-22b-distilled:q3-k-s"),
+            variant_quality_rank("ltx-2.5-22b-distilled:q3")
+        );
+    }
+
+    #[test]
     fn model_base_name_extracts_prefix() {
         use super::model_base_name;
         assert_eq!(model_base_name("flux-dev:q4"), "flux-dev");
@@ -7893,7 +7907,10 @@ mod tests {
         // LTX 2.5 contract/runtime bump (#1372/#1373): six split-pack
         // manifests. Dev/Distilled each expose compact INT8 and full BF16
         // Conv-VAE runtimes; the two diffusion-VAE contracts stay hidden.
-        assert_eq!(known_manifests().len(), 170);
+        // LTX 2.5 GGUF bump (#1414): +7 Abiray Distilled transformer tiers
+        // (:q3-k-s :q3 :q4-k-s :q4 :q5 :q6 :q8) on the shared int8-conv
+        // companion graph — visible downloads, runtime still gated.
+        assert_eq!(known_manifests().len(), 177);
     }
 
     #[test]

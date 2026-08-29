@@ -884,6 +884,7 @@ impl Ltx2Engine {
                     let mp4_path = work_dir.join("native-video.mp4");
                     fs::write(&mp4_path, &video_only)?;
                     if let Some(audio_track) = rendered.audio_track.as_ref() {
+                        let mux_start = Instant::now();
                         let muxed_path = work_dir.join("native-video-audio.mp4");
                         crate::av_media::attach_aac_track_from_f32_interleaved(
                             &mp4_path,
@@ -892,7 +893,14 @@ impl Ltx2Engine {
                             audio_track.sample_rate,
                             audio_track.channels,
                         )?;
-                        fs::read(muxed_path)?
+                        let muxed = fs::read(muxed_path)?;
+                        super::runtime::emit_phase_done(
+                            self.on_progress.as_ref(),
+                            crate::progress::ProgressPhase::Mux,
+                            "Muxing audio track",
+                            mux_start.elapsed(),
+                        );
+                        muxed
                     } else {
                         video_only
                     }
@@ -1054,6 +1062,8 @@ impl Ltx2Engine {
         self.checkpoint()?;
 
         let source_len = source_frames.len();
+        let outcome_attention_path = outcome.attention_path.clone();
+        let outcome_int8_arm = outcome.int8_arm.clone();
         let frames = stitch_extend_frames(source_frames, &outcome.frames, overlap)?;
         let appended = frames.len() - source_len;
 
@@ -1067,6 +1077,8 @@ impl Ltx2Engine {
             has_audio: false,
             audio_sample_rate: None,
             audio_channels: None,
+            attention_path: None,
+            int8_arm: None,
         };
         let (output_bytes, thumbnail_bytes, gif_preview, out_probe) =
             self.encode_native_video(req, &plan, &rendered, work_dir.path())?;
@@ -1085,6 +1097,9 @@ impl Ltx2Engine {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                video_only: (!plan.execution_graph.run_audio_branch).then_some(true),
+                attention_path: outcome_attention_path,
+                int8_arm: outcome_int8_arm,
                 data: output_bytes,
                 format: req.resolved_output_format(),
                 width: plan.width,
@@ -1263,6 +1278,9 @@ impl Ltx2Engine {
             audio: None,
             images: vec![],
             video: Some(VideoData {
+                video_only: (!plan.execution_graph.run_audio_branch).then_some(true),
+                attention_path: rendered.attention_path.map(str::to_string),
+                int8_arm: rendered.int8_arm.map(str::to_string),
                 data: output_bytes,
                 format: req.resolved_output_format(),
                 width,
@@ -1536,6 +1554,8 @@ impl Ltx2Engine {
         let frames = rendered.frames;
         let audio = rendered.audio_track;
         let hdr_frames_written = rendered.hdr_frames_written;
+        let attention_path = rendered.attention_path.map(str::to_string);
+        let int8_arm = rendered.int8_arm.map(str::to_string);
         let tail_pixel_frames = motion_tail_pixel_frames as usize;
         if frames.len() < tail_pixel_frames {
             bail!(
@@ -1560,6 +1580,8 @@ impl Ltx2Engine {
             audio,
             hdr_frames_written,
             generation_time_ms,
+            attention_path,
+            int8_arm,
         })
     }
 }
@@ -2142,6 +2164,7 @@ mod tests {
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -2471,6 +2494,7 @@ mod tests {
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -2550,6 +2574,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,
@@ -2802,6 +2827,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            video_only: None,
             collection: None,
             tags: None,
             title: None,

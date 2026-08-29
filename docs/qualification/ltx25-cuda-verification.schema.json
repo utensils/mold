@@ -1,0 +1,934 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utensils.io/mold/schemas/ltx25-cuda-verification-v1.json",
+  "title": "Mold LTX-2.5 CUDA verification report",
+  "description": "One sealed report per qualification campaign (#1398, #1414). Every row is one scripts/fixtures/ltx25-cuda-matrix.json entry; passed rows are bound to retained media, a Library row, and hashed logs; blocked rows carry a machine-readable reason; not_run rows say why they were never attempted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "captured_at",
+    "source_commit",
+    "source_tree_state",
+    "mold_home",
+    "models_dir",
+    "backend_scope",
+    "matrix",
+    "host",
+    "assets",
+    "references",
+    "server_profiles",
+    "rows",
+    "comfy_reference",
+    "gates",
+    "summary",
+    "qualification_status",
+    "preservation"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "mold.ltx25.cuda.verification.v1"
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "source_tree_state": {
+      "enum": [
+        "clean",
+        "contract_test"
+      ]
+    },
+    "mold_home": {
+      "type": "string",
+      "minLength": 1
+    },
+    "models_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "backend_scope": {
+      "const": "cuda"
+    },
+    "matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "schema_version",
+        "rows"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "schema_version": {
+          "const": "mold.ltx25.cuda.matrix.v1"
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "kernel",
+        "arch",
+        "hostname",
+        "gpus",
+        "nvcc",
+        "driver_version",
+        "host_ram_bytes",
+        "zfs_arc_max_bytes",
+        "build"
+      ],
+      "properties": {
+        "os": {
+          "const": "Linux"
+        },
+        "kernel": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arch": {
+          "const": "x86_64"
+        },
+        "hostname": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gpus": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/gpu"
+          }
+        },
+        "nvcc": {
+          "type": "string",
+          "minLength": 1
+        },
+        "driver_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "host_ram_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "zfs_arc_max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "binary_path",
+            "binary_sha256",
+            "version",
+            "features",
+            "candle_rev",
+            "cargo_lock_candle_rev",
+            "cargo_command",
+            "git_sha"
+          ],
+          "properties": {
+            "binary_path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "binary_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "features": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "candle_rev": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "cargo_lock_candle_rev": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "cargo_command": {
+              "type": "string",
+              "minLength": 1
+            },
+            "git_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          }
+        }
+      }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "manifest",
+          "component",
+          "storage_relative_path",
+          "path",
+          "present",
+          "bytes",
+          "expected_bytes",
+          "expected_sha256",
+          "marker_sha256",
+          "actual_sha256",
+          "identity_proof"
+        ],
+        "properties": {
+          "manifest": {
+            "type": "string",
+            "minLength": 1
+          },
+          "component": {
+            "type": "string",
+            "minLength": 1
+          },
+          "storage_relative_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "expected_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expected_sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "marker_sha256": {
+            "$ref": "#/$defs/nullable_sha256"
+          },
+          "actual_sha256": {
+            "$ref": "#/$defs/nullable_sha256"
+          },
+          "identity_proof": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "references": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "path",
+          "commit",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "status": {
+            "const": "pinned_clean"
+          }
+        }
+      }
+    },
+    "server_profiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "env",
+          "rows_attempted"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "env": {
+            "type": "object"
+          },
+          "rows_attempted": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "rows": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/row"
+      }
+    },
+    "comfy_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "int8",
+        "gguf_q4"
+      ],
+      "properties": {
+        "int8": {
+          "$ref": "#/$defs/comfy_reference"
+        },
+        "gguf_q4": {
+          "$ref": "#/$defs/comfy_reference"
+        }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "status",
+          "exit_code",
+          "seconds",
+          "command",
+          "log_path",
+          "log_sha256"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "skipped_contract_test"
+            ]
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "log_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "log_sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "failed",
+        "blocked",
+        "not_run"
+      ],
+      "properties": {
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blocked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_run": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "qualification_status": {
+      "enum": [
+        "passed",
+        "failed",
+        "incomplete",
+        "not_qualified_contract_test"
+      ]
+    },
+    "preservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "downloaded_models_deleted",
+        "rendered_media_deleted"
+      ],
+      "properties": {
+        "downloaded_models_deleted": {
+          "const": false
+        },
+        "rendered_media_deleted": {
+          "const": false
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullable_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uuid",
+        "name",
+        "compute_capability",
+        "driver_version",
+        "memory_total_mib"
+      ],
+      "properties": {
+        "uuid": {
+          "type": "string",
+          "pattern": "^GPU-[0-9A-Fa-f-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compute_capability": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$"
+        },
+        "driver_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "memory_total_mib": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "provenance_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "line",
+        "scope"
+      ],
+      "properties": {
+        "line": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope": {
+          "enum": [
+            "slice",
+            "process"
+          ]
+        }
+      }
+    },
+    "media": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "format",
+        "sha256",
+        "bytes",
+        "ffprobe_path",
+        "ffprobe_sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "enum": [
+            "apng",
+            "mp4",
+            "wav"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ffprobe_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ffprobe_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "model",
+        "case",
+        "profile",
+        "kind",
+        "status",
+        "manifest_path",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "case": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "render",
+            "perf",
+            "cancellation",
+            "fatal_cuda",
+            "deferred"
+          ]
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "not_run"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason_source": {
+          "enum": [
+            "admission",
+            "runtime_readiness",
+            "http_status",
+            "oom_envelope"
+          ]
+        },
+        "manifest_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "stdout_log_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stdout_log_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "server_log_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "server_log_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "media": {
+          "$ref": "#/$defs/media"
+        },
+        "generation": {
+          "type": "object"
+        },
+        "provenance_expected": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "provenance_observed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/provenance_observation"
+          }
+        },
+        "metadata_expected": {
+          "type": "object"
+        },
+        "gpu": {
+          "type": "object"
+        },
+        "host": {
+          "type": "object"
+        },
+        "generator_commit": {
+          "type": "string",
+          "minLength": 7
+        },
+        "metal_ab": {
+          "description": "Metal reference A/B for the int8-conv smoke rows: geometry parity plus per-frame PSNR/SSIM against halcyon's sealed render. Recorded provenance only; null when no reference root is available.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "reference_file",
+            "reference_sha256",
+            "candidate_sha256",
+            "parity",
+            "frames_compared",
+            "psnr_db",
+            "ssim",
+            "identical",
+            "method",
+            "summary_path",
+            "summary_sha256"
+          ],
+          "properties": {
+            "reference_file": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reference_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "candidate_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "parity": {
+              "type": "object"
+            },
+            "frames_compared": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "psnr_db": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "ssim": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "identical": {
+              "type": "boolean"
+            },
+            "method": {
+              "type": "string",
+              "minLength": 1
+            },
+            "summary_path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "summary_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "started_at",
+              "finished_at",
+              "seconds",
+              "exit_code",
+              "command",
+              "stdout_log_path",
+              "stdout_log_sha256",
+              "server_log_path",
+              "server_log_sha256",
+              "provenance_expected",
+              "provenance_observed"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              },
+              "kind": {
+                "enum": [
+                  "render",
+                  "perf"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "media",
+              "generation",
+              "generator_commit"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason",
+              "reason_source",
+              "command",
+              "stdout_log_path",
+              "stdout_log_sha256"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason",
+              "command",
+              "exit_code",
+              "stdout_log_path",
+              "stdout_log_sha256"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "not_run"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          }
+        }
+      ]
+    },
+    "comfy_reference": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "passed",
+            "operator_deferred",
+            "not_run"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "schema_version": {
+          "const": "mold.ltx25.comfy-cuda-reference.v1"
+        },
+        "backend": {
+          "const": "CUDA"
+        },
+        "checkpoint": {
+          "enum": [
+            "distilled INT8 ConvRot",
+            "distilled GGUF Q4_K_M"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "not_run"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "manifest_path",
+              "manifest_sha256",
+              "schema_version",
+              "backend",
+              "checkpoint",
+              "video"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "operator_deferred"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "manifest_path",
+              "manifest_sha256",
+              "schema_version",
+              "backend",
+              "checkpoint",
+              "deferred"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

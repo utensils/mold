@@ -326,6 +326,9 @@ pub(crate) mod tests {
 
     pub(crate) fn test_metadata(width: u32, height: u32) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            video_only: None,
+            attention_path: None,
+            int8_arm: None,
             collection: None,
             tags: None,
             title: None,

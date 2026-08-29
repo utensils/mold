@@ -78,7 +78,8 @@ import {
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { effectiveGenerationGuidance, isWanFamily } from "@studio/lib/generationCapabilities";
-import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
+import { isAudioOnlyPipeline, stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
+import { requestVideoOnly } from "@studio/lib/videoOnly";
 import {
   effectiveGenerationRecipe,
   fixedRecipeControlOverrides,
@@ -303,6 +304,8 @@ export interface GenerateForm {
   durationPredictionSupported: boolean;
   fps: number;
   enableAudio: boolean;
+  /** LTX-2 video-only opt-in (#1037); output-changing, never a default. */
+  videoOnly: boolean;
   // LTX-2 advanced video (ltx2 only). All optional-safe: null / [] defaults so
   // a partial stored form (template snapshot) still hydrates cleanly.
   sourceVideo: PickedImage | null;
@@ -391,6 +394,7 @@ export function newGenerateForm(): GenerateForm {
     durationPredictionSupported: false,
     fps: 24,
     enableAudio: false,
+    videoOnly: false,
     sourceVideo: null,
     extendVideo: null,
     extendOverlapFrames: null,
@@ -553,6 +557,7 @@ export function applyRecipeDefaults(
   if (!recipe.capabilities.supports_audio) {
     form.enableAudio = false;
     form.audioFile = null;
+    form.videoOnly = false;
   }
   return true;
 }
@@ -739,7 +744,10 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
       form.sourceFit = coerceSourceFitForMaskless(form.sourceFit);
     }
   }
-  if (!caps.supportsAudio || m.supports_audio === false) form.enableAudio = false;
+  if (!caps.supportsAudio || m.supports_audio === false) {
+    form.enableAudio = false;
+    form.videoOnly = false;
+  }
   // Continuation is per family, not part of the LTX-2 advanced-video suite
   // (#783) — wan continues and is deliberately not an advanced-video family,
   // so clearing it with that suite would drop a staged clip on every row
@@ -1082,7 +1090,22 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
       req.frames = form.frames;
     }
     req.fps = form.fps;
-    if (caps.supportsAudio) req.enable_audio = form.enableAudio;
+    if (caps.supportsAudio) {
+      req.enable_audio = form.enableAudio;
+      // `video_only` is an LTX-2 request field (server validation refuses it
+      // elsewhere), so a flag parked from an earlier LTX-2 selection must not
+      // ride a MiniMax H3 request just because H3 also supports audio —
+      // matching the web builder's family gate.
+      if (caps.supportsAdvancedVideo) {
+        const videoOnly = requestVideoOnly(form.videoOnly, {
+          audioEnabled: form.enableAudio,
+          audioOnlyPipeline: isAudioOnlyPipeline(form.pipeline),
+          hasConditioningAudio: form.audioFile !== null,
+          isExtend: form.extendVideo !== null,
+        });
+        if (videoOnly) req.video_only = videoOnly;
+      }
+    }
   }
 
   // Continuation is per family, not part of the LTX-2 suite (#783): wan
@@ -1330,6 +1353,7 @@ export function applyMetadataToForm(
   const fps = metadata.fps ?? metadata.video_fps;
   if (fps != null) form.fps = fps;
   if (metadata.enable_audio != null) form.enableAudio = metadata.enable_audio;
+  form.videoOnly = metadata.video_only === true;
   form.pipeline = pipelineForSettingsReuse(metadata);
   form.icLoraControl = metadata.ic_lora_control ?? null;
   form.retakeRange = metadata.retake_range ?? null;
@@ -1485,6 +1509,7 @@ export function applyRequestToForm(
     form.durationPredictionSupported;
   form.fps = request.fps ?? form.fps;
   form.enableAudio = request.enable_audio ?? false;
+  form.videoOnly = request.video_only === true;
   form.audioFile = request.audio_file
     ? { filename: "Audio input", base64: request.audio_file }
     : null;

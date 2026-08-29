@@ -37,8 +37,23 @@ duration head, and spatial and temporal upscalers. `/api/models` marks a pack
 Auto and Most capable routing exclude a host that explicitly reports an
 incomplete pack.
 
-All weights are gated and downloaded from the official
-[`Lightricks/LTX-2.5`](https://huggingface.co/Lightricks/LTX-2.5) repository.
+Seven transformer-only GGUF tiers from
+[`Abiray/LTX-2.5-Distilled-GGUF`](https://huggingface.co/Abiray/LTX-2.5-Distilled-GGUF)
+are also pinned and runnable: `:q3-k-s`, `:q3` (Q3_K_M), `:q4-k-s`, `:q4`
+(Q4_K_M), `:q5`, `:q6`, and `:q8`. They reuse the official packed INT8
+Gemma 4, Conv VAE, audio VAE/vocoder, duration head, and both latent
+upscalers. The quantized weights stay compact at rest — block linears load as
+ggml `QTensor`s and dequantize per forward on CUDA by default
+(`MOLD_LTX2_QMATMUL=1` opts into candle's quantized fast path; Metal keeps
+`QMatMul`) — so adaptive residency prices the tiers at their file sizes:
+Q4_K_M's ~15.7 GB transformer sits fully resident on a 24 GB card. LoRAs
+apply as a parallel low-rank branch, never merged into the quantized weight;
+full-weight `.diff` deltas are refused with a pointer at the safetensors
+packs.
+
+Official companion weights are gated and downloaded from
+[`Lightricks/LTX-2.5`](https://huggingface.co/Lightricks/LTX-2.5). The public
+GGUF mirror does not remove the underlying LTX-2.x license obligations.
 See the [license boundary](architecture/ltx-2.5-license.md) before commercial
 use or redistribution.
 
@@ -64,6 +79,18 @@ mold run ltx-2.5-22b-distilled "a complete product reveal" \
 Surfaces show this option only when the selected host advertises both
 `supports_duration_prediction: true` and `runtime_ready: true`. Saved metadata
 and Use as prompt preserve whether duration was explicit or predicted.
+
+### Video-only rendering
+
+`--video-only` (`GenerateRequest.video_only: true`, the Advanced "Video only"
+toggle on web and desktop) skips the audio-video transformer's audio branch
+entirely, the way upstream's video-only configurator omits it
+([#1037](https://github.com/utensils/mold/issues/1037)). It is
+output-changing, so it is never inferred or defaulted, and is refused
+alongside `enable_audio: true`, conditioning audio, the text-to-audio
+pipeline, and `extend_video`. Mold Sequence's chain wire does not carry
+`video_only` yet — a sequence clip always renders with its ordinary audio
+behavior.
 
 ## Native multishot and Mold Sequence
 

@@ -385,6 +385,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ltx25_gguf_tiers_are_ordinary_runnable_identities() {
+        for identifier in [
+            crate::ltx25_manifest::DISTILLED_Q3_K_S,
+            crate::ltx25_manifest::DISTILLED_Q3,
+            crate::ltx25_manifest::DISTILLED_Q4_K_S,
+            crate::ltx25_manifest::DISTILLED_Q4,
+            crate::ltx25_manifest::DISTILLED_Q5,
+            crate::ltx25_manifest::DISTILLED_Q6,
+            crate::ltx25_manifest::DISTILLED_Q8,
+        ] {
+            assert_eq!(
+                model_acquisition(identifier, Some(crate::ltx25_manifest::FAMILY)),
+                ModelActivation::Available,
+                "{identifier}"
+            );
+            assert_eq!(
+                model_activation(identifier, Some(crate::ltx25_manifest::FAMILY)),
+                ModelActivation::Available,
+                "{identifier}"
+            );
+            require_model_activation(identifier, Some(crate::ltx25_manifest::FAMILY))
+                .expect("the native quantized runtime admits GGUF execution (#1414)");
+        }
+    }
+
+    #[test]
     #[cfg(not(feature = "h3"))]
     fn minimax_h3_aliases_and_task_variants_are_compliance_gated() {
         for identifier in [

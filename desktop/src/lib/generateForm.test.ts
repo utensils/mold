@@ -916,6 +916,17 @@ describe("buildRequest — LTX-2 advanced video", () => {
     expect(buildRequest(form).audio_file).toBeUndefined();
   });
 
+  it("keeps a parked video_only off a non-ltx2 audio family", () => {
+    // video_only is an LTX-2 request field; a flag parked from an earlier
+    // LTX-2 selection must not ride a MiniMax H3 request just because H3
+    // also advertises audio — server validation would refuse every print.
+    const form = ltx2Form();
+    form.videoOnly = true;
+    expect(buildRequest(form).video_only).toBe(true);
+    form.family = "minimax-h3";
+    expect(buildRequest(form).video_only).toBeUndefined();
+  });
+
   it("includes retake_range only when set", () => {
     const form = ltx2Form();
     expect(buildRequest(form).retake_range).toBeUndefined();

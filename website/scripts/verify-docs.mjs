@@ -251,6 +251,12 @@ const ignoredEnvVars = new Set([
   'MOLD_DIFF_BF16',
   'MOLD_DIFF_GGUF',
   'MOLD_NVFP4_PROBE_PATH',
+  // `MOLD_LTX25_GGUF_SMOKE` gates the ignored real-file GGUF smoke test
+  // behind an installed checkpoint path; `MOLD_STORE_ENV_VARS` is a Rust
+  // const NAME in mold-server's test_support (the hermetic-store guard),
+  // not an environment variable at all — the scan's regex cannot tell.
+  'MOLD_LTX25_GGUF_SMOKE',
+  'MOLD_STORE_ENV_VARS',
   // Batch transaction subprocess fixtures and their stdout marker. These are
   // compiled only for Rust tests and are not supported runtime configuration.
   'MOLD_RESERVATION_TEST',
@@ -299,6 +305,15 @@ const ignoredEnvVars = new Set([
   // Execution-plan classifier/error-display sentinels, not real settings.
   'MOLD_NOT_A_SHAPING_VARIABLE',
   'MOLD_X',
+  // LTX-2.5 CUDA qualification knobs whose names the UAT harness pins ahead
+  // of their emitters (crates/mold-inference/src/ltx2/provenance_vocabulary.rs,
+  // #1398/#1414). The cuda-core and gguf-runtime PRs ship the real readers
+  // together with their website/guide/configuration.md rows; these entries
+  // may be removed once those rows are on main (the check is one-directional,
+  // so leaving them is harmless).
+  'MOLD_LTX2_ATTN_F32',
+  'MOLD_LTX2_INT8',
+  'MOLD_LTX2_QMATMUL',
 ])
 const docsText = walk(websiteDir)
   .filter((file) => /\.(md|ts|css)$/u.test(file))
