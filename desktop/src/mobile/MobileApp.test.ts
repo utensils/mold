@@ -9811,6 +9811,7 @@ describe("MobileApp gallery", () => {
         },
       ]),
     );
+    localStorage.setItem("mold.mobile.generate-target.v1", "studio-id");
     apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
       // This machine's capability probe fails: the labels below pin that.
