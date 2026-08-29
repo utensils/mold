@@ -1089,6 +1089,30 @@ async fn hf_search_paged(
     Ok(result)
 }
 
+/// Upstream query used when a family filter has no user-entered search text.
+///
+/// Hugging Face has no structured family filter. Fetching its generic
+/// downloads-sorted window and filtering locally leaves less common families
+/// empty even though matching repositories exist beyond that window. Keep the
+/// query terms here exhaustive so every taxonomy addition must choose an
+/// upstream spelling before it can compile.
+fn hf_family_search_term(family: Family) -> &'static str {
+    match family {
+        Family::Flux => "flux.1",
+        Family::Flux2 => "flux.2",
+        Family::Sd15 => "stable-diffusion-v1",
+        Family::Sdxl => "stable-diffusion-xl",
+        Family::Sd3 => "stable-diffusion-3.5",
+        Family::ZImage => "z-image",
+        Family::LtxVideo => "ltx-video",
+        Family::Ltx2 => "ltx-2",
+        Family::Wan => "wan2",
+        Family::MinimaxH3 => "minimax-h3",
+        Family::QwenImage => "qwen-image",
+        Family::Wuerstchen => "wuerstchen",
+    }
+}
+
 /// HF `/api/models?search=…` summary row. Lean compared to the per-repo
 /// detail; `tree` is fetched lazily on download (`fetch_hf_repo`).
 #[derive(Clone, Debug, Deserialize)]
@@ -1118,13 +1142,14 @@ async fn hf_search(base: &str, opts: &LiveSearchOpts) -> Result<LiveSearchResult
     let mut url =
         reqwest::Url::parse(&format!("{base}/api/models")).expect("hf base URL must be valid");
     let trimmed_q = opts.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let upstream_search = trimmed_q.or_else(|| opts.family.map(hf_family_search_term));
     {
         let mut q = url.query_pairs_mut();
         let window = opts.page.saturating_mul(opts.page_size).clamp(1, 1000);
         q.append_pair("limit", &window.to_string());
         q.append_pair("sort", opts.sort.hf_value());
         q.append_pair("direction", "-1");
-        if let Some(query) = trimmed_q {
+        if let Some(query) = upstream_search {
             q.append_pair("search", query);
         }
         // Pin to diffusers / text-to-image / image-to-video so the search
@@ -1390,6 +1415,12 @@ pub fn family_from_hf(
         Family::QwenImage
     } else if id_lower.contains("wuerstchen") {
         Family::Wuerstchen
+    } else if id_lower.contains("stable-diffusion-3.5")
+        || id_lower.contains("stable-diffusion-3-")
+        || id_lower.contains("/sd3.5")
+        || id_lower.contains("/sd3-")
+    {
+        Family::Sd3
     } else if id_lower.contains("stable-diffusion-xl") || id_lower.contains("sdxl") {
         Family::Sdxl
     } else if id_lower.contains("stable-diffusion-v1")
@@ -1402,16 +1433,22 @@ pub fn family_from_hf(
         let mut matched: Option<Family> = None;
         for tag in tags {
             let t = tag.to_ascii_lowercase();
-            matched = match t.as_str() {
-                "flux" => Some(Family::Flux),
-                "flux.2" | "flux2" => Some(Family::Flux2),
-                "stable-diffusion-xl" | "sdxl" => Some(Family::Sdxl),
-                "stable-diffusion" => Some(Family::Sd15),
-                // Safe as an exact tag where it is unsafe as a substring:
-                // a repo that tags itself `wan` is claiming the family.
-                "wan" => Some(Family::Wan),
-                "minimax-h3" | "minimax_h3" | "minimaxh3" => Some(Family::MinimaxH3),
-                _ => continue,
+            matched = if t.starts_with("base_model:stabilityai/stable-diffusion-3")
+                || t == "diffusers:stablediffusion3pipeline"
+            {
+                Some(Family::Sd3)
+            } else {
+                match t.as_str() {
+                    "flux" => Some(Family::Flux),
+                    "flux.2" | "flux2" => Some(Family::Flux2),
+                    "stable-diffusion-xl" | "sdxl" => Some(Family::Sdxl),
+                    "stable-diffusion" => Some(Family::Sd15),
+                    // Safe as an exact tag where it is unsafe as a substring:
+                    // a repo that tags itself `wan` is claiming the family.
+                    "wan" => Some(Family::Wan),
+                    "minimax-h3" | "minimax_h3" | "minimaxh3" => Some(Family::MinimaxH3),
+                    _ => continue,
+                }
             };
             break;
         }
@@ -1788,6 +1825,28 @@ mod tests {
     }
 
     #[test]
+    fn hf_family_search_terms_follow_current_upstream_names() {
+        let cases = [
+            (Family::Flux, "flux.1"),
+            (Family::Flux2, "flux.2"),
+            (Family::Sd15, "stable-diffusion-v1"),
+            (Family::Sdxl, "stable-diffusion-xl"),
+            (Family::Sd3, "stable-diffusion-3.5"),
+            (Family::ZImage, "z-image"),
+            (Family::LtxVideo, "ltx-video"),
+            (Family::Ltx2, "ltx-2"),
+            (Family::Wan, "wan2"),
+            (Family::MinimaxH3, "minimax-h3"),
+            (Family::QwenImage, "qwen-image"),
+            (Family::Wuerstchen, "wuerstchen"),
+        ];
+        assert_eq!(cases.len(), crate::families::ALL_FAMILIES.len());
+        for (family, expected) in cases {
+            assert_eq!(hf_family_search_term(family), expected, "{family}");
+        }
+    }
+
+    #[test]
     fn page_offset_is_safe_for_zero_and_maximum_caller_values() {
         assert_eq!(page_offset(&LiveSearchOpts::default()), 0);
         assert_eq!(
@@ -1845,6 +1904,45 @@ mod tests {
         assert!(result.entries[0].id.0.contains("dev-3"));
         assert!(result.entries[1].id.0.contains("dev-4"));
         assert_eq!(result.total, 5, "a full window must advertise another page");
+    }
+
+    #[tokio::test]
+    async fn hf_family_filter_constrains_the_upstream_window_for_sd3() {
+        let server = MockServer::start().await;
+        let hits = vec![serde_json::json!({
+            "id": "city96/stable-diffusion-3.5-medium-gguf",
+            "tags": [
+                "diffusers",
+                "base_model:stabilityai/stable-diffusion-3.5-medium"
+            ],
+            "pipeline_tag": "text-to-image"
+        })];
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .and(query_param("search", "stable-diffusion-3.5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(hits))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = hf_search(
+            &server.uri(),
+            &LiveSearchOpts {
+                family: Some(Family::Sd3),
+                source: Some(Source::Hf),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("SD3 family page");
+
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].family, Family::Sd3);
+        assert_eq!(
+            result.entries[0].source_id,
+            "city96/stable-diffusion-3.5-medium-gguf"
+        );
+        server.verify().await;
     }
 
     /// Real Civitai ignores `page=` entirely — `/api/v1/models` is

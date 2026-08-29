@@ -282,9 +282,12 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         // the VAE in its own file, and the GGUF experts could not bundle one
         // even in principle. So there is nothing to probe for and the resolver
         // routes straight to the VAE companion.
-        Family::Flux2 | Family::ZImage | Family::LtxVideo | Family::Wan | Family::MinimaxH3 => {
-            false
-        }
+        Family::Flux2
+        | Family::Sd3
+        | Family::ZImage
+        | Family::LtxVideo
+        | Family::Wan
+        | Family::MinimaxH3 => false,
         Family::QwenImage | Family::Wuerstchen => false,
     }
 }

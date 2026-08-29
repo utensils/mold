@@ -17,6 +17,7 @@ async fn families_endpoint_returns_static_taxonomy() {
         "flux2",
         "sd15",
         "sdxl",
+        "sd3",
         "z-image",
         "ltx-video",
         "ltx2",
@@ -52,6 +53,11 @@ async fn capabilities_includes_catalog_block() {
         .unwrap()
         .iter()
         .any(|family| family == "minimax-h3"));
+    assert!(v["catalog"]["families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|family| family == "sd3"));
     // The reviewed compact H3 rows are ordinary model identities. Execution
     // availability is advertised by the task/backend capability instead of a
     // family-wide licensing restriction.

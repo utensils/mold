@@ -189,7 +189,7 @@ pub fn supported_for(family: Family, bundling: Bundling, kind: Kind) -> bool {
         // don't inherit checkpoint runnability rules.
         Lora => matches!(
             family,
-            Flux | Flux2 | Sd15 | Sdxl | ZImage | Ltx2 | Wan | QwenImage
+            Flux | Flux2 | Sd15 | Sdxl | Sd3 | ZImage | Ltx2 | Wan | QwenImage
         ),
         Vae | TextEncoder | Tokenizer | Clip => true,
         ControlNet => matches!(family, Sd15 | Sdxl),
@@ -197,6 +197,30 @@ pub fn supported_for(family: Family, bundling: Bundling, kind: Kind) -> bool {
     }
 }
 
-fn supported_for_checkpoint(_family: Family, _bundling: Bundling) -> bool {
-    true
+fn supported_for_checkpoint(family: Family, bundling: Bundling) -> bool {
+    // SD3.5 is runnable from a complete separated Diffusers repository. A
+    // bare bundled transformer needs the three text encoders and VAE that the
+    // catalog does not yet synthesize as companions, so do not advertise that
+    // shape as runnable.
+    family != Family::Sd3 || bundling == Bundling::Separated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sd3_support_requires_a_complete_separated_repository() {
+        assert!(supported_for(
+            Family::Sd3,
+            Bundling::Separated,
+            Kind::Checkpoint
+        ));
+        assert!(!supported_for(
+            Family::Sd3,
+            Bundling::SingleFile,
+            Kind::Checkpoint
+        ));
+        assert!(supported_for(Family::Sd3, Bundling::SingleFile, Kind::Lora));
+    }
 }
