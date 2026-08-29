@@ -92,6 +92,35 @@ fn lora_stack_fingerprint(loras: &[mold_core::LoraWeight]) -> Vec<(String, u64)>
 const VAE_SCALE_STANDARD: f64 = 0.18215;
 /// VAE scaling factor for SDXL Turbo models.
 const VAE_SCALE_TURBO: f64 = 0.13025;
+/// Playground v2.5 trains against per-channel normalized SDXL VAE latents.
+const PLAYGROUND_VAE_SCALE: f64 = 0.5;
+const PLAYGROUND_LATENTS_MEAN: [f32; 4] = [-1.6574, 1.886, -1.383, 2.5155];
+const PLAYGROUND_LATENTS_STD: [f32; 4] = [8.4927, 5.9022, 6.5498, 5.2299];
+
+fn playground_latent_stats(device: &Device, dtype: DType) -> Result<(Tensor, Tensor)> {
+    let mean = Tensor::new(&PLAYGROUND_LATENTS_MEAN, device)?
+        .reshape((1, 4, 1, 1))?
+        .to_dtype(dtype)?;
+    let std = Tensor::new(&PLAYGROUND_LATENTS_STD, device)?
+        .reshape((1, 4, 1, 1))?
+        .to_dtype(dtype)?;
+    Ok((mean, std))
+}
+
+fn normalize_playground_latents(latents: &Tensor) -> Result<Tensor> {
+    let (mean, std) = playground_latent_stats(latents.device(), latents.dtype())?;
+    ((latents - mean.broadcast_as(latents.shape())?)? * PLAYGROUND_VAE_SCALE)?
+        .broadcast_div(&std)
+        .map_err(Into::into)
+}
+
+fn denormalize_playground_latents(latents: &Tensor) -> Result<Tensor> {
+    let (mean, std) = playground_latent_stats(latents.device(), latents.dtype())?;
+    (((latents.broadcast_mul(&std)? / PLAYGROUND_VAE_SCALE)?
+        + mean.broadcast_as(latents.shape())?)?)
+    .to_dtype(latents.dtype())
+    .map_err(Into::into)
+}
 
 fn resolve_sdxl_vae_dtype(default_dtype: DType, single_file: bool) -> DType {
     let default = if single_file {
@@ -953,7 +982,6 @@ impl SDXLEngine {
     ///
     /// `start_step` allows starting from a later timestep for img2img (0 = full txt2img).
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn denoise_loop(
         &self,
         unet: &stable_diffusion::unet_2d::UNet2DConditionModel,
@@ -967,6 +995,19 @@ impl SDXLEngine {
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
         identity: Option<&super::identity::ResolvedSdxlIdentity>,
     ) -> Result<()> {
+        if matches!(sched, Scheduler::EdmDpmPp2m) {
+            return self.denoise_loop_playground_edm(
+                unet,
+                text_embeddings,
+                latents,
+                guidance,
+                cfg_plus,
+                steps,
+                start_step,
+                inpaint_ctx,
+                identity,
+            );
+        }
         let use_cfg = cfg_active(guidance);
         let mut scheduler = crate::scheduler::build_scheduler(
             sched,
@@ -1080,6 +1121,88 @@ impl SDXLEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn denoise_loop_playground_edm(
+        &self,
+        unet: &stable_diffusion::unet_2d::UNet2DConditionModel,
+        text_embeddings: &Tensor,
+        latents: &mut Tensor,
+        guidance: f64,
+        cfg_plus: bool,
+        steps: u32,
+        start_step: usize,
+        inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
+        identity: Option<&super::identity::ResolvedSdxlIdentity>,
+    ) -> Result<()> {
+        if start_step >= steps as usize {
+            return Ok(());
+        }
+        if cfg_plus {
+            tracing::warn!(
+                "cfg_plus requested for Playground EDM — using the model's required DPM++ 2M integrator without CFG++"
+            );
+        }
+        let use_cfg = cfg_active(guidance);
+        let mut scheduler =
+            crate::playground_edm::PlaygroundEdmScheduler::new(steps as usize, start_step)?;
+        let timesteps = scheduler.timesteps().to_vec();
+        let active_timesteps = &timesteps[start_step..];
+        let identity_runtime = identity.map(super::identity::ResolvedSdxlIdentity::runtime);
+        if let Some(resolved) = identity {
+            self.base.progress.info(&format!(
+                "Face identity: {} cross-attention modules",
+                resolved.module_count()
+            ));
+        }
+
+        let denoise_label = format!("Denoising ({} EDM steps)", active_timesteps.len());
+        self.base.progress.stage_start(&denoise_label);
+        let denoise_start = Instant::now();
+
+        for (step_idx, &t) in active_timesteps.iter().enumerate() {
+            self.base.progress.checkpoint()?;
+            let step_start = Instant::now();
+            let latent_input = if use_cfg {
+                Tensor::cat(&[&*latents, &*latents], 0)?
+            } else {
+                latents.clone()
+            };
+            let latent_input = scheduler.scale_model_input(&latent_input)?;
+            let hook = identity_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.hook_for_step(start_step + step_idx));
+            let noise_pred = match hook.as_ref() {
+                Some(hook) => unet.forward_with_hook(&latent_input, t, text_embeddings, hook)?,
+                None => unet.forward(&latent_input, t, text_embeddings)?,
+            };
+            let noise_pred = if use_cfg {
+                let chunks = noise_pred.chunk(2, 0)?;
+                (&chunks[0] + ((&chunks[1] - &chunks[0])? * guidance)?)?
+            } else {
+                noise_pred
+            };
+            *latents = scheduler.step(&noise_pred, &*latents)?;
+
+            if let Some(ctx) = inpaint_ctx {
+                let noised_original =
+                    scheduler.add_noise_at_current_sigma(&ctx.original_latents, &ctx.noise)?;
+                *latents = crate::img2img::blend_inpaint_latents(&*latents, ctx, &noised_original)?;
+            }
+
+            self.base.progress.emit(ProgressEvent::DenoiseStep {
+                step: step_idx + 1,
+                total: active_timesteps.len(),
+                elapsed: step_start.elapsed(),
+            });
+        }
+
+        self.base.progress.checkpoint()?;
+        self.base
+            .progress
+            .stage_done(&denoise_label, denoise_start.elapsed());
+        Ok(())
+    }
+
     /// Prepare img2img latents: VAE encode source image, add noise at the appropriate timestep.
     /// Returns (noised_latents, start_step, encoded, noise).
     ///
@@ -1128,8 +1251,12 @@ impl SDXLEngine {
                     device,
                     vae_dtype,
                 )?;
-                let encoded = vae.encode(&source_tensor)?;
-                let encoded = (encoded.mode()? * vae_scale)?;
+                let encoded = vae.encode(&source_tensor)?.mode()?;
+                let encoded = if matches!(sched, Scheduler::EdmDpmPp2m) {
+                    normalize_playground_latents(&encoded)?
+                } else {
+                    (encoded * vae_scale)?
+                };
                 // VAE may have been loaded at fp32 (banding fix); cast the
                 // encoded latents back to engine dtype so the rest of the
                 // denoise loop stays at its natural precision.
@@ -1149,21 +1276,24 @@ impl SDXLEngine {
 
         let start_step = crate::img2img::img2img_start_index(steps as usize, strength);
 
-        let scheduler = crate::scheduler::build_scheduler(
-            sched,
-            steps as usize,
-            PredictionType::Epsilon,
-            self.is_turbo,
-        )?;
-        let timesteps = scheduler.timesteps().to_vec();
-
         let latent_h = height as usize / 8;
         let latent_w = width as usize / 8;
         let noise =
             crate::engine::seeded_randn(seed, &[1, 4, latent_h, latent_w], device, DType::F32)?;
         let noise = noise.to_dtype(dtype)?;
 
-        let noised = if start_step < timesteps.len() {
+        let noised = if start_step < steps as usize && matches!(sched, Scheduler::EdmDpmPp2m) {
+            let scheduler =
+                crate::playground_edm::PlaygroundEdmScheduler::new(steps as usize, start_step)?;
+            scheduler.add_noise_at(&encoded, &noise, start_step)?
+        } else if start_step < steps as usize {
+            let scheduler = crate::scheduler::build_scheduler(
+                sched,
+                steps as usize,
+                PredictionType::Epsilon,
+                self.is_turbo,
+            )?;
+            let timesteps = scheduler.timesteps();
             scheduler.add_noise(&encoded, noise.clone(), timesteps[start_step])?
         } else {
             encoded.clone()
@@ -1511,14 +1641,17 @@ impl SDXLEngine {
         } else {
             let latent_h = height / 8;
             let latent_w = width / 8;
-            let init_scheduler = crate::scheduler::build_scheduler(
-                sched,
-                req.steps as usize,
-                PredictionType::Epsilon,
-                self.is_turbo,
-            )?;
-            let init_noise_sigma = init_scheduler.init_noise_sigma();
-            drop(init_scheduler);
+            let init_noise_sigma = if matches!(sched, Scheduler::EdmDpmPp2m) {
+                crate::playground_edm::PlaygroundEdmScheduler::init_noise_sigma()
+            } else {
+                crate::scheduler::build_scheduler(
+                    sched,
+                    req.steps as usize,
+                    PredictionType::Epsilon,
+                    self.is_turbo,
+                )?
+                .init_noise_sigma()
+            };
             let latents = (crate::engine::seeded_randn(
                 seed,
                 &[1, 4, latent_h, latent_w],
@@ -1578,12 +1711,16 @@ impl SDXLEngine {
         self.base.progress.stage_start("VAE decode");
         let vae_decode_start = Instant::now();
 
-        let vae_scale = if self.is_turbo {
-            VAE_SCALE_TURBO
+        let latents = if matches!(sched, Scheduler::EdmDpmPp2m) {
+            denormalize_playground_latents(&latents)?
         } else {
-            VAE_SCALE_STANDARD
+            let vae_scale = if self.is_turbo {
+                VAE_SCALE_TURBO
+            } else {
+                VAE_SCALE_STANDARD
+            };
+            (latents / vae_scale)?
         };
-        let latents = (latents / vae_scale)?;
         let latents_for_vae = latents.to_dtype(vae_dtype)?;
         let device_for_sync = device.clone();
         let img = crate::vae_tiling::decode_with_oom_fallback(
@@ -1746,14 +1883,17 @@ impl SDXLEngine {
             } else {
                 let latent_h = height / 8;
                 let latent_w = width / 8;
-                let init_scheduler = crate::scheduler::build_scheduler(
-                    sched,
-                    req.steps as usize,
-                    PredictionType::Epsilon,
-                    self.is_turbo,
-                )?;
-                let init_noise_sigma = init_scheduler.init_noise_sigma();
-                drop(init_scheduler);
+                let init_noise_sigma = if matches!(sched, Scheduler::EdmDpmPp2m) {
+                    crate::playground_edm::PlaygroundEdmScheduler::init_noise_sigma()
+                } else {
+                    crate::scheduler::build_scheduler(
+                        sched,
+                        req.steps as usize,
+                        PredictionType::Epsilon,
+                        self.is_turbo,
+                    )?
+                    .init_noise_sigma()
+                };
                 let latents = (crate::engine::seeded_randn(
                     seed,
                     &[1, 4, latent_h, latent_w],
@@ -1807,12 +1947,16 @@ impl SDXLEngine {
         self.base.progress.stage_start("VAE decode");
         let vae_start = Instant::now();
 
-        let vae_scale = if self.is_turbo {
-            VAE_SCALE_TURBO
+        let latents = if matches!(sched, Scheduler::EdmDpmPp2m) {
+            denormalize_playground_latents(&latents)?
         } else {
-            VAE_SCALE_STANDARD
+            let vae_scale = if self.is_turbo {
+                VAE_SCALE_TURBO
+            } else {
+                VAE_SCALE_STANDARD
+            };
+            (latents / vae_scale)?
         };
-        let latents = (latents / vae_scale)?;
         let latents_for_vae = latents.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
@@ -1972,6 +2116,26 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokenizers::models::bpe::BPE;
+
+    #[test]
+    fn playground_latent_normalization_round_trips_all_channels() {
+        let device = Device::Cpu;
+        let latents = Tensor::new(&[[[[1.0f32]], [[-2.0]], [[3.5]], [[0.25]]]], &device).unwrap();
+        let normalized = normalize_playground_latents(&latents).unwrap();
+        let restored = denormalize_playground_latents(&normalized).unwrap();
+        let delta = (&restored - &latents)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(
+            delta < 1e-5,
+            "Playground latent transform drifted by {delta}"
+        );
+    }
 
     /// Synthesise a minimal SDXL-shaped single-file safetensors with one
     /// representative key per component bucket. Tensor data is one zero

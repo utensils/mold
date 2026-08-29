@@ -124,8 +124,9 @@ mod base64_required {
 /// Scheduler / solver selection.
 ///
 /// Two disjoint families share this wire slot:
-/// - `Ddim` / `EulerAncestral` / `UniPc` — UNet-based image models (SD1.5,
-///   SDXL). Flow-matching image models (FLUX, SD3, Z-Image, Flux.2,
+/// - `Ddim` / `EulerAncestral` / `UniPc` / `EdmDpmPp2m` — UNet-based image
+///   models (SD1.5, SDXL). `EdmDpmPp2m` is the Playground v2.5 training
+///   contract. Flow-matching image models (FLUX, SD3, Z-Image, Flux.2,
 ///   Qwen-Image) ignore those.
 /// - `Euler` / `DpmPp` — Wan's flow-matching sample solvers (upstream
 ///   `--sample_solver`), alongside `UniPc` which doubles as Wan's default
@@ -139,6 +140,10 @@ pub enum Scheduler {
     Ddim,
     EulerAncestral,
     UniPc,
+    /// EDM DPM++ 2M with the Karras 80 → 0.002 sigma schedule, midpoint
+    /// second-order update, and sigma_data=0.5 (Playground v2.5 only).
+    #[serde(rename = "edm-dpm-pp-2m")]
+    EdmDpmPp2m,
     /// Plain flow Euler over the diffusers/Lightning sigma grid — the solver
     /// the lightx2v 4-step recipe specifies (wan only).
     Euler,
@@ -154,6 +159,7 @@ impl std::fmt::Display for Scheduler {
             Scheduler::Ddim => write!(f, "ddim"),
             Scheduler::EulerAncestral => write!(f, "euler-ancestral"),
             Scheduler::UniPc => write!(f, "uni-pc"),
+            Scheduler::EdmDpmPp2m => write!(f, "edm-dpm-pp-2m"),
             Scheduler::Euler => write!(f, "euler"),
             Scheduler::DpmPp => write!(f, "dpm-pp"),
         }
@@ -174,12 +180,15 @@ impl std::str::FromStr for Scheduler {
                 Ok(Scheduler::EulerAncestral)
             }
             "uni-pc" | "unipc" | "uni_pc" => Ok(Scheduler::UniPc),
+            "edm-dpm-pp-2m" | "edm-dpm++-2m" | "edm_dpm_pp_2m" => {
+                Ok(Scheduler::EdmDpmPp2m)
+            }
             "euler" => Ok(Scheduler::Euler),
             // `dpm++` is upstream Wan's spelling; kebab-case `dpm-pp` is the
             // wire form.
             "dpm-pp" | "dpm++" | "dpmpp" | "dpm_pp" => Ok(Scheduler::DpmPp),
             other => Err(format!(
-                "unknown scheduler: '{other}'. Valid: ddim, euler-ancestral, uni-pc, euler, dpm-pp"
+                "unknown scheduler: '{other}'. Valid: ddim, euler-ancestral, uni-pc, edm-dpm-pp-2m, euler, dpm-pp"
             )),
         }
     }
@@ -5464,11 +5473,15 @@ mod tests {
 
     #[test]
     fn scheduler_serde_roundtrip() {
-        let sched = Scheduler::EulerAncestral;
-        let json = serde_json::to_string(&sched).unwrap();
-        assert_eq!(json, r#""euler-ancestral""#);
-        let back: Scheduler = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, sched);
+        for (sched, expected) in [
+            (Scheduler::EulerAncestral, r#""euler-ancestral""#),
+            (Scheduler::EdmDpmPp2m, r#""edm-dpm-pp-2m""#),
+        ] {
+            let json = serde_json::to_string(&sched).unwrap();
+            assert_eq!(json, expected);
+            let back: Scheduler = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, sched);
+        }
     }
 
     #[test]
@@ -5485,6 +5498,10 @@ mod tests {
         assert_eq!("uni-pc".parse::<Scheduler>().unwrap(), Scheduler::UniPc);
         assert_eq!("unipc".parse::<Scheduler>().unwrap(), Scheduler::UniPc);
         assert_eq!("uni_pc".parse::<Scheduler>().unwrap(), Scheduler::UniPc);
+        assert_eq!(
+            "edm-dpm-pp-2m".parse::<Scheduler>().unwrap(),
+            Scheduler::EdmDpmPp2m
+        );
     }
 
     #[test]
@@ -5497,6 +5514,7 @@ mod tests {
         assert_eq!(Scheduler::Ddim.to_string(), "ddim");
         assert_eq!(Scheduler::EulerAncestral.to_string(), "euler-ancestral");
         assert_eq!(Scheduler::UniPc.to_string(), "uni-pc");
+        assert_eq!(Scheduler::EdmDpmPp2m.to_string(), "edm-dpm-pp-2m");
     }
 
     #[test]

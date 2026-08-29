@@ -695,6 +695,7 @@ Default model if none specified: `flux2-klein:q8`
 | `flux-schnell`                 | 4     | 0.0      | 1024x1024                                      |
 | `flux-dev`                     | 25    | 3.5      | 1024x1024                                      |
 | `sdxl-base`                    | 25    | 7.5      | 1024x1024                                      |
+| `playground-v2.5`             | 50    | 3.0      | 1024x1024 (EDM DPM++ 2M)                       |
 | `sdxl-turbo`                   | 4     | 0.0      | 512x512                                        |
 | `sd15`                         | 25    | 7.5      | 512x512                                        |
 | `sd3.5-large`                  | 28    | 4.0      | 1024x1024                                      |

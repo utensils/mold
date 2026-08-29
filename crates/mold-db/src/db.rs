@@ -994,6 +994,7 @@ fn scheduler_to_str(s: &Scheduler) -> &'static str {
         Scheduler::Ddim => "ddim",
         Scheduler::EulerAncestral => "euler-ancestral",
         Scheduler::UniPc => "uni-pc",
+        Scheduler::EdmDpmPp2m => "edm-dpm-pp-2m",
         Scheduler::Euler => "euler",
         Scheduler::DpmPp => "dpm-pp",
     }
@@ -1004,6 +1005,7 @@ fn scheduler_from_str(s: &str) -> Option<Scheduler> {
         "ddim" => Scheduler::Ddim,
         "euler-ancestral" => Scheduler::EulerAncestral,
         "uni-pc" | "unipc" => Scheduler::UniPc,
+        "edm-dpm-pp-2m" => Scheduler::EdmDpmPp2m,
         "euler" => Scheduler::Euler,
         "dpm-pp" | "dpm++" | "dpmpp" => Scheduler::DpmPp,
         _ => return None,

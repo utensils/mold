@@ -83,6 +83,7 @@ pub use minimax_h3::private_server::{
 };
 pub mod model_registry;
 pub(crate) mod nvfp4;
+pub(crate) mod playground_edm;
 pub mod progress;
 #[cfg(test)]
 pub(crate) mod pulid_fixtures;

@@ -6441,8 +6441,11 @@ impl App {
                     Some(Scheduler::EulerAncestral) => Some(Scheduler::UniPc),
                     Some(Scheduler::UniPc) => None,
                     // Wan flow solvers are not part of the SD scheduler row's
-                    // cycle; a stale restored value resets to the default.
-                    Some(Scheduler::Euler) | Some(Scheduler::DpmPp) => None,
+                    // cycle; model-specific EDM and stale Wan values reset to
+                    // the manifest default.
+                    Some(Scheduler::EdmDpmPp2m)
+                    | Some(Scheduler::Euler)
+                    | Some(Scheduler::DpmPp) => None,
                 };
             }
             // Enter on the merged Seed row edits the value (◀▶ cycles mode)
@@ -6844,7 +6847,13 @@ impl App {
                 key: SettingsKey::ModelScheduler,
                 label: "Scheduler",
                 field_type: SettingsFieldType::Toggle {
-                    options: vec!["(none)", "ddim", "euler-ancestral", "uni-pc"],
+                    options: vec![
+                        "(none)",
+                        "ddim",
+                        "euler-ancestral",
+                        "uni-pc",
+                        "edm-dpm-pp-2m",
+                    ],
                 },
             });
             rows.push(SettingsRow::Field {
@@ -7304,6 +7313,7 @@ impl App {
                             "ddim" => Some(Scheduler::Ddim),
                             "euler-ancestral" => Some(Scheduler::EulerAncestral),
                             "uni-pc" => Some(Scheduler::UniPc),
+                            "edm-dpm-pp-2m" => Some(Scheduler::EdmDpmPp2m),
                             _ => None,
                         };
                     }

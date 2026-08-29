@@ -1277,7 +1277,8 @@ Examples:
         )]
         qwen2_text_encoder_mode: Option<String>,
 
-        /// Scheduler algorithm for UNet models: ddim, euler-ancestral, uni-pc
+        /// Scheduler algorithm for UNet models: ddim, euler-ancestral, uni-pc,
+        /// or edm-dpm-pp-2m (Playground v2.5 only)
         /// Ignored by flow-matching models (FLUX, SD3, Z-Image, Flux.2, Qwen-Image).
         #[arg(long, env = "MOLD_SCHEDULER", help_heading = "Advanced")]
         scheduler: Option<Scheduler>,

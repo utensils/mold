@@ -755,9 +755,10 @@ fn set_model_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
                 Some("ddim") => Some(Scheduler::Ddim),
                 Some("euler-ancestral") => Some(Scheduler::EulerAncestral),
                 Some("uni-pc") => Some(Scheduler::UniPc),
+                Some("edm-dpm-pp-2m") => Some(Scheduler::EdmDpmPp2m),
                 Some(v) => {
                     bail!(
-                        "invalid value for {key}: '{}'. Valid: none, ddim, euler-ancestral, uni-pc",
+                        "invalid value for {key}: '{}'. Valid: none, ddim, euler-ancestral, uni-pc, edm-dpm-pp-2m",
                         v
                     );
                 }
