@@ -937,6 +937,8 @@ pub async fn live_search_catalog(
                         .push(mold_catalog::live::CatalogProviderError {
                             source: failed_source,
                             message: format!("{provider} is temporarily unavailable."),
+                            code: None,
+                            retry_after_seconds: None,
                         });
                     partial
                 }

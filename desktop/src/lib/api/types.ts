@@ -436,7 +436,13 @@ export interface ExpandResponse {
 
 export type RemixSourceKind = "original" | "current" | "direct";
 export type RemixDimension =
-  "composition" | "camera" | "lighting" | "setting" | "mood" | "movement" | "style";
+  | "composition"
+  | "camera"
+  | "lighting"
+  | "setting"
+  | "mood"
+  | "movement"
+  | "style";
 
 export interface RemixRequest {
   source_prompt: string;
@@ -1023,6 +1029,8 @@ export interface CatalogSearchResponse {
 export interface CatalogProviderError {
   source: "hf" | "civitai";
   message: string;
+  code?: "overloaded" | "rate-limited" | string;
+  retry_after_seconds?: number;
 }
 
 /** One family from `GET /api/catalog/families`. */
@@ -1251,7 +1259,13 @@ export interface ChainLimits {
 }
 
 export type ChainJobState =
-  "queued" | "running" | "paused" | "interrupted" | "failed" | "completed" | "cancelled";
+  | "queued"
+  | "running"
+  | "paused"
+  | "interrupted"
+  | "failed"
+  | "completed"
+  | "cancelled";
 
 export type StageState = "pending" | "running" | "completed" | "failed";
 

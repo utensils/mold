@@ -150,6 +150,9 @@ pub enum LiveSearchError {
         host: &'static str,
         status: u16,
         body: String,
+        /// Upstream-provided delay from `Retry-After`, when present. Search
+        /// retries honor this instead of immediately adding more load.
+        retry_after: Option<Duration>,
     },
 }
 
@@ -408,9 +411,42 @@ pub struct LiveSearchResult {
 pub struct CatalogProviderError {
     pub source: Source,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u64>,
 }
 
 const SEARCH_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(100), Duration::from_millis(250)];
+const MAX_SEARCH_RETRY_DELAY: Duration = Duration::from_secs(15);
+
+fn upstream_retry_after(error: &LiveSearchError) -> Option<Duration> {
+    match error {
+        LiveSearchError::Upstream { retry_after, .. } => *retry_after,
+        _ => None,
+    }
+}
+
+fn search_retry_delay(error: &LiveSearchError, fallback: Duration) -> Option<Duration> {
+    match upstream_retry_after(error) {
+        Some(delay) if delay > MAX_SEARCH_RETRY_DELAY => None,
+        Some(delay) => Some(delay.max(fallback)),
+        None => Some(fallback),
+    }
+}
+
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let seconds = raw.parse::<f64>().ok()?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+    Duration::try_from_secs_f64(seconds).ok()
+}
 
 fn retryable_search_error(error: &LiveSearchError) -> bool {
     match error {
@@ -429,13 +465,22 @@ where
     for (attempt, delay) in SEARCH_RETRY_DELAYS.iter().enumerate() {
         match search().await {
             Err(error) if retryable_search_error(&error) => {
+                let Some(delay) = search_retry_delay(&error, *delay) else {
+                    tracing::warn!(
+                        target: "catalog.live",
+                        attempt = attempt + 1,
+                        error = %error,
+                        "catalog provider requested a retry beyond the request wait budget"
+                    );
+                    return Err(error);
+                };
                 tracing::warn!(
                     target: "catalog.live",
                     attempt = attempt + 1,
                     error = %error,
                     "catalog provider request failed; retrying"
                 );
-                tokio::time::sleep(*delay).await;
+                tokio::time::sleep(delay).await;
             }
             result => return result,
         }
@@ -443,14 +488,39 @@ where
     search().await
 }
 
-fn provider_error(source: Source) -> CatalogProviderError {
+fn provider_error(source: Source, error: &LiveSearchError) -> CatalogProviderError {
     let provider = match source {
         Source::Hf => "Hugging Face",
         Source::Civitai => "Civitai",
     };
+    let (code, message) = match error {
+        LiveSearchError::Upstream { status: 429, .. } => (
+            Some("rate-limited"),
+            format!("{provider} is handling too many requests right now. Try again shortly."),
+        ),
+        LiveSearchError::Upstream { status: 503, .. } if source == Source::Civitai => (
+            Some("overloaded"),
+            "Civitai is busy right now. Try again in a few seconds.".into(),
+        ),
+        _ => (None, format!("{provider} is temporarily unavailable.")),
+    };
     CatalogProviderError {
         source,
-        message: format!("{provider} is temporarily unavailable."),
+        message,
+        code,
+        retry_after_seconds: upstream_retry_after(error).map(|delay| delay.as_secs().max(1)),
+    }
+}
+
+fn transient_provider_result(
+    source: Source,
+    error: &LiveSearchError,
+    opts: &LiveSearchOpts,
+) -> LiveSearchResult {
+    LiveSearchResult {
+        entries: Vec::new(),
+        total: page_offset(opts),
+        provider_errors: vec![provider_error(source, error)],
     }
 }
 
@@ -523,10 +593,16 @@ pub async fn search_page(
                     status: 401 | 403, ..
                 },
             ) => return Err(error),
+            Err(error)
+                if matches!(opts.source, Some(Source::Civitai))
+                    && retryable_search_error(&error) =>
+            {
+                return Ok(transient_provider_result(Source::Civitai, &error, opts));
+            }
             Err(error) if matches!(opts.source, Some(Source::Civitai)) => return Err(error),
             Err(error) => {
                 tracing::warn!(target: "catalog.live", error = %error, "civitai search failed");
-                provider_errors.push(provider_error(Source::Civitai));
+                provider_errors.push(provider_error(Source::Civitai, &error));
             }
         }
     }
@@ -543,10 +619,13 @@ pub async fn search_page(
                     status: 401 | 403, ..
                 },
             ) => return Err(e),
+            Err(e) if matches!(opts.source, Some(Source::Hf)) && retryable_search_error(&e) => {
+                return Ok(transient_provider_result(Source::Hf, &e, opts));
+            }
             Err(e) if matches!(opts.source, Some(Source::Hf)) => return Err(e),
             Err(e) => {
                 tracing::warn!(target: "catalog.live", error = %e, "hf search failed");
-                provider_errors.push(provider_error(Source::Hf));
+                provider_errors.push(provider_error(Source::Hf, &e));
             }
         }
     }
@@ -1015,12 +1094,14 @@ async fn civitai_fetch_window(
     }
     let resp = req.send().await?;
     let status = resp.status();
+    let retry_after = parse_retry_after(resp.headers());
     let body = resp.text().await?;
     if !status.is_success() {
         return Err(LiveSearchError::Upstream {
             host: "civitai.com",
             status: status.as_u16(),
             body: body.chars().take(400).collect(),
+            retry_after,
         });
     }
     let parsed: CivitaiResponse = serde_json::from_str(&body)?;
@@ -1148,12 +1229,14 @@ async fn hf_search(base: &str, opts: &LiveSearchOpts) -> Result<LiveSearchResult
     }
     let resp = req.send().await?;
     let status = resp.status();
+    let retry_after = parse_retry_after(resp.headers());
     let body = resp.text().await?;
     if !status.is_success() {
         return Err(LiveSearchError::Upstream {
             host: "huggingface.co",
             status: status.as_u16(),
             body: body.chars().take(400).collect(),
+            retry_after,
         });
     }
     let hits: Vec<HfSearchHit> = serde_json::from_str(&body)?;
@@ -1480,6 +1563,7 @@ pub async fn fetch_civitai_version(
             host: "civitai.com",
             status: status.as_u16(),
             body: body.chars().take(400).collect(),
+            retry_after: None,
         });
     }
     let detail: CivitaiVersionDetail = serde_json::from_str(&body)?;
@@ -1536,6 +1620,7 @@ pub async fn fetch_civitai_version(
         body: format!(
             "model-version {version_id} did not normalize (unsupported kind, missing safetensors, or unknown baseModel)"
         ),
+        retry_after: None,
     })
 }
 
@@ -1564,6 +1649,7 @@ async fn fetch_civitai_model_item(
             host: "civitai.com",
             status: status.as_u16(),
             body: body.chars().take(400).collect(),
+            retry_after: None,
         });
     }
     Ok(serde_json::from_str(&body)?)
@@ -1593,6 +1679,7 @@ pub async fn fetch_entry_by_id(
             host: "catalog",
             status: 400,
             body: format!("'{id}' is not a catalog id (expected a cv: or hf: prefix)"),
+            retry_after: None,
         })
     }
 }
@@ -1628,6 +1715,7 @@ pub async fn fetch_hf_repo(
             host: "huggingface.co",
             status: detail_status.as_u16(),
             body: detail_body.chars().take(400).collect(),
+            retry_after: None,
         });
     }
     let detail: HfDetail = serde_json::from_str(&detail_body)?;
@@ -1639,6 +1727,7 @@ pub async fn fetch_hf_repo(
             host: "huggingface.co",
             status: tree_status.as_u16(),
             body: tree_body.chars().take(400).collect(),
+            retry_after: None,
         });
     }
     let tree: Vec<HfTreeEntry> = serde_json::from_str(&tree_body)?;
@@ -1649,6 +1738,7 @@ pub async fn fetch_hf_repo(
                 host: "huggingface.co",
                 status: 422,
                 body: format!("repo {repo_id} doesn't map to a supported mold family"),
+                retry_after: None,
             },
         )?;
 
@@ -1656,6 +1746,7 @@ pub async fn fetch_hf_repo(
         host: "huggingface.co",
         status: 422,
         body: e.to_string(),
+        retry_after: None,
     })
 }
 
@@ -2414,6 +2505,8 @@ mod tests {
             [CatalogProviderError {
                 source: Source::Hf,
                 message: "Hugging Face is temporarily unavailable.".into(),
+                code: None,
+                retry_after_seconds: None,
             }]
         );
         let requests = server.received_requests().await.expect("requests");
@@ -2461,6 +2554,8 @@ mod tests {
             [CatalogProviderError {
                 source: Source::Civitai,
                 message: "Civitai is temporarily unavailable.".into(),
+                code: None,
+                retry_after_seconds: None,
             }]
         );
     }
@@ -2475,6 +2570,7 @@ mod tests {
                     host: "huggingface.co",
                     status: 502,
                     body: "bad gateway".into(),
+                    retry_after: None,
                 })
             } else {
                 Ok("recovered")
@@ -2485,6 +2581,78 @@ mod tests {
 
         assert_eq!(result, "recovered");
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn retry_after_delay_wins_over_the_short_local_backoff() {
+        let error = LiveSearchError::Upstream {
+            host: "civitai.com",
+            status: 503,
+            body: "overloaded".into(),
+            retry_after: Some(Duration::from_secs(2)),
+        };
+
+        assert_eq!(
+            search_retry_delay(&error, Duration::from_millis(100)),
+            Some(Duration::from_secs(2))
+        );
+    }
+
+    #[tokio::test]
+    async fn long_retry_after_stops_in_request_retries_without_truncating_notice() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let error = retry_search(|| async {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<(), _>(LiveSearchError::Upstream {
+                host: "civitai.com",
+                status: 429,
+                body: "slow down".into(),
+                retry_after: Some(Duration::from_secs(60)),
+            })
+        })
+        .await
+        .expect_err("long Retry-After should leave retry timing to the caller");
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let notice = provider_error(Source::Civitai, &error);
+        assert_eq!(notice.retry_after_seconds, Some(60));
+    }
+
+    #[test]
+    fn retry_after_parser_accepts_civitais_seconds_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(2)));
+    }
+
+    #[tokio::test]
+    async fn source_only_overload_becomes_a_provider_notice() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("Retry-After", "0")
+                    .set_body_string("Model search is temporarily overloaded — please retry."),
+            )
+            .expect(3)
+            .mount(&server)
+            .await;
+        let opts = LiveSearchOpts {
+            source: Some(Source::Civitai),
+            ..Default::default()
+        };
+
+        let result = search_page(&server.uri(), &server.uri(), &test_cache(), &opts)
+            .await
+            .expect("a temporary source-only outage is a normal degraded response");
+
+        assert!(result.entries.is_empty());
+        assert_eq!(result.total, 0);
+        assert_eq!(result.provider_errors.len(), 1);
+        assert_eq!(result.provider_errors[0].source, Source::Civitai);
+        assert_eq!(result.provider_errors[0].code, Some("overloaded"));
+        assert!(result.provider_errors[0].message.contains("busy right now"));
     }
 
     #[tokio::test]

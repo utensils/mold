@@ -1991,13 +1991,22 @@ describe("MobileCatalogView", () => {
   });
 
   it("keeps partial provider rows when a manual retry still fails", async () => {
-    searchCatalog.mockResolvedValueOnce({
+    searchCatalog.mockResolvedValue({
       ...searchResponse([entry("Healthy HF model")]),
-      provider_errors: [{ source: "civitai", message: "Civitai is temporarily unavailable." }],
+      provider_errors: [
+        {
+          source: "civitai",
+          code: "overloaded",
+          retry_after_seconds: 2,
+          message: "Civitai is busy right now. Try again in a few seconds.",
+        },
+      ],
     });
     wrapper = mountCatalog(studio.id, [studio]);
     await flushPromises();
     expect(wrapper.text()).toContain("Healthy HF model");
+    expect(wrapper.text()).toContain("The catalog is catching up.");
+    expect(wrapper.get(".mobile-catalog-error").classes()).toContain("mobile-catalog-warning");
 
     searchCatalog.mockRejectedValueOnce(new Error("still unavailable"));
     await wrapper.get(".mobile-catalog-retry").trigger("click");
@@ -2005,6 +2014,30 @@ describe("MobileCatalogView", () => {
 
     expect(wrapper.text()).toContain("Healthy HF model");
     expect(wrapper.text()).toContain("still unavailable");
+  });
+
+  it("does not claim an unavailable provider returned no matches", async () => {
+    searchCatalog.mockResolvedValueOnce({
+      ...searchResponse([]),
+      provider_errors: [
+        {
+          source: "civitai",
+          code: "overloaded",
+          retry_after_seconds: 60,
+          message: "Civitai is busy right now. Try again in a few seconds.",
+        },
+      ],
+    });
+
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+    await wrapper.get('[aria-label="Catalog source"] button:last-child').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("The catalog is catching up.");
+    expect(wrapper.find("[data-test='mobile-catalog-empty']").exists()).toBe(false);
+    expect(wrapper.find(".mobile-catalog-results").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("No catalog models found.");
   });
 
   it("falls back to the families seen in results when the taxonomy is unavailable", async () => {
