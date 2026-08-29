@@ -12,10 +12,11 @@ pub struct DiscoveredHost {
     pub host: String,
     pub port: u16,
     pub auth_required: bool,
+    pub instance_id: Option<String>,
 }
 
 #[cfg(any(target_vendor = "apple", test))]
-fn auth_required_from_txt(txt: &[u8]) -> bool {
+fn txt_value(txt: &[u8], key: &[u8]) -> Option<String> {
     let mut cursor = 0;
     while cursor < txt.len() {
         let length = usize::from(txt[cursor]);
@@ -23,12 +24,22 @@ fn auth_required_from_txt(txt: &[u8]) -> bool {
         let Some(end) = cursor.checked_add(length).filter(|end| *end <= txt.len()) else {
             break;
         };
-        if txt[cursor..end] == *b"auth=1" {
-            return true;
+        let record = &txt[cursor..end];
+        if record.starts_with(key) && record.get(key.len()) == Some(&b'=') {
+            return std::str::from_utf8(&record[key.len() + 1..])
+                .ok()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
         }
         cursor = end;
     }
-    false
+    None
+}
+
+#[cfg(any(target_vendor = "apple", test))]
+fn auth_required_from_txt(txt: &[u8]) -> bool {
+    txt_value(txt, b"auth").as_deref() == Some("1")
 }
 
 #[tauri::command]
@@ -58,6 +69,7 @@ async fn platform_discover(
                     host: host.host,
                     port: host.port,
                     auth_required: host.auth_required,
+                    instance_id: host.instance_id,
                 })
                 .collect()
         })
@@ -90,7 +102,7 @@ mod apple {
     use std::ffi::{c_char, c_void};
     use std::time::{Duration, Instant};
 
-    use super::{DiscoveredHost, auth_required_from_txt};
+    use super::{DiscoveredHost, auth_required_from_txt, txt_value};
 
     type ServiceRef = *mut c_void;
     type Flags = u32;
@@ -210,16 +222,18 @@ mod apple {
             .to_string();
         let full = unsafe { CStr::from_ptr(fullname) }.to_string_lossy();
         let name = full.split("._mold").next().unwrap_or(&host).to_string();
-        let auth_required = if txt.is_null() || txt_len == 0 {
-            false
+        let txt = if txt.is_null() || txt_len == 0 {
+            &[][..]
         } else {
-            auth_required_from_txt(unsafe { std::slice::from_raw_parts(txt, usize::from(txt_len)) })
+            unsafe { std::slice::from_raw_parts(txt, usize::from(txt_len)) }
         };
+        let auth_required = auth_required_from_txt(txt);
         state.host = Some(DiscoveredHost {
             name,
             host,
             port: u16::from_be(port_be),
             auth_required,
+            instance_id: txt_value(txt, b"id"),
         });
     }
 
@@ -315,7 +329,7 @@ mod apple {
 
 #[cfg(test)]
 mod tests {
-    use super::auth_required_from_txt;
+    use super::{auth_required_from_txt, txt_value};
 
     #[test]
     fn reads_auth_required_from_dns_sd_txt() {
@@ -328,5 +342,14 @@ mod tests {
             6, b'a', b'u', b't', b'h', b'=', b'0'
         ]));
         assert!(!auth_required_from_txt(&[8, b'a', b'u']));
+    }
+
+    #[test]
+    fn reads_instance_id_from_dns_sd_txt() {
+        let txt = [
+            6, b'a', b'u', b't', b'h', b'=', b'1', 9, b'i', b'd', b'=', b'u', b'u', b'i', b'd',
+            b'-', b'1',
+        ];
+        assert_eq!(txt_value(&txt, b"id").as_deref(), Some("uuid-1"));
     }
 }

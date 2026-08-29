@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   ORIGIN_HOST_ID,
+  HOSTS_STORAGE_KEY,
   addHost,
   dedupeByInstanceId,
   getGenerateTargetId,
@@ -10,6 +11,8 @@ import {
   listStoredHosts,
   normalizeHostAddress,
   originHost,
+  recordSuccessfulHostInstance,
+  reconcileOriginInstanceId,
   removeHost,
   setGenerateTargetId,
   setHostConnected,
@@ -51,9 +54,7 @@ describe("normalizeHostAddress", () => {
     );
   });
 
-  it("respects an explicit scheme without inventing a port", () => {
-    // Typing the scheme means "I know the port" — http defaults to 80,
-    // matching desktop normalizeHostUrl.
+  it("uses the scheme default when a complete URL omits a port", () => {
     expect(normalizeHostAddress("http://100.105.134.43")).toBe(
       "http://100.105.134.43",
     );
@@ -166,6 +167,107 @@ describe("dedupe by instance id", () => {
     expect(merged.url).toBe("http://studio.local:7680");
     expect(merged.name).toBe("Studio (mDNS)");
     expect(listStoredHosts()).toHaveLength(1);
+  });
+
+  it("migrates stored aliases onto the most recently successful address", () => {
+    localStorage.setItem(
+      HOSTS_STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: "hal9000-7680",
+          name: "hal9000",
+          url: "http://hal9000:7680",
+          instanceId: "uuid-1",
+          lastConnectedAtMs: 10,
+        },
+        {
+          id: "100-123-198-98-7681",
+          name: "hal9000",
+          url: "http://100.123.198.98:7681",
+          instanceId: "uuid-1",
+          lastConnectedAtMs: 20,
+        },
+      ]),
+    );
+    setGenerateTargetId("hal9000-7680");
+
+    expect(listStoredHosts()).toEqual([
+      expect.objectContaining({
+        id: "100-123-198-98-7681",
+        url: "http://100.123.198.98:7681",
+      }),
+    ]);
+    expect(getGenerateTargetId()).toBe("100-123-198-98-7681");
+  });
+
+  it("persists a polled UUID, selects that working address, and remaps recovery state", () => {
+    const hostname = addHost({
+      url: "hal9000:7680",
+      name: "hal9000",
+      instanceId: "uuid-1",
+    });
+    const ip = addHost({ url: "100.123.198.98:7681", name: "hal9000 IP" });
+    localStorage.setItem(
+      "mold.create.tracked-sequences.v1",
+      JSON.stringify([{ hostId: hostname.id, jobId: "chain-1" }]),
+    );
+    localStorage.setItem(
+      "mold.generate.jobs",
+      JSON.stringify({ version: 1, jobs: [{ hostId: hostname.id }] }),
+    );
+    localStorage.setItem(
+      "mold.generate.jobs.recovery.batch-1",
+      JSON.stringify({ version: 1, jobs: [{ hostId: hostname.id }] }),
+    );
+    setGenerateTargetId(hostname.id);
+
+    const canonical = recordSuccessfulHostInstance(ip.id, " uuid-1 ");
+
+    expect(canonical).toMatchObject({
+      id: ip.id,
+      url: "http://100.123.198.98:7681",
+    });
+    expect(listStoredHosts()).toHaveLength(1);
+    expect(getGenerateTargetId()).toBe(ip.id);
+    expect(localStorage.getItem("mold.create.tracked-sequences.v1")).toContain(
+      ip.id,
+    );
+    expect(localStorage.getItem("mold.generate.jobs")).toContain(ip.id);
+    expect(
+      localStorage.getItem("mold.generate.jobs.recovery.batch-1"),
+    ).toContain(ip.id);
+  });
+
+  it("keeps different UUIDs separate even when the URL slug is reused", () => {
+    const old = addHost({
+      url: "render:7680",
+      name: "Old",
+      instanceId: "uuid-old",
+    });
+    const replacement = addHost({
+      url: "render:7680",
+      name: "Replacement",
+      instanceId: "uuid-new",
+    });
+    expect(replacement.id).not.toBe(old.id);
+    expect(listStoredHosts()).toHaveLength(2);
+    expect(
+      listStoredHosts().find((host) => host.id === old.id)?.connected,
+    ).toBe(false);
+  });
+
+  it("removes a stored alias when its UUID is the browser origin", () => {
+    const alias = addHost({
+      url: "127.0.0.1:7680",
+      name: "Local alias",
+      instanceId: "origin-uuid",
+    });
+    setGenerateTargetId(alias.id);
+
+    reconcileOriginInstanceId(" origin-uuid ");
+
+    expect(listStoredHosts()).toEqual([]);
+    expect(getGenerateTargetId()).toBe(ORIGIN_HOST_ID);
   });
 
   it("merges a re-add of the same address by slug", () => {

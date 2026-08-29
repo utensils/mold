@@ -45,24 +45,6 @@ export interface SavedHostLike {
   url: string;
   lastUsedMs?: number | null;
   instanceId?: string | null;
-  /** Last-known server-reported hostname (from telemetry / the connect probe).
-   *  Never persisted — callers thread it in to disambiguate distinct servers
-   *  that share an instance id (shared MOLD_HOME). Absent = unknown. */
-  hostname?: string | null;
-}
-
-/**
- * Whether two server-reported hostnames could belong to the same physical
- * server. Unknown hostnames (older servers, entries never polled) are
- * compatible with anything for back-compat; two distinct known hostnames are
- * proof of two distinct servers even when their instance ids collide (two
- * RunPod pods on one network volume share a mold.db and thus one uuid).
- */
-export function hostnamesCompatible(
-  a: string | null | undefined,
-  b: string | null | undefined,
-): boolean {
-  return !a || !b || a === b;
 }
 
 /**
@@ -72,9 +54,8 @@ export function hostnamesCompatible(
  * `lastUsedMs` (ties broken by input order), keeping its slug (and thus its
  * `remote-api-key.<id>` secret and routing keys); a user-assigned name on any
  * duplicate is preserved. Entries with no `instanceId` are never merged, and
- * a shared `instanceId` only counts when the reported hostnames are
- * compatible — two distinct known hostnames mean two distinct servers
- * sharing a MOLD_HOME, which must never collapse. Returns the deduped list
+ * a shared non-empty `instanceId` is authoritative regardless of which IP,
+ * hostname, or MagicDNS alias answered. Returns the deduped list
  * (input order, losers removed) and the loser→survivor id pairs so callers
  * can re-home secrets, connected ids, and a sticky generation target.
  */
@@ -90,11 +71,6 @@ export function mergeSavedHostsByInstanceId<T extends SavedHostLike>(
   }
   const survivorByInstance = new Map<string, T>();
   for (const [uuid, group] of groups) {
-    const known = new Set(group.map((h) => h.hostname).filter((n): n is string => !!n));
-    // ≥2 distinct hostnames answering under one uuid: distinct servers with a
-    // shared/copied data dir. Leave the whole group untouched — an unknown-
-    // hostname entry can't safely be assigned to either server.
-    if (known.size > 1) continue;
     let survivor = group[0]!;
     for (const host of group) {
       if ((host.lastUsedMs ?? 0) > (survivor.lastUsedMs ?? 0)) survivor = host;

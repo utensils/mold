@@ -6,6 +6,7 @@ const appSettingsGet = vi.fn();
 const appSettingsSet = vi.fn().mockResolvedValue(undefined);
 const secretGet = vi.fn().mockResolvedValue(null);
 const secretSet = vi.fn().mockResolvedValue(undefined);
+const secretClear = vi.fn().mockResolvedValue(undefined);
 const testRemoteHost = vi.fn();
 const startLocalEngine = vi.fn();
 const ensureLocalServer = vi.fn();
@@ -17,6 +18,7 @@ vi.mock("../lib/ipc", () => ({
     appSettingsSet: (...a: unknown[]) => appSettingsSet(...a),
     secretGet: (...a: unknown[]) => secretGet(...a),
     secretSet: (...a: unknown[]) => secretSet(...a),
+    secretClear: (...a: unknown[]) => secretClear(...a),
     testRemoteHost: (...a: unknown[]) => testRemoteHost(...a),
     startLocalEngine: (...a: unknown[]) => startLocalEngine(...a),
     ensureLocalServer: (...a: unknown[]) => ensureLocalServer(...a),
@@ -2609,9 +2611,7 @@ describe("hosts store", () => {
     expect(live.status).toBe("ready");
   });
 
-  it("connect() keeps two servers with the same instance id but different hostnames separate", async () => {
-    // Two RunPod pods sharing one network volume (shared MOLD_HOME) report
-    // the SAME instance uuid — the reported hostname tells them apart.
+  it("connect() treats the server UUID as authoritative across different hostnames", async () => {
     testRemoteHost.mockImplementation((url: string) =>
       Promise.resolve({
         ok: true,
@@ -2622,13 +2622,11 @@ describe("hosts store", () => {
       }),
     );
     const hosts = useHostsStore();
-    await hosts.connect("http://pod-a:7680", null, null);
+    const first = await hosts.connect("http://pod-a:7680", null, null);
     const second = await hosts.connect("http://pod-b:7680", null, null);
-    expect(second.id).toBe("pod-b-7680");
-    expect(hosts.all.filter((h) => h.kind === "remote").map((h) => h.id)).toEqual([
-      "pod-a-7680",
-      "pod-b-7680",
-    ]);
+    expect(second.id).toBe(first.id);
+    expect(second.baseUrl).toBe("http://pod-b:7680");
+    expect(hosts.all.filter((h) => h.kind === "remote").map((h) => h.id)).toEqual(["pod-a-7680"]);
   });
 
   it("reconcile does not clobber a settings write that lands during its secret IPC", async () => {
@@ -2691,6 +2689,9 @@ describe("hosts store", () => {
         connectedHostIds: [ip.id],
       }),
     );
+    secretGet.mockImplementation((name: string) =>
+      Promise.resolve(name.endsWith(ip.id) ? "working-ip-key" : "stale-hostname-key"),
+    );
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     apiJsonTo.mockImplementation((target: { baseUrl: string }) => {
       const remote = !target.baseUrl.includes("127.0.0.1");
@@ -2702,6 +2703,9 @@ describe("hosts store", () => {
         hostname: remote ? "hal9000" : "this-mac",
       });
     });
+    useHostModelsStore().byHost[hal.id] = { entries: [], fetchedAt: 1, error: null };
+    useHostModelsStore().byHost[ip.id] = { entries: [], fetchedAt: 1, error: null };
+    const unsubscribeHost = vi.spyOn(useDownloadsStore(), "unsubscribeHost");
     const hosts = useHostsStore();
     await hosts.init();
     await hosts.refresh();
@@ -2710,6 +2714,13 @@ describe("hosts store", () => {
     expect(hosts.all.some((h) => h.id === ip.id)).toBe(false);
     const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
     expect(persisted.connectedHostIds).toEqual([hal.id]);
+    expect(secretSet).toHaveBeenCalledWith(`remote-api-key.${hal.id}`, "working-ip-key");
+    expect(useHostModelsStore().byHost[hal.id]).toBeUndefined();
+    expect(useHostModelsStore().byHost[ip.id]).toBeUndefined();
+    expect(useHostModelsStore().authorityEpoch[hal.id]).toBeGreaterThan(0);
+    expect(useHostModelsStore().authorityEpoch[ip.id]).toBeGreaterThan(0);
+    expect(unsubscribeHost).toHaveBeenCalledWith(hal.id);
+    expect(unsubscribeHost).toHaveBeenCalledWith(ip.id);
   });
 
   it("reconcile re-homes in-memory names and the appPrefs snapshot", async () => {
@@ -2785,5 +2796,47 @@ describe("hosts store", () => {
     expect(persisted.savedHosts.map((h: SavedHost) => h.id)).toEqual([hal.id]);
     expect(persisted.connectedHostIds).toEqual([hal.id]);
     expect(persisted.generateTargetHost).toBe(hal.id);
+  });
+
+  it("refresh() removes a remote alias of the built-in local UUID", async () => {
+    installSettings(
+      settings({
+        savedHosts: [{ ...hal, instanceId: "uuid-local" }],
+        connectedHostIds: [hal.id],
+        generateTargetHost: hal.id,
+      }),
+    );
+    testRemoteHost.mockResolvedValue({
+      ok: true,
+      version: null,
+      error: null,
+      instanceId: "uuid-local",
+    });
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 0,
+      queue_capacity: 8,
+      version: "0.18.0",
+      instance_id: "uuid-local",
+      hostname: "this-mac",
+    });
+    useHostModelsStore().byHost.local = { entries: [], fetchedAt: 1, error: null };
+    useHostModelsStore().byHost[hal.id] = { entries: [], fetchedAt: 1, error: null };
+    const unsubscribeHost = vi.spyOn(useDownloadsStore(), "unsubscribeHost");
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+
+    expect(hosts.all.filter((host) => host.kind === "remote")).toEqual([]);
+    expect(hosts.extras).toEqual([]);
+    expect(useHostModelsStore().byHost.local).toBeUndefined();
+    expect(useHostModelsStore().byHost[hal.id]).toBeUndefined();
+    expect(useHostModelsStore().authorityEpoch.local).toBeGreaterThan(0);
+    expect(useHostModelsStore().authorityEpoch[hal.id]).toBeGreaterThan(0);
+    expect(unsubscribeHost).toHaveBeenCalledWith(hal.id);
+    expect(unsubscribeHost).not.toHaveBeenCalledWith("local");
+    const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
+    expect(persisted.savedHosts).toEqual([]);
+    expect(persisted.connectedHostIds).toEqual([]);
+    expect(persisted.generateTargetHost).toBe("local");
   });
 });

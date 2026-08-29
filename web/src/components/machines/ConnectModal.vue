@@ -53,12 +53,17 @@ const { onKeydown } = useOverlayFocus(isOpen, host, () => close());
 
 const visiblePeers = computed(() => {
   const storedIds = new Set(listStoredHosts().map((host) => host.id));
-  return discovered.value.filter(
-    (peer) =>
+  const seenInstanceIds = new Set<string>();
+  return discovered.value.filter((peer) => {
+    const instanceId = peer.instance_id?.trim() || null;
+    const visible =
       !peer.is_this_machine &&
-      !(peer.instance_id && dedupeByInstanceId(peer.instance_id)) &&
-      !storedIds.has(hostIdFromUrl(peer.url)),
-  );
+      !(instanceId && dedupeByInstanceId(instanceId)) &&
+      !storedIds.has(hostIdFromUrl(peer.url)) &&
+      !(instanceId && seenInstanceIds.has(instanceId));
+    if (visible && instanceId) seenInstanceIds.add(instanceId);
+    return visible;
+  });
 });
 
 function stopDiscoveryRefresh() {

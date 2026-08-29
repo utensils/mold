@@ -16,6 +16,10 @@ export const ORIGIN_HOST_ID = "origin";
 export const HOSTS_STORAGE_KEY = "mold.web.hosts.v1";
 export const HOSTS_CHANGED_EVENT = "mold:hosts-changed";
 export const GENERATE_TARGET_CHANGED_EVENT = "mold:generate-target-changed";
+const TRACKED_SEQUENCES_KEY = "mold.create.tracked-sequences.v1";
+const LEGACY_SEQUENCE_HOST_KEY = "mold.create.chain-job-host";
+const GENERATE_JOBS_KEY = "mold.generate.jobs";
+const GENERATE_RECOVERY_PREFIX = `${GENERATE_JOBS_KEY}.recovery.`;
 
 export interface HostEntry {
   /** Slug of the host URL, or "origin" for the serving host. */
@@ -27,6 +31,8 @@ export interface HostEntry {
   apiKey?: string;
   /** Last-seen `/api/status.instance_id`, used to dedupe re-adds. */
   instanceId?: string;
+  /** Successful connection that selected `url`; failed attempts never update it. */
+  lastConnectedAtMs?: number;
   /** False only after an explicit disconnect. Missing means connected for
    *  compatibility with registries written by older Mold versions. */
   connected?: boolean;
@@ -91,9 +97,113 @@ function isHostEntry(value: unknown): value is HostEntry {
     typeof c.url === "string" &&
     (c.apiKey === undefined || typeof c.apiKey === "string") &&
     (c.instanceId === undefined || typeof c.instanceId === "string") &&
+    (c.lastConnectedAtMs === undefined ||
+      typeof c.lastConnectedAtMs === "number") &&
     (c.connected === undefined || typeof c.connected === "boolean") &&
     c.id !== ORIGIN_HOST_ID
   );
+}
+
+function normalizedInstanceId(value: string | null | undefined): string | null {
+  const normalized = value?.trim();
+  return normalized ? normalized : null;
+}
+
+export function mergeStoredHostsByInstanceId(hosts: readonly HostEntry[]): {
+  hosts: HostEntry[];
+  dropped: Array<{ loser: string; survivor: string }>;
+} {
+  const winnerByUuid = new Map<string, HostEntry>();
+  for (const host of hosts) {
+    const uuid = normalizedInstanceId(host.instanceId);
+    if (!uuid) continue;
+    const current = winnerByUuid.get(uuid);
+    const hostConnected = host.connected !== false;
+    const currentConnected = current?.connected !== false;
+    if (
+      !current ||
+      (hostConnected && !currentConnected) ||
+      (hostConnected === currentConnected &&
+        (host.lastConnectedAtMs ?? 0) > (current.lastConnectedAtMs ?? 0))
+    ) {
+      winnerByUuid.set(uuid, host);
+    }
+  }
+  const merged: HostEntry[] = [];
+  const dropped: Array<{ loser: string; survivor: string }> = [];
+  for (const host of hosts) {
+    const uuid = normalizedInstanceId(host.instanceId);
+    const winner = uuid ? winnerByUuid.get(uuid) : undefined;
+    if (!winner || winner.id === host.id) {
+      const fallbackKey = uuid
+        ? hosts.find(
+            (candidate) =>
+              normalizedInstanceId(candidate.instanceId) === uuid &&
+              Boolean(candidate.apiKey),
+          )?.apiKey
+        : undefined;
+      merged.push(
+        fallbackKey && !host.apiKey ? { ...host, apiKey: fallbackKey } : host,
+      );
+    } else dropped.push({ loser: host.id, survivor: winner.id });
+  }
+  return { hosts: merged, dropped };
+}
+
+function remapPersistedHostIds(
+  dropped: ReadonlyArray<{ loser: string; survivor: string }>,
+): void {
+  if (dropped.length === 0) return;
+  const remap = new Map(
+    dropped.map(({ loser, survivor }) => [loser, survivor]),
+  );
+  const remapJson = (key: string, arrayRoot: boolean): void => {
+    const raw = localStorage.getItem(key);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      const rows = arrayRoot
+        ? parsed
+        : parsed && typeof parsed === "object"
+          ? (parsed as { jobs?: unknown }).jobs
+          : null;
+      if (!Array.isArray(rows)) return;
+      let changed = false;
+      for (const row of rows) {
+        if (!row || typeof row !== "object") continue;
+        const record = row as { hostId?: unknown };
+        if (typeof record.hostId !== "string") continue;
+        const survivor = remap.get(record.hostId);
+        if (!survivor) continue;
+        record.hostId = survivor;
+        changed = true;
+      }
+      if (changed) localStorage.setItem(key, JSON.stringify(parsed));
+    } catch {
+      // Recovery state is best effort; malformed records remain untouched.
+    }
+  };
+  remapJson(TRACKED_SEQUENCES_KEY, true);
+  remapJson(GENERATE_JOBS_KEY, false);
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(GENERATE_RECOVERY_PREFIX)) remapJson(key, false);
+  }
+  const legacyHost = localStorage.getItem(LEGACY_SEQUENCE_HOST_KEY);
+  const legacySurvivor = legacyHost ? remap.get(legacyHost) : null;
+  if (legacySurvivor)
+    localStorage.setItem(LEGACY_SEQUENCE_HOST_KEY, legacySurvivor);
+}
+
+function applyAliasRemap(
+  dropped: ReadonlyArray<{ loser: string; survivor: string }>,
+): void {
+  if (dropped.length === 0) return;
+  const target = getGenerateTargetId();
+  const targetRemap = dropped.find(({ loser }) => loser === target);
+  if (targetRemap)
+    localStorage.setItem(GENERATE_TARGET_STORAGE_KEY, targetRemap.survivor);
+  remapPersistedHostIds(dropped);
 }
 
 /** User-added remote hosts (excludes the primary origin). */
@@ -103,7 +213,13 @@ export function listStoredHosts(): HostEntry[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isHostEntry);
+    const valid = parsed.filter(isHostEntry);
+    const merged = mergeStoredHostsByInstanceId(valid);
+    if (merged.dropped.length > 0) {
+      localStorage.setItem(HOSTS_STORAGE_KEY, JSON.stringify(merged.hosts));
+      applyAliasRemap(merged.dropped);
+    }
+    return merged.hosts;
   } catch {
     return [];
   }
@@ -143,8 +259,13 @@ export function getKnownHost(id: string): HostEntry | null {
  * A blank instance id never matches — an unknown server must not merge.
  */
 export function dedupeByInstanceId(instanceId: string): HostEntry | null {
-  if (!instanceId) return null;
-  return listStoredHosts().find((h) => h.instanceId === instanceId) ?? null;
+  const normalized = normalizedInstanceId(instanceId);
+  if (!normalized) return null;
+  return (
+    listStoredHosts().find(
+      (host) => normalizedInstanceId(host.instanceId) === normalized,
+    ) ?? null
+  );
 }
 
 export interface AddHostInput {
@@ -167,28 +288,105 @@ export function addHost(input: AddHostInput): HostEntry {
   if (url === originUrl()) return originHost();
 
   const stored = listStoredHosts();
-  const byInstance = input.instanceId
-    ? stored.find((h) => h.instanceId === input.instanceId)
+  const instanceId = normalizedInstanceId(input.instanceId);
+  const byInstance = instanceId
+    ? stored.find(
+        (host) => normalizedInstanceId(host.instanceId) === instanceId,
+      )
     : undefined;
-  const id = hostIdFromUrl(url);
-  const existing = byInstance ?? stored.find((h) => h.id === id);
+  const slug = hostIdFromUrl(url);
+  const bySlug = stored.find((host) => host.id === slug);
+  const slugInstanceId = normalizedInstanceId(bySlug?.instanceId);
+  const slugConflict = Boolean(
+    bySlug && instanceId && slugInstanceId && instanceId !== slugInstanceId,
+  );
+  const existing = byInstance ?? (slugConflict ? undefined : bySlug);
+  const id =
+    existing?.id ??
+    (slugConflict && instanceId
+      ? `${slug}-${instanceId
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .slice(0, 12)}`
+      : slug);
 
   const entry: HostEntry = {
     id: existing?.id ?? id,
     name,
     url,
     connected: true,
+    lastConnectedAtMs: Date.now(),
   };
   if (input.apiKey) entry.apiKey = input.apiKey;
   else if (existing?.apiKey) entry.apiKey = existing.apiKey;
-  if (input.instanceId) entry.instanceId = input.instanceId;
+  if (instanceId) entry.instanceId = instanceId;
   else if (existing?.instanceId) entry.instanceId = existing.instanceId;
 
+  const retired = slugConflict
+    ? stored.map((host) =>
+        host.id === bySlug?.id ? { ...host, connected: false } : host,
+      )
+    : stored;
   const next = existing
-    ? stored.map((h) => (h.id === existing.id ? entry : h))
-    : [...stored, entry];
+    ? retired.map((h) => (h.id === existing.id ? entry : h))
+    : [...retired, entry];
   writeStoredHosts(next);
   return entry;
+}
+
+/** Remove a remembered alias when it proves to be the browser's origin. */
+export function reconcileOriginInstanceId(instanceId: string): void {
+  const normalized = normalizedInstanceId(instanceId);
+  if (!normalized) return;
+  const stored = listStoredHosts();
+  const aliases = stored.filter(
+    (host) => normalizedInstanceId(host.instanceId) === normalized,
+  );
+  if (aliases.length === 0) return;
+  const aliasIds = new Set(aliases.map((host) => host.id));
+  writeStoredHosts(stored.filter((host) => !aliasIds.has(host.id)));
+  applyAliasRemap(
+    aliases.map((host) => ({ loser: host.id, survivor: ORIGIN_HOST_ID })),
+  );
+}
+
+/** Persist a UUID learned from a successful exact-authority status poll.
+ * The answering address wins, then every alias-owned recovery record follows
+ * the surviving row id. */
+export function recordSuccessfulHostInstance(
+  id: string,
+  instanceId: string | null | undefined,
+): HostEntry | null {
+  const normalized = normalizedInstanceId(instanceId);
+  if (!normalized) return getKnownHost(id);
+  if (id === ORIGIN_HOST_ID) {
+    reconcileOriginInstanceId(normalized);
+    return originHost();
+  }
+  const stored = listStoredHosts();
+  const current = stored.find((host) => host.id === id);
+  if (!current) return null;
+  if (normalizedInstanceId(current.instanceId) === normalized) return current;
+  const successfulAt = Math.max(
+    Date.now(),
+    ...stored.map((host) => (host.lastConnectedAtMs ?? 0) + 1),
+  );
+  const stamped = stored.map((host) =>
+    host.id === id
+      ? {
+          ...host,
+          instanceId: normalized,
+          connected: true,
+          lastConnectedAtMs: successfulAt,
+        }
+      : host,
+  );
+  const merged = mergeStoredHostsByInstanceId(stamped);
+  const survivorId =
+    merged.dropped.find(({ loser }) => loser === id)?.survivor ?? id;
+  writeStoredHosts(merged.hosts);
+  applyAliasRemap(merged.dropped);
+  return merged.hosts.find((host) => host.id === survivorId) ?? null;
 }
 
 /** Patch a stored host. The immutable primary cannot be updated (returns null). */

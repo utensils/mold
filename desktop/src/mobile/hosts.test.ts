@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   mobileHostHealthLabel,
   mobileHostMatchesRoute,
+  mergeMobileHostsByInstanceId,
   normalizeRemoteAddress,
   recordMobileHostAuthorityRejection,
   recordMobileHostProbeFailure,
@@ -38,6 +39,37 @@ function verifiedHost(overrides: Partial<MobileHost> = {}): MobileHost {
 }
 
 describe("mobile remote hosts", () => {
+  it("collapses IP and hostname aliases by UUID onto the last successful address", () => {
+    const byName = verifiedHost({
+      id: "hal9000-7680",
+      baseUrl: "http://hal9000:7680",
+      instanceId: "same-uuid",
+      lastConnectedAtMs: 10,
+    });
+    const byIp = verifiedHost({
+      id: "100-123-198-98-7681",
+      baseUrl: "http://100.123.198.98:7681",
+      instanceId: "same-uuid",
+      lastConnectedAtMs: 20,
+    });
+
+    expect(mergeMobileHostsByInstanceId([byName, byIp])).toEqual({
+      hosts: [byIp],
+      dropped: [{ loser: byName.id, survivor: byIp.id }],
+    });
+  });
+
+  it("does not merge missing or different server UUIDs", () => {
+    const unknown = verifiedHost({ id: "unknown", instanceId: " " });
+    const first = verifiedHost({ id: "first", instanceId: "uuid-1" });
+    const second = verifiedHost({ id: "second", instanceId: "uuid-2" });
+    expect(mergeMobileHostsByInstanceId([unknown, first, second]).hosts).toEqual([
+      unknown,
+      first,
+      second,
+    ]);
+  });
+
   it("accepts Tailscale MagicDNS names and applies Mold's default port", () => {
     expect(normalizeRemoteAddress("studio.tailnet.ts.net")).toBe(
       "http://studio.tailnet.ts.net:7680",
@@ -50,7 +82,7 @@ describe("mobile remote hosts", () => {
     );
   });
 
-  it("uses the standard HTTPS port when a complete HTTPS URL is entered", () => {
+  it("uses the HTTPS scheme default when a complete URL omits a port", () => {
     expect(normalizeRemoteAddress("https://mold.example.com/")).toBe("https://mold.example.com");
   });
 

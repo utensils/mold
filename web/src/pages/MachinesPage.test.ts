@@ -30,6 +30,7 @@ let poll: {
 
 vi.mock("../components/machines/hostClient", () => ({
   useHostPoll: () => poll,
+  hostStatus: vi.fn().mockResolvedValue({ instance_id: "origin-instance" }),
 }));
 
 vi.mock("vue-router", () => ({

@@ -27,6 +27,7 @@ export type UnionModelEntry = ModelEntry & { hostIds: string[] };
 export const useHostModelsStore = defineStore("hostModels", {
   state: () => ({
     byHost: {} as Record<string, HostModelList>,
+    authorityEpoch: {} as Record<string, number>,
     loading: false,
   }),
   getters: {
@@ -131,6 +132,11 @@ export const useHostModelsStore = defineStore("hostModels", {
     },
   },
   actions: {
+    /** Retire cached and in-flight model inventory read under an old target. */
+    retireAuthority(hostId: string) {
+      this.authorityEpoch[hostId] = (this.authorityEpoch[hostId] ?? 0) + 1;
+      delete this.byHost[hostId];
+    },
     /**
      * Fan out `/api/models` to every ready host. Hosts fetched under 60s ago
      * are skipped unless `force`; a host that fails keeps its last entries
@@ -143,13 +149,24 @@ export const useHostModelsStore = defineStore("hostModels", {
         .filter((h) => h.status === "ready" && h.baseUrl)
         .filter((h) => force || now - (this.byHost[h.id]?.fetchedAt ?? 0) >= STALE_MS)
         .map(async (h) => {
+          const authorityEpoch = this.authorityEpoch[h.id] ?? 0;
+          const isCurrent = () => {
+            const current = useHostsStore().all.find((host) => host.id === h.id);
+            return (
+              (this.authorityEpoch[h.id] ?? 0) === authorityEpoch &&
+              current?.baseUrl === h.baseUrl &&
+              current.apiKey === h.apiKey
+            );
+          };
           try {
             const entries = await apiJsonTo<ModelEntry[]>(
               { baseUrl: h.baseUrl!, apiKey: h.apiKey },
               "/api/models",
             );
+            if (!isCurrent()) return;
             this.byHost[h.id] = { entries, fetchedAt: Date.now(), error: null };
           } catch (err) {
+            if (!isCurrent()) return;
             const prev = this.byHost[h.id];
             this.byHost[h.id] = {
               entries: prev?.entries ?? [],

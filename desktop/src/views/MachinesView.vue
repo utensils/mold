@@ -268,19 +268,24 @@ async function connectSaved(host: SavedHost) {
 const discovered = ref<DiscoveredHost[]>([]);
 const scanning = ref(false);
 
-const undiscovered = computed(() =>
-  discovered.value.filter(
-    (d) =>
+const undiscovered = computed(() => {
+  const seenInstanceIds = new Set<string>();
+  return discovered.value.filter((d) => {
+    const instanceId = d.instanceId?.trim() || null;
+    const visible =
       !connectedRemoteIds.value.has(hostIdFromUrl(d.url)) &&
-      !(d.instanceId && connectedRemoteInstanceIds.value.has(d.instanceId)) &&
+      !(instanceId && connectedRemoteInstanceIds.value.has(instanceId)) &&
       // The app's own embedded server is already the This-device card; its
       // mDNS advertisement is noise here. Instance UUID identifies the
       // primary (so a standalone `mold serve` on this machine stays listed),
       // and isThisMachine guards against a copied MOLD_HOME sharing that
       // UUID from another box.
-      !(d.isThisMachine && d.instanceId && d.instanceId === hosts.primaryHost?.instanceId),
-  ),
-);
+      !(d.isThisMachine && instanceId && instanceId === hosts.primaryHost?.instanceId) &&
+      !(instanceId && seenInstanceIds.has(instanceId));
+    if (visible && instanceId) seenInstanceIds.add(instanceId);
+    return visible;
+  });
+});
 
 async function scan() {
   scanning.value = true;
