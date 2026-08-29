@@ -4829,6 +4829,17 @@ fn run_real_distilled_stage(
     progress: Option<&ProgressCallback>,
     cancellation: Option<&InferenceCancellationToken>,
 ) -> Result<(Tensor, Option<Tensor>)> {
+    // Audio context follows the AUDIO BRANCH, not the prompt: a video-only
+    // render (#1037) skips the branch structurally, so it has audio prompt
+    // encodings but no audio latents and therefore no audio positions.
+    // Passing the prompt-derived contexts on would hand the transformer a
+    // batched audio context with no positions — the exact Some/None mismatch
+    // `prepare_static_inputs` refuses. Positions are the branch's own
+    // authority, so every audio context is normalized against them here,
+    // once, rather than at each of the guidance-batch builders below.
+    let audio_context = audio_context.filter(|_| audio_positions.is_some());
+    let uncond_audio_context = uncond_audio_context.filter(|_| audio_positions.is_some());
+    let alt_audio_context = alt_audio_context.filter(|_| audio_positions.is_some());
     let device = video_start_latents.device().clone();
     let video_patchifier = VideoLatentPatchifier::new(1);
     let audio_patchifier = AudioPatchifier::new(
