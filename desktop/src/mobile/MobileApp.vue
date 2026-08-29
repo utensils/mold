@@ -58,6 +58,7 @@ import type { CanvasIntent } from "@studio/lib/outputShape";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { virtualGridWindow } from "@studio/lib/virtualGrid";
 import { galleryThumbnailScheduler, type ThumbnailHandle } from "@studio/lib/thumbnailScheduler";
+import { thumbnailRenditionQuery, thumbnailTier } from "@studio/lib/thumbnailPersistentCache";
 import {
   collectionSlug,
   collectionSlugResolver,
@@ -265,7 +266,9 @@ import {
   isAudioItem,
   isVideoItem,
   streamableMediaUrl,
+  thumbnailPath,
 } from "../lib/gallery/media";
+import { chunkForProbe, planPrewarm, type PrewarmCandidate } from "../lib/gallery/thumbnailPrewarm";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
@@ -385,16 +388,25 @@ import {
 import {
   captureCachedHostFence,
   clearCachedGalleryHosts,
+  createThumbnailRouteGenerationRegistry,
+  evictCachedGalleryMedia,
+  evictCachedGalleryMediaEntry,
+  isCachedHostFenceCurrent,
   loadCachedGallery,
   loadCachedGalleryMedia,
   loadCachedHostPresentation,
   patchCachedGalleryPrints,
+  probeCachedGalleryMedia,
   pruneCachedGalleryMedia,
   removeCachedGalleryPrints,
+  removeCachedGalleryRows,
   storeCachedGallery,
   storeCachedGalleryMedia,
   storeCachedHostPresentation,
+  validGalleryThumbnailBlob,
+  type CachedGalleryMediaRef,
   type CachedHostPresentation,
+  type MobileThumbnailTier,
 } from "./galleryCache";
 import {
   MOBILE_GALLERY_COLUMNS_MAX,
@@ -1029,6 +1041,7 @@ const generationAnnouncement = ref("");
 const gallery = ref<GalleryPrint[]>([]);
 const galleryByThumbnailKey = new Map<string, GalleryPrint>();
 const galleryLoading = ref(false);
+const galleryRefreshing = ref(false);
 const galleryError = ref("");
 const viewPullDistance = ref(0);
 const viewPullRefreshing = ref(false);
@@ -1099,6 +1112,7 @@ interface CollectionCoverState {
   hostId: string;
   filename: string;
   candidatesKey: string;
+  mediaRef: CachedGalleryMediaRef | null;
   url: string;
   status: "loading" | "ready" | "error";
 }
@@ -1149,9 +1163,14 @@ let galleryOperationTail: Promise<void> = Promise.resolve();
 let pendingLibraryScrollRestore: { top: number; left: number } | null = null;
 let libraryScrollRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 const activeGalleryThumbnailControllers = new Set<AbortController>();
-const galleryThumbnailHandles = new Map<string, ThumbnailHandle<string>>();
+const galleryThumbnailHandles = new Map<string, ThumbnailHandle<Blob>>();
 let visibleGalleryThumbnailKeys = new Set<string>();
 const galleryThumbnailRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const thumbnailRouteGenerationFor = createThumbnailRouteGenerationRegistry();
+const mobileGalleryPrewarmHandles = new Set<ThumbnailHandle<Blob>>();
+const mobileGalleryPrewarmAttempted = new Set<string>();
+let mobileGalleryPrewarmTimer: ReturnType<typeof setTimeout> | null = null;
+let mobileGalleryPrewarmEpoch = 0;
 let galleryDragPointerId: number | null = null;
 let galleryDragActive = false;
 let galleryDragSelect = true;
@@ -7041,12 +7060,78 @@ function retryGeneratedPreview(): void {
   renewGeneratedResult(true);
 }
 
-async function thumbnailUrl(
-  target: ApiTarget,
-  hostId: string,
-  filename: string,
+const THUMBNAIL_RENDITION_HEADER = "x-mold-thumbnail-rendition";
+
+function persistentThumbnailVersion(
+  print: Pick<MobileGalleryImage, "media_version" | "timestamp" | "size_bytes">,
+): string | null {
+  if (typeof print.media_version === "string" && print.media_version.trim()) {
+    return print.media_version;
+  }
+  return typeof print.size_bytes === "number" &&
+    Number.isFinite(print.size_bytes) &&
+    print.size_bytes >= 0
+    ? `${print.timestamp}:${print.size_bytes}`
+    : null;
+}
+
+function runtimeThumbnailVersion(
+  print: Pick<MobileGalleryImage, "media_version" | "timestamp" | "size_bytes">,
+): string {
+  return persistentThumbnailVersion(print) ?? `session:${print.timestamp}`;
+}
+
+function thumbnailRouteGeneration(print: Pick<PendingGalleryPrint, "cacheKey" | "target">): number {
+  return thumbnailRouteGenerationFor(print.cacheKey, print.target);
+}
+
+function thumbnailIdentity(
+  print: Pick<
+    PendingGalleryPrint,
+    "cacheKey" | "filename" | "media_version" | "timestamp" | "size_bytes" | "target"
+  >,
+  tier: MobileThumbnailTier = thumbnailTier(),
+): string {
+  return JSON.stringify([
+    print.cacheKey,
+    print.filename,
+    runtimeThumbnailVersion(print),
+    tier,
+    thumbnailRouteGeneration(print),
+  ]);
+}
+
+function cachedThumbnailRef(
+  print: Pick<
+    PendingGalleryPrint,
+    "cacheKey" | "filename" | "media_version" | "timestamp" | "size_bytes"
+  >,
+  tier: MobileThumbnailTier = thumbnailTier(),
+): CachedGalleryMediaRef | null {
+  const mediaVersion = persistentThumbnailVersion(print);
+  return mediaVersion
+    ? { hostId: print.cacheKey, filename: print.filename, mediaVersion, tier }
+    : null;
+}
+
+function thumbnailRequestPath(
+  print: Pick<PendingGalleryPrint, "filename" | "media_version" | "timestamp" | "size_bytes">,
+  tier: MobileThumbnailTier,
+): string {
+  const params = [
+    persistentThumbnailVersion(print)
+      ? `v=${encodeURIComponent(persistentThumbnailVersion(print)!)}`
+      : null,
+    thumbnailRenditionQuery(tier),
+  ].filter((value): value is string => value !== null);
+  return `${thumbnailPath(print.filename)}?${params.join("&")}`;
+}
+
+async function thumbnailBlob(
+  print: PendingGalleryPrint,
+  tier: MobileThumbnailTier = thumbnailTier(),
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<Blob> {
   const controller = new AbortController();
   const cancel = () => controller.abort();
   if (signal?.aborted) controller.abort();
@@ -7056,34 +7141,34 @@ async function thumbnailUrl(
   const deadline = new Promise<never>((_resolve, reject) => {
     controller.signal.addEventListener(
       "abort",
-      () => reject(new Error(`Gallery thumbnail timed out: ${filename}`)),
+      () => reject(new Error(`Gallery thumbnail timed out: ${print.filename}`)),
       { once: true },
     );
     timeout = setTimeout(() => controller.abort(), GALLERY_THUMBNAIL_TIMEOUT_MS);
   });
   const load = async () => {
-    let blob = await loadCachedGalleryMedia(hostId, filename, "thumbnail");
-    if (controller.signal.aborted) throw new Error(`Gallery thumbnail timed out: ${filename}`);
+    const mediaRef = cachedThumbnailRef(print, tier);
+    let blob = mediaRef ? await loadCachedGalleryMedia(mediaRef) : null;
+    if (controller.signal.aborted) {
+      throw new Error(`Gallery thumbnail timed out: ${print.filename}`);
+    }
     if (!blob) {
-      const response = await apiFetchTo(target, galleryMediaPath(filename, "host", true), {
+      const response = await apiFetchTo(print.target, thumbnailRequestPath(print, tier), {
         signal: controller.signal,
       });
+      if (response.ok === false) throw new Error(`Gallery thumbnail failed: ${response.status}`);
       blob = await response.blob();
-      if (controller.signal.aborted) throw new Error(`Gallery thumbnail timed out: ${filename}`);
-      void storeCachedGalleryMedia(hostId, filename, "thumbnail", blob);
+      if (controller.signal.aborted) {
+        throw new Error(`Gallery thumbnail timed out: ${print.filename}`);
+      }
+      if (!(await validGalleryThumbnailBlob(blob))) {
+        throw new Error(`Gallery thumbnail was not a bounded image: ${print.filename}`);
+      }
+      const confirmedRendition =
+        tier === 256 || response.headers?.get(THUMBNAIL_RENDITION_HEADER) != null;
+      if (mediaRef && confirmedRendition) await storeCachedGalleryMedia(mediaRef, blob);
     }
-    // WKWebView's native image context menu forwards an object URL as text to
-    // Share extensions. Give iOS an inline image resource so Share, Copy, and
-    // Save to Photos receive image data rather than a process-local `blob:` URL.
-    // Thumbnails are bounded to 256 px by the server, so the base64 expansion
-    // stays small; browser development keeps cheaper revocable object URLs.
-    if (isNativeIOSRuntime()) {
-      const mimeType = blob.type.startsWith("image/") ? blob.type : "image/png";
-      return `data:${mimeType};base64,${await blobToBase64(blob)}`;
-    }
-    const url = URL.createObjectURL(blob);
-    objectUrls.add(url);
-    return url;
+    return blob;
   };
   try {
     // The explicit race is intentional: some WKWebView/Android WebView fetch
@@ -7096,8 +7181,21 @@ async function thumbnailUrl(
   }
 }
 
-function galleryThumbnailRetryKey(print: Pick<GalleryPrint, "cacheKey" | "filename">): string {
-  return `${print.cacheKey}\u0000${print.filename}`;
+async function thumbnailDisplayUrl(blob: Blob): Promise<string> {
+  // WKWebView's native image context menu forwards an object URL as text to
+  // Share extensions. Give iOS an inline image resource so Share, Copy, and
+  // Save to Photos receive image data rather than a process-local `blob:` URL.
+  if (isNativeIOSRuntime()) {
+    const mimeType = blob.type.startsWith("image/") ? blob.type : "image/png";
+    return `data:${mimeType};base64,${await blobToBase64(blob)}`;
+  }
+  const url = URL.createObjectURL(blob);
+  objectUrls.add(url);
+  return url;
+}
+
+function galleryThumbnailRetryKey(print: PendingGalleryPrint): string {
+  return thumbnailIdentity(print);
 }
 
 function cancelGalleryThumbnailRetries(): void {
@@ -7138,18 +7236,18 @@ function scheduleGalleryThumbnailRetry(print: GalleryPrint, attempt = 0): void {
 function loadGalleryThumbnail(print: GalleryPrint, failedAttempts = 0): void {
   const key = galleryThumbnailRetryKey(print);
   if (galleryThumbnailHandles.has(key) || !print.thumbnailPending) return;
-  const mediaVersion = print.media_version ?? `${print.timestamp}:${print.size_bytes ?? "unknown"}`;
   const handle = galleryThumbnailScheduler.schedule({
-    key: `${print.cacheKey}|${print.filename}|${mediaVersion}`,
+    key,
     hostKey: print.cacheKey,
     priority: "visible",
-    run: (signal) => thumbnailUrl(print.target, print.cacheKey, print.filename, signal),
+    run: (signal) => thumbnailBlob(print, thumbnailTier(), signal),
   });
   galleryThumbnailHandles.set(key, handle);
   void handle.promise
-    .then((url) => {
+    .then(async (blob) => {
+      const url = await thumbnailDisplayUrl(blob);
       const latest = galleryByThumbnailKey.get(key);
-      if (!latest || unmounted) {
+      if (!latest || unmounted || galleryThumbnailRetryKey(latest) !== key) {
         revokeObjectUrl(url);
         return;
       }
@@ -7160,6 +7258,112 @@ function loadGalleryThumbnail(print: GalleryPrint, failedAttempts = 0): void {
     .finally(() => {
       if (galleryThumbnailHandles.get(key) === handle) galleryThumbnailHandles.delete(key);
     });
+}
+
+interface MobilePrewarmCandidate extends PrewarmCandidate {
+  print: GalleryPrint;
+  mediaRef: CachedGalleryMediaRef;
+  identity: string;
+}
+
+function cancelMobileGalleryPrewarm(): void {
+  mobileGalleryPrewarmEpoch += 1;
+  if (mobileGalleryPrewarmTimer !== null) clearTimeout(mobileGalleryPrewarmTimer);
+  mobileGalleryPrewarmTimer = null;
+  for (const handle of mobileGalleryPrewarmHandles) handle.cancel();
+  mobileGalleryPrewarmHandles.clear();
+}
+
+async function runMobileGalleryPrewarm(): Promise<void> {
+  if (
+    tab.value !== "gallery" ||
+    document.visibilityState === "hidden" ||
+    gallery.value.length === 0
+  ) {
+    return;
+  }
+  const epoch = ++mobileGalleryPrewarmEpoch;
+  const tier = thumbnailTier();
+  const columns = Math.max(1, galleryColumns.value);
+  const startRow = Math.floor(mobileGalleryWindow.value.startIndex / columns);
+  const endRow = Math.max(startRow, Math.floor((mobileGalleryWindow.value.endIndex - 1) / columns));
+  const rowsPerViewport = Math.max(1, endRow - startRow + 1);
+  const candidates: MobilePrewarmCandidate[] = gallery.value.flatMap((print, index) => {
+    const mediaRef = cachedThumbnailRef(print, tier);
+    const identity = thumbnailIdentity(print, tier);
+    // Visible rows already persist through the foreground loader. Excluding
+    // them here also keeps a foreground failure on one retry stream instead
+    // of letting background prewarm race its backoff with another fetch.
+    return mediaRef &&
+      !visibleGalleryThumbnailKeys.has(identity) &&
+      !galleryThumbnailHandles.has(identity) &&
+      !galleryThumbnailRetryTimers.has(identity) &&
+      !mobileGalleryPrewarmAttempted.has(identity)
+      ? [
+          {
+            sourceKey: print.cacheKey,
+            filename: print.filename,
+            mediaVersion: mediaRef.mediaVersion,
+            rowIndex: Math.floor(index / columns),
+            print,
+            mediaRef,
+            identity,
+          },
+        ]
+      : [];
+  });
+  const plan = planPrewarm(candidates, { startRow, endRow, rowsPerViewport });
+  if (plan.length === 0) return;
+  const byHost = new Map<string, typeof plan>();
+  for (const entry of plan) {
+    const list = byHost.get(entry.candidate.sourceKey) ?? [];
+    list.push(entry);
+    byHost.set(entry.candidate.sourceKey, list);
+  }
+  const tranche: ThumbnailHandle<Blob>[] = [];
+  for (const entries of byHost.values()) {
+    for (const batch of chunkForProbe(entries)) {
+      const typed = batch as Array<{
+        candidate: MobilePrewarmCandidate;
+        priority: "near" | "background";
+      }>;
+      const cached = await probeCachedGalleryMedia(typed.map((entry) => entry.candidate.mediaRef));
+      if (epoch !== mobileGalleryPrewarmEpoch) return;
+      typed.forEach((entry, index) => {
+        mobileGalleryPrewarmAttempted.add(entry.candidate.identity);
+        if (cached[index]) return;
+        const handle = galleryThumbnailScheduler.schedule({
+          key: entry.candidate.identity,
+          hostKey: entry.candidate.sourceKey,
+          priority: entry.priority,
+          run: (signal) => thumbnailBlob(entry.candidate.print, tier, signal),
+        });
+        mobileGalleryPrewarmHandles.add(handle);
+        tranche.push(handle);
+        void handle.promise
+          .catch(() => {})
+          .finally(() => mobileGalleryPrewarmHandles.delete(handle));
+      });
+    }
+  }
+  await Promise.allSettled(tranche.map((handle) => handle.promise));
+  if (epoch !== mobileGalleryPrewarmEpoch) return;
+  scheduleMobileGalleryPrewarm(100);
+}
+
+function scheduleMobileGalleryPrewarm(delay = 500): void {
+  cancelMobileGalleryPrewarm();
+  if (
+    tab.value !== "gallery" ||
+    document.visibilityState === "hidden" ||
+    gallery.value.length === 0
+  ) {
+    return;
+  }
+  mobileGalleryPrewarmTimer = setTimeout(() => {
+    mobileGalleryPrewarmTimer = null;
+    void runMobileGalleryPrewarm();
+  }, delay);
 }
 
 function mobileGalleryCacheKey(host: MobileHost): string {
@@ -7212,12 +7416,9 @@ function enqueueGalleryOperation(operation: () => Promise<void>): Promise<void> 
 async function performGalleryRefresh(): Promise<void> {
   cancelGalleryThumbnailRetries();
   clearGallerySelection();
-  galleryLoading.value = true;
+  galleryLoading.value = galleryCopies.length === 0;
+  galleryRefreshing.value = true;
   galleryError.value = "";
-  const prior = gallery.value;
-  gallery.value = [];
-  galleryByThumbnailKey.clear();
-  for (const item of prior) revokeObjectUrl(item.thumbnailUrl);
   const allHosts = connectedHosts.value;
   const cachedResults = await Promise.all(
     allHosts.map(async (host) => ({
@@ -7239,11 +7440,20 @@ async function performGalleryRefresh(): Promise<void> {
       target,
     }));
   });
-  if (cachedCopies.length > 0) {
+  if (galleryCopies.length === 0 && cachedCopies.length > 0) {
     galleryCopies = cachedCopies.sort((a, b) => b.timestamp - a.timestamp);
     rebuildGalleryOrganization();
     pendingGallery = visibleRepresentatives();
     await loadMoreGalleryPage();
+  }
+  const savedBaseline = galleryCopies.length > 0 ? [...galleryCopies] : cachedCopies;
+  if (savedBaseline.length > 0) {
+    galleryLoading.value = false;
+    await nextTick();
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+      else resolve();
+    });
   }
 
   const galleryHosts = allHosts.filter(
@@ -7254,6 +7464,7 @@ async function performGalleryRefresh(): Promise<void> {
     galleryHosts.map(async (host) => {
       const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
       const cacheKey = mobileGalleryCacheKey(host);
+      const cacheFence = captureCachedHostFence(cacheKey);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), GALLERY_HOST_TIMEOUT_MS);
       let prints: MobileGalleryImage[];
@@ -7287,12 +7498,16 @@ async function performGalleryRefresh(): Promise<void> {
       if (
         !currentHost ||
         currentHost.instanceMismatch ||
-        mobileGalleryCacheKey(currentHost) !== cacheKey
+        mobileGalleryCacheKey(currentHost) !== cacheKey ||
+        !isCachedHostFenceCurrent(cacheFence)
       ) {
         throw new Error("Gallery host identity changed while refreshing");
       }
       if (capabilities !== undefined) serverCapabilities[host.id] = capabilities;
-      await storeCachedGallery(cacheKey, prints);
+      await storeCachedGallery(cacheKey, prints, cacheFence);
+      if (!isCachedHostFenceCurrent(cacheFence)) {
+        throw new Error("Gallery changed while refreshing");
+      }
       return { host, cacheKey, target, prints };
     }),
   );
@@ -7306,13 +7521,22 @@ async function performGalleryRefresh(): Promise<void> {
       result.status === "fulfilled" ? [[result.value.host.id, result.value] as const] : [],
     ),
   );
+  const savedByHost = new Map<string, PendingGalleryPrint[]>();
+  for (const copy of savedBaseline) {
+    const copies = savedByHost.get(copy.hostId) ?? [];
+    copies.push(copy);
+    savedByHost.set(copy.hostId, copies);
+  }
   const refreshedCopies = connectedHosts.value
     .flatMap((host) => {
       const refreshed = refreshedByHost.get(host.id);
       const cacheKey = refreshed?.cacheKey ?? mobileGalleryCacheKey(host);
       const target = refreshed?.target ?? { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
       const cached = cachedByHost.get(host.id);
-      const prints = refreshed?.prints ?? (cached?.cacheKey === cacheKey ? cached.prints : []);
+      const saved = savedByHost.get(host.id);
+      const prints =
+        refreshed?.prints ??
+        (saved?.length ? saved : cached?.cacheKey === cacheKey ? cached.prints : []);
       return prints.map((print) => ({
         ...print,
         hostId: host.id,
@@ -7327,16 +7551,15 @@ async function performGalleryRefresh(): Promise<void> {
     galleryRefreshDeferred = true;
     if (failed) {
       galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable${
-        cachedCopies.length > 0 ? " · Showing saved Library" : ""
+        savedBaseline.length > 0 ? " · Showing saved Library" : ""
       }`;
     }
     galleryLoading.value = false;
+    galleryRefreshing.value = false;
     return;
   }
   galleryCopies = refreshedCopies;
-  for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
-  gallery.value = [];
-  galleryByThumbnailKey.clear();
+  mobileGalleryPrewarmAttempted.clear();
   rebuildGalleryOrganization();
   // The Trash listing is refetched on its own schedule; a live refresh only
   // marks it stale so the next Trash visit re-reads the host.
@@ -7344,32 +7567,51 @@ async function performGalleryRefresh(): Promise<void> {
   pendingGallery = visibleRepresentatives();
   if (failed) {
     galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable${
-      cachedCopies.length > 0 ? " · Showing saved Library" : ""
+      savedBaseline.length > 0 ? " · Showing saved Library" : ""
     }`;
   }
   await loadMoreGalleryPage();
   void pruneCachedGalleryMedia();
   galleryLoading.value = false;
+  galleryRefreshing.value = false;
   if (libraryScope.value === "trash") void refreshTrash();
 }
 
 async function loadMoreGalleryPage(): Promise<void> {
-  const page = pendingGallery.splice(0);
-  // Keep the complete logical index in memory so navigation, filtering, and
-  // selection stay O(1), but the template windows its DOM rows and hydrates
-  // thumbnails only for the visible/near window below.
-  const placed = page.map((print): GalleryPrint => ({
-    ...print,
-    thumbnailUrl: GALLERY_THUMBNAIL_PLACEHOLDER,
-    thumbnailPending: true,
-  }));
-  const start = gallery.value.length;
-  gallery.value.push(...placed);
-  // Store Vue proxies, not the raw objects passed to push: thumbnail
+  const desired = pendingGallery.splice(0);
+  const priorByPhysicalKey = new Map(
+    gallery.value.map((print) => [
+      galleryPrintKey(print),
+      { print, identity: thumbnailIdentity(print) },
+    ]),
+  );
+  const next: GalleryPrint[] = [];
+  for (const print of desired) {
+    const prior = priorByPhysicalKey.get(galleryPrintKey(print));
+    const identity = thumbnailIdentity(print);
+    if (prior?.identity === identity) {
+      Object.assign(prior.print, print);
+      next.push(prior.print);
+      priorByPhysicalKey.delete(galleryPrintKey(print));
+    } else {
+      if (prior) {
+        revokeObjectUrl(prior.print.thumbnailUrl);
+        priorByPhysicalKey.delete(galleryPrintKey(print));
+      }
+      next.push({
+        ...print,
+        thumbnailUrl: GALLERY_THUMBNAIL_PLACEHOLDER,
+        thumbnailPending: true,
+      });
+    }
+  }
+  for (const { print } of priorByPhysicalKey.values()) revokeObjectUrl(print.thumbnailUrl);
+  gallery.value.splice(0, gallery.value.length, ...next);
+  // Store Vue proxies, not the raw objects passed to splice: thumbnail
   // completions arrive from async closures and raw mutation bypasses proxy
   // traps, leaving the DOM stuck on its placeholder.
-  for (let index = start; index < gallery.value.length; index++) {
-    const print = gallery.value[index]!;
+  galleryByThumbnailKey.clear();
+  for (const print of gallery.value) {
     galleryByThumbnailKey.set(galleryThumbnailRetryKey(print), print);
   }
   markMobileLibrarySeen(galleryCopies);
@@ -7380,6 +7622,7 @@ async function loadMoreGalleryPage(): Promise<void> {
   // scrolling changes the window. Hydrate the proxies we just installed.
   await nextTick();
   syncVisibleGalleryThumbnails();
+  scheduleMobileGalleryPrewarm();
 }
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
@@ -8358,9 +8601,6 @@ function visibleRepresentatives(): PendingGalleryPrint[] {
 /** Rebuild the paged grid from the current scope, filters, and organization. */
 async function resetGalleryPaging(): Promise<void> {
   cancelGalleryThumbnailRetries();
-  for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
-  gallery.value = [];
-  galleryByThumbnailKey.clear();
   pendingGallery = visibleRepresentatives();
   await loadMoreGalleryPage();
 }
@@ -8435,17 +8675,19 @@ function closeCollection(): void {
 /** Collection cards own their cover URL. Grid URLs are revoked whenever scope
  * paging resets, so borrowing one here produces a broken image after the user
  * switches from Prints to Collections. */
-function collectionCoverCandidates(
-  card: MobileCollectionCard,
-): Array<{ hostId: string; filename: string }> {
-  const candidates: Array<{ hostId: string; filename: string }> = [];
+function collectionCoverCandidates(card: MobileCollectionCard): PendingGalleryPrint[] {
+  const candidates: PendingGalleryPrint[] = [];
   const seen = new Set<string>();
   const add = (candidate: { hostId: string; filename: string } | null) => {
     if (!candidate) return;
     const key = `${candidate.hostId}\u0000${candidate.filename}`;
     if (seen.has(key)) return;
+    const print = galleryCopies.find(
+      (copy) => copy.hostId === candidate.hostId && copy.filename === candidate.filename,
+    );
+    if (!print) return;
     seen.add(key);
-    candidates.push(candidate);
+    candidates.push(print);
   };
   add(card.cover);
   // A merged collection can name its explicit cover on a sleeping machine.
@@ -8476,7 +8718,7 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
   for (const card of cards) {
     const candidates = collectionCoverCandidates(card);
     const candidatesKey = candidates
-      .map((candidate) => `${candidate.hostId}\u0000${candidate.filename}`)
+      .map((candidate) => thumbnailIdentity(candidate))
       .join("\u0001");
     const prior = collectionCovers[card.slug];
     if (candidates.length === 0) {
@@ -8503,6 +8745,7 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
       hostId: first.hostId,
       filename: first.filename,
       candidatesKey,
+      mediaRef: cachedThumbnailRef(first),
       url: "",
       status: "loading",
     };
@@ -8515,20 +8758,19 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
         // be offline. Its Lightroom-style local thumbnail remains eligible;
         // otherwise move immediately to a reachable physical copy.
         if (host.online === false) {
-          const cached = await loadCachedGalleryMedia(
-            mobileGalleryCacheKey(host),
-            candidate.filename,
-            "thumbnail",
-          );
+          const mediaRef = cachedThumbnailRef(candidate);
+          const cached = mediaRef ? await loadCachedGalleryMedia(mediaRef) : null;
           if (!cached) continue;
         }
         try {
-          const url = await thumbnailUrl(
-            mobileHostTarget(host),
-            mobileGalleryCacheKey(host),
-            candidate.filename,
-          );
-          return { ...candidate, url };
+          const blob = await thumbnailBlob(candidate);
+          const url = await thumbnailDisplayUrl(blob);
+          return {
+            ...candidate,
+            url,
+            mediaRef: cachedThumbnailRef(candidate),
+            identity: thumbnailIdentity(candidate),
+          };
         } catch {
           // A collection is cross-host. Try its next physical member before
           // turning the entire card into an error placeholder.
@@ -8536,14 +8778,25 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
       }
       throw new Error("No collection cover is currently readable");
     })()
-      .then(({ hostId, filename, url }) => {
+      .then(({ hostId, filename, url, mediaRef, identity }) => {
         const current = collectionCovers[card.slug];
-        if (!current || current.candidatesKey !== candidatesKey || unmounted) {
+        if (
+          !current ||
+          current.candidatesKey !== candidatesKey ||
+          unmounted ||
+          !candidates.some(
+            (candidate) =>
+              candidate.hostId === hostId &&
+              candidate.filename === filename &&
+              thumbnailIdentity(candidate) === identity,
+          )
+        ) {
           revokeObjectUrl(url);
           return;
         }
         current.hostId = hostId;
         current.filename = filename;
+        current.mediaRef = mediaRef;
         current.url = url;
         current.status = "ready";
         const timer = collectionCoverRetryTimers.get(card.slug);
@@ -8581,7 +8834,7 @@ function scheduleCollectionCoverRetry(card: MobileCollectionCard): void {
         current.status !== "error" ||
         current.candidatesKey !==
           collectionCoverCandidates(card)
-            .map((candidate) => `${candidate.hostId}\u0000${candidate.filename}`)
+            .map((candidate) => thumbnailIdentity(candidate))
             .join("\u0001")
       ) {
         return;
@@ -8602,6 +8855,7 @@ function pauseCollectionCoverRetries(): void {
 function handleCollectionCoverError(card: MobileCollectionCard): void {
   const state = collectionCovers[card.slug];
   if (!state) return;
+  if (state.mediaRef) void evictCachedGalleryMediaEntry(state.mediaRef);
   revokeObjectUrl(state.url);
   state.url = "";
   state.status = "error";
@@ -8610,6 +8864,8 @@ function handleCollectionCoverError(card: MobileCollectionCard): void {
 
 function handleGalleryThumbnailError(print: GalleryPrint): void {
   if (print.thumbnailPending) return;
+  const mediaRef = cachedThumbnailRef(print);
+  if (mediaRef) void evictCachedGalleryMediaEntry(mediaRef);
   revokeObjectUrl(print.thumbnailUrl);
   print.thumbnailUrl = GALLERY_THUMBNAIL_PLACEHOLDER;
   print.thumbnailPending = true;
@@ -9753,15 +10009,20 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
     copies.filter((copy) => !failedHostIds.has(copy.hostId)).map(galleryPrintKey),
   );
   const removedCopies = copies.filter((copy) => removedKeys.has(galleryPrintKey(copy)));
-  // Removed copies leave the offline cache (metadata and thumbnail bytes);
-  // the Trash grid repaints trashed prints from the host's own listing.
-  await removeCachedGalleryPrints(
-    removedCopies.map((copy) => ({ hostId: copy.cacheKey, filename: copy.filename })),
-  );
   const trashedCopies =
     kind === "trash"
       ? removedCopies.filter((copy) => librarySupport.value.trashHostIds.has(copy.hostId))
       : [];
+  const trashedKeys = new Set(trashedCopies.map(galleryPrintKey));
+  const hardDeletedCopies = removedCopies.filter((copy) => !trashedKeys.has(galleryPrintKey(copy)));
+  const removedCacheRows = removedCopies.map((copy) => ({
+    hostId: copy.cacheKey,
+    filename: copy.filename,
+  }));
+  await removeCachedGalleryRows(removedCacheRows);
+  await evictCachedGalleryMedia(
+    hardDeletedCopies.map((copy) => ({ hostId: copy.cacheKey, filename: copy.filename })),
+  );
   for (const print of gallery.value) revokeObjectUrl(print.thumbnailUrl);
   galleryCopies = galleryCopies.filter((print) => !removedKeys.has(galleryPrintKey(print)));
   trashCopies = trashCopies.filter((print) => !removedKeys.has(galleryPrintKey(print)));
@@ -10022,6 +10283,7 @@ watch(tab, (next, previous) => {
     pendingLibraryScrollRestore = sessionScrollPosition(MOBILE_LIBRARY_SCROLL_KEY);
     void refreshGallery().then(restoreMobileLibraryScroll);
   } else {
+    cancelMobileGalleryPrewarm();
     pendingLibraryScrollRestore = null;
     // The primary destinations share this one WebView scroller. Non-Library
     // destinations still start at the top rather than inheriting its offset.
@@ -10071,7 +10333,11 @@ watch(
  * the submit path's settled handler.
  */
 function handleForegroundResume(): void {
-  if (unmounted || document.visibilityState === "hidden") return;
+  if (unmounted) return;
+  if (document.visibilityState === "hidden") {
+    cancelMobileGalleryPrewarm();
+    return;
+  }
   // Suspending mid-touch never delivers the matching pointerup, and a phantom
   // finger would make the next single touch read as a pinch — resizing the grid
   // from a plain scroll. Nothing can still be held after a resume, so drop them.
@@ -10095,6 +10361,7 @@ function handleForegroundResume(): void {
     void nextTick(() => {
       measureMobileGalleryWindow();
       syncVisibleGalleryThumbnails();
+      scheduleMobileGalleryPrewarm();
     });
     void refreshGallery();
   }
@@ -10505,6 +10772,7 @@ onBeforeUnmount(() => {
   if (liveActivityTimer) clearInterval(liveActivityTimer);
   liveActivityTimer = null;
   cancelGalleryThumbnailRetries();
+  cancelMobileGalleryPrewarm();
   if (libraryScrollRestoreTimer !== null) clearTimeout(libraryScrollRestoreTimer);
   libraryScrollRestoreTimer = null;
   for (const handle of galleryThumbnailHandles.values()) handle.cancel();
@@ -11881,10 +12149,14 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             ref="galleryPinchSurface"
             class="mobile-gallery-pinch-surface"
             data-test="mobile-gallery-pinch-surface"
+            :aria-busy="galleryLoading || galleryRefreshing"
             @pointerdown="beginGalleryPinch"
           >
             <div
-              v-if="galleryLoading || (libraryScope === 'trash' && trashLoading && !gallery.length)"
+              v-if="
+                (galleryLoading && !gallery.length) ||
+                (libraryScope === 'trash' && trashLoading && !gallery.length)
+              "
               class="empty-state"
             >
               {{ libraryScope === "trash" ? "Loading trash…" : "Loading prints…" }}

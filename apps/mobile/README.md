@@ -205,6 +205,18 @@ pushed screen opened from the header.
   Infinite scroll gives each thumbnail load a fixed deadline and keeps paging
   while its sentinel remains visible, so one stalled iOS or Android WebView
   request can never strand older prints behind a permanent loading state.
+  Library metadata and bounded thumbnails persist in IndexedDB, so a return to
+  Library paints the last saved grid before the live host refresh begins. The
+  cache mirrors desktop's content-version contract: thumbnail records are
+  keyed by exact host instance, filename, `media_version` (or timestamp plus
+  finite byte size for older hosts), and the current 256/512 rendition tier.
+  It never persists full originals, unversioned media, non-image responses, or
+  files above 2 MiB. Metadata keeps up to 4,000 rows per host; thumbnails keep
+  up to 4,000 rows and 256 MiB globally with transactional LRU eviction.
+  Foreground rows load first, then bounded near/background work fills missing
+  thumbnails without duplicating visible fetches. Live reconciliation keeps
+  unchanged URLs mounted, replaces changed versions, preserves cached media
+  through Trash/Restore, and evicts it on Delete forever or host removal.
   Tap the 44pt **Select** control to enter multi-select, then select all, clear,
   or delete the chosen prints. Delete removes every matching copy from
   reachable saved hosts; a host failure leaves that copy visible and reports
