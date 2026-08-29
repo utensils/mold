@@ -456,10 +456,12 @@ export const useHostsStore = defineStore("hosts", {
     async connect(rawUrl: string, apiKey: string | null, name: string | null): Promise<HostView> {
       const url = normalizeHostUrl(rawUrl);
       const id = hostIdFromUrl(url);
-      // `https://local` slugs to the literal "local", colliding with the
-      // built-in engine's reserved id — refuse it rather than shadow the
-      // primary's secret/routing keys.
-      if (id === "local") throw new Error("That address is reserved for the built-in engine.");
+      // The host name "local" is reserved for the built-in engine. Check the
+      // normalized authority directly: adding Mold's default port must not
+      // turn the same reserved address into a different slug.
+      if (new URL(url).hostname.toLowerCase() === "local") {
+        throw new Error("That address is reserved for the built-in engine.");
+      }
       const existing = this.all.find((h) => h.id === id);
       // A fresh row already validated with this authority needs no work. A
       // stale row (or an explicitly supplied replacement key) must probe:

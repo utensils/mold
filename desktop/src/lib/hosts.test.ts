@@ -32,12 +32,32 @@ describe("hostIdFromUrl", () => {
 });
 
 describe("normalizeHostUrl", () => {
-  it("mirrors the Rust normalize_host_url rules", () => {
-    expect(normalizeHostUrl("hal9000")).toBe("http://hal9000:7680");
-    expect(normalizeHostUrl("studio.local:7680")).toBe("http://studio.local:7680");
+  it.each([
+    ["100.123.198.98", "http://100.123.198.98:7680"],
+    ["100.123.198.98:9000", "http://100.123.198.98:9000"],
+    ["http://100.123.198.98", "http://100.123.198.98"],
+    ["https://studio.tailnet.ts.net", "https://studio.tailnet.ts.net"],
+    ["https://studio.tailnet.ts.net:443", "https://studio.tailnet.ts.net"],
+    ["::1", "http://[::1]:7680"],
+  ])("normalizes %s with only the missing defaults", (input, expected) => {
+    expect(normalizeHostUrl(input)).toBe(expected);
+  });
+
+  it("strips trailing slashes and rejects blank input", () => {
     expect(normalizeHostUrl("http://studio.local:7680///")).toBe("http://studio.local:7680");
-    expect(normalizeHostUrl("https://mold.example.com/")).toBe("https://mold.example.com");
     expect(() => normalizeHostUrl("   ")).toThrow();
+  });
+
+  it.each([
+    "100.123.198.98",
+    "100.123.198.98:9000",
+    "http://100.123.198.98",
+    "https://studio.tailnet.ts.net",
+    "https://studio.tailnet.ts.net:443",
+    "::1",
+  ])("is idempotent for %s", (input) => {
+    const once = normalizeHostUrl(input);
+    expect(normalizeHostUrl(once)).toBe(once);
   });
 });
 

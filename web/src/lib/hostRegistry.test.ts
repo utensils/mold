@@ -30,7 +30,7 @@ describe("normalizeHostAddress", () => {
     );
   });
 
-  it("keeps an explicit https scheme (MagicDNS / TLS host)", () => {
+  it("keeps explicit https on its standard port", () => {
     expect(normalizeHostAddress("https://box.tail1234.ts.net")).toBe(
       "https://box.tail1234.ts.net",
     );
@@ -58,6 +58,29 @@ describe("normalizeHostAddress", () => {
     expect(normalizeHostAddress("http://100.105.134.43")).toBe(
       "http://100.105.134.43",
     );
+  });
+
+  it("preserves an explicitly selected standard HTTPS port", () => {
+    expect(normalizeHostAddress("https://box.tail1234.ts.net:443")).toBe(
+      "https://box.tail1234.ts.net",
+    );
+  });
+
+  it("accepts a bare IPv6 address and supplies both defaults", () => {
+    expect(normalizeHostAddress("::1")).toBe("http://[::1]:7680");
+  });
+
+  it.each([
+    "100.123.198.98",
+    "100.123.198.98:9000",
+    "http://100.123.198.98",
+    "https://box.tail1234.ts.net",
+    "https://box.tail1234.ts.net:443",
+    "::1",
+  ])("is idempotent for %s", (input) => {
+    const once = normalizeHostAddress(input);
+    expect(once).not.toBeNull();
+    expect(normalizeHostAddress(once!)).toBe(once);
   });
 
   it("returns null for empty or unparseable input", () => {

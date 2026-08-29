@@ -97,12 +97,13 @@ export function mergeSavedHostsByInstanceId<T extends SavedHostLike>(
   return { hosts: out, dropped };
 }
 
-/** Default scheme/port, strip trailing slashes. Throws on garbage input. */
+/** Default a bare host to HTTP on Mold's port. Throws on garbage input. */
 export function normalizeHostUrl(input: string): string {
   const trimmed = input.trim().replace(/\/+$/, "");
   if (!trimmed) throw new Error("Enter a host, like hal9000");
-  const hasScheme = trimmed.startsWith("http://") || trimmed.startsWith("https://");
-  const withScheme = hasScheme ? trimmed : `http://${trimmed}`;
+  const hasScheme = /^https?:\/\//i.test(trimmed);
+  const bareIpv6 = !hasScheme && !trimmed.startsWith("[") && (trimmed.match(/:/g)?.length ?? 0) > 1;
+  const withScheme = hasScheme ? trimmed : `http://${bareIpv6 ? `[${trimmed}]` : trimmed}`;
   const url = new URL(withScheme);
   if (!url.hostname) throw new Error("Enter a valid host.");
   if (!hasScheme && !url.port) url.port = "7680";

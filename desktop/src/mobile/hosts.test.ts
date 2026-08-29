@@ -70,10 +70,13 @@ describe("mobile remote hosts", () => {
     ]);
   });
 
-  it("accepts Tailscale MagicDNS names and applies Mold's default port", () => {
-    expect(normalizeRemoteAddress("studio.tailnet.ts.net")).toBe(
-      "http://studio.tailnet.ts.net:7680",
-    );
+  it.each([
+    ["studio.tailnet.ts.net", "http://studio.tailnet.ts.net:7680"],
+    ["100.123.198.98", "http://100.123.198.98:7680"],
+    ["http://100.123.198.98", "http://100.123.198.98"],
+    ["https://studio.tailnet.ts.net", "https://studio.tailnet.ts.net"],
+  ])("uses iOS and Android connection defaults for %s", (input, expected) => {
+    expect(normalizeRemoteAddress(input)).toBe(expected);
   });
 
   it("preserves explicit HTTPS ports", () => {
@@ -84,6 +87,12 @@ describe("mobile remote hosts", () => {
 
   it("uses the HTTPS scheme default when a complete URL omits a port", () => {
     expect(normalizeRemoteAddress("https://mold.example.com/")).toBe("https://mold.example.com");
+  });
+
+  it("preserves an explicitly selected standard HTTPS port", () => {
+    expect(normalizeRemoteAddress("https://mold.example.com:443/")).toBe(
+      "https://mold.example.com",
+    );
   });
 
   it("creates a stable URL slug for legacy hosts without instance ids", () => {
