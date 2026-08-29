@@ -84,6 +84,309 @@ fn unknown_subcommand_fails() {
     env.cmd().arg("nonexistent-subcommand").assert().failure();
 }
 
+fn library_capabilities(organize: bool, bulk_mutations: bool, trash: bool) -> serde_json::Value {
+    serde_json::json!({
+        "gallery": {
+            "can_delete": true,
+            "organize": organize,
+            "bulk_mutations": bulk_mutations,
+            "trash": trash.then_some(serde_json::json!({
+                "enabled": true,
+                "retention_days": 30
+            }))
+        },
+        "catalog": { "available": false, "families": [] }
+    })
+}
+
+fn library_row(filename: &str, timestamp: u64, tags: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "filename": filename,
+        "metadata": {
+            "prompt": "night owl",
+            "model": "flux-dev:q4",
+            "seed": 7,
+            "steps": 20,
+            "guidance": 3.5,
+            "width": 1024,
+            "height": 1024,
+            "output_format": "png",
+            "version": "test"
+        },
+        "timestamp": timestamp,
+        "format": "png",
+        "tags": tags,
+        "favorite": true,
+        "collections": []
+    })
+}
+
+#[tokio::test]
+async fn library_list_json_is_pure_and_uses_the_same_filtered_page() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            library_row("older.png", 1, &["owl"]),
+            library_row("newer.png", 2, &["owl", "night"])
+        ])))
+        .mount(&server)
+        .await;
+
+    let output = env
+        .cmd()
+        .env("MOLD_HOST", server.uri())
+        .args([
+            "library", "list", "--tag", "night", "--limit", "1", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.stdout.contains(&0x1b),
+        "JSON stdout contains ANSI bytes"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["items"][0]["filename"], "newer.png");
+}
+
+#[tokio::test]
+async fn library_tag_add_uses_replay_safe_bulk_mutation_when_advertised() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capabilities"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(library_capabilities(true, true, true)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/gallery/mutations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "operation_id": "server-receipt",
+            "changed": 2,
+            "revision": 1
+        })))
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args([
+            "library",
+            "tag",
+            "add",
+            "a.png",
+            "b.png",
+            "--tag",
+            "night owls",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.received_requests().await.unwrap();
+    let request = requests
+        .iter()
+        .find(|request| request.url.path() == "/api/gallery/mutations")
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body["filenames"], serde_json::json!(["a.png", "b.png"]));
+    assert_eq!(body["add_tags"], serde_json::json!(["night owls"]));
+    assert!(uuid::Uuid::parse_str(body["operation_id"].as_str().unwrap()).is_ok());
+}
+
+#[tokio::test]
+async fn library_tag_add_falls_back_to_legacy_organize_route() {
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capabilities"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(library_capabilities(true, false, true)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/gallery/organize"))
+        .and(body_json(serde_json::json!({
+            "filenames": ["a.png"],
+            "add_tags": ["owl"]
+        })))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "tag", "add", "a.png", "--tag", "owl"])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn library_trash_refuses_a_host_without_recoverable_trash() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capabilities"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(library_capabilities(true, false, false)),
+        )
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "trash", "keep-me.png"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no files were deleted"));
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "refusal must not send a DELETE/POST");
+}
+
+#[tokio::test]
+async fn library_collection_remove_resolves_slug_and_sends_membership_change() {
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capabilities"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(library_capabilities(true, true, true)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery/collections"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": "collection-id",
+                "name": "Night Owls",
+                "slug": "night-owls",
+                "hidden": false,
+                "count": 2,
+                "created_at": 1,
+                "updated_at": 2
+            }])),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/gallery/collections/collection-id/items"))
+        .and(body_json(serde_json::json!({
+            "add": [],
+            "remove": ["odd # 100%.png"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "collection-id",
+            "name": "Night Owls",
+            "slug": "night-owls",
+            "hidden": false,
+            "count": 1,
+            "created_at": 1,
+            "updated_at": 3
+        })))
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args([
+            "library",
+            "collection",
+            "remove",
+            "night-owls",
+            "odd # 100%.png",
+        ])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn library_show_video_uses_thumbnail_when_animated_preview_is_missing() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    let mut row = library_row("clip.mp4", 2, &["motion"]);
+    row["format"] = serde_json::json!("mp4");
+    row["metadata"]["output_format"] = serde_json::json!("mp4");
+    Mock::given(method("GET"))
+        .and(path("/api/gallery"))
+        .and(query_param("filename", "clip.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([row])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery/preview/clip.mp4"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery/thumbnail/clip.mp4"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not-a-real-png"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "show", "clip.mp4", "--preview"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Filename: clip.mp4"));
+}
+
+#[tokio::test]
+async fn library_global_tag_delete_requires_yes_without_a_tty() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capabilities"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(library_capabilities(true, true, true)),
+        )
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "tag", "delete", "owl"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pass --yes"));
+
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
 // ── mold default ──────────────────────────────────────────────────────────
 
 #[test]

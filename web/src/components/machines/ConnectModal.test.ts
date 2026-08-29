@@ -286,6 +286,19 @@ describe("ConnectModal", () => {
     expect(w.emitted("close")).toBeTruthy();
   });
 
+  it("probes a bare IP through the default protocol and port", async () => {
+    hostStatus.mockResolvedValue(okStatus());
+    const w = mountModal();
+    await advanceToDetails(w);
+    await w.get('[data-test="connect-address"]').setValue("100.123.198.98");
+    await w.get('[data-test="connect-submit"]').trigger("click");
+    await flushPromises();
+
+    expect(hostStatus.mock.calls[0]?.[0]).toMatchObject({
+      url: "http://100.123.198.98:7680",
+    });
+  });
+
   it("labels an unnamed host with the server's hostname, never the raw URL", async () => {
     hostStatus.mockResolvedValue(okStatus({ hostname: "plato" }));
     const w = mountModal();

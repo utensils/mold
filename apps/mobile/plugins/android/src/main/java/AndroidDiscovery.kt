@@ -134,6 +134,7 @@ internal class AndroidDiscovery(
                                 address,
                                 port,
                                 resolved.attributes["auth"]?.toString(Charsets.UTF_8) == "1",
+                                resolved.attributes["id"]?.toString(Charsets.UTF_8)?.trim()?.ifBlank { null },
                             )
                         }
                         resolveNext()
@@ -159,6 +160,7 @@ internal class AndroidDiscovery(
                 put("host", host.host)
                 put("port", host.port)
                 put("authRequired", host.authRequired)
+                put("instanceId", host.instanceId)
             })
         }
         invoke.resolve(JSObject().apply { put("hosts", array) })
@@ -202,6 +204,7 @@ internal class AndroidDiscovery(
         val host: String,
         val port: Int,
         val authRequired: Boolean,
+        val instanceId: String?,
     )
 
     companion object {

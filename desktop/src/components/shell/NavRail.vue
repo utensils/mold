@@ -215,6 +215,7 @@ onBeforeUnmount(() => {
 /** `clip 3/5 · developing…` — the sequence's answer to developingLabel. */
 function sequenceLine(vm: ActivityJobVM & { kind: "sequence" }): string {
   const clip = Math.min(vm.currentStage + 1, vm.stageCount);
+  if (vm.state === "paused") return `clip ${clip}/${vm.stageCount} · paused after restart`;
   if (vm.phase === "queued") return `clip ${clip}/${vm.stageCount} · queued`;
   if (vm.phase === "finalizing") return `clip ${clip}/${vm.stageCount} · finalizing…`;
   return `clip ${clip}/${vm.stageCount} · developing…`;

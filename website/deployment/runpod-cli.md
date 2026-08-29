@@ -1,12 +1,12 @@
-# `mold runpod` — native RunPod CLI
+# `mold runpod`: native RunPod CLI
 
 `mold runpod` manages RunPod cloud GPU pods end-to-end from the same binary
 you use for local generation. Create a pod, connect to it, hand off logs to the
 RunPod console, track spend, and (with `mold runpod run`) create-generate-save
 in a single command.
 
-Compared to the [Docker & RunPod](./docker) guide — which shows the manual
-pod-creation flow via `runpodctl` or the web console — this guide covers
+Compared to the [Docker & RunPod](./docker) guide (which shows the manual
+pod-creation flow via `runpodctl` or the web console) this guide covers
 the integrated workflow.
 
 ## Setup
@@ -29,7 +29,7 @@ mold runpod doctor
 `mold runpod doctor` checks the key, the REST endpoint, and your RunPod
 balance + spend rate.
 
-## The killer feature — `mold runpod run`
+## The killer feature: `mold runpod run`
 
 Generate an image on a fresh or reused pod with one command:
 
@@ -137,7 +137,7 @@ detached by deleting its pod before the volume itself can be deleted.
 When `mold runpod create` (or `run`) is invoked without `--gpu`/`--dc`:
 
 1. `RunPodClient::gpu_types()` aggregates the highest stock signal per GPU
-   across all datacenters (via GraphQL — the REST API doesn't expose
+   across all datacenters (via GraphQL; the REST API doesn't expose
    this).
 2. The cheapest family with **High** or **Medium** stock wins, from the
    preference list `4090 > 5090 > L40S > A100`.
@@ -190,16 +190,16 @@ All keys are settable via `mold config set runpod.<key> <value>`.
 | ---------------- | --------------------------------- |
 | `RUNPOD_API_KEY` | Overrides `config.runpod.api_key` |
 
-Other runpod settings are config-only (no env-var override) — they rarely
+Other runpod settings are config-only (no env-var override); they rarely
 change between runs.
 
 ## State files
 
 `mold runpod` persists two files under `$MOLD_HOME/` (default `~/.mold/`):
 
-- `runpod-state.json` — warm-pod pointer (`last_pod_id`, timestamps, cached
+- `runpod-state.json`: warm-pod pointer (`last_pod_id`, timestamps, cached
   GPU + cost). Used by `run` for reuse detection.
-- `runpod-history.jsonl` — append-only log of pod lifetime events with
+- `runpod-history.jsonl`: append-only log of pod lifetime events with
   cost and prompt metadata. Used by `mold runpod usage --since <win>`.
 
 Delete these any time to reset state; they're caches, not sources of truth.
@@ -216,8 +216,8 @@ services.mold = {
 };
 ```
 
-The key is read via `ExecStartPre` and injected into the service
-environment — never written into the Nix store. Same pattern as
+The key is read via `ExecStartPre` and injected into the service environment.
+It is never written into the Nix store. The same pattern applies to
 `hfTokenFile`, `civitaiTokenFile`, and `apiKeyFile`.
 
 ## REST vs GraphQL
@@ -225,32 +225,32 @@ environment — never written into the Nix store. Same pattern as
 `RunPodClient` hits RunPod's REST API at `https://rest.runpod.io/v1/` for pod
 lifecycle (create/list/get/stop/start/delete) and network-volume management,
 and uses the GraphQL endpoint at `https://api.runpod.io/graphql` for account
-info, GPU catalog, and datacenter availability — those aren't exposed via
+info, GPU catalog, and datacenter availability; those aren't exposed via
 REST. Container/system logs remain a RunPod console-only surface.
 
 Both paths use the same API key (`Authorization: Bearer …`).
 
 ## Troubleshooting
 
-**"pod didn't schedule within 90s"** — the datacenter likely has no real
+**"pod didn't schedule within 90s"**: the datacenter likely has no real
 capacity despite a High/Medium stock signal. `mold runpod run` will
 automatically try the next candidate. If all fail, RunPod is out of
 capacity for that GPU family right now. Retry later, pick a different
 GPU, or fall back to a local GPU host.
 
-**"value must be one of …" from `/pods`** — you pinned a datacenter that
+**"value must be one of …" from `/pods`**: you pinned a datacenter that
 isn't in RunPod's REST enum whitelist. GraphQL exposes datacenters that
 REST doesn't accept. Omit `--dc` to let RunPod pick.
 
-**"RunPod /user 401" or "…403"** — stale/invalid/missing API key. Run
+**"RunPod /user 401" or "…403"**: stale/invalid/missing API key. Run
 `mold runpod doctor` to confirm. Regenerate at
 [runpod.io/console/user/settings](https://www.runpod.io/console/user/settings).
 
-**Pod logs** — RunPod does not expose container/system logs through the Pod
+**Pod logs**: RunPod does not expose container/system logs through the Pod
 REST API. `mold runpod logs <pod-id>` validates the Pod, prints its state and
 the console URL, then tells you to open that Pod's **Logs** panel. `--follow`
 is retained for compatibility but cannot stream console-only logs.
 
-**Orphaned pods after Ctrl-C** — `mold runpod run` persists `last_pod_id`
+**Orphaned pods after Ctrl-C**: `mold runpod run` persists `last_pod_id`
 **before** waiting for readiness, so `mold runpod list` always surfaces
 zombie pods. Delete with `mold runpod delete <id>`.

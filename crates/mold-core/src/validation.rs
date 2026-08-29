@@ -2557,15 +2557,33 @@ fn validate_generate_request_after_activation_with(
     // wan's flow solvers are rejected off-family and the UNet schedulers are
     // rejected for wan — at admission, not after the model loads.
     match req.scheduler {
+        Some(crate::Scheduler::EdmDpmPp2m)
+            if family != Some("sdxl") || !req.model.starts_with("playground-v2.5") =>
+        {
+            return Err(
+                "scheduler 'edm-dpm-pp-2m' is the Playground v2.5 sampling contract and is only supported for that model"
+                    .to_string(),
+            );
+        }
+        Some(scheduler)
+            if req.model.starts_with("playground-v2.5")
+                && scheduler != crate::Scheduler::EdmDpmPp2m =>
+        {
+            return Err(format!(
+                "Playground v2.5 requires edm-dpm-pp-2m; scheduler '{scheduler}' would render invalid noise"
+            ));
+        }
         Some(crate::Scheduler::Euler | crate::Scheduler::DpmPp) if family != Some("wan") => {
             return Err(format!(
                 "scheduler '{}' is a Wan sample solver and is only supported for wan models",
                 req.scheduler.expect("matched Some")
             ));
         }
-        Some(crate::Scheduler::Ddim | crate::Scheduler::EulerAncestral)
-            if family == Some("wan") =>
-        {
+        Some(
+            crate::Scheduler::Ddim
+            | crate::Scheduler::EulerAncestral
+            | crate::Scheduler::EdmDpmPp2m,
+        ) if family == Some("wan") => {
             return Err(format!(
                 "Wan supports the uni-pc, euler, and dpm-pp sample solvers; '{}' is a UNet \
                  scheduler",
@@ -5780,6 +5798,26 @@ mod tests {
         // The UNet schedulers keep working off-family.
         flux.scheduler = Some(Scheduler::Ddim);
         assert!(validate_generate_request(&flux).is_ok());
+    }
+
+    #[test]
+    fn playground_v25_requires_its_edm_sampling_contract() {
+        use crate::Scheduler;
+
+        let mut playground = valid_req();
+        playground.model = "playground-v2.5:fp16".to_string();
+        playground.scheduler = Some(Scheduler::EdmDpmPp2m);
+        assert!(validate_generate_request(&playground).is_ok());
+
+        playground.scheduler = Some(Scheduler::Ddim);
+        let error = validate_generate_request(&playground).unwrap_err();
+        assert!(error.contains("would render invalid noise"), "got: {error}");
+
+        let mut generic_sdxl = valid_req();
+        generic_sdxl.model = "sdxl-base:fp16".to_string();
+        generic_sdxl.scheduler = Some(Scheduler::EdmDpmPp2m);
+        let error = validate_generate_request(&generic_sdxl).unwrap_err();
+        assert!(error.contains("only supported"), "got: {error}");
     }
 
     /// #779: wan admits exactly the first/last endpoint keyframe pair, and

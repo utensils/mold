@@ -142,14 +142,23 @@ const runs = computed<MergedPrint[]>(() => {
  *  grouping key carries the origin so same-named prints on two hosts stay
  *  distinct rows. */
 const runKey = (e: MergedPrint) => `${e.sourceKey}\0${e.item.filename}`;
+/** The Runs list is not windowed, and every row mounts a thumbnail, so it is
+ *  capped exactly like Sequences: a 1 000-print library must not mount 1 000
+ *  media requests the moment the drawer opens. */
+const visibleRuns = computed(() => runs.value.slice(0, HISTORY_JOBS_RENDER_CAP));
+const runsCapNote = computed(() =>
+  runs.value.length > HISTORY_JOBS_RENDER_CAP
+    ? `showing ${HISTORY_JOBS_RENDER_CAP} of ${runs.value.length} — search to narrow`
+    : null,
+);
 const runGroups = computed(() => {
-  const pseudo = runs.value.map((e) => ({
+  const pseudo = visibleRuns.value.map((e) => ({
     prompt: runKey(e),
     model: e.item.metadata.model,
     used_at: e.item.timestamp * 1000,
   }));
   const groups = groupByDay(pseudo);
-  const byKey = new Map(runs.value.map((e) => [runKey(e), e]));
+  const byKey = new Map(visibleRuns.value.map((e) => [runKey(e), e]));
   return groups.map((g) => ({
     label: g.label,
     runs: g.entries.map((e) => byKey.get(e.prompt)!).filter(Boolean),
@@ -644,6 +653,7 @@ async function cleanUpDiskConfirmed() {
                 "
                 :target="gallery.targetOf(entry.sourceKey)"
                 :cache-key="entry.sourceKey"
+                :media-version="entry.item.media_version ?? null"
                 :alt="entry.item.metadata.prompt"
               />
             </div>
@@ -670,6 +680,9 @@ async function cleanUpDiskConfirmed() {
             }}</span>
           </button>
         </template>
+        <p v-if="runsCapNote" data-test="runs-cap-note" class="edge-code mt-1">
+          {{ runsCapNote }}
+        </p>
       </div>
 
       <!-- Sequences: the durable chain jobs, with their maintenance -->

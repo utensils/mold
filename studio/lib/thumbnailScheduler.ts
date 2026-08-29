@@ -34,6 +34,12 @@ export interface ThumbnailSchedulerOptions {
   backgroundConcurrency?: number;
 }
 
+const PRIORITIES: readonly ThumbnailPriority[] = [
+  "visible",
+  "near",
+  "background",
+];
+
 const priorityRank: Record<ThumbnailPriority, number> = {
   visible: 0,
   near: 1,
@@ -49,8 +55,44 @@ function abortError(): Error {
 }
 
 /**
+ * FIFO with an advancing head, so dequeue is O(1) and the array is compacted
+ * only once the dead prefix outweighs the live tail.
+ */
+class Fifo<T> {
+  private items: T[] = [];
+  private head = 0;
+
+  push(item: T): void {
+    this.items.push(item);
+  }
+
+  shift(): T | undefined {
+    if (this.head >= this.items.length) return undefined;
+    const item = this.items[this.head];
+    this.items[this.head] = undefined as unknown as T;
+    this.head += 1;
+    if (this.head > 1024 && this.head * 2 > this.items.length) {
+      this.items = this.items.slice(this.head);
+      this.head = 0;
+    }
+    return item;
+  }
+
+  get size(): number {
+    return this.items.length - this.head;
+  }
+}
+
+/**
  * Shared policy for every gallery surface. Adapters own transport and cache;
  * this class only bounds, prioritizes, deduplicates, and cancels work.
+ *
+ * Dispatch is O(hosts): one FIFO per (priority, host), visited highest
+ * priority first and round-robin across hosts with a free slot. Entries whose
+ * priority was raised or that were cancelled while queued are skipped lazily
+ * when they surface, so nothing ever re-sorts the queue — the previous
+ * implementation copied and sorted every queued entry per dispatch, which
+ * made draining Q tiles O(Q² log Q).
  */
 export class ThumbnailScheduler {
   private readonly concurrency: number;
@@ -58,10 +100,16 @@ export class ThumbnailScheduler {
   private readonly backgroundConcurrency: number;
   private readonly entries = new Map<string, ScheduledEntry<unknown>>();
   private readonly runningByHost = new Map<string, number>();
+  /** priority → host → FIFO of queued entries (lazily invalidated). */
+  private readonly queues: Record<
+    ThumbnailPriority,
+    Map<string, Fifo<ScheduledEntry<unknown>>>
+  > = { visible: new Map(), near: new Map(), background: new Map() };
   private running = 0;
   private runningBackground = 0;
   private sequence = 0;
   private pumpQueued = false;
+  private dispatchScans = 0;
 
   constructor(options: ThumbnailSchedulerOptions = {}) {
     this.concurrency = Math.max(1, options.concurrency ?? 12);
@@ -97,8 +145,9 @@ export class ThumbnailScheduler {
         reject,
       };
       this.entries.set(request.key, entry as ScheduledEntry<unknown>);
+      this.enqueue(entry as ScheduledEntry<unknown>);
     } else if (priorityRank[request.priority] < priorityRank[entry.priority]) {
-      entry.priority = request.priority;
+      this.raise(entry as ScheduledEntry<unknown>, request.priority);
     }
     entry.consumers += 1;
     this.queuePump();
@@ -113,6 +162,7 @@ export class ThumbnailScheduler {
         if (entry!.consumers > 0) return;
         entry!.controller.abort();
         if (entry!.state === "queued") {
+          // The FIFO slot stays behind and is skipped when it surfaces.
           this.entries.delete(entry!.key);
           entry!.reject(abortError());
         }
@@ -120,7 +170,7 @@ export class ThumbnailScheduler {
       setPriority: (priority) => {
         if (!active || priorityRank[priority] >= priorityRank[entry!.priority])
           return;
-        entry!.priority = priority;
+        this.raise(entry! as ScheduledEntry<unknown>, priority);
         this.queuePump();
       },
     };
@@ -131,6 +181,8 @@ export class ThumbnailScheduler {
     running: number;
     background: number;
     keys: number;
+    /** FIFO slots examined by dispatch so far — the perf guard's budget. */
+    dispatchScans: number;
   }> {
     let queued = 0;
     for (const entry of this.entries.values())
@@ -140,7 +192,27 @@ export class ThumbnailScheduler {
       running: this.running,
       background: this.runningBackground,
       keys: this.entries.size,
+      dispatchScans: this.dispatchScans,
     };
+  }
+
+  private enqueue(entry: ScheduledEntry<unknown>): void {
+    const byHost = this.queues[entry.priority];
+    let fifo = byHost.get(entry.hostKey);
+    if (!fifo) {
+      fifo = new Fifo();
+      byHost.set(entry.hostKey, fifo);
+    }
+    fifo.push(entry);
+  }
+
+  /** Re-file a queued entry under a higher priority; the old slot goes stale. */
+  private raise(
+    entry: ScheduledEntry<unknown>,
+    priority: ThumbnailPriority,
+  ): void {
+    entry.priority = priority;
+    if (entry.state === "queued") this.enqueue(entry);
   }
 
   private queuePump(): void {
@@ -160,23 +232,50 @@ export class ThumbnailScheduler {
     }
   }
 
+  /** A slot is live only while it is still the entry's current filing. */
+  private isLive(
+    entry: ScheduledEntry<unknown>,
+    priority: ThumbnailPriority,
+  ): boolean {
+    return (
+      entry.state === "queued" &&
+      entry.consumers > 0 &&
+      entry.priority === priority &&
+      this.entries.get(entry.key) === entry
+    );
+  }
+
   private nextRunnable(): ScheduledEntry<unknown> | null {
-    const candidates = [...this.entries.values()]
-      .filter(
-        (entry) =>
-          entry.state === "queued" &&
-          entry.consumers > 0 &&
-          (this.runningByHost.get(entry.hostKey) ?? 0) <
-            this.perHostConcurrency &&
-          (entry.priority !== "background" ||
-            this.runningBackground < this.backgroundConcurrency),
-      )
-      .sort(
-        (left, right) =>
-          priorityRank[left.priority] - priorityRank[right.priority] ||
-          left.sequence - right.sequence,
-      );
-    return candidates[0] ?? null;
+    for (const priority of PRIORITIES) {
+      if (
+        priority === "background" &&
+        this.runningBackground >= this.backgroundConcurrency
+      ) {
+        continue;
+      }
+      const byHost = this.queues[priority];
+      for (const [hostKey, fifo] of byHost) {
+        if ((this.runningByHost.get(hostKey) ?? 0) >= this.perHostConcurrency)
+          continue;
+        for (;;) {
+          const entry = fifo.shift();
+          if (!entry) {
+            byHost.delete(hostKey);
+            break;
+          }
+          this.dispatchScans += 1;
+          if (this.isLive(entry, priority)) {
+            // Round-robin: the host that just won moves to the back so a
+            // third host is never starved while two busy ones keep refilling
+            // freed slots ahead of it.
+            byHost.delete(hostKey);
+            byHost.set(hostKey, fifo);
+            return entry;
+          }
+        }
+      }
+    }
+    return null;
   }
 
   private start(entry: ScheduledEntry<unknown>): void {

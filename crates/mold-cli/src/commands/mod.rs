@@ -15,6 +15,7 @@ pub(crate) mod identity;
 pub mod info;
 pub mod jobs;
 pub mod lambda;
+pub mod library;
 pub mod licenses;
 pub mod list;
 pub(crate) mod local_engine;

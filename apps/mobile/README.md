@@ -205,6 +205,18 @@ pushed screen opened from the header.
   Infinite scroll gives each thumbnail load a fixed deadline and keeps paging
   while its sentinel remains visible, so one stalled iOS or Android WebView
   request can never strand older prints behind a permanent loading state.
+  Library metadata and bounded thumbnails persist in IndexedDB, so a return to
+  Library paints the last saved grid before the live host refresh begins. The
+  cache mirrors desktop's content-version contract: thumbnail records are
+  keyed by exact host instance, filename, `media_version` (or timestamp plus
+  finite byte size for older hosts), and the current 256/512 rendition tier.
+  It never persists full originals, unversioned media, non-image responses, or
+  files above 2 MiB. Metadata keeps up to 4,000 rows per host; thumbnails keep
+  up to 4,000 rows and 256 MiB globally with transactional LRU eviction.
+  Foreground rows load first, then bounded near/background work fills missing
+  thumbnails without duplicating visible fetches. Live reconciliation keeps
+  unchanged URLs mounted, replaces changed versions, preserves cached media
+  through Trash/Restore, and evicts it on Delete forever or host removal.
   Tap the 44pt **Select** control to enter multi-select, then select all, clear,
   or delete the chosen prints. Delete removes every matching copy from
   reachable saved hosts; a host failure leaves that copy visible and reports
@@ -243,6 +255,8 @@ pushed screen opened from the header.
   content-addressed stash, disclosing the miss in the persistent inline status
   line when the stash no longer holds it — saved metadata carries the digest,
   never the face bytes.
+  A downward swipe from the top dismisses Info without affecting the viewer's
+  horizontal previous/next-print swipe.
   Every mutation fans out to each physical copy's exact Keychain-authenticated
   host via the shared `planOrganizationFanout` plan
   (`desktop/src/mobile/libraryOrganization.ts` holds the mobile state
@@ -329,9 +343,15 @@ pushed screen opened from the header.
   `https://utensils.io/mold/privacy` through the native external-browser opener.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
-overscroll. The Library viewer keeps its scoped horizontal swipe gesture, and
-the Library grid keeps a scoped two-finger pinch (`touch-action: pan-y`) that
-resizes thumbnails while one-finger scrolling is unaffected.
+overscroll. A horizontal swipe moves through Create → Library → Models →
+Machines, while a right swipe pops Machine Detail or Settings. Editable
+controls, horizontal scrollers, action rows, dialogs, and the full-screen
+Library viewer retain their own gesture authority. Pulling down at the top
+refreshes Library, Models, Machines, and Machine Detail; Create and Settings
+stay on their existing live polling/streaming paths so an in-progress form is
+never disrupted. The Library viewer keeps its scoped horizontal swipe gesture,
+and the Library grid keeps a scoped two-finger pinch (`touch-action: pan-y`)
+that resizes thumbnails while one-finger scrolling is unaffected.
 
 Prepared expansion always snapshots the selected remote host ID, endpoint,
 Keychain-provided key, and server instance. Batch is a directly editable

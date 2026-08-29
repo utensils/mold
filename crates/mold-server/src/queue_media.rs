@@ -415,78 +415,10 @@ fn scrub_opaque_records(records: &mut [OpaqueQueueMediaRecord]) {
 /// are deliberately left alone: they are settings, not media — byte-identical
 /// to what `OutputMetadata.references` persists — and no public authority can
 /// be present on them past admission.
+/// The durable queue's scrub, owned by `mold_core::request_media` so the H3
+/// admission identity in `mold-inference` hashes the same persisted form.
 pub(crate) fn scrub_request_media(request: &mut mold_core::GenerateRequest) {
-    fn scrub_bytes(value: &mut Option<Vec<u8>>) {
-        if let Some(bytes) = value {
-            bytes.zeroize();
-        }
-        *value = None;
-    }
-
-    fn scrub_text(value: &mut Option<String>) {
-        if let Some(text) = value {
-            text.zeroize();
-        }
-        *value = None;
-    }
-
-    fn scrub_byte_collection(value: &mut Option<Vec<Vec<u8>>>) {
-        if let Some(items) = value {
-            for item in items.iter_mut() {
-                item.zeroize();
-            }
-            items.clear();
-        }
-        *value = None;
-    }
-
-    fn scrub_text_collection(value: &mut Option<Vec<String>>) {
-        if let Some(items) = value {
-            for item in items.iter_mut() {
-                item.zeroize();
-            }
-            items.clear();
-        }
-        *value = None;
-    }
-
-    scrub_bytes(&mut request.source_image);
-    scrub_text(&mut request.source_image_name);
-    scrub_bytes(&mut request.id_image);
-    scrub_text(&mut request.id_image_name);
-    scrub_byte_collection(&mut request.id_images);
-    scrub_text_collection(&mut request.id_image_names);
-    scrub_byte_collection(&mut request.edit_images);
-    scrub_bytes(&mut request.mask_image);
-    scrub_bytes(&mut request.control_image);
-    scrub_bytes(&mut request.audio_file);
-    scrub_text(&mut request.audio_file_path);
-    scrub_bytes(&mut request.source_video);
-    scrub_text(&mut request.source_video_path);
-    scrub_bytes(&mut request.extend_video);
-    scrub_text(&mut request.extend_video_path);
-    if let Some(keyframes) = &mut request.keyframes {
-        for keyframe in keyframes.iter_mut() {
-            keyframe.image.zeroize();
-            if let Some(name) = &mut keyframe.name {
-                name.zeroize();
-            }
-        }
-        keyframes.clear();
-    }
-    request.keyframes = None;
-    scrub_text(&mut request.hdr_exr_dir);
-    if let Some(lora) = &mut request.lora {
-        lora.path.zeroize();
-    }
-    request.lora = None;
-    if let Some(loras) = &mut request.loras {
-        for lora in loras.iter_mut() {
-            lora.path.zeroize();
-        }
-        loras.clear();
-    }
-    request.loras = None;
+    mold_core::request_media::scrub_request_media(request);
 }
 
 pub struct ExtractedQueueRequest {

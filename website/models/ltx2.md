@@ -1,4 +1,11 @@
-# LTX-2 / LTX-2.3 / LTX-2.5
+# LTX Video
+
+Mold's LTX Video family covers three generations from Lightricks: the legacy
+[LTX Video 0.9.x checkpoints](./ltx-video.md), LTX-2 / LTX-2.3, and LTX-2.5.
+Use the legacy models for a straightforward text-to-video path, or the newer
+LTX-2 models for joint audio-video generation and advanced conditioning.
+
+## LTX-2, LTX-2.3, and LTX-2.5
 
 LTX-2 is Lightricks' joint audio-video family. In mold it is exposed as a
 separate `ltx2` family from the older `ltx-video` checkpoints, with defaults
@@ -11,7 +18,7 @@ performance-qualified backends; CPU remains a correctness-oriented path. Metal
 uses BF16 transformer compute, fused SDPA, streamed FP8 widening, and temporal
 VAE chunks; the measured Apple Silicon campaign and checkpoint-backed renders
 cover the 19B (LTX-2) and 22B (LTX-2.3) distilled FP8 tiers. Expect Metal to
-be slower than a comparable CUDA card — the streamed FP8 path trades speed for
+be slower than a comparable CUDA card; the streamed FP8 path trades speed for
 fitting a 19B-22B model in unified memory. The
 native CUDA workflow matrix is validated across 19B/22B text+audio-video,
 image-to-video, audio-to-video, keyframe, retake, lip dub, public IC-LoRA,
@@ -34,7 +41,7 @@ which was ported from
 [FerrisMind/candle-video](https://github.com/FerrisMind/candle-video)
 (Copyright 2025 FerrisMind,
 [Apache License 2.0](https://github.com/FerrisMind/candle-video/blob/main/LICENSE)),
-so those two files retain Apache-2.0 portions — see the repository's
+so those two files retain Apache-2.0 portions; see the repository's
 `THIRD_PARTY_NOTICES.md`.
 :::
 
@@ -68,7 +75,7 @@ training and quality evaluation. Each BF16 checkpoint is about 46.1 GB
 (43.0 GiB); a 48 GB+ CUDA card is the practical target for resident weights.
 On smaller CUDA cards, mold's native LTX-2 runtime adaptively streams
 transformer blocks from host memory, trading speed and substantial system RAM
-for lower VRAM use — see [Memory on 24 GB cards](#memory-on-24-gb-cards). The
+for lower VRAM use; see [Memory on 24 GB cards](#memory-on-24-gb-cards). The
 shared gated Gemma encoder and optional upscaler/LoRA assets add to download and
 disk requirements.
 
@@ -172,7 +179,7 @@ should compare generated contact sheets or clips from that fixed seed.
   rejects dev or architecture-unknown catalog checkpoints before starting a
   download. Raw custom IC-LoRAs remain available through
   `--pipeline ic-lora --lora /path/custom.safetensors`.
-- Lip dub takes its length and frame rate from the reference clip — `--frames`
+- Lip dub takes its length and frame rate from the reference clip; `--frames`
   and `--fps` are overridden, and mold says so when it does. The reference must
   carry an audio track, because its speech is what the dub imitates; a silent
   reference is rejected up front rather than after the checkpoint has loaded.
@@ -205,7 +212,7 @@ should compare generated contact sheets or clips from that fixed seed.
 ### HDR output
 
 The HDR IC-LoRA re-grades a reference video into ARRI LogC3, which is a _log_
-signal — an ordinary 8-bit export throws away the range the adapter exists to
+signal; an ordinary 8-bit export throws away the range the adapter exists to
 produce. Ask for an EXR sequence alongside the video:
 
 ```bash
@@ -225,19 +232,19 @@ mold uses them the way upstream does: they _replace_ prompt encoding rather
 than supplementing it. The adapter was trained against that one fixed scene
 context, so a prompt of your own would be out of distribution. Mold loads the
 companion and skips the Gemma encode entirely, which also makes an HDR render
-noticeably faster — about 120 s instead of 180 s for a 25-frame 704x448 clip on
-a 4090. Your prompt text is ignored for this control; that is upstream's design,
+noticeably faster; about 120 s instead of 180 s for a 25-frame 704x448 clip on
+a 4090. Your prompt text is ignored for this control. That is upstream's design,
 not a limitation of the port.
 
 EXR export also works with **auto-chaining**: a frame count above the model's
 per-clip cap is split into stitched clips, and the sidecar's frame numbering is
-**global across the stitched timeline** — each stage writes only the frames it
+**global across the stitched timeline**; each stage writes only the frames it
 delivers, skipping the motion-tail overlap the stitch drops, so a 121-frame
 render yields exactly `frame_00000.exr` through `frame_00120.exr` with no
 duplicates or holes. Each stage regrades its own temporal window of the
 reference video, and the final stage is sized to the exact remainder so
 nothing renders past the reference's end. Three constraints come with this:
-chained EXR export runs **locally only** (`--local` — a remote server cannot
+chained EXR export runs **locally only** (`--local`; a remote server cannot
 write the sidecar to your machine), the reference video must cover the full
 requested duration at the render's frame rate, and only Smooth and Cut
 transitions are supported (a Fade's blended frames exist in no stage's linear
@@ -247,7 +254,7 @@ video).
 The EXR sequence is a **sidecar**, not the gallery artifact: a sequence is many
 files and gigabytes, so the ordinary tonemapped video is still written and is
 what appears in the Library. Note that LogC3's toe decodes pure black slightly
-below zero (about -0.0173); that is faithful to the transfer function and is
+below zero (about -0.0173). That is faithful to the transfer function and is
 written verbatim, so a compositor sees the same values upstream produces.
 
 ### Resolution
@@ -256,7 +263,7 @@ LTX-2 renders on a 32-pixel grid, under two independent limits: a total-pixel
 budget and a **per-axis span**. The span is the one that decides how far the
 resolution ladder goes. The checkpoints normalize RoPE pixel positions by
 **2048px**, so a longer edge is outside the trained range even when the frame's
-total area is small — 3200x512 is 1.64 MP and still out of distribution.
+total area is small; 3200x512 is 1.64 MP and still out of distribution.
 
 Both limits are **per model**, because they depend on how the checkpoint
 renders:
@@ -271,7 +278,7 @@ shape. It renders **stage 1 at half the target**, upsamples that latent x2 with
 the learned upsampler, then refines the result with a stage-2 pass over
 [latent tiles](#spatial-tiling-spatial-tile) each brought back inside the
 trained span. That composition is what lets the output exceed a span the
-transformer never saw — and it is also where the ladder stops. 4096px is
+transformer never saw, and it is also where the ladder stops. 4096px is
 exactly the widest target whose halved stage 1 still lands at 2048px; mold
 applies one spatial rung, so there is no second halving to rescue anything
 wider.
@@ -290,7 +297,7 @@ The 4096px figure belongs to the **x2 rung**, which is what the pipeline
 applies by default. `--spatial-upscale x1.5` only divides by 1.5, so its
 stage 1 is larger for the same output: a 3840px frame would render stage 1 at
 2560px, past the span. x1.5 therefore reaches **3072px** on the long edge, and
-mold refuses the combination rather than rendering it — stage 2 tiles the
+mold refuses the combination rather than rendering it; stage 2 tiles the
 refinement, never stage 1. Choosing a single-pass pipeline explicitly
 (`--pipeline one-stage`, retake, lip dub) drops the ceiling back to 2048px for
 the same reason.
@@ -298,7 +305,7 @@ the same reason.
 #### The output ladder
 
 Every rung is a multiple of 64, so the halved stage-1 shape still lands on the
-VAE's 32-pixel latent grid — upstream's own `divisor = 64 if is_two_stage`
+VAE's 32-pixel latent grid; upstream's own `divisor = 64 if is_two_stage`
 rule.
 
 | Rung          | Output    | Stage 1   | Stage-2 tiles |
@@ -319,10 +326,10 @@ Rounding down is also what upstream's own `align_resolution` does in
 The _generation_ ceiling is higher than the ladder: an axis is admitted up to
 4096px, which is where the halved stage 1 leaves the trained span. Between
 3840 and 4096 the render succeeds and only the H.264 export fails, so those
-shapes are admitted rather than blocked — but no preset offers one, because
+shapes are admitted rather than blocked, but no preset offers one, because
 the default output would not be writable.
 
-Portrait is the same rung transposed — 2112x3840 composes and costs exactly
+Portrait is the same rung transposed; 2112x3840 composes and costs exactly
 what 3840x2112 does.
 
 #### What this costs, measured
@@ -339,7 +346,7 @@ at 24 fps, silent, seed 424303:
 | 3840x2112 with `--spatial-tile 768` | **rendered** (4K UHD rung)        | 474 s     | 18.2 GB   |
 
 Two things are worth reading off that table. Peak VRAM barely moves between
-1080p and 1440p — the composition is what bounds it, since every stage-2 tile
+1080p and 1440p; the composition is what bounds it, since every stage-2 tile
 is denoised at a shape inside the trained span and the residency planner
 simply streams one more transformer block (38/10 resident/streamed at 1080p,
 37/11 at 1440p, 36/12 at 4K). And the default 1280px tile is the thing that
@@ -350,12 +357,12 @@ needs the smaller tile.
 
 With the default `auto` tiling, 4K reaches the VAE decode and fails there with
 an out-of-memory error naming the phase and the numbers. It does not silently
-render something smaller. Pass `--spatial-tile 768` — upstream's own advice for
-lower-VRAM GPUs — and the whole render completes at 18.2 GB.
+render something smaller. Pass `--spatial-tile 768` (upstream's own advice for
+lower-VRAM GPUs) and the whole render completes at 18.2 GB.
 
 These are single-configuration measurements at **25 frames**, not a support
 matrix. Activation cost scales with frame count, and upstream's own table (for
-a different pipeline — HDR IC-LoRA, 161 frames, 22B) puts 4K at 48–80 GB, so
+a different pipeline; HDR IC-LoRA, 161 frames, 22B) puts 4K at 48–80 GB, so
 do not read the numbers above as a promise for a long clip.
 
 :::
@@ -373,7 +380,7 @@ For reference, upstream's published figures
 | 4096x2160 | 105 frames   | 49 frames     |
 
 Note that the module its `--help` points at for per-configuration estimates,
-`ltx_pipelines.utils.vram_budget`, is not published in the repository — the
+`ltx_pipelines.utils.vram_budget`, is not published in the repository; the
 table is the only figure upstream provides.
 
 ### Spatial tiling (`--spatial-tile`)
@@ -405,11 +412,11 @@ Forcing a tile size is mainly a way to compare a tiled render against an
 untiled one at a resolution that needs neither.
 
 Two things a tiled refinement gives up. Tiles are refined independently, so a
-structure crossing a seam is resolved by two passes that cannot see each other
-— wider overlaps hide more of this. And a tiled stage 2 refines **video only**,
+structure crossing a seam is resolved by two passes that cannot see each other.
+Wider overlaps hide more of this. A tiled stage 2 also refines **video only**,
 carrying stage 1's audio track through unrefined. This is upstream's own
-behaviour — each tile runs "a tile-sized `ModalitySpec` for video only (audio
-is omitted entirely for HDR)" — and the reason holds independently: a spatial
+behaviour (each tile runs "a tile-sized `ModalitySpec` for video only (audio
+is omitted entirely for HDR)") and the reason holds independently: a spatial
 tile carries no statement about an audio track, so refining one once per tile
 would denoise the same track once per tile with no defensible way to recombine
 the results.
@@ -423,7 +430,7 @@ H.264/YUV420 compression at the checkpoint generation's training level
 (LTX-2 and LTX-2.3 were trained against CRF-33 conditioning; mold's bundled
 encoder expresses this as a constant-quantizer-33 frame and records
 `openh264-cqp33` in the saved metadata), and then fill-resizes and
-center-crops to the render canvas — the source is never stretched to a
+center-crops to the render canvas; the source is never stretched to a
 mismatched aspect ratio. The round-trip is deliberate: the conditioner was
 trained on compressed video frames, and a pristine still sits outside that
 distribution. A checkpoint whose generation mold cannot identify refuses
@@ -438,7 +445,7 @@ unchanged either way.) The default is `0.75`.
 ## The prompt is optional for image-to-video
 
 LTX-2 and the older `ltx-video` family accept an **empty prompt**, but only when
-the request already carries something to animate — a source image, keyframes, a
+the request already carries something to animate; a source image, keyframes, a
 source video, or an `--extend` continuation:
 
 ```bash
@@ -463,8 +470,8 @@ Two things worth being blunt about:
 Everything else keeps the prompt required: text-to-video with no conditioning,
 and every image family (FLUX, Flux.2, SD1.5/SDXL/SD3.5, Qwen-Image, Z-Image,
 Wuerstchen) even when you pass `--image`. A blank prompt also disables prompt
-expansion for that run — mold will not let the expander invent the prompt that
-then gets recorded in your metadata — and is not written to prompt history.
+expansion for that run (mold will not let the expander invent the prompt that
+then gets recorded in your metadata) and is not written to prompt history.
 
 Web, desktop, and iPhone Create all enable **Generate** once a source image is
 attached to a compatible model and say the same thing in the prompt
@@ -478,10 +485,10 @@ The 19B and 22B checkpoints are far larger than a consumer card, so the native
 runtime plans residency rather than assuming it. Two mechanisms do the work:
 
 - **Admission** reads the checkpoint's own safetensors header and reconstructs
-  the plan the engine will build — per-block sizes, the non-block transformer
+  the plan the engine will build (per-block sizes, the non-block transformer
   weights that streaming never offloads, the bundled video VAE, a token-based
   activation budget for the exact render shape, runtime headroom, and a
-  fragmentation margin — before anything is loaded. Each chain stage is priced
+  fragmentation margin) before anything is loaded. Each chain stage is priced
   at its own shape, so stage 1 of a two-stage distilled render is charged for
   its half-resolution render, not the final one.
 - **Adaptive residency** then keeps as many transformer blocks GPU-resident as
@@ -492,7 +499,7 @@ runtime plans residency rather than assuming it. Two mechanisms do the work:
 
 A shape that cannot run is therefore rejected **before** the two-minute load.
 The rejection names the per-device shortfall and, for LTX-2, resolution/frame
-combinations that do fit on that card — for example:
+combinations that do fit on that card, for example:
 
 ```
 no device has enough effective VRAM capacity for a safe execution plan:
@@ -508,12 +515,12 @@ If CUDA still runs out of memory, the denoise stage retries at a reduced
 budget, the OOM cooldown is keyed on `(model, shape, GPU)` so a single-GPU host
 stops re-admitting the identical failing shape, and one conservative retry at a
 smaller grant is offered per shape. A _fatal_ CUDA fault (illegal address,
-uncorrectable ECC, launch failure) is never retried — the worker is quarantined
+uncorrectable ECC, launch failure) is never retried; the worker is quarantined
 and the process stops, as everywhere else in mold.
 
 Practical guidance for a 24 GB card: `ltx-2-19b-distilled:fp8` is the intended
 path, and 1024x1024 x 97 frames is close to the ceiling. Lower the resolution
-before the frame count if you need headroom — attention cost grows with the
+before the frame count if you need headroom; attention cost grows with the
 square of the token count, and tokens scale with area × latent frames.
 
 ## Examples
@@ -587,7 +594,7 @@ mold run ltx-2.3-22b-distilled:fp8 \
 
 ## Text-to-audio
 
-`--pipeline t2a` renders sound with no video at all — speech, ambience, or
+`--pipeline t2a` renders sound with no video at all: speech, ambience, or
 music straight from a prompt. It is upstream's `T2AOneStagePipeline`.
 
 ```bash
@@ -604,13 +611,13 @@ Things worth knowing:
   uses: 121 frames at 24 fps is 5.04 seconds. There is no separate duration
   flag, because the model's temporal budget is expressed in the video clock
   either way.
-- **The output is a 16-bit PCM stereo WAV** at the vocoder's own rate — 24 kHz,
+- **The output is a 16-bit PCM stereo WAV** at the vocoder's own rate: 24 kHz,
   or 48 kHz on checkpoints that ship the bandwidth-extension stage. `--format`
   defaults to `wav` for this pipeline and rejects every other value; `wav`
   likewise requires `--pipeline t2a`.
 - **It needs a checkpoint with audio.** A video-only LTX-2 export has no audio
   VAE or vocoder, and the request is refused before any weights load.
-- **Steps default to the non-distilled schedule** — 40 on LTX-2 19B, 30 on
+- **Steps default to the non-distilled schedule**: 40 on LTX-2 19B, 30 on
   LTX-2.3 22B. The family's usual 8-step default is tuned for the distilled
   _video_ ladder and produces hiss here, so a smaller `--steps` is raised to
   the preset default and the run says so. A larger value is used as given.
@@ -630,8 +637,8 @@ Audio prints land in the gallery like any other output, with a rendered
 waveform as the tile. Web, desktop, and the CLI all play or save them; the
 Library's kind filter gains an **Audio** chip.
 
-Audio-only generation loads just the `audio_*` half of the checkpoint — about
-a quarter of the per-block parameters, with both cross-modal attentions gone —
+Audio-only generation loads just the `audio_*` half of the checkpoint; about
+a quarter of the per-block parameters, with both cross-modal attentions gone;
 so it fits comfortably on a 24 GB card without block streaming.
 
 ## Advanced guidance controls
@@ -680,7 +687,7 @@ forward pass per denoise step: expect a slower render and more VRAM.
 ## Chained video output
 
 The LTX-2 distilled pipeline maxes out at 97 pixel frames per clip (13 latent
-frames after the VAE's 8× temporal compression — `8 × 12 + 1 = 97` satisfies the
+frames after the VAE's 8× temporal compression; `8 × 12 + 1 = 97` satisfies the
 `8k+1` frame-grid constraint). For anything longer, mold renders a _chain_: the
 request is split into N sub-clips, each generated back-to-back, and stitched
 into a single MP4 at the end. mold keeps the last few frames of clip _N_'s
@@ -691,18 +698,18 @@ stays visually coherent.
 `mold run` routes automatically: when `--frames` is `≤ 97` you stay on the
 single-clip path; above 97 the request is rewritten into a chain and submitted
 as a durable chain job (`POST /api/chain-jobs`), whose stage progress the CLI
-follows over `GET /api/chain-jobs/{id}/events`. Chaining is supported for
-the LTX-2 generation pipelines — `one-stage`, `distilled`, `two-stage`, and
-`two-stage-hq` (the specialized keyframe, audio-to-video, IC-LoRA, retake,
-lip-dub, and audio-only modes render single clips only) — for LTX-Video
-(independent clips), and for Wan (checkpoint-dependent seam — see the
-[Wan page](./wan.md#sequences)).
+follows over `GET /api/chain-jobs/{id}/events`. Chaining supports the LTX-2
+generation pipelines (`one-stage`, `distilled`, `two-stage`, and `two-stage-hq`),
+legacy LTX Video as independent clips, and Wan with checkpoint-dependent seams.
+Specialized keyframe, audio-to-video, IC-LoRA, retake, lip-dub, and audio-only
+modes render single clips only. See the [Wan page](./wan.md#sequences) for its
+seam behavior.
 Image-family models reject `--frames` past their single-request ceiling with an
 actionable error rather than silently over-producing. `/api/models` advertises
 `supports_sequence` per model.
 
 ::: tip 97 is a routing default, not the model's ceiling
-LTX-2's real single-request limit is a **20-second runtime budget** — 484 frames
+LTX-2's real single-request limit is a **20-second runtime budget**: 484 frames
 at 24 fps (see [Frame ceiling](#frame-ceiling) below). 97 is simply the clip
 size that fits comfortably on one consumer GPU, so auto-chaining uses it. Raise
 `--clip-frames` to render one long coherent clip instead of a stitched
@@ -722,7 +729,7 @@ Chain [━━━━━━━━━━━━━━━━━━━━━━━━�
   Stage 4  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
   Stage 5  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
 ✓ Saved: mold-ltx-2-19b-distilled-<ts>.mp4 (400 frames, 1216x704, 24 fps)
-✓ Done — ltx-2-19b-distilled:fp8 in 226.8s (400 frames, seed: 42)
+✓ Done: ltx-2-19b-distilled:fp8 in 226.8s (400 frames, seed: 42)
 ```
 
 ### Motion-tail carryover
@@ -732,13 +739,13 @@ clip are reused as latent-space conditioning for the next. Instead of decoding
 the prior clip's last frame back to RGB and re-encoding it through the VAE as
 a new `source_image`, mold narrows the final denoise tensor along its time
 axis and patchifies those latent tokens directly into the next stage's
-`StageVideoConditioning` — so the handoff never leaves latent space. At stitch
+`StageVideoConditioning`, so the handoff never leaves latent space. At stitch
 time, every stage after the first drops its leading `N` output frames because
 those are the overlap region shared with the prior clip.
 
-- `--motion-tail 0` — hard concatenation, no overlap. Visible seams are common
+- `--motion-tail 0`: hard concatenation, no overlap. Visible seams are common
   at clip boundaries; useful when you _want_ discrete shots.
-- `--motion-tail 17` — the default: three latent frames of carryover (one
+- `--motion-tail 17`: the default: three latent frames of carryover (one
   causal plus two continuation) after the VAE's 8× temporal compression,
   enough temporal context to continue motion, object identity, and lighting
   across the seam.
@@ -766,13 +773,13 @@ $ mold run ltx-2-19b-distilled:fp8 "the car rounds the headland into fog" \
 
 The delivered file is the original followed by the new footage. `--frames` is
 the length of the _rendered continuation_, and its leading `--extend-overlap`
-frames re-render the source tail as motion context — those are dropped from the
+frames re-render the source tail as motion context; those are dropped from the
 result, so the run appends `frames - overlap` new frames.
 
-| Flag                 | Default | Description                                                                                                                                                                                        |
-| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--extend PATH`      | —       | Video to continue. On LTX-2 every checkpoint continues; [Wan](./wan.md#extending-a-clip) continues from an image-conditioned checkpoint. No other family has a continuation path.                  |
-| `--extend-overlap N` | `17`    | Pixel frames of the source tail used as motion context. On LTX-2, must be `8k+1` and `< --frames`. The default is per family — see [Wan](./wan.md#extending-a-clip), whose carryover is one frame. |
+| Flag                 | Default | Description                                                                                                                                                                                       |
+| -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--extend PATH`      | --      | Video to continue. On LTX-2 every checkpoint continues; [Wan](./wan.md#extending-a-clip) continues from an image-conditioned checkpoint. No other family has a continuation path.                 |
+| `--extend-overlap N` | `17`    | Pixel frames of the source tail used as motion context. On LTX-2, must be `8k+1` and `< --frames`. The default is per family; see [Wan](./wan.md#extending-a-clip), whose carryover is one frame. |
 
 Constraints, all enforced before any GPU work:
 
@@ -785,14 +792,14 @@ Constraints, all enforced before any GPU work:
   continuation adds at least one new frame.
 
 Under the hood this is the same motion-tail handoff a sequence uses between
-clips — the carryover simply comes from a file instead of the previous stage.
+clips; the carryover simply comes from a file instead of the previous stage.
 To chain several continuations, extend the result again.
 
 ### Frame ceiling
 
 LTX-2's single-request ceiling is a **duration**, not a frame count. The
 checkpoints ship `pos_embed_max_pos = 20`, and the temporal RoPE axis is
-normalized in seconds — the pixel-frame coordinate is divided by fps before
+normalized in seconds; the pixel-frame coordinate is divided by fps before
 `max_pos` normalization. So the budget is 20 seconds of runtime:
 
 ```
@@ -813,7 +820,7 @@ stage-1 frame count _and_ the stage-1 fps, so stage 1 renders the same runtime
 at half the frame rate.
 
 Whether a long single clip actually _fits_ is a separate question from whether
-the model allows it — attention cost grows with the square of the token count,
+the model allows it; attention cost grows with the square of the token count,
 so a 481-frame render at 1216x704 needs far more VRAM than most cards have.
 The validator permits it; auto-chaining stays at 97-frame clips by default.
 
@@ -830,7 +837,7 @@ at the head stays intact.
   [Wan sequences](./wan.md#sequences)). Image-family models reject `--frames`
   above their single-clip budget.
 - **Single GPU per chain.** Every stage runs on the GPU the engine was loaded
-  onto — multi-GPU stage fan-out is a v2 movie-maker feature.
+  onto; multi-GPU stage fan-out is a v2 movie-maker feature.
 - **Fail-closed.** If any stage errors, the whole chain returns `502` and
   nothing is written to the gallery. There is no partial-resume in v1.
 - **Multiple CLI authoring modes.** A large `--frames` request still replicates
@@ -839,8 +846,8 @@ at the head stays intact.
   `mold.chain.v1` script with per-stage prompts, source images, frame counts,
   and transitions.
 
-The rest of the LTX-2 surface — `--image`, `--audio-file`, `--lora`,
-`--camera-control`, `--spatial-upscale`, `--temporal-upscale`, and so on —
+The rest of the LTX-2 surface; `--image`, `--audio-file`, `--lora`,
+`--camera-control`, `--spatial-upscale`, `--temporal-upscale`, and so on;
 applies to chain renders the same way it applies to single-clip renders. The
 exception is the advanced guidance overrides above: chain stages keep their
 pipeline's guider constants, and `mold run` says so rather than pretending the
@@ -858,7 +865,7 @@ lightweight `webm` previews so the examples load quickly in the browser.
 
 <video controls muted loop playsinline preload="metadata" src="/gallery/ltx2/ltx2-docs-candidate-lighthouse-640x384-97f-12fps-seed424301.webm"></video>
 
-**ltx-2-19b-distilled:fp8** — 97 frames, 640x384, 12 fps
+**ltx-2-19b-distilled:fp8**: 97 frames, 640x384, 12 fps
 
 _Storm-lashed lighthouse at dusk, gliding coastal pass, thunder, rain, wind,
 and surf._
@@ -868,7 +875,7 @@ and surf._
 
 <video controls muted loop playsinline preload="metadata" src="/gallery/ltx2/ltx2-docs-candidate-subway-drummer-640x384-97f-12fps-seed424302.webm"></video>
 
-**ltx-2-19b-distilled:fp8** — 97 frames, 640x384, 12 fps
+**ltx-2-19b-distilled:fp8**: 97 frames, 640x384, 12 fps
 
 _Subway-tunnel drummer performance, orbiting concert camera, percussion, reverb,
 and distant train rumble._
@@ -878,7 +885,7 @@ and distant train rumble._
 
 <video controls muted loop playsinline preload="metadata" src="/gallery/ltx2/ltx2-docs-candidate-seaplane-640x384-97f-12fps-seed424303.webm"></video>
 
-**ltx-2.3-22b-distilled:fp8** — 97 frames, 640x384, 12 fps
+**ltx-2.3-22b-distilled:fp8**: 97 frames, 640x384, 12 fps
 
 _Red seaplane over an Arctic fjord at sunrise, wingtip bank, spray off the
 floats, propeller engine, wind, and water hiss._

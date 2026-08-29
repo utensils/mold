@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
-  "gitCommitHash": "7a56077d0b1364309f0c8b7e6fa51a02e838f7c3",
-  "generatedAt": "2026-08-28T14:10:09.351Z",
+  "gitCommitHash": "3db4501d931196954bb80290797c4cc6c004bc5b",
+  "generatedAt": "2026-08-28T16:27:44.501Z",
   "files": {
     "apps/mobile/plugins/android/src/androidTest/java/AndroidDiscoveryInstrumentedTest.kt": {
       "filePath": "apps/mobile/plugins/android/src/androidTest/java/AndroidDiscoveryInstrumentedTest.kt",
@@ -36524,14 +36524,13 @@
     },
     "crates/mold-cli/src/main.rs": {
       "filePath": "crates/mold-cli/src/main.rs",
-      "contentHash": "38024ac2d6ec2b046011f7d8d3fb788f22b4dac84ded0cec274a55c721b8c113",
+      "contentHash": "5b7e10f51dae246552e418e48ba0cb11b379234cba5f42d95bdda2b0d12dc1db",
       "functions": [
         {
           "name": "output_format_parser",
           "params": [
             "formats"
           ],
-          "returnType": "clap::builder::ValueParser",
           "exported": false,
           "lineCount": 7
         },
@@ -36540,7 +36539,6 @@
           "params": [
             "raw"
           ],
-          "returnType": "Result<String, String>",
           "exported": false,
           "lineCount": 7
         },
@@ -36549,7 +36547,6 @@
           "params": [
             "raw"
           ],
-          "returnType": "Result<String, String>",
           "exported": false,
           "lineCount": 7
         },
@@ -36558,23 +36555,28 @@
           "params": [
             "raw"
           ],
-          "returnType": "Result<String, String>",
           "exported": false,
           "lineCount": 3
+        },
+        {
+          "name": "library_limit_parser",
+          "params": [
+            "raw"
+          ],
+          "exported": false,
+          "lineCount": 9
         },
         {
           "name": "fmt",
           "params": [
             "_f"
           ],
-          "returnType": "std::fmt::Result",
           "exported": false,
           "lineCount": 3
         },
         {
           "name": "complete_shell",
           "params": [],
-          "returnType": "Vec<CompletionCandidate>",
           "exported": false,
           "lineCount": 6
         },
@@ -36595,16 +36597,14 @@
         {
           "name": "run",
           "params": [],
-          "returnType": "anyhow::Result<()>",
           "exported": false,
-          "lineCount": 774
+          "lineCount": 777
         },
         {
           "name": "generate_completions",
           "params": [
             "shell"
           ],
-          "returnType": "anyhow::Result<()>",
           "exported": false,
           "lineCount": 86
         },
@@ -36613,7 +36613,6 @@
           "params": [
             "id"
           ],
-          "returnType": "anyhow::Result<CatalogIdResolution>",
           "exported": true,
           "lineCount": 20
         }
@@ -36838,6 +36837,51 @@
           "lineCount": 30
         },
         {
+          "name": "LibraryTagAction",
+          "methods": [],
+          "properties": [
+            "List",
+            "Add",
+            "Remove",
+            "Rename",
+            "Delete"
+          ],
+          "exported": true,
+          "lineCount": 35
+        },
+        {
+          "name": "LibraryCollectionAction",
+          "methods": [],
+          "properties": [
+            "List",
+            "Show",
+            "Create",
+            "Update",
+            "Delete",
+            "Add",
+            "Remove"
+          ],
+          "exported": true,
+          "lineCount": 61
+        },
+        {
+          "name": "LibraryAction",
+          "methods": [],
+          "properties": [
+            "List",
+            "Show",
+            "Grid",
+            "Title",
+            "Favorite",
+            "Unfavorite",
+            "Tag",
+            "Collection",
+            "Trash"
+          ],
+          "exported": true,
+          "lineCount": 71
+        },
+        {
           "name": "Commands",
           "methods": [],
           "properties": [
@@ -36849,6 +36893,7 @@
             "Chain",
             "Jobs",
             "Queue",
+            "Library",
             "Trash",
             "Pull",
             "Licenses",
@@ -36874,7 +36919,7 @@
             "Completions"
           ],
           "exported": false,
-          "lineCount": 1101
+          "lineCount": 1120
         },
         {
           "name": "CatalogIdResolution",
@@ -36889,27 +36934,52 @@
       ],
       "imports": [
         {
-          "source": "clap",
-          "specifiers": [
-            "builder::ValueHint",
-            "CommandFactory",
-            "Parser",
-            "Subcommand"
-          ]
+          "source": "crates/mold-cli/src/catalog_bridge.rs",
+          "specifiers": []
         },
         {
-          "source": "clap_complete::engine",
-          "specifiers": [
-            "ArgValueCandidates",
-            "CompletionCandidate"
-          ]
+          "source": "crates/mold-cli/src/commands/mod.rs",
+          "specifiers": []
         },
         {
-          "source": "mold_core",
-          "specifiers": [
-            "OutputFormat",
-            "Scheduler"
-          ]
+          "source": "crates/mold-cli/src/control.rs",
+          "specifiers": []
+        },
+        {
+          "source": "crates/mold-cli/src/errors.rs",
+          "specifiers": []
+        },
+        {
+          "source": "crates/mold-cli/src/fs_util.rs",
+          "specifiers": []
+        },
+        {
+          "source": "crates/mold-cli/src/metadata_db.rs",
+          "specifiers": []
+        },
+        {
+          "source": "crates/mold-cli/src/output.rs",
+          "specifiers": []
+        },
+        {
+          "source": "crates/mold-cli/src/procinfo.rs",
+          "specifiers": []
+        },
+        {
+          "source": "crates/mold-cli/src/skill/mod.rs",
+          "specifiers": []
+        },
+        {
+          "source": "crates/mold-cli/src/test_support.rs",
+          "specifiers": []
+        },
+        {
+          "source": "crates/mold-cli/src/theme.rs",
+          "specifiers": []
+        },
+        {
+          "source": "crates/mold-cli/src/ui.rs",
+          "specifiers": []
         }
       ],
       "exports": [
@@ -36920,10 +36990,13 @@
         "RetakeModeArg",
         "QueueAction",
         "TrashAction",
+        "LibraryTagAction",
+        "LibraryCollectionAction",
+        "LibraryAction",
         "CatalogIdResolution",
         "resolve_catalog_id"
       ],
-      "totalLines": 4200,
+      "totalLines": 4522,
       "hasStructuralAnalysis": true
     },
     "crates/mold-cli/src/metadata_db.rs": {
@@ -37958,7 +38031,7 @@
     },
     "crates/mold-cli/tests/cli_integration.rs": {
       "filePath": "crates/mold-cli/tests/cli_integration.rs",
-      "contentHash": "917c36fb6d4a44c9b4cee4723e1e12d422db15075ce3f0d8d2641fe9fb8e0968",
+      "contentHash": "aa8dc5e6319a8c51a3c74bb121e0fdc6698e8c5851a77ba60846abfca4c052bb",
       "functions": [
         {
           "name": "loopback_admin_commands_do_not_hide_live_server_http_errors",
@@ -37989,6 +38062,68 @@
           "params": [],
           "exported": false,
           "lineCount": 4
+        },
+        {
+          "name": "library_capabilities",
+          "params": [
+            "organize",
+            "bulk_mutations",
+            "trash"
+          ],
+          "exported": false,
+          "lineCount": 14
+        },
+        {
+          "name": "library_row",
+          "params": [
+            "filename",
+            "timestamp",
+            "tags"
+          ],
+          "exported": false,
+          "lineCount": 21
+        },
+        {
+          "name": "library_list_json_is_pure_and_uses_the_same_filtered_page",
+          "params": [],
+          "exported": false,
+          "lineCount": 36
+        },
+        {
+          "name": "library_tag_add_uses_replay_safe_bulk_mutation_when_advertised",
+          "params": [],
+          "exported": false,
+          "lineCount": 47
+        },
+        {
+          "name": "library_tag_add_falls_back_to_legacy_organize_route",
+          "params": [],
+          "exported": false,
+          "lineCount": 29
+        },
+        {
+          "name": "library_trash_refuses_a_host_without_recoverable_trash",
+          "params": [],
+          "exported": false,
+          "lineCount": 24
+        },
+        {
+          "name": "library_collection_remove_resolves_slug_and_sends_membership_change",
+          "params": [],
+          "exported": false,
+          "lineCount": 58
+        },
+        {
+          "name": "library_show_video_uses_thumbnail_when_animated_preview_is_missing",
+          "params": [],
+          "exported": false,
+          "lineCount": 35
+        },
+        {
+          "name": "library_global_tag_delete_requires_yes_without_a_tty",
+          "params": [],
+          "exported": false,
+          "lineCount": 23
         },
         {
           "name": "default_shows_fallback_model",
@@ -38288,20 +38423,12 @@
       "classes": [],
       "imports": [
         {
-          "source": "common",
-          "specifiers": [
-            "TestEnv"
-          ]
-        },
-        {
-          "source": "predicates::prelude",
-          "specifiers": [
-            "*"
-          ]
+          "source": "crates/mold-cli/tests/common/mod.rs",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 951,
+      "totalLines": 1254,
       "hasStructuralAnalysis": true
     },
     "crates/mold-cli/tests/common/mod.rs": {
@@ -40283,7 +40410,7 @@
     },
     "crates/mold-core/src/client.rs": {
       "filePath": "crates/mold-core/src/client.rs",
-      "contentHash": "6a9f1206799d1f2f7eb59a823fc2c8bb9d93700455e8fab3894a8dee17afdfc7",
+      "contentHash": "9b22a914a0ddc106c2e3b8ba59a3bec519bfd311363f212f8f4adb04688b0db1",
       "functions": [
         {
           "name": "pull_body",
@@ -40291,7 +40418,6 @@
             "model",
             "accept_licenses"
           ],
-          "returnType": "serde_json::Value",
           "exported": false,
           "lineCount": 10
         },
@@ -40300,7 +40426,6 @@
           "params": [
             "req"
           ],
-          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 10
         },
@@ -40311,7 +40436,6 @@
             "job_id",
             "host"
           ],
-          "returnType": "anyhow::Error",
           "exported": false,
           "lineCount": 10
         },
@@ -40322,7 +40446,6 @@
             "job_id",
             "host"
           ],
-          "returnType": "anyhow::Error",
           "exported": false,
           "lineCount": 8
         },
@@ -40331,7 +40454,6 @@
           "params": [
             "base_url"
           ],
-          "returnType": "Self",
           "exported": true,
           "lineCount": 8
         },
@@ -40341,21 +40463,18 @@
             "base_url",
             "api_key"
           ],
-          "returnType": "Self",
           "exported": true,
           "lineCount": 8
         },
         {
           "name": "from_env",
           "params": [],
-          "returnType": "Self",
           "exported": true,
           "lineCount": 11
         },
         {
           "name": "has_api_key",
           "params": [],
-          "returnType": "bool",
           "exported": true,
           "lineCount": 3
         },
@@ -40364,7 +40483,6 @@
           "params": [
             "request"
           ],
-          "returnType": "Result<ReferenceUploadSessionResponse>",
           "exported": true,
           "lineCount": 21
         },
@@ -40375,7 +40493,6 @@
             "path",
             "mime_type"
           ],
-          "returnType": "Result<ReferenceUploadCompleteResponse>",
           "exported": true,
           "lineCount": 26
         },
@@ -40386,7 +40503,6 @@
             "file",
             "mime_type"
           ],
-          "returnType": "Result<ReferenceUploadCompleteResponse>",
           "exported": true,
           "lineCount": 22
         },
@@ -40397,7 +40513,6 @@
             "bytes",
             "mime_type"
           ],
-          "returnType": "Result<ReferenceUploadCompleteResponse>",
           "exported": true,
           "lineCount": 11
         },
@@ -40409,7 +40524,6 @@
             "content_length",
             "body"
           ],
-          "returnType": "Result<ReferenceUploadCompleteResponse>",
           "exported": false,
           "lineCount": 21
         },
@@ -40418,7 +40532,6 @@
           "params": [
             "handle"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 13
         },
@@ -40427,7 +40540,6 @@
           "params": [
             "req"
           ],
-          "returnType": "Result<Vec<u8>>",
           "exported": true,
           "lineCount": 16
         },
@@ -40436,21 +40548,18 @@
           "params": [
             "req"
           ],
-          "returnType": "Result<GenerateResponse>",
           "exported": true,
           "lineCount": 118
         },
         {
           "name": "list_models",
           "params": [],
-          "returnType": "Result<Vec<ModelInfo>>",
           "exported": true,
           "lineCount": 4
         },
         {
           "name": "list_models_extended",
           "params": [],
-          "returnType": "Result<Vec<ModelInfoExtended>>",
           "exported": true,
           "lineCount": 11
         },
@@ -40459,7 +40568,6 @@
           "params": [
             "model"
           ],
-          "returnType": "Result<Vec<LoraInfo>>",
           "exported": true,
           "lineCount": 14
         },
@@ -40468,7 +40576,6 @@
           "params": [
             "model"
           ],
-          "returnType": "Result<Vec<LoraInfo>>",
           "exported": false,
           "lineCount": 15
         },
@@ -40477,7 +40584,6 @@
           "params": [
             "model"
           ],
-          "returnType": "Result<Vec<LoraInfo>>",
           "exported": false,
           "lineCount": 34
         },
@@ -40486,7 +40592,6 @@
           "params": [
             "err"
           ],
-          "returnType": "bool",
           "exported": true,
           "lineCount": 12
         },
@@ -40495,7 +40600,6 @@
           "params": [
             "err"
           ],
-          "returnType": "bool",
           "exported": true,
           "lineCount": 13
         },
@@ -40505,7 +40609,6 @@
             "req",
             "progress_tx"
           ],
-          "returnType": "Result<GenerateResponse>",
           "exported": true,
           "lineCount": 222
         },
@@ -40515,7 +40618,6 @@
             "job_id",
             "progress_tx"
           ],
-          "returnType": "Result<ChainJobOutcome>",
           "exported": true,
           "lineCount": 109
         },
@@ -40524,14 +40626,12 @@
           "params": [
             "req"
           ],
-          "returnType": "Result<CreateChainJobResponse>",
           "exported": true,
           "lineCount": 13
         },
         {
           "name": "list_chain_jobs",
           "params": [],
-          "returnType": "Result<ChainJobListing>",
           "exported": true,
           "lineCount": 16
         },
@@ -40540,7 +40640,6 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<ChainJobDetail>",
           "exported": true,
           "lineCount": 15
         },
@@ -40549,7 +40648,6 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<ChainJobSummary>",
           "exported": true,
           "lineCount": 15
         },
@@ -40559,7 +40657,6 @@
             "id",
             "req"
           ],
-          "returnType": "Result<ChainJobSummary>",
           "exported": true,
           "lineCount": 17
         },
@@ -40568,7 +40665,6 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<ChainJobSummary>",
           "exported": true,
           "lineCount": 15
         },
@@ -40577,14 +40673,12 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 13
         },
         {
           "name": "gc_chain_jobs",
           "params": [],
-          "returnType": "Result<GcOutcome>",
           "exported": true,
           "lineCount": 11
         },
@@ -40593,7 +40687,6 @@
           "params": [
             "model"
           ],
-          "returnType": "Result<String>",
           "exported": true,
           "lineCount": 3
         },
@@ -40603,14 +40696,12 @@
             "model",
             "accept_licenses"
           ],
-          "returnType": "Result<String>",
           "exported": true,
           "lineCount": 16
         },
         {
           "name": "list_licenses",
           "params": [],
-          "returnType": "Result<Vec<crate::types::ThirdPartyLicenseStatus>>",
           "exported": true,
           "lineCount": 11
         },
@@ -40620,14 +40711,12 @@
             "request",
             "copies"
           ],
-          "returnType": "Result<crate::types::GenerationPlacementPreview>",
           "exported": true,
           "lineCount": 17
         },
         {
           "name": "shutdown_server",
           "params": [],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 8
         },
@@ -40637,7 +40726,6 @@
             "model",
             "progress_tx"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 8
         },
@@ -40648,21 +40736,18 @@
             "accept_licenses",
             "progress_tx"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 64
         },
         {
           "name": "host",
           "params": [],
-          "returnType": "&str",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "unload_model",
           "params": [],
-          "returnType": "Result<String>",
           "exported": true,
           "lineCount": 3
         },
@@ -40672,35 +40757,30 @@
             "model",
             "gpu"
           ],
-          "returnType": "Result<String>",
           "exported": true,
           "lineCount": 20
         },
         {
           "name": "server_status",
           "params": [],
-          "returnType": "Result<ServerStatus>",
           "exported": true,
           "lineCount": 11
         },
         {
           "name": "server_capabilities",
           "params": [],
-          "returnType": "Result<crate::ServerCapabilities>",
           "exported": true,
           "lineCount": 11
         },
         {
           "name": "devices",
           "params": [],
-          "returnType": "Result<DeviceState>",
           "exported": true,
           "lineCount": 11
         },
         {
           "name": "capabilities",
           "params": [],
-          "returnType": "Result<crate::ServerCapabilities>",
           "exported": true,
           "lineCount": 3
         },
@@ -40709,7 +40789,6 @@
           "params": [
             "request"
           ],
-          "returnType": "Result<GenerationBatchStatus>",
           "exported": true,
           "lineCount": 15
         },
@@ -40718,7 +40797,6 @@
           "params": [
             "client_batch_id"
           ],
-          "returnType": "Result<Option<GenerationBatchStatus>>",
           "exported": true,
           "lineCount": 23
         },
@@ -40727,7 +40805,6 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<Option<GenerationBatchStatus>>",
           "exported": true,
           "lineCount": 20
         },
@@ -40736,7 +40813,6 @@
           "params": [
             "request"
           ],
-          "returnType": "Result<GenerationBatchStatusResponse>",
           "exported": true,
           "lineCount": 15
         },
@@ -40745,7 +40821,6 @@
           "params": [
             "request"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 14
         },
@@ -40755,14 +40830,12 @@
             "device_id",
             "enabled"
           ],
-          "returnType": "Result<crate::DeviceInfo>",
           "exported": true,
           "lineCount": 21
         },
         {
           "name": "list_queue",
           "params": [],
-          "returnType": "Result<QueueListingWire>",
           "exported": true,
           "lineCount": 4
         },
@@ -40771,7 +40844,6 @@
           "params": [
             "queue_capacity"
           ],
-          "returnType": "Result<QueueListingWire>",
           "exported": true,
           "lineCount": 10
         },
@@ -40781,14 +40853,12 @@
             "limit",
             "cursor"
           ],
-          "returnType": "Result<QueueListingWire>",
           "exported": true,
           "lineCount": 10
         },
         {
           "name": "list_queue_all",
           "params": [],
-          "returnType": "Result<QueueListingWire>",
           "exported": true,
           "lineCount": 36
         },
@@ -40797,7 +40867,6 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<Option<crate::QueueJobEntryWire>>",
           "exported": true,
           "lineCount": 19
         },
@@ -40807,7 +40876,6 @@
             "limit",
             "cursor"
           ],
-          "returnType": "Result<QueueListingWire>",
           "exported": false,
           "lineCount": 21
         },
@@ -40816,7 +40884,6 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<Option<QueueJobProgress>>",
           "exported": true,
           "lineCount": 18
         },
@@ -40825,7 +40892,6 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 13
         },
@@ -40834,7 +40900,6 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<Option<crate::QueueJobDetailWire>>",
           "exported": true,
           "lineCount": 20
         },
@@ -40844,14 +40909,12 @@
             "id",
             "position"
           ],
-          "returnType": "Result<crate::QueueJobEntryWire>",
           "exported": true,
           "lineCount": 20
         },
         {
           "name": "cancel_all_queue_jobs",
           "params": [],
-          "returnType": "Result<usize>",
           "exported": true,
           "lineCount": 12
         },
@@ -40860,21 +40923,18 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<GenerationBatchStatus>",
           "exported": true,
           "lineCount": 15
         },
         {
           "name": "pause_queue",
           "params": [],
-          "returnType": "Result<bool>",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "resume_queue",
           "params": [],
-          "returnType": "Result<bool>",
           "exported": true,
           "lineCount": 3
         },
@@ -40883,28 +40943,24 @@
           "params": [
             "action"
           ],
-          "returnType": "Result<bool>",
           "exported": false,
           "lineCount": 12
         },
         {
           "name": "sweep_held_queue",
           "params": [],
-          "returnType": "Result<crate::HeldSweepResult>",
           "exported": true,
           "lineCount": 11
         },
         {
           "name": "sweep_settled_batches",
           "params": [],
-          "returnType": "Result<crate::SettledBatchSweepResult>",
           "exported": true,
           "lineCount": 11
         },
         {
           "name": "list_gallery",
           "params": [],
-          "returnType": "Result<Vec<GalleryImage>>",
           "exported": true,
           "lineCount": 11
         },
@@ -40913,7 +40969,6 @@
           "params": [
             "filename"
           ],
-          "returnType": "Result<Option<GalleryImage>>",
           "exported": true,
           "lineCount": 12
         },
@@ -40922,25 +40977,22 @@
           "params": [
             "filename"
           ],
-          "returnType": "Result<Vec<u8>>",
           "exported": true,
-          "lineCount": 11
+          "lineCount": 15
         },
         {
           "name": "delete_gallery_image",
           "params": [
             "filename"
           ],
-          "returnType": "Result<()>",
           "exported": true,
-          "lineCount": 8
+          "lineCount": 12
         },
         {
           "name": "list_gallery_view",
           "params": [
             "view"
           ],
-          "returnType": "Result<Vec<GalleryImage>>",
           "exported": true,
           "lineCount": 12
         },
@@ -40949,7 +41001,6 @@
           "params": [
             "filename"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 13
         },
@@ -40958,7 +41009,6 @@
           "params": [
             "filename"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 14
         },
@@ -40967,7 +41017,6 @@
           "params": [
             "filenames"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 12
         },
@@ -40976,21 +41025,18 @@
           "params": [
             "filenames"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 12
         },
         {
           "name": "empty_trash",
           "params": [],
-          "returnType": "Result<EmptyTrashResult>",
           "exported": true,
           "lineCount": 11
         },
         {
           "name": "sweep_trash",
           "params": [],
-          "returnType": "Result<TrashSweepResult>",
           "exported": true,
           "lineCount": 11
         },
@@ -41000,7 +41046,6 @@
             "filename",
             "patch"
           ],
-          "returnType": "Result<GalleryImage>",
           "exported": true,
           "lineCount": 20
         },
@@ -41009,23 +41054,36 @@
           "params": [
             "req"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 10
         },
         {
+          "name": "mutate_gallery_bulk",
+          "params": [
+            "req"
+          ],
+          "exported": true,
+          "lineCount": 15
+        },
+        {
           "name": "list_collections",
           "params": [],
-          "returnType": "Result<Vec<Collection>>",
           "exported": true,
           "lineCount": 11
+        },
+        {
+          "name": "get_collection",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 15
         },
         {
           "name": "create_collection",
           "params": [
             "req"
           ],
-          "returnType": "Result<Collection>",
           "exported": true,
           "lineCount": 12
         },
@@ -41035,7 +41093,6 @@
             "id",
             "req"
           ],
-          "returnType": "Result<Collection>",
           "exported": true,
           "lineCount": 20
         },
@@ -41044,7 +41101,6 @@
           "params": [
             "id"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 13
         },
@@ -41054,14 +41110,12 @@
             "id",
             "req"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 14
         },
         {
           "name": "list_tags",
           "params": [],
-          "returnType": "Result<Vec<TagCount>>",
           "exported": true,
           "lineCount": 11
         },
@@ -41071,7 +41125,6 @@
             "name",
             "new_name"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 16
         },
@@ -41080,7 +41133,6 @@
           "params": [
             "name"
           ],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 13
         },
@@ -41089,25 +41141,22 @@
           "params": [
             "filename"
           ],
-          "returnType": "Result<Option<Vec<u8>>>",
           "exported": true,
-          "lineCount": 12
+          "lineCount": 16
         },
         {
           "name": "get_gallery_thumbnail",
           "params": [
             "filename"
           ],
-          "returnType": "Result<Vec<u8>>",
           "exported": true,
-          "lineCount": 14
+          "lineCount": 15
         },
         {
           "name": "expand_prompt",
           "params": [
             "req"
           ],
-          "returnType": "Result<ExpandResponse>",
           "exported": true,
           "lineCount": 13
         },
@@ -41116,7 +41165,6 @@
           "params": [
             "req"
           ],
-          "returnType": "Result<crate::RemixResponse>",
           "exported": true,
           "lineCount": 13
         },
@@ -41125,7 +41173,6 @@
           "params": [
             "req"
           ],
-          "returnType": "Result<crate::UpscaleResponse>",
           "exported": true,
           "lineCount": 12
         },
@@ -41135,7 +41182,6 @@
             "req",
             "progress_tx"
           ],
-          "returnType": "Result<Option<crate::UpscaleResponse>>",
           "exported": true,
           "lineCount": 73
         },
@@ -41144,7 +41190,6 @@
           "params": [
             "entry"
           ],
-          "returnType": "Option<LoraInfo>",
           "exported": false,
           "lineCount": 18
         },
@@ -41153,7 +41198,6 @@
           "params": [
             "err"
           ],
-          "returnType": "bool",
           "exported": false,
           "lineCount": 12
         },
@@ -41162,7 +41206,6 @@
           "params": [
             "err"
           ],
-          "returnType": "bool",
           "exported": true,
           "lineCount": 14
         },
@@ -41171,7 +41214,6 @@
           "params": [
             "err"
           ],
-          "returnType": "bool",
           "exported": true,
           "lineCount": 20
         },
@@ -41180,7 +41222,6 @@
           "params": [
             "formatter"
           ],
-          "returnType": "std::fmt::Result",
           "exported": false,
           "lineCount": 3
         },
@@ -41189,7 +41230,6 @@
           "params": [
             "resp"
           ],
-          "returnType": "Result<reqwest::Response>",
           "exported": false,
           "lineCount": 8
         },
@@ -41198,7 +41238,6 @@
           "params": [
             "resp"
           ],
-          "returnType": "Result<reqwest::Response>",
           "exported": false,
           "lineCount": 40
         },
@@ -41207,7 +41246,6 @@
           "params": [
             "resp"
           ],
-          "returnType": "bool",
           "exported": false,
           "lineCount": 6
         },
@@ -41216,7 +41254,6 @@
           "params": [
             "body"
           ],
-          "returnType": "String",
           "exported": false,
           "lineCount": 14
         },
@@ -41225,7 +41262,6 @@
           "params": [
             "model"
           ],
-          "returnType": "Option<String>",
           "exported": false,
           "lineCount": 18
         },
@@ -41234,7 +41270,6 @@
           "params": [
             "family"
           ],
-          "returnType": "String",
           "exported": false,
           "lineCount": 6
         },
@@ -41243,7 +41278,6 @@
           "params": [
             "headers"
           ],
-          "returnType": "Vec<String>",
           "exported": false,
           "lineCount": 10
         },
@@ -41253,7 +41287,6 @@
             "from_headers",
             "from_completion"
           ],
-          "returnType": "Vec<String>",
           "exported": false,
           "lineCount": 11
         },
@@ -41262,7 +41295,6 @@
           "params": [
             "headers"
           ],
-          "returnType": "Option<VideoMeta>",
           "exported": false,
           "lineCount": 62
         },
@@ -41271,7 +41303,6 @@
           "params": [
             "headers"
           ],
-          "returnType": "Option<AudioMeta>",
           "exported": false,
           "lineCount": 23
         },
@@ -41280,7 +41311,6 @@
           "params": [
             "buffer"
           ],
-          "returnType": "Option<String>",
           "exported": false,
           "lineCount": 10
         },
@@ -41289,7 +41319,6 @@
           "params": [
             "event_text"
           ],
-          "returnType": "(String, String)",
           "exported": false,
           "lineCount": 15
         },
@@ -41298,7 +41327,6 @@
           "params": [
             "api_key"
           ],
-          "returnType": "(Client, bool)",
           "exported": false,
           "lineCount": 24
         },
@@ -41307,7 +41335,6 @@
           "params": [
             "input"
           ],
-          "returnType": "String",
           "exported": true,
           "lineCount": 10
         },
@@ -41316,7 +41343,6 @@
           "params": [
             "raw"
           ],
-          "returnType": "String",
           "exported": false,
           "lineCount": 12
         },
@@ -41325,7 +41351,6 @@
           "params": [
             "f"
           ],
-          "returnType": "std::fmt::Result",
           "exported": false,
           "lineCount": 3
         }
@@ -41413,7 +41438,9 @@
             "sweep_trash",
             "patch_gallery_image",
             "organize_gallery",
+            "mutate_gallery_bulk",
             "list_collections",
+            "get_collection",
             "create_collection",
             "update_collection",
             "delete_collection",
@@ -41504,115 +41531,24 @@
       ],
       "imports": [
         {
-          "source": "crate::chain",
-          "specifiers": [
-            "ChainProgressEvent",
-            "ChainRequest"
-          ]
+          "source": "crates/mold-core/src/chain.rs",
+          "specifiers": []
         },
         {
-          "source": "crate::chain_job",
-          "specifiers": [
-            "ChainJobDetail",
-            "ChainJobListing",
-            "ChainJobSummary",
-            "CreateChainJobResponse",
-            "GcOutcome",
-            "RetakeRequest"
-          ]
+          "source": "crates/mold-core/src/chain_job.rs",
+          "specifiers": []
         },
         {
-          "source": "crate::error",
-          "specifiers": [
-            "MoldError"
-          ]
+          "source": "crates/mold-core/src/error.rs",
+          "specifiers": []
         },
         {
-          "source": "crate::queue_progress",
-          "specifiers": [
-            "QueueJobProgress"
-          ]
+          "source": "crates/mold-core/src/queue_progress.rs",
+          "specifiers": []
         },
         {
-          "source": "crate::types",
-          "specifiers": [
-            "AudioData",
-            "Collection",
-            "CollectionCreateRequest",
-            "CollectionItemsRequest",
-            "CollectionUpdateRequest",
-            "DeviceState",
-            "EmptyTrashResult",
-            "ExpandRequest",
-            "ExpandResponse",
-            "GalleryImage",
-            "GalleryOrganizeRequest",
-            "GalleryPatchRequest",
-            "GenerateRequest",
-            "GenerateResponse",
-            "GenerationBatchAdmissionRequest",
-            "GenerationBatchStatus",
-            "GenerationBatchStatusRequest",
-            "GenerationBatchStatusResponse",
-            "GenerationRetryRequest",
-            "ImageData",
-            "LoraInfo",
-            "ModelInfo",
-            "ModelInfoExtended",
-            "OutputFormat",
-            "QueueListingWire",
-            "ReferenceUploadCompleteResponse",
-            "ReferenceUploadSessionRequest",
-            "ReferenceUploadSessionResponse",
-            "ServerStatus",
-            "SseCompleteEvent",
-            "SseErrorEvent",
-            "SseProgressEvent",
-            "TagCount",
-            "TagRenameRequest",
-            "TrashFilenamesRequest",
-            "TrashSweepResult",
-            "VideoData"
-          ]
-        },
-        {
-          "source": "anyhow",
-          "specifiers": [
-            "Context",
-            "Result"
-          ]
-        },
-        {
-          "source": "base64::Engine as _",
-          "specifiers": [
-            "base64::Engine as _"
-          ]
-        },
-        {
-          "source": "reqwest",
-          "specifiers": [
-            "Client",
-            "StatusCode"
-          ]
-        },
-        {
-          "source": "std::io",
-          "specifiers": [
-            "Seek",
-            "SeekFrom"
-          ]
-        },
-        {
-          "source": "std::path",
-          "specifiers": [
-            "Path"
-          ]
-        },
-        {
-          "source": "tokio_util::io",
-          "specifiers": [
-            "ReaderStream"
-          ]
+          "source": "crates/mold-core/src/types.rs",
+          "specifiers": []
         }
       ],
       "exports": [
@@ -41692,7 +41628,9 @@
         "sweep_trash",
         "patch_gallery_image",
         "organize_gallery",
+        "mutate_gallery_bulk",
         "list_collections",
+        "get_collection",
         "create_collection",
         "update_collection",
         "delete_collection",
@@ -41711,7 +41649,7 @@
         "normalize_host",
         "ModelNotFoundError"
       ],
-      "totalLines": 4926,
+      "totalLines": 5016,
       "hasStructuralAnalysis": true
     },
     "crates/mold-core/src/config.rs": {
@@ -82640,12 +82578,11 @@
     },
     "crates/mold-inference/src/expand.rs": {
       "filePath": "crates/mold-inference/src/expand.rs",
-      "contentHash": "42ae2ef6a540d2be67cd74f42a2f7b6f87c41208c5daf3d4521cc8293d497d23",
+      "contentHash": "9c7ebb1e19a722934f2d6d0645eceae706c497f03801cfacc1874d3e2c19c774",
       "functions": [
         {
           "name": "validate",
           "params": [],
-          "returnType": "Result<()>",
           "exported": true,
           "lineCount": 19
         },
@@ -82655,7 +82592,6 @@
             "progress",
             "_safe_point"
           ],
-          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 3
         },
@@ -82665,7 +82601,6 @@
             "path",
             "size_bytes"
           ],
-          "returnType": "Result<String>",
           "exported": false,
           "lineCount": 31
         },
@@ -82674,7 +82609,6 @@
           "params": [
             "path"
           ],
-          "returnType": "Result<ResolvedExpandArtifact>",
           "exported": false,
           "lineCount": 11
         },
@@ -82684,7 +82618,6 @@
             "label",
             "frozen"
           ],
-          "returnType": "Result<()>",
           "exported": false,
           "lineCount": 15
         },
@@ -82693,7 +82626,6 @@
           "params": [
             "expand_model"
           ],
-          "returnType": "Vec<String>",
           "exported": false,
           "lineCount": 16
         },
@@ -82703,7 +82635,6 @@
             "artifacts",
             "placement"
           ],
-          "returnType": "(u64, u64)",
           "exported": false,
           "lineCount": 28
         },
@@ -82715,7 +82646,6 @@
             "predicted_vram_peak_bytes",
             "predicted_host_increment_bytes"
           ],
-          "returnType": "String",
           "exported": false,
           "lineCount": 28
         },
@@ -82725,7 +82655,6 @@
             "config",
             "expand_model"
           ],
-          "returnType": "Result<ResolvedExpandArtifacts>",
           "exported": true,
           "lineCount": 35
         },
@@ -82736,7 +82665,6 @@
             "expand_model",
             "placement"
           ],
-          "returnType": "Result<ResolvedExpandExecutionPlan>",
           "exported": true,
           "lineCount": 10
         },
@@ -82746,7 +82674,6 @@
             "artifacts",
             "placement"
           ],
-          "returnType": "ResolvedExpandExecutionPlan",
           "exported": true,
           "lineCount": 20
         },
@@ -82757,7 +82684,6 @@
             "progress",
             "gpu_factory"
           ],
-          "returnType": "Result<Device>",
           "exported": false,
           "lineCount": 38
         },
@@ -82770,7 +82696,6 @@
             "preferred_gpu",
             "progress"
           ],
-          "returnType": "Result<Device>",
           "exported": false,
           "lineCount": 41
         },
@@ -82790,7 +82715,6 @@
             "model_path",
             "tokenizer_path"
           ],
-          "returnType": "Self",
           "exported": true,
           "lineCount": 10
         },
@@ -82799,7 +82723,6 @@
           "params": [
             "plan"
           ],
-          "returnType": "Self",
           "exported": true,
           "lineCount": 10
         },
@@ -82832,7 +82755,6 @@
             "config",
             "token"
           ],
-          "returnType": "Result<ExpandResult>",
           "exported": true,
           "lineCount": 16
         },
@@ -82841,7 +82763,6 @@
           "params": [
             "gpu_selection"
           ],
-          "returnType": "Self",
           "exported": true,
           "lineCount": 4
         },
@@ -82850,7 +82771,6 @@
           "params": [
             "preferred_gpu"
           ],
-          "returnType": "Self",
           "exported": true,
           "lineCount": 4
         },
@@ -82860,7 +82780,6 @@
             "config",
             "expand_model"
           ],
-          "returnType": "Option<Self>",
           "exported": true,
           "lineCount": 3
         },
@@ -82870,7 +82789,6 @@
             "config",
             "expand_model"
           ],
-          "returnType": "Option<Self>",
           "exported": true,
           "lineCount": 7
         },
@@ -82880,7 +82798,6 @@
             "prompt_text",
             "config"
           ],
-          "returnType": "Result<String>",
           "exported": false,
           "lineCount": 163
         },
@@ -82890,9 +82807,16 @@
             "prompt",
             "config"
           ],
-          "returnType": "Result<ExpandResult>",
           "exported": false,
-          "lineCount": 67
+          "lineCount": 59
+        },
+        {
+          "name": "local_expand_error_with_recovery",
+          "params": [
+            "error"
+          ],
+          "exported": false,
+          "lineCount": 7
         },
         {
           "name": "sample_token",
@@ -82901,7 +82825,6 @@
             "temperature",
             "top_p"
           ],
-          "returnType": "Result<u32>",
           "exported": false,
           "lineCount": 53
         },
@@ -82911,7 +82834,6 @@
             "dir",
             "model_spec"
           ],
-          "returnType": "Option<PathBuf>",
           "exported": false,
           "lineCount": 27
         },
@@ -82920,7 +82842,6 @@
           "params": [
             "dir"
           ],
-          "returnType": "Option<PathBuf>",
           "exported": false,
           "lineCount": 25
         }
@@ -83017,94 +82938,12 @@
       ],
       "imports": [
         {
-          "source": "anyhow",
-          "specifiers": [
-            "bail",
-            "Result"
-          ]
+          "source": "crates/mold-inference/src/device.rs",
+          "specifiers": []
         },
         {
-          "source": "candle_core",
-          "specifiers": [
-            "DType",
-            "Device",
-            "Tensor"
-          ]
-        },
-        {
-          "source": "candle_transformers::models::quantized_qwen3",
-          "specifiers": [
-            "ModelWeights"
-          ]
-        },
-        {
-          "source": "sha2",
-          "specifiers": [
-            "Digest",
-            "Sha256"
-          ]
-        },
-        {
-          "source": "std::io",
-          "specifiers": [
-            "Seek"
-          ]
-        },
-        {
-          "source": "std::path",
-          "specifiers": [
-            "Path",
-            "PathBuf"
-          ]
-        },
-        {
-          "source": "tokenizers",
-          "specifiers": [
-            "Tokenizer"
-          ]
-        },
-        {
-          "source": "mold_core::expand",
-          "specifiers": [
-            "ExpandConfig",
-            "ExpandResult",
-            "PromptExpander"
-          ]
-        },
-        {
-          "source": "mold_core::expand_prompts",
-          "specifiers": [
-            "build_batch_messages_with_context_for_task",
-            "build_remix_messages_with_context_for_task",
-            "build_single_messages_for_task",
-            "format_chatml"
-          ]
-        },
-        {
-          "source": "crate::device",
-          "specifiers": [
-            "discover_gpus",
-            "expand_vram_threshold",
-            "memory_status_string",
-            "preflight_memory_check",
-            "resolve_gpu_selection",
-            "select_expand_device_with_preference",
-            "ExpandPlacement"
-          ]
-        },
-        {
-          "source": "crate::progress",
-          "specifiers": [
-            "InferenceCancellationToken",
-            "ProgressCallback",
-            "ProgressReporter"
-          ]
-        },
-        {
-          "source": "mold_core::types",
-          "specifiers": [
-            "GpuSelection"
-          ]
+          "source": "crates/mold-inference/src/progress.rs",
+          "specifiers": []
         }
       ],
       "exports": [
@@ -83128,7 +82967,7 @@
         "from_config",
         "from_config_legacy_dynamic"
       ],
-      "totalLines": 1157,
+      "totalLines": 1168,
       "hasStructuralAnalysis": true
     },
     "crates/mold-inference/src/factory.rs": {
@@ -202861,7 +202700,7 @@
     },
     "crates/mold-tui/src/app.rs": {
       "filePath": "crates/mold-tui/src/app.rs",
-      "contentHash": "a2001ec755f3ffdb598c30906cf23a133c2471870074ccc1dba3d23870d4a03b",
+      "contentHash": "b70250acd2a46fd5c8414fa3709d051aad08a74fea294b36d5b774f406d20689",
       "functions": [
         {
           "name": "clear",
@@ -203354,6 +203193,16 @@
           "lineCount": 8
         },
         {
+          "name": "check_gallery_access",
+          "params": [
+            "url",
+            "api_key"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 8
+        },
+        {
           "name": "start_background_server",
           "params": [
             "port"
@@ -203400,13 +203249,26 @@
           ],
           "returnType": "Result<Self>",
           "exported": true,
-          "lineCount": 307
+          "lineCount": 9
+        },
+        {
+          "name": "new_with_launch_policy",
+          "params": [
+            "host",
+            "local",
+            "picker",
+            "api_key",
+            "strict_host"
+          ],
+          "returnType": "Result<Self>",
+          "exported": true,
+          "lineCount": 354
         },
         {
           "name": "spawn_gallery_scan",
           "params": [],
           "exported": true,
-          "lineCount": 9
+          "lineCount": 10
         },
         {
           "name": "should_poll_remote",
@@ -203521,6 +203383,12 @@
           "name": "shutdown",
           "params": [],
           "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "cleanup_runtime_authority",
+          "params": [],
+          "exported": false,
           "lineCount": 11
         },
         {
@@ -203651,6 +203519,12 @@
           ],
           "exported": false,
           "lineCount": 20
+        },
+        {
+          "name": "open_library",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
         },
         {
           "name": "dispatch_action",
@@ -204145,6 +204019,12 @@
           "returnType": "bool",
           "exported": false,
           "lineCount": 161
+        },
+        {
+          "name": "drop",
+          "params": [],
+          "exported": false,
+          "lineCount": 6
         }
       ],
       "classes": [
@@ -204832,6 +204712,7 @@
           "name": "App",
           "methods": [
             "new",
+            "new_with_launch_policy",
             "spawn_gallery_scan",
             "should_poll_remote",
             "should_save_output_locally",
@@ -204849,6 +204730,7 @@
             "sync_pipeline_guidance",
             "spawn_upscale",
             "shutdown",
+            "cleanup_runtime_authority",
             "save_session",
             "apply_theme_preset",
             "update_model",
@@ -204867,6 +204749,7 @@
             "update_upscale_model_filter",
             "update_model_selector_filter",
             "set_active_view",
+            "open_library",
             "dispatch_action",
             "increment_param",
             "adjust_field",
@@ -204924,7 +204807,8 @@
             "apply_prompt_variant",
             "prepare_prompt_variants",
             "process_background_events",
-            "handle_progress"
+            "handle_progress",
+            "drop"
           ],
           "properties": [
             "active_view",
@@ -204952,6 +204836,8 @@
             "history",
             "layout",
             "server_process",
+            "session_api_key_host_id",
+            "strict_gallery_authority",
             "upscale_in_progress",
             "upscale_task",
             "upscale_tile_progress",
@@ -204960,7 +204846,7 @@
             "show_timeline"
           ],
           "exported": true,
-          "lineCount": 52
+          "lineCount": 58
         },
         {
           "name": "LayoutAreas",
@@ -204985,6 +204871,7 @@
         {
           "source": "anyhow",
           "specifiers": [
+            "Context",
             "Result"
           ]
         },
@@ -205165,6 +205052,7 @@
         "tab_at_column",
         "configure_background_server_command",
         "new",
+        "new_with_launch_policy",
         "spawn_gallery_scan",
         "should_poll_remote",
         "should_save_output_locally",
@@ -205177,6 +205065,7 @@
         "update_model",
         "refresh_create_rows",
         "handle_crossterm_event",
+        "open_library",
         "dispatch_action",
         "tick_animations",
         "apply_gallery_scan",
@@ -205192,7 +205081,7 @@
         "settings_env_override",
         "process_background_events"
       ],
-      "totalLines": 18654,
+      "totalLines": 18774,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/backend.rs": {
@@ -205794,7 +205683,7 @@
     },
     "crates/mold-tui/src/gallery_scan.rs": {
       "filePath": "crates/mold-tui/src/gallery_scan.rs",
-      "contentHash": "b8db22152591e1f9aa14a3ab98ce50ace2e2d73cde3b49442399d87d799c160c",
+      "contentHash": "cc7e6d2bf16e865e8d28a07ac7862bda6df27c33fe5948ae591885a0dff7a06d",
       "functions": [
         {
           "name": "default_gallery_dir",
@@ -205925,11 +205814,12 @@
         {
           "name": "scan_all_hosts",
           "params": [
-            "sources"
+            "sources",
+            "allow_local_fallback"
           ],
           "returnType": "MergedScan",
           "exported": true,
-          "lineCount": 41
+          "lineCount": 48
         },
         {
           "name": "merge_scans",
@@ -206047,7 +205937,7 @@
         "filter_entries",
         "library_hint"
       ],
-      "totalLines": 1144,
+      "totalLines": 1165,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/gallery_trash.rs": {
@@ -206567,7 +206457,7 @@
     },
     "crates/mold-tui/src/hosts.rs": {
       "filePath": "crates/mold-tui/src/hosts.rs",
-      "contentHash": "162fd4c9a45e875689a8c6dac547c28920569ae44f6cbad4354f6d5672e492b5",
+      "contentHash": "f4ac58abcafc451d9ffed32dc85d629f165cacc9623fd5c29580843409221168",
       "functions": [
         {
           "name": "local_display_name",
@@ -206681,13 +206571,30 @@
           "lineCount": 3
         },
         {
+          "name": "set_session_api_key",
+          "params": [
+            "id",
+            "key"
+          ],
+          "exported": true,
+          "lineCount": 9
+        },
+        {
+          "name": "clear_session_api_key",
+          "params": [
+            "id"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
           "name": "api_key_for",
           "params": [
             "id"
           ],
           "returnType": "Option<String>",
           "exported": true,
-          "lineCount": 7
+          "lineCount": 15
         },
         {
           "name": "save_api_key",
@@ -207345,6 +207252,13 @@
           ]
         },
         {
+          "source": "std::sync",
+          "specifiers": [
+            "LazyLock",
+            "RwLock"
+          ]
+        },
+        {
           "source": "tokio::sync",
           "specifiers": [
             "mpsc"
@@ -207395,6 +207309,8 @@
         "all",
         "host_id_from_url",
         "host_port_label",
+        "set_session_api_key",
+        "clear_session_api_key",
         "api_key_for",
         "save_api_key",
         "delete_api_key",
@@ -207455,7 +207371,7 @@
         "test_connection",
         "cancel_host_job"
       ],
-      "totalLines": 2278,
+      "totalLines": 2310,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/identity.rs": {
@@ -207537,8 +207453,27 @@
     },
     "crates/mold-tui/src/lib.rs": {
       "filePath": "crates/mold-tui/src/lib.rs",
-      "contentHash": "d5f33d0073245a649d1d0f891a2e189ff50492ff1bc56002489829af095996d2",
+      "contentHash": "6c32ca2e3be0cdc54ad12a31d66ec29f8fa66956414ac406b8f1379949da3aed",
       "functions": [
+        {
+          "name": "arm",
+          "params": [],
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "restore",
+          "params": [],
+          "returnType": "io::Result<()>",
+          "exported": false,
+          "lineCount": 9
+        },
+        {
+          "name": "drop",
+          "params": [],
+          "exported": false,
+          "lineCount": 3
+        },
         {
           "name": "run_tui",
           "params": [
@@ -207547,7 +207482,16 @@
           ],
           "returnType": "Result<()>",
           "exported": true,
-          "lineCount": 41
+          "lineCount": 8
+        },
+        {
+          "name": "run_tui_with_options",
+          "params": [
+            "options"
+          ],
+          "returnType": "Result<()>",
+          "exported": true,
+          "lineCount": 53
         },
         {
           "name": "run_event_loop",
@@ -207560,7 +207504,44 @@
           "lineCount": 46
         }
       ],
-      "classes": [],
+      "classes": [
+        {
+          "name": "TerminalRestoreGuard",
+          "methods": [
+            "arm",
+            "restore",
+            "drop"
+          ],
+          "properties": [
+            "active"
+          ],
+          "exported": false,
+          "lineCount": 3
+        },
+        {
+          "name": "TuiInitialWorkspace",
+          "methods": [],
+          "properties": [
+            "Create",
+            "Library"
+          ],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "TuiLaunchOptions",
+          "methods": [],
+          "properties": [
+            "host",
+            "local",
+            "api_key",
+            "initial_workspace",
+            "strict_host"
+          ],
+          "exported": true,
+          "lineCount": 11
+        }
+      ],
       "imports": [
         {
           "source": "std",
@@ -207600,9 +207581,12 @@
         }
       ],
       "exports": [
-        "run_tui"
+        "TuiInitialWorkspace",
+        "TuiLaunchOptions",
+        "run_tui",
+        "run_tui_with_options"
       ],
-      "totalLines": 130,
+      "totalLines": 271,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/model_info.rs": {
@@ -210245,7 +210229,7 @@
     },
     "crates/mold-tui/src/ui/popup.rs": {
       "filePath": "crates/mold-tui/src/ui/popup.rs",
-      "contentHash": "61a2bed0d8af64f8de1750f4c0beb14b539d32ab0fa031853d15cd275bafaaa1",
+      "contentHash": "f108eee7734ff57bbffd147a23219e667d6632788389f1b2f333b24768dc0288",
       "functions": [
         {
           "name": "render",
@@ -210521,7 +210505,7 @@
       "exports": [
         "render"
       ],
-      "totalLines": 1671,
+      "totalLines": 1673,
       "hasStructuralAnalysis": true
     },
     "crates/mold-tui/src/ui/preview.rs": {
@@ -217289,14 +217273,13 @@
     },
     "desktop/src/components/generate/SourceImageWell.test.ts": {
       "filePath": "desktop/src/components/generate/SourceImageWell.test.ts",
-      "contentHash": "c48f5f5402e255842cdfd69de374a976fc3d204daa7e45744b717d542af57532",
+      "contentHash": "a90bb4284c853057c538ec5464c9d1e1d17f905fd6a9aa914254543f55ff0cfc",
       "functions": [
         {
           "name": "formFor",
           "params": [
             "family"
           ],
-          "returnType": "GenerateForm",
           "exported": false,
           "lineCount": 3
         }
@@ -217304,70 +217287,28 @@
       "classes": [],
       "imports": [
         {
-          "source": "vitest",
-          "specifiers": [
-            "afterEach",
-            "beforeEach",
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
+          "source": "desktop/src/components/generate/ImagePickerModal.vue",
+          "specifiers": []
         },
         {
-          "source": "pinia",
-          "specifiers": [
-            "createPinia",
-            "setActivePinia"
-          ]
+          "source": "desktop/src/components/generate/MaskEditorModal.vue",
+          "specifiers": []
         },
         {
-          "source": "@vue/test-utils",
-          "specifiers": [
-            "mount",
-            "flushPromises"
-          ]
+          "source": "desktop/src/components/generate/SourceImageWell.vue",
+          "specifiers": []
         },
         {
-          "source": "vue",
-          "specifiers": [
-            "reactive"
-          ]
+          "source": "desktop/src/lib/generateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "./SourceImageWell.vue",
-          "specifiers": [
-            "SourceImageWell"
-          ]
-        },
-        {
-          "source": "./ImagePickerModal.vue",
-          "specifiers": [
-            "ImagePickerModal"
-          ]
-        },
-        {
-          "source": "./MaskEditorModal.vue",
-          "specifiers": [
-            "MaskEditorModal"
-          ]
-        },
-        {
-          "source": "@studio/components/ReferenceCropEditor.vue",
-          "specifiers": [
-            "ReferenceCropEditor"
-          ]
-        },
-        {
-          "source": "../../lib/generateForm",
-          "specifiers": [
-            "newGenerateForm",
-            "GenerateForm"
-          ]
+          "source": "studio/components/ReferenceCropEditor.vue",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 509,
+      "totalLines": 511,
       "hasStructuralAnalysis": true
     },
     "desktop/src/components/generate/StarterCards.test.ts": {
@@ -223312,7 +223253,7 @@
     },
     "desktop/src/lib/desktopImageDrop.ts": {
       "filePath": "desktop/src/lib/desktopImageDrop.ts",
-      "contentHash": "561dbc2d698168353ab6716d7f8e4b8639286fd00ffcfb36d606e6720ef0d235",
+      "contentHash": "cdd9b52cf089be574269c38813c12b34abd3d8f91ed6c98066d790434f753a32",
       "functions": [
         {
           "name": "applyDesktopImageDrop",
@@ -223321,7 +223262,6 @@
             "image",
             "models"
           ],
-          "returnType": "DesktopImageDropResult",
           "exported": true,
           "lineCount": 28
         }
@@ -223329,30 +223269,22 @@
       "classes": [],
       "imports": [
         {
-          "source": "./capabilities",
-          "specifiers": [
-            "generationCapabilitiesForFamily"
-          ]
+          "source": "desktop/src/lib/api/types.ts",
+          "specifiers": []
         },
         {
-          "source": "./api/types",
-          "specifiers": [
-            "ModelEntry",
-            "OutputMetadata"
-          ]
+          "source": "desktop/src/lib/capabilities.ts",
+          "specifiers": []
         },
         {
-          "source": "./generateForm",
-          "specifiers": [
-            "applyMetadataToForm",
-            "GenerateForm"
-          ]
+          "source": "desktop/src/lib/generateForm.ts",
+          "specifiers": []
         }
       ],
       "exports": [
         "applyDesktopImageDrop"
       ],
-      "totalLines": 54,
+      "totalLines": 55,
       "hasStructuralAnalysis": true
     },
     "desktop/src/lib/discovery.test.ts": {
@@ -225014,19 +224946,17 @@
     },
     "desktop/src/lib/generateForm.test.ts": {
       "filePath": "desktop/src/lib/generateForm.test.ts",
-      "contentHash": "c67505e8b951413d04ffa8172eed80bac8c0ebc3112017bd8ec72dff32a30b23",
+      "contentHash": "d94cba23abe592795234d22053fae20edca4697b0e75a128d5d381678548fbe1",
       "functions": [
         {
           "name": "ltx2Model",
           "params": [],
-          "returnType": "ModelEntry",
           "exported": false,
           "lineCount": 15
         },
         {
           "name": "profiledLtx2Model",
           "params": [],
-          "returnType": "ModelEntry",
           "exported": false,
           "lineCount": 84
         },
@@ -225039,7 +224969,6 @@
         {
           "name": "qwenEditModel",
           "params": [],
-          "returnType": "ModelEntry",
           "exported": false,
           "lineCount": 11
         },
@@ -225048,7 +224977,6 @@
           "params": [
             "name"
           ],
-          "returnType": "ModelEntry",
           "exported": false,
           "lineCount": 11
         },
@@ -225063,14 +224991,12 @@
         {
           "name": "sd15Model",
           "params": [],
-          "returnType": "ModelEntry",
           "exported": false,
           "lineCount": 11
         },
         {
           "name": "richImageMetadata",
           "params": [],
-          "returnType": "OutputMetadata",
           "exported": false,
           "lineCount": 27
         }
@@ -225078,95 +225004,53 @@
       "classes": [],
       "imports": [
         {
-          "source": "vitest",
-          "specifiers": [
-            "describe",
-            "expect",
-            "it"
-          ]
+          "source": "desktop/src/lib/api/types.ts",
+          "specifiers": []
         },
         {
-          "source": "./generateForm",
-          "specifiers": [
-            "applyMetadataToForm",
-            "applyModelDefaults",
-            "applyRecipeDefaults",
-            "applyPrefillToForm",
-            "applyRequestToForm",
-            "buildRequest",
-            "chainFilingFields",
-            "cloneGenerateForm",
-            "newGenerateForm",
-            "normalizeLegacyNegativeSnapshot",
-            "reconcileModelCapabilities",
-            "resetAdvancedToModelDefaults",
-            "resetFormToModelDefaults",
-            "seedMode",
-            "GenerateForm"
-          ]
+          "source": "desktop/src/lib/capabilities.ts",
+          "specifiers": []
         },
         {
-          "source": "./capabilities",
-          "specifiers": [
-            "MAX_LORA_STACK"
-          ]
+          "source": "desktop/src/lib/generateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/negativePrompt",
-          "specifiers": [
-            "WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT"
-          ]
+          "source": "studio/lib/extend.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/extend",
-          "specifiers": [
-            "DEFAULT_EXTEND_OVERLAP_FRAMES"
-          ]
+          "source": "studio/lib/fileUnder.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/fileUnder",
-          "specifiers": [
-            "addTag",
-            "emptyFileUnderState",
-            "pickCollection"
-          ]
+          "source": "studio/lib/generationProfile.ts",
+          "specifiers": []
         },
         {
-          "source": "./api/types",
-          "specifiers": [
-            "ModelEntry",
-            "OutputMetadata"
-          ]
-        },
-        {
-          "source": "@studio/lib/generationProfile",
-          "specifiers": [
-            "GenerationProfileSet",
-            "GenerationRecipeProfile"
-          ]
+          "source": "studio/lib/negativePrompt.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 3196,
+      "totalLines": 3197,
       "hasStructuralAnalysis": true
     },
     "desktop/src/lib/generateForm.ts": {
       "filePath": "desktop/src/lib/generateForm.ts",
-      "contentHash": "56d798f112d8000c2e70feace9d274bc095fa2ba64e71fd8d2d2d1b5246e7852",
+      "contentHash": "bb724d9068e6c2d08cc0dc3f7aad34449ba2ddf592fc1929672b2ee0c4ef3fff",
       "functions": [
         {
           "name": "seedMode",
           "params": [
             "seed"
           ],
-          "returnType": "\"random\" | \"fixed\"",
           "exported": true,
           "lineCount": 3
         },
         {
           "name": "newGenerateForm",
           "params": [],
-          "returnType": "GenerateForm",
           "exported": true,
           "lineCount": 65
         },
@@ -225175,7 +225059,6 @@
           "params": [
             "form"
           ],
-          "returnType": "GenerateForm",
           "exported": true,
           "lineCount": 34
         },
@@ -225185,7 +225068,6 @@
             "form",
             "m"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 40
         },
@@ -225196,7 +225078,6 @@
             "m",
             "pipeline"
           ],
-          "returnType": "boolean",
           "exported": true,
           "lineCount": 55
         },
@@ -225206,7 +225087,6 @@
             "form",
             "m"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 205
         },
@@ -225216,7 +225096,6 @@
             "snapshot",
             "models"
           ],
-          "returnType": "GenerateForm",
           "exported": true,
           "lineCount": 21
         },
@@ -225226,7 +225105,6 @@
             "form",
             "rewrite"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 8
         },
@@ -225236,7 +225114,6 @@
             "form",
             "m"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 16
         },
@@ -225246,7 +225123,6 @@
             "form",
             "m"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 39
         },
@@ -225255,7 +225131,6 @@
           "params": [
             "form"
           ],
-          "returnType": "number",
           "exported": true,
           "lineCount": 6
         },
@@ -225264,7 +225139,6 @@
           "params": [
             "form"
           ],
-          "returnType": "GenerateRequest",
           "exported": true,
           "lineCount": 220
         },
@@ -225273,7 +225147,6 @@
           "params": [
             "form"
           ],
-          "returnType": "{\n  title?: string;\n  tags?: string[];\n  collection?: { name: string };\n}",
           "exported": true,
           "lineCount": 18
         },
@@ -225285,7 +225158,6 @@
             "tags",
             "collectionName"
           ],
-          "returnType": "FileUnderState",
           "exported": true,
           "lineCount": 24
         },
@@ -225294,7 +225166,6 @@
           "params": [
             "name"
           ],
-          "returnType": "string",
           "exported": false,
           "lineCount": 1
         },
@@ -225303,7 +225174,6 @@
           "params": [
             "s"
           ],
-          "returnType": "Scheduler",
           "exported": false,
           "lineCount": 5
         },
@@ -225312,7 +225182,6 @@
           "params": [
             "path"
           ],
-          "returnType": "string",
           "exported": false,
           "lineCount": 5
         },
@@ -225323,7 +225192,6 @@
             "metadata",
             "models"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 137
         },
@@ -225334,7 +225202,6 @@
             "request",
             "models"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 134
         },
@@ -225345,7 +225212,6 @@
             "prefill",
             "models"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 24
         }
@@ -225353,181 +225219,88 @@
       "classes": [],
       "imports": [
         {
-          "source": "./api/types",
-          "specifiers": [
-            "GenerateRequest",
-            "KeyframeConditionWire",
-            "LoraWeight",
-            "Ltx2PipelineMode",
-            "Ltx2SpatialUpscale",
-            "Ltx2TemporalUpscale",
-            "ModelEntry",
-            "OutputFormat",
-            "OutputMetadata",
-            "Scheduler",
-            "TimeRange"
-          ]
+          "source": "desktop/src/lib/api/types.ts",
+          "specifiers": []
         },
         {
-          "source": "./capabilities",
-          "specifiers": [
-            "MAX_LORA_STACK",
-            "defaultOutputFormat",
-            "generationCapabilitiesForFamily",
-            "outputFormatsForFamily",
-            "pruneRequestForFamily"
-          ]
+          "source": "desktop/src/lib/capabilities.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/sourceFit",
-          "specifiers": [
-            "coerceSourceFitForMaskless",
-            "parseSourceFitPolicy",
-            "SourceFitPolicy"
-          ]
+          "source": "desktop/src/lib/generateModels.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/fileUnder",
-          "specifiers": [
-            "addTag",
-            "buildFileUnderRequestFields",
-            "deriveGhostTag",
-            "emptyFileUnderState",
-            "pickCollection",
-            "requestTagKey",
-            "FileUnderCollectionLike",
-            "FileUnderState"
-          ]
+          "source": "studio/lib/cameraMotion.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/sequence",
-          "specifiers": [
-            "defaultVideoFps"
-          ]
+          "source": "studio/lib/extend.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/videoDuration",
-          "specifiers": [
-            "videoFramesForModelSelection"
-          ]
+          "source": "studio/lib/fileUnder.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/outputReuse",
-          "specifiers": [
-            "pipelineForSettingsReuse"
-          ]
+          "source": "studio/lib/generationCapabilities.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/extend",
-          "specifiers": [
-            "familySupportsExtend",
-            "resolveExtendOverlapFrames"
-          ]
+          "source": "studio/lib/generationProfile.ts",
+          "specifiers": []
         },
         {
-          "source": "./generateModels",
-          "specifiers": [
-            "findInstalledModel"
-          ]
+          "source": "studio/lib/guidanceOverrides.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/cameraMotion",
-          "specifiers": [
-            "cameraMotionFromLoraPath",
-            "cameraMotionLoraLabel",
-            "syncCameraMotionLora"
-          ]
+          "source": "studio/lib/identityConditioning.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/guidanceOverrides",
-          "specifiers": [
-            "emptyGuidanceOverrides",
-            "guidanceOverridesFromWire",
-            "guidanceOverridesToWire",
-            "Ltx2GuidanceOverridesState"
-          ]
+          "source": "studio/lib/libraryOrganization.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/wanRecipe",
-          "specifiers": [
-            "emptyWanRecipe",
-            "wanRecipeFromWire",
-            "wanRecipeToWire",
-            "WanRecipeState"
-          ]
+          "source": "studio/lib/ltx2Control.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/negativePrompt",
-          "specifiers": [
-            "effectiveNegativeDefault",
-            "negativePromptOnDefaultChange",
-            "negativePromptWireValue",
-            "restoredNegativeExplicitClear",
-            "restoredNegativePrompt"
-          ]
+          "source": "studio/lib/ltx2Pipeline.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/ltx2Control",
-          "specifiers": [
-            "pipelineForControlId"
-          ]
+          "source": "studio/lib/minimaxH3Authoring.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/identityConditioning",
-          "specifiers": [
-            "identityRequestFields",
-            "identityReuse",
-            "supportsIdentity"
-          ]
+          "source": "studio/lib/negativePrompt.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/libraryOrganization",
-          "specifiers": [
-            "validatePrintTitle"
-          ]
+          "source": "studio/lib/outputReuse.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/sourceImageCapability",
-          "specifiers": [
-            "firstLastFrameKeyframes"
-          ]
+          "source": "studio/lib/sequence.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/generationCapabilities",
-          "specifiers": [
-            "effectiveGenerationGuidance",
-            "isWanFamily"
-          ]
+          "source": "studio/lib/sourceFit.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/ltx2Pipeline",
-          "specifiers": [
-            "stripAudioOnlyIncompatibleFields"
-          ]
+          "source": "studio/lib/sourceImageCapability.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/generationProfile",
-          "specifiers": [
-            "effectiveGenerationRecipe",
-            "fixedRecipeControlOverrides"
-          ]
+          "source": "studio/lib/videoDuration.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/minimaxH3Authoring",
-          "specifiers": [
-            "MINIMAX_H3_REVIEWED_COMPACT_FRAMES",
-            "cloneMinimaxH3AuthoringState",
-            "emptyMinimaxH3AuthoringState",
-            "isMinimaxH3Family",
-            "minimaxH3BoundaryFromSourceMetadata",
-            "minimaxH3BoundaryFromStagedImage",
-            "minimaxH3ClosingBoundaryFromMetadata",
-            "minimaxH3ReferenceDraftsFromMetadata",
-            "minimaxH3TaskForModel",
-            "serializeMinimaxH3Authoring",
-            "stagedImageFromMinimaxH3Boundary",
-            "MinimaxH3AuthoringState"
-          ]
+          "source": "studio/lib/wanRecipe.ts",
+          "specifiers": []
         }
       ],
       "exports": [
@@ -225549,7 +225322,7 @@
         "applyRequestToForm",
         "applyPrefillToForm"
       ],
-      "totalLines": 1524,
+      "totalLines": 1525,
       "hasStructuralAnalysis": true
     },
     "desktop/src/lib/generateModels.test.ts": {
@@ -229877,7 +229650,7 @@
     },
     "desktop/src/lib/sourceAttachment.ts": {
       "filePath": "desktop/src/lib/sourceAttachment.ts",
-      "contentHash": "b3ff04a9697664c5d56a069345e815dd092b5fd220bb6464e35ac31464d45c43",
+      "contentHash": "37574f05f373e3bbe07e09c10eb3f4ec21deaa4cdce298bcdf9494f14ecf39bf",
       "functions": [
         {
           "name": "attachPickedImage",
@@ -229885,7 +229658,6 @@
             "form",
             "picked"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 5
         },
@@ -229895,7 +229667,6 @@
             "form",
             "picked"
           ],
-          "returnType": "void",
           "exported": true,
           "lineCount": 3
         }
@@ -229903,30 +229674,26 @@
       "classes": [],
       "imports": [
         {
-          "source": "./generateForm",
-          "specifiers": [
-            "GenerateForm",
-            "PickedImage"
-          ]
+          "source": "desktop/src/lib/generateForm.ts",
+          "specifiers": []
         }
       ],
       "exports": [
         "attachPickedImage",
         "attachPickedVideo"
       ],
-      "totalLines": 14,
+      "totalLines": 15,
       "hasStructuralAnalysis": true
     },
     "desktop/src/lib/sourceFitPreprocess.test.ts": {
       "filePath": "desktop/src/lib/sourceFitPreprocess.test.ts",
-      "contentHash": "e7fa01177f04f2d8d2bae0e3f4de4b84e92959a81bb263c6ddcc797c222d65f7",
+      "contentHash": "816da0e017e166e631680f03cba3893aafa7a9664aabbf957d1ee2fdd1a52bd4",
       "functions": [
         {
           "name": "fakeOps",
           "params": [
             "size"
           ],
-          "returnType": "SourceFitCanvasOps & {\n  fitCalls: Array<{ base64: string; transform: SourceFitTransform }>;\n  maskCalls: Array<{ existing: string | null; padRects: Rect[] }>;\n}",
           "exported": false,
           "lineCount": 20
         }
@@ -229934,53 +229701,31 @@
       "classes": [],
       "imports": [
         {
-          "source": "vitest",
-          "specifiers": [
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
+          "source": "desktop/src/lib/sourceFitPreprocess.ts",
+          "specifiers": []
         },
         {
-          "source": "@ui/lib/sourceFitPreprocessCache",
-          "specifiers": [
-            "SourceFitPreprocessCache"
-          ]
+          "source": "studio/lib/sourceFit.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/sourceFit",
-          "specifiers": [
-            "Rect",
-            "SourceFitPolicy",
-            "SourceFitTransform"
-          ]
-        },
-        {
-          "source": "./sourceFitPreprocess",
-          "specifiers": [
-            "applyH3BoundaryFit",
-            "applySourceFitPreprocess",
-            "drawableFitPolicy",
-            "SourceFitCanvasOps",
-            "SourceFitInput"
-          ]
+          "source": "ui/lib/sourceFitPreprocessCache.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 388,
+      "totalLines": 387,
       "hasStructuralAnalysis": true
     },
     "desktop/src/lib/sourceFitPreprocess.ts": {
       "filePath": "desktop/src/lib/sourceFitPreprocess.ts",
-      "contentHash": "3723e9e0157a6b8daa938a1e96d4340945f22cb8d781c22f043dd6755fef3c25",
+      "contentHash": "b5f4b26e50dc9d0ce3ef02afcce05bcf04cdf84a0f2ca8859e8fafceb130598a",
       "functions": [
         {
           "name": "drawableFitPolicy",
           "params": [
             "policy"
           ],
-          "returnType": "SourceFitPolicy",
           "exported": true,
           "lineCount": 5
         },
@@ -229990,7 +229735,6 @@
             "input",
             "deps"
           ],
-          "returnType": "Promise<SourceFitResult>",
           "exported": true,
           "lineCount": 51
         },
@@ -230002,7 +229746,6 @@
             "target",
             "deps"
           ],
-          "returnType": "Promise<MinimaxH3AuthoringState | null>",
           "exported": true,
           "lineCount": 30
         }
@@ -230010,32 +229753,20 @@
       "classes": [],
       "imports": [
         {
-          "source": "@ui/lib/sourceFitPreprocessCache",
-          "specifiers": [
-            "SourceFitPreprocessCache"
-          ]
+          "source": "studio/lib/minimaxH3Authoring.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/sourceFit",
-          "specifiers": [
-            "coerceSourceFitForMaskless",
-            "maskPaddingRectangles",
-            "resolveSourceFitTransform",
-            "Size",
-            "SourceFitPolicy"
-          ]
+          "source": "studio/lib/sourceFit.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/sourceFitCanvas",
-          "specifiers": [
-            "SourceFitCanvasOps"
-          ]
+          "source": "studio/lib/sourceFitCanvas.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/minimaxH3Authoring",
-          "specifiers": [
-            "MinimaxH3AuthoringState"
-          ]
+          "source": "ui/lib/sourceFitPreprocessCache.ts",
+          "specifiers": []
         }
       ],
       "exports": [
@@ -230044,7 +229775,7 @@
         "applySourceFitPreprocess",
         "applyH3BoundaryFit"
       ],
-      "totalLines": 155,
+      "totalLines": 153,
       "hasStructuralAnalysis": true
     },
     "desktop/src/lib/sourceRestore.test.ts": {
@@ -230596,7 +230327,7 @@
     },
     "desktop/src/mobile/MobileApp.test.ts": {
       "filePath": "desktop/src/mobile/MobileApp.test.ts",
-      "contentHash": "c82c010ef4ada2f4f6ad7b0e281421c39f427921d3171983433bd2fd41453095",
+      "contentHash": "b571e2186f26033b1eab19d0bd5fa7127af4156f946e64986a85c65b5fee2ba5",
       "functions": [
         {
           "name": "plannedPlacement",
@@ -230610,7 +230341,6 @@
             "init",
             "overrides"
           ],
-          "returnType": "Record<string, unknown>",
           "exported": false,
           "lineCount": 31
         },
@@ -230621,7 +230351,6 @@
             "init",
             "callTarget"
           ],
-          "returnType": "Promise<unknown>",
           "exported": false,
           "lineCount": 30
         },
@@ -230630,49 +230359,42 @@
           "params": [
             "...filenames"
           ],
-          "returnType": "void",
           "exported": false,
           "lineCount": 3
         },
         {
           "name": "admittedRequests",
           "params": [],
-          "returnType": "Array<Record<string, unknown>>",
           "exported": false,
           "lineCount": 3
         },
         {
           "name": "admissionTargets",
           "params": [],
-          "returnType": "unknown[]",
           "exported": false,
           "lineCount": 3
         },
         {
           "name": "admittedBatches",
           "params": [],
-          "returnType": "Array<{ client_batch_id: string; requests: unknown[] }>",
           "exported": false,
           "lineCount": 3
         },
         {
           "name": "admissionCalls",
           "params": [],
-          "returnType": "unknown[][]",
           "exported": false,
           "lineCount": 7
         },
         {
           "name": "heldAdmissions",
           "params": [],
-          "returnType": "{\n  count: () => number;\n  settleAt: (\n    index: number,\n    options?: {\n      state?: string;\n      filename?: string | null;\n      error?: string;\n      children?: ReadonlyArray<{ state?: string; filename?: string | null; error?: string }>;\n    },\n  ) => void;\n  settle: (state?: string, filenames?: readonly string[]) => void;\n}",
           "exported": false,
           "lineCount": 83
         },
         {
           "name": "serveStillModel",
           "params": [],
-          "returnType": "void",
           "exported": false,
           "lineCount": 7
         },
@@ -230681,7 +230403,6 @@
           "params": [
             "pinia"
           ],
-          "returnType": "VueWrapper",
           "exported": false,
           "lineCount": 7
         },
@@ -230690,7 +230411,6 @@
           "params": [
             "label"
           ],
-          "returnType": "DOMWrapper<Element>",
           "exported": false,
           "lineCount": 7
         },
@@ -230720,153 +230440,76 @@
       ],
       "imports": [
         {
-          "source": "@vue/test-utils",
-          "specifiers": [
-            "flushPromises",
-            "mount",
-            "DOMWrapper",
-            "VueWrapper"
-          ]
+          "source": "desktop/src/lib/api/client.ts",
+          "specifiers": []
         },
         {
-          "source": "pinia",
-          "specifiers": [
-            "createPinia",
-            "Pinia"
-          ]
+          "source": "desktop/src/lib/api/types.ts",
+          "specifiers": []
         },
         {
-          "source": "vitest",
-          "specifiers": [
-            "afterEach",
-            "beforeEach",
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
+          "source": "desktop/src/lib/generateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "fake-indexeddb",
-          "specifiers": [
-            "IDBFactory"
-          ]
+          "source": "desktop/src/lib/generationTemplates.ts",
+          "specifiers": []
         },
         {
-          "source": "../lib/testSupport/memoryLocalStorage",
-          "specifiers": [
-            "installMemoryLocalStorage"
-          ]
+          "source": "desktop/src/lib/testSupport/memoryLocalStorage.ts",
+          "specifiers": []
         },
         {
-          "source": "../lib/api/types",
-          "specifiers": [
-            "GalleryImage",
-            "ModelEntry",
-            "ServerStatus"
-          ]
+          "source": "desktop/src/mobile/MobileApp.vue",
+          "specifiers": []
         },
         {
-          "source": "../lib/generateForm",
-          "specifiers": [
-            "applyModelDefaults",
-            "newGenerateForm",
-            "GenerateForm"
-          ]
+          "source": "desktop/src/mobile/MobileImagePickerSheet.vue",
+          "specifiers": []
         },
         {
-          "source": "../lib/generationTemplates",
-          "specifiers": [
-            "saveGenerationTemplate"
-          ]
+          "source": "desktop/src/mobile/MobileLoraControls.vue",
+          "specifiers": []
         },
         {
-          "source": "./mobileTemplateStorage",
-          "specifiers": [
-            "MOBILE_GENERATION_TEMPLATES_STORAGE_KEY"
-          ]
+          "source": "desktop/src/mobile/MobileSourceControls.vue",
+          "specifiers": []
         },
         {
-          "source": "./mobileGenerationRecovery",
-          "specifiers": [
-            "MOBILE_DURABLE_GENERATIONS_KEY",
-            "createMobileDurableGenerationRecovery",
-            "reduceMobileDurableGenerationRecovery"
-          ]
+          "source": "desktop/src/mobile/MobileTemplates.vue",
+          "specifiers": []
         },
         {
-          "source": "./galleryCache",
-          "specifiers": [
-            "loadCachedGallery",
-            "storeCachedGallery",
-            "storeCachedGalleryMedia",
-            "storeCachedHostPresentation"
-          ]
+          "source": "desktop/src/mobile/galleryCache.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/libraryOrganization",
-          "specifiers": [
-            "clearSessionScrollForTests",
-            "sessionScrollPosition"
-          ]
+          "source": "desktop/src/mobile/mobileDownloads.ts",
+          "specifiers": []
         },
         {
-          "source": "./MobileApp.vue",
-          "specifiers": [
-            "MobileApp"
-          ]
+          "source": "desktop/src/mobile/mobileGenerationRecovery.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/components/IdentityPhotoWell.vue",
-          "specifiers": [
-            "IdentityPhotoWell"
-          ]
+          "source": "desktop/src/mobile/mobileTemplateStorage.ts",
+          "specifiers": []
         },
         {
-          "source": "./MobileImagePickerSheet.vue",
-          "specifiers": [
-            "MobileImagePickerSheet"
-          ]
+          "source": "studio/components/IdentityPhotoWell.vue",
+          "specifiers": []
         },
         {
-          "source": "./MobileLoraControls.vue",
-          "specifiers": [
-            "MobileLoraControls"
-          ]
+          "source": "studio/lib/libraryOrganization.ts",
+          "specifiers": []
         },
         {
-          "source": "./MobileSourceControls.vue",
-          "specifiers": [
-            "MobileSourceControls"
-          ]
-        },
-        {
-          "source": "./MobileTemplates.vue",
-          "specifiers": [
-            "MobileTemplates"
-          ]
-        },
-        {
-          "source": "./mobileDownloads",
-          "specifiers": [
-            "useMobileDownloadsStore"
-          ]
-        },
-        {
-          "source": "../lib/api/client",
-          "specifiers": [
-            "ApiError"
-          ]
-        },
-        {
-          "source": "@studio/stores/sequenceDraft",
-          "specifiers": [
-            "useSequenceDraftStore"
-          ]
+          "source": "studio/stores/sequenceDraft.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 13212,
+      "totalLines": 13235,
       "hasStructuralAnalysis": true
     },
     "desktop/src/mobile/MobileBatchControl.test.ts": {
@@ -232240,14 +231883,13 @@
     },
     "desktop/src/mobile/MobileSourceControls.test.ts": {
       "filePath": "desktop/src/mobile/MobileSourceControls.test.ts",
-      "contentHash": "e8892a38f8558f6185487ff6ddaf6381aadbd7e66afc2f89532d971e3f2b700f",
+      "contentHash": "c2f239bfba2ba5f167bb8c0079a3867cd99c5a51542e6bf292f6426bbfb76e33",
       "functions": [
         {
           "name": "formFor",
           "params": [
             "family"
           ],
-          "returnType": "GenerateForm",
           "exported": false,
           "lineCount": 3
         },
@@ -232258,7 +231900,6 @@
             "family",
             "downloaded"
           ],
-          "returnType": "ModelEntry",
           "exported": false,
           "lineCount": 15
         },
@@ -232269,7 +231910,6 @@
             "selector",
             "files"
           ],
-          "returnType": "Promise<void>",
           "exported": false,
           "lineCount": 14
         }
@@ -232277,81 +231917,40 @@
       "classes": [],
       "imports": [
         {
-          "source": "@vue/test-utils",
-          "specifiers": [
-            "flushPromises",
-            "mount"
-          ]
+          "source": "desktop/src/components/generate/MaskEditorModal.vue",
+          "specifiers": []
         },
         {
-          "source": "vue",
-          "specifiers": [
-            "reactive"
-          ]
+          "source": "desktop/src/lib/api/types.ts",
+          "specifiers": []
         },
         {
-          "source": "vitest",
-          "specifiers": [
-            "afterEach",
-            "beforeEach",
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
+          "source": "desktop/src/lib/generateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "../lib/api/types",
-          "specifiers": [
-            "ModelEntry"
-          ]
+          "source": "desktop/src/lib/generateValidation.ts",
+          "specifiers": []
         },
         {
-          "source": "../lib/generateValidation",
-          "specifiers": [
-            "MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES"
-          ]
+          "source": "desktop/src/mobile/MobileImagePickerSheet.vue",
+          "specifiers": []
         },
         {
-          "source": "../lib/generateForm",
-          "specifiers": [
-            "newGenerateForm",
-            "GenerateForm"
-          ]
+          "source": "desktop/src/mobile/MobileReferenceCropSheet.vue",
+          "specifiers": []
         },
         {
-          "source": "../components/generate/MaskEditorModal.vue",
-          "specifiers": [
-            "MaskEditorModal"
-          ]
+          "source": "desktop/src/mobile/MobileSourceControls.vue",
+          "specifiers": []
         },
         {
-          "source": "./MobileImagePickerSheet.vue",
-          "specifiers": [
-            "MobileImagePickerSheet"
-          ]
-        },
-        {
-          "source": "./MobileReferenceCropSheet.vue",
-          "specifiers": [
-            "MobileReferenceCropSheet"
-          ]
-        },
-        {
-          "source": "@studio/components/ReferenceCropEditor.vue",
-          "specifiers": [
-            "ReferenceCropEditor"
-          ]
-        },
-        {
-          "source": "./MobileSourceControls.vue",
-          "specifiers": [
-            "MobileSourceControls"
-          ]
+          "source": "studio/components/ReferenceCropEditor.vue",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 704,
+      "totalLines": 717,
       "hasStructuralAnalysis": true
     },
     "desktop/src/mobile/MobileStyleChips.test.ts": {
@@ -241117,7 +240716,7 @@
     },
     "desktop/src/views/GenerateView.prepared.test.ts": {
       "filePath": "desktop/src/views/GenerateView.prepared.test.ts",
-      "contentHash": "fb866886a6a7cb87117702bcf55fedc3cc564cbee95777a9ebde6c37aa3a572b",
+      "contentHash": "181744833c3033f0a0990224f2f4c6e9fb4cfff73e17c18fceab33c2422de0ac",
       "functions": [
         {
           "name": "deferred",
@@ -241135,174 +240734,92 @@
       "classes": [],
       "imports": [
         {
-          "source": "vitest",
-          "specifiers": [
-            "afterEach",
-            "beforeEach",
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
+          "source": "desktop/src/components/generate/ExpandControl.vue",
+          "specifiers": []
         },
         {
-          "source": "@vue/test-utils",
-          "specifiers": [
-            "enableAutoUnmount",
-            "flushPromises",
-            "mount"
-          ]
+          "source": "desktop/src/components/generate/ExpansionPullStatus.vue",
+          "specifiers": []
         },
         {
-          "source": "pinia",
-          "specifiers": [
-            "createPinia",
-            "setActivePinia"
-          ]
+          "source": "desktop/src/components/generate/MissingModelDialog.vue",
+          "specifiers": []
         },
         {
-          "source": "vue",
-          "specifiers": [
-            "nextTick"
-          ]
+          "source": "desktop/src/components/generate/PreparedExpansionBatch.vue",
+          "specifiers": []
         },
         {
-          "source": "./GenerateView.vue",
-          "specifiers": [
-            "GenerateView"
-          ]
+          "source": "desktop/src/lib/api/catalog.ts",
+          "specifiers": []
         },
         {
-          "source": "../components/generate/ExpandControl.vue",
-          "specifiers": [
-            "ExpandControl"
-          ]
+          "source": "desktop/src/lib/api/client.ts",
+          "specifiers": []
         },
         {
-          "source": "../components/generate/PreparedExpansionBatch.vue",
-          "specifiers": [
-            "PreparedExpansionBatch"
-          ]
+          "source": "desktop/src/lib/api/expand.ts",
+          "specifiers": []
         },
         {
-          "source": "../components/generate/ExpansionPullStatus.vue",
-          "specifiers": [
-            "ExpansionPullStatus"
-          ]
+          "source": "desktop/src/lib/api/remix.ts",
+          "specifiers": []
         },
         {
-          "source": "../components/generate/MissingModelDialog.vue",
-          "specifiers": [
-            "MissingModelDialog"
-          ]
+          "source": "desktop/src/lib/api/types.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/connection",
-          "specifiers": [
-            "useConnectionStore"
-          ]
+          "source": "desktop/src/lib/sourceFitPreprocess.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/generateForm",
-          "specifiers": [
-            "useGenerateFormStore"
-          ]
+          "source": "desktop/src/stores/appPrefs.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/generation",
-          "specifiers": [
-            "newJob",
-            "useGenerationStore"
-          ]
+          "source": "desktop/src/stores/composer.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/hosts",
-          "specifiers": [
-            "useHostsStore",
-            "FeasibleRouteResult"
-          ]
+          "source": "desktop/src/stores/connection.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/hostModels",
-          "specifiers": [
-            "useHostModelsStore"
-          ]
+          "source": "desktop/src/stores/downloads.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/models",
-          "specifiers": [
-            "useModelStore"
-          ]
+          "source": "desktop/src/stores/generateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/toasts",
-          "specifiers": [
-            "useToastStore"
-          ]
+          "source": "desktop/src/stores/hostModels.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/downloads",
-          "specifiers": [
-            "useDownloadsStore"
-          ]
+          "source": "desktop/src/stores/hosts.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/ui",
-          "specifiers": [
-            "useUiStore"
-          ]
+          "source": "desktop/src/stores/models.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/appPrefs",
-          "specifiers": [
-            "useAppPrefsStore"
-          ]
+          "source": "desktop/src/stores/toasts.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/composer",
-          "specifiers": [
-            "useComposerStore"
-          ]
+          "source": "desktop/src/stores/ui.ts",
+          "specifiers": []
         },
         {
-          "source": "../lib/api/expand",
-          "specifiers": [
-            "expandPrompt"
-          ]
-        },
-        {
-          "source": "../lib/api/remix",
-          "specifiers": [
-            "remixPrompt"
-          ]
-        },
-        {
-          "source": "../lib/api/catalog",
-          "specifiers": [
-            "startCatalogDownload"
-          ]
-        },
-        {
-          "source": "../lib/api/client",
-          "specifiers": [
-            "ApiError"
-          ]
-        },
-        {
-          "source": "../lib/sourceFitPreprocess",
-          "specifiers": [
-            "applySourceFitPreprocess"
-          ]
-        },
-        {
-          "source": "../lib/api/types",
-          "specifiers": [
-            "ModelEntry"
-          ]
+          "source": "desktop/src/views/GenerateView.vue",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 1593,
+      "totalLines": 1611,
       "hasStructuralAnalysis": true
     },
     "desktop/src/views/GenerateView.printIdentity.test.ts": {
@@ -241424,7 +240941,7 @@
     },
     "desktop/src/views/GenerateView.sequence.test.ts": {
       "filePath": "desktop/src/views/GenerateView.sequence.test.ts",
-      "contentHash": "1f6cf9b2f7653bb85127548e515ffa7abbb65ef684454edc583f41024620229e",
+      "contentHash": "1aed70f9e54589ffb23c45fbea06004b972fba1b11ac0f0fa912b62de0e6447d",
       "functions": [
         {
           "name": "readyLocal",
@@ -241442,128 +240959,64 @@
       "classes": [],
       "imports": [
         {
-          "source": "vitest",
-          "specifiers": [
-            "afterEach",
-            "beforeEach",
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
+          "source": "desktop/src/lib/api/types.ts",
+          "specifiers": []
         },
         {
-          "source": "pinia",
-          "specifiers": [
-            "createPinia",
-            "setActivePinia"
-          ]
+          "source": "desktop/src/stores/appPrefs.ts",
+          "specifiers": []
         },
         {
-          "source": "@vue/test-utils",
-          "specifiers": [
-            "enableAutoUnmount",
-            "flushPromises",
-            "mount"
-          ]
+          "source": "desktop/src/stores/chainJobs.ts",
+          "specifiers": []
         },
         {
-          "source": "./GenerateView.vue",
-          "specifiers": [
-            "GenerateView"
-          ]
+          "source": "desktop/src/stores/composer.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/stores/sequenceDraft",
-          "specifiers": [
-            "useSequenceDraftStore"
-          ]
+          "source": "desktop/src/stores/connection.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/lib/fileUnder",
-          "specifiers": [
-            "addTag"
-          ]
+          "source": "desktop/src/stores/contextMenu.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/generateForm",
-          "specifiers": [
-            "useGenerateFormStore"
-          ]
+          "source": "desktop/src/stores/generateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/chainJobs",
-          "specifiers": [
-            "useChainJobsStore"
-          ]
+          "source": "desktop/src/stores/hosts.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/composer",
-          "specifiers": [
-            "useComposerStore"
-          ]
+          "source": "desktop/src/stores/models.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/connection",
-          "specifiers": [
-            "useConnectionStore"
-          ]
+          "source": "desktop/src/stores/toasts.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/hosts",
-          "specifiers": [
-            "useHostsStore"
-          ]
+          "source": "desktop/src/stores/ui.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/appPrefs",
-          "specifiers": [
-            "useAppPrefsStore"
-          ]
+          "source": "desktop/src/views/GenerateView.vue",
+          "specifiers": []
         },
         {
-          "source": "../stores/models",
-          "specifiers": [
-            "useModelStore"
-          ]
+          "source": "studio/lib/api/chainTypes.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/toasts",
-          "specifiers": [
-            "useToastStore"
-          ]
+          "source": "studio/lib/fileUnder.ts",
+          "specifiers": []
         },
         {
-          "source": "../stores/ui",
-          "specifiers": [
-            "useUiStore"
-          ]
-        },
-        {
-          "source": "../stores/contextMenu",
-          "specifiers": [
-            "useContextMenuStore"
-          ]
-        },
-        {
-          "source": "../stores/generation",
-          "specifiers": [
-            "newJob",
-            "useGenerationStore"
-          ]
-        },
-        {
-          "source": "../lib/api/types",
-          "specifiers": [
-            "ModelEntry",
-            "OutputMetadata"
-          ]
-        },
-        {
-          "source": "@studio/lib/api/chainTypes",
-          "specifiers": [
-            "ChainJobDetail"
-          ]
+          "source": "studio/stores/sequenceDraft.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
@@ -256295,7 +255748,7 @@
     },
     "studio/lib/expansionRouting.test.ts": {
       "filePath": "studio/lib/expansionRouting.test.ts",
-      "contentHash": "ef282dad8691daf81a009932a492eb8d2b8d028f014eba11b3689957a49563f3",
+      "contentHash": "d991992210331e9e27ad12061a124206d591237fa711766b5f2047f19520e5a3",
       "functions": [
         {
           "name": "candidate",
@@ -256303,7 +255756,6 @@
             "hostId",
             "overrides"
           ],
-          "returnType": "ExpansionCandidate",
           "exported": false,
           "lineCount": 6
         },
@@ -256319,32 +255771,17 @@
       "classes": [],
       "imports": [
         {
-          "source": "vitest",
-          "specifiers": [
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
-        },
-        {
-          "source": "./expansionRouting",
-          "specifiers": [
-            "DEFAULT_EXPAND_MODEL",
-            "expandModelId",
-            "expansionPolicyForSelection",
-            "resolveExpansionRoute",
-            "ExpansionCandidate"
-          ]
+          "source": "studio/lib/expansionRouting.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 195,
+      "totalLines": 220,
       "hasStructuralAnalysis": true
     },
     "studio/lib/expansionRouting.ts": {
       "filePath": "studio/lib/expansionRouting.ts",
-      "contentHash": "fad1547c296268369e8118ced7bca53238091ade1b668834d9024c5c98a40742",
+      "contentHash": "63282377680ac424fa31fa41948870f53c5572f3dfc1ce3d9b686c80b9458062",
       "functions": [
         {
           "name": "candidateFor",
@@ -256352,7 +255789,6 @@
             "candidates",
             "hostId"
           ],
-          "returnType": "ExpansionCandidate | null",
           "exported": false,
           "lineCount": 7
         },
@@ -256361,7 +255797,6 @@
           "params": [
             "candidate"
           ],
-          "returnType": "boolean",
           "exported": false,
           "lineCount": 3
         },
@@ -256373,7 +255808,6 @@
             "candidates",
             "rank"
           ],
-          "returnType": "ExpansionRouteDecision",
           "exported": true,
           "lineCount": 27
         },
@@ -256383,7 +255817,6 @@
             "selection",
             "sentinels"
           ],
-          "returnType": "ExpansionPolicy",
           "exported": true,
           "lineCount": 10
         },
@@ -256392,16 +255825,14 @@
           "params": [
             "message"
           ],
-          "returnType": "string | null",
           "exported": true,
-          "lineCount": 4
+          "lineCount": 7
         },
         {
           "name": "expandModelId",
           "params": [
             "capability"
           ],
-          "returnType": "string",
           "exported": true,
           "lineCount": 6
         }
@@ -256415,7 +255846,7 @@
         "parseMissingExpandModel",
         "expandModelId"
       ],
-      "totalLines": 142,
+      "totalLines": 146,
       "hasStructuralAnalysis": true
     },
     "studio/lib/extend.test.ts": {
@@ -265792,44 +265223,34 @@
     },
     "studio/lib/sourceFit.test.ts": {
       "filePath": "studio/lib/sourceFit.test.ts",
-      "contentHash": "84a9a1a2c0efd5cd1e55fa7df12940f74ef94d0d8b2fa6b3ed231b7fd3c784aa",
+      "contentHash": "87a1fa87b4a7cc9e572cd5e8823ade1948df09c01af8ccac2a414f3c898303f8",
       "functions": [],
       "classes": [],
       "imports": [
         {
-          "source": "vitest",
-          "specifiers": [
-            "describe",
-            "expect",
-            "it"
-          ]
-        },
-        {
-          "source": "./sourceFit",
-          "specifiers": [
-            "coerceSourceFitForMaskless",
-            "describeSourceFit",
-            "maskPaddingRectangles",
-            "parseSourceFitPolicy",
-            "resolveSourceFitTransform",
-            "sourceFitPolicyForMode"
-          ]
+          "source": "studio/lib/sourceFit.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 254,
+      "totalLines": 272,
       "hasStructuralAnalysis": true
     },
     "studio/lib/sourceFit.ts": {
       "filePath": "studio/lib/sourceFit.ts",
-      "contentHash": "16b98db8c51e699e51a58f35f2b2f6c86e3641314a52474c160bc6cf86f2c3a5",
+      "contentHash": "bf66c4342906c07239e7709c092f60b2a36e6e1a59d3489e03174ca4b97013cf",
       "functions": [
+        {
+          "name": "defaultSourceFitPolicy",
+          "params": [],
+          "exported": true,
+          "lineCount": 3
+        },
         {
           "name": "sourceFitHelp",
           "params": [
             "mode"
           ],
-          "returnType": "string",
           "exported": true,
           "lineCount": 3
         },
@@ -265838,7 +265259,6 @@
           "params": [
             "value"
           ],
-          "returnType": "SourceFitPolicy | null",
           "exported": true,
           "lineCount": 37
         },
@@ -265848,9 +265268,8 @@
             "mode",
             "options"
           ],
-          "returnType": "SourceFitPolicy",
           "exported": true,
-          "lineCount": 21
+          "lineCount": 19
         },
         {
           "name": "alignOffset",
@@ -265858,7 +265277,6 @@
             "available",
             "align"
           ],
-          "returnType": "number",
           "exported": false,
           "lineCount": 8
         },
@@ -265869,7 +265287,6 @@
             "target",
             "policy"
           ],
-          "returnType": "SourceFitTransform",
           "exported": true,
           "lineCount": 53
         },
@@ -265878,7 +265295,6 @@
           "params": [
             "t"
           ],
-          "returnType": "Rect[]",
           "exported": true,
           "lineCount": 31
         },
@@ -265887,7 +265303,6 @@
           "params": [
             "policy"
           ],
-          "returnType": "SourceFitPolicy",
           "exported": true,
           "lineCount": 14
         },
@@ -265896,7 +265311,6 @@
           "params": [
             "policy"
           ],
-          "returnType": "string",
           "exported": true,
           "lineCount": 14
         }
@@ -265904,6 +265318,7 @@
       "classes": [],
       "imports": [],
       "exports": [
+        "defaultSourceFitPolicy",
         "SOURCE_FIT_OPTIONS",
         "MASKLESS_SOURCE_FIT_OPTIONS",
         "sourceFitHelp",
@@ -265914,7 +265329,7 @@
         "coerceSourceFitForMaskless",
         "describeSourceFit"
       ],
-      "totalLines": 293,
+      "totalLines": 296,
       "hasStructuralAnalysis": true
     },
     "studio/lib/sourceFitCanvas.ts": {
@@ -272645,14 +272060,13 @@
     },
     "web/src/components/create/SequenceOpeningImagePanel.test.ts": {
       "filePath": "web/src/components/create/SequenceOpeningImagePanel.test.ts",
-      "contentHash": "8b6d8dc99255a1ecacbe7a75f00af12536b75549bf24e60bd7c538fa71aea914",
+      "contentHash": "0eded01ae5a33c3c8f9d0d7f6d5bf08ce2fcc4f43654cda73a254ff138baac82",
       "functions": [
         {
           "name": "baseForm",
           "params": [
             "overrides"
           ],
-          "returnType": "GenerateFormState",
           "exported": false,
           "lineCount": 7
         },
@@ -272676,53 +272090,16 @@
       "classes": [],
       "imports": [
         {
-          "source": "@vue/test-utils",
-          "specifiers": [
-            "flushPromises",
-            "mount"
-          ]
+          "source": "web/src/components/create/SequenceOpeningImagePanel.vue",
+          "specifiers": []
         },
         {
-          "source": "vitest",
-          "specifiers": [
-            "afterEach",
-            "beforeEach",
-            "describe",
-            "expect",
-            "it"
-          ]
+          "source": "web/src/composables/useGenerateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "pinia",
-          "specifiers": [
-            "createPinia",
-            "setActivePinia"
-          ]
-        },
-        {
-          "source": "./SequenceOpeningImagePanel.vue",
-          "specifiers": [
-            "SequenceOpeningImagePanel"
-          ]
-        },
-        {
-          "source": "../../composables/useGenerateForm",
-          "specifiers": [
-            "useGenerateForm",
-            "__testing__"
-          ]
-        },
-        {
-          "source": "@studio/stores/sequenceDraft",
-          "specifiers": [
-            "useSequenceDraftStore"
-          ]
-        },
-        {
-          "source": "../../types",
-          "specifiers": [
-            "GenerateFormState"
-          ]
+          "source": "web/src/types.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
@@ -272731,14 +272108,13 @@
     },
     "web/src/components/create/SourceMediaPanel.test.ts": {
       "filePath": "web/src/components/create/SourceMediaPanel.test.ts",
-      "contentHash": "1dce8a58936e670361680f0a4b7cf77e1ac772ec729fa5feff737baf254be54c",
+      "contentHash": "780801cb6fab6e0936fd815144127edd228b569ee2e1202e6220ae2f40e4938c",
       "functions": [
         {
           "name": "baseForm",
           "params": [
             "overrides"
           ],
-          "returnType": "GenerateFormState",
           "exported": false,
           "lineCount": 7
         },
@@ -272756,44 +272132,20 @@
       "classes": [],
       "imports": [
         {
-          "source": "@vue/test-utils",
-          "specifiers": [
-            "mount"
-          ]
+          "source": "web/src/components/create/SourceMediaPanel.vue",
+          "specifiers": []
         },
         {
-          "source": "vitest",
-          "specifiers": [
-            "afterEach",
-            "beforeEach",
-            "describe",
-            "expect",
-            "it"
-          ]
+          "source": "web/src/composables/useGenerateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "./SourceMediaPanel.vue",
-          "specifiers": [
-            "SourceMediaPanel"
-          ]
-        },
-        {
-          "source": "../../composables/useGenerateForm",
-          "specifiers": [
-            "useGenerateForm",
-            "__testing__"
-          ]
-        },
-        {
-          "source": "../../types",
-          "specifiers": [
-            "GenerateFormState",
-            "ModelInfoExtended"
-          ]
+          "source": "web/src/types.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 447,
+      "totalLines": 448,
       "hasStructuralAnalysis": true
     },
     "web/src/components/create/advanced/ExtendVideoControls.test.ts": {
@@ -275657,14 +275009,13 @@
     },
     "web/src/composables/useGenerateForm.test.ts": {
       "filePath": "web/src/composables/useGenerateForm.test.ts",
-      "contentHash": "12159d0ccb21ed80c3c219c35a739765a44e3ed4fb92930f853e8232df07b6a0",
+      "contentHash": "1e8df2d9164f78def7f7e654ca40ed05a5fc000e1560498da0a5c4f577885faa",
       "functions": [
         {
           "name": "makeModel",
           "params": [
             "overrides"
           ],
-          "returnType": "ModelInfoExtended",
           "exported": false,
           "lineCount": 19
         },
@@ -275684,53 +275035,12 @@
       "classes": [],
       "imports": [
         {
-          "source": "vitest",
-          "specifiers": [
-            "afterEach",
-            "beforeEach",
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
+          "source": "web/src/composables/useGenerateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "vue",
-          "specifiers": [
-            "nextTick"
-          ]
-        },
-        {
-          "source": "fake-indexeddb",
-          "specifiers": [
-            "IDBFactory"
-          ]
-        },
-        {
-          "source": "./useGenerateForm",
-          "specifiers": [
-            "applyMetadataToForm",
-            "normalizeLegacyNegativeFormState",
-            "cloneTemplateForm",
-            "promptWithStyle",
-            "sanitizePersistedForm",
-            "useGenerateForm",
-            "__testing__"
-          ]
-        },
-        {
-          "source": "../types",
-          "specifiers": [
-            "GenerateFormState",
-            "ModelInfoExtended",
-            "OutputMetadata"
-          ]
-        },
-        {
-          "source": "@studio/lib/negativePrompt",
-          "specifiers": [
-            "WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT"
-          ]
+          "source": "web/src/types.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
@@ -275739,14 +275049,13 @@
     },
     "web/src/composables/useGenerateForm.ts": {
       "filePath": "web/src/composables/useGenerateForm.ts",
-      "contentHash": "ba672788645b6ceedcdd3f8e81c6e9148a192e8794890c43eacd45e569ac6419",
+      "contentHash": "6452c72b476311aad82e3d9dc3a2cb372fe0b25ebb6a12e97ea6a544e52aa3d4",
       "functions": [
         {
           "name": "promptWithStyle",
           "params": [
             "state"
           ],
-          "returnType": "string",
           "exported": true,
           "lineCount": 5
         },
@@ -275755,14 +275064,12 @@
           "params": [
             "s"
           ],
-          "returnType": "string",
           "exported": false,
           "lineCount": 27
         },
         {
           "name": "defaultForm",
           "params": [],
-          "returnType": "GenerateFormState",
           "exported": false,
           "lineCount": 64
         },
@@ -275771,7 +275078,6 @@
           "params": [
             "state"
           ],
-          "returnType": "T",
           "exported": false,
           "lineCount": 3
         },
@@ -275780,7 +275086,6 @@
           "params": [
             "state"
           ],
-          "returnType": "GenerateFormState",
           "exported": true,
           "lineCount": 40
         },
@@ -275789,7 +275094,6 @@
           "params": [
             "state"
           ],
-          "returnType": "GenerateFormState",
           "exported": true,
           "lineCount": 3
         },
@@ -275799,7 +275103,6 @@
             "current",
             "model"
           ],
-          "returnType": "GenerateFormState",
           "exported": false,
           "lineCount": 262
         },
@@ -275809,7 +275112,6 @@
             "current",
             "model"
           ],
-          "returnType": "GenerateFormState",
           "exported": true,
           "lineCount": 17
         },
@@ -275819,7 +275121,6 @@
             "state",
             "models"
           ],
-          "returnType": "GenerateFormState",
           "exported": true,
           "lineCount": 22
         },
@@ -275830,7 +275131,6 @@
             "metadata",
             "options"
           ],
-          "returnType": "GenerateFormState",
           "exported": true,
           "lineCount": 145
         },
@@ -275839,7 +275139,6 @@
           "params": [
             "media"
           ],
-          "returnType": "T",
           "exported": false,
           "lineCount": 5
         },
@@ -275848,7 +275147,6 @@
           "params": [
             "state"
           ],
-          "returnType": "MinimaxH3AuthoringState",
           "exported": false,
           "lineCount": 26
         },
@@ -275865,7 +275163,6 @@
           "params": [
             "state"
           ],
-          "returnType": "DraftMediaRecord[]",
           "exported": false,
           "lineCount": 17
         },
@@ -275874,7 +275171,6 @@
           "params": [
             "state"
           ],
-          "returnType": "DraftMediaRecord[]",
           "exported": false,
           "lineCount": 14
         },
@@ -275897,7 +275193,6 @@
         {
           "name": "load",
           "params": [],
-          "returnType": "GenerateFormState",
           "exported": false,
           "lineCount": 26
         },
@@ -275912,7 +275207,6 @@
         {
           "name": "useGenerateForm",
           "params": [],
-          "returnType": "UseGenerateForm",
           "exported": true,
           "lineCount": 375
         }
@@ -275920,191 +275214,20 @@
       "classes": [],
       "imports": [
         {
-          "source": "vue",
-          "specifiers": [
-            "ref",
-            "watch",
-            "Ref",
-            "WatchStopHandle"
-          ]
+          "source": "web/src/lib/draftMediaStore.ts",
+          "specifiers": []
         },
         {
-          "source": "../types",
-          "specifiers": [
-            "GenerateFormState",
-            "GenerateRequestWire",
-            "LoraSelection",
-            "ModelInfoExtended",
-            "OutputMetadata",
-            "OutputFormat",
-            "Scheduler"
-          ]
+          "source": "web/src/lib/generateCapabilities.ts",
+          "specifiers": []
         },
         {
-          "source": "../types",
-          "specifiers": [
-            "MAX_LORA_STACK"
-          ]
+          "source": "web/src/lib/stylePresets.ts",
+          "specifiers": []
         },
         {
-          "source": "../lib/draftMediaStore",
-          "specifiers": [
-            "clearMemoryDraftsForTest",
-            "getDraftMedia",
-            "newDraftId"
-          ]
-        },
-        {
-          "source": "@studio/lib/draftMediaStore",
-          "specifiers": [
-            "putDurableMediaBatch",
-            "DraftMediaRecord"
-          ]
-        },
-        {
-          "source": "../lib/generateCapabilities",
-          "specifiers": [
-            "generationCapabilitiesForFamily",
-            "isQwenImageEditFamily",
-            "isVideoFamily",
-            "supportsLora",
-            "supportsNegativePrompt",
-            "supportsScheduler"
-          ]
-        },
-        {
-          "source": "../lib/stylePresets",
-          "specifiers": [
-            "composeStyle"
-          ]
-        },
-        {
-          "source": "@studio/lib/sourceFit",
-          "specifiers": [
-            "parseSourceFitPolicy"
-          ]
-        },
-        {
-          "source": "@studio/lib/negativePrompt",
-          "specifiers": [
-            "effectiveNegativeDefault",
-            "negativePromptOnDefaultChange",
-            "negativePromptWireValue",
-            "restoredNegativeExplicitClear",
-            "restoredNegativePrompt"
-          ]
-        },
-        {
-          "source": "@studio/lib/sequence",
-          "specifiers": [
-            "defaultVideoFps"
-          ]
-        },
-        {
-          "source": "@studio/lib/videoDuration",
-          "specifiers": [
-            "videoFramesForModelSelection"
-          ]
-        },
-        {
-          "source": "@studio/lib/outputReuse",
-          "specifiers": [
-            "pipelineForSettingsReuse"
-          ]
-        },
-        {
-          "source": "@studio/lib/extend",
-          "specifiers": [
-            "familySupportsExtend",
-            "resolveExtendOverlapFrames"
-          ]
-        },
-        {
-          "source": "@studio/lib/generationProfile",
-          "specifiers": [
-            "effectiveGenerationRecipe",
-            "fixedRecipeControlOverrides"
-          ]
-        },
-        {
-          "source": "@studio/lib/generationCapabilities",
-          "specifiers": [
-            "effectiveGenerationGuidance"
-          ]
-        },
-        {
-          "source": "@studio/lib/cameraMotion",
-          "specifiers": [
-            "cameraMotionLoraPath",
-            "normalizeCameraMotionLoraState",
-            "syncCameraMotionLora"
-          ]
-        },
-        {
-          "source": "@studio/lib/ltx2Control",
-          "specifiers": [
-            "pipelineForControlId"
-          ]
-        },
-        {
-          "source": "@studio/lib/identityConditioning",
-          "specifiers": [
-            "identityRequestFields",
-            "identityReuse",
-            "supportsIdentity"
-          ]
-        },
-        {
-          "source": "@studio/lib/libraryOrganization",
-          "specifiers": [
-            "validatePrintTitle"
-          ]
-        },
-        {
-          "source": "@studio/lib/sourceImageCapability",
-          "specifiers": [
-            "firstLastFrameKeyframes"
-          ]
-        },
-        {
-          "source": "@studio/lib/ltx2Pipeline",
-          "specifiers": [
-            "stripAudioOnlyIncompatibleFields"
-          ]
-        },
-        {
-          "source": "@studio/lib/guidanceOverrides",
-          "specifiers": [
-            "emptyGuidanceOverrides",
-            "guidanceOverridesFromWire",
-            "guidanceOverridesToWire"
-          ]
-        },
-        {
-          "source": "@studio/lib/wanRecipe",
-          "specifiers": [
-            "emptyWanRecipe",
-            "wanRecipeFromWire",
-            "wanRecipeToWire"
-          ]
-        },
-        {
-          "source": "@studio/lib/minimaxH3Authoring",
-          "specifiers": [
-            "MINIMAX_H3_REVIEWED_COMPACT_FRAMES",
-            "emptyMinimaxH3AuthoringState",
-            "isMinimaxH3Family",
-            "minimaxH3BoundaryFromSourceMetadata",
-            "minimaxH3BoundaryFromStagedImage",
-            "minimaxH3ClosingBoundaryFromMetadata",
-            "minimaxH3ReferenceDraftsFromMetadata",
-            "minimaxH3TaskForModel",
-            "serializeMinimaxH3Authoring",
-            "stagedImageFromMinimaxH3Boundary",
-            "MinimaxH3AuthoringState",
-            "MinimaxH3BoundaryImage",
-            "MinimaxH3ReferenceDraft"
-          ]
+          "source": "web/src/types.ts",
+          "specifiers": []
         }
       ],
       "exports": [
@@ -276119,7 +275242,7 @@
         "isQwenImageEditFamily",
         "__testing__"
       ],
-      "totalLines": 1465,
+      "totalLines": 1468,
       "hasStructuralAnalysis": true
     },
     "web/src/composables/useGenerateStream.test.ts": {
@@ -282922,7 +282045,7 @@
     },
     "web/src/pages/CreatePage.test.ts": {
       "filePath": "web/src/pages/CreatePage.test.ts",
-      "contentHash": "67d1f681189a4ceaa5c33f83f73935e746b56451192f69f08695e50439fbf11c",
+      "contentHash": "925a5ee7853061f41e06f0b8ad6c67b7664127d2c5829d8c9f665b40fda7c58c",
       "functions": [
         {
           "name": "installedModelRow",
@@ -282955,171 +282078,68 @@
       "classes": [],
       "imports": [
         {
-          "source": "@vue/test-utils",
-          "specifiers": [
-            "flushPromises",
-            "mount"
-          ]
+          "source": "web/src/api.ts",
+          "specifiers": []
         },
         {
-          "source": "vitest",
-          "specifiers": [
-            "beforeEach",
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
+          "source": "web/src/composables/useChainJobs.ts",
+          "specifiers": []
         },
         {
-          "source": "vue",
-          "specifiers": [
-            "defineComponent",
-            "nextTick",
-            "Component"
-          ]
+          "source": "web/src/composables/useGenerateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "pinia",
-          "specifiers": [
-            "createPinia",
-            "setActivePinia"
-          ]
+          "source": "web/src/composables/useGenerateStream.ts",
+          "specifiers": []
         },
         {
-          "source": "./CreatePage.vue",
-          "specifiers": [
-            "CreatePage"
-          ]
+          "source": "web/src/composables/useGenerationHandoff.ts",
+          "specifiers": []
         },
         {
-          "source": "../composables/useGenerateForm",
-          "specifiers": [
-            "useGenerateForm",
-            "generateFormTesting"
-          ]
+          "source": "web/src/composables/useHostRouting.ts",
+          "specifiers": []
         },
         {
-          "source": "../lib/toasts",
-          "specifiers": [
-            "resetNotifications",
-            "runToastAction",
-            "settleConfirm",
-            "useNotifications"
-          ]
+          "source": "web/src/composables/usePullResume.ts",
+          "specifiers": []
         },
         {
-          "source": "../lib/stylePresets",
-          "specifiers": [
-            "styleHint"
-          ]
+          "source": "web/src/composables/useSequenceHandoff.ts",
+          "specifiers": []
         },
         {
-          "source": "../composables/useHostRouting",
-          "specifiers": [
-            "hostRoutingTesting"
-          ]
+          "source": "web/src/lib/fileUnder.ts",
+          "specifiers": []
         },
         {
-          "source": "../composables/useHostRouting",
-          "specifiers": [
-            "useHostRouting"
-          ]
+          "source": "web/src/lib/hostRegistry.ts",
+          "specifiers": []
         },
         {
-          "source": "../composables/usePullResume",
-          "specifiers": [
-            "usePullResume"
-          ]
+          "source": "web/src/lib/hostRouting.ts",
+          "specifiers": []
         },
         {
-          "source": "../composables/useChainJobs",
-          "specifiers": [
-            "chainJobsTesting",
-            "useChainJobs"
-          ]
+          "source": "web/src/lib/stylePresets.ts",
+          "specifiers": []
         },
         {
-          "source": "@studio/stores/sequenceDraft",
-          "specifiers": [
-            "useSequenceDraftStore"
-          ]
+          "source": "web/src/lib/toasts.ts",
+          "specifiers": []
         },
         {
-          "source": "../composables/useSequenceHandoff",
-          "specifiers": [
-            "pendingSequenceHandoff",
-            "setSequenceHandoff",
-            "takeSequenceHandoff"
-          ]
+          "source": "web/src/pages/CreatePage.vue",
+          "specifiers": []
         },
         {
-          "source": "../composables/useGenerationHandoff",
-          "specifiers": [
-            "setGenerationHandoff",
-            "takeGenerationHandoff"
-          ]
-        },
-        {
-          "source": "../api",
-          "specifiers": [
-            "ApiHttpError"
-          ]
-        },
-        {
-          "source": "../lib/hostRegistry",
-          "specifiers": [
-            "addHost",
-            "ORIGIN_HOST_ID"
-          ]
-        },
-        {
-          "source": "../lib/fileUnder",
-          "specifiers": [
-            "autoTagTitle",
-            "reloadAutoTagTitle"
-          ]
-        },
-        {
-          "source": "../lib/hostRouting",
-          "specifiers": [
-            "AUTO_TARGET_ID",
-            "CAPABLE_TARGET_ID"
-          ]
-        },
-        {
-          "source": "../types",
-          "specifiers": [
-            "GalleryImage",
-            "GenerateFormState",
-            "GenerateRequestWire",
-            "ModelInfoExtended",
-            "OutputMetadata"
-          ]
-        },
-        {
-          "source": "../composables/useGenerateStream",
-          "specifiers": [
-            "Job"
-          ]
-        },
-        {
-          "source": "@studio/lib/api/chainTypes",
-          "specifiers": [
-            "ChainJobDetail",
-            "ChainRequestWire",
-            "CreateChainJobResponse"
-          ]
-        },
-        {
-          "source": "../api",
-          "specifiers": [
-            "StreamTarget"
-          ]
+          "source": "web/src/types.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 5004,
+      "totalLines": 5080,
       "hasStructuralAnalysis": true
     },
     "web/src/pages/HostDetailPage.test.ts": {
@@ -283467,7 +282487,7 @@
     },
     "web/src/pages/LibraryPage.test.ts": {
       "filePath": "web/src/pages/LibraryPage.test.ts",
-      "contentHash": "66f2e26a95640200c2d948a5f793de4999c9eea5c7334d190cbf06ed14f09486",
+      "contentHash": "3691106850a6a7f1f5488fdc2f459e9baa3820f1064829ba7e2d33668e14b131",
       "functions": [
         {
           "name": "makeEntry",
@@ -283477,7 +282497,6 @@
             "model",
             "seed"
           ],
-          "returnType": "GalleryImage",
           "exported": false,
           "lineCount": 22
         },
@@ -283497,73 +282516,24 @@
       "classes": [],
       "imports": [
         {
-          "source": "@vue/test-utils",
-          "specifiers": [
-            "flushPromises",
-            "mount"
-          ]
+          "source": "web/src/composables/useGenerateForm.ts",
+          "specifiers": []
         },
         {
-          "source": "vitest",
-          "specifiers": [
-            "afterEach",
-            "beforeEach",
-            "describe",
-            "expect",
-            "it",
-            "vi"
-          ]
+          "source": "web/src/lib/toasts.ts",
+          "specifiers": []
         },
         {
-          "source": "vue",
-          "specifiers": [
-            "defineComponent"
-          ]
+          "source": "web/src/pages/LibraryPage.vue",
+          "specifiers": []
         },
         {
-          "source": "pinia",
-          "specifiers": [
-            "createPinia",
-            "setActivePinia"
-          ]
-        },
-        {
-          "source": "./LibraryPage.vue",
-          "specifiers": [
-            "LibraryPage"
-          ]
-        },
-        {
-          "source": "../lib/toasts",
-          "specifiers": [
-            "requestConfirm",
-            "resetNotifications",
-            "runToastAction",
-            "useNotifications"
-          ]
-        },
-        {
-          "source": "../composables/useGenerateForm",
-          "specifiers": [
-            "formTesting",
-            "useGenerateForm"
-          ]
-        },
-        {
-          "source": "../types",
-          "specifiers": [
-            "GalleryImage"
-          ]
-        },
-        {
-          "source": "@studio/lib/libraryOrganization",
-          "specifiers": [
-            "clearSessionScrollForTests"
-          ]
+          "source": "web/src/types.ts",
+          "specifiers": []
         }
       ],
       "exports": [],
-      "totalLines": 854,
+      "totalLines": 858,
       "hasStructuralAnalysis": true
     },
     "web/src/pages/MachinesPage.test.ts": {
@@ -284328,6 +283298,326 @@
       ],
       "exports": [],
       "totalLines": 14,
+      "hasStructuralAnalysis": true
+    },
+    "crates/mold-cli/src/commands/library.rs": {
+      "filePath": "crates/mold-cli/src/commands/library.rs",
+      "contentHash": "619f32df40276dcc474cff0a20b1d430450c1a71940f53cbcb4002084523ec75",
+      "functions": [
+        {
+          "name": "run",
+          "params": [
+            "action"
+          ],
+          "returnType": "Result<()>",
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "run_remote",
+          "params": [
+            "action",
+            "client"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 49
+        },
+        {
+          "name": "library_list",
+          "params": [
+            "client",
+            "options"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 49
+        },
+        {
+          "name": "library_show",
+          "params": [
+            "client",
+            "filename",
+            "json",
+            "preview"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 22
+        },
+        {
+          "name": "preview_bytes",
+          "params": [
+            "client",
+            "image"
+          ],
+          "returnType": "Result<Vec<u8>>",
+          "exported": false,
+          "lineCount": 13
+        },
+        {
+          "name": "library_title",
+          "params": [
+            "client",
+            "filename",
+            "title",
+            "clear"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 20
+        },
+        {
+          "name": "library_tag",
+          "params": [
+            "client",
+            "action"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 39
+        },
+        {
+          "name": "mutate_prints",
+          "params": [
+            "client",
+            "filenames",
+            "favorite",
+            "add_tags",
+            "remove_tags"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 33
+        },
+        {
+          "name": "library_collection",
+          "params": [
+            "client",
+            "action"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 118
+        },
+        {
+          "name": "collection_membership",
+          "params": [
+            "client",
+            "reference",
+            "filenames",
+            "add"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 26
+        },
+        {
+          "name": "library_trash",
+          "params": [
+            "client",
+            "filenames"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 24
+        },
+        {
+          "name": "require_organize",
+          "params": [
+            "client"
+          ],
+          "returnType": "Result<ServerCapabilities>",
+          "exported": false,
+          "lineCount": 13
+        },
+        {
+          "name": "resolve_collection",
+          "params": [
+            "collections",
+            "value"
+          ],
+          "returnType": "Result<&'a Collection>",
+          "exported": false,
+          "lineCount": 31
+        },
+        {
+          "name": "filter_and_sort",
+          "params": [
+            "rows",
+            "query",
+            "tags",
+            "collection_id",
+            "favorite",
+            "format"
+          ],
+          "exported": false,
+          "lineCount": 37
+        },
+        {
+          "name": "gallery_format",
+          "params": [
+            "row"
+          ],
+          "returnType": "Option<OutputFormat>",
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "display_title",
+          "params": [
+            "row"
+          ],
+          "returnType": "&str",
+          "exported": false,
+          "lineCount": 7
+        },
+        {
+          "name": "render_listing",
+          "params": [
+            "rows",
+            "total",
+            "offset",
+            "collections"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 53
+        },
+        {
+          "name": "render_detail",
+          "params": [
+            "row"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 30
+        },
+        {
+          "name": "render_collections",
+          "params": [
+            "rows"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 23
+        },
+        {
+          "name": "truncate",
+          "params": [
+            "value",
+            "max"
+          ],
+          "returnType": "String",
+          "exported": false,
+          "lineCount": 12
+        },
+        {
+          "name": "confirm",
+          "params": [
+            "prompt"
+          ],
+          "returnType": "Result<bool>",
+          "exported": false,
+          "lineCount": 13
+        },
+        {
+          "name": "library_grid",
+          "params": [
+            "host",
+            "local"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 10
+        },
+        {
+          "name": "library_grid",
+          "params": [
+            "_host",
+            "_local"
+          ],
+          "returnType": "Result<()>",
+          "exported": false,
+          "lineCount": 3
+        }
+      ],
+      "classes": [
+        {
+          "name": "ListOptions",
+          "methods": [],
+          "properties": [
+            "query",
+            "tags",
+            "collection",
+            "favorite",
+            "format",
+            "limit",
+            "offset",
+            "json"
+          ],
+          "exported": false,
+          "lineCount": 10
+        }
+      ],
+      "imports": [
+        {
+          "source": "std::collections",
+          "specifiers": [
+            "HashMap"
+          ]
+        },
+        {
+          "source": "std::io",
+          "specifiers": [
+            "self",
+            "IsTerminal",
+            "Write"
+          ]
+        },
+        {
+          "source": "anyhow",
+          "specifiers": [
+            "bail",
+            "Context",
+            "Result"
+          ]
+        },
+        {
+          "source": "colored",
+          "specifiers": [
+            "Colorize"
+          ]
+        },
+        {
+          "source": "mold_core",
+          "specifiers": [
+            "Collection",
+            "CollectionCreateRequest",
+            "CollectionItemsRequest",
+            "CollectionUpdateRequest",
+            "GalleryBulkMutationRequest",
+            "GalleryImage",
+            "GalleryOrganizeRequest",
+            "GalleryPatchRequest",
+            "MoldClient",
+            "OutputFormat",
+            "ServerCapabilities"
+          ]
+        },
+        {
+          "source": "crate",
+          "specifiers": [
+            "LibraryAction",
+            "LibraryCollectionAction",
+            "LibraryTagAction"
+          ]
+        }
+      ],
+      "exports": [
+        "run"
+      ],
+      "totalLines": 774,
       "hasStructuralAnalysis": true
     }
   }

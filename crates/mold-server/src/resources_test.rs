@@ -22,6 +22,7 @@ fn fake_snapshot() -> ResourceSnapshot {
             total: 64_000_000_000,
             used: 0,
             available: Some(64_000_000_000),
+            reclaimable_zfs_arc: None,
             used_by_mold: 0,
             used_by_other: 0,
         },
@@ -179,6 +180,34 @@ fn ram_snapshot_satisfies_invariants() {
         ram.available
             .is_some_and(|available| available <= ram.total),
         "OS available RAM must be retained for admission"
+    );
+    // #1439: the evictable ZFS ARC credit rides beside MemAvailable and the
+    // sum admission spends can never exceed the machine. On a ZFS host this
+    // exercises the real arcstats reader; elsewhere the credit is absent.
+    let credit = ram.reclaimable_zfs_arc.unwrap_or(0);
+    assert!(
+        ram.available_or_estimate().saturating_add(credit) <= ram.total,
+        "available {} + evictable ARC {} must fit in total {}",
+        ram.available_or_estimate(),
+        credit,
+        ram.total
+    );
+    assert!(ram.available_with_evictable_arc() <= ram.total);
+    assert!(
+        ram.available_with_evictable_arc() >= ram.available_or_estimate(),
+        "the credit never lowers the figure admission spends"
+    );
+    eprintln!(
+        "ram_snapshot on this host: total={} available={:?} reclaimable_zfs_arc={:?} available_with_evictable_arc={}",
+        ram.total,
+        ram.available,
+        ram.reclaimable_zfs_arc,
+        ram.available_with_evictable_arc()
+    );
+    let system = crate::resources::ram_snapshot_from_system();
+    assert_eq!(
+        system.reclaimable_zfs_arc, None,
+        "the RSS-only reading never consults arcstats"
     );
 }
 

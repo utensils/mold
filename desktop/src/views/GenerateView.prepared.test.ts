@@ -723,6 +723,69 @@ describe("GenerateView prepared expansion batches", () => {
     });
   });
 
+  it.each([
+    ["prepared", 3],
+    ["quick", 1],
+  ])("refuses a %s expansion frozen to a different machine than its LoRA", async (_kind, batch) => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = batch;
+    const hosts = useHostsStore();
+    const localRoute = {
+      hostId: "local",
+      label: "This device",
+      kind: "local" as const,
+      target: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      instanceId: null,
+    };
+    const remoteRoute = {
+      hostId: "remote-one",
+      label: "Studio GPU",
+      kind: "remote" as const,
+      target: { baseUrl: "http://studio:7680", apiKey: "remote-key" },
+      instanceId: "studio-id",
+    };
+    const resolveRoute = vi.spyOn(hosts, "resolveRoute").mockReturnValue(localRoute);
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: Array.from({ length: batch }, (_, index) => `variation ${index + 1}`),
+    });
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    resolveRoute.mockImplementation((selection) =>
+      selection === remoteRoute.hostId ? remoteRoute : localRoute,
+    );
+    form.loras = [
+      {
+        path: "/studio/alien.safetensors",
+        name: "Alien LoRA",
+        scale: 1,
+        trainedWords: [],
+        hostId: remoteRoute.hostId,
+        hostBaseUrl: remoteRoute.target.baseUrl,
+        hostInstanceId: remoteRoute.instanceId,
+      },
+    ];
+
+    if (batch > 1) {
+      wrapper.findComponent(PreparedExpansionBatch).vm.$emit("generate");
+    } else {
+      await wrapper.get('[data-test="generate-button"]').trigger("click");
+    }
+    await flushPromises();
+
+    expect(submit).not.toHaveBeenCalled();
+    expect(useToastStore().items.at(-1)?.message).toContain(
+      "prepared print is frozen to a different machine",
+    );
+  });
+
   it("reuses a quick transformed prompt after a host-only selection change", async () => {
     const form = useGenerateFormStore().form;
     form.batchSize = 1;

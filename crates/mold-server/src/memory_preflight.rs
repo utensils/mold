@@ -260,14 +260,26 @@ pub(crate) fn check_planned_memory_budget(
 /// and dispatch disagreeing is what oscillates work through the dispatch-replan
 /// budget. Callers with no ledger evidence retain the grant instead of calling
 /// this with a guessed headroom.
+///
+/// `reclaimable_zfs_arc_bytes` is the evictable ZFS ARC the SAME ledger sample
+/// counted into that headroom (#1439); a positive credit is named in the
+/// refusal so the figure a user reads already includes it.
 pub(crate) fn check_planned_host_budget(
     model_name: &str,
     predicted_host_increment_bytes: u64,
     available_host_headroom_bytes: u64,
+    reclaimable_zfs_arc_bytes: Option<u64>,
 ) -> Result<(), ApiError> {
     if predicted_host_increment_bytes > available_host_headroom_bytes {
+        let clause = match reclaimable_zfs_arc_bytes {
+            Some(credit) if credit > 0 => format!(
+                " (including ~{:.1} GB evictable ZFS ARC)",
+                credit as f64 / 1_000_000_000.0
+            ),
+            _ => String::new(),
+        };
         return Err(ApiError::insufficient_memory(format!(
-            "model '{model_name}' frozen host-memory increment ~{:.1} GB no longer fits the current ~{:.1} GB host-memory headroom after the canonical safety floor; {ADMISSION_PRESSURE_MARKER}",
+            "model '{model_name}' frozen host-memory increment ~{:.1} GB no longer fits the current ~{:.1} GB host-memory headroom after the canonical safety floor{clause}; {ADMISSION_PRESSURE_MARKER}",
             predicted_host_increment_bytes as f64 / 1_000_000_000.0,
             available_host_headroom_bytes as f64 / 1_000_000_000.0,
         )));

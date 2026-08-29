@@ -75,7 +75,7 @@ fixed_scale?: number | null, };
 
 export type SourceImageCapability = "unsupported" | "optional" | "required";
 
-export type Scheduler = "ddim" | "euler-ancestral" | "uni-pc" | "euler" | "dpm-pp";
+export type Scheduler = "ddim" | "euler-ancestral" | "uni-pc" | "edm-dpm-pp-2m" | "euler" | "dpm-pp";
 
 export type GenerationCapabilitiesProfile = { guidance: GuidanceCapabilities, negative_prompt: FeatureControlProfile, source_image?: SourceImageCapability | null, supports_lora: boolean, supports_controlnet: boolean,
 /**

@@ -21,9 +21,14 @@ pub fn seeds_for(family: Family) -> &'static [&'static str] {
             "stable-diffusion-v1-5/stable-diffusion-v1-5",
         ],
         Sdxl => &["stabilityai/stable-diffusion-xl-base-1.0"],
+        Sd3 => &[
+            "stabilityai/stable-diffusion-3.5-large",
+            "stabilityai/stable-diffusion-3.5-large-turbo",
+            "stabilityai/stable-diffusion-3.5-medium",
+        ],
         ZImage => &["Tongyi-MAI/Z-Image-Turbo", "Tongyi-MAI/Z-Image-Base"],
         LtxVideo => &["Lightricks/LTX-Video"],
-        Ltx2 => &["Lightricks/LTX-Video-2", "Lightricks/LTX-Video-2.3"],
+        Ltx2 => &["Lightricks/LTX-2", "Lightricks/LTX-2.3"],
         // Upstream's own releases plus the two repack lines mold's manifests
         // actually pull from — a user searching "wan" should see those ranked
         // as foundations rather than buried under community fine-tunes.

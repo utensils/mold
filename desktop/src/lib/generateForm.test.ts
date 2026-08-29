@@ -8,6 +8,7 @@ import {
   buildRequest,
   chainFilingFields,
   cloneGenerateForm,
+  loraHostBinding,
   newGenerateForm,
   normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
@@ -22,6 +23,50 @@ import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import { addTag, emptyFileUnderState, pickCollection } from "@studio/lib/fileUnder";
 import type { ModelEntry, OutputMetadata } from "./api/types";
 import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/generationProfile";
+
+describe("loraHostBinding", () => {
+  it("binds host-local LoRA paths to one machine and rejects mixed stacks", () => {
+    const row = (hostId?: string, hostInstanceId?: string | null, hostBaseUrl?: string) => ({
+      path: `${hostId ?? "legacy"}.safetensors`,
+      name: "LoRA",
+      scale: 1,
+      trainedWords: [],
+      ...(hostId
+        ? {
+            hostId,
+            hostBaseUrl: hostBaseUrl ?? `http://${hostId}:7680`,
+            hostInstanceId: hostInstanceId === undefined ? `${hostId}-instance` : hostInstanceId,
+          }
+        : {}),
+    });
+
+    expect(loraHostBinding([row()])).toEqual({ kind: "unbound" });
+    expect(loraHostBinding([row("plato"), row("plato")])).toEqual({
+      kind: "bound",
+      hostId: "plato",
+      baseUrl: "http://plato:7680",
+      instanceId: "plato-instance",
+    });
+    expect(loraHostBinding([row("plato"), row("hal")])).toEqual({
+      kind: "conflict",
+      hostIds: ["plato", "hal"],
+    });
+    expect(loraHostBinding([row(), row("plato")])).toEqual({
+      kind: "conflict",
+      hostIds: ["plato"],
+    });
+    expect(loraHostBinding([row("plato", "old"), row("plato", "new")])).toEqual({
+      kind: "conflict",
+      hostIds: ["plato"],
+    });
+    expect(loraHostBinding([row("plato", null), row("plato", "plato-instance")])).toEqual({
+      kind: "bound",
+      hostId: "plato",
+      baseUrl: "http://plato:7680",
+      instanceId: "plato-instance",
+    });
+  });
+});
 
 function ltx2Model(): ModelEntry {
   return {

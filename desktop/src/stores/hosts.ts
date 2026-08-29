@@ -20,7 +20,6 @@ import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import {
   hostIdFromUrl,
-  hostnamesCompatible,
   mergeSavedHostsByInstanceId,
   normalizeHostUrl,
   pickAutoHost,
@@ -346,8 +345,6 @@ export const useHostsStore = defineStore("hosts", {
     all(state): HostView[] {
       const primary = this.primaryHost;
       const rows: HostView[] = primary ? [primary] : [];
-      const hostnameOf = (id: string): string | null =>
-        state.hostnames[id] ?? state.telemetry[id]?.hostname ?? null;
       for (const extra of state.extras) {
         const t = state.telemetry[extra.id];
         const instanceId = t?.instanceId ?? extra.instanceId ?? null;
@@ -360,9 +357,7 @@ export const useHostsStore = defineStore("hosts", {
             (row) =>
               row.id === extra.id ||
               (row.baseUrl && row.baseUrl === extra.url) ||
-              (instanceId !== null &&
-                row.instanceId === instanceId &&
-                hostnamesCompatible(hostnameOf(row.id), hostnameOf(extra.id))),
+              (instanceId !== null && row.instanceId === instanceId),
           )
         )
           continue;
@@ -370,7 +365,11 @@ export const useHostsStore = defineStore("hosts", {
           id: extra.id,
           // User rename wins; otherwise the last-known server hostname (sticky
           // across failed polls); otherwise the URL.
-          label: this.names[extra.id] ?? hostnameOf(extra.id) ?? extra.label,
+          label:
+            this.names[extra.id] ??
+            state.hostnames[extra.id] ??
+            state.telemetry[extra.id]?.hostname ??
+            extra.label,
           kind: "remote",
           baseUrl: extra.url,
           apiKey: extra.apiKey,
@@ -457,10 +456,12 @@ export const useHostsStore = defineStore("hosts", {
     async connect(rawUrl: string, apiKey: string | null, name: string | null): Promise<HostView> {
       const url = normalizeHostUrl(rawUrl);
       const id = hostIdFromUrl(url);
-      // `https://local` slugs to the literal "local", colliding with the
-      // built-in engine's reserved id — refuse it rather than shadow the
-      // primary's secret/routing keys.
-      if (id === "local") throw new Error("That address is reserved for the built-in engine.");
+      // The host name "local" is reserved for the built-in engine. Check the
+      // normalized authority directly: adding Mold's default port must not
+      // turn the same reserved address into a different slug.
+      if (new URL(url).hostname.toLowerCase() === "local") {
+        throw new Error("That address is reserved for the built-in engine.");
+      }
       const existing = this.all.find((h) => h.id === id);
       // A fresh row already validated with this authority needs no work. A
       // stale row (or an explicitly supplied replacement key) must probe:
@@ -487,16 +488,7 @@ export const useHostsStore = defineStore("hosts", {
       // instead of returning the dead row untouched. The primary "local" row
       // has no extra, so it is returned as-is.
       if (instanceId !== null) {
-        // Hostname-qualified: a shared uuid with a DIFFERENT reported hostname
-        // is two servers sharing a MOLD_HOME, not one server on two addresses.
-        const twin = this.all.find(
-          (h) =>
-            h.instanceId === instanceId &&
-            hostnamesCompatible(
-              this.hostnames[h.id] ?? this.telemetry[h.id]?.hostname,
-              test.hostname,
-            ),
-        );
+        const twin = this.all.find((h) => h.instanceId === instanceId);
         if (twin) {
           if (test.hostname) this.hostnames[twin.id] = test.hostname;
           if (apiKey) await ipc.secretSet(`remote-api-key.${twin.id}`, apiKey);
@@ -517,7 +509,7 @@ export const useHostsStore = defineStore("hosts", {
               // model, or capability data read under another URL/key current.
               delete this.telemetry[twin.id];
               delete this.capabilities[twin.id];
-              delete useHostModelsStore().byHost[twin.id];
+              useHostModelsStore().retireAuthority(twin.id);
               live.url = url;
               live.status = "connecting";
               live.error = null;
@@ -557,7 +549,7 @@ export const useHostsStore = defineStore("hosts", {
           retiredExistingAuthority = true;
           delete this.telemetry[id];
           delete this.capabilities[id];
-          delete useHostModelsStore().byHost[id];
+          useHostModelsStore().retireAuthority(id);
         }
       }
       this.extras = this.extras.filter((h) => h.id !== id);
@@ -586,7 +578,7 @@ export const useHostsStore = defineStore("hosts", {
       this.extras = this.extras.filter((h) => h.id !== id);
       delete this.telemetry[id];
       delete this.capabilities[id];
-      delete useHostModelsStore().byHost[id];
+      useHostModelsStore().retireAuthority(id);
       let clearedTarget = false;
       await withSettingsLock(async () => {
         const settings = await ipc.appSettingsGet();
@@ -1311,7 +1303,7 @@ export const useHostsStore = defineStore("hosts", {
               return false;
             delete this.telemetry[host.id];
             delete this.capabilities[host.id];
-            delete useHostModelsStore().byHost[host.id];
+            useHostModelsStore().retireAuthority(host.id);
             const extra = this.extras.find((candidate) => candidate.id === host.id);
             if (extra) {
               extra.status = "connecting";
@@ -1361,7 +1353,7 @@ export const useHostsStore = defineStore("hosts", {
             const queue = queueResult.value;
             const nextInstanceId = status.instance_id ?? null;
             const instanceChanged = previousInstanceId !== nextInstanceId;
-            if (instanceChanged) delete useHostModelsStore().byHost[host.id];
+            if (instanceChanged) useHostModelsStore().retireAuthority(host.id);
             const previousPredictedCompletion = previousTelemetry?.predictedCompletionMs ?? null;
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
@@ -1456,59 +1448,81 @@ export const useHostsStore = defineStore("hosts", {
     /**
      * Persist newly-learned instance ids onto their saved entries and collapse
      * saved hosts that turn out to be the same physical server (same instance
-     * id AND a compatible hostname). Writes settings only when something
+     * id). Writes settings only when something
      * actually changed, so the 10 s poll stays quiet in steady state. Re-homes
      * the loser's connected-id, sticky target, per-host secret, user name, and
      * live extra onto the surviving slug — in memory as well as on disk.
      */
     async reconcileSavedInstanceIds(learned: Map<string, string>) {
-      const hostnameOf = (id: string): string | null =>
-        this.hostnames[id] ?? this.telemetry[id]?.hostname ?? null;
       const stamp = (saved: SavedHost[]) =>
         saved.map((h) => {
           const uuid = learned.get(h.id);
-          const next = uuid && h.instanceId !== uuid ? { ...h, instanceId: uuid } : h;
-          const hostname = hostnameOf(h.id);
-          return (hostname ? { ...next, hostname } : next) as SavedHost & {
-            hostname?: string | null;
-          };
+          return uuid && h.instanceId !== uuid ? { ...h, instanceId: uuid } : h;
         });
-      // Carry per-host secrets onto survivors BEFORE the settings
-      // read-modify-write, so the get→set window below contains no slow
-      // secret IPC — writers outside this store's lock (theme toggles, route
-      // memory) must not be clobbered by a stale settings snapshot.
-      const probe = mergeSavedHostsByInstanceId(stamp((await ipc.appSettingsGet()).savedHosts));
-      for (const { loser, survivor } of probe.dropped) {
-        const survivorKey = await ipc.secretGet(`remote-api-key.${survivor}`);
-        if (!survivorKey) {
-          const loserKey = await ipc.secretGet(`remote-api-key.${loser}`);
-          if (loserKey) await ipc.secretSet(`remote-api-key.${survivor}`, loserKey);
-        }
-      }
+      const mergeWithLocal = (saved: SavedHost[]) => {
+        const localInstanceId = learned.get("local") ?? this.telemetry.local?.instanceId ?? null;
+        const local = this.primaryHost;
+        if (!localInstanceId || !local?.baseUrl) return mergeSavedHostsByInstanceId(saved);
+        const syntheticLocal: SavedHost = {
+          id: "local",
+          name: null,
+          url: local.baseUrl,
+          lastUsedMs: Number.MAX_SAFE_INTEGER,
+          instanceId: localInstanceId,
+        };
+        const merged = mergeSavedHostsByInstanceId([syntheticLocal, ...saved]);
+        return { ...merged, hosts: merged.hosts.filter((host) => host.id !== "local") };
+      };
+      let appliedDropped: Array<{ loser: string; survivor: string }> = [];
       await withSettingsLock(async () => {
         const settings = await ipc.appSettingsGet();
         const stamped = stamp(settings.savedHosts);
-        const { hosts: merged, dropped } = mergeSavedHostsByInstanceId(stamped);
+        const { hosts: initiallyMerged, dropped } = mergeWithLocal(stamped);
+        let merged = initiallyMerged;
         const changed =
           dropped.length > 0 ||
           stamped.some((h, i) => h.instanceId !== settings.savedHosts[i]?.instanceId);
         if (!changed) return;
+        appliedDropped = dropped;
 
         let connectedHostIds = settings.connectedHostIds;
         let generateTargetHost = settings.generateTargetHost;
         for (const { loser, survivor } of dropped) {
+          const downloads = useDownloadsStore();
+          downloads.unsubscribeHost(loser);
+          if (survivor !== "local") downloads.unsubscribeHost(survivor);
+          useHostModelsStore().retireAuthority(loser);
+          useHostModelsStore().retireAuthority(survivor);
           connectedHostIds = connectedHostIds.map((id) => (id === loser ? survivor : id));
           if (generateTargetHost === loser) generateTargetHost = survivor;
+          if (survivor === "local") {
+            this.extras = this.extras.filter((host) => host.id !== loser && host.id !== "local");
+            delete this.telemetry[loser];
+            delete this.capabilities[loser];
+            delete this.hostnames[loser];
+            delete this.names[loser];
+            continue;
+          }
           // The loser may hold the only working live connection (the
           // survivor's own address might not answer right now) — re-home it
           // onto the surviving slug instead of deleting it.
           const loserLive = this.extras.find((h) => h.id === loser);
-          if (loserLive && !this.extras.some((h) => h.id === survivor)) {
-            this.extras = this.extras.map((h) => (h.id === loser ? { ...h, id: survivor } : h));
+          const survivorLive = this.extras.find((h) => h.id === survivor);
+          const loserIsOnlySuccessfulAlias = learned.has(loser) && !learned.has(survivor);
+          if (loserLive && (!survivorLive || loserIsOnlySuccessfulAlias)) {
+            this.extras = this.extras
+              .filter((host) => host.id !== survivor)
+              .map((host) => (host.id === loser ? { ...host, id: survivor } : host));
             if (this.telemetry[loser]) this.telemetry[survivor] = this.telemetry[loser];
             if (this.capabilities[loser]) this.capabilities[survivor] = this.capabilities[loser];
             if (this.hostnames[loser] && !this.hostnames[survivor])
               this.hostnames[survivor] = this.hostnames[loser];
+            // The UUID owns the row, while this successful route owns its
+            // current address. Persist it so the next launch does not retry a
+            // dead hostname alias before showing the working IP.
+            merged = merged.map((host) =>
+              host.id === survivor ? { ...host, url: loserLive.url, lastUsedMs: Date.now() } : host,
+            );
           } else {
             this.extras = this.extras.filter((h) => h.id !== loser);
           }
@@ -1520,12 +1534,8 @@ export const useHostsStore = defineStore("hosts", {
           if (this.names[loser] && !this.names[survivor]) this.names[survivor] = this.names[loser];
           delete this.names[loser];
         }
-        // `hostname` is a merge input, never a persisted field.
-        const savedHosts: SavedHost[] = merged.map((h) => {
-          const { hostname: _hostname, ...rest } = h;
-          return rest;
-        });
-        connectedHostIds = [...new Set(connectedHostIds)];
+        const savedHosts: SavedHost[] = merged;
+        connectedHostIds = [...new Set(connectedHostIds)].filter((id) => id !== "local");
         await ipc.appSettingsSet({ ...settings, savedHosts, connectedHostIds, generateTargetHost });
         // Keep the in-memory prefs snapshot coherent the same way disconnect()
         // does — every generateTargetHost reader consumes it.
@@ -1533,6 +1543,20 @@ export const useHostsStore = defineStore("hosts", {
         if (prefs.settings)
           prefs.settings = { ...prefs.settings, savedHosts, connectedHostIds, generateTargetHost };
       });
+      // Migrate only the aliases from the exact settings snapshot committed
+      // above. A stale preflight must never clear a key for a row another
+      // settings writer kept or introduced.
+      for (const { loser, survivor } of appliedDropped) {
+        if (survivor !== "local") {
+          const survivorKey = await ipc.secretGet(`remote-api-key.${survivor}`);
+          const loserKey = await ipc.secretGet(`remote-api-key.${loser}`);
+          const loserIsOnlySuccessfulAlias = learned.has(loser) && !learned.has(survivor);
+          if (loserKey && (loserIsOnlySuccessfulAlias || !survivorKey)) {
+            await ipc.secretSet(`remote-api-key.${survivor}`, loserKey);
+          }
+        }
+        await ipc.secretClear(`remote-api-key.${loser}`);
+      }
     },
     async runPoll(generation: number) {
       try {
@@ -1578,17 +1602,8 @@ export const useHostsStore = defineStore("hosts", {
           },
           ...settings.savedHosts.filter((h) => h.id !== id),
         ].slice(0, MAX_SAVED_HOSTS);
-        // Collapse any saved twin that shares this host's instance id (and a
-        // compatible last-known hostname).
-        const withHostnames = upserted.map((h) => {
-          const hostname = this.hostnames[h.id] ?? this.telemetry[h.id]?.hostname ?? null;
-          return hostname ? { ...h, hostname } : h;
-        });
-        const { hosts: mergedHosts, dropped } = mergeSavedHostsByInstanceId(withHostnames);
-        const savedHosts: SavedHost[] = mergedHosts.map((h) => {
-          const { hostname: _hostname, ...rest } = h as SavedHost & { hostname?: string | null };
-          return rest;
-        });
+        // Collapse any saved twin that shares this host's authoritative UUID.
+        const { hosts: savedHosts, dropped } = mergeSavedHostsByInstanceId(upserted);
         const droppedIds = new Set(dropped.map((d) => d.loser));
         const connectedHostIds = [
           ...new Set(

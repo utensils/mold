@@ -877,6 +877,7 @@ onBeforeUnmount(() => {
       :open="infoOpen"
       :title="viewerTitle"
       :focus-first-control="false"
+      swipe-to-dismiss
       test-id="gallery-viewer-info-sheet"
       @close="closeInfo"
     >

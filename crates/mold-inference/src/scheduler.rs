@@ -45,6 +45,11 @@ pub fn build_scheduler(
             };
             config.build(inference_steps)
         }
+        MoldScheduler::EdmDpmPp2m => {
+            anyhow::bail!(
+                "scheduler '{scheduler}' requires Playground EDM's continuous timesteps and is handled by the SDXL pipeline"
+            )
+        }
         // Wan's flow solvers (#795) never reach the UNet scheduler factory:
         // admission rejects them for every non-wan family, and the wan engine
         // consumes the selection itself. Fail loudly rather than silently

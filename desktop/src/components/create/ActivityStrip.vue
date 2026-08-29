@@ -97,6 +97,7 @@ const queueStatus = computed(() =>
       hostId: snapshot.hostId,
       entries: snapshot.entries,
       plan: snapshot.plan,
+      paused: snapshot.paused,
     })),
   ),
 );

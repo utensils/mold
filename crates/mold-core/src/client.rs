@@ -6,15 +6,16 @@ use crate::chain_job::{
 use crate::error::MoldError;
 use crate::queue_progress::QueueJobProgress;
 use crate::types::{
-    AudioData, Collection, CollectionCreateRequest, CollectionItemsRequest,
+    AudioData, Collection, CollectionCreateRequest, CollectionDetail, CollectionItemsRequest,
     CollectionUpdateRequest, DeviceState, EmptyTrashResult, ExpandRequest, ExpandResponse,
-    GalleryImage, GalleryOrganizeRequest, GalleryPatchRequest, GenerateRequest, GenerateResponse,
-    GenerationBatchAdmissionRequest, GenerationBatchStatus, GenerationBatchStatusRequest,
-    GenerationBatchStatusResponse, GenerationRetryRequest, ImageData, LoraInfo, ModelInfo,
-    ModelInfoExtended, OutputFormat, QueueListingWire, ReferenceUploadCompleteResponse,
-    ReferenceUploadSessionRequest, ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent,
-    SseErrorEvent, SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest,
-    TrashSweepResult, VideoData,
+    GalleryBulkMutationRequest, GalleryBulkMutationResult, GalleryImage, GalleryOrganizeRequest,
+    GalleryPatchRequest, GenerateRequest, GenerateResponse, GenerationBatchAdmissionRequest,
+    GenerationBatchStatus, GenerationBatchStatusRequest, GenerationBatchStatusResponse,
+    GenerationRetryRequest, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat,
+    QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
+    ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent, SseErrorEvent,
+    SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest, TrashSweepResult,
+    VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -1742,7 +1743,11 @@ impl MoldClient {
     pub async fn get_gallery_image(&self, filename: &str) -> Result<Vec<u8>> {
         let resp = self
             .client
-            .get(format!("{}/api/gallery/image/{filename}", self.base_url))
+            .get(format!(
+                "{}/api/gallery/image/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
             .send()
             .await?
             .error_for_status()?
@@ -1754,7 +1759,11 @@ impl MoldClient {
     /// Delete a gallery image on the server.
     pub async fn delete_gallery_image(&self, filename: &str) -> Result<()> {
         self.client
-            .delete(format!("{}/api/gallery/image/{filename}", self.base_url))
+            .delete(format!(
+                "{}/api/gallery/image/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
             .send()
             .await?
             .error_for_status()?;
@@ -1906,6 +1915,24 @@ impl MoldClient {
         Ok(())
     }
 
+    /// Apply one replay-safe bulk organization mutation
+    /// (`POST /api/gallery/mutations`).
+    pub async fn mutate_gallery_bulk(
+        &self,
+        req: &GalleryBulkMutationRequest,
+    ) -> Result<GalleryBulkMutationResult> {
+        let resp = self
+            .client
+            .post(format!("{}/api/gallery/mutations", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<GalleryBulkMutationResult>()
+            .await?)
+    }
+
     /// List the host's collections (`GET /api/gallery/collections`).
     pub async fn list_collections(&self) -> Result<Vec<Collection>> {
         let resp = self
@@ -1916,6 +1943,24 @@ impl MoldClient {
         Ok(error_for_status_with_body(resp)
             .await?
             .json::<Vec<Collection>>()
+            .await?)
+    }
+
+    /// Read one collection and its ordered member filenames
+    /// (`GET /api/gallery/collections/:id`).
+    pub async fn get_collection(&self, id: &str) -> Result<CollectionDetail> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/gallery/collections/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<CollectionDetail>()
             .await?)
     }
 
@@ -2043,7 +2088,11 @@ impl MoldClient {
     pub async fn get_gallery_preview(&self, filename: &str) -> Result<Option<Vec<u8>>> {
         let resp = self
             .client
-            .get(format!("{}/api/gallery/preview/{filename}", self.base_url))
+            .get(format!(
+                "{}/api/gallery/preview/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -2058,8 +2107,9 @@ impl MoldClient {
         let resp = self
             .client
             .get(format!(
-                "{}/api/gallery/thumbnail/{filename}",
-                self.base_url
+                "{}/api/gallery/thumbnail/{}",
+                self.base_url,
+                encode_path_segment(filename)
             ))
             .send()
             .await?
@@ -2649,14 +2699,35 @@ fn build_client(api_key: Option<&str>) -> (Client, bool) {
 /// - Host with port: `hal9000:8080` → `http://hal9000:8080`
 /// - Full URL: `http://hal9000:7680` → unchanged
 /// - URL without port: `http://hal9000` → unchanged (uses scheme default 80/443)
+fn has_http_scheme(input: &str) -> bool {
+    input
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || input
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+}
+
 pub fn normalize_host(input: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/');
-    if trimmed.contains("://") {
+    let has_scheme = has_http_scheme(trimmed);
+    let bare_ipv6 = !has_scheme
+        && !trimmed.starts_with('[')
+        && trimmed.bytes().filter(|byte| *byte == b':').count() > 1;
+    let candidate = if has_scheme {
         trimmed.to_string()
-    } else if trimmed.contains(':') {
-        format!("http://{trimmed}")
+    } else if bare_ipv6 {
+        format!("http://[{trimmed}]")
     } else {
-        format!("http://{trimmed}:7680")
+        format!("http://{trimmed}")
+    };
+    if let Ok(mut url) = reqwest::Url::parse(&candidate) {
+        if !has_scheme && url.port().is_none() {
+            let _ = url.set_port(Some(7680));
+        }
+        url.to_string().trim_end_matches('/').to_string()
+    } else {
+        candidate
     }
 }
 
@@ -2690,6 +2761,46 @@ impl std::error::Error for ModelNotFoundError {}
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    #[tokio::test]
+    async fn gallery_media_helpers_encode_reserved_filename_characters() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let encoded = "odd%20%23%20100%25-%E6%97%A5%E6%9C%AC.png";
+        for (method_name, route, body) in [
+            ("GET", "image", b"image".as_slice()),
+            ("GET", "preview", b"preview".as_slice()),
+            ("GET", "thumbnail", b"thumbnail".as_slice()),
+        ] {
+            Mock::given(method(method_name))
+                .and(path(format!("/api/gallery/{route}/{encoded}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/gallery/image/{encoded}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let filename = "odd # 100%-日本.png";
+        assert_eq!(client.get_gallery_image(filename).await.unwrap(), b"image");
+        assert_eq!(
+            client.get_gallery_preview(filename).await.unwrap().unwrap(),
+            b"preview"
+        );
+        assert_eq!(
+            client.get_gallery_thumbnail(filename).await.unwrap(),
+            b"thumbnail"
+        );
+        client.delete_gallery_image(filename).await.unwrap();
+    }
 
     #[test]
     fn transient_request_errors_include_wrapped_rate_limits_and_server_failures() {
@@ -2839,6 +2950,12 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_scheme_case_insensitively() {
+        let client = MoldClient::new("HTTP://hal9000");
+        assert_eq!(client.host(), "http://hal9000");
+    }
+
+    #[test]
     fn test_normalize_localhost() {
         let client = MoldClient::new("localhost");
         assert_eq!(client.host(), "http://localhost:7680");
@@ -2852,14 +2969,35 @@ mod tests {
 
     #[test]
     fn test_normalize_ip_address() {
-        let client = MoldClient::new("192.168.1.100");
-        assert_eq!(client.host(), "http://192.168.1.100:7680");
+        let client = MoldClient::new("100.123.198.98");
+        assert_eq!(client.host(), "http://100.123.198.98:7680");
     }
 
     #[test]
     fn test_normalize_ip_with_port() {
         let client = MoldClient::new("192.168.1.100:9090");
         assert_eq!(client.host(), "http://192.168.1.100:9090");
+    }
+
+    #[test]
+    fn test_normalize_bare_ipv6() {
+        let client = MoldClient::new("::1");
+        assert_eq!(client.host(), "http://[::1]:7680");
+    }
+
+    #[test]
+    fn test_normalize_host_is_idempotent() {
+        for input in [
+            "100.123.198.98",
+            "100.123.198.98:9000",
+            "http://100.123.198.98",
+            "https://studio.tailnet.ts.net",
+            "https://studio.tailnet.ts.net:443",
+            "::1",
+        ] {
+            let once = normalize_host(input);
+            assert_eq!(normalize_host(&once), once, "{input}");
+        }
     }
 
     #[test]

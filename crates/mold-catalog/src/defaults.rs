@@ -134,6 +134,15 @@ pub fn runtime_defaults_for_family(
             frames: None,
             fps: None,
         },
+        "sd3" | "sd3.5" => CatalogRuntimeDefaults {
+            width: 1024,
+            height: 1024,
+            steps: 28,
+            guidance: 4.0,
+            is_schnell: None,
+            frames: None,
+            fps: None,
+        },
         "sd15" => CatalogRuntimeDefaults {
             width: 512,
             height: 512,
@@ -192,6 +201,11 @@ mod tests {
         let flux = runtime_defaults_for_family("flux", None);
         assert_eq!(flux.frames, None);
         assert_eq!(flux.fps, None);
+
+        let sd3 = runtime_defaults_for_family("sd3", None);
+        assert_eq!((sd3.width, sd3.height), (1024, 1024));
+        assert_eq!((sd3.steps, sd3.guidance), (28, 4.0));
+        assert_eq!((sd3.frames, sd3.fps), (None, None));
     }
 
     /// Wan's timing splits on VAE generation, and the sub-family name is the

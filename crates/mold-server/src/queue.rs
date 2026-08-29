@@ -2073,7 +2073,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     // RSS sample taken just before inference; the post-inference sample below
     // logs the per-job delta so RAM growth can be attributed to a specific
     // generation rather than tracked at process granularity.
-    let rss_before = crate::resources::ram_snapshot().used_by_mold;
+    let rss_before = crate::resources::ram_snapshot_from_system().used_by_mold;
     // Run generation on the blocking pool. Move the engine in, return it back
     // out (alongside the result + any panic payload) so we can restore it to
     // the cache in async context regardless of outcome.
@@ -2090,7 +2090,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     })
     .await;
 
-    let rss_after = crate::resources::ram_snapshot().used_by_mold;
+    let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
     let rss_delta = rss_after as i64 - rss_before as i64;
     tracing::info!(
         model = %request.model,
@@ -4118,10 +4118,10 @@ mod tests {
         let row = mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "stale")
             .unwrap()
             .unwrap();
-        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Queued);
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Paused);
         assert_eq!(
             journal.generation_batch("batch").unwrap().children[0].state,
-            "accepted"
+            "paused"
         );
     }
 
@@ -4575,6 +4575,7 @@ mod tests {
                 total: 64 << 30,
                 used: 8 << 30,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },
@@ -4642,6 +4643,7 @@ mod tests {
                 total: 64 << 30,
                 used: 8 << 30,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },
@@ -4712,6 +4714,7 @@ mod tests {
                 total: 64 << 30,
                 used: 8 << 30,
                 available: Some(56 << 30),
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },
@@ -4787,6 +4790,7 @@ mod tests {
                 total: 64 << 30,
                 used: 8 << 30,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },
@@ -4881,6 +4885,7 @@ mod tests {
                 total: 64 << 30,
                 used: 8 << 30,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },

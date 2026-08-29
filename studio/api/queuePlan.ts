@@ -352,6 +352,16 @@ export async function cancelQueueJob(
   });
 }
 
+/** Set the host-wide queue dispatch gate on one explicit authenticated host. */
+export async function setQueuePaused(
+  target: ApiTarget,
+  paused: boolean,
+): Promise<void> {
+  await apiFetchTo(target, paused ? "/api/queue/pause" : "/api/queue/resume", {
+    method: "POST",
+  });
+}
+
 export interface QueueJobAuthority {
   instanceId: string;
   batchId: string;

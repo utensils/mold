@@ -16,6 +16,13 @@ export interface HostMemorySnapshot {
   headroom_bytes: number;
   /** Reserve the scheduler will not admit work into. */
   safety_floor_bytes: number;
+  /**
+   * Evictable ZFS ARC the server counted into `headroom_bytes` (#1439).
+   * Present only on a ZFS host with the credit enabled; `0` is a cold cache
+   * and absence is no ZFS, an older server, or `MOLD_HOST_RAM_ZFS_ARC=0`.
+   * `available_bytes` stays `MemAvailable` — the credit rides beside it.
+   */
+  reclaimable_zfs_arc_bytes?: number;
 }
 
 /** Mirrors the VRAM meter's vocabulary; `null` means "the host did not say". */
@@ -46,12 +53,36 @@ export function parseHostMemory(value: unknown): HostMemorySnapshot | null {
   ) {
     return null;
   }
-  return {
+  const snapshot: HostMemorySnapshot = {
     total_bytes: total,
     available_bytes: available,
     headroom_bytes: headroom,
     safety_floor_bytes: floor,
   };
+  // Additive: a malformed credit reads as absent rather than spoiling the
+  // four fields every meter depends on.
+  const arc = finite(row.reclaimable_zfs_arc_bytes);
+  if (arc !== null) snapshot.reclaimable_zfs_arc_bytes = arc;
+  return snapshot;
+}
+
+/**
+ * The one sentence every surface prints for what the host can still
+ * schedule — `"41.3 GB available to schedule"`, optionally `"… of 62.5 GB"` —
+ * naming the evictable ZFS ARC that headroom already includes whenever the
+ * credit is positive, so the figure a user reads says what it counts.
+ */
+export function hostMemoryScheduleLabel(
+  hostMemory: HostMemorySnapshot,
+  formatBytes: (bytes: number) => string,
+  options: { withTotal?: boolean } = {},
+): string {
+  const base = options.withTotal
+    ? `${formatBytes(hostMemory.headroom_bytes)} of ${formatBytes(hostMemory.total_bytes)} available to schedule`
+    : `${formatBytes(hostMemory.headroom_bytes)} available to schedule`;
+  const arc = finite(hostMemory.reclaimable_zfs_arc_bytes);
+  if (arc === null || arc <= 0) return base;
+  return `${base} (includes ${formatBytes(arc)} evictable ZFS ARC)`;
 }
 
 /**

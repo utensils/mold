@@ -45,24 +45,6 @@ export interface SavedHostLike {
   url: string;
   lastUsedMs?: number | null;
   instanceId?: string | null;
-  /** Last-known server-reported hostname (from telemetry / the connect probe).
-   *  Never persisted — callers thread it in to disambiguate distinct servers
-   *  that share an instance id (shared MOLD_HOME). Absent = unknown. */
-  hostname?: string | null;
-}
-
-/**
- * Whether two server-reported hostnames could belong to the same physical
- * server. Unknown hostnames (older servers, entries never polled) are
- * compatible with anything for back-compat; two distinct known hostnames are
- * proof of two distinct servers even when their instance ids collide (two
- * RunPod pods on one network volume share a mold.db and thus one uuid).
- */
-export function hostnamesCompatible(
-  a: string | null | undefined,
-  b: string | null | undefined,
-): boolean {
-  return !a || !b || a === b;
 }
 
 /**
@@ -72,9 +54,8 @@ export function hostnamesCompatible(
  * `lastUsedMs` (ties broken by input order), keeping its slug (and thus its
  * `remote-api-key.<id>` secret and routing keys); a user-assigned name on any
  * duplicate is preserved. Entries with no `instanceId` are never merged, and
- * a shared `instanceId` only counts when the reported hostnames are
- * compatible — two distinct known hostnames mean two distinct servers
- * sharing a MOLD_HOME, which must never collapse. Returns the deduped list
+ * a shared non-empty `instanceId` is authoritative regardless of which IP,
+ * hostname, or MagicDNS alias answered. Returns the deduped list
  * (input order, losers removed) and the loser→survivor id pairs so callers
  * can re-home secrets, connected ids, and a sticky generation target.
  */
@@ -90,11 +71,6 @@ export function mergeSavedHostsByInstanceId<T extends SavedHostLike>(
   }
   const survivorByInstance = new Map<string, T>();
   for (const [uuid, group] of groups) {
-    const known = new Set(group.map((h) => h.hostname).filter((n): n is string => !!n));
-    // ≥2 distinct hostnames answering under one uuid: distinct servers with a
-    // shared/copied data dir. Leave the whole group untouched — an unknown-
-    // hostname entry can't safely be assigned to either server.
-    if (known.size > 1) continue;
     let survivor = group[0]!;
     for (const host of group) {
       if ((host.lastUsedMs ?? 0) > (survivor.lastUsedMs ?? 0)) survivor = host;
@@ -121,12 +97,13 @@ export function mergeSavedHostsByInstanceId<T extends SavedHostLike>(
   return { hosts: out, dropped };
 }
 
-/** Default scheme/port, strip trailing slashes. Throws on garbage input. */
+/** Default a bare host to HTTP on Mold's port. Throws on garbage input. */
 export function normalizeHostUrl(input: string): string {
   const trimmed = input.trim().replace(/\/+$/, "");
   if (!trimmed) throw new Error("Enter a host, like hal9000");
-  const hasScheme = trimmed.startsWith("http://") || trimmed.startsWith("https://");
-  const withScheme = hasScheme ? trimmed : `http://${trimmed}`;
+  const hasScheme = /^https?:\/\//i.test(trimmed);
+  const bareIpv6 = !hasScheme && !trimmed.startsWith("[") && (trimmed.match(/:/g)?.length ?? 0) > 1;
+  const withScheme = hasScheme ? trimmed : `http://${bareIpv6 ? `[${trimmed}]` : trimmed}`;
   const url = new URL(withScheme);
   if (!url.hostname) throw new Error("Enter a valid host.");
   if (!hasScheme && !url.port) url.port = "7680";

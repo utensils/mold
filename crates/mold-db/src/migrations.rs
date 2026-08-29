@@ -640,7 +640,22 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 30,
         kind: MigrationKind::Sql(V30_GENERATION_BATCH_CHILD_ERROR_CODE),
     },
+    Migration {
+        version: 31,
+        kind: MigrationKind::Sql(V31_GENERATION_DIR_RECENCY_INDEX),
+    },
 ];
+
+/// The gallery listing is `WHERE output_dir = ? ORDER BY
+/// COALESCE(file_mtime_ms, created_at_ms) DESC`; without an index matching
+/// that exact expression SQLite filtered on `idx_gen_output_dir` and then
+/// sorted every row of the directory in a temp B-tree on every `GET
+/// /api/gallery` (and every 15 s poll). An expression index lets the planner
+/// walk rows already in listing order.
+const V31_GENERATION_DIR_RECENCY_INDEX: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_gen_dir_recency
+    ON generations(output_dir, COALESCE(file_mtime_ms, created_at_ms) DESC);
+"#;
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
 /// render's leased device, where it became a typed scheduler phase
@@ -717,7 +732,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 30;
+pub const SCHEMA_VERSION: i64 = 31;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -1299,6 +1314,35 @@ mod tests {
         n == 1
     }
 
+    /// The Library listing must walk the new expression index in listing
+    /// order rather than filter-then-sort: a temp B-tree over every row of
+    /// the directory ran on every `GET /api/gallery` and every poll.
+    #[test]
+    fn gallery_listing_uses_the_recency_index_instead_of_a_temp_sort() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pending(&mut conn).unwrap();
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT id FROM generations \
+                 WHERE output_dir = ?1 \
+                 ORDER BY COALESCE(file_mtime_ms, created_at_ms) DESC",
+            )
+            .unwrap()
+            .query_map(["/out"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let joined = plan.join(" | ");
+        assert!(
+            joined.contains("idx_gen_dir_recency"),
+            "listing must use idx_gen_dir_recency, got: {joined}"
+        );
+        assert!(
+            !joined.contains("TEMP B-TREE"),
+            "listing must not sort in a temp B-tree, got: {joined}"
+        );
+    }
+
     fn index_exists(conn: &Connection, index: &str) -> bool {
         let n: i64 = conn
             .query_row(
@@ -1319,7 +1363,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 30);
+        assert_eq!(SCHEMA_VERSION, 31);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1473,7 +1517,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 30);
+        assert_eq!(SCHEMA_VERSION, 31);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1610,7 +1654,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 30);
+        assert_eq!(SCHEMA_VERSION, 31);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1628,6 +1672,7 @@ mod tests {
             "idx_gen_favorite",
             "idx_generation_tags_tag",
             "idx_collection_items_generation",
+            "idx_gen_dir_recency",
         ] {
             assert!(index_exists(&conn, index), "missing index {index}");
         }
@@ -1871,7 +1916,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 30);
+        assert_eq!(SCHEMA_VERSION, 31);
     }
 
     #[test]

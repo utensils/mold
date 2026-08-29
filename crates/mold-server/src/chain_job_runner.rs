@@ -431,6 +431,22 @@ impl ChainJobRunnerHandle {
     }
 
     #[cfg(test)]
+    pub(crate) fn command_probe_for_tests(
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<RunnerCmd>) {
+        let (kick_tx, kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            Self {
+                kick_tx,
+                cancel: Arc::new(CancelRegistry::new()),
+                events: Arc::new(JobEventBus::new()),
+                job_locks: Arc::new(JobMutationLocks::new()),
+                mutation_cancels: Arc::new(Mutex::new(HashMap::new())),
+            },
+            kick_rx,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn register_cancel_for_tests(&self, job_id: &str) {
         self.cancel.register(job_id);
     }
@@ -610,27 +626,16 @@ pub(crate) fn create_job_with_params(
     Ok(row)
 }
 
-/// Spec section 7 steps 1-2: flip running->interrupted; repair rows from
-/// manifests (manifest wins). Returns (flipped, repaired) for the startup log.
+/// Park all pre-existing queued/running jobs, then repair rows from manifests
+/// (manifest wins for artifacts, while the restart pause remains authoritative
+/// for execution). Returns (paused, repaired) for the startup log.
 ///
 /// Manifest artifact paths are rejected during `ChainJobManifest::read_from_dir`
 /// before any later startup/resume path joins them to the job directory. Keep
 /// that rejection-before-join ordering; it is the traversal boundary.
 pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(usize, usize)> {
     let now = now_ms_i64();
-    let running = chain_jobs::jobs_in_state(db, ChainJobState::Running)?;
-    let mut flipped = 0;
-    for row in running {
-        if chain_jobs::update_job_state(
-            db,
-            &row.id,
-            ChainJobState::Interrupted,
-            Some("server restarted while chain job was running"),
-            now,
-        )? {
-            flipped += 1;
-        }
-    }
+    let paused = chain_jobs::pause_active_for_restart(db, now)?;
 
     let mut repaired = 0;
     for row in chain_jobs::list_jobs(db)? {
@@ -698,7 +703,7 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
         }
 
         let (state, current_stage, mut error) = manifest_index_state(&manifest, row.state);
-        if state == ChainJobState::Interrupted && error.is_none() {
+        if matches!(state, ChainJobState::Interrupted | ChainJobState::Paused) && error.is_none() {
             error = row.error.clone();
         }
         let finalized_at = row.finalized_at_ms.or_else(|| {
@@ -732,7 +737,7 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
         }
     }
 
-    Ok((flipped, repaired))
+    Ok((paused, repaired))
 }
 
 /// One GC pass (daily tick + POST /api/chain-jobs/gc). Orphan predicate per
@@ -7743,7 +7748,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_reconcile_flips_running_to_interrupted_and_repairs_from_manifest() {
+    fn startup_reconcile_pauses_running_and_repairs_from_manifest() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
         let req = request(vec![TransitionMode::Smooth]);
@@ -7767,19 +7772,19 @@ mod tests {
         second_manifest.stage_status[0].state = StageState::Running;
         second_manifest.write_atomic(&second_dir).unwrap();
 
-        let (flipped, repaired) = startup_reconcile(&db, &dir.path().join("jobs")).unwrap();
+        let (paused, repaired) = startup_reconcile(&db, &dir.path().join("jobs")).unwrap();
 
-        assert_eq!(flipped, 2);
+        assert_eq!(paused, 2);
         assert!(repaired >= 1);
         let row_after = chain_jobs::get_job(&db, &row.id).unwrap().unwrap();
-        assert_eq!(row_after.state, ChainJobState::Interrupted);
+        assert_eq!(row_after.state, ChainJobState::Paused);
         assert_eq!(row_after.current_stage, 1);
         assert_eq!(
             row_after.error.as_deref(),
             Some("server restarted while chain job was running")
         );
         let second_after = chain_jobs::get_job(&db, &second.id).unwrap().unwrap();
-        assert_eq!(second_after.state, ChainJobState::Interrupted);
+        assert_eq!(second_after.state, ChainJobState::Paused);
         assert_eq!(second_after.current_stage, 0);
         let second_stage = chain_jobs::stages_for_job(&db, &second.id)
             .unwrap()
@@ -7837,7 +7842,7 @@ mod tests {
         startup_reconcile(db, &jobs_root).unwrap();
 
         let recovered = chain_jobs::get_job(db, &row.id).unwrap().unwrap();
-        assert_eq!(recovered.state, ChainJobState::Queued);
+        assert_eq!(recovered.state, ChainJobState::Paused);
         assert_eq!(recovered.current_stage, 2);
         assert_eq!(
             ChainExecutionAuthority::read_for_parent(&job_dir, &row.id)
@@ -7877,9 +7882,9 @@ mod tests {
             authority.persist_atomic(&job_dir).unwrap();
         }
 
-        let (flipped, _) = startup_reconcile(&db, &jobs_root).unwrap();
+        let (paused, _) = startup_reconcile(&db, &jobs_root).unwrap();
 
-        assert_eq!(flipped, 2);
+        assert_eq!(paused, 2);
         for index in 0..2 {
             let authority =
                 ChainExecutionAuthority::read(&jobs_root.join(format!("01JBR55RECOVER{index}")))
@@ -7928,7 +7933,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            ChainJobState::Queued
+            ChainJobState::Paused
         );
         assert_eq!(
             ChainExecutionAuthority::read_for_parent(&healthy_dir, &healthy.id)

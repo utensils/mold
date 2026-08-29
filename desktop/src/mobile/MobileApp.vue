@@ -58,6 +58,7 @@ import type { CanvasIntent } from "@studio/lib/outputShape";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { virtualGridWindow } from "@studio/lib/virtualGrid";
 import { galleryThumbnailScheduler, type ThumbnailHandle } from "@studio/lib/thumbnailScheduler";
+import { thumbnailRenditionQuery, thumbnailTier } from "@studio/lib/thumbnailPersistentCache";
 import {
   collectionSlug,
   collectionSlugResolver,
@@ -131,6 +132,7 @@ import { profileConflictMessage, profileHashConflict } from "@studio/lib/profile
 import {
   MOBILE_AUTO_ROUTING_HINT,
   MOBILE_CAPABLE_ROUTING_HINT,
+  MOBILE_GENERATE_TARGET_KEY,
   loadMobileGenerateTarget,
   mobileGenerateTargetLabel,
   mobileAutoRoutingAvailable,
@@ -168,6 +170,7 @@ import {
   mergeQueueEntries,
   queuePageRequestForCapacity,
   retryQueueJobRecoveringAmbiguity,
+  setQueuePaused as setQueueDispatchPaused,
   type QueueListing,
 } from "@studio/api/queuePlan";
 import {
@@ -264,7 +267,9 @@ import {
   isAudioItem,
   isVideoItem,
   streamableMediaUrl,
+  thumbnailPath,
 } from "../lib/gallery/media";
+import { chunkForProbe, planPrewarm, type PrewarmCandidate } from "../lib/gallery/thumbnailPrewarm";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
@@ -346,12 +351,14 @@ import {
   mobileHostHealthLabel,
   mobileHostMatchesRoute,
   mobileHostTarget,
+  mergeMobileHostsByInstanceId,
   normalizeRemoteAddress,
   recordMobileHostAuthorityRejection,
   recordMobileHostProbeFailure,
   recordMobileHostStatus,
   remoteHostId,
   type MobileHost,
+  type MobileHostAliasDrop,
 } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
 import {
@@ -384,16 +391,25 @@ import {
 import {
   captureCachedHostFence,
   clearCachedGalleryHosts,
+  createThumbnailRouteGenerationRegistry,
+  evictCachedGalleryMedia,
+  evictCachedGalleryMediaEntry,
+  isCachedHostFenceCurrent,
   loadCachedGallery,
   loadCachedGalleryMedia,
   loadCachedHostPresentation,
   patchCachedGalleryPrints,
+  probeCachedGalleryMedia,
   pruneCachedGalleryMedia,
   removeCachedGalleryPrints,
+  removeCachedGalleryRows,
   storeCachedGallery,
   storeCachedGalleryMedia,
   storeCachedHostPresentation,
+  validGalleryThumbnailBlob,
+  type CachedGalleryMediaRef,
   type CachedHostPresentation,
+  type MobileThumbnailTier,
 } from "./galleryCache";
 import {
   MOBILE_GALLERY_COLUMNS_MAX,
@@ -472,6 +488,7 @@ import {
   claimMobileDurableTerminalEffect,
   createMobileDurableGenerationRecovery,
   loadMobileDurableGenerationRecoveries,
+  MOBILE_DURABLE_GENERATIONS_KEY,
   mergeMobileDurableHostStatus,
   mobileDurableAdmissionEffectKey,
   mobileDurableJobs,
@@ -507,6 +524,7 @@ import {
 import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
+type RefreshableMobileView = { refresh(): Promise<void> };
 
 /** Deep-link payload for the Discover shelf; `token` re-fires the intent even
  *  when the (KeepAlive-cached) catalog is asked for the same filters twice. */
@@ -523,6 +541,8 @@ type ActivityRow =
       print: Job;
       /** Live dispatch order from `/api/queue`; absent on older hosts. */
       queuePosition: number | null;
+      /** Effective lifecycle after applying the host-wide queue pause. */
+      queueState: string | null;
       blockedReason: string | null;
       sequence: null;
     }
@@ -533,6 +553,7 @@ interface DiscoveredHost {
   host: string;
   port: number;
   authRequired: boolean;
+  instanceId?: string;
 }
 
 interface GalleryPrint extends MobileGalleryImage {
@@ -638,6 +659,7 @@ const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
 const GALLERY_TAGS_KEY = "mold.mobile.gallery-tags.v1";
+const GALLERY_VIEWER_HISTORY_KEY = "mold.mobile.gallery-viewer";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 /** A broken WebView connection must not hold a thumbnail page forever. Five
@@ -647,6 +669,7 @@ const GALLERY_THUMBNAIL_TIMEOUT_MS = 5_000;
 const GALLERY_THUMBNAIL_PLACEHOLDER = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
 const GALLERY_THUMBNAIL_RETRY_MAX_MS = 30_000;
 const MOBILE_LIBRARY_SCROLL_KEY = "mobile:library";
+const MOBILE_MACHINES_SCROLL_KEY = "mobile:machines";
 const REUSE_PRESENTATION_TIMEOUT_MS = 9_000;
 const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
@@ -661,11 +684,15 @@ const draft = useSequenceDraftStore();
 const licenseAcceptance = useLicenseAcceptance();
 draft.hydrate();
 const mobileContent = ref<HTMLElement | null>(null);
+const catalogView = ref<RefreshableMobileView | null>(null);
+const hostDetailView = ref<RefreshableMobileView | null>(null);
+const createHeading = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
 const settingsButton = ref<HTMLButtonElement | null>(null);
 const settingsBackButton = ref<HTMLButtonElement | null>(null);
 const mobileSettings = reactive<MobileSettings>(loadMobileSettings());
 const appVersion = ref(import.meta.env.DEV ? "Development build" : "Current build");
+let pendingMobileHostAliasDrops: MobileHostAliasDrop[] = [];
 const hosts = ref<MobileHost[]>(loadHosts());
 function loadMobileActivity(): Record<string, ActivityHostSnapshot> {
   try {
@@ -1020,14 +1047,21 @@ const generationAnnouncement = ref("");
 const gallery = ref<GalleryPrint[]>([]);
 const galleryByThumbnailKey = new Map<string, GalleryPrint>();
 const galleryLoading = ref(false);
+const galleryRefreshing = ref(false);
 const galleryError = ref("");
-const galleryPullDistance = ref(0);
-const galleryPullRefreshing = ref(false);
-const GALLERY_PULL_THRESHOLD = 72;
-const GALLERY_PULL_MAX = 112;
-let galleryPullTouchId: number | null = null;
-let galleryPullStartX = 0;
-let galleryPullStartY = 0;
+const viewPullDistance = ref(0);
+const viewPullRefreshing = ref(false);
+const VIEW_PULL_THRESHOLD = 72;
+const VIEW_PULL_MAX = 112;
+let viewPullTouchId: number | null = null;
+let viewPullStartX = 0;
+let viewPullStartY = 0;
+const MAJOR_TABS: readonly Tab[] = ["generate", "gallery", "catalog", "hosts"];
+const MAJOR_SWIPE_DISTANCE = 64;
+const MAJOR_SWIPE_INTENT_RATIO = 1.2;
+let majorSwipeTouchId: number | null = null;
+let majorSwipeStartX = 0;
+let majorSwipeStartY = 0;
 const gallerySelectMode = ref(false);
 let nativeGalleryContextKey: string | null = null;
 const gallerySelection = ref<Set<string>>(new Set());
@@ -1084,6 +1118,7 @@ interface CollectionCoverState {
   hostId: string;
   filename: string;
   candidatesKey: string;
+  mediaRef: CachedGalleryMediaRef | null;
   url: string;
   status: "loading" | "ready" | "error";
 }
@@ -1134,9 +1169,14 @@ let galleryOperationTail: Promise<void> = Promise.resolve();
 let pendingLibraryScrollRestore: { top: number; left: number } | null = null;
 let libraryScrollRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 const activeGalleryThumbnailControllers = new Set<AbortController>();
-const galleryThumbnailHandles = new Map<string, ThumbnailHandle<string>>();
+const galleryThumbnailHandles = new Map<string, ThumbnailHandle<Blob>>();
 let visibleGalleryThumbnailKeys = new Set<string>();
 const galleryThumbnailRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const thumbnailRouteGenerationFor = createThumbnailRouteGenerationRegistry();
+const mobileGalleryPrewarmHandles = new Set<ThumbnailHandle<Blob>>();
+const mobileGalleryPrewarmAttempted = new Set<string>();
+let mobileGalleryPrewarmTimer: ReturnType<typeof setTimeout> | null = null;
+let mobileGalleryPrewarmEpoch = 0;
 let galleryDragPointerId: number | null = null;
 let galleryDragActive = false;
 let galleryDragSelect = true;
@@ -1189,6 +1229,35 @@ const durableGenerationRetryConfirmations = new Set<string>();
 let nextDurableGenerationClientId = -1;
 let selectedDurableGenerationClientId: number | null = null;
 const mobileDownloads = useMobileDownloadsStore();
+
+function remapMobileHostAliases(dropped: readonly MobileHostAliasDrop[]): void {
+  for (const { loser, survivor } of dropped) {
+    cancelHostProbe(loser);
+    if (selectedHostId.value === loser) selectedHostId.value = survivor;
+    if (catalogHostId.value === loser) catalogHostId.value = survivor;
+    if (hostDetailId.value === loser) hostDetailId.value = survivor;
+    if (generateTargetPolicy.value === loser) {
+      generateTargetPolicy.value = survivor;
+      saveMobileGenerateTarget(survivor);
+    }
+    durableGenerationRecoveries.value = durableGenerationRecoveries.value.map((recovery) =>
+      recovery.tracker.hostId === loser
+        ? { ...recovery, tracker: { ...recovery.tracker, hostId: survivor } }
+        : recovery,
+    );
+    delete liveActivityHosts.value[loser];
+    delete liveQueues.value[loser];
+    delete liveActivityEpochs[loser];
+    retireMobileHostAuthority(loser);
+    pruneHostOrganization(loser);
+    knownHostReachability.delete(loser);
+    void invoke("keychain_delete_api_key", { hostId: loser }).catch(() => undefined);
+  }
+  if (dropped.length > 0) {
+    persistDurableGenerationRecoveries();
+    syncDurableGenerationJobs();
+  }
+}
 function loadLibrarySeenAt(): Record<string, number> {
   try {
     const parsed = JSON.parse(localStorage.getItem(LIBRARY_SEEN_AT_KEY) ?? "{}");
@@ -2293,6 +2362,7 @@ const queueStatusIndex = computed(() =>
       hostId,
       entries: listing.entries,
       plan: listing.plan,
+      paused: hostTelemetry[hostId]?.queuePaused,
     })),
   ),
 );
@@ -2344,6 +2414,7 @@ const activityRows = computed<ActivityRow[]>(() =>
             sequence: null,
             print,
             queuePosition: vm.queuePosition ?? null,
+            queueState: vm.queueState ?? null,
             blockedReason: vm.blockedReason ?? null,
           },
         ]
@@ -2413,7 +2484,7 @@ function fleetQueueAuthority(row: FleetActiveWork): MobileQueueControlAuthority 
 
 function canPauseFleetActivity(row: FleetActiveWork): boolean {
   return (
-    row.phase === "queued" &&
+    (row.phase === "queued" || row.phase === "paused") &&
     serverCapabilities[row.hostId]?.queue?.can_pause === true &&
     fleetQueueAuthority(row) !== null
   );
@@ -2433,9 +2504,7 @@ async function setQueuePaused(
       throw new Error(`${host.name} now reaches a different Mold server instance.`);
     }
     captureHostTelemetry(hostId, status);
-    await apiFetchTo(target, paused ? "/api/queue/pause" : "/api/queue/resume", {
-      method: "POST",
-    });
+    await setQueueDispatchPaused(target, paused);
     if (hostTelemetry[hostId]) hostTelemetry[hostId]!.queuePaused = paused;
     setGenerationStatus(
       paused
@@ -2463,6 +2532,10 @@ async function setFleetHostQueuePaused(row: FleetActiveWork, paused: boolean): P
   await setQueuePaused(authority, paused);
 }
 
+function fleetQueueResumeNeeded(row: FleetActiveWork): boolean {
+  return row.phase === "paused" || hostTelemetry[row.hostId]?.queuePaused === true;
+}
+
 /**
  * Status code for one queue row, in this list's compact uppercase idiom. A
  * queued print reads its place from the live `/api/queue` listing rather than
@@ -2474,8 +2547,11 @@ async function setFleetHostQueuePaused(row: FleetActiveWork, paused: boolean): P
 function activityRowStatus(row: ActivityRow): string {
   if (!row.print) return "";
   if (row.print.status !== "queued") return jobStatusCode(row.print);
+  if (durableHold(row.print)) return "HELD";
+  if (activityRowQueuePaused(row)) return "QUEUE PAUSED";
   return queueWaitCode(
     resolveQueueWait({
+      state: row.queueState,
       position: row.queuePosition ?? row.print.queuePosition,
       blockedReason: row.blockedReason,
     }),
@@ -2542,6 +2618,16 @@ function clearSelectedQueueRender(): void {
   selectedQueueRender.value = null;
 }
 
+function revealRestoredMobileGeneration(): void {
+  tab.value = "generate";
+  void nextTick(() => {
+    if (!mobileContent.value) return;
+    mobileContent.value.scrollTop = 0;
+    mobileContent.value.scrollLeft = 0;
+    createHeading.value?.focus({ preventScroll: true });
+  });
+}
+
 async function selectMobilePrint(job: Job): Promise<void> {
   const epoch = ++mobilePrintSelectionEpoch;
   clearSelectedQueueRender();
@@ -2579,7 +2665,7 @@ async function selectMobilePrint(job: Job): Promise<void> {
   draft.stopEditing();
   draft.output = "single";
   latestResultClientId.value = job.status === "complete" ? job.clientId : null;
-  tab.value = "generate";
+  revealRestoredMobileGeneration();
   if (
     durable &&
     job.id &&
@@ -3564,7 +3650,8 @@ async function submitMobileDurableGeneration(input: {
 function loadHosts(): MobileHost[] {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as MobileHost[];
-    return raw.map((host) => ({
+    const merged = mergeMobileHostsByInstanceId(raw);
+    const normalized = merged.hosts.map((host) => ({
       ...host,
       connected: host.connected !== false,
       apiKey: "",
@@ -3574,6 +3661,50 @@ function loadHosts(): MobileHost[] {
       authorityRejected: false,
       instanceMismatch: undefined,
     }));
+    pendingMobileHostAliasDrops = merged.dropped;
+    for (const { loser, survivor } of merged.dropped) {
+      if (localStorage.getItem(SELECTED_KEY) === loser)
+        localStorage.setItem(SELECTED_KEY, survivor);
+      if (localStorage.getItem(MOBILE_GENERATE_TARGET_KEY) === loser) {
+        localStorage.setItem(MOBILE_GENERATE_TARGET_KEY, survivor);
+      }
+      try {
+        const durable = JSON.parse(
+          localStorage.getItem(MOBILE_DURABLE_GENERATIONS_KEY) ?? "[]",
+        ) as Array<{ tracker?: { hostId?: string } }>;
+        for (const recovery of durable) {
+          if (recovery.tracker?.hostId === loser) recovery.tracker.hostId = survivor;
+        }
+        localStorage.setItem(MOBILE_DURABLE_GENERATIONS_KEY, JSON.stringify(durable));
+
+        const sequence = JSON.parse(localStorage.getItem(SEQUENCE_RECOVERY_KEY) ?? "null") as {
+          hostId?: string;
+        } | null;
+        if (sequence?.hostId === loser) {
+          sequence.hostId = survivor;
+          localStorage.setItem(SEQUENCE_RECOVERY_KEY, JSON.stringify(sequence));
+        }
+
+        const activity = JSON.parse(localStorage.getItem(LIVE_ACTIVITY_KEY) ?? "{}") as Record<
+          string,
+          unknown
+        >;
+        if (Object.hasOwn(activity, loser)) {
+          activity[survivor] ??= activity[loser];
+          delete activity[loser];
+          localStorage.setItem(LIVE_ACTIVITY_KEY, JSON.stringify(activity));
+        }
+      } catch {
+        // Each loader already rejects malformed recovery state safely.
+      }
+    }
+    if (merged.dropped.length > 0) {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify(normalized.map(({ apiKey: _apiKey, ...host }) => host)),
+      );
+    }
+    return normalized;
   } catch {
     return [];
   }
@@ -3601,13 +3732,34 @@ async function hydrateApiKeys(): Promise<void> {
   await Promise.all(
     hosts.value.map(async (host) => {
       try {
-        host.apiKey =
-          (await invoke<string | null>("keychain_get_api_key", { hostId: host.id })) ?? "";
+        let key = await invoke<string | null>("keychain_get_api_key", { hostId: host.id });
+        let migratedAliasKey = false;
+        if (!key) {
+          for (const alias of pendingMobileHostAliasDrops.filter(
+            ({ survivor }) => survivor === host.id,
+          )) {
+            key = await invoke<string | null>("keychain_get_api_key", { hostId: alias.loser });
+            if (key) {
+              migratedAliasKey = true;
+              break;
+            }
+          }
+        }
+        host.apiKey = key ?? "";
+        if (host.apiKey && migratedAliasKey) {
+          await invoke("keychain_set_api_key", { hostId: host.id, apiKey: host.apiKey });
+        }
       } catch {
         host.apiKey = "";
       }
     }),
   );
+  await Promise.all(
+    pendingMobileHostAliasDrops.map(({ loser }) =>
+      invoke("keychain_delete_api_key", { hostId: loser }).catch(() => undefined),
+    ),
+  );
+  pendingMobileHostAliasDrops = [];
 }
 
 async function connectHost(address?: string, discoveredName?: string): Promise<void> {
@@ -3616,25 +3768,27 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     const baseUrl = normalizeRemoteAddress(address ?? hostInput.address);
     const target = { baseUrl, apiKey: hostInput.apiKey.trim() || null };
     const status = await apiJsonTo<ServerStatus>(target, "/api/status");
-    const instanceId = status.instance_id ?? undefined;
+    const instanceId = status.instance_id?.trim() || undefined;
     const existing = hosts.value.find(
       (host) =>
-        host.baseUrl === baseUrl ||
-        (instanceId &&
-          (host.instanceId === instanceId || host.id === instanceId) &&
-          (!host.hostname || !status.hostname || host.hostname === status.hostname)),
+        (instanceId && host.instanceId?.trim() === instanceId) ||
+        (host.baseUrl === baseUrl && (!host.instanceId || !instanceId)),
     );
-    // URL identity keeps two machines that copied the same MOLD_HOME distinct;
-    // a compatible saved alias keeps its existing keychain id.
-    const id = existing?.id ?? remoteHostId(baseUrl);
+    const slug = remoteHostId(baseUrl);
+    const conflictingSlug = hosts.value.some(
+      (host) => host.id === slug && host.instanceId?.trim() !== instanceId,
+    );
+    const id = existing?.id ?? (conflictingSlug && instanceId ? instanceId : slug);
+    const successfulApiKey = hostInput.apiKey.trim() || existing?.apiKey || "";
     const saved: MobileHost = {
       id,
       name: hostInput.name.trim() || discoveredName || status.hostname || new URL(baseUrl).hostname,
       baseUrl,
-      apiKey: hostInput.apiKey.trim(),
+      apiKey: successfulApiKey,
       hostname: status.hostname ?? undefined,
       version: status.version,
       instanceId,
+      lastConnectedAtMs: Date.now(),
       connected: true,
       online: true,
       stale: false,
@@ -3642,8 +3796,26 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
       authorityRejected: false,
       instanceMismatch: undefined,
     };
-    if (existing) Object.assign(existing, saved);
-    else hosts.value.push(saved);
+    if (existing) {
+      if (existing.baseUrl !== baseUrl || existing.apiKey !== successfulApiKey) {
+        cancelHostProbe(existing.id);
+        retireMobileHostAuthority(existing.id);
+        pruneHostOrganization(existing.id);
+        knownHostReachability.delete(existing.id);
+      }
+      Object.assign(existing, saved);
+    } else {
+      for (const host of hosts.value) {
+        if (host.baseUrl === baseUrl && host.instanceId?.trim() !== instanceId) {
+          host.connected = false;
+          host.online = false;
+        }
+      }
+      hosts.value.push(saved);
+    }
+    const aliases = mergeMobileHostsByInstanceId(hosts.value);
+    hosts.value = aliases.hosts;
+    remapMobileHostAliases(aliases.dropped);
     knownHostReachability.add(saved.id);
     if (saved.apiKey) {
       await invoke("keychain_set_api_key", { hostId: saved.id, apiKey: saved.apiKey });
@@ -3688,10 +3860,25 @@ function clearDiscoveredHost() {
 }
 
 async function discoverHosts(): Promise<void> {
+  if (discovering.value) return;
   discovering.value = true;
   hostError.value = "";
   try {
-    discovered.value = await invoke<DiscoveredHost[]>("discover_mold_hosts", { timeoutMs: 2500 });
+    const found = await invoke<DiscoveredHost[]>("discover_mold_hosts", { timeoutMs: 2500 });
+    const reachableKnown = new Set(
+      hosts.value
+        .filter((host) => host.connected !== false && host.online && !host.stale)
+        .map((host) => host.instanceId?.trim())
+        .filter(Boolean),
+    );
+    const seen = new Set<string>();
+    discovered.value = found.filter((host) => {
+      const uuid = host.instanceId?.trim();
+      if (!uuid) return true;
+      if (reachableKnown.has(uuid) || seen.has(uuid)) return false;
+      seen.add(uuid);
+      return true;
+    });
   } catch (error) {
     hostError.value = describeTransportError(error);
   } finally {
@@ -3789,7 +3976,27 @@ async function selectHost(id: string): Promise<void> {
 }
 
 function showHostDetail(id: string): void {
+  const scroller = mobileContent.value;
+  const showingMachineList = Boolean(scroller?.querySelector("[data-test='mobile-host-row']"));
+  rememberSessionScroll(MOBILE_MACHINES_SCROLL_KEY, {
+    top: showingMachineList ? (scroller?.scrollTop ?? 0) : 0,
+    left: 0,
+  });
   hostDetailId.value = id;
+  void nextTick(() => {
+    if (mobileContent.value) mobileContent.value.scrollTop = 0;
+  });
+}
+
+function closeHostDetail(): void {
+  hostDetailId.value = "";
+  void nextTick(() => {
+    const scroller = mobileContent.value;
+    if (!scroller) return;
+    const position = sessionScrollPosition(MOBILE_MACHINES_SCROLL_KEY);
+    scroller.scrollTop = position.top;
+    scroller.scrollLeft = position.left;
+  });
 }
 
 function renameHost(payload: { id: string; name: string }): void {
@@ -3830,6 +4037,7 @@ function updateHostStatus(payload: {
   const host = hosts.value.find((candidate) => candidate.id === payload.id);
   if (!host) return false;
   if (payload.status) {
+    const priorInstanceId = host.instanceId?.trim() || null;
     const priorCacheKey = host.instanceId?.trim() || host.id;
     if (recordMobileHostStatus(host, payload.status) === "instance_mismatch") {
       retireMobileHostAuthority(host.id);
@@ -3840,6 +4048,14 @@ function updateHostStatus(payload: {
     const nextCacheKey = host.instanceId?.trim() || host.id;
     if (priorCacheKey !== nextCacheKey) void clearCachedGalleryHosts([priorCacheKey]);
     captureHostTelemetry(host.id, payload.status);
+    const aliases = mergeMobileHostsByInstanceId(hosts.value);
+    if (aliases.dropped.length > 0) {
+      hosts.value = aliases.hosts;
+      remapMobileHostAliases(aliases.dropped);
+    }
+    if (priorInstanceId !== (host.instanceId?.trim() || null) || aliases.dropped.length > 0) {
+      persistHosts();
+    }
   } else {
     const error = payload.error ?? new Error("Status probe failed");
     if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
@@ -6988,12 +7204,78 @@ function retryGeneratedPreview(): void {
   renewGeneratedResult(true);
 }
 
-async function thumbnailUrl(
-  target: ApiTarget,
-  hostId: string,
-  filename: string,
+const THUMBNAIL_RENDITION_HEADER = "x-mold-thumbnail-rendition";
+
+function persistentThumbnailVersion(
+  print: Pick<MobileGalleryImage, "media_version" | "timestamp" | "size_bytes">,
+): string | null {
+  if (typeof print.media_version === "string" && print.media_version.trim()) {
+    return print.media_version;
+  }
+  return typeof print.size_bytes === "number" &&
+    Number.isFinite(print.size_bytes) &&
+    print.size_bytes >= 0
+    ? `${print.timestamp}:${print.size_bytes}`
+    : null;
+}
+
+function runtimeThumbnailVersion(
+  print: Pick<MobileGalleryImage, "media_version" | "timestamp" | "size_bytes">,
+): string {
+  return persistentThumbnailVersion(print) ?? `session:${print.timestamp}`;
+}
+
+function thumbnailRouteGeneration(print: Pick<PendingGalleryPrint, "cacheKey" | "target">): number {
+  return thumbnailRouteGenerationFor(print.cacheKey, print.target);
+}
+
+function thumbnailIdentity(
+  print: Pick<
+    PendingGalleryPrint,
+    "cacheKey" | "filename" | "media_version" | "timestamp" | "size_bytes" | "target"
+  >,
+  tier: MobileThumbnailTier = thumbnailTier(),
+): string {
+  return JSON.stringify([
+    print.cacheKey,
+    print.filename,
+    runtimeThumbnailVersion(print),
+    tier,
+    thumbnailRouteGeneration(print),
+  ]);
+}
+
+function cachedThumbnailRef(
+  print: Pick<
+    PendingGalleryPrint,
+    "cacheKey" | "filename" | "media_version" | "timestamp" | "size_bytes"
+  >,
+  tier: MobileThumbnailTier = thumbnailTier(),
+): CachedGalleryMediaRef | null {
+  const mediaVersion = persistentThumbnailVersion(print);
+  return mediaVersion
+    ? { hostId: print.cacheKey, filename: print.filename, mediaVersion, tier }
+    : null;
+}
+
+function thumbnailRequestPath(
+  print: Pick<PendingGalleryPrint, "filename" | "media_version" | "timestamp" | "size_bytes">,
+  tier: MobileThumbnailTier,
+): string {
+  const params = [
+    persistentThumbnailVersion(print)
+      ? `v=${encodeURIComponent(persistentThumbnailVersion(print)!)}`
+      : null,
+    thumbnailRenditionQuery(tier),
+  ].filter((value): value is string => value !== null);
+  return `${thumbnailPath(print.filename)}?${params.join("&")}`;
+}
+
+async function thumbnailBlob(
+  print: PendingGalleryPrint,
+  tier: MobileThumbnailTier = thumbnailTier(),
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<Blob> {
   const controller = new AbortController();
   const cancel = () => controller.abort();
   if (signal?.aborted) controller.abort();
@@ -7003,34 +7285,34 @@ async function thumbnailUrl(
   const deadline = new Promise<never>((_resolve, reject) => {
     controller.signal.addEventListener(
       "abort",
-      () => reject(new Error(`Gallery thumbnail timed out: ${filename}`)),
+      () => reject(new Error(`Gallery thumbnail timed out: ${print.filename}`)),
       { once: true },
     );
     timeout = setTimeout(() => controller.abort(), GALLERY_THUMBNAIL_TIMEOUT_MS);
   });
   const load = async () => {
-    let blob = await loadCachedGalleryMedia(hostId, filename, "thumbnail");
-    if (controller.signal.aborted) throw new Error(`Gallery thumbnail timed out: ${filename}`);
+    const mediaRef = cachedThumbnailRef(print, tier);
+    let blob = mediaRef ? await loadCachedGalleryMedia(mediaRef) : null;
+    if (controller.signal.aborted) {
+      throw new Error(`Gallery thumbnail timed out: ${print.filename}`);
+    }
     if (!blob) {
-      const response = await apiFetchTo(target, galleryMediaPath(filename, "host", true), {
+      const response = await apiFetchTo(print.target, thumbnailRequestPath(print, tier), {
         signal: controller.signal,
       });
+      if (response.ok === false) throw new Error(`Gallery thumbnail failed: ${response.status}`);
       blob = await response.blob();
-      if (controller.signal.aborted) throw new Error(`Gallery thumbnail timed out: ${filename}`);
-      void storeCachedGalleryMedia(hostId, filename, "thumbnail", blob);
+      if (controller.signal.aborted) {
+        throw new Error(`Gallery thumbnail timed out: ${print.filename}`);
+      }
+      if (!(await validGalleryThumbnailBlob(blob))) {
+        throw new Error(`Gallery thumbnail was not a bounded image: ${print.filename}`);
+      }
+      const confirmedRendition =
+        tier === 256 || response.headers?.get(THUMBNAIL_RENDITION_HEADER) != null;
+      if (mediaRef && confirmedRendition) await storeCachedGalleryMedia(mediaRef, blob);
     }
-    // WKWebView's native image context menu forwards an object URL as text to
-    // Share extensions. Give iOS an inline image resource so Share, Copy, and
-    // Save to Photos receive image data rather than a process-local `blob:` URL.
-    // Thumbnails are bounded to 256 px by the server, so the base64 expansion
-    // stays small; browser development keeps cheaper revocable object URLs.
-    if (isNativeIOSRuntime()) {
-      const mimeType = blob.type.startsWith("image/") ? blob.type : "image/png";
-      return `data:${mimeType};base64,${await blobToBase64(blob)}`;
-    }
-    const url = URL.createObjectURL(blob);
-    objectUrls.add(url);
-    return url;
+    return blob;
   };
   try {
     // The explicit race is intentional: some WKWebView/Android WebView fetch
@@ -7043,8 +7325,21 @@ async function thumbnailUrl(
   }
 }
 
-function galleryThumbnailRetryKey(print: Pick<GalleryPrint, "cacheKey" | "filename">): string {
-  return `${print.cacheKey}\u0000${print.filename}`;
+async function thumbnailDisplayUrl(blob: Blob): Promise<string> {
+  // WKWebView's native image context menu forwards an object URL as text to
+  // Share extensions. Give iOS an inline image resource so Share, Copy, and
+  // Save to Photos receive image data rather than a process-local `blob:` URL.
+  if (isNativeIOSRuntime()) {
+    const mimeType = blob.type.startsWith("image/") ? blob.type : "image/png";
+    return `data:${mimeType};base64,${await blobToBase64(blob)}`;
+  }
+  const url = URL.createObjectURL(blob);
+  objectUrls.add(url);
+  return url;
+}
+
+function galleryThumbnailRetryKey(print: PendingGalleryPrint): string {
+  return thumbnailIdentity(print);
 }
 
 function cancelGalleryThumbnailRetries(): void {
@@ -7085,18 +7380,18 @@ function scheduleGalleryThumbnailRetry(print: GalleryPrint, attempt = 0): void {
 function loadGalleryThumbnail(print: GalleryPrint, failedAttempts = 0): void {
   const key = galleryThumbnailRetryKey(print);
   if (galleryThumbnailHandles.has(key) || !print.thumbnailPending) return;
-  const mediaVersion = print.media_version ?? `${print.timestamp}:${print.size_bytes ?? "unknown"}`;
   const handle = galleryThumbnailScheduler.schedule({
-    key: `${print.cacheKey}|${print.filename}|${mediaVersion}`,
+    key,
     hostKey: print.cacheKey,
     priority: "visible",
-    run: (signal) => thumbnailUrl(print.target, print.cacheKey, print.filename, signal),
+    run: (signal) => thumbnailBlob(print, thumbnailTier(), signal),
   });
   galleryThumbnailHandles.set(key, handle);
   void handle.promise
-    .then((url) => {
+    .then(async (blob) => {
+      const url = await thumbnailDisplayUrl(blob);
       const latest = galleryByThumbnailKey.get(key);
-      if (!latest || unmounted) {
+      if (!latest || unmounted || galleryThumbnailRetryKey(latest) !== key) {
         revokeObjectUrl(url);
         return;
       }
@@ -7107,6 +7402,112 @@ function loadGalleryThumbnail(print: GalleryPrint, failedAttempts = 0): void {
     .finally(() => {
       if (galleryThumbnailHandles.get(key) === handle) galleryThumbnailHandles.delete(key);
     });
+}
+
+interface MobilePrewarmCandidate extends PrewarmCandidate {
+  print: GalleryPrint;
+  mediaRef: CachedGalleryMediaRef;
+  identity: string;
+}
+
+function cancelMobileGalleryPrewarm(): void {
+  mobileGalleryPrewarmEpoch += 1;
+  if (mobileGalleryPrewarmTimer !== null) clearTimeout(mobileGalleryPrewarmTimer);
+  mobileGalleryPrewarmTimer = null;
+  for (const handle of mobileGalleryPrewarmHandles) handle.cancel();
+  mobileGalleryPrewarmHandles.clear();
+}
+
+async function runMobileGalleryPrewarm(): Promise<void> {
+  if (
+    tab.value !== "gallery" ||
+    document.visibilityState === "hidden" ||
+    gallery.value.length === 0
+  ) {
+    return;
+  }
+  const epoch = ++mobileGalleryPrewarmEpoch;
+  const tier = thumbnailTier();
+  const columns = Math.max(1, galleryColumns.value);
+  const startRow = Math.floor(mobileGalleryWindow.value.startIndex / columns);
+  const endRow = Math.max(startRow, Math.floor((mobileGalleryWindow.value.endIndex - 1) / columns));
+  const rowsPerViewport = Math.max(1, endRow - startRow + 1);
+  const candidates: MobilePrewarmCandidate[] = gallery.value.flatMap((print, index) => {
+    const mediaRef = cachedThumbnailRef(print, tier);
+    const identity = thumbnailIdentity(print, tier);
+    // Visible rows already persist through the foreground loader. Excluding
+    // them here also keeps a foreground failure on one retry stream instead
+    // of letting background prewarm race its backoff with another fetch.
+    return mediaRef &&
+      !visibleGalleryThumbnailKeys.has(identity) &&
+      !galleryThumbnailHandles.has(identity) &&
+      !galleryThumbnailRetryTimers.has(identity) &&
+      !mobileGalleryPrewarmAttempted.has(identity)
+      ? [
+          {
+            sourceKey: print.cacheKey,
+            filename: print.filename,
+            mediaVersion: mediaRef.mediaVersion,
+            rowIndex: Math.floor(index / columns),
+            print,
+            mediaRef,
+            identity,
+          },
+        ]
+      : [];
+  });
+  const plan = planPrewarm(candidates, { startRow, endRow, rowsPerViewport });
+  if (plan.length === 0) return;
+  const byHost = new Map<string, typeof plan>();
+  for (const entry of plan) {
+    const list = byHost.get(entry.candidate.sourceKey) ?? [];
+    list.push(entry);
+    byHost.set(entry.candidate.sourceKey, list);
+  }
+  const tranche: ThumbnailHandle<Blob>[] = [];
+  for (const entries of byHost.values()) {
+    for (const batch of chunkForProbe(entries)) {
+      const typed = batch as Array<{
+        candidate: MobilePrewarmCandidate;
+        priority: "near" | "background";
+      }>;
+      const cached = await probeCachedGalleryMedia(typed.map((entry) => entry.candidate.mediaRef));
+      if (epoch !== mobileGalleryPrewarmEpoch) return;
+      typed.forEach((entry, index) => {
+        mobileGalleryPrewarmAttempted.add(entry.candidate.identity);
+        if (cached[index]) return;
+        const handle = galleryThumbnailScheduler.schedule({
+          key: entry.candidate.identity,
+          hostKey: entry.candidate.sourceKey,
+          priority: entry.priority,
+          run: (signal) => thumbnailBlob(entry.candidate.print, tier, signal),
+        });
+        mobileGalleryPrewarmHandles.add(handle);
+        tranche.push(handle);
+        void handle.promise
+          .catch(() => {})
+          .finally(() => mobileGalleryPrewarmHandles.delete(handle));
+      });
+    }
+  }
+  await Promise.allSettled(tranche.map((handle) => handle.promise));
+  if (epoch !== mobileGalleryPrewarmEpoch) return;
+  scheduleMobileGalleryPrewarm(100);
+}
+
+function scheduleMobileGalleryPrewarm(delay = 500): void {
+  cancelMobileGalleryPrewarm();
+  if (
+    tab.value !== "gallery" ||
+    document.visibilityState === "hidden" ||
+    gallery.value.length === 0
+  ) {
+    return;
+  }
+  mobileGalleryPrewarmTimer = setTimeout(() => {
+    mobileGalleryPrewarmTimer = null;
+    void runMobileGalleryPrewarm();
+  }, delay);
 }
 
 function mobileGalleryCacheKey(host: MobileHost): string {
@@ -7159,12 +7560,9 @@ function enqueueGalleryOperation(operation: () => Promise<void>): Promise<void> 
 async function performGalleryRefresh(): Promise<void> {
   cancelGalleryThumbnailRetries();
   clearGallerySelection();
-  galleryLoading.value = true;
+  galleryLoading.value = galleryCopies.length === 0;
+  galleryRefreshing.value = true;
   galleryError.value = "";
-  const prior = gallery.value;
-  gallery.value = [];
-  galleryByThumbnailKey.clear();
-  for (const item of prior) revokeObjectUrl(item.thumbnailUrl);
   const allHosts = connectedHosts.value;
   const cachedResults = await Promise.all(
     allHosts.map(async (host) => ({
@@ -7186,11 +7584,20 @@ async function performGalleryRefresh(): Promise<void> {
       target,
     }));
   });
-  if (cachedCopies.length > 0) {
+  if (galleryCopies.length === 0 && cachedCopies.length > 0) {
     galleryCopies = cachedCopies.sort((a, b) => b.timestamp - a.timestamp);
     rebuildGalleryOrganization();
     pendingGallery = visibleRepresentatives();
     await loadMoreGalleryPage();
+  }
+  const savedBaseline = galleryCopies.length > 0 ? [...galleryCopies] : cachedCopies;
+  if (savedBaseline.length > 0) {
+    galleryLoading.value = false;
+    await nextTick();
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+      else resolve();
+    });
   }
 
   const galleryHosts = allHosts.filter(
@@ -7201,6 +7608,7 @@ async function performGalleryRefresh(): Promise<void> {
     galleryHosts.map(async (host) => {
       const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
       const cacheKey = mobileGalleryCacheKey(host);
+      const cacheFence = captureCachedHostFence(cacheKey);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), GALLERY_HOST_TIMEOUT_MS);
       let prints: MobileGalleryImage[];
@@ -7234,12 +7642,16 @@ async function performGalleryRefresh(): Promise<void> {
       if (
         !currentHost ||
         currentHost.instanceMismatch ||
-        mobileGalleryCacheKey(currentHost) !== cacheKey
+        mobileGalleryCacheKey(currentHost) !== cacheKey ||
+        !isCachedHostFenceCurrent(cacheFence)
       ) {
         throw new Error("Gallery host identity changed while refreshing");
       }
       if (capabilities !== undefined) serverCapabilities[host.id] = capabilities;
-      await storeCachedGallery(cacheKey, prints);
+      await storeCachedGallery(cacheKey, prints, cacheFence);
+      if (!isCachedHostFenceCurrent(cacheFence)) {
+        throw new Error("Gallery changed while refreshing");
+      }
       return { host, cacheKey, target, prints };
     }),
   );
@@ -7253,13 +7665,22 @@ async function performGalleryRefresh(): Promise<void> {
       result.status === "fulfilled" ? [[result.value.host.id, result.value] as const] : [],
     ),
   );
+  const savedByHost = new Map<string, PendingGalleryPrint[]>();
+  for (const copy of savedBaseline) {
+    const copies = savedByHost.get(copy.hostId) ?? [];
+    copies.push(copy);
+    savedByHost.set(copy.hostId, copies);
+  }
   const refreshedCopies = connectedHosts.value
     .flatMap((host) => {
       const refreshed = refreshedByHost.get(host.id);
       const cacheKey = refreshed?.cacheKey ?? mobileGalleryCacheKey(host);
       const target = refreshed?.target ?? { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
       const cached = cachedByHost.get(host.id);
-      const prints = refreshed?.prints ?? (cached?.cacheKey === cacheKey ? cached.prints : []);
+      const saved = savedByHost.get(host.id);
+      const prints =
+        refreshed?.prints ??
+        (saved?.length ? saved : cached?.cacheKey === cacheKey ? cached.prints : []);
       return prints.map((print) => ({
         ...print,
         hostId: host.id,
@@ -7274,16 +7695,15 @@ async function performGalleryRefresh(): Promise<void> {
     galleryRefreshDeferred = true;
     if (failed) {
       galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable${
-        cachedCopies.length > 0 ? " · Showing saved Library" : ""
+        savedBaseline.length > 0 ? " · Showing saved Library" : ""
       }`;
     }
     galleryLoading.value = false;
+    galleryRefreshing.value = false;
     return;
   }
   galleryCopies = refreshedCopies;
-  for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
-  gallery.value = [];
-  galleryByThumbnailKey.clear();
+  mobileGalleryPrewarmAttempted.clear();
   rebuildGalleryOrganization();
   // The Trash listing is refetched on its own schedule; a live refresh only
   // marks it stale so the next Trash visit re-reads the host.
@@ -7291,32 +7711,51 @@ async function performGalleryRefresh(): Promise<void> {
   pendingGallery = visibleRepresentatives();
   if (failed) {
     galleryError.value = `${failed} host${failed === 1 ? "" : "s"} unavailable${
-      cachedCopies.length > 0 ? " · Showing saved Library" : ""
+      savedBaseline.length > 0 ? " · Showing saved Library" : ""
     }`;
   }
   await loadMoreGalleryPage();
   void pruneCachedGalleryMedia();
   galleryLoading.value = false;
+  galleryRefreshing.value = false;
   if (libraryScope.value === "trash") void refreshTrash();
 }
 
 async function loadMoreGalleryPage(): Promise<void> {
-  const page = pendingGallery.splice(0);
-  // Keep the complete logical index in memory so navigation, filtering, and
-  // selection stay O(1), but the template windows its DOM rows and hydrates
-  // thumbnails only for the visible/near window below.
-  const placed = page.map((print): GalleryPrint => ({
-    ...print,
-    thumbnailUrl: GALLERY_THUMBNAIL_PLACEHOLDER,
-    thumbnailPending: true,
-  }));
-  const start = gallery.value.length;
-  gallery.value.push(...placed);
-  // Store Vue proxies, not the raw objects passed to push: thumbnail
+  const desired = pendingGallery.splice(0);
+  const priorByPhysicalKey = new Map(
+    gallery.value.map((print) => [
+      galleryPrintKey(print),
+      { print, identity: thumbnailIdentity(print) },
+    ]),
+  );
+  const next: GalleryPrint[] = [];
+  for (const print of desired) {
+    const prior = priorByPhysicalKey.get(galleryPrintKey(print));
+    const identity = thumbnailIdentity(print);
+    if (prior?.identity === identity) {
+      Object.assign(prior.print, print);
+      next.push(prior.print);
+      priorByPhysicalKey.delete(galleryPrintKey(print));
+    } else {
+      if (prior) {
+        revokeObjectUrl(prior.print.thumbnailUrl);
+        priorByPhysicalKey.delete(galleryPrintKey(print));
+      }
+      next.push({
+        ...print,
+        thumbnailUrl: GALLERY_THUMBNAIL_PLACEHOLDER,
+        thumbnailPending: true,
+      });
+    }
+  }
+  for (const { print } of priorByPhysicalKey.values()) revokeObjectUrl(print.thumbnailUrl);
+  gallery.value.splice(0, gallery.value.length, ...next);
+  // Store Vue proxies, not the raw objects passed to splice: thumbnail
   // completions arrive from async closures and raw mutation bypasses proxy
   // traps, leaving the DOM stuck on its placeholder.
-  for (let index = start; index < gallery.value.length; index++) {
-    const print = gallery.value[index]!;
+  galleryByThumbnailKey.clear();
+  for (const print of gallery.value) {
     galleryByThumbnailKey.set(galleryThumbnailRetryKey(print), print);
   }
   markMobileLibrarySeen(galleryCopies);
@@ -7327,6 +7766,7 @@ async function loadMoreGalleryPage(): Promise<void> {
   // scrolling changes the window. Hydrate the proxies we just installed.
   await nextTick();
   syncVisibleGalleryThumbnails();
+  scheduleMobileGalleryPrewarm();
 }
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
@@ -7489,7 +7929,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     // was a gallery image its bytes are still on the print's host — fetch
     // them so the wells fill instead of demanding a reattach.
     void restoreReusedH3BoundaryMedia(print);
-    selectedPrint.value = null;
+    dismissSelectedPrint();
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.
     galleryRefreshDeferred = false;
@@ -7849,7 +8289,7 @@ async function useSelectedPrintAsSource(): Promise<void> {
       form.sourceFit = defaultSourceFitPolicy();
       setGenerationStatus("Gallery print selected as source");
     }
-    selectedPrint.value = null;
+    dismissSelectedPrint();
     galleryRefreshDeferred = false;
     tab.value = "generate";
   } catch (error) {
@@ -7874,6 +8314,12 @@ function galleryImageMimeType(print: GalleryImage, declared: string): string {
 function openPrint(print: GalleryPrint): void {
   reusePrintError.value = "";
   selectedPrint.value = print;
+  if (androidNativeRuntime && !window.history.state?.[GALLERY_VIEWER_HISTORY_KEY]) {
+    window.history.pushState(
+      { ...(window.history.state ?? {}), [GALLERY_VIEWER_HISTORY_KEY]: true },
+      "",
+    );
+  }
 }
 
 const galleryPrintKey = (print: Pick<GalleryPrint, "hostId" | "filename">) =>
@@ -8299,9 +8745,6 @@ function visibleRepresentatives(): PendingGalleryPrint[] {
 /** Rebuild the paged grid from the current scope, filters, and organization. */
 async function resetGalleryPaging(): Promise<void> {
   cancelGalleryThumbnailRetries();
-  for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
-  gallery.value = [];
-  galleryByThumbnailKey.clear();
   pendingGallery = visibleRepresentatives();
   await loadMoreGalleryPage();
 }
@@ -8376,17 +8819,19 @@ function closeCollection(): void {
 /** Collection cards own their cover URL. Grid URLs are revoked whenever scope
  * paging resets, so borrowing one here produces a broken image after the user
  * switches from Prints to Collections. */
-function collectionCoverCandidates(
-  card: MobileCollectionCard,
-): Array<{ hostId: string; filename: string }> {
-  const candidates: Array<{ hostId: string; filename: string }> = [];
+function collectionCoverCandidates(card: MobileCollectionCard): PendingGalleryPrint[] {
+  const candidates: PendingGalleryPrint[] = [];
   const seen = new Set<string>();
   const add = (candidate: { hostId: string; filename: string } | null) => {
     if (!candidate) return;
     const key = `${candidate.hostId}\u0000${candidate.filename}`;
     if (seen.has(key)) return;
+    const print = galleryCopies.find(
+      (copy) => copy.hostId === candidate.hostId && copy.filename === candidate.filename,
+    );
+    if (!print) return;
     seen.add(key);
-    candidates.push(candidate);
+    candidates.push(print);
   };
   add(card.cover);
   // A merged collection can name its explicit cover on a sleeping machine.
@@ -8417,7 +8862,7 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
   for (const card of cards) {
     const candidates = collectionCoverCandidates(card);
     const candidatesKey = candidates
-      .map((candidate) => `${candidate.hostId}\u0000${candidate.filename}`)
+      .map((candidate) => thumbnailIdentity(candidate))
       .join("\u0001");
     const prior = collectionCovers[card.slug];
     if (candidates.length === 0) {
@@ -8444,6 +8889,7 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
       hostId: first.hostId,
       filename: first.filename,
       candidatesKey,
+      mediaRef: cachedThumbnailRef(first),
       url: "",
       status: "loading",
     };
@@ -8456,20 +8902,19 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
         // be offline. Its Lightroom-style local thumbnail remains eligible;
         // otherwise move immediately to a reachable physical copy.
         if (host.online === false) {
-          const cached = await loadCachedGalleryMedia(
-            mobileGalleryCacheKey(host),
-            candidate.filename,
-            "thumbnail",
-          );
+          const mediaRef = cachedThumbnailRef(candidate);
+          const cached = mediaRef ? await loadCachedGalleryMedia(mediaRef) : null;
           if (!cached) continue;
         }
         try {
-          const url = await thumbnailUrl(
-            mobileHostTarget(host),
-            mobileGalleryCacheKey(host),
-            candidate.filename,
-          );
-          return { ...candidate, url };
+          const blob = await thumbnailBlob(candidate);
+          const url = await thumbnailDisplayUrl(blob);
+          return {
+            ...candidate,
+            url,
+            mediaRef: cachedThumbnailRef(candidate),
+            identity: thumbnailIdentity(candidate),
+          };
         } catch {
           // A collection is cross-host. Try its next physical member before
           // turning the entire card into an error placeholder.
@@ -8477,14 +8922,25 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
       }
       throw new Error("No collection cover is currently readable");
     })()
-      .then(({ hostId, filename, url }) => {
+      .then(({ hostId, filename, url, mediaRef, identity }) => {
         const current = collectionCovers[card.slug];
-        if (!current || current.candidatesKey !== candidatesKey || unmounted) {
+        if (
+          !current ||
+          current.candidatesKey !== candidatesKey ||
+          unmounted ||
+          !candidates.some(
+            (candidate) =>
+              candidate.hostId === hostId &&
+              candidate.filename === filename &&
+              thumbnailIdentity(candidate) === identity,
+          )
+        ) {
           revokeObjectUrl(url);
           return;
         }
         current.hostId = hostId;
         current.filename = filename;
+        current.mediaRef = mediaRef;
         current.url = url;
         current.status = "ready";
         const timer = collectionCoverRetryTimers.get(card.slug);
@@ -8522,7 +8978,7 @@ function scheduleCollectionCoverRetry(card: MobileCollectionCard): void {
         current.status !== "error" ||
         current.candidatesKey !==
           collectionCoverCandidates(card)
-            .map((candidate) => `${candidate.hostId}\u0000${candidate.filename}`)
+            .map((candidate) => thumbnailIdentity(candidate))
             .join("\u0001")
       ) {
         return;
@@ -8543,6 +8999,7 @@ function pauseCollectionCoverRetries(): void {
 function handleCollectionCoverError(card: MobileCollectionCard): void {
   const state = collectionCovers[card.slug];
   if (!state) return;
+  if (state.mediaRef) void evictCachedGalleryMediaEntry(state.mediaRef);
   revokeObjectUrl(state.url);
   state.url = "";
   state.status = "error";
@@ -8551,6 +9008,8 @@ function handleCollectionCoverError(card: MobileCollectionCard): void {
 
 function handleGalleryThumbnailError(print: GalleryPrint): void {
   if (print.thumbnailPending) return;
+  const mediaRef = cachedThumbnailRef(print);
+  if (mediaRef) void evictCachedGalleryMediaEntry(mediaRef);
   revokeObjectUrl(print.thumbnailUrl);
   print.thumbnailUrl = GALLERY_THUMBNAIL_PLACEHOLDER;
   print.thumbnailPending = true;
@@ -9350,7 +9809,7 @@ async function restoreSelectedPrint(): Promise<void> {
     ...restored.map(({ trashed_at: _trashedAt, purge_at: _purgeAt, ...copy }) => copy),
   ].sort((a, b) => b.timestamp - a.timestamp);
   trashCopies = trashCopies.filter((copy) => !keys.has(galleryPrintKey(copy)));
-  selectedPrint.value = null;
+  dismissSelectedPrint();
   galleryRefreshDeferred = false;
   rebuildGalleryOrganization();
   await requeueGallery();
@@ -9367,7 +9826,7 @@ async function deleteSelectedPrintForever(): Promise<void> {
     copies.filter((copy) => !outcome.failedHostIds.has(copy.hostId)).map(galleryPrintKey),
   );
   if (keys.size === 0) return;
-  selectedPrint.value = null;
+  dismissSelectedPrint();
   galleryRefreshDeferred = false;
   await enqueueGalleryOperation(() => dropCopiesFromLibrary(keys, { purgeThumbnails: true }));
 }
@@ -9444,8 +9903,33 @@ function galleryPrintAtPoint(x: number, y: number): GalleryPrint | null {
   const tile = elements
     .map((element) => element?.closest<HTMLElement>("[data-gallery-print-key]") ?? null)
     .find((element) => element !== null);
-  const key = tile?.dataset.galleryPrintKey;
+  // Android tiles deliberately sit outside pointer hit-testing so Chrome can
+  // hand a vertical drag to the Library scroller. Recover the visual tile by
+  // bounds for delegated taps and select-mode drag painting.
+  const boundedTile =
+    tile ??
+    [
+      ...(galleryGridSurface.value?.querySelectorAll<HTMLElement>("[data-gallery-print-key]") ??
+        []),
+    ].find((element) => {
+      const bounds = element.getBoundingClientRect();
+      return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
+    });
+  const key = boundedTile?.dataset.galleryPrintKey;
   return key ? (gallery.value.find((print) => galleryPrintKey(print) === key) ?? null) : null;
+}
+
+function beginAndroidGalleryGridSelection(event: PointerEvent): void {
+  if (!androidNativeRuntime) return;
+  const print = galleryPrintAtPoint(event.clientX, event.clientY);
+  if (print) beginGallerySelectionDrag(event, print);
+}
+
+function handleAndroidGalleryGridClick(event: MouseEvent): void {
+  if (!androidNativeRuntime) return;
+  if (event.target instanceof Element && event.target.closest("[data-gallery-print-key]")) return;
+  const print = galleryPrintAtPoint(event.clientX, event.clientY);
+  if (print) handleGalleryTileClick(event, print);
 }
 
 function applyGalleryDragAtPoint(): void {
@@ -9620,7 +10104,7 @@ function selectAllGalleryPrints(): void {
   galleryDeleteConfirming.value = false;
 }
 
-function handleGalleryTileClick(event: MouseEvent, print: GalleryPrint): void {
+function handleGalleryTileClick(event: MouseEvent | KeyboardEvent, print: GalleryPrint): void {
   if (galleryPinchPendingClicks > 0 && event.detail !== 0) {
     galleryPinchPendingClicks -= 1;
     return;
@@ -9669,15 +10153,20 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
     copies.filter((copy) => !failedHostIds.has(copy.hostId)).map(galleryPrintKey),
   );
   const removedCopies = copies.filter((copy) => removedKeys.has(galleryPrintKey(copy)));
-  // Removed copies leave the offline cache (metadata and thumbnail bytes);
-  // the Trash grid repaints trashed prints from the host's own listing.
-  await removeCachedGalleryPrints(
-    removedCopies.map((copy) => ({ hostId: copy.cacheKey, filename: copy.filename })),
-  );
   const trashedCopies =
     kind === "trash"
       ? removedCopies.filter((copy) => librarySupport.value.trashHostIds.has(copy.hostId))
       : [];
+  const trashedKeys = new Set(trashedCopies.map(galleryPrintKey));
+  const hardDeletedCopies = removedCopies.filter((copy) => !trashedKeys.has(galleryPrintKey(copy)));
+  const removedCacheRows = removedCopies.map((copy) => ({
+    hostId: copy.cacheKey,
+    filename: copy.filename,
+  }));
+  await removeCachedGalleryRows(removedCacheRows);
+  await evictCachedGalleryMedia(
+    hardDeletedCopies.map((copy) => ({ hostId: copy.cacheKey, filename: copy.filename })),
+  );
   for (const print of gallery.value) revokeObjectUrl(print.thumbnailUrl);
   galleryCopies = galleryCopies.filter((print) => !removedKeys.has(galleryPrintKey(print)));
   trashCopies = trashCopies.filter((print) => !removedKeys.has(galleryPrintKey(print)));
@@ -9741,7 +10230,7 @@ function navigateSelectedPrint(delta: -1 | 1): void {
   selectedPrint.value = next;
 }
 
-function closePrint(): void {
+function closePrint(syncAndroidHistory = true): void {
   reusePrintEpoch += 1;
   reusePrintController?.abort();
   reusePrintController = null;
@@ -9751,7 +10240,7 @@ function closePrint(): void {
   sourceUseController = null;
   usingPrintAsSource.value = false;
   reusePrintError.value = "";
-  selectedPrint.value = null;
+  dismissSelectedPrint(syncAndroidHistory);
   if (galleryRefreshDeferred || galleryRefreshRequested) {
     galleryRefreshDeferred = false;
     // The viewer normally restores focus to its tile. A deferred refresh — or
@@ -9762,6 +10251,21 @@ function closePrint(): void {
       void refreshGallery();
     });
   }
+}
+
+function dismissSelectedPrint(syncAndroidHistory = true): void {
+  selectedPrint.value = null;
+  if (
+    syncAndroidHistory &&
+    androidNativeRuntime &&
+    window.history.state?.[GALLERY_VIEWER_HISTORY_KEY]
+  ) {
+    window.history.back();
+  }
+}
+
+function handleAndroidHistoryPop(): void {
+  if (androidNativeRuntime && selectedPrint.value) closePrint(false);
 }
 
 function reuseSelectedPrint(): void {
@@ -9923,6 +10427,7 @@ watch(tab, (next, previous) => {
     pendingLibraryScrollRestore = sessionScrollPosition(MOBILE_LIBRARY_SCROLL_KEY);
     void refreshGallery().then(restoreMobileLibraryScroll);
   } else {
+    cancelMobileGalleryPrewarm();
     pendingLibraryScrollRestore = null;
     // The primary destinations share this one WebView scroller. Non-Library
     // destinations still start at the top rather than inheriting its offset.
@@ -9972,7 +10477,11 @@ watch(
  * the submit path's settled handler.
  */
 function handleForegroundResume(): void {
-  if (unmounted || document.visibilityState === "hidden") return;
+  if (unmounted) return;
+  if (document.visibilityState === "hidden") {
+    cancelMobileGalleryPrewarm();
+    return;
+  }
   // Suspending mid-touch never delivers the matching pointerup, and a phantom
   // finger would make the next single touch read as a pinch — resizing the grid
   // from a plain scroll. Nothing can still be held after a resume, so drop them.
@@ -9996,63 +10505,192 @@ function handleForegroundResume(): void {
     void nextTick(() => {
       measureMobileGalleryWindow();
       syncVisibleGalleryThumbnails();
+      scheduleMobileGalleryPrewarm();
     });
     void refreshGallery();
   }
 }
 
-function beginLibraryPull(event: TouchEvent): void {
+const currentRefreshLabel = computed(() => {
+  if (tab.value === "gallery") return "Library";
+  if (tab.value === "catalog") return "Models";
+  if (tab.value === "hosts") return hostDetail.value ? hostDetail.value.name : "Machines";
+  return "";
+});
+
+const pullRefreshAvailable = computed(
+  () => !settingsOpen.value && ["gallery", "catalog", "hosts"].includes(tab.value),
+);
+
+async function refreshCurrentView(): Promise<void> {
+  if (tab.value === "gallery") {
+    await refreshGallery();
+    return;
+  }
+  if (tab.value === "catalog") {
+    await catalogView.value?.refresh();
+    return;
+  }
+  if (tab.value !== "hosts") return;
+  if (hostDetail.value) {
+    await hostDetailView.value?.refresh();
+    return;
+  }
+  await Promise.all([...connectedHosts.value.map((host) => probeHost(host)), discoverHosts()]);
+}
+
+function beginViewPull(event: TouchEvent): void {
   const scroller = mobileContent.value;
   if (
-    tab.value !== "gallery" ||
-    galleryPullRefreshing.value ||
+    !pullRefreshAvailable.value ||
+    viewPullRefreshing.value ||
     !scroller ||
     scroller.scrollTop > 0 ||
     event.touches.length !== 1
   ) {
-    galleryPullTouchId = null;
+    viewPullTouchId = null;
     return;
   }
   const touch = event.touches[0];
   if (!touch) return;
-  galleryPullTouchId = touch.identifier;
-  galleryPullStartX = touch.clientX;
-  galleryPullStartY = touch.clientY;
+  viewPullTouchId = touch.identifier;
+  viewPullStartX = touch.clientX;
+  viewPullStartY = touch.clientY;
 }
 
-function moveLibraryPull(event: TouchEvent): void {
-  if (galleryPullTouchId === null || event.touches.length !== 1) return;
-  const touch = [...event.touches].find((candidate) => candidate.identifier === galleryPullTouchId);
+function moveViewPull(event: TouchEvent): void {
+  if (viewPullTouchId === null || event.touches.length !== 1) return;
+  const touch = [...event.touches].find((candidate) => candidate.identifier === viewPullTouchId);
   if (!touch) return;
-  const deltaX = touch.clientX - galleryPullStartX;
-  const deltaY = touch.clientY - galleryPullStartY;
+  const deltaX = touch.clientX - viewPullStartX;
+  const deltaY = touch.clientY - viewPullStartY;
   if (deltaY <= 0 || Math.abs(deltaX) >= deltaY) {
-    galleryPullDistance.value = 0;
+    viewPullDistance.value = 0;
     return;
   }
   // Resist the drag like a native refresh control while keeping the threshold
   // reachable with one ordinary thumb pull.
-  galleryPullDistance.value = Math.min(GALLERY_PULL_MAX, deltaY * 0.62);
+  viewPullDistance.value = Math.min(VIEW_PULL_MAX, deltaY * 0.62);
   event.preventDefault();
 }
 
-function finishLibraryPull(): void {
-  if (galleryPullTouchId === null) return;
-  galleryPullTouchId = null;
-  const shouldRefresh = galleryPullDistance.value >= GALLERY_PULL_THRESHOLD;
-  galleryPullDistance.value = 0;
-  if (!shouldRefresh || galleryPullRefreshing.value) return;
-  galleryPullRefreshing.value = true;
-  galleryPullDistance.value = 48;
-  void refreshGallery().finally(() => {
-    galleryPullRefreshing.value = false;
-    galleryPullDistance.value = 0;
+function finishViewPull(): void {
+  if (viewPullTouchId === null) return;
+  viewPullTouchId = null;
+  const shouldRefresh = viewPullDistance.value >= VIEW_PULL_THRESHOLD;
+  viewPullDistance.value = 0;
+  if (!shouldRefresh || viewPullRefreshing.value) return;
+  viewPullRefreshing.value = true;
+  viewPullDistance.value = 48;
+  void refreshCurrentView().finally(() => {
+    viewPullRefreshing.value = false;
+    viewPullDistance.value = 0;
   });
 }
 
-function cancelLibraryPull(): void {
-  galleryPullTouchId = null;
-  galleryPullDistance.value = 0;
+function cancelViewPull(): void {
+  viewPullTouchId = null;
+  viewPullDistance.value = 0;
+}
+
+function horizontalScrollOwnsGesture(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  if (
+    target.closest(
+      "input, textarea, select, video, audio, [contenteditable='true'], [role='dialog'], .swipe-row, .live-activity-row--has-actions, .mobile-library-sheet, .mobile-catalog-detail, .mobile-catalog-target-sheet",
+    )
+  )
+    return true;
+  let element: Element | null = target;
+  while (element && element !== mobileContent.value) {
+    const style = getComputedStyle(element);
+    if (
+      (style.overflowX === "auto" || style.overflowX === "scroll") &&
+      element.scrollWidth > element.clientWidth
+    )
+      return true;
+    element = element.parentElement;
+  }
+  return false;
+}
+
+function beginMajorSwipe(event: TouchEvent): void {
+  if (
+    pairingScannerOpen.value ||
+    gallerySelectMode.value ||
+    event.touches.length !== 1 ||
+    horizontalScrollOwnsGesture(event.target)
+  ) {
+    majorSwipeTouchId = null;
+    return;
+  }
+  const touch = event.touches[0];
+  if (!touch) return;
+  majorSwipeTouchId = touch.identifier;
+  majorSwipeStartX = touch.clientX;
+  majorSwipeStartY = touch.clientY;
+}
+
+function moveMajorSwipe(event: TouchEvent): void {
+  if (majorSwipeTouchId === null || event.touches.length !== 1) return;
+  const touch = [...event.touches].find((candidate) => candidate.identifier === majorSwipeTouchId);
+  if (!touch) return;
+  const deltaX = touch.clientX - majorSwipeStartX;
+  const deltaY = touch.clientY - majorSwipeStartY;
+  if (Math.abs(deltaX) > 12 && Math.abs(deltaX) >= Math.abs(deltaY) * MAJOR_SWIPE_INTENT_RATIO)
+    event.preventDefault();
+}
+
+function finishMajorSwipe(event: TouchEvent): void {
+  if (majorSwipeTouchId === null) return;
+  const touch = [...(event.changedTouches ?? [])].find(
+    (candidate) => candidate.identifier === majorSwipeTouchId,
+  );
+  majorSwipeTouchId = null;
+  if (!touch) return;
+  const deltaX = touch.clientX - majorSwipeStartX;
+  const deltaY = touch.clientY - majorSwipeStartY;
+  if (
+    Math.abs(deltaX) < MAJOR_SWIPE_DISTANCE ||
+    Math.abs(deltaX) < Math.abs(deltaY) * MAJOR_SWIPE_INTENT_RATIO
+  )
+    return;
+
+  if (settingsOpen.value) {
+    if (deltaX > 0) closeSettings();
+    return;
+  }
+  if (deltaX > 0 && tab.value === "hosts" && hostDetail.value) {
+    closeHostDetail();
+    return;
+  }
+  const current = MAJOR_TABS.indexOf(tab.value);
+  const next = current + (deltaX < 0 ? 1 : -1);
+  if (next >= 0 && next < MAJOR_TABS.length) tab.value = MAJOR_TABS[next]!;
+}
+
+function cancelMajorSwipe(): void {
+  majorSwipeTouchId = null;
+}
+
+function beginMobileTouch(event: TouchEvent): void {
+  beginViewPull(event);
+  beginMajorSwipe(event);
+}
+
+function moveMobileTouch(event: TouchEvent): void {
+  moveViewPull(event);
+  moveMajorSwipe(event);
+}
+
+function finishMobileTouch(event: TouchEvent): void {
+  finishViewPull();
+  finishMajorSwipe(event);
+}
+
+function cancelMobileTouch(): void {
+  cancelViewPull();
+  cancelMajorSwipe();
 }
 
 function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement {
@@ -10153,6 +10791,7 @@ onMounted(async () => {
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
   window.addEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  window.addEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.addEventListener("scroll", scheduleMobileGalleryWindow, { passive: true });
   // The pinch tracks globally so a finger that slides off the grid mid-gesture
   // still reports, and so a lift outside the grid always ends it.
@@ -10252,6 +10891,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
   window.removeEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  window.removeEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.removeEventListener("scroll", scheduleMobileGalleryWindow);
   nativeGalleryContextKey = null;
   finishGallerySelectionDrag();
@@ -10276,6 +10916,7 @@ onBeforeUnmount(() => {
   if (liveActivityTimer) clearInterval(liveActivityTimer);
   liveActivityTimer = null;
   cancelGalleryThumbnailRetries();
+  cancelMobileGalleryPrewarm();
   if (libraryScrollRestoreTimer !== null) clearTimeout(libraryScrollRestoreTimer);
   libraryScrollRestoreTimer = null;
   for (const handle of galleryThumbnailHandles.values()) handle.cancel();
@@ -10439,10 +11080,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       ref="mobileContent"
       class="mobile-content"
       :class="{ 'is-library': !settingsOpen && tab === 'gallery' }"
-      @touchstart="beginLibraryPull"
-      @touchmove="moveLibraryPull"
-      @touchend="finishLibraryPull"
-      @touchcancel="cancelLibraryPull"
+      @touchstart="beginMobileTouch"
+      @touchmove="moveMobileTouch"
+      @touchend="finishMobileTouch"
+      @touchcancel="cancelMobileTouch"
     >
       <MobileSettingsView
         v-if="settingsOpen"
@@ -10454,7 +11095,20 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
       />
-      <template v-else-if="tab === 'generate'">
+      <div
+        v-if="pullRefreshAvailable"
+        class="mobile-library-pull"
+        :class="{ 'is-refreshing': viewPullRefreshing }"
+        :style="{ height: `${viewPullDistance}px` }"
+        role="status"
+        aria-live="polite"
+        data-test="mobile-view-pull"
+      >
+        <span v-if="viewPullRefreshing">Refreshing {{ currentRefreshLabel }}…</span>
+        <span v-else-if="viewPullDistance >= VIEW_PULL_THRESHOLD">Release to refresh</span>
+        <span v-else-if="viewPullDistance > 0">Pull to refresh</span>
+      </div>
+      <template v-if="!settingsOpen && tab === 'generate'">
         <div v-if="!selectedHost" class="empty-state">
           <div>
             <h1 class="section-title">Connect a host</h1>
@@ -10464,7 +11118,14 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </div>
         <template v-else>
           <div class="mobile-create-head">
-            <h1 class="section-title">Create</h1>
+            <h1
+              ref="createHeading"
+              class="section-title"
+              tabindex="-1"
+              data-test="mobile-create-heading"
+            >
+              Create
+            </h1>
             <button
               class="mobile-settings-reset"
               type="button"
@@ -11275,15 +11936,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       type="button"
                       data-test="mobile-fleet-queue-control"
                       :disabled="queueControlHostIds.has(row.hostId)"
-                      :aria-label="`${hostTelemetry[row.hostId]?.queuePaused ? 'Resume' : 'Pause'} ${row.hostLabel} queue`"
-                      @click.stop="
-                        setFleetHostQueuePaused(
-                          row,
-                          !(hostTelemetry[row.hostId]?.queuePaused === true),
-                        )
-                      "
+                      :aria-label="`${fleetQueueResumeNeeded(row) ? 'Resume' : 'Pause'} ${row.hostLabel} queue`"
+                      @click.stop="setFleetHostQueuePaused(row, !fleetQueueResumeNeeded(row))"
                     >
-                      {{ hostTelemetry[row.hostId]?.queuePaused ? "Resume" : "Pause" }}
+                      {{ fleetQueueResumeNeeded(row) ? "Resume" : "Pause" }}
                     </button>
                   </template>
                 </LiveActivityList>
@@ -11302,18 +11958,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </template>
 
       <template v-else-if="tab === 'gallery'">
-        <div
-          class="mobile-library-pull"
-          :class="{ 'is-refreshing': galleryPullRefreshing }"
-          :style="{ height: `${galleryPullDistance}px` }"
-          role="status"
-          aria-live="polite"
-          data-test="mobile-library-pull"
-        >
-          <span v-if="galleryPullRefreshing">Refreshing…</span>
-          <span v-else-if="galleryPullDistance >= GALLERY_PULL_THRESHOLD">Release to refresh</span>
-          <span v-else-if="galleryPullDistance > 0">Pull to refresh</span>
-        </div>
         <div class="mobile-library-heading">
           <div>
             <h1 class="section-title">Library</h1>
@@ -11649,10 +12293,14 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             ref="galleryPinchSurface"
             class="mobile-gallery-pinch-surface"
             data-test="mobile-gallery-pinch-surface"
+            :aria-busy="galleryLoading || galleryRefreshing"
             @pointerdown="beginGalleryPinch"
           >
             <div
-              v-if="galleryLoading || (libraryScope === 'trash' && trashLoading && !gallery.length)"
+              v-if="
+                (galleryLoading && !gallery.length) ||
+                (libraryScope === 'trash' && trashLoading && !gallery.length)
+              "
               class="empty-state"
             >
               {{ libraryScope === "trash" ? "Loading trash…" : "Loading prints…" }}
@@ -11674,11 +12322,16 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             >
               <div
                 class="gallery-grid gallery-grid-virtual"
-                :class="{ 'is-selecting': gallerySelectMode }"
+                :class="{
+                  'is-selecting': gallerySelectMode,
+                  'is-android-native': androidNativeRuntime,
+                }"
                 :style="{
                   '--mobile-gallery-columns': galleryColumns,
                   transform: `translateY(${mobileGalleryWindow.offset}px)`,
                 }"
+                @pointerdown="beginAndroidGalleryGridSelection"
+                @click="handleAndroidGalleryGridClick"
               >
                 <button
                   v-for="print in visibleGallery"
@@ -12055,9 +12708,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       <template v-else-if="tab === 'hosts'">
         <MobileHostDetail
           v-if="hostDetail"
+          ref="hostDetailView"
           :host="hostDetail"
           :active="hostDetail.id === selectedHostId"
-          @back="hostDetailId = ''"
+          @back="closeHostDetail"
           @select="useHostForGenerations"
           @rename="renameHost"
           @disconnect="disconnectHost"
@@ -12252,6 +12906,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       <KeepAlive>
         <MobileCatalogView
           v-if="!settingsOpen && tab === 'catalog'"
+          ref="catalogView"
           :hosts="connectedHosts"
           :selected-host-id="catalogHostId"
           :filter-intent="catalogFilterIntent"

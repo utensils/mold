@@ -44,6 +44,10 @@ function statusLine(row: QueueSurfaceRow): string {
     const reason = row.entry.held_reason?.trim();
     return `held${reason ? ` (${reason})` : ""} · ${row.hostLabel}`;
   }
+  if (row.entry.state === "paused") return `paused after restart · ${row.hostLabel}`;
+  if (row.entry.state === "queued" && jobs.queues[row.hostId]?.paused === true) {
+    return `paused · ${row.hostLabel}`;
+  }
   const state =
     row.entry.state === "running"
       ? job?.status === "finishing"
@@ -129,6 +133,7 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
           <div
             v-if="
               row.entry.state === 'queued' ||
+              row.entry.state === 'paused' ||
               row.entry.state === 'held' ||
               (row.entry.state === 'running' && row.canCancelRunning)
             "

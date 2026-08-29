@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, RwLock};
 use tokio::sync::mpsc;
 
 use mold_core::{DeviceInfo, DeviceState, MoldClient, ServerCapabilities, ServerStatus};
@@ -202,8 +203,39 @@ fn host_key_setting(id: &str) -> String {
     format!("{}{id}", keys::TUI_HOST_KEY_PREFIX)
 }
 
+/// Per-process credentials supplied by the command that launched this TUI.
+/// They deliberately never enter SQLite: `MOLD_API_KEY` remains an ephemeral
+/// environment authority unless the user explicitly saves a host key.
+static SESSION_API_KEYS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+pub(crate) fn set_session_api_key(id: &str, key: &str) {
+    if key.is_empty() {
+        return;
+    }
+    SESSION_API_KEYS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(id.to_string(), key.to_string());
+}
+
+pub(crate) fn clear_session_api_key(id: &str) {
+    SESSION_API_KEYS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(id);
+}
+
 /// Read the saved API key for a host, if any.
 pub(crate) fn api_key_for(id: &str) -> Option<String> {
+    if let Some(key) = SESSION_API_KEYS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(id)
+        .cloned()
+    {
+        return Some(key);
+    }
     let db = open_db()?;
     Settings::new(&db)
         .get_str(&host_key_setting(id))

@@ -7,6 +7,7 @@ import {
   mergeQueueEntries,
   moveQueueJobToBack,
   queuePageRequestForCapacity,
+  setQueuePaused as setQueueDispatchPaused,
   setQueueDevicePin,
   type QueuePlan,
 } from "@studio/api/queuePlan";
@@ -22,7 +23,7 @@ import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
-import { hostMemoryLevel } from "@studio/lib/hostMemory";
+import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { gpuSnapshotsFromStatus } from "../lib/api/gpuStatus";
@@ -102,6 +103,7 @@ const renameValue = ref("");
 const forgetPending = ref(false);
 const unloading = ref<Set<string>>(new Set());
 const cancellingQueueIds = ref(new Set<string>());
+const queueControlBusy = ref(false);
 // ── Library card (per-host trash retention, #4 iPhone V3) ───────────────────
 const retentionEntry = ref<HostConfigEntry | null>(null);
 const retentionValue = ref<number | null>(null);
@@ -115,6 +117,7 @@ let loadEpoch = 0;
 let queueRequestGeneration = 0;
 let queueLoadMoreGeneration = 0;
 let deviceRequestGeneration = 0;
+let statusRequestGeneration = 0;
 let resourceAbort: AbortController | null = null;
 let downloadsAbort: AbortController | null = null;
 let deviceEventsAbort: AbortController | null = null;
@@ -174,7 +177,7 @@ const unifiedMemory = computed(() => unifiedMemoryHost(gpus.value));
 const hostMemoryPressure = computed(() => hostMemoryLevel(queuePlan.value?.host_memory));
 const hostMemoryLabel = computed(() => {
   const memory = queuePlan.value?.host_memory;
-  return memory ? `${formatGB(memory.headroom_bytes)} available to schedule` : null;
+  return memory ? hostMemoryScheduleLabel(memory, formatGB) : null;
 });
 const disk = computed(() => status.value?.models_disk ?? null);
 const h3Host = computed(() => [
@@ -428,13 +431,46 @@ async function refreshDevicesSafely(epoch: number): Promise<void> {
   }
 }
 
+async function refreshStatusSafely(epoch: number): Promise<void> {
+  if (queueControlBusy.value) return;
+  const generation = ++statusRequestGeneration;
+  const requestTarget = target.value;
+  try {
+    const nextStatus = await apiJsonTo<ServerStatus>(requestTarget, "/api/status");
+    if (
+      generation !== statusRequestGeneration ||
+      epoch !== loadEpoch ||
+      queueControlBusy.value ||
+      requestTarget.baseUrl !== target.value.baseUrl ||
+      requestTarget.apiKey !== target.value.apiKey
+    )
+      return;
+    const expectedInstanceId = props.host.instanceId?.trim() || status.value?.instance_id?.trim();
+    const reportedInstanceId = nextStatus.instance_id?.trim();
+    if (expectedInstanceId && reportedInstanceId && expectedInstanceId !== reportedInstanceId) {
+      emit("status", { id: props.host.id, status: nextStatus });
+      error.value = "This address now reports a different Mold server identity.";
+      return;
+    }
+    status.value = nextStatus;
+    emit("status", { id: props.host.id, status: nextStatus });
+  } catch {
+    // Queue and device polling remain useful during a transient status failure.
+    // The next five-second pass retries without clearing the last good state.
+  }
+}
+
 function scheduleLivePoll(epoch: number): void {
   if (epoch !== loadEpoch) return;
   livePollTimer = setTimeout(async () => {
     livePollTimer = null;
     // Queue authority has its own generation fence and must not hold device
     // freshness hostage if an older endpoint never settles.
-    await Promise.all([requestQueueRefresh(epoch), refreshDevicesSafely(epoch)]);
+    await Promise.all([
+      refreshStatusSafely(epoch),
+      requestQueueRefresh(epoch),
+      refreshDevicesSafely(epoch),
+    ]);
     scheduleLivePoll(epoch);
   }, 5_000);
 }
@@ -558,6 +594,7 @@ async function emptyTrashNow(): Promise<void> {
 
 async function loadHost(): Promise<void> {
   const epoch = ++loadEpoch;
+  statusRequestGeneration += 1;
   stopLiveServices();
   loading.value = true;
   error.value = "";
@@ -581,6 +618,7 @@ async function loadHost(): Promise<void> {
   renaming.value = false;
   forgetPending.value = false;
   cancellingQueueIds.value = new Set();
+  queueControlBusy.value = false;
   retentionEntry.value = null;
   retentionValue.value = null;
   retentionProbeFailed.value = false;
@@ -620,6 +658,52 @@ async function loadHost(): Promise<void> {
   }
 }
 
+/** Refresh every stale-capable card without clearing the screen or restarting
+ * its live streams. This is the Machine Detail pull-to-refresh authority. */
+async function refreshHostDetail(): Promise<void> {
+  if (props.host.connected === false) return;
+  const epoch = loadEpoch;
+  const requestTarget = target.value;
+  error.value = "";
+  const [statusResult, modelsResult] = await Promise.allSettled([
+    apiJsonTo<ServerStatus>(requestTarget, "/api/status"),
+    apiJsonTo<ModelEntry[]>(requestTarget, "/api/models"),
+  ]);
+  if (
+    epoch !== loadEpoch ||
+    requestTarget.baseUrl !== target.value.baseUrl ||
+    requestTarget.apiKey !== target.value.apiKey
+  )
+    return;
+
+  if (statusResult.status === "fulfilled") {
+    const expectedInstanceId = props.host.instanceId?.trim();
+    const reportedInstanceId = statusResult.value.instance_id?.trim();
+    if (expectedInstanceId && reportedInstanceId && expectedInstanceId !== reportedInstanceId) {
+      emit("status", { id: props.host.id, status: statusResult.value });
+      error.value = "This address now reports a different Mold server identity.";
+      return;
+    }
+    status.value = statusResult.value;
+    emit("status", { id: props.host.id, status: statusResult.value });
+  }
+  if (modelsResult.status === "fulfilled") {
+    installed.value = modelsResult.value.filter((model) => model.downloaded);
+  }
+  if (statusResult.status === "rejected" && modelsResult.status === "rejected") {
+    error.value = describeTransportError(statusResult.reason, props.host.name);
+    emit("status", { id: props.host.id, status: null });
+  }
+
+  await Promise.all([
+    requestQueueRefresh(epoch),
+    refreshDevicesSafely(epoch),
+    refreshLibraryCard(epoch),
+  ]);
+}
+
+defineExpose({ refresh: refreshHostDetail });
+
 async function toggleDevice(device: DeviceInfo): Promise<void> {
   if (!canMutateDevice(device, deviceCapabilities.value)) return;
   const enabled = !device.desired_enabled;
@@ -654,6 +738,8 @@ async function unpinWork(workId: string): Promise<void> {
 function queueEntryCancellable(entry: QueueEntry): boolean {
   return (
     entry.state === "queued" ||
+    entry.state === "paused" ||
+    entry.state === "held" ||
     (entry.state === "running" &&
       deviceCapabilities.value?.queue?.cooperative_cancellation === true)
   );
@@ -707,6 +793,10 @@ let stopQueuePreview: (() => void) | null = null;
 let queueDetailTimer: ReturnType<typeof setInterval> | null = null;
 
 const canReorderQueue = computed(() => deviceCapabilities.value?.queue?.can_reorder === true);
+const canPauseQueue = computed(() => deviceCapabilities.value?.queue?.can_pause === true);
+const dispatchPaused = computed(() => status.value?.queue_paused === true);
+const restartPaused = computed(() => queue.value.some((entry) => entry.state === "paused"));
+const resumeNeeded = computed(() => dispatchPaused.value || restartPaused.value);
 
 const inspectedQueueEntry = computed(
   () => queue.value.find((entry) => entry.id === inspectedQueueId.value) ?? null,
@@ -732,6 +822,12 @@ const inspectedQueueModel = computed(() => {
  *  non-destructive Move to back. */
 function queueRowActions(entry: QueueEntry): SwipeRowAction[] {
   const actions: SwipeRowAction[] = [];
+  if (canPauseQueue.value && ["queued", "paused", "held"].includes(entry.state)) {
+    actions.push({
+      id: resumeNeeded.value ? "queue-resume" : "queue-pause",
+      label: resumeNeeded.value ? "Resume" : "Pause",
+    });
+  }
   if (canReorderQueue.value && entry.state === "queued") {
     actions.push({ id: "back", label: "To back" });
   }
@@ -747,11 +843,47 @@ function queueRowActions(entry: QueueEntry): SwipeRowAction[] {
 }
 
 function queueRowBusy(entry: QueueEntry): boolean {
-  return cancellingQueueIds.value.has(entry.id) || reorderingQueueIds.value.has(entry.id);
+  return (
+    queueControlBusy.value ||
+    cancellingQueueIds.value.has(entry.id) ||
+    reorderingQueueIds.value.has(entry.id)
+  );
+}
+
+async function setHostQueuePaused(paused: boolean): Promise<void> {
+  if (!canPauseQueue.value || queueControlBusy.value) return;
+  const epoch = loadEpoch;
+  const requestTarget = target.value;
+  statusRequestGeneration += 1;
+  queueControlBusy.value = true;
+  queueRowError.value = null;
+  try {
+    const liveStatus = await apiJsonTo<ServerStatus>(requestTarget, "/api/status");
+    const expectedInstanceId = props.host.instanceId?.trim() || status.value?.instance_id?.trim();
+    if (expectedInstanceId && liveStatus.instance_id?.trim() !== expectedInstanceId) {
+      throw new Error("This address now reports a different Mold server identity.");
+    }
+    await setQueueDispatchPaused(requestTarget, paused);
+    if (epoch !== loadEpoch || requestTarget.baseUrl !== target.value.baseUrl) return;
+    const nextStatus = { ...liveStatus, queue_paused: paused };
+    status.value = nextStatus;
+    emit("status", { id: props.host.id, status: nextStatus });
+    await requestQueueRefresh(epoch);
+  } catch (caught) {
+    if (epoch === loadEpoch) {
+      queueRowError.value = describeTransportError(caught, props.host.name);
+    }
+  } finally {
+    if (epoch === loadEpoch) queueControlBusy.value = false;
+  }
 }
 
 async function onQueueRowAction(entry: QueueEntry, action: string) {
   queueRowError.value = null;
+  if (action === "queue-pause" || action === "queue-resume") {
+    await setHostQueuePaused(action === "queue-pause");
+    return;
+  }
   if (action === "cancel") {
     await cancelQueuedJob(entry);
     if (inspectedQueueId.value === entry.id) inspectedQueueId.value = null;
@@ -847,6 +979,7 @@ async function unload(name: string): Promise<void> {
 function queueCode(entry: QueueEntry): string {
   if (entry.state === "running")
     return entry.gpu == null ? "RUNNING" : `RUNNING · GPU ${entry.gpu}`;
+  if (dispatchPaused.value && entry.state === "queued") return "PAUSED";
   // Same waiting vocabulary as the Create queue, resolved once in studio —
   // a held row reads HELD, never a place in line.
   return queueWaitCode(resolveQueueWait({ state: entry.state, position: entry.position }));
@@ -1053,7 +1186,22 @@ onBeforeUnmount(() => {
       <section class="mobile-detail-section" aria-labelledby="host-queue-title">
         <div class="mobile-section-head">
           <h2 id="host-queue-title">Queue</h2>
-          <span data-test="host-detail-queue-total">{{ queueSummary }}</span>
+          <div class="mobile-host-queue-controls">
+            <span v-if="resumeNeeded" data-test="host-detail-queue-paused">
+              {{ restartPaused && !dispatchPaused ? "PAUSED AFTER RESTART" : "PAUSED" }}
+            </span>
+            <span data-test="host-detail-queue-total">{{ queueSummary }}</span>
+            <button
+              v-if="canPauseQueue"
+              type="button"
+              class="secondary-button mobile-host-queue-pause"
+              data-test="host-detail-queue-pause"
+              :disabled="queueControlBusy"
+              @click="setHostQueuePaused(!resumeNeeded)"
+            >
+              {{ queueControlBusy ? "Working…" : resumeNeeded ? "Resume" : "Pause" }}
+            </button>
+          </div>
         </div>
         <p class="mobile-empty-note" data-test="host-detail-queue-scope">
           <template v-if="queueApiAvailable">{{ queue.length }} loaded</template>

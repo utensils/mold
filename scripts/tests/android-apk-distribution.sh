@@ -20,10 +20,10 @@ grep -Fq '*.apk > SHA256SUMS' "$release" || fail "APK is missing from release ch
 grep -Fq 'ANDROID_KEY_BASE64' "$release" || fail "CI signing keystore secret is not configured"
 grep -Fq 'signingConfig = signingConfigs.getByName("release")' "$gradle" || fail "Gradle release signing is not configured"
 
-stable='https://github.com/utensils/mold/releases/latest/download/Mold-android.apk'
+# The current stable release does not expose the APK, so user docs point to the
+# live rolling release until a tagged APK is available there.
 nightly='https://github.com/utensils/mold/releases/download/latest/Mold-android.apk'
 for doc in "$readme" "$android_guide" "$installation_guide"; do
-  grep -Fq "$stable" "$doc" || fail "stable raw APK link missing from ${doc#"$repo_root/"}"
   grep -Fq "$nightly" "$doc" || fail "nightly raw APK link missing from ${doc#"$repo_root/"}"
 done
 

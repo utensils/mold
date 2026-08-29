@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use mold_catalog::families::{Family, ALL_FAMILIES};
 
 #[test]
@@ -19,6 +21,7 @@ fn manifest_strings_are_stable() {
         (Family::Flux2, "flux2"),
         (Family::Sd15, "sd15"),
         (Family::Sdxl, "sdxl"),
+        (Family::Sd3, "sd3"),
         (Family::ZImage, "z-image"),
         (Family::LtxVideo, "ltx-video"),
         (Family::Ltx2, "ltx2"),
@@ -30,6 +33,40 @@ fn manifest_strings_are_stable() {
         assert_eq!(fam.as_str(), s, "{:?} → {s}", fam);
         assert_eq!(Family::from_str(s).unwrap(), fam, "{s} → {:?}", fam);
     }
+}
+
+/// The manifest registry is the shipped-model authority; the Models taxonomy
+/// must cover every visible generation family in it. Qwen Image Edit is the
+/// one deliberate presentation merge, sharing the Qwen Image catalog shelf.
+/// Utility manifests are not generation families and never belong in the
+/// family picker.
+#[test]
+fn catalog_taxonomy_covers_every_visible_generation_manifest_family() {
+    const UTILITY_FAMILIES: &[&str] = &[
+        "companion",
+        "controlnet",
+        "ltx2-camera-control",
+        "ltx2-control",
+        "qwen3-expand",
+        "upscaler",
+    ];
+
+    let manifest_families = mold_core::manifest::visible_manifests()
+        .filter_map(|manifest| {
+            let family = match manifest.family.as_str() {
+                "qwen-image-edit" => "qwen-image",
+                family if UTILITY_FAMILIES.contains(&family) => return None,
+                family => family,
+            };
+            Some(family.to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    let catalog_families = ALL_FAMILIES
+        .iter()
+        .map(|family| family.as_str().to_string())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(catalog_families, manifest_families);
 }
 
 /// `is_video` and the runtime-defaults table are two statements of the same

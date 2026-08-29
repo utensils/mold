@@ -1604,7 +1604,7 @@ fn resolve_execution_plans_with_policy(
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(prepared) = prepared.filter(|prepared| prepared.h3_private_ingress_grant.is_some())
     {
-        return resolve_private_h3_execution_plans(config, request, devices, prepared);
+        return resolve_private_h3_execution_plans(config, request, devices, prepared, projection);
     }
     let overlaid_config = prepared_config_overlay(config, request, prepared);
     let config = overlaid_config.as_ref().unwrap_or(config);
@@ -1713,7 +1713,15 @@ fn resolve_private_h3_execution_plans(
     request: &GenerateRequest,
     devices: &[DeviceFact],
     prepared: &PreparedExecutionInputs,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
+    // The scheduler resolves the payload-free durable row; what the queue
+    // media store holds for it is the projection. Dropping it here read every
+    // FL2VA first-frame job as T2AV and refused it at resolve (#1423).
+    let media = mold_core::minimax_h3::ResolvedMediaPresence {
+        source_image: request.source_image.is_some()
+            || projection.is_some_and(|projection| projection.source_image),
+    };
     let grant = prepared.h3_private_ingress_grant.as_ref().ok_or_else(|| {
         ExecutionPlanError::PreparedInputsStale(
             "MiniMax H3 private planning lost its authenticated ingress grant".into(),
@@ -1733,8 +1741,8 @@ fn resolve_private_h3_execution_plans(
         ));
     }
     let eligible = eligible_devices_for_private_h3(config, request, devices)?;
-    let available_host_headroom_bytes =
-        crate::h3_admission::current_h3_host_memory().headroom_bytes();
+    let host = crate::h3_admission::current_h3_host_memory();
+    let available_host_headroom_bytes = host.headroom_bytes();
     let mut plans = Vec::new();
     let mut rejections = Vec::new();
     let mut host_shortfall: Option<String> = None;
@@ -1764,18 +1772,31 @@ fn resolve_private_h3_execution_plans(
                     &device.id,
                     required_host_bytes,
                     available_host_headroom_bytes,
+                    host.reclaimable_zfs_arc_bytes,
                 )
             });
             continue;
         }
         if let Err(error) = evidence.validate_for(
             request,
+            media,
             &device.id,
             device.ordinal,
             device.compute_capability,
             available_device_bytes,
             available_host_headroom_bytes,
         ) {
+            // The planner reports this as a VRAM block with only the two byte
+            // counts; the sentence that says WHICH conjunct refused must reach
+            // the log or the block is undiagnosable (#1423: a fitting plan
+            // sat blocked for four hours with "required < headroom").
+            tracing::warn!(
+                target: "mold_server::execution_plan",
+                device_id = %device.id,
+                model = %request.model,
+                error = %format!("{error:#}"),
+                "private H3 admission evidence refused at resolve"
+            );
             rejections.push(DeviceInfeasibility {
                 device_id: device.id,
                 predicted_peak_bytes: evidence.predicted_device_peak_bytes(),
@@ -1883,14 +1904,25 @@ fn resolve_private_h3_execution_plans(
 /// staleness, and the whole point of #1218's honest refusals is that a user can
 /// read the shortfall and act on it.
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+///
+/// `reclaimable_zfs_arc_bytes` is the evictable ZFS ARC the SAME sample
+/// counted into `available_host_headroom_bytes` (#1439); a positive credit is
+/// named so the figure already includes everything the kernel would drain.
 pub(crate) fn h3_host_headroom_shortfall_reason(
     device_id: &str,
     required_host_bytes: u64,
     available_host_headroom_bytes: u64,
+    reclaimable_zfs_arc_bytes: Option<u64>,
 ) -> String {
+    let clause = match reclaimable_zfs_arc_bytes {
+        Some(credit) if credit > 0 => {
+            format!(" (the sample includes {credit} bytes of evictable ZFS ARC)")
+        }
+        _ => String::new(),
+    };
     format!(
         "MiniMax H3 host-memory capacity changed after private admission: {device_id} needs \
-         {required_host_bytes} host bytes but only {available_host_headroom_bytes} are available"
+         {required_host_bytes} host bytes but only {available_host_headroom_bytes} are available{clause}"
     )
 }
 
@@ -4690,6 +4722,36 @@ mod tests {
         GenerationReferenceProvenance, ModelConfig,
     };
     use tempfile::TempDir;
+
+    /// The H3 host shortfall names the evictable ZFS ARC its sample already
+    /// counted (#1439), and stays byte-identical for every other host.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn h3_host_headroom_shortfall_reason_names_the_evictable_arc() {
+        let plain =
+            h3_host_headroom_shortfall_reason("cuda:0", 32_775_178_178, 26_200_000_000, None);
+        assert_eq!(
+            plain,
+            "MiniMax H3 host-memory capacity changed after private admission: cuda:0 needs \
+             32775178178 host bytes but only 26200000000 are available"
+        );
+        assert_eq!(
+            h3_host_headroom_shortfall_reason("cuda:0", 32_775_178_178, 26_200_000_000, Some(0)),
+            plain,
+            "a cold ARC on a ZFS host reads like any other host"
+        );
+        assert_eq!(
+            h3_host_headroom_shortfall_reason(
+                "cuda:0",
+                45_000_000_000,
+                41_281_432_704,
+                Some(15_081_432_704),
+            ),
+            "MiniMax H3 host-memory capacity changed after private admission: cuda:0 needs \
+             45000000000 host bytes but only 41281432704 are available (the sample includes \
+             15081432704 bytes of evictable ZFS ARC)"
+        );
+    }
 
     #[test]
     fn packed_gemma4_safetensors_are_streamed_weights() {

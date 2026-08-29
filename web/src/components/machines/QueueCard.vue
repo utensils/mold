@@ -17,6 +17,7 @@ import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
 import type { QueuePlan } from "@studio/api/queuePlan";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
+import { queueWaitLabel, resolveQueueWait } from "@studio/lib/queuePosition";
 
 const props = withDefaults(
   defineProps<{
@@ -59,6 +60,15 @@ const emit = defineEmits<{
 const queuedIds = computed(() =>
   props.entries.filter((e) => e.state === "queued").map((e) => e.id),
 );
+const cancellableIds = computed(() =>
+  props.entries
+    .filter((entry) => entry.state === "queued" || entry.state === "paused")
+    .map((entry) => entry.id),
+);
+const restartPaused = computed(() =>
+  props.entries.some((entry) => entry.state === "paused"),
+);
+const resumeNeeded = computed(() => props.paused || restartPaused.value);
 const entryIds = computed(() => props.entries.map((entry) => entry.id));
 const hasPlanOnlyWork = computed(
   () => queuePlanOnlyWork(props.plan, entryIds.value).length > 0,
@@ -71,6 +81,17 @@ const visibleWorkCount = computed(
 function laneValue(entry: QueueEntry): string {
   const lane = entry.target_gpu ?? null;
   return lane == null ? "" : String(lane);
+}
+
+function entryStateLabel(entry: QueueEntry): string {
+  return queueWaitLabel(
+    resolveQueueWait({
+      state: entry.state,
+      position: entry.position,
+      blockedReason:
+        props.paused && entry.state === "queued" ? "queue_paused" : null,
+    }),
+  );
 }
 
 function onLane(entry: QueueEntry, event: Event) {
@@ -103,11 +124,20 @@ function queuedIndexOf(id: string): number {
       </div>
 
       <div
-        v-if="canPause || (canCancelAll && queuedIds.length > 0) || paused"
+        v-if="
+          canPause ||
+          (canCancelAll && cancellableIds.length > 0) ||
+          resumeNeeded
+        "
         class="qc__controls"
       >
-        <BadgePill v-if="paused" tone="accent" outline data-test="paused-chip">
-          paused
+        <BadgePill
+          v-if="resumeNeeded"
+          tone="accent"
+          outline
+          data-test="paused-chip"
+        >
+          {{ restartPaused && !paused ? "paused after restart" : "paused" }}
         </BadgePill>
         <span class="qc__spacer" />
         <button
@@ -118,10 +148,10 @@ function queuedIndexOf(id: string): number {
           :disabled="dimmed"
           @click="emit('togglePause')"
         >
-          {{ paused ? "Resume" : "Pause" }}
+          {{ resumeNeeded ? "Resume" : "Pause" }}
         </button>
         <button
-          v-if="canCancelAll && queuedIds.length > 0"
+          v-if="canCancelAll && cancellableIds.length > 0"
           type="button"
           class="qc__control qc__control--danger"
           data-test="cancel-all"
@@ -151,7 +181,7 @@ function queuedIndexOf(id: string): number {
             :tone="entry.state === 'running' ? 'accent' : 'neutral'"
             outline
           >
-            {{ entry.state }}
+            {{ entryStateLabel(entry) }}
           </BadgePill>
           <button
             type="button"

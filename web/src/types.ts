@@ -67,7 +67,8 @@ export type Scheduler =
   | GenerationScheduler
   | { ddim: unknown }
   | { "euler-ancestral": unknown }
-  | { "uni-pc": unknown };
+  | { "uni-pc": unknown }
+  | { "edm-dpm-pp-2m": unknown };
 
 export interface OutputMetadata {
   /** User-facing authoring mode; independent of internal auto-chaining. */
@@ -597,7 +598,7 @@ export interface HostDiskUsage {
 /** `held` is additive: a journalled job the host parked after it exhausted its
  * replay or dispatch budget. It exists only in the durable queue, never starts
  * on its own, and is listed so it is not invisible. Absent on older servers. */
-export type QueueJobState = "queued" | "running" | "held";
+export type QueueJobState = "queued" | "running" | "paused" | "held";
 
 export interface QueueEntry {
   id: string;
@@ -835,7 +836,13 @@ export interface ChainJobSummary {
 }
 
 export type ChainJobState =
-  "queued" | "running" | "interrupted" | "failed" | "completed" | "cancelled";
+  | "queued"
+  | "running"
+  | "paused"
+  | "interrupted"
+  | "failed"
+  | "completed"
+  | "cancelled";
 
 export type StageState = "pending" | "running" | "completed" | "failed";
 
@@ -1292,6 +1299,10 @@ export interface GpuSnapshot {
 export interface RamSnapshot {
   total: number;
   used: number;
+  /** `MemAvailable`; additive on newer servers. */
+  available?: number;
+  /** Evictable ZFS ARC beside `available`, never inside it (#1439). */
+  reclaimable_zfs_arc?: number;
   used_by_mold: number;
   used_by_other: number;
 }
@@ -1396,6 +1407,8 @@ export interface CatalogListResponse {
 export interface CatalogProviderError {
   source: "hf" | "civitai";
   message: string;
+  code?: "overloaded" | "rate-limited" | string;
+  retry_after_seconds?: number;
 }
 
 export interface CatalogFamilyCount {

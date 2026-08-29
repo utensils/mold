@@ -109,12 +109,13 @@ const TERMINAL_PHASES = new Set<GenerationLifecyclePhase>([
 const FORWARD_PHASE_RANK: Record<GenerationLifecyclePhase, number> = {
   accepted: 0,
   queued: 1,
-  held: 2,
-  running: 3,
-  cancelling: 4,
-  complete: 5,
-  failed: 5,
-  cancelled: 5,
+  paused: 2,
+  held: 3,
+  running: 4,
+  cancelling: 5,
+  complete: 6,
+  failed: 6,
+  cancelled: 6,
 };
 
 export function isTerminalGenerationPhase(

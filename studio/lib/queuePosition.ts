@@ -75,6 +75,10 @@ export interface QueueStatusSource {
   hostId: string;
   entries?: readonly QueueEntry[] | null | undefined;
   plan?: QueuePlan | null | undefined;
+  /** Host-wide dispatch gate from `/api/status.queue_paused`. A queued row
+   * remains `queued` on the wire while this gate is closed, so surfaces must
+   * project the pause into its visible waiting state. */
+  paused?: boolean | null | undefined;
 }
 
 export type QueueStatusIndex = ReadonlyMap<string, QueueStatus>;
@@ -245,10 +249,16 @@ export function buildQueueStatusIndex(
     for (const entry of source.entries ?? []) {
       if (!entry || typeof entry.id !== "string" || entry.id.length === 0)
         continue;
+      const state = typeof entry.state === "string" ? entry.state : null;
       index.set(queueStatusKey(source.hostId, entry.id), {
-        state: typeof entry.state === "string" ? entry.state : null,
+        state,
         position: finitePosition(entry.position),
-        blockedReason: planBlockedReason(source.plan, entry.id),
+        // Held is an operator-action state and running work continues through
+        // a queue pause. Only ordinary queued work inherits the global gate.
+        blockedReason:
+          source.paused === true && state === "queued"
+            ? "queue_paused"
+            : planBlockedReason(source.plan, entry.id),
         preparation: planPreparation(source.plan, entry.id),
       });
     }
@@ -286,6 +296,8 @@ export function queuePositionLabel(
  * queued jobs three different ways.
  */
 export type QueueWaitStatus =
+  /** Recovered after restart and waiting for an explicit queue resume. */
+  | { kind: "paused" }
   /** Parked by the host: never dispatched on its own, so never "in line". */
   | { kind: "held" }
   /** An actionable reason outranks the position: say what to fix. */
@@ -314,6 +326,7 @@ export interface QueueWaitInput {
 export function resolveQueueWait(
   input: QueueWaitInput | null | undefined,
 ): QueueWaitStatus {
+  if (input?.state === "paused") return { kind: "paused" };
   if (input?.state === "held") return { kind: "held" };
   if (input?.blockedReason === "preparing") {
     return { kind: "blocked", label: preparationLabel(input.preparation) };
@@ -328,6 +341,8 @@ export function resolveQueueWait(
 /** Sentence-case copy — web and desktop pills, and the iPhone status line. */
 export function queueWaitLabel(wait: QueueWaitStatus): string {
   switch (wait.kind) {
+    case "paused":
+      return "Paused after restart";
     case "held":
       return "Held";
     case "blocked":
@@ -344,6 +359,8 @@ export function queueWaitLabel(wait: QueueWaitStatus): string {
 /** Compact uppercase code — the iPhone queue list's existing idiom. */
 export function queueWaitCode(wait: QueueWaitStatus): string {
   switch (wait.kind) {
+    case "paused":
+      return "PAUSED";
     case "held":
       return "HELD";
     case "blocked":

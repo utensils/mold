@@ -2786,6 +2786,16 @@ button:disabled {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  touch-action: pan-y;
+  -webkit-user-drag: none;
+}
+
+/* Chrome WebView cancels the pointer stream on a gallery button but fails to
+   transfer it to the scroll container. Android delegates taps through the
+   grid, leaving the visual tile outside hit-testing so image-origin drags pan
+   the Library natively. iOS keeps the tile hit-testable for its context menu. */
+.gallery-grid.is-android-native .gallery-item {
+  pointer-events: none;
 }
 
 .gallery-item img.is-thumbnail-pending {
@@ -3561,6 +3571,19 @@ button:disabled {
   justify-content: space-between;
   gap: 12px;
   margin: 14px 0;
+}
+
+.mobile-catalog-error > span {
+  display: grid;
+  gap: 3px;
+}
+
+.mobile-catalog-error-detail {
+  opacity: 0.82;
+}
+
+.mobile-catalog-warning {
+  color: var(--warning);
 }
 
 .mobile-catalog-retry {
@@ -4381,6 +4404,23 @@ button:disabled {
   font: inherit;
 }
 
+.mobile-host-queue-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.mobile-host-queue-pause {
+  min-width: 72px;
+  min-height: 44px;
+  border: 0;
+  padding: 0 8px;
+  color: var(--safelight);
+  font: inherit;
+}
+
 .telemetry-panel {
   display: grid;
   gap: 11px;
@@ -5124,6 +5164,7 @@ button:disabled {
   inset: 0;
   border: 0;
   background: color-mix(in srgb, var(--print) 62%, transparent);
+  transition: opacity 160ms ease-out;
 }
 
 .mobile-library-sheet-panel {
@@ -5137,6 +5178,12 @@ button:disabled {
   background: var(--bath);
   color: var(--rebate);
   animation: mobile-sheet-in 0.2s ease;
+  transition: transform 160ms ease-out;
+  will-change: transform;
+}
+
+.mobile-library-sheet-panel.is-dragging {
+  transition: none;
 }
 
 .mobile-library-sheet-grabber {
@@ -5157,7 +5204,7 @@ button:disabled {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: none;
-  touch-action: manipulation;
+  touch-action: pan-y;
   padding: 10px max(18px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
     max(18px, env(safe-area-inset-left));
 }

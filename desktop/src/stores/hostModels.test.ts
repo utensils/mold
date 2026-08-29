@@ -95,6 +95,27 @@ describe("hostModels store", () => {
     expect(store.byHost["local"]?.error).toBeNull();
   });
 
+  it("does not restore an in-flight model snapshot after its authority is retired", async () => {
+    addExtra("hal9000-7680", "http://hal9000:7680");
+    let resolveRemote!: (entries: ModelEntry[]) => void;
+    apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
+      target.baseUrl.includes("hal9000")
+        ? new Promise<ModelEntry[]>((resolve) => {
+            resolveRemote = resolve;
+          })
+        : Promise.resolve([model("local-model")]),
+    );
+    const store = useHostModelsStore();
+    const refresh = store.refresh();
+    await vi.waitFor(() => expect(resolveRemote).toBeTypeOf("function"));
+
+    store.retireAuthority("hal9000-7680");
+    resolveRemote([model("stale-remote-model")]);
+    await refresh;
+
+    expect(store.byHost["hal9000-7680"]).toBeUndefined();
+  });
+
   it("skips hosts fetched under 60s ago unless forced", async () => {
     const store = useHostModelsStore();
     await store.refresh();

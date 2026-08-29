@@ -16,6 +16,8 @@ export interface CoverTile {
   path: string;
   target: ApiTarget | null;
   cacheKey: string | null;
+  /** Content version so the cover can come from the persistent native cache. */
+  mediaVersion?: string | null;
   video?: boolean;
   alt?: string;
 }
@@ -78,6 +80,7 @@ const mosaic = computed(() => props.covers.slice(0, 4));
         :path="cover.path"
         :target="cover.target"
         :cache-key="cover.cacheKey"
+        :media-version="cover.mediaVersion ?? null"
         :video="cover.video === true"
         :alt="cover.alt ?? ''"
         class="h-full w-full object-cover"

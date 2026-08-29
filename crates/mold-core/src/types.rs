@@ -124,8 +124,9 @@ mod base64_required {
 /// Scheduler / solver selection.
 ///
 /// Two disjoint families share this wire slot:
-/// - `Ddim` / `EulerAncestral` / `UniPc` — UNet-based image models (SD1.5,
-///   SDXL). Flow-matching image models (FLUX, SD3, Z-Image, Flux.2,
+/// - `Ddim` / `EulerAncestral` / `UniPc` / `EdmDpmPp2m` — UNet-based image
+///   models (SD1.5, SDXL). `EdmDpmPp2m` is the Playground v2.5 training
+///   contract. Flow-matching image models (FLUX, SD3, Z-Image, Flux.2,
 ///   Qwen-Image) ignore those.
 /// - `Euler` / `DpmPp` — Wan's flow-matching sample solvers (upstream
 ///   `--sample_solver`), alongside `UniPc` which doubles as Wan's default
@@ -139,6 +140,10 @@ pub enum Scheduler {
     Ddim,
     EulerAncestral,
     UniPc,
+    /// EDM DPM++ 2M with the Karras 80 → 0.002 sigma schedule, midpoint
+    /// second-order update, and sigma_data=0.5 (Playground v2.5 only).
+    #[serde(rename = "edm-dpm-pp-2m")]
+    EdmDpmPp2m,
     /// Plain flow Euler over the diffusers/Lightning sigma grid — the solver
     /// the lightx2v 4-step recipe specifies (wan only).
     Euler,
@@ -154,6 +159,7 @@ impl std::fmt::Display for Scheduler {
             Scheduler::Ddim => write!(f, "ddim"),
             Scheduler::EulerAncestral => write!(f, "euler-ancestral"),
             Scheduler::UniPc => write!(f, "uni-pc"),
+            Scheduler::EdmDpmPp2m => write!(f, "edm-dpm-pp-2m"),
             Scheduler::Euler => write!(f, "euler"),
             Scheduler::DpmPp => write!(f, "dpm-pp"),
         }
@@ -174,12 +180,15 @@ impl std::str::FromStr for Scheduler {
                 Ok(Scheduler::EulerAncestral)
             }
             "uni-pc" | "unipc" | "uni_pc" => Ok(Scheduler::UniPc),
+            "edm-dpm-pp-2m" | "edm-dpm++-2m" | "edm_dpm_pp_2m" => {
+                Ok(Scheduler::EdmDpmPp2m)
+            }
             "euler" => Ok(Scheduler::Euler),
             // `dpm++` is upstream Wan's spelling; kebab-case `dpm-pp` is the
             // wire form.
             "dpm-pp" | "dpm++" | "dpmpp" | "dpm_pp" => Ok(Scheduler::DpmPp),
             other => Err(format!(
-                "unknown scheduler: '{other}'. Valid: ddim, euler-ancestral, uni-pc, euler, dpm-pp"
+                "unknown scheduler: '{other}'. Valid: ddim, euler-ancestral, uni-pc, edm-dpm-pp-2m, euler, dpm-pp"
             )),
         }
     }
@@ -3974,11 +3983,11 @@ impl QueueWorkItem {
 
 /// Host-RAM telemetry for the machine serving this request.
 ///
-/// `headroom_bytes` is what admission actually spends: available bytes less
-/// the safety floor and every live reservation, so it is not
-/// `available_bytes - safety_floor_bytes` and can be zero while the machine
-/// still reports free memory. Clients colour pressure from `headroom_bytes`
-/// against `safety_floor_bytes`.
+/// `headroom_bytes` is what admission actually spends: available bytes plus
+/// the evictable ZFS ARC credit, less the safety floor and every live
+/// reservation, so it is not `available_bytes - safety_floor_bytes` and can
+/// be zero while the machine still reports free memory. Clients colour
+/// pressure from `headroom_bytes` against `safety_floor_bytes`.
 ///
 /// Absent on the parent whenever the host ledger has produced no sample —
 /// legacy dispatch, or before the first sample lands. Absent means unknown;
@@ -3987,12 +3996,20 @@ impl QueueWorkItem {
 pub struct HostMemorySnapshot {
     #[schema(example = 67_430_000_000_u64)]
     pub total_bytes: u64,
+    /// `MemAvailable` alone — the ZFS credit is reported beside it, never in it.
     #[schema(example = 58_000_000_000_u64)]
     pub available_bytes: u64,
     #[schema(example = 48_700_000_000_u64)]
     pub headroom_bytes: u64,
     #[schema(example = 10_114_500_000_u64)]
     pub safety_floor_bytes: u64,
+    /// Evictable ZFS ARC counted into `headroom_bytes` (#1439). Present only
+    /// on a host with arcstats and the credit enabled; `Some(0)` is a ZFS
+    /// host with a cold cache, absence is no ZFS, an older server, or
+    /// `MOLD_HOST_RAM_ZFS_ARC=0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 15_081_432_704_u64)]
+    pub reclaimable_zfs_arc_bytes: Option<u64>,
 }
 
 /// Versioned scheduler plan appended to `GET /api/queue`.
@@ -4731,10 +4748,49 @@ pub struct RamSnapshot {
     pub used: u64,
     /// OS-reported memory immediately available without swapping. Additive
     /// and optional so older resource snapshots remain wire-compatible.
+    ///
+    /// Always `MemAvailable` on Linux — never the ZFS credit below folded in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available: Option<u64>,
+    /// Evictable ZFS ARC the kernel shrinker will reclaim under pressure but
+    /// `MemAvailable` does not count (#1439). `None` when the host has no
+    /// arcstats, the credit is disabled, or an older server reported the
+    /// snapshot; `Some(0)` is a ZFS host whose cache is cold. Never added
+    /// into `available`: [`RamSnapshot::available_with_evictable_arc`] is
+    /// the one place the two halves meet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reclaimable_zfs_arc: Option<u64>,
     pub used_by_mold: u64,
     pub used_by_other: u64,
+}
+
+impl RamSnapshot {
+    /// `MemAvailable`, or `total - used` when the OS did not report it.
+    pub fn available_or_estimate(&self) -> u64 {
+        self.available
+            .unwrap_or_else(|| self.total.saturating_sub(self.used))
+            .min(self.total)
+    }
+
+    /// Record the evictable ZFS ARC credit beside `available`, clamped so
+    /// `available_or_estimate() + credit` can never exceed `total`. This is
+    /// the ONLY writer of `reclaimable_zfs_arc`; it never raises `available`.
+    pub fn with_zfs_arc_credit(mut self, credit: Option<u64>) -> Self {
+        self.reclaimable_zfs_arc = credit
+            .map(|credit| credit.min(self.total.saturating_sub(self.available_or_estimate())));
+        self
+    }
+
+    /// THE figure host admission spends: `MemAvailable` plus the evictable
+    /// ZFS ARC credit, at most `total`. Every consumer — the scheduler
+    /// ledger, H3 admission, the reclaim re-sample, the forced-local CLI —
+    /// reads this so the credit is added exactly once; `available` keeps
+    /// meaning `MemAvailable` for every pin and every wire consumer.
+    pub fn available_with_evictable_arc(&self) -> u64 {
+        self.available_or_estimate()
+            .saturating_add(self.reclaimable_zfs_arc.unwrap_or(0))
+            .min(self.total)
+    }
 }
 
 #[derive(
@@ -5481,11 +5537,15 @@ mod tests {
 
     #[test]
     fn scheduler_serde_roundtrip() {
-        let sched = Scheduler::EulerAncestral;
-        let json = serde_json::to_string(&sched).unwrap();
-        assert_eq!(json, r#""euler-ancestral""#);
-        let back: Scheduler = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, sched);
+        for (sched, expected) in [
+            (Scheduler::EulerAncestral, r#""euler-ancestral""#),
+            (Scheduler::EdmDpmPp2m, r#""edm-dpm-pp-2m""#),
+        ] {
+            let json = serde_json::to_string(&sched).unwrap();
+            assert_eq!(json, expected);
+            let back: Scheduler = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, sched);
+        }
     }
 
     #[test]
@@ -5502,6 +5562,10 @@ mod tests {
         assert_eq!("uni-pc".parse::<Scheduler>().unwrap(), Scheduler::UniPc);
         assert_eq!("unipc".parse::<Scheduler>().unwrap(), Scheduler::UniPc);
         assert_eq!("uni_pc".parse::<Scheduler>().unwrap(), Scheduler::UniPc);
+        assert_eq!(
+            "edm-dpm-pp-2m".parse::<Scheduler>().unwrap(),
+            Scheduler::EdmDpmPp2m
+        );
     }
 
     #[test]
@@ -5514,6 +5578,7 @@ mod tests {
         assert_eq!(Scheduler::Ddim.to_string(), "ddim");
         assert_eq!(Scheduler::EulerAncestral.to_string(), "euler-ancestral");
         assert_eq!(Scheduler::UniPc.to_string(), "uni-pc");
+        assert_eq!(Scheduler::EdmDpmPp2m.to_string(), "edm-dpm-pp-2m");
     }
 
     #[test]
@@ -8318,6 +8383,7 @@ mod tests {
                 total: 64_000_000_000,
                 used: 38_400_000_000,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 22_100_000_000,
                 used_by_other: 16_300_000_000,
             },
@@ -8346,18 +8412,120 @@ mod tests {
         }"#;
         let parsed: RamSnapshot = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.available, None);
+        assert_eq!(parsed.reclaimable_zfs_arc, None);
 
         let current = RamSnapshot {
             total: 64_000_000_000,
             used: 50_000_000_000,
             available: Some(20_000_000_000),
+            reclaimable_zfs_arc: None,
             used_by_mold: 10_000_000_000,
             used_by_other: 40_000_000_000,
         };
         let json = serde_json::to_string(&current).unwrap();
         assert!(json.contains(r#""available":20000000000"#));
+        assert!(
+            !json.contains("reclaimable_zfs_arc"),
+            "a host without ZFS must not serialize the credit: {json}"
+        );
         let round_trip: RamSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(round_trip.available, current.available);
+
+        let zfs = RamSnapshot {
+            reclaimable_zfs_arc: Some(2_206_597_312),
+            ..current
+        };
+        let json = serde_json::to_string(&zfs).unwrap();
+        assert!(
+            json.contains(r#""reclaimable_zfs_arc":2206597312"#),
+            "{json}"
+        );
+        let round_trip: RamSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.reclaimable_zfs_arc, Some(2_206_597_312));
+        assert_eq!(
+            round_trip.available,
+            Some(20_000_000_000),
+            "the credit rides beside MemAvailable, never inside it"
+        );
+    }
+
+    /// hal9000, 2026-08-27 (#1439): MemAvailable 36.27 GB beside 15.08 GB of
+    /// evictable ARC on a 67.15 GB host. The credit is added exactly once,
+    /// and the sum can never exceed the machine.
+    #[test]
+    fn available_with_evictable_arc_adds_the_zfs_credit_once_and_clamps_to_total() {
+        let hal9000 = RamSnapshot {
+            total: 67_149_967_360,
+            used: 30_000_000_000,
+            available: Some(36_272_495_104),
+            reclaimable_zfs_arc: None,
+            used_by_mold: 1_000_000_000,
+            used_by_other: 29_000_000_000,
+        }
+        .with_zfs_arc_credit(Some(15_081_432_704));
+        assert_eq!(hal9000.available_with_evictable_arc(), 51_353_927_808);
+        assert_eq!(hal9000.available, Some(36_272_495_104));
+
+        let clamped = RamSnapshot {
+            total: 64_000_000_000,
+            used: 4_000_000_000,
+            available: Some(60_000_000_000),
+            reclaimable_zfs_arc: None,
+            used_by_mold: 0,
+            used_by_other: 4_000_000_000,
+        }
+        .with_zfs_arc_credit(Some(10_000_000_000));
+        assert_eq!(clamped.available_with_evictable_arc(), 64_000_000_000);
+
+        let estimated = RamSnapshot {
+            total: 64_000_000_000,
+            used: 40_000_000_000,
+            available: None,
+            reclaimable_zfs_arc: None,
+            used_by_mold: 0,
+            used_by_other: 40_000_000_000,
+        }
+        .with_zfs_arc_credit(Some(5_000_000_000));
+        assert_eq!(estimated.available_or_estimate(), 24_000_000_000);
+        assert_eq!(estimated.available_with_evictable_arc(), 29_000_000_000);
+
+        let no_zfs = RamSnapshot {
+            reclaimable_zfs_arc: None,
+            ..hal9000.clone()
+        };
+        assert_eq!(
+            no_zfs.available_with_evictable_arc(),
+            36_272_495_104,
+            "without a credit the figure IS MemAvailable"
+        );
+    }
+
+    #[test]
+    fn with_zfs_arc_credit_never_raises_available_and_clamps_the_credit() {
+        let base = RamSnapshot {
+            total: 64_000_000_000,
+            used: 4_000_000_000,
+            available: Some(60_000_000_000),
+            reclaimable_zfs_arc: None,
+            used_by_mold: 0,
+            used_by_other: 4_000_000_000,
+        };
+        let credited = base.clone().with_zfs_arc_credit(Some(10_000_000_000));
+        assert_eq!(credited.available, base.available);
+        assert_eq!(
+            credited.reclaimable_zfs_arc,
+            Some(4_000_000_000),
+            "the credit is clamped to total - available"
+        );
+        assert_eq!(
+            base.clone().with_zfs_arc_credit(None).reclaimable_zfs_arc,
+            None
+        );
+        assert_eq!(
+            base.with_zfs_arc_credit(Some(0)).reclaimable_zfs_arc,
+            Some(0),
+            "a cold ARC on a ZFS host stays Some(0) so the wire can say so"
+        );
     }
 
     #[test]
@@ -8626,6 +8794,7 @@ pub struct GenerationBatchAdmissionRequest {
 #[serde(rename_all = "snake_case")]
 pub enum GenerationBatchChildState {
     Accepted,
+    Paused,
     Cancelling,
     Running,
     Complete,
@@ -11241,6 +11410,7 @@ mod queue_plan_wire_tests {
                 available_bytes: 58_000_000_000,
                 headroom_bytes: 48_700_000_000,
                 safety_floor_bytes: 10_114_500_000,
+                reclaimable_zfs_arc_bytes: None,
             }),
             ..Default::default()
         };
@@ -11252,13 +11422,29 @@ mod queue_plan_wire_tests {
                 "available_bytes": 58_000_000_000_u64,
                 "headroom_bytes": 48_700_000_000_u64,
                 "safety_floor_bytes": 10_114_500_000_u64,
-            })
+            }),
+            "a host without ZFS publishes exactly the pre-#1439 shape"
         );
         assert_eq!(
             serde_json::from_value::<QueuePlan>(json).unwrap(),
             plan,
             "the wire shape must round-trip"
         );
+
+        let zfs = QueuePlan {
+            host_memory: Some(HostMemorySnapshot {
+                reclaimable_zfs_arc_bytes: Some(15_081_432_704),
+                ..plan.host_memory.unwrap()
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&zfs).unwrap();
+        assert_eq!(
+            json["host_memory"]["reclaimable_zfs_arc_bytes"],
+            serde_json::json!(15_081_432_704_u64),
+            "the ZFS credit is additive under its published name"
+        );
+        assert_eq!(serde_json::from_value::<QueuePlan>(json).unwrap(), zfs);
     }
 
     #[test]

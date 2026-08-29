@@ -20,7 +20,11 @@ import {
   setQueueDevicePin,
   type QueuePlan,
 } from "@studio/api/queuePlan";
-import { hostMemoryLevel } from "@studio/lib/hostMemory";
+import {
+  hostMemoryLevel,
+  hostMemoryScheduleLabel,
+} from "@studio/lib/hostMemory";
+import { formatGB } from "../util/format";
 import {
   modelDisplayName,
   modelDisplayNameForId,
@@ -136,6 +140,10 @@ const telemetry = computed(() =>
 /** RAM pressure from the scheduler's ledger rather than used/total — a
  * reservation that has not allocated yet still parks the queue and the OS
  * cannot see it. Absent on older servers, which keeps the plain info bar. */
+const hostMemoryLabel = computed(() => {
+  const memory = queuePlan.value?.host_memory;
+  return memory ? hostMemoryScheduleLabel(memory, formatGB) : null;
+});
 const hostMemoryPressure = computed(() =>
   hostMemoryLevel(queuePlan.value?.host_memory),
 );
@@ -169,6 +177,9 @@ const gpuOrdinals = computed(() => {
 const canReorder = computed(() => !!caps.value?.queue?.can_reorder);
 const isTarget = computed(() => targetId.value === hostId.value);
 const paused = computed(() => poll.status.value?.queue_paused === true);
+const resumeNeeded = computed(
+  () => paused.value || queue.value.some((entry) => entry.state === "paused"),
+);
 
 const address = computed(() => {
   if (!host.value) return "";
@@ -684,13 +695,13 @@ async function onTogglePause() {
   const entry = host.value;
   if (!entry) return;
   try {
-    if (paused.value) await resumeHostQueue(entry);
+    if (resumeNeeded.value) await resumeHostQueue(entry);
     else await pauseHostQueue(entry);
     await poll.refresh();
   } catch (e) {
     toast(
       "error",
-      `Couldn't ${paused.value ? "resume" : "pause"} queue: ${errMsg(e)}`,
+      `Couldn't ${resumeNeeded.value ? "resume" : "pause"} queue: ${errMsg(e)}`,
     );
   }
 }
@@ -1036,6 +1047,7 @@ onBeforeUnmount(() => {
             :tone="ramTone"
             label="System RAM"
             :data-pressure="hostMemoryPressure ?? undefined"
+            :title="hostMemoryLabel ?? undefined"
           />
 
           <div class="md-tiles">

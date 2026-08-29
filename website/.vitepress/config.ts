@@ -4,7 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   title: 'mold',
   description:
-    'CLI-native local AI image and video generation for people, scripts, and agents — CUDA, Metal, desktop, web, REST, SSE, and MCP',
+    'CLI-native local AI image and video generation for people, scripts, and agents. CUDA, Metal, desktop, web, REST, SSE, and MCP',
   base: '/mold/',
 
   vite: {
@@ -21,7 +21,7 @@ export default defineConfig({
       'meta',
       {
         property: 'og:title',
-        content: 'mold — CLI-native local AI image and video generation',
+        content: 'mold: CLI-native local AI image and video generation',
       },
     ],
     [
@@ -45,7 +45,7 @@ export default defineConfig({
       'meta',
       {
         name: 'twitter:title',
-        content: 'mold — CLI-native local AI image and video generation',
+        content: 'mold: CLI-native local AI image and video generation',
       },
     ],
     [
@@ -138,8 +138,7 @@ export default defineConfig({
             { text: 'Z-Image', link: '/models/z-image' },
             { text: 'Wuerstchen', link: '/models/wuerstchen' },
             { text: 'Qwen-Image', link: '/models/qwen-image' },
-            { text: 'LTX-2 / 2.3', link: '/models/ltx2' },
-            { text: 'LTX Video', link: '/models/ltx-video' },
+            { text: 'LTX Video', link: '/models/ltx2' },
             { text: 'MiniMax H3', link: '/models/minimax-h3' },
             { text: 'Wan Video', link: '/models/wan' },
             { text: 'Upscalers', link: '/models/upscalers' },

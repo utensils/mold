@@ -3,6 +3,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import InspectorPanel from "./InspectorPanel.vue";
+import AdvancedSettings from "./AdvancedSettings.vue";
 import ModelPicker from "./ModelPicker.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
@@ -570,6 +571,32 @@ describe("InspectorPanel — seed mode", () => {
 });
 
 describe("InspectorPanel — advanced", () => {
+  it("passes the selected generation machine to the one-shot LoRA picker", async () => {
+    const connection = useConnectionStore();
+    connection.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "local" };
+    connection.status = "ready";
+    useHostsStore().extras.push({
+      id: "plato-7680",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: "plato-instance",
+    });
+    useAppPrefsStore().settings = { generateTargetHost: "plato-7680" } as never;
+    const form = formFor("z-image");
+    form.model = "z-image-turbo:q8";
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    await wrapper.get('[data-test="open-advanced"]').trigger("click");
+
+    expect(wrapper.getComponent(AdvancedSettings).props("loraRoute")).toMatchObject({
+      hostId: "plato-7680",
+      target: { baseUrl: "http://plato:7680" },
+    });
+  });
+
   it("never counts the Sequence opening image — it is primary-form media, not Advanced", async () => {
     const draft = useSequenceDraftStore();
     draft.output = "sequence";

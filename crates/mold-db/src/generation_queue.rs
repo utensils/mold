@@ -69,6 +69,8 @@ pub enum QueueRowState {
     Queued,
     /// Claimed by a worker. Flipped back to `Queued` by startup reconcile.
     Running,
+    /// Recovered after a server restart. Listed, never auto-run until resumed.
+    Paused,
     /// Exceeded an attempt cap or failed to reconcile. Listed, never auto-run.
     Held,
 }
@@ -78,6 +80,7 @@ impl QueueRowState {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Paused => "paused",
             Self::Held => "held",
         }
     }
@@ -86,6 +89,7 @@ impl QueueRowState {
         match raw {
             "queued" => Some(Self::Queued),
             "running" => Some(Self::Running),
+            "paused" => Some(Self::Paused),
             "held" => Some(Self::Held),
             _ => None,
         }
@@ -252,6 +256,17 @@ const QUEUE_PROJECTION_BY_ID_SQL: &str = "
       LEFT JOIN generation_batches AS b ON b.id = c.batch_id
      WHERE q.id = ?1 AND q.owner_uuid = ?2";
 
+const QUEUE_PROJECTION_BY_STATE_SQL: &str = "
+    SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
+           q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
+           q.rowid, c.batch_id, c.batch_index, b.client_batch_id
+      FROM generation_queue AS q
+      LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
+      LEFT JOIN generation_batches AS b ON b.id = c.batch_id
+     WHERE q.owner_uuid = ?1 AND q.state = ?2
+     ORDER BY q.created_at, q.rowid
+     LIMIT ?3";
+
 /// Payload-free stable scan used to complete a bounded hydrated reorder with
 /// every queued row that still lives only in SQLite.
 const QUEUE_REORDER_CANDIDATES_SQL: &str = "
@@ -307,7 +322,10 @@ pub struct ClaimedQueueRuntimePosition {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeClaimRecovery {
     pub claims_cleared: usize,
-    pub running_requeued: usize,
+    /// Pre-existing queued or running rows parked for explicit resume.
+    pub jobs_paused: usize,
+    /// Subset of `jobs_paused` that had been claimed by a worker.
+    pub running_paused: usize,
     /// Recovery-active rows that spent one boot of replay budget.
     pub replays_charged: usize,
     /// Charged claims parked after exceeding the configured replay budget.
@@ -553,7 +571,8 @@ pub fn purge_held(db: &MetadataDb, owner_uuid: &str, id: &str, now_ms: i64) -> R
 pub fn delete_all_queued(db: &MetadataDb, owner_uuid: &str) -> Result<usize> {
     db.with_conn(|conn| {
         let removed = conn.execute(
-            "DELETE FROM generation_queue WHERE owner_uuid = ?1 AND state = 'queued'",
+            "DELETE FROM generation_queue
+              WHERE owner_uuid = ?1 AND state IN ('queued', 'paused')",
             params![owner_uuid],
         )?;
         Ok(removed)
@@ -577,7 +596,7 @@ pub fn delete_all_queued_legacy(db: &MetadataDb, owner_uuid: &str) -> Result<usi
     db.with_conn(|conn| {
         Ok(conn.execute(
             "DELETE FROM generation_queue
-              WHERE owner_uuid = ?1 AND state = 'queued'
+              WHERE owner_uuid = ?1 AND state IN ('queued', 'paused')
                 AND NOT EXISTS (
                     SELECT 1 FROM generation_batch_children AS child
                      WHERE child.job_id = generation_queue.id
@@ -691,6 +710,29 @@ pub fn projection_for(
         })
         .optional()
         .map_err(Into::into)
+    })
+}
+
+/// Payload-free projection of one lifecycle state, used by reconnect surfaces
+/// that must see parked work even though it is absent from the live registry.
+pub fn projections_in_state(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    state: QueueRowState,
+    limit: usize,
+) -> Result<Vec<GenerationQueueProjection>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(QUEUE_PROJECTION_BY_STATE_SQL)?;
+        let rows = stmt
+            .query_map(params![owner_uuid, state.as_str(), limit], |row| {
+                projection_page_row(row).map(|(projection, _)| projection)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     })
 }
 
@@ -1169,11 +1211,14 @@ pub fn hold_media_jobs(
             let Some((queue_state, child_state)) = row else {
                 continue;
             };
-            if !matches!(queue_state.as_str(), "queued" | "running" | "held") {
+            if !matches!(
+                queue_state.as_str(),
+                "queued" | "running" | "paused" | "held"
+            ) {
                 bail!("media queue row {job_id} has invalid state {queue_state}");
             }
             if let Some(child_state) = child_state.as_deref() {
-                if !matches!(child_state, "accepted" | "running" | "held") {
+                if !matches!(child_state, "accepted" | "running" | "paused" | "held") {
                     bail!(
                         "media queue row {job_id} cannot be held beside batch child state {child_state}"
                     );
@@ -1193,13 +1238,13 @@ pub fn hold_media_jobs(
     })
 }
 
-/// Flip every `running` row this installation owns back to `queued`.
+/// Park every queued or running row this installation owns as `paused`.
 ///
 /// Startup recovery for runtime-only ownership.
 ///
-/// All running rows are replayable after a process death, including legacy
-/// untokened rows. Every token is cleared in the same statement, so a stale
-/// feeder or worker from the prior runtime is fenced from later CAS writes.
+/// Every token is cleared in the same transaction, so a stale feeder or worker
+/// from the prior runtime is fenced from later CAS writes. Paused rows are not
+/// claimable and require an explicit queue resume.
 pub fn recover_runtime_claims(
     db: &MetadataDb,
     owner_uuid: &str,
@@ -1305,27 +1350,124 @@ fn recover_runtime_claims_inner(
                 }
             }
         }
-        let running_requeued: i64 = conn.query_row(
+        let running_paused: i64 = conn.query_row(
             "SELECT COUNT(*) FROM generation_queue
               WHERE owner_uuid = ?1 AND state = 'running'",
             params![owner_uuid],
             |row| row.get(0),
         )?;
+        let jobs_paused: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM generation_queue
+              WHERE owner_uuid = ?1 AND state IN ('queued', 'running')",
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            "UPDATE generation_batch_children
+                SET state = 'paused', error = NULL,
+                    updated_at_ms = MAX(?2, updated_at_ms + 1),
+                    revision = revision + 1
+              WHERE state IN ('accepted', 'running')
+                AND job_id IN (
+                    SELECT id FROM generation_queue
+                     WHERE owner_uuid = ?1 AND state IN ('queued', 'running')
+                )",
+            params![owner_uuid, now_ms],
+        )?;
         conn.execute(
             "UPDATE generation_queue
-                SET state = CASE WHEN state = 'running' THEN 'queued' ELSE state END,
+                SET state = 'paused',
                     claim_token = NULL,
-                    started_at = CASE WHEN state = 'running' THEN NULL ELSE started_at END,
+                    started_at = NULL,
                     updated_at = ?2
               WHERE owner_uuid = ?1
-                AND (state = 'running' OR claim_token IS NOT NULL)",
+                AND state IN ('queued', 'running')",
             params![owner_uuid, now_ms],
+        )?;
+        conn.execute(
+            "UPDATE generation_queue
+                SET claim_token = NULL
+              WHERE owner_uuid = ?1 AND claim_token IS NOT NULL",
+            params![owner_uuid],
         )?;
         Ok(RuntimeClaimRecovery {
             claims_cleared: claims_cleared as usize,
-            running_requeued: running_requeued as usize,
+            jobs_paused: jobs_paused as usize,
+            running_paused: running_paused as usize,
             replays_charged,
             replays_held,
+        })
+    })
+}
+
+/// Return every restart-paused row owned by this installation to the runnable
+/// queue. Queue rows and their durable batch summaries move together so a
+/// reconnect can never observe `accepted` without execution authority, or a
+/// queued authority whose child still says `paused`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PausedWorkResume {
+    pub generation_jobs: usize,
+    pub chain_jobs: usize,
+}
+
+pub fn resume_all_paused(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    now_ms: i64,
+) -> Result<PausedWorkResume> {
+    db.transact_immediate(|conn| {
+        let inconsistent: Option<(String, String)> = conn
+            .query_row(
+                "SELECT q.id, child.state
+                   FROM generation_queue AS q
+                   JOIN generation_batch_children AS child ON child.job_id = q.id
+                  WHERE q.owner_uuid = ?1 AND q.state = 'paused'
+                    AND child.state NOT IN ('paused', 'cancelling')
+                  LIMIT 1",
+                params![owner_uuid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((job_id, child_state)) = inconsistent {
+            bail!("paused queue row {job_id} has inconsistent batch child state {child_state}");
+        }
+
+        let resumed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM generation_queue
+              WHERE owner_uuid = ?1 AND state = 'paused'",
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            "UPDATE generation_batch_children
+                SET state = 'accepted', error = NULL, error_code = NULL,
+                    updated_at_ms = MAX(?2, updated_at_ms + 1),
+                    revision = revision + 1
+              WHERE state = 'paused'
+                AND job_id IN (
+                    SELECT id FROM generation_queue
+                     WHERE owner_uuid = ?1 AND state = 'paused'
+                )",
+            params![owner_uuid, now_ms],
+        )?;
+        conn.execute(
+            "UPDATE generation_queue
+                SET state = 'queued', claim_token = NULL, started_at = NULL,
+                    updated_at = MAX(?2, updated_at + 1)
+              WHERE owner_uuid = ?1 AND state = 'paused'",
+            params![owner_uuid, now_ms],
+        )?;
+        let chains = conn.execute(
+            "UPDATE chain_jobs
+                SET state = 'queued', error = NULL,
+                    updated_at = MAX(?1, updated_at + 1)
+              WHERE state = 'paused'",
+            params![now_ms],
+        )?;
+        Ok(PausedWorkResume {
+            generation_jobs: usize::try_from(resumed)
+                .map_err(|_| anyhow::anyhow!("paused queue count is outside usize"))?,
+            chain_jobs: chains,
         })
     })
 }
@@ -2029,8 +2171,7 @@ mod tests {
         );
     }
 
-    /// This owner's rows the feeder may still claim, in claim order: every
-    /// row that is not held, oldest first with `rowid` breaking ties.
+    /// This owner's replay-order rows, excluding permanently held work.
     fn claimable(db: &MetadataDb, owner: &str) -> Vec<GenerationQueueRow> {
         list_all(db, owner)
             .unwrap()
@@ -2373,6 +2514,60 @@ mod tests {
     }
 
     #[test]
+    fn state_projection_is_payload_free_owner_scoped_and_ordered() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for (id, owner, created, state) in [
+            ("later", "owner-a", 2, QueueRowState::Paused),
+            ("queued", "owner-a", 1, QueueRowState::Queued),
+            ("first", "owner-a", 1, QueueRowState::Paused),
+            ("foreign", "owner-b", 0, QueueRowState::Paused),
+        ] {
+            let mut stored = row(id, owner, created);
+            stored.state = state;
+            stored.request_json = "large-payload".repeat(10_000);
+            insert(&db, &stored).unwrap();
+        }
+
+        assert_eq!(
+            projections_in_state(&db, "owner-a", QueueRowState::Paused, 1)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["first"]
+        );
+        assert!(!QUEUE_PROJECTION_BY_STATE_SQL.contains("request_json"));
+    }
+
+    #[test]
+    fn replay_exhaustion_holds_the_row_and_clears_its_runtime_token() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_claimed(&db, &row("job", "owner-a", 1), "first-runtime").unwrap();
+
+        recover_runtime_claims_and_charge_replays(&db, "owner-a", 10, 1).unwrap();
+        resume_all_paused(&db, "owner-a", 11).unwrap();
+        claim_next(&db, "owner-a", "second-runtime", 12)
+            .unwrap()
+            .unwrap();
+
+        let recovered = recover_runtime_claims_and_charge_replays(&db, "owner-a", 20, 1).unwrap();
+        assert_eq!(recovered.replays_held, 1);
+        assert_eq!(recovered.claims_cleared, 1);
+        assert_eq!(get(&db, "job").unwrap().unwrap().state, QueueRowState::Held);
+        let token: Option<String> = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT claim_token FROM generation_queue WHERE id = 'job'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(token, None);
+    }
+
+    #[test]
     fn mark_dispatched_sets_running_and_returns_the_incremented_count() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert(&db, &row("job-1", "owner-a", 1)).unwrap();
@@ -2388,31 +2583,109 @@ mod tests {
     }
 
     #[test]
-    fn requeue_running_returns_interrupted_rows_to_the_queue() {
+    fn restart_parks_all_runnable_rows_until_resume_and_preserves_order() {
         let db = MetadataDb::open_in_memory().unwrap();
-        insert(&db, &row("job-1", "owner-a", 1)).unwrap();
-        insert(&db, &row("job-2", "owner-b", 1)).unwrap();
-        mark_dispatched(&db, "job-1", 10).unwrap();
-        mark_dispatched(&db, "job-2", 10).unwrap();
+        insert(&db, &row("queued", "owner-a", 1)).unwrap();
+        insert(&db, &row("running", "owner-a", 2)).unwrap();
+        insert(&db, &row("held", "owner-a", 3)).unwrap();
+        insert(&db, &row("foreign", "owner-b", 1)).unwrap();
+        mark_dispatched(&db, "running", 10).unwrap();
+        mark_dispatched(&db, "foreign", 10).unwrap();
+        hold(&db, "held", "operator review", 11).unwrap();
 
+        let recovered = recover_runtime_claims(&db, "owner-a", 20).unwrap();
+        assert_eq!(recovered.jobs_paused, 2);
+        assert_eq!(recovered.running_paused, 1);
+        let running = get(&db, "running").unwrap().unwrap();
+        assert_eq!(running.state, QueueRowState::Paused);
+        assert_eq!(running.started_at_ms, None);
         assert_eq!(
-            recover_runtime_claims(&db, "owner-a", 20)
-                .unwrap()
-                .running_requeued,
-            1
-        );
-        let mine = get(&db, "job-1").unwrap().unwrap();
-        assert_eq!(mine.state, QueueRowState::Queued);
-        assert_eq!(mine.started_at_ms, None);
-        assert_eq!(
-            mine.dispatch_attempts, 1,
-            "requeueing must not refund the attempt that killed the process"
+            running.dispatch_attempts, 1,
+            "pausing must not refund the attempt that killed the process"
         );
         assert_eq!(
-            get(&db, "job-2").unwrap().unwrap().state,
+            get(&db, "queued").unwrap().unwrap().state,
+            QueueRowState::Paused
+        );
+        assert_eq!(
+            get(&db, "held").unwrap().unwrap().state,
+            QueueRowState::Held
+        );
+        assert_eq!(
+            get(&db, "foreign").unwrap().unwrap().state,
             QueueRowState::Running,
             "another installation's rows are never touched"
         );
+        assert!(claim_next(&db, "owner-a", "before-resume", 21)
+            .unwrap()
+            .is_none());
+
+        let resumed = resume_all_paused(&db, "owner-a", 22).unwrap();
+        assert_eq!(resumed.generation_jobs, 2);
+        assert_eq!(claimable_ids(&db, "owner-a"), ["queued", "running"]);
+        assert_eq!(
+            claim_next(&db, "owner-a", "after-resume", 23)
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            "queued"
+        );
+    }
+
+    #[test]
+    fn repeated_restart_recovery_is_idempotent_for_already_paused_rows() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_claimed(&db, &row("job", "owner-a", 1), "runtime").unwrap();
+
+        let first = recover_runtime_claims_and_charge_replays(&db, "owner-a", 10, 3).unwrap();
+        assert_eq!(first.jobs_paused, 1);
+        assert_eq!(first.replays_charged, 1);
+        assert_eq!(get(&db, "job").unwrap().unwrap().replay_seen, 1);
+
+        let second = recover_runtime_claims_and_charge_replays(&db, "owner-a", 20, 3).unwrap();
+        assert_eq!(second.jobs_paused, 0);
+        assert_eq!(second.replays_charged, 0);
+        assert_eq!(get(&db, "job").unwrap().unwrap().replay_seen, 1);
+    }
+
+    #[test]
+    fn resume_all_paused_releases_singletons_and_sequences_together() {
+        use crate::chain_jobs::{self, ChainJobRow};
+        use mold_core::chain_job::ChainJobState;
+
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut generation = row("generation", "owner-a", 1);
+        generation.state = QueueRowState::Paused;
+        insert(&db, &generation).unwrap();
+        chain_jobs::insert_job(
+            &db,
+            &ChainJobRow {
+                id: "sequence".into(),
+                state: ChainJobState::Paused,
+                model: "ltx-video".into(),
+                request_json: "{}".into(),
+                job_dir: PathBuf::from("/jobs/sequence"),
+                stage_count: 2,
+                current_stage: 1,
+                error: Some("server restarted while chain job was running".into()),
+                created_at_ms: 2,
+                updated_at_ms: 2,
+                finalized_at_ms: None,
+            },
+        )
+        .unwrap();
+
+        let resumed = resume_all_paused(&db, "owner-a", 10).unwrap();
+        assert_eq!(resumed.generation_jobs, 1);
+        assert_eq!(resumed.chain_jobs, 1);
+        assert_eq!(
+            get(&db, "generation").unwrap().unwrap().state,
+            QueueRowState::Queued
+        );
+        let sequence = chain_jobs::get_job(&db, "sequence").unwrap().unwrap();
+        assert_eq!(sequence.state, ChainJobState::Queued);
+        assert_eq!(sequence.error, None);
     }
 
     #[test]
@@ -2796,9 +3069,18 @@ mod tests {
 
         let recovered = recover_runtime_claims(&db, "owner-a", 20).unwrap();
         assert_eq!(recovered.claims_cleared, 1);
-        assert_eq!(recovered.running_requeued, 0);
+        assert_eq!(recovered.running_paused, 0);
 
-        let replay = claim_next(&db, "owner-a", "feeder-after-restart", 21)
+        assert!(claim_next(&db, "owner-a", "feeder-before-resume", 21)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            resume_all_paused(&db, "owner-a", 22)
+                .unwrap()
+                .generation_jobs,
+            1
+        );
+        let replay = claim_next(&db, "owner-a", "feeder-after-restart", 23)
             .unwrap()
             .expect("the dead runtime's direct row becomes feeder-owned after recovery");
         assert_eq!(replay.row.id, "live-direct");
@@ -2866,7 +3148,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_clears_queued_claims_requeues_running_and_fences_old_tokens() {
+    fn recovery_clears_claims_pauses_backlog_and_fences_old_tokens() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert(&db, &row("queued", "owner-a", 1)).unwrap();
         insert(&db, &row("running", "owner-a", 2)).unwrap();
@@ -2876,14 +3158,15 @@ mod tests {
 
         let recovered = recover_runtime_claims(&db, "owner-a", 20).unwrap();
         assert_eq!(recovered.claims_cleared, 2);
-        assert_eq!(recovered.running_requeued, 1);
+        assert_eq!(recovered.running_paused, 1);
+        assert_eq!(recovered.jobs_paused, 2);
         assert_eq!(
             get(&db, "queued").unwrap().unwrap().state,
-            QueueRowState::Queued
+            QueueRowState::Paused
         );
         assert_eq!(
             get(&db, "running").unwrap().unwrap().state,
-            QueueRowState::Queued
+            QueueRowState::Paused
         );
         assert_eq!(
             mark_dispatched_claimed(&db, "running", "token-running", 21).unwrap(),

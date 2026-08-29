@@ -19,6 +19,7 @@ import {
   storeCachedHostPresentation,
 } from "./galleryCache";
 import { clearSessionScrollForTests, sessionScrollPosition } from "@studio/lib/libraryOrganization";
+import { thumbnailTier } from "@studio/lib/thumbnailPersistentCache";
 
 const {
   invoke,
@@ -200,6 +201,7 @@ const print: GalleryImage = {
     return Math.floor(Date.now() / 1000) + 5;
   },
   format: "mp4",
+  media_version: "mobile-test-v1",
   metadata: {
     prompt: "a ship crossing violet lightning",
     negative_prompt: "calm water",
@@ -217,6 +219,19 @@ const print: GalleryImage = {
     fps: 30,
   },
 };
+
+function cachedThumbnailRef(item: GalleryImage, hostId = "studio-instance") {
+  return {
+    hostId,
+    filename: item.filename,
+    mediaVersion: item.media_version!,
+    tier: thumbnailTier(),
+  };
+}
+
+function cachedThumbnailBlob(label = "cached thumbnail"): Blob {
+  return new Blob([Uint8Array.of(0x89, 0x50, 0x4e, 0x47), label], { type: "image/png" });
+}
 
 let durableJobSequence = 0;
 
@@ -516,6 +531,22 @@ function fieldControl(label: string): DOMWrapper<Element> {
   return field.find("input, textarea, select");
 }
 
+function mobileTouch(type: string, x: number, y: number, ended = false): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  const point = { identifier: 17, clientX: x, clientY: y };
+  Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
+  Object.defineProperty(event, "changedTouches", { value: [point] });
+  return event;
+}
+
+async function swipeMobileContent(fromX: number, toX: number, y = 180): Promise<void> {
+  const content = wrapper!.get(".mobile-content").element;
+  content.dispatchEvent(mobileTouch("touchstart", fromX, y));
+  content.dispatchEvent(mobileTouch("touchmove", toX, y));
+  content.dispatchEvent(mobileTouch("touchend", toX, y, true));
+  await flushPromises();
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -580,9 +611,10 @@ beforeEach(() => {
         const body = await apiJsonTo(requestTarget, path, init);
         return new Response(JSON.stringify(body));
       }
-      return {
-        blob: () => Promise.resolve(new Blob(["thumbnail"])),
-      } as Response;
+      return new Response(cachedThumbnailBlob("network thumbnail"), {
+        status: 200,
+        headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+      });
     });
   openStreams.length = 0;
   sseStream.mockReset().mockImplementation(
@@ -2751,8 +2783,12 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await flushPromises();
+    const content = wrapper.get(".mobile-content").element as HTMLElement;
+    content.scrollTop = 640;
     const row = wrapper.get("[data-test='mobile-generation-job']");
-    await row.get(".mobile-generation-job").trigger("click");
+    const rowButton = row.get(".mobile-generation-job");
+    (rowButton.element as HTMLElement).focus();
+    await rowButton.trigger("keydown", { key: "Enter" });
     await flushPromises();
     await flushPromises();
 
@@ -2762,6 +2798,8 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-generation-job']").text()).not.toContain(
       "Recovered print",
     );
+    expect(content.scrollTop).toBe(0);
+    expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-create-heading']").element);
   });
 
   it("persists one pre-admission cancel tap until the exact server job id is reconciled", async () => {
@@ -5721,12 +5759,14 @@ describe("MobileApp generation queue", () => {
     await control.trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/pause", { method: "POST" });
+    expect(row.get("[data-test='mobile-generation-status']").text()).toBe("QUEUE PAUSED");
     const resume = row.get("[data-test='swipe-action-queue-resume']");
     expect(resume.text()).toBe("Resume");
 
     await resume.trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/resume", { method: "POST" });
+    expect(row.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED");
     expect(row.get("[data-test='swipe-action-queue-pause']").text()).toBe("Pause");
   });
 
@@ -6466,9 +6506,12 @@ describe("MobileApp generation queue", () => {
           // never resolving. The page deadline must still advance the grid.
           return new Promise(() => {});
         }
-        return Promise.resolve({
-          blob: () => Promise.resolve(new Blob([`thumbnail-${thumbnailCall}`])),
-        } as Response);
+        return Promise.resolve(
+          new Response(cachedThumbnailBlob(`thumbnail-${thumbnailCall}`), {
+            status: 200,
+            headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+          }),
+        );
       });
 
       wrapper = mountMobileApp();
@@ -6488,7 +6531,9 @@ describe("MobileApp generation queue", () => {
       await vi.advanceTimersByTimeAsync(5_020);
 
       expect(stalledSignal?.aborted).toBe(true);
-      expect(requestedPaths).toContain("/api/gallery/thumbnail/stalled-pagination-print-39.mp4");
+      expect(requestedPaths).toContain(
+        "/api/gallery/thumbnail/stalled-pagination-print-39.mp4?v=mobile-test-v1&size=256&fmt=jpeg",
+      );
       expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
       expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1);
       expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
@@ -6516,12 +6561,15 @@ describe("MobileApp generation queue", () => {
       apiFetchTo.mockImplementation((_target, path) => {
         const attempt = (attempts.get(path) ?? 0) + 1;
         attempts.set(path, attempt);
-        if (path.endsWith("retry-pagination-print-39.mp4") && attempt === 1) {
+        if (path.includes("retry-pagination-print-39.mp4") && attempt === 1) {
           return Promise.reject(new Error("temporary thumbnail failure"));
         }
-        return Promise.resolve({
-          blob: () => Promise.resolve(new Blob([`${path}-${attempt}`])),
-        } as Response);
+        return Promise.resolve(
+          new Response(cachedThumbnailBlob(`${path}-${attempt}`), {
+            status: 200,
+            headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+          }),
+        );
       });
 
       wrapper = mountMobileApp();
@@ -6538,7 +6586,11 @@ describe("MobileApp generation queue", () => {
       await vi.advanceTimersByTimeAsync(4_000);
 
       expect(wrapper.find("[data-test='gallery-thumbnail-pending']").exists()).toBe(false);
-      expect(attempts.get("/api/gallery/thumbnail/retry-pagination-print-39.mp4")).toBe(2);
+      expect(
+        attempts.get(
+          "/api/gallery/thumbnail/retry-pagination-print-39.mp4?v=mobile-test-v1&size=256&fmt=jpeg",
+        ),
+      ).toBe(2);
     } finally {
       vi.useRealTimers();
     }
@@ -6559,7 +6611,7 @@ describe("MobileApp generation queue", () => {
     const lateThumbnail = deferred<Response>();
     let pendingSignal: AbortSignal | undefined;
     apiFetchTo.mockImplementation((_target, path, init) => {
-      if (path.endsWith("unmount-pagination-print-0.mp4")) {
+      if (path.includes("unmount-pagination-print-0.mp4")) {
         pendingSignal = init?.signal;
         return lateThumbnail.promise;
       }
@@ -7690,6 +7742,127 @@ describe("MobileApp create settings reset", () => {
 });
 
 describe("MobileApp primary navigation", () => {
+  it("swipes left and right through the four major destinations", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await swipeMobileContent(280, 100);
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+    await swipeMobileContent(280, 100);
+    expect(wrapper.get("[data-test='mobile-tab-catalog']").attributes("aria-current")).toBe("page");
+    await swipeMobileContent(100, 280);
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+  });
+
+  it("ignores left swipes in Settings and returns to the same underlying tab", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+    await swipeMobileContent(280, 100);
+    expect(wrapper.find("[data-test='mobile-settings-back']").exists()).toBe(true);
+
+    await wrapper.get("[data-test='mobile-settings-back']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+      "page",
+    );
+  });
+
+  it("swipes right out of Machine Detail without stealing swipe-row gestures", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(true);
+
+    await swipeMobileContent(90, 270);
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-tab-hosts']").attributes("aria-current")).toBe("page");
+  });
+
+  it("opens Machine Detail at the top and restores the Machines list scroll", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    const content = wrapper.get(".mobile-content").element as HTMLElement;
+    content.scrollTop = 360;
+
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    await flushPromises();
+    expect(content.scrollTop).toBe(0);
+
+    await wrapper.get("[data-test='host-detail-back']").trigger("click");
+    await flushPromises();
+    expect(content.scrollTop).toBe(360);
+  });
+
+  it("does not switch destinations when a horizontal control owns the gesture", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const modelPicker = fieldControl("Model").element;
+    modelPicker.dispatchEvent(mobileTouch("touchstart", 280, 180));
+    modelPicker.dispatchEvent(mobileTouch("touchmove", 100, 180));
+    modelPicker.dispatchEvent(mobileTouch("touchend", 100, 180, true));
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+      "page",
+    );
+  });
+
+  it("pulls Models and Machines to refresh their remote snapshots", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "discover_mold_hosts") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const content = wrapper.get(".mobile-content").element;
+
+    await wrapper.get("[data-test='mobile-tab-catalog']").trigger("click");
+    await flushPromises();
+    const catalogBefore = apiJsonTo.mock.calls.filter(([, path]) =>
+      String(path).startsWith("/api/catalog/search"),
+    ).length;
+    content.dispatchEvent(mobileTouch("touchstart", 120, 100));
+    content.dispatchEvent(mobileTouch("touchmove", 120, 230));
+    content.dispatchEvent(mobileTouch("touchend", 120, 230, true));
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => String(path).startsWith("/api/catalog/search"))
+          .length,
+      ).toBeGreaterThan(catalogBefore),
+    );
+
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await flushPromises();
+    const probesBefore = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status").length;
+    content.dispatchEvent(mobileTouch("touchstart", 120, 100));
+    content.dispatchEvent(mobileTouch("touchmove", 120, 230));
+    content.dispatchEvent(mobileTouch("touchend", 120, 230, true));
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status").length,
+      ).toBeGreaterThan(probesBefore),
+    );
+    expect(invoke).toHaveBeenCalledWith("discover_mold_hosts", { timeoutMs: 2500 });
+
+    await wrapper.get("[data-test='mobile-host-row']").trigger("click");
+    await flushPromises();
+    const detailModelsBefore = apiJsonTo.mock.calls.filter(
+      ([, path]) => path === "/api/models",
+    ).length;
+    content.dispatchEvent(mobileTouch("touchstart", 120, 100));
+    content.dispatchEvent(mobileTouch("touchmove", 120, 230));
+    content.dispatchEvent(mobileTouch("touchend", 120, 230, true));
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/models").length,
+      ).toBeGreaterThan(detailModelsBefore),
+    );
+  });
+
   it("starts each tab at the top instead of carrying another tab's scroll position", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
@@ -7792,12 +7965,7 @@ describe("MobileApp gallery", () => {
       ]),
     );
     await storeCachedGallery("studio-instance", [print]);
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     const liveGallery = deferred<GalleryImage[]>();
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status")
@@ -7817,10 +7985,14 @@ describe("MobileApp gallery", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
-    // Cached metadata hydrates behind the loading surface while the live host
-    // read is pending. Wait for those bytes to resolve before replacing the
-    // proxies with the same physical keys.
-    await vi.waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
+    await vi.waitFor(() => {
+      const tile = wrapper!.get("[data-test='gallery-item']");
+      expect(tile.find(".mobile-media-placeholder").exists()).toBe(false);
+      expect(tile.get("img").attributes("src")).toContain("blob:");
+    });
+    expect(wrapper.text()).not.toContain("Loading prints…");
+    const cachedUrl = wrapper.get("[data-test='gallery-item'] img").attributes("src");
+    const objectUrlsBeforeLive = vi.mocked(URL.createObjectURL).mock.calls.length;
 
     liveGallery.resolve([print]);
     await flushPromises();
@@ -7828,8 +8000,58 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() => {
       const tile = wrapper!.get("[data-test='gallery-item']");
       expect(tile.find(".mobile-media-placeholder").exists()).toBe(false);
-      expect(tile.get("img").attributes("src")).toContain("blob:");
+      expect(tile.get("img").attributes("src")).toBe(cachedUrl);
     });
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(objectUrlsBeforeLive);
+  });
+
+  it("reloads a cached tile when the live content version changes", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: true,
+        },
+      ]),
+    );
+    await storeCachedGallery("studio-instance", [print]);
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob("old"));
+    const liveGallery = deferred<GalleryImage[]>();
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status")
+        return Promise.resolve({ ...status, instance_id: "studio-instance" });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve(null);
+      if (path === "/api/gallery") return liveGallery.promise;
+      if (path === "/api/activity")
+        return Promise.resolve({
+          instance_id: "studio-instance",
+          observed_at_unix_ms: 1,
+          items: [],
+        });
+      return durableApiFallback(path, init, callTarget);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).toContain("blob:"),
+    );
+    const cachedUrl = wrapper.get("[data-test='gallery-item'] img").attributes("src");
+
+    liveGallery.resolve([{ ...print, media_version: "mobile-test-v2" }]);
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).not.toBe(cachedUrl),
+    );
   });
 
   it("reuses a cached print immediately while its host is offline", async () => {
@@ -7858,12 +8080,7 @@ describe("MobileApp gallery", () => {
       models: [model],
       capabilities: null,
     });
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     apiJsonTo.mockRejectedValue(new Error("offline"));
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -7904,12 +8121,7 @@ describe("MobileApp gallery", () => {
       ]),
     );
     await storeCachedGallery("studio-instance", [print]);
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     const lateStatus = deferred<ServerStatus>();
     const lateModels = deferred<ModelEntry[]>();
     let statusCalls = 0;
@@ -8014,10 +8226,14 @@ describe("MobileApp gallery", () => {
       }
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
-    apiFetchTo.mockResolvedValue({
-      headers: new Headers({ "content-type": "image/png" }),
-      blob: () => Promise.resolve(new Blob(["subject bytes"], { type: "image/png" })),
-    } as Response);
+    apiFetchTo.mockImplementation(() =>
+      Promise.resolve(
+        new Response(cachedThumbnailBlob("subject bytes"), {
+          status: 200,
+          headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+        }),
+      ),
+    );
     const lateDigest = deferred<ArrayBuffer>();
     const digest = vi
       .spyOn(globalThis.crypto.subtle, "digest")
@@ -8096,12 +8312,7 @@ describe("MobileApp gallery", () => {
       ]),
     );
     await storeCachedGallery("studio-instance", [print]);
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     apiJsonTo.mockRejectedValue(new Error("offline"));
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -8161,12 +8372,7 @@ describe("MobileApp gallery", () => {
       models: [model],
       capabilities: null,
     });
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      conditioned.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(conditioned), cachedThumbnailBlob());
     apiJsonTo.mockRejectedValue(new Error("offline"));
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -8223,12 +8429,7 @@ describe("MobileApp gallery", () => {
       models: [model],
       capabilities: null,
     });
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     apiJsonTo.mockRejectedValue(new Error("offline"));
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -8266,12 +8467,7 @@ describe("MobileApp gallery", () => {
       ]),
     );
     await storeCachedGallery("studio-instance", [print]);
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status" || path === "/api/gallery") {
         return Promise.reject(new Error("offline"));
@@ -8715,9 +8911,12 @@ describe("MobileApp gallery", () => {
 
   it("backs the native iOS image context menu with image data instead of a blob URL", async () => {
     isNativeIOSRuntime.mockReturnValue(true);
-    apiFetchTo.mockResolvedValue({
-      blob: () => Promise.resolve(new Blob([Uint8Array.from([1, 2, 3])], { type: "image/png" })),
-    } as Response);
+    apiFetchTo.mockResolvedValue(
+      new Response(cachedThumbnailBlob("native context menu"), {
+        status: 200,
+        headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+      }),
+    );
 
     wrapper = mountMobileApp();
     await flushPromises();
@@ -8726,8 +8925,8 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() => expect(apiFetchTo).toHaveBeenCalled());
 
     await vi.waitFor(() =>
-      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).toBe(
-        "data:image/png;base64,AQID",
+      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).toMatch(
+        /^data:image\/png;base64,/,
       ),
     );
     const image = wrapper.get("[data-test='gallery-item'] img");
@@ -9040,7 +9239,10 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() =>
       expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery")).toHaveLength(2),
     );
-    await vi.waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-1"));
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:thumbnail-1");
+    expect(wrapper.get("[data-test='gallery-item'] img").attributes("src")).toBe(
+      "blob:thumbnail-1",
+    );
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
   });
 
@@ -9345,10 +9547,14 @@ describe("MobileApp gallery", () => {
       if (path === "/api/gallery") return Promise.resolve([still]);
       return durableApiFallback(path, init, callTarget);
     });
-    apiFetchTo.mockResolvedValue({
-      headers: new Headers({ "content-type": "image/png" }),
-      blob: () => Promise.resolve(new Blob(["subject bytes"], { type: "image/png" })),
-    } as Response);
+    apiFetchTo.mockImplementation(() =>
+      Promise.resolve(
+        new Response(cachedThumbnailBlob("subject bytes"), {
+          status: 200,
+          headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+        }),
+      ),
+    );
 
     wrapper = mountMobileApp();
     await flushPromises();
@@ -9605,6 +9811,7 @@ describe("MobileApp gallery", () => {
         },
       ]),
     );
+    localStorage.setItem("mold.mobile.generate-target.v1", "studio-id");
     apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
       // This machine's capability probe fails: the labels below pin that.
@@ -9614,6 +9821,7 @@ describe("MobileApp gallery", () => {
       if (path === "/api/status") {
         return Promise.resolve({
           ...status,
+          instance_id: baseUrl === remoteTarget.baseUrl ? "remote-instance" : "studio-instance",
           hostname: baseUrl === remoteTarget.baseUrl ? "remote" : "studio",
         });
       }
@@ -9631,8 +9839,9 @@ describe("MobileApp gallery", () => {
     });
 
     wrapper = mountMobileApp();
-    await vi.waitFor(() =>
-      expect(fieldControl("Model").element).toHaveProperty("value", studioModel.name),
+    await vi.waitFor(
+      () => expect(fieldControl("Model").element).toHaveProperty("value", studioModel.name),
+      { timeout: 5_000 },
     );
 
     const hostsTab = wrapper
@@ -9664,7 +9873,7 @@ describe("MobileApp gallery", () => {
       .findAll("button")
       .find((button) => button.text() === "Develop print");
     expect(developButton?.attributes("disabled")).toBeUndefined();
-  });
+  }, 15_000);
 });
 
 describe("MobileApp host and catalog coordination", () => {
@@ -9936,7 +10145,8 @@ describe("MobileApp host and catalog coordination", () => {
         (requestTarget: unknown, path: string, init?: { signal?: AbortSignal }) => {
           const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
           if (path === "/api/models") return Promise.resolve([model]);
-          if (path === "/api/status" && baseUrl === target.baseUrl) return Promise.resolve(status);
+          if (path === "/api/status" && baseUrl === target.baseUrl)
+            return Promise.resolve({ ...status, instance_id: "studio-instance" });
           if (path === "/api/status") {
             return new Promise<ServerStatus>((resolve, reject) => {
               remoteProbes.push({ resolve, reject, signal: init?.signal });
@@ -9954,7 +10164,12 @@ describe("MobileApp host and catalog coordination", () => {
       expect(remoteProbes).toHaveLength(2);
       expect(remoteProbes[0]?.signal?.aborted).toBe(true);
 
-      remoteProbes[1]?.resolve({ ...status, version: "0.19.0", hostname: "render" });
+      remoteProbes[1]?.resolve({
+        ...status,
+        instance_id: "render-instance",
+        version: "0.19.0",
+        hostname: "render",
+      });
       await flushPromises();
       remoteProbes[0]?.reject(new Error("stale timeout"));
       await flushPromises();
@@ -9988,6 +10203,7 @@ describe("MobileApp host and catalog coordination", () => {
       if (path === "/api/status") {
         return Promise.resolve({
           ...status,
+          instance_id: baseUrl === remoteTarget.baseUrl ? "render-instance" : "studio-instance",
           hostname: baseUrl === remoteTarget.baseUrl ? "render" : "studio",
         });
       }
@@ -11199,12 +11415,15 @@ describe("MobileApp Library organization", () => {
       return durableApiFallback(path, init, callTarget);
     });
     // Thumbnails read blobs; organization mutations read empty JSON bodies.
-    apiFetchTo.mockImplementation(() =>
-      Promise.resolve({
-        status: 204,
-        blob: () => Promise.resolve(new Blob(["thumbnail"])),
-        text: () => Promise.resolve(""),
-      } as unknown as Response),
+    apiFetchTo.mockImplementation((_callTarget, _path, init) =>
+      Promise.resolve(
+        init?.method
+          ? new Response(null, { status: 204 })
+          : new Response(cachedThumbnailBlob(), {
+              status: 200,
+              headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+            }),
+      ),
     );
   }
 
@@ -11228,6 +11447,10 @@ describe("MobileApp Library organization", () => {
       configurable: true,
       value: clientY === undefined ? [] : [{ identifier: 7, clientX: 120, clientY }],
     });
+    Object.defineProperty(event, "changedTouches", {
+      configurable: true,
+      value: clientY === undefined ? [] : [{ identifier: 7, clientX: 120, clientY }],
+    });
     return event;
   }
 
@@ -11242,9 +11465,7 @@ describe("MobileApp Library organization", () => {
     content.dispatchEvent(move);
     await flushPromises();
     expect(move.defaultPrevented).toBe(true);
-    expect(wrapper!.get("[data-test='mobile-library-pull']").text()).toContain(
-      "Release to refresh",
-    );
+    expect(wrapper!.get("[data-test='mobile-view-pull']").text()).toContain("Release to refresh");
     content.dispatchEvent(libraryTouch("touchend"));
 
     await vi.waitFor(() =>
@@ -11265,7 +11486,7 @@ describe("MobileApp Library organization", () => {
     content.dispatchEvent(libraryTouch("touchcancel"));
     await flushPromises();
 
-    expect(wrapper!.get("[data-test='mobile-library-pull']").text()).not.toContain(
+    expect(wrapper!.get("[data-test='mobile-view-pull']").text()).not.toContain(
       "Release to refresh",
     );
     expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery")).toHaveLength(before);
@@ -11351,7 +11572,7 @@ describe("MobileApp Library organization", () => {
     expect(card.text()).toContain("1");
     await vi.waitFor(() => expect(card.find(".mobile-collection-cover img").exists()).toBe(true));
     expect(card.get(".mobile-collection-cover img").attributes("src")).not.toBe(gridThumbnail);
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith(gridThumbnail);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith(gridThumbnail);
 
     vi.useFakeTimers();
     await card.get(".mobile-collection-cover img").trigger("error");
@@ -11386,11 +11607,12 @@ describe("MobileApp Library organization", () => {
     installLibraryApi();
     apiFetchTo.mockImplementation((_callTarget: unknown, path: string, _init?: RequestInit) => {
       if (path.includes("cover.png")) return Promise.reject(new Error("cover host offline"));
-      return Promise.resolve({
-        status: 200,
-        blob: () => Promise.resolve(new Blob(["member thumbnail"], { type: "image/png" })),
-        text: () => Promise.resolve(""),
-      } as unknown as Response);
+      return Promise.resolve(
+        new Response(cachedThumbnailBlob("member thumbnail"), {
+          status: 200,
+          headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+        }),
+      );
     });
     await openLibrary();
 
@@ -12758,6 +12980,67 @@ describe("MobileApp identity photo", () => {
 
     expect(wrapper.get("[data-test='mobile-identity-picker']").classes()).not.toContain("is-open");
     expect(invoke).not.toHaveBeenCalledWith("pick_identity_photo", expect.anything());
+  });
+
+  it("keeps Android semantic tile activation and viewer history in sync", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    const { frames: _frames, fps: _fps, ...stillMetadata } = print.metadata;
+    const androidPrint: GalleryImage = {
+      ...print,
+      filename: "storm.png",
+      format: "png",
+      metadata: {
+        ...stillMetadata,
+        model: identityModel.name,
+        output_format: "png",
+      },
+    };
+    const historyBack = vi.spyOn(window.history, "back").mockImplementation(() => {});
+    serveIdentity([identityModel], [androidPrint]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    const semanticTile = wrapper.get("[data-test='gallery-item']");
+    vi.spyOn(semanticTile.element, "getBoundingClientRect").mockReturnValue({
+      left: 100,
+      right: 200,
+      top: 100,
+      bottom: 200,
+      width: 100,
+      height: 100,
+      x: 100,
+      y: 100,
+      toJSON: () => ({}),
+    });
+    await semanticTile.trigger("click", { detail: 0, clientX: 0, clientY: 0 });
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer']").exists()).toBe(false),
+    );
+    expect(historyBack).toHaveBeenCalledTimes(1);
+
+    // The real browser removes the marker when history.back() lands.
+    window.history.replaceState(null, "");
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click", {
+      detail: 0,
+      clientX: 0,
+      clientY: 0,
+    });
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
+    expect(historyBack).toHaveBeenCalledTimes(1);
+    window.history.replaceState(null, "");
+    historyBack.mockRestore();
   });
 
   it("keeps an oversized Android pick inline and never stages its bytes", async () => {

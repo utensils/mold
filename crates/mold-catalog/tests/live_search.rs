@@ -884,10 +884,13 @@ fn family_from_hf_id_substring() {
         ("black-forest-labs/FLUX.1-dev", Family::Flux),
         ("black-forest-labs/FLUX.2-dev", Family::Flux2),
         ("Lightricks/LTX-Video-2.3", Family::Ltx2),
+        ("Lightricks/LTX-2.3", Family::Ltx2),
         ("Lightricks/LTX-Video", Family::LtxVideo),
         ("MiniMaxAI/MiniMax-H3", Family::MinimaxH3),
         ("someone/MiniMax-H3-FL2VA-finetune", Family::MinimaxH3),
         ("stabilityai/stable-diffusion-xl-base-1.0", Family::Sdxl),
+        ("stabilityai/stable-diffusion-3.5-large", Family::Sd3),
+        ("city96/stable-diffusion-3.5-medium-gguf", Family::Sd3),
         ("Tongyi-MAI/Z-Image-Turbo", Family::ZImage),
     ];
     for (id, want) in cases {
@@ -905,6 +908,25 @@ fn family_from_hf_id_substring() {
             "H3 lookalike {id} must not be classified"
         );
     }
+}
+
+#[test]
+fn family_from_hf_recognizes_sd3_metadata_without_misclassifying_sd15() {
+    for tags in [
+        vec!["diffusers:StableDiffusion3Pipeline".to_string()],
+        vec!["base_model:stabilityai/stable-diffusion-3.5-large".to_string()],
+    ] {
+        let (family, _) = family_from_hf("someone/opaque-image-model", &tags, None).unwrap();
+        assert_eq!(family, Family::Sd3);
+    }
+
+    let (family, _) = family_from_hf(
+        "stabilityai/stable-diffusion-v1-5",
+        &["stable-diffusion".to_string()],
+        None,
+    )
+    .unwrap();
+    assert_eq!(family, Family::Sd15);
 }
 
 /// Every spelling of Wan that the ecosystem actually ships must land on the

@@ -577,6 +577,182 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.get("[data-test='host-detail-queue']").text()).toContain("flux-dev:q8");
   });
 
+  it("gives held machine rows the shared pause, resume, and cancel swipe actions", async () => {
+    let currentQueue: QueueEntry[] = [
+      { ...queueEntries[0]!, id: "job-held", state: "held", held_reason: "host memory" },
+      { ...queueEntries[1]!, position: 0 },
+    ];
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          devices: { available: true, lifecycle: true },
+          dispatch: { v2_authoritative: true },
+          queue: { can_pause: true },
+        });
+      }
+      if (path === "/api/queue?limit=8") return Promise.resolve({ entries: currentQueue });
+      return originalApi(requestTarget, path);
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/queue/job-held") && init?.method === "DELETE") {
+        currentQueue = currentQueue.filter((entry) => entry.id !== "job-held");
+        return new Response(null, { status: 204 });
+      }
+      return Response.json({ paused: url.endsWith("/pause") });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const view = await mountDetail();
+    const held = view.get("[data-test='host-detail-queue-row-job-held']");
+
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Pause");
+    expect(held.get("[data-test='swipe-action-queue-pause']").text()).toBe("Pause");
+    expect(held.get("[data-test='swipe-action-cancel']").text()).toBe("Cancel");
+
+    await held.get("[data-test='swipe-action-queue-pause']").trigger("click");
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${studio.baseUrl}/api/queue/pause`,
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(held.text()).toContain("HELD");
+    expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).toContain("PAUSED");
+    expect(view.get("[data-test='host-detail-queue-paused']").text()).toBe("PAUSED");
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Resume");
+
+    await held.get("[data-test='swipe-action-queue-resume']").trigger("click");
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${studio.baseUrl}/api/queue/resume`,
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).toContain("NEXT UP");
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Pause");
+
+    await held.get("[data-test='swipe-action-cancel']").trigger("click");
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${studio.baseUrl}/api/queue/job-held`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(view.find("[data-test='host-detail-queue-row-job-held']").exists()).toBe(false);
+  });
+
+  it("keeps ordinary queued work waiting when only another row is restart-paused", async () => {
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          devices: { available: true, lifecycle: true },
+          dispatch: { v2_authoritative: true },
+          queue: { can_pause: true },
+        });
+      }
+      if (path === "/api/queue?limit=8") {
+        return Promise.resolve({
+          entries: [
+            { ...queueEntries[0]!, id: "job-paused", state: "paused", position: 0 },
+            { ...queueEntries[1]!, position: 1 },
+          ],
+        });
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+
+    expect(view.get("[data-test='host-detail-queue-row-job-paused']").text()).toContain("PAUSED");
+    expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).toContain(
+      "QUEUED #1",
+    );
+    expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).not.toContain(
+      "PAUSED",
+    );
+    expect(view.get("[data-test='host-detail-queue-paused']").text()).toBe("PAUSED AFTER RESTART");
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Resume");
+  });
+
+  it("refreshes host-wide pause state changed from another surface", async () => {
+    vi.useFakeTimers();
+    let queuePaused = false;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/status") {
+        return Promise.resolve(serverStatus({ queue_paused: queuePaused }));
+      }
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          devices: { available: true, lifecycle: true },
+          dispatch: { v2_authoritative: true },
+          queue: { can_pause: true },
+        });
+      }
+      return originalApi(requestTarget, path);
+    });
+
+    const view = await mountDetail();
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Pause");
+
+    queuePaused = true;
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).toContain("PAUSED");
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Resume");
+
+    queuePaused = false;
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).toContain(
+      "QUEUED #2",
+    );
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Pause");
+  });
+
+  it("does not let an older status poll overwrite a queue pause action", async () => {
+    vi.useFakeTimers();
+    const staleStatus = deferred<ServerStatus>();
+    let statusCalls = 0;
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/status") {
+        statusCalls += 1;
+        return statusCalls === 2
+          ? staleStatus.promise
+          : Promise.resolve(serverStatus({ queue_paused: false }));
+      }
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          devices: { available: true, lifecycle: true },
+          dispatch: { v2_authoritative: true },
+          queue: { can_pause: true },
+        });
+      }
+      return originalApi(requestTarget, path);
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(Response.json({ paused: true }))),
+    );
+
+    const view = await mountDetail();
+    vi.advanceTimersByTime(5_000);
+    await flushPromises();
+
+    await view.get("[data-test='host-detail-queue-pause']").trigger("click");
+    await flushPromises();
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Resume");
+
+    staleStatus.resolve(serverStatus({ queue_paused: false }));
+    await flushPromises();
+    expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).toContain("PAUSED");
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Resume");
+  });
+
   it("confirms and cancels a running job when the host advertises cooperative support", async () => {
     const originalApi = apiJsonTo.getMockImplementation()!;
     apiJsonTo.mockImplementation((requestTarget, path) => {

@@ -1,6 +1,6 @@
 @import 'tailwindcss';
 
-/* mold brand colors — magenta/cyan gradient accent */
+/* mold brand colors -- magenta/cyan gradient accent */
 :root {
   --vp-c-brand-1: #e879f9;
   --vp-c-brand-2: #c026d3;

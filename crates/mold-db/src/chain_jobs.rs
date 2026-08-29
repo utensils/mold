@@ -129,6 +129,26 @@ pub fn jobs_in_state(db: &MetadataDb, state: ChainJobState) -> Result<Vec<ChainJ
     })
 }
 
+/// Park every pre-existing runnable sequence during startup. This is one
+/// database transition so the runner can never observe only part of the
+/// recovered backlog.
+pub fn pause_active_for_restart(db: &MetadataDb, updated_at_ms: i64) -> Result<usize> {
+    db.with_conn(|conn| {
+        let changed = conn.execute(
+            "UPDATE chain_jobs
+                SET state = 'paused',
+                    error = CASE
+                        WHEN state = 'running' THEN 'server restarted while chain job was running'
+                        ELSE NULL
+                    END,
+                    updated_at = MAX(?1, updated_at + 1)
+              WHERE state IN ('queued', 'running')",
+            params![updated_at_ms],
+        )?;
+        Ok(changed)
+    })
+}
+
 /// Oldest queued job by `created_at` (FIFO runner contract).
 pub fn next_queued_job(db: &MetadataDb) -> Result<Option<ChainJobRow>> {
     db.with_conn(|conn| {

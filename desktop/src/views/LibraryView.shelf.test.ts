@@ -1020,14 +1020,16 @@ describe("Trash-aware This-Mac media + file actions", () => {
   it("resolves a trashed This-Mac tile's media into `.trash/` via the view-aware protocol URL", async () => {
     const { wrapper } = await mountWithLocalTrash();
     const media = tileFor(wrapper, localTrashed.filename).get("[data-test='authed-media']");
+    // A tile is a thumbnail request against the native cache; the trash hint
+    // rides along so the offline render reads `.trash/` first.
     expect(media.attributes("data-path")).toBe(
-      `mold-local://localhost/${encodeURIComponent(localTrashed.filename)}?view=trash`,
+      `mold-thumb://localhost/local/${encodeURIComponent(localTrashed.filename)}?view=trash`,
     );
     // Host-backed trash rows stay on the API path (their server resolves
     // trashed rows itself).
     const hostMedia = tileFor(wrapper, trashed.filename).get("[data-test='authed-media']");
-    expect(hostMedia.attributes("data-path")).toBe(
-      `/api/gallery/thumbnail/${encodeURIComponent(trashed.filename)}`,
+    expect(hostMedia.attributes("data-path")).toMatch(
+      new RegExp(`^/api/gallery/thumbnail/${encodeURIComponent(trashed.filename)}\\?size=`),
     );
     wrapper.unmount();
   });

@@ -32,6 +32,7 @@ pub struct DiscoveredHost {
     pub host: String,
     pub port: u16,
     pub auth_required: bool,
+    pub instance_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

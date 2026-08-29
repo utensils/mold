@@ -1931,12 +1931,12 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: ManifestDefaults {
-                steps: 25,
+                steps: 50,
                 guidance: 3.0,
                 width: 1024,
                 height: 1024,
                 is_schnell: false,
-                scheduler: Some(Scheduler::Ddim),
+                scheduler: Some(Scheduler::EdmDpmPp2m),
                 negative_prompt: None,
                 frames: None,
                 fps: None,
@@ -8905,6 +8905,14 @@ mod tests {
         let manifest = find_manifest("sdxl-base").unwrap();
         assert_eq!(manifest.defaults.scheduler, Some(Scheduler::Ddim));
         assert_eq!(manifest.defaults.steps, 25);
+    }
+
+    #[test]
+    fn playground_v25_uses_its_upstream_edm_contract() {
+        let manifest = find_manifest("playground-v2.5").unwrap();
+        assert_eq!(manifest.defaults.scheduler, Some(Scheduler::EdmDpmPp2m));
+        assert_eq!(manifest.defaults.steps, 50);
+        assert_eq!(manifest.defaults.guidance, 3.0);
     }
 
     #[test]

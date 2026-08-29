@@ -123,6 +123,8 @@ pub fn blocked_reason_label(reason: Option<&QueueBlockedReason>) -> Option<Strin
 /// decides the vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueWaitStatus {
+    /// Recovered after restart and waiting for explicit resume.
+    Paused,
     /// Parked by the host: never dispatched on its own, so never "in line".
     Held,
     /// An actionable reason outranks the position: say what to fix.
@@ -138,6 +140,7 @@ pub enum QueueWaitStatus {
 /// One row's evidence, in whatever shape the caller already holds.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QueueWaitInput<'a> {
+    pub paused: bool,
     /// The row is `held`. It still carries a listing position, and reading
     /// that as a place in line is how a parked job rendered as "Next up".
     pub held: bool,
@@ -148,6 +151,9 @@ pub struct QueueWaitInput<'a> {
 
 /// Resolve one waiting row. Absent evidence degrades to a plain `Queued`.
 pub fn resolve_queue_wait(input: &QueueWaitInput<'_>) -> QueueWaitStatus {
+    if input.paused {
+        return QueueWaitStatus::Paused;
+    }
     if input.held {
         return QueueWaitStatus::Held;
     }
@@ -222,7 +228,7 @@ pub fn assign_listed_positions(entries: &mut [crate::QueueJobEntryWire]) {
     let mut next = 0;
     for entry in entries.iter_mut() {
         entry.position = next;
-        if entry.state != "held" {
+        if matches!(entry.state.as_str(), "queued" | "running") {
             next += 1;
         }
     }
@@ -237,6 +243,7 @@ pub fn resolve_listed_wait(
     plan: Option<&QueuePlan>,
     job_id: &str,
     position: Option<usize>,
+    paused: bool,
     held: bool,
 ) -> QueueWaitStatus {
     let (reason, preparation) = match plan {
@@ -244,6 +251,7 @@ pub fn resolve_listed_wait(
         None => (None, None),
     };
     resolve_queue_wait(&QueueWaitInput {
+        paused,
         held,
         position,
         blocked_reason: reason.as_ref(),
@@ -254,6 +262,7 @@ pub fn resolve_listed_wait(
 /// Sentence-case copy, the idiom every list and pill uses.
 pub fn queue_wait_label(wait: &QueueWaitStatus) -> String {
     match wait {
+        QueueWaitStatus::Paused => "Paused after restart".to_string(),
         QueueWaitStatus::Held => "Held".to_string(),
         QueueWaitStatus::Blocked(label) => label.clone(),
         QueueWaitStatus::Next => "Next up".to_string(),
@@ -265,6 +274,7 @@ pub fn queue_wait_label(wait: &QueueWaitStatus) -> String {
 /// Compact uppercase code, for surfaces whose existing idiom is a code column.
 pub fn queue_wait_code(wait: &QueueWaitStatus) -> String {
     match wait {
+        QueueWaitStatus::Paused => "PAUSED".to_string(),
         QueueWaitStatus::Held => "HELD".to_string(),
         QueueWaitStatus::Blocked(label) => label.to_uppercase(),
         QueueWaitStatus::Next => "NEXT UP".to_string(),
@@ -288,6 +298,7 @@ mod tests {
         };
         let mut entries = vec![
             row("held-a", "held"),
+            row("paused-a", "paused"),
             row("queued-b", "queued"),
             row("held-c", "held"),
             row("queued-d", "queued"),
@@ -301,6 +312,7 @@ mod tests {
             positions,
             vec![
                 ("held-a", 0),
+                ("paused-a", 0),
                 ("queued-b", 0),
                 ("held-c", 1),
                 ("queued-d", 1)
@@ -309,8 +321,17 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_paused_row_never_reads_as_waiting_in_line() {
+        let paused = resolve_listed_wait(None, "job", Some(7), true, false);
+        assert_eq!(paused, QueueWaitStatus::Paused);
+        assert_eq!(queue_wait_label(&paused), "Paused after restart");
+        assert_eq!(queue_wait_code(&paused), "PAUSED");
+    }
+
+    #[test]
     fn a_held_row_is_held_whatever_position_the_listing_gave_it() {
         let held = resolve_queue_wait(&QueueWaitInput {
+            paused: false,
             held: true,
             position: Some(0),
             blocked_reason: Some(&QueueBlockedReason::InsufficientVram),
@@ -320,17 +341,18 @@ mod tests {
         assert_eq!(queue_wait_label(&held), "Held");
         assert_eq!(queue_wait_code(&held), "HELD");
         assert_eq!(
-            resolve_listed_wait(None, "job", Some(0), true),
+            resolve_listed_wait(None, "job", Some(0), false, true),
             QueueWaitStatus::Held
         );
         assert_eq!(
-            resolve_listed_wait(None, "job", Some(0), false),
+            resolve_listed_wait(None, "job", Some(0), false, false),
             QueueWaitStatus::Next
         );
     }
 
     fn wait(position: Option<usize>, reason: Option<QueueBlockedReason>) -> QueueWaitStatus {
         resolve_queue_wait(&QueueWaitInput {
+            paused: false,
             held: false,
             position,
             blocked_reason: reason.as_ref(),
@@ -426,18 +448,18 @@ mod tests {
             item("job-1", Some("model_not_installed")),
         ]);
         assert_eq!(
-            resolve_listed_wait(Some(&plan), "job-1", Some(2), false),
+            resolve_listed_wait(Some(&plan), "job-1", Some(2), false, false),
             QueueWaitStatus::Blocked("Model not installed".into())
         );
         // A benign reason on the plan still leaves the row counting.
         let benign = plan_with(vec![item("job-1", Some("no_idle_device"))]);
         assert_eq!(
-            resolve_listed_wait(Some(&benign), "job-1", Some(2), false),
+            resolve_listed_wait(Some(&benign), "job-1", Some(2), false, false),
             QueueWaitStatus::Position(2)
         );
         // No plan is absence of evidence, never a fault.
         assert_eq!(
-            resolve_listed_wait(None, "job-1", Some(0), false),
+            resolve_listed_wait(None, "job-1", Some(0), false, false),
             QueueWaitStatus::Next
         );
     }
@@ -448,7 +470,7 @@ mod tests {
         child.parent_id = "job-1".to_string();
         let plan = plan_with(vec![child]);
         assert_eq!(
-            resolve_listed_wait(Some(&plan), "job-1", Some(1), false),
+            resolve_listed_wait(Some(&plan), "job-1", Some(1), false, false),
             QueueWaitStatus::Blocked("Waiting for GPU memory".into())
         );
     }
@@ -458,7 +480,13 @@ mod tests {
         let mut legacy = item("job-1", None);
         legacy.reason = Some("device_disabled".to_string());
         assert_eq!(
-            resolve_listed_wait(Some(&plan_with(vec![legacy])), "job-1", Some(1), false),
+            resolve_listed_wait(
+                Some(&plan_with(vec![legacy])),
+                "job-1",
+                Some(1),
+                false,
+                false,
+            ),
             QueueWaitStatus::Blocked("Device turned off".into())
         );
         // An assignment reason describes why work WON a device and is never
@@ -466,7 +494,13 @@ mod tests {
         let mut assignment = item("job-1", None);
         assignment.reason = Some("warm_resident".to_string());
         assert_eq!(
-            resolve_listed_wait(Some(&plan_with(vec![assignment])), "job-1", Some(1), false),
+            resolve_listed_wait(
+                Some(&plan_with(vec![assignment])),
+                "job-1",
+                Some(1),
+                false,
+                false,
+            ),
             QueueWaitStatus::Position(1)
         );
     }
@@ -481,7 +515,13 @@ mod tests {
             phase_elapsed_ms: None,
         });
         assert_eq!(
-            resolve_listed_wait(Some(&plan_with(vec![preparing])), "job-1", Some(0), false),
+            resolve_listed_wait(
+                Some(&plan_with(vec![preparing])),
+                "job-1",
+                Some(0),
+                false,
+                false,
+            ),
             QueueWaitStatus::Blocked("Preparing · MiniMax H3 artifacts 25%".into())
         );
     }
@@ -489,6 +529,7 @@ mod tests {
     #[test]
     fn preparing_names_its_component_and_percentage() {
         let status = resolve_queue_wait(&QueueWaitInput {
+            paused: false,
             held: false,
             position: Some(0),
             blocked_reason: Some(&QueueBlockedReason::Preparing),

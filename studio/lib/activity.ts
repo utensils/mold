@@ -23,7 +23,8 @@ import { friendlySequenceError } from "./sequence";
 export type ActivityAction =
   "cancel" | "watch" | "retake" | "edit" | "resume" | "delete";
 
-export type PrintPhase = "queued" | "running" | "done" | "failed" | "cancelled";
+export type PrintPhase =
+  "queued" | "running" | "paused" | "done" | "failed" | "cancelled";
 
 export type ActivityJobVM =
   | {
@@ -48,6 +49,8 @@ export type ActivityJobVM =
        *  the one-shot SSE `Queued` frame. Absent when the host has not been
        *  read or is too old to list the job. */
       queuePosition?: number | null;
+      /** Effective waiting lifecycle after projecting host-wide pause state. */
+      queueState?: string | null;
       /** Raw scheduler `blocked_reason` for this job, when the plan named one. */
       blockedReason?: string | null;
     }
@@ -90,6 +93,7 @@ export function sequenceActions(state: ChainJobState): ActivityAction[] {
       return ["watch", "cancel"];
     case "completed":
       return ["watch", "edit", "delete"];
+    case "paused":
     case "interrupted":
     case "failed":
     case "cancelled":
@@ -167,6 +171,7 @@ export function withLiveQueueStatus(
   const status = queueStatusFor(index, vm.hostId, serverJobId);
   if (!status) return vm;
   const next: PrintActivityVM = { ...vm };
+  if (status.state !== null) next.queueState = status.state;
   if (status.position !== null) next.queuePosition = status.position;
   if (status.blockedReason !== null) next.blockedReason = status.blockedReason;
   return next;
@@ -183,6 +188,7 @@ export function queueStatusLabel(vm: ActivityJobVM): string | null {
   if (vm.kind !== "print" || vm.phase !== "queued") return null;
   return queueWaitLabel(
     resolveQueueWait({
+      state: vm.queueState,
       position: vm.queuePosition,
       blockedReason: vm.blockedReason,
     }),
@@ -220,8 +226,8 @@ export function activityAnnouncement(counts: ActivityCounts): string {
 
 function isActive(vm: ActivityJobVM): boolean {
   return vm.kind === "print"
-    ? vm.phase === "queued" || vm.phase === "running"
-    : vm.state === "queued" || vm.state === "running";
+    ? vm.phase === "queued" || vm.phase === "running" || vm.phase === "paused"
+    : vm.state === "queued" || vm.state === "running" || vm.state === "paused";
 }
 
 /** Settled work that still wants a decision: a failed print, a failed or
@@ -230,7 +236,9 @@ function isActive(vm: ActivityJobVM): boolean {
 export function needsAttention(vm: ActivityJobVM): boolean {
   return vm.kind === "print"
     ? vm.phase === "failed"
-    : vm.state === "failed" || vm.state === "interrupted";
+    : vm.state === "failed" ||
+        vm.state === "interrupted" ||
+        vm.state === "paused";
 }
 
 /** Merge prints and sequences into one list. Active work stays in chronological

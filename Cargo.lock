@@ -3272,6 +3272,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "viuer",
  "walkdir",
  "wiremock",
@@ -3342,6 +3343,7 @@ dependencies = [
  "utoipa",
  "uuid",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
@@ -3470,6 +3472,7 @@ dependencies = [
  "mold-ai-scheduler",
  "mp4",
  "nvml-wrapper",
+ "rayon",
  "rust-embed",
  "serde",
  "serde_json",
@@ -3522,6 +3525,7 @@ dependencies = [
  "tui-textarea",
  "unicode-width 0.2.0",
  "ureq",
+ "wiremock",
 ]
 
 [[package]]

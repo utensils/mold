@@ -26942,7 +26942,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "sdxl.playground-v2.5",
-        "profile_hash": "040f10f4eaf21b8a73af6eaa9bf8f827998278586b80eda6185af461709e4dbc",
+        "profile_hash": "86e278946573501e9d6955d5c165aa89534322a649fde435fc682282546ebf9d",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -26952,7 +26952,7 @@
             "defaults": {
               "width": 1024,
               "height": 1024,
-              "steps": 25,
+              "steps": 50,
               "guidance": 3.0
             },
             "resolution": {
@@ -27073,12 +27073,12 @@
               ]
             },
             "steps": {
-              "default": 25,
+              "default": 50,
               "min": 1,
               "max": 100,
               "step": 1,
               "recommended": [
-                25
+                50
               ],
               "mode": "adjustable"
             },
@@ -27148,9 +27148,7 @@
                 "reason": "Wan sampler controls apply only to Wan models."
               },
               "schedulers": [
-                "ddim",
-                "euler-ancestral",
-                "uni-pc"
+                "edm-dpm-pp-2m"
               ]
             },
             "provenance": [

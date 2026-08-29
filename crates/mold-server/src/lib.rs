@@ -83,9 +83,15 @@ pub mod routes_config;
 pub mod scheduler;
 mod signals;
 pub mod state;
+pub mod thumbnails;
 pub mod variant_dependencies;
 mod wan_admission;
 pub mod web_ui;
+// The arcstats parser and credit policy are pure and unit-tested on every
+// platform, but only the Linux reader calls them; the other targets would
+// otherwise fail `-D warnings` on dead code (#1439).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod zfs_arc;
 
 #[cfg(test)]
 mod admission_contract_test;
@@ -806,7 +812,7 @@ pub async fn run_server(
         std::fs::create_dir_all(&jobs_root)?;
         let db_arc = state.metadata_db.clone();
         let reconcile_root = jobs_root.clone();
-        let (flipped, repaired) = tokio::task::spawn_blocking(move || {
+        let (paused, repaired) = tokio::task::spawn_blocking(move || {
             let Some(db) = db_arc.as_ref().as_ref() else {
                 anyhow::bail!("metadata DB disappeared before chain reconcile");
             };
@@ -814,7 +820,7 @@ pub async fn run_server(
         })
         .await??;
         tracing::info!(
-            flipped,
+            paused,
             repaired,
             jobs_root = %jobs_root.display(),
             "chain job startup reconcile complete"
@@ -1677,6 +1683,7 @@ fn build_cors_layer() -> Result<CorsLayer> {
                     axum::http::header::HeaderName::from_static("x-mold-video-audio-channels"),
                     axum::http::header::HeaderName::from_static("x-mold-dimension-warning"),
                     axum::http::header::HeaderName::from_static("x-mold-request-warning"),
+                    axum::http::header::HeaderName::from_static("x-mold-thumbnail-rendition"),
                 ])
         }
         _ => CorsLayer::permissive(),

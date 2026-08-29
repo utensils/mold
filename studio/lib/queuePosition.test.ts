@@ -43,6 +43,30 @@ function plan(blocked: Record<string, string>): QueuePlan {
 }
 
 describe("buildQueueStatusIndex", () => {
+  it("projects a host-wide pause onto queued rows without hiding held work", () => {
+    const index = buildQueueStatusIndex([
+      {
+        hostId: "alpha",
+        paused: true,
+        entries: [
+          { id: "waiting", state: "queued", position: 0 } as QueueEntry,
+          { id: "parked", state: "held", position: 1 } as QueueEntry,
+        ],
+      },
+    ]);
+
+    expect(
+      queueWaitLabel(
+        resolveQueueWait(queueStatusFor(index, "alpha", "waiting")),
+      ),
+    ).toBe("Queue paused");
+    expect(
+      queueWaitLabel(
+        resolveQueueWait(queueStatusFor(index, "alpha", "parked")),
+      ),
+    ).toBe("Held");
+  });
+
   it("carries the row's lifecycle so a held row resolves as held", () => {
     const index = buildQueueStatusIndex([
       {
@@ -269,6 +293,13 @@ describe("resolveQueueWait", () => {
     expect(resolveQueueWait({ state: "queued", position: 0 })).toEqual({
       kind: "next",
     });
+  });
+
+  it("reads a restart-paused row as paused instead of in line", () => {
+    const wait = resolveQueueWait({ state: "paused", position: 0 });
+    expect(wait).toEqual({ kind: "paused" });
+    expect(queueWaitLabel(wait)).toBe("Paused after restart");
+    expect(queueWaitCode(wait)).toBe("PAUSED");
   });
 
   it("names the head of the line rather than staying silent", () => {

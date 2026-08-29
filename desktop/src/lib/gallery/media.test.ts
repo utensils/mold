@@ -9,8 +9,12 @@ import {
   fullSizeMediaUrl,
   galleryFilenameOfPath,
   galleryMediaPath,
+  isThumbnailPath,
   mediaMimeType,
+  prepareNativeThumbnail,
   streamableMediaUrl,
+  thumbnailFilenameOfPath,
+  thumbnailTier,
 } from "./media";
 
 vi.mock("../api/client", async (importOriginal) => ({
@@ -25,6 +29,7 @@ vi.mock("../ipc", () => ({
     fetchGalleryThumbnail: vi.fn(),
     cancelGalleryThumbnail: vi.fn(() => Promise.resolve()),
     fetchGalleryMedia: vi.fn(),
+    prepareGalleryThumbnail: vi.fn(),
   },
 }));
 
@@ -327,25 +332,146 @@ describe("fullSizeMediaUrl", () => {
   });
 });
 
+describe("prepareNativeThumbnail", () => {
+  const target = { baseUrl: "http://plato:7680", apiKey: "k" };
+
+  it("picks the 512 tier on retina displays and 256 elsewhere", () => {
+    expect(thumbnailTier(1)).toBe(256);
+    expect(thumbnailTier(1.49)).toBe(256);
+    expect(thumbnailTier(2)).toBe(512);
+    expect(thumbnailTier(3)).toBe(512);
+  });
+
+  it("does not apply outside Tauri or without a content version", async () => {
+    vi.mocked(inTauri).mockReturnValue(false);
+    await expect(
+      prepareNativeThumbnail({
+        path: "/api/gallery/thumbnail/a.png",
+        target,
+        cacheKey: "plato-7680",
+        mediaVersion: "1:10",
+      }),
+    ).resolves.toBeNull();
+    vi.mocked(inTauri).mockReturnValue(true);
+    await expect(
+      prepareNativeThumbnail({
+        path: "/api/gallery/thumbnail/a.png",
+        target,
+        cacheKey: "plato-7680",
+        mediaVersion: null,
+      }),
+    ).resolves.toBeNull();
+    expect(ipc.prepareGalleryThumbnail).not.toHaveBeenCalled();
+  });
+
+  it("asks the native cache for the tile at the display's tier and returns its URL", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.prepareGalleryThumbnail).mockResolvedValue(
+      "mold-thumb://localhost/abcd/512/a.png?v=1%3A10",
+    );
+    Object.defineProperty(globalThis, "devicePixelRatio", { configurable: true, value: 2 });
+    await expect(
+      prepareNativeThumbnail({
+        path: "/api/gallery/thumbnail/a.png",
+        target,
+        cacheKey: "plato-7680",
+        mediaVersion: "1:10",
+      }),
+    ).resolves.toBe("mold-thumb://localhost/abcd/512/a.png?v=1%3A10");
+    expect(ipc.prepareGalleryThumbnail).toHaveBeenCalledWith(
+      target,
+      "plato-7680",
+      "a.png",
+      "1:10",
+      512,
+      expect.any(String),
+      false,
+    );
+    // This device with its server Off: no target, origin "local"; a Trash
+    // view request carries the `.trash/`-first hint.
+    await prepareNativeThumbnail({
+      path: "mold-thumb://localhost/local/b.png?view=trash",
+      target: null,
+      cacheKey: "local",
+      mediaVersion: "2:20",
+    });
+    expect(ipc.prepareGalleryThumbnail).toHaveBeenLastCalledWith(
+      null,
+      "local",
+      "b.png",
+      "2:20",
+      512,
+      expect.any(String),
+      true,
+    );
+  });
+
+  it("falls back (null) when the native route refuses, but propagates cancellation", async () => {
+    vi.mocked(inTauri).mockReturnValue(true);
+    vi.mocked(ipc.prepareGalleryThumbnail).mockRejectedValue(new Error("host unreachable"));
+    await expect(
+      prepareNativeThumbnail({
+        path: "/api/gallery/thumbnail/a.png",
+        target,
+        cacheKey: "plato-7680",
+        mediaVersion: "1:10",
+      }),
+    ).resolves.toBeNull();
+    const controller = new AbortController();
+    vi.mocked(ipc.prepareGalleryThumbnail).mockImplementation(() => {
+      controller.abort();
+      return Promise.reject(new Error("cancelled"));
+    });
+    await expect(
+      prepareNativeThumbnail({
+        path: "/api/gallery/thumbnail/a.png",
+        target,
+        cacheKey: "plato-7680",
+        mediaVersion: "1:10",
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
 describe("galleryMediaPath", () => {
   it("keeps host gallery media on the authenticated API", () => {
     expect(galleryMediaPath("print one.png", "host")).toBe("/api/gallery/image/print%20one.png");
-    expect(galleryMediaPath("print one.png", "host", true)).toBe(
-      "/api/gallery/thumbnail/print%20one.png",
+    // The host tile carries the shared rendition query on every surface (the
+    // phone reaches the host through this path); an older server ignores it.
+    expect(galleryMediaPath("print one.png", "host", true)).toMatch(
+      /^\/api\/gallery\/thumbnail\/print%20one\.png\?size=(256|512)&fmt=jpeg$/,
     );
   });
 
   it("routes local gallery media through the restricted native protocol", () => {
-    expect(galleryMediaPath("print one.png", "local", true)).toBe(
+    expect(galleryMediaPath("print one.png", "local")).toBe(
       "mold-local://localhost/print%20one.png",
     );
+  });
+
+  it("never answers a local THUMBNAIL with the full-size file", () => {
+    // With the server Off every grid tile used to decode the full-resolution
+    // print (and mount a <video> per clip); a thumbnail request now names the
+    // native cache instead.
+    const path = galleryMediaPath("clip one.mp4", "local", true);
+    expect(path).toBe("mold-thumb://localhost/local/clip%20one.mp4");
+    expect(path.startsWith("mold-local:")).toBe(false);
+    expect(isThumbnailPath(path)).toBe(true);
+    expect(thumbnailFilenameOfPath(path)).toBe("clip one.mp4");
+    expect(thumbnailFilenameOfPath("/api/gallery/thumbnail/a%20b.png")).toBe("a b.png");
+    expect(thumbnailFilenameOfPath("/api/gallery/image/a.png")).toBeNull();
+    expect(thumbnailFilenameOfPath("mold-thumb://localhost/abcd/256/a.png?v=1")).toBeNull();
   });
 
   it("marks Trash-view local media so the native protocol reads `.trash/`", () => {
     // A trashed row must never be shadowed by a newer live file under the
     // same name — the query flips the protocol's live-first resolution.
     expect(galleryMediaPath("print one.png", "local", true, true)).toBe(
-      "mold-local://localhost/print%20one.png?view=trash",
+      "mold-thumb://localhost/local/print%20one.png?view=trash",
+    );
+    expect(thumbnailFilenameOfPath("mold-thumb://localhost/local/print%20one.png?view=trash")).toBe(
+      "print one.png",
     );
     expect(galleryMediaPath("print one.png", "local", false, true)).toBe(
       "mold-local://localhost/print%20one.png?view=trash",

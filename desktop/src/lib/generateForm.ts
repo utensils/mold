@@ -105,6 +105,63 @@ export interface FormLora {
   name: string;
   scale: number;
   trainedWords: string[];
+  /** Machine whose `/api/loras` returned this host-local path. UI-only: the
+   * request builder strips it before the LoRA reaches the wire. */
+  hostId?: string;
+  /** Endpoint that returned the path, used when instance telemetry was not
+   * available yet. */
+  hostBaseUrl?: string;
+  /** Server installation that owned the path. Null means identity telemetry
+   * was unavailable when picked; a later identity may be accepted only at the
+   * same host id and endpoint. */
+  hostInstanceId?: string | null;
+}
+
+export type LoraHostBinding =
+  | { kind: "unbound" }
+  | { kind: "bound"; hostId: string; baseUrl: string | null; instanceId: string | null }
+  | { kind: "conflict"; hostIds: string[] };
+
+/** A LoRA path is host-local, so a picked stack freezes generation to the
+ * machine that supplied it. Legacy/restored rows have no binding and retain
+ * the selected generation policy. */
+export function loraHostBinding(loras: readonly FormLora[]): LoraHostBinding {
+  const hostIds = new Set<string>();
+  const baseUrls = new Set<string>();
+  const instanceIds = new Set<string>();
+  let unboundCount = 0;
+  for (const lora of loras) {
+    if (!lora.hostId) {
+      unboundCount += 1;
+      continue;
+    }
+    hostIds.add(lora.hostId);
+    if (lora.hostBaseUrl) baseUrls.add(lora.hostBaseUrl);
+    if (lora.hostInstanceId) instanceIds.add(lora.hostInstanceId);
+  }
+  if (hostIds.size === 0) return { kind: "unbound" };
+  if (unboundCount > 0 || hostIds.size > 1 || baseUrls.size > 1 || instanceIds.size > 1)
+    return { kind: "conflict", hostIds: [...hostIds] };
+  return {
+    kind: "bound",
+    hostId: hostIds.values().next().value!,
+    baseUrl: baseUrls.values().next().value ?? null,
+    instanceId: instanceIds.values().next().value ?? null,
+  };
+}
+
+/** Whether a concrete route can safely consume a host-local LoRA path. A
+ * missing picked instance may promote to later telemetry only when the host
+ * id and exact endpoint still match. */
+export function loraBindingMatchesRoute(
+  binding: Extract<LoraHostBinding, { kind: "bound" }>,
+  route: { hostId: string; instanceId?: string | null; target: { baseUrl: string } },
+): boolean {
+  return (
+    route.hostId === binding.hostId &&
+    (binding.baseUrl === null || route.target.baseUrl === binding.baseUrl) &&
+    (binding.instanceId === null || (route.instanceId ?? null) === binding.instanceId)
+  );
 }
 
 /** A picked file (base64, no data-URI prefix); `filename` is display metadata. */

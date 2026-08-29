@@ -20,6 +20,8 @@ export interface MobileHost {
   version: string | undefined;
   /** Stable server installation id, kept separate from the URL-based row id. */
   instanceId?: string | undefined;
+  /** Wall-clock time of the successful probe that selected `baseUrl`. */
+  lastConnectedAtMs?: number | undefined;
   /** False only after an explicit disconnect; the address and Keychain key remain. */
   connected?: boolean;
   /** A status read succeeded for this exact host target during this app session. */
@@ -41,9 +43,54 @@ export interface MobileHost {
 
 export type MobileHostStatusOutcome = "verified" | "instance_mismatch";
 
-function normalizedInstanceId(value: string | null | undefined): string | null {
+export function normalizedInstanceId(value: string | null | undefined): string | null {
   const normalized = value?.trim();
   return normalized ? normalized : null;
+}
+
+export interface MobileHostAliasDrop {
+  loser: string;
+  survivor: string;
+}
+
+/**
+ * Collapse persisted URL aliases by the server UUID. The most recently
+ * successful address wins the whole row (including its stable Keychain id);
+ * legacy rows fall back to the one last known online, then input order.
+ * Empty UUIDs never merge.
+ */
+export function mergeMobileHostsByInstanceId<T extends MobileHost>(
+  input: readonly T[],
+): { hosts: T[]; dropped: MobileHostAliasDrop[] } {
+  const winnerByUuid = new Map<string, T>();
+  for (const host of input) {
+    const uuid = normalizedInstanceId(host.instanceId);
+    if (!uuid) continue;
+    const current = winnerByUuid.get(uuid);
+    const hostConnected = host.connected !== false;
+    const currentConnected = current?.connected !== false;
+    if (
+      !current ||
+      (hostConnected && !currentConnected) ||
+      (hostConnected === currentConnected &&
+        (host.lastConnectedAtMs ?? 0) > (current.lastConnectedAtMs ?? 0)) ||
+      (hostConnected === currentConnected &&
+        (host.lastConnectedAtMs ?? 0) === (current.lastConnectedAtMs ?? 0) &&
+        host.online &&
+        !current.online)
+    ) {
+      winnerByUuid.set(uuid, host);
+    }
+  }
+  const hosts: T[] = [];
+  const dropped: MobileHostAliasDrop[] = [];
+  for (const host of input) {
+    const uuid = normalizedInstanceId(host.instanceId);
+    const winner = uuid ? winnerByUuid.get(uuid) : undefined;
+    if (!winner || winner.id === host.id) hosts.push(host);
+    else dropped.push({ loser: host.id, survivor: winner.id });
+  }
+  return { hosts, dropped };
 }
 
 /**
@@ -75,6 +122,7 @@ export function recordMobileHostStatus(
   host.version = status.version;
   host.hostname = status.hostname ?? undefined;
   host.instanceId = reported ?? host.instanceId;
+  host.lastConnectedAtMs = Date.now();
   return "verified";
 }
 

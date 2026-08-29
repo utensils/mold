@@ -172,8 +172,9 @@ struct PlannedLoadContract<'a> {
     /// Metal where the same claim rides the unified device gate.
     predicted_host_increment_bytes: u64,
     /// Ledger headroom for the owning lease, or `None` when no ledger can
-    /// answer — the recheck then retains the scheduler's grant.
-    available_host_headroom_bytes: Option<u64>,
+    /// answer — the recheck then retains the scheduler's grant. Carries the
+    /// evictable ZFS ARC the same sample counted (#1439) for the refusal.
+    available_host_headroom: Option<crate::scheduler::HostHeadroomReply>,
     execution_fingerprint: &'a str,
     request: &'a mold_core::GenerateRequest,
     engine_paths: &'a mold_core::ModelPaths,
@@ -1373,10 +1374,22 @@ fn complete_h3_claim_failure(grant: LeaseGrant, error: String) -> OwnerProcessOu
 ///
 /// The reply restores the caller's own reservation and keeps every peer
 /// charged, so admission and dispatch read one number and cannot oscillate.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn request_lease_host_headroom(
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
     fence: &crate::scheduler::LeaseFence,
 ) -> Result<u64, crate::routes::ApiError> {
+    request_lease_host_headroom_reply(scheduler_tx, fence).map(|reply| reply.headroom_bytes)
+}
+
+/// [`request_lease_host_headroom`] with the evictable ZFS ARC the same sample
+/// counted into that headroom (#1439), for the one caller whose refusal names
+/// it. The H3 arms keep the bare figure — `mold-inference`'s precheck takes
+/// a `u64` and stays ZFS-blind.
+fn request_lease_host_headroom_reply(
+    scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    fence: &crate::scheduler::LeaseFence,
+) -> Result<crate::scheduler::HostHeadroomReply, crate::routes::ApiError> {
     let (reply, response) = std::sync::mpsc::sync_channel(1);
     scheduler_tx
         .send(crate::scheduler::WorkerEvent::HostMemoryRecheck {
@@ -1702,7 +1715,7 @@ pub(crate) fn trim_malloc_arenas() -> Option<u64> {
     if !enabled {
         return None;
     }
-    let rss_pre_trim = crate::resources::ram_snapshot().used_by_mold;
+    let rss_pre_trim = crate::resources::ram_snapshot_from_system().used_by_mold;
     #[cfg(target_os = "linux")]
     unsafe {
         libc::malloc_trim(0);
@@ -1725,7 +1738,7 @@ struct ChainStageMemoryWatchdog {
 
 impl ChainStageMemoryWatchdog {
     fn start(ordinal: usize, model: String, work_id: String) -> Self {
-        let rss_before = crate::resources::ram_snapshot().used_by_mold;
+        let rss_before = crate::resources::ram_snapshot_from_system().used_by_mold;
         let (stop, stopped) = std::sync::mpsc::channel();
         let thread_model = model.clone();
         let thread_work_id = work_id.clone();
@@ -1736,7 +1749,7 @@ impl ChainStageMemoryWatchdog {
                 while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                     stopped.recv_timeout(Duration::from_secs(1))
                 {
-                    let rss = crate::resources::ram_snapshot().used_by_mold;
+                    let rss = crate::resources::ram_snapshot_from_system().used_by_mold;
                     tracing::info!(
                         gpu = ordinal,
                         model = %thread_model,
@@ -1777,7 +1790,7 @@ impl Drop for ChainStageMemoryWatchdog {
             let _ = handle.join();
         }
         let rss_pre_trim = trim_malloc_arenas();
-        let rss_after = crate::resources::ram_snapshot().used_by_mold;
+        let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
         tracing::info!(
             gpu = self.ordinal,
             model = %self.model,
@@ -3120,7 +3133,10 @@ fn run_claimed_h3_generation(
     if let Err(error) = validate_h3_prepared_attempt_facts(scope_facts, &prepared_facts) {
         return reject_claimed_h3_generation_message(job, error.to_string());
     }
-    if let Err(error) = prepared_facts.media.validate_for_request(&job.request) {
+    if let Err(error) = prepared_facts.media.validate_for_request_with_media(
+        &job.request,
+        crate::h3_private_bridge::job_media_presence(&job),
+    ) {
         return reject_claimed_h3_generation_message(job, error);
     }
     let lease = match job.lease.clone() {
@@ -3234,7 +3250,7 @@ fn run_claimed_h3_generation(
     // driver fault or panic. The adapter consumes its one-shot inference value
     // internally; normal and ordinary-error paths explicitly release it.
     let mut prepared = std::mem::ManuallyDrop::new(prepared);
-    let rss_before = crate::resources::ram_snapshot().used_by_mold;
+    let rss_before = crate::resources::ram_snapshot_from_system().used_by_mold;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         prepared.run_once(scope, &mut progress, allocation_commit)
     }));
@@ -3255,7 +3271,7 @@ fn run_claimed_h3_generation(
         // the CUDA context remains safe for normal destruction.
         unsafe { std::mem::ManuallyDrop::drop(prepared) }
         let rss_pre_trim = trim_malloc_arenas();
-        let rss_after = crate::resources::ram_snapshot().used_by_mold;
+        let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
         tracing::info!(
             gpu = ordinal,
             model = %model_name,
@@ -3464,9 +3480,13 @@ fn validate_h3_publication_contract(
 ) -> anyhow::Result<()> {
     let contract = &prepared.media;
     let expected_contract =
-        crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request).map_err(
-            |_| anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract"),
-        )?;
+        crate::h3_private_bridge::H3PreparedMediaContract::from_request_with_media(
+            &job.request,
+            crate::h3_private_bridge::job_media_presence(job),
+        )
+        .map_err(|_| {
+            anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract")
+        })?;
     let expected_seed = job.request.seed.ok_or_else(|| {
         anyhow::anyhow!("private H3 terminal media provenance mismatch: request-seed")
     })?;
@@ -3643,9 +3663,12 @@ impl GenerationEventSink<'_> {
     /// Legacy dispatch has no host ledger, and an unreachable or stale
     /// coordinator is missing evidence rather than proof of pressure — both
     /// retain the scheduler's grant instead of inventing a rejection.
-    fn host_headroom_for_lease(&self, lease: &crate::scheduler::LeaseFence) -> Option<u64> {
+    fn host_headroom_for_lease(
+        &self,
+        lease: &crate::scheduler::LeaseFence,
+    ) -> Option<crate::scheduler::HostHeadroomReply> {
         match self {
-            Self::V2(scheduler_tx) => request_lease_host_headroom(scheduler_tx, lease).ok(),
+            Self::V2(scheduler_tx) => request_lease_host_headroom_reply(scheduler_tx, lease).ok(),
             Self::Legacy(_) => None,
         }
     }
@@ -4033,7 +4056,7 @@ fn process_job_with_sink(
         .execution_plan
         .as_ref()
         .map_or(0, |plan| plan.admission_host_demand_bytes());
-    let planned_host_headroom_bytes = job
+    let planned_host_headroom = job
         .lease
         .as_ref()
         .filter(|_| planned_host_increment_bytes > 0)
@@ -4043,7 +4066,7 @@ fn process_job_with_sink(
         predicted_vram_peak_bytes: plan.predicted_vram_peak_bytes,
         learned_vram_envelope_bytes: plan.learned_vram_envelope_bytes,
         predicted_host_increment_bytes: planned_host_increment_bytes,
-        available_host_headroom_bytes: planned_host_headroom_bytes,
+        available_host_headroom: planned_host_headroom,
         execution_fingerprint: plan.execution_fingerprint.as_str(),
         request: &request,
         engine_paths: &plan.engine_paths,
@@ -4196,7 +4219,7 @@ fn process_job_with_sink(
     // RSS sample taken just before inference; the post-inference sample below
     // logs the per-job delta so RAM growth can be attributed to a specific
     // generation rather than tracked at process granularity.
-    let rss_before = crate::resources::ram_snapshot().used_by_mold;
+    let rss_before = crate::resources::ram_snapshot_from_system().used_by_mold;
 
     // Watchdog: log RSS every 1s while inference runs so we can see RAM
     // growth as it happens. The post-inference summary log can't fire when
@@ -4215,7 +4238,7 @@ fn process_job_with_sink(
                     if stop.load(Ordering::SeqCst) {
                         break;
                     }
-                    let rss = crate::resources::ram_snapshot().used_by_mold;
+                    let rss = crate::resources::ram_snapshot_from_system().used_by_mold;
                     tracing::info!(
                         gpu = ordinal,
                         model = %model,
@@ -4261,7 +4284,7 @@ fn process_job_with_sink(
 
     let rss_pre_trim = trim_malloc_arenas();
 
-    let rss_after = crate::resources::ram_snapshot().used_by_mold;
+    let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
     let rss_delta = rss_after as i64 - rss_before as i64;
     tracing::info!(
         gpu = ordinal,
@@ -5068,6 +5091,7 @@ fn validate_private_h3_physical_capacity(
         model_name,
         predicted_host_increment_bytes,
         available_host_headroom_bytes,
+        None,
     )
 }
 
@@ -5090,8 +5114,7 @@ fn ensure_model_ready_sync_inner(
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
     let planned_host_increment_bytes =
         planned_load.map_or(0, |planned| planned.predicted_host_increment_bytes);
-    let planned_host_headroom_bytes =
-        planned_load.and_then(|planned| planned.available_host_headroom_bytes);
+    let planned_host_headroom = planned_load.and_then(|planned| planned.available_host_headroom);
     let load_request = planned_load.map(|planned| planned.request);
     let planned_engine_paths = planned_load.map(|planned| planned.engine_paths);
     let planned_engine_config = planned_load.map(|planned| planned.engine_config);
@@ -5152,11 +5175,12 @@ fn ensure_model_ready_sync_inner(
     // double-count exactly the pages it is meant to protect. Absent ledger
     // evidence retains the scheduler's grant.
     if planned_host_increment_bytes > 0 {
-        if let Some(available_host_headroom_bytes) = planned_host_headroom_bytes {
+        if let Some(available_host_headroom) = planned_host_headroom {
             crate::memory_preflight::check_planned_host_budget(
                 model_name,
                 planned_host_increment_bytes,
-                available_host_headroom_bytes,
+                available_host_headroom.headroom_bytes,
+                available_host_headroom.reclaimable_zfs_arc_bytes,
             )
             .map_err(|error| anyhow::anyhow!(error.error))?;
         } else {
@@ -6012,7 +6036,7 @@ fn run_stage_blocking_planned<T, E: std::fmt::Display + std::fmt::Debug>(
             // and has no route back to the ledger from here, so it retains the
             // scheduler's grant rather than rechecking against a guess.
             predicted_host_increment_bytes: load.plan.admission_host_demand_bytes(),
-            available_host_headroom_bytes: None,
+            available_host_headroom: None,
             execution_fingerprint: &load.plan.execution_fingerprint,
             request: load.request,
             engine_paths: &load.plan.engine_paths,
@@ -6748,7 +6772,10 @@ mod tests {
                     while let Some(event) = rx.blocking_recv() {
                         match event {
                             crate::scheduler::WorkerEvent::HostMemoryRecheck { reply, .. } => {
-                                let _ = reply.send(Ok(FAKE_SCHEDULER_HOST_HEADROOM_BYTES));
+                                let _ = reply.send(Ok(crate::scheduler::HostHeadroomReply {
+                                    headroom_bytes: FAKE_SCHEDULER_HOST_HEADROOM_BYTES,
+                                    reclaimable_zfs_arc_bytes: None,
+                                }));
                                 if matches!(mode, FakeSchedulerV2Mode::ClosedAfterRecheck) {
                                     break;
                                 }
@@ -12448,6 +12475,7 @@ mod tests {
             "ltx2-19b",
             predicted_host_increment_bytes,
             predicted_host_increment_bytes,
+            None,
         )
         .expect("exactly enough headroom must admit");
 
@@ -12455,16 +12483,56 @@ mod tests {
             "ltx2-19b",
             predicted_host_increment_bytes,
             predicted_host_increment_bytes - 1,
+            None,
         )
         .expect_err("one byte short of the frozen increment must reject");
         assert!(error.error.contains("canonical safety floor"));
+        assert!(
+            !error.error.contains("ZFS"),
+            "a host without a ZFS credit keeps the pre-#1439 sentence: {}",
+            error.error
+        );
         assert!(
             !crate::gpu_worker::is_fatal_cuda_error(&anyhow::anyhow!(error.error.clone())),
             "host pressure must never reach the fatal-CUDA quarantine"
         );
 
-        crate::memory_preflight::check_planned_host_budget("ltx2-19b", 0, 0)
+        crate::memory_preflight::check_planned_host_budget("ltx2-19b", 0, 0, None)
             .expect("a plan with no host increment is not gated");
+    }
+
+    /// The headroom a ZFS host refuses against already contains the
+    /// evictable ARC (#1439); the refusal says so, and only when the credit
+    /// is positive, so a cold-cache ZFS host reads exactly like any other.
+    #[test]
+    fn check_planned_host_budget_names_the_evictable_arc() {
+        let error = crate::memory_preflight::check_planned_host_budget(
+            "minimax-h3-ref2va",
+            32_775_178_178,
+            26_200_000_000,
+            Some(15_081_432_704),
+        )
+        .expect_err("short");
+        assert_eq!(
+            error.error,
+            "model 'minimax-h3-ref2va' frozen host-memory increment ~32.8 GB no longer fits the current ~26.2 GB host-memory headroom after the canonical safety floor (including ~15.1 GB evictable ZFS ARC); memory pressure changed after scheduler admission"
+        );
+        let cold = crate::memory_preflight::check_planned_host_budget(
+            "minimax-h3-ref2va",
+            32_775_178_178,
+            26_200_000_000,
+            Some(0),
+        )
+        .expect_err("short");
+        let blind = crate::memory_preflight::check_planned_host_budget(
+            "minimax-h3-ref2va",
+            32_775_178_178,
+            26_200_000_000,
+            None,
+        )
+        .expect_err("short");
+        assert_eq!(cold.error, blind.error);
+        assert!(!blind.error.contains("ZFS"));
     }
 
     /// The host fence must sit past the hot-cache early return.
@@ -12504,7 +12572,7 @@ mod tests {
     #[test]
     fn memory_pressure_rejections_do_not_count_against_worker_health() {
         let host = anyhow::anyhow!(
-            crate::memory_preflight::check_planned_host_budget("ltx2-19b", 24 << 30, 1 << 30)
+            crate::memory_preflight::check_planned_host_budget("ltx2-19b", 24 << 30, 1 << 30, None)
                 .expect_err("host pressure rejects")
                 .error
         );

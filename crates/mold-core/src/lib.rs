@@ -42,6 +42,7 @@ pub mod queue_progress;
 pub mod queue_wait;
 pub mod reference_upload;
 pub mod removal;
+pub mod request_media;
 pub mod runpod;
 pub mod safetensors_probe;
 pub mod secure_file;

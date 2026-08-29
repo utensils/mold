@@ -515,6 +515,7 @@ mod tests {
                 total: 128_000_000_000,
                 used: 32_000_000_000,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 1_000_000_000,
                 used_by_other: 31_000_000_000,
             },
@@ -3021,6 +3022,7 @@ mod tests {
                 total: 64_000_000_000,
                 used: 20_000_000_000,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 2_000_000_000,
                 used_by_other: 18_000_000_000,
             },
@@ -4605,6 +4607,154 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(json_body(resp).await["queue_paused"], false);
+    }
+
+    #[tokio::test]
+    async fn resume_releases_restart_paused_durable_work_and_activity_exposes_it() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "restart-paused",
+            mold_db::generation_queue::QueueRowState::Paused,
+            1,
+            0,
+        );
+        let app = app_with_state(state.clone());
+
+        let activity = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/activity").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(activity["items"][0]["id"], "restart-paused");
+        assert_eq!(activity["items"][0]["phase"], "paused");
+        assert_eq!(activity["items"][0]["can_cancel"], true);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/queue/resume")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "restart-paused")
+                .unwrap()
+                .unwrap()
+                .state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_pauses_every_active_queue_and_resume_wakes_both_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, mut generation_rx) = durable_state(db.clone(), root.path());
+
+        admit_one_durable_batch(&state, "queued-generation", "queued-batch");
+        admit_one_durable_batch(&state, "running-generation", "running-batch");
+        let claimed = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        let running = state
+            .queue_journal
+            .attach_claimed(&claimed.row.id, claimed.claim_token);
+        assert_eq!(
+            running.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
+        state.queue_journal.retain_all();
+        drop(running);
+
+        seed_chain_job(
+            db.as_ref().as_ref().unwrap(),
+            root.path(),
+            "queued-sequence",
+            ChainJobState::Queued,
+        );
+        seed_chain_job(
+            db.as_ref().as_ref().unwrap(),
+            root.path(),
+            "running-sequence",
+            ChainJobState::Running,
+        );
+
+        crate::durable_queue_feeder::recover_runtime(&state)
+            .await
+            .unwrap();
+        crate::chain_job_runner::startup_reconcile(
+            db.as_ref().as_ref().unwrap(),
+            &root.path().join("jobs"),
+        )
+        .unwrap();
+        assert!(state
+            .queue_journal
+            .list_all()
+            .iter()
+            .all(|row| row.state == mold_db::generation_queue::QueueRowState::Paused));
+        assert!(["queued-sequence", "running-sequence"].iter().all(|id| {
+            mold_db::chain_jobs::get_job(db.as_ref().as_ref().unwrap(), id)
+                .unwrap()
+                .unwrap()
+                .state
+                == ChainJobState::Paused
+        }));
+
+        let (chain_handle, mut chain_commands) =
+            crate::chain_job_runner::ChainJobRunnerHandle::command_probe_for_tests();
+        state.chain_jobs = Some(Arc::new(chain_handle));
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), generation_rx.recv())
+                .await
+                .is_err(),
+            "restart-paused generations must not reach the worker"
+        );
+        assert!(chain_commands.try_recv().is_err());
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::post("/api/queue/resume")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let generation = tokio::time::timeout(Duration::from_secs(5), generation_rx.recv())
+            .await
+            .expect("resume wakes the durable generation feeder")
+            .expect("generation queue remains open");
+        assert!(matches!(
+            generation.id.as_str(),
+            "queued-generation" | "running-generation"
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), chain_commands.recv())
+                .await
+                .expect("resume wakes the chain runner"),
+            Some(crate::chain_job_runner::RunnerCmd::Kick)
+        ));
+        assert!(["queued-sequence", "running-sequence"].iter().all(|id| {
+            mold_db::chain_jobs::get_job(db.as_ref().as_ref().unwrap(), id)
+                .unwrap()
+                .unwrap()
+                .state
+                == ChainJobState::Queued
+        }));
+
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
     }
 
     #[tokio::test]
@@ -7188,7 +7338,10 @@ mod tests {
     /// preparation must validate that form rather than the admission form —
     /// hal9000 held the first live Ref2VA print with
     /// `MINIMAX_H3_REFERENCE_DESCRIPTOR_ONLY` (2026-08-27).
-    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    ///
+    /// `h3` only: `authless_app` and `inline_ref2va_body` are `h3`-gated
+    /// helpers, so the `h3-private-uat` test graph could not compile this.
+    #[cfg(feature = "h3")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deferred_preparation_validates_references_in_their_resolved_form() {
         let root = tempfile::tempdir().unwrap();
@@ -7264,7 +7417,7 @@ mod tests {
         spawn_durable_feeder(&state);
         tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let mut last = serde_json::Value::Null;
+        let mut last;
         loop {
             let detail = json_body(
                 authless_app(state.clone())
@@ -8631,6 +8784,10 @@ mod tests {
         crate::durable_queue_feeder::recover_runtime(&state)
             .await
             .expect("restart clears the prior runtime's retained claim tokens");
+        state
+            .queue_journal
+            .resume_all_paused()
+            .expect("test operator resumes restart-paused work");
         let feeder_shutdown = tokio_util::sync::CancellationToken::new();
         let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
         let mut replayed = Vec::new();
@@ -9190,9 +9347,8 @@ mod tests {
         assert!(journal.list_all().is_empty());
     }
 
-    /// Boot the durable feeder the way `run_server` does: recover the prior
-    /// runtime's claims, then spawn the feeder. The caller stops it with
-    /// `stop_feeder`.
+    /// Boot the durable feeder after simulating the operator's explicit
+    /// resume of restart-paused work. The caller stops it with `stop_feeder`.
     async fn boot_feeder(
         state: &AppState,
     ) -> (
@@ -9202,6 +9358,10 @@ mod tests {
         crate::durable_queue_feeder::recover_runtime(state)
             .await
             .expect("durable runtime recovery");
+        state
+            .queue_journal
+            .resume_all_paused()
+            .expect("test operator resumes restart-paused work");
         let shutdown = tokio_util::sync::CancellationToken::new();
         let feeder = crate::durable_queue_feeder::spawn(state.clone(), shutdown.clone());
         (shutdown, feeder)
@@ -9424,6 +9584,10 @@ mod tests {
         crate::durable_queue_feeder::recover_runtime(&state)
             .await
             .unwrap();
+        state
+            .queue_journal
+            .resume_all_paused()
+            .expect("test operator resumes restart-paused work");
         let shutdown = tokio_util::sync::CancellationToken::new();
         let feeder = crate::durable_queue_feeder::spawn(state.clone(), shutdown.clone());
         let mut replayed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -9623,10 +9787,9 @@ mod tests {
     }
 
     /// A maintenance boot (`MOLD_GPUS=none`) has no dispatch owner at all, so
-    /// `run_server` recovers the prior runtime's claims and spawns no feeder.
-    /// Nothing is hydrated, every row survives, and — because recovery only
-    /// charges rows that were claimed or running — the untouched backlog
-    /// spends none of its replay budget on a boot that could not run it.
+    /// `run_server` pauses the prior runtime's work and spawns no feeder.
+    /// Nothing is hydrated, every row survives, and untouched backlog spends
+    /// none of its replay budget on a boot that could not run it.
     #[tokio::test]
     async fn a_boot_with_no_dispatch_owner_replays_nothing_and_keeps_every_row() {
         let output_dir = tempfile::tempdir().unwrap();
@@ -9648,6 +9811,11 @@ mod tests {
         assert!(
             rows.iter().all(|row| row.replay_seen == 0),
             "a boot that cannot replay must not spend the row's replay budget"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.state == mold_db::generation_queue::QueueRowState::Paused),
+            "restart recovery must park every retained row"
         );
     }
 
@@ -9787,7 +9955,7 @@ mod tests {
             "retained work must be visible even when this boot cannot run it"
         );
         for entry in entries {
-            assert_eq!(entry["state"], "queued");
+            assert_eq!(entry["state"], "paused");
             assert_eq!(entry["durable"], true);
         }
 
@@ -11409,6 +11577,7 @@ mod tests {
                 total: 128_000_000_000,
                 used: 32_000_000_000,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 2_000_000_000,
                 used_by_other: 30_000_000_000,
             },
@@ -17841,6 +18010,7 @@ mod tests {
                 total: 1,
                 used: 0,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 0,
             },
@@ -17896,6 +18066,7 @@ mod tests {
                 total: 1,
                 used: 0,
                 available: None,
+                reclaimable_zfs_arc: None,
                 used_by_mold: 0,
                 used_by_other: 0,
             },

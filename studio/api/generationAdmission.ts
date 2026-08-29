@@ -3,6 +3,7 @@ import { ApiError, apiJsonTo, type ApiTarget } from "./client";
 export type GenerationLifecyclePhase =
   | "accepted"
   | "queued"
+  | "paused"
   | "cancelling"
   | "running"
   | "held"
@@ -186,6 +187,7 @@ function isLifecyclePhase(value: unknown): value is GenerationLifecyclePhase {
   return (
     value === "accepted" ||
     value === "queued" ||
+    value === "paused" ||
     value === "cancelling" ||
     value === "running" ||
     value === "held" ||

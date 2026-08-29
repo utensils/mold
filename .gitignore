@@ -75,6 +75,8 @@ mold-outputs/
 **/target
 /target
 /target/coverage/
+# Locally generated engineering reports.
+/reports/
 tmp/
 uat-*
 *.gif

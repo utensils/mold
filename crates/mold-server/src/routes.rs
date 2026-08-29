@@ -2151,7 +2151,7 @@ pub(crate) fn release_host_memory_after_unload(state: &AppState) {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .release_unreferenced_cpu_tensors();
     let rss_pre_trim = crate::gpu_worker::trim_malloc_arenas();
-    let rss_after = crate::resources::ram_snapshot().used_by_mold;
+    let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
     tracing::info!(
         shared_pool_released_mb = released / 1_000_000,
         rss_pre_trim_mb = rss_pre_trim.map(|value| value / 1_000_000).unwrap_or(0),
@@ -5993,7 +5993,13 @@ async fn list_queue(
     let schedulable_in_page = durable_page
         .rows
         .iter()
-        .filter(|row| row.state != mold_db::generation_queue::QueueRowState::Held)
+        .filter(|row| {
+            matches!(
+                row.state,
+                mold_db::generation_queue::QueueRowState::Queued
+                    | mold_db::generation_queue::QueueRowState::Running
+            )
+        })
         .count();
     let next_schedulable_offset = schedulable_offset
         .checked_add(schedulable_in_page)
@@ -6413,10 +6419,18 @@ fn job_entry_from_durable_projection(
     position: usize,
 ) -> crate::job_registry::JobEntry {
     let state = match row.state {
+        mold_db::generation_queue::QueueRowState::Queued => {
+            crate::job_registry::JobLifecycle::Queued
+        }
+        mold_db::generation_queue::QueueRowState::Running => {
+            // A durable running row without a live registry owner belongs to a
+            // prior runtime and is awaiting startup reconciliation.
+            crate::job_registry::JobLifecycle::Queued
+        }
+        mold_db::generation_queue::QueueRowState::Paused => {
+            crate::job_registry::JobLifecycle::Paused
+        }
         mold_db::generation_queue::QueueRowState::Held => crate::job_registry::JobLifecycle::Held,
-        // A durable `running` row with no live registry owner is interrupted
-        // work awaiting the next boot and therefore projects as queued.
-        _ => crate::job_registry::JobLifecycle::Queued,
     };
     let error = row.held_reason.clone();
     crate::job_registry::JobEntry {
@@ -6835,8 +6849,9 @@ async fn pause_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRes
     Ok(Json(QueuePauseResponse { paused: true }))
 }
 
-/// Resume dispatch of new generation jobs. Idempotent — repeat resumes return
-/// `{"paused": false}` without re-emitting the `queue_resumed` event.
+/// Resume dispatch and return every restart-paused durable job to its queue.
+/// Idempotent — repeat resumes return `{"paused": false}` without duplicating
+/// work or re-emitting the global `queue_resumed` event.
 #[utoipa::path(
     post,
     path = "/api/queue/resume",
@@ -6860,14 +6875,25 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
     if changed && !v2_authoritative {
         state.events.publish(mold_core::ServerEvent::QueueResumed);
     }
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let journal = state.queue_journal.clone();
+    let resumed = spawn_queue_mutation(move || journal.resume_all_paused()).await?;
+    if resumed.generation_jobs > 0 {
+        state.queue_journal.wake_feeder();
+    }
+    if resumed.chain_jobs > 0 {
+        if let Some(handle) = state.chain_jobs.as_ref() {
+            handle.kick();
+        }
+    }
     Ok(Json(QueuePauseResponse { paused: false }))
 }
 
-/// Cancel every still-queued generation job on this host, settling each
-/// queued row's batch child as `cancelled`. Running jobs are left untouched —
+/// Cancel every queued or restart-paused generation job on this host, settling
+/// each row's batch child as `cancelled`. Running jobs are left untouched —
 /// use `DELETE /api/queue/{id}` for one running singleton, or `DELETE
 /// /api/generation-batches/{id}` for one batch's children. The returned count
-/// is the number of queued rows removed, preserving the established queue API
+/// is the number of queued or paused rows removed, preserving the queue API
 /// contract.
 #[utoipa::path(
     delete,
@@ -9131,10 +9157,47 @@ fn content_type_for_filename(name: &str) -> &'static str {
 
 /// Serve a thumbnail for a gallery image. Generated on-demand and cached
 /// at ~/.mold/cache/thumbnails/ on the server side.
+/// `?size=256|512` and `?fmt=png|jpeg` select a rendition; absent means the
+/// historical 256 px PNG, whose cache path and ETag are unchanged.
+#[derive(Debug, Default, serde::Deserialize)]
+struct ThumbnailQuery {
+    size: Option<u32>,
+    fmt: Option<String>,
+}
+
+/// Names the rendition the server UNDERSTOOD (`256-png`, `512-jpg`), so a
+/// client can tell "this server honours `?size`" from an older server that
+/// answered its 256 px PNG to every request — a small source legitimately
+/// comes back smaller than the tier it asked for, and without this signal a
+/// client would misread that as a legacy server.
+pub const THUMBNAIL_RENDITION_HEADER: &str = "x-mold-thumbnail-rendition";
+
 async fn get_gallery_thumbnail(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(filename): axum::extract::Path<String>,
+    // Not `Option<Query<_>>`: that would swallow a malformed `?size=abc` as
+    // the default rendition. Both fields are optional, so an absent query
+    // still parses; a malformed one is axum's 400.
+    Query(query): Query<ThumbnailQuery>,
+) -> Result<Response, ApiError> {
+    let variant = crate::thumbnails::ThumbnailVariant::from_query(query.size, query.fmt.as_deref())
+        .map_err(ApiError::validation)?;
+    let mut response = render_gallery_thumbnail(state, headers, filename, variant).await?;
+    if let Ok(value) = header::HeaderValue::from_str(&variant.rendition_label()) {
+        response.headers_mut().insert(
+            header::HeaderName::from_static(THUMBNAIL_RENDITION_HEADER),
+            value,
+        );
+    }
+    Ok(response)
+}
+
+async fn render_gallery_thumbnail(
+    state: AppState,
+    headers: HeaderMap,
+    filename: String,
+    variant: crate::thumbnails::ThumbnailVariant,
 ) -> Result<Response, ApiError> {
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
@@ -9164,7 +9227,7 @@ async fn get_gallery_thumbnail(
         .await
         .map_err(|error| ApiError::internal(format!("failed to stat gallery media: {error}")))?;
     let media_version = file_media_version(&source_metadata);
-    let etag = format!("\"thumb-{media_version}\"");
+    let etag = format!("\"thumb-{media_version}{}\"", variant.etag_suffix());
 
     // Thumbnail cache path: always `.png` regardless of the source extension,
     // so mp4 / gif / apng / webp / jpg all coexist cleanly in the same cache
@@ -9179,7 +9242,7 @@ async fn get_gallery_thumbnail(
     let thumb_path = if is_audio {
         thumb_dir.join(format!("{clean_name}.png"))
     } else {
-        versioned_thumbnail_path(&thumb_dir, &clean_name, &media_version)
+        variant.cache_path(&thumb_dir, &clean_name, &media_version)
     };
     if is_audio && !thumb_path.is_file() {
         return thumbnail_response(
@@ -9198,28 +9261,32 @@ async fn get_gallery_thumbnail(
             let data = tokio::fs::read(&thumb_path)
                 .await
                 .map_err(|e| ApiError::internal(format!("failed to read thumbnail: {e}")))?;
+            let content_type = crate::thumbnails::sniff_content_type(&data).unwrap_or("image/png");
             return thumbnail_response(
                 &headers,
-                "image/png",
+                content_type,
                 "public, max-age=31536000, immutable",
                 &etag,
                 data,
             );
         }
         // Generate thumbnail on-demand. Videos go through openh264 for a real
-        // first-frame extract; everything else decodes via the `image` crate.
-        // If either path fails, we fall back to serving the source bytes
-        // directly — browsers are more lenient about partial / checksum-
-        // mismatched images than either decoder, and the SPA would rather
-        // show something than a 500.
+        // first-frame extract (only the first frame is decoded); everything
+        // else decodes via the `image` crate. If either path fails, we fall
+        // back to serving the source bytes directly — browsers are more
+        // lenient about partial / checksum-mismatched images than either
+        // decoder, and the SPA would rather show something than a 500.
         let source = source_path.clone();
         let dest = thumb_path.clone();
+        let name_for_render = clean_name.clone();
         let gen_result = tokio::task::spawn_blocking(move || {
-            if is_video {
-                generate_video_thumbnail(&source, &dest)
-            } else {
-                generate_server_thumbnail(&source, &dest)
-            }
+            let rendered = crate::thumbnails::render_thumbnail(
+                &source,
+                &name_for_render,
+                variant.max_dim,
+                variant.format,
+            )?;
+            write_thumbnail_atomically(&dest, &rendered)
         })
         .await
         .map_err(|e| ApiError::internal(format!("thumbnail generation failed: {e}")))?;
@@ -9258,34 +9325,25 @@ async fn get_gallery_thumbnail(
     let data = tokio::fs::read(&thumb_path)
         .await
         .map_err(|e| ApiError::internal(format!("failed to read thumbnail: {e}")))?;
+    // A JPEG-requested tile of a transparent print is stored as PNG under the
+    // `.jpg` name, so the type comes from the bytes.
+    let content_type = crate::thumbnails::sniff_content_type(&data).unwrap_or("image/png");
 
     thumbnail_response(
         &headers,
-        "image/png",
+        content_type,
         "public, max-age=31536000, immutable",
         &etag,
         data,
     )
 }
 
-fn file_media_version(metadata: &std::fs::Metadata) -> String {
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|value| value.as_nanos())
-        .unwrap_or_default();
-    format!("{modified}-{}", metadata.len())
-}
-
-fn versioned_thumbnail_path(
-    thumb_dir: &std::path::Path,
-    filename: &str,
-    media_version: &str,
-) -> std::path::PathBuf {
-    let key = Sha256::digest(format!("{filename}:{media_version}").as_bytes());
-    thumb_dir.join(format!("{key:x}.png"))
-}
+// The cache layout and the renderers live in `crate::thumbnails` so the
+// desktop app's offline tiles share them; these names stay as thin aliases
+// for the route, the warmup, and the trash sweeper.
+use crate::thumbnails::{
+    file_media_version, versioned_thumbnail_path, AUDIO_PLACEHOLDER_SVG, VIDEO_PLACEHOLDER_SVG,
+};
 
 fn thumbnail_singleflight(path: &std::path::Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
     static FLIGHTS: std::sync::LazyLock<
@@ -9332,10 +9390,6 @@ fn thumbnail_response(
         .body(Body::from(bytes))
         .map_err(|error| ApiError::internal(format!("thumbnail response failed: {error}")))
 }
-
-const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#a)"/><g fill="rgba(226,232,240,0.85)"><rect x="52" y="112" width="8" height="32" rx="4"/><rect x="72" y="92" width="8" height="72" rx="4"/><rect x="92" y="68" width="8" height="120" rx="4"/><rect x="112" y="100" width="8" height="56" rx="4"/><rect x="132" y="76" width="8" height="104" rx="4"/><rect x="152" y="104" width="8" height="48" rx="4"/><rect x="172" y="86" width="8" height="84" rx="4"/><rect x="192" y="116" width="8" height="24" rx="4"/></g></svg>"##;
-
-const VIDEO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#g)"/><circle cx="128" cy="128" r="52" fill="rgba(255,255,255,0.08)"/><polygon points="112,100 112,156 160,128" fill="rgba(226,232,240,0.85)"/></svg>"##;
 
 /// Serve a cached animated GIF preview for a gallery video output.
 ///
@@ -9424,10 +9478,25 @@ pub(crate) fn server_preview_gif_dir() -> std::path::PathBuf {
 
 /// Server-side thumbnail cache directory.
 pub(crate) fn server_thumbnail_dir() -> std::path::PathBuf {
-    mold_core::Config::mold_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
-        .join("cache")
-        .join("thumbnails")
+    crate::thumbnails::server_thumbnail_dir()
+}
+
+/// Write one rendered tile atomically (temp + rename) so a concurrent reader
+/// never sees a half-written PNG.
+fn write_thumbnail_atomically(
+    dest: &std::path::Path,
+    rendered: &crate::thumbnails::RenderedThumbnail,
+) -> anyhow::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&tmp, &rendered.bytes)?;
+    if let Err(error) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 /// Generate a 256x256 max thumbnail from source image. The result is always
@@ -9437,46 +9506,37 @@ fn generate_server_thumbnail(
     source: &std::path::Path,
     dest: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let img = image::open(source)?;
-    let thumb = img.thumbnail(256, 256);
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    thumb.save_with_format(dest, image::ImageFormat::Png)?;
-    Ok(())
+    let rendered = crate::thumbnails::render_raster_thumbnail(
+        source,
+        crate::thumbnails::DEFAULT_MAX_DIM,
+        crate::thumbnails::ThumbFormat::Png,
+    )?;
+    write_thumbnail_atomically(dest, &rendered)
 }
 
-/// Extract the first frame of an MP4 as a PNG thumbnail and downscale to
-/// 256px max via the `image` crate. Uses the openh264 pipeline that
-/// `mold_inference::ltx2::media` already ships for video probes.
-///
-/// The full-frame PNG is written to a sibling temp path first, then decoded
-/// and resized — this keeps `mold_inference`'s existing helper surface stable
-/// while still producing a compact thumbnail.
+/// Extract the first frame of an MP4 (and only the first frame — see
+/// `mold_inference::ltx2::media::extract_first_frame`) and downscale it to
+/// a 256px max PNG.
 fn generate_video_thumbnail(
     source: &std::path::Path,
     dest: &std::path::Path,
 ) -> anyhow::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Decode the first frame to a temporary full-resolution PNG, then
-    // thumbnail-resize via the `image` crate. We stage through a temp file
-    // rather than through memory to reuse `extract_thumbnail`'s existing
-    // I/O-based API.
-    let tmp = dest.with_extension("firstframe.png");
-    mold_inference::ltx2::media::extract_thumbnail(source, &tmp)?;
-    let decode_result = (|| -> anyhow::Result<()> {
-        let img = image::open(&tmp)?;
-        let thumb = img.thumbnail(256, 256);
-        thumb.save_with_format(dest, image::ImageFormat::Png)?;
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(&tmp);
-    decode_result
+    let rendered = crate::thumbnails::render_video_thumbnail(
+        source,
+        crate::thumbnails::DEFAULT_MAX_DIM,
+        crate::thumbnails::ThumbFormat::Png,
+    )?;
+    write_thumbnail_atomically(dest, &rendered)
 }
 
 /// Pre-generate thumbnails for all gallery images on server startup.
+///
+/// The directory walk keeps its per-entry publication-gate contract (one
+/// read authority per observation, so a publisher can only run between
+/// entries), but the DECODES no longer happen inside it: misses are
+/// collected newest-first and rendered on a bounded thread pool, each job
+/// taking its own read guard. A 1 000-print gallery used to warm serially
+/// on one core.
 fn warm_gallery_thumbnails(
     output_dir: &std::path::Path,
     thumb_dir: &std::path::Path,
@@ -9484,6 +9544,81 @@ fn warm_gallery_thumbnails(
     after_acquire: &dyn Fn(usize),
     after_release: &dyn Fn(usize),
 ) {
+    let misses = collect_thumbnail_misses(
+        output_dir,
+        thumb_dir,
+        gallery_gate,
+        after_acquire,
+        after_release,
+    );
+    if misses.is_empty() {
+        return;
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 4);
+    let pool = match rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("mold-thumb-warm-{i}"))
+        .build()
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::warn!(%error, "thumbnail warmup pool unavailable; rendering serially");
+            for miss in &misses {
+                render_warmup_miss(miss, gallery_gate);
+            }
+            return;
+        }
+    };
+    pool.install(|| {
+        use rayon::prelude::*;
+        misses
+            .par_iter()
+            .for_each(|miss| render_warmup_miss(miss, gallery_gate));
+    });
+}
+
+struct ThumbnailMiss {
+    source: std::path::PathBuf,
+    filename: String,
+    dest: std::path::PathBuf,
+    is_video: bool,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn render_warmup_miss(
+    miss: &ThumbnailMiss,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+) {
+    let _gallery_reader = gallery_gate.blocking_read();
+    if miss.dest.is_file() || !miss.source.is_file() {
+        return;
+    }
+    let result = if miss.is_video {
+        generate_video_thumbnail(&miss.source, &miss.dest)
+    } else {
+        generate_server_thumbnail(&miss.source, &miss.dest)
+    };
+    if let Err(e) = result {
+        tracing::warn!(
+            "failed to generate thumbnail for {}: {e}",
+            miss.source.display()
+        );
+    }
+}
+
+/// The walk half of warmup: which prints lack a default tile, newest first
+/// (the ones a Library opens on), observed one entry per read guard.
+fn collect_thumbnail_misses(
+    output_dir: &std::path::Path,
+    thumb_dir: &std::path::Path,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+    after_acquire: &dyn Fn(usize),
+    after_release: &dyn Fn(usize),
+) -> Vec<ThumbnailMiss> {
+    let mut misses = Vec::new();
     let mut walker = walkdir::WalkDir::new(output_dir).max_depth(1).into_iter();
     let mut observation = 0_usize;
     loop {
@@ -9515,29 +9650,25 @@ fn warm_gallery_thumbnails(
                         .file_name()
                         .map(|f| f.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    let thumb_path = entry
-                        .metadata()
-                        .ok()
+                    let metadata = entry.metadata().ok();
+                    let thumb_path = metadata
+                        .as_ref()
                         .map(|metadata| {
                             versioned_thumbnail_path(
                                 thumb_dir,
                                 &filename,
-                                &file_media_version(&metadata),
+                                &file_media_version(metadata),
                             )
                         })
                         .unwrap_or_else(|| thumb_dir.join(format!("{filename}.png")));
                     if !thumb_path.is_file() {
-                        let result = if is_video {
-                            generate_video_thumbnail(path, &thumb_path)
-                        } else {
-                            generate_server_thumbnail(path, &thumb_path)
-                        };
-                        if let Err(e) = result {
-                            tracing::warn!(
-                                "failed to generate thumbnail for {}: {e}",
-                                path.display()
-                            );
-                        }
+                        misses.push(ThumbnailMiss {
+                            source: path.to_path_buf(),
+                            filename,
+                            dest: thumb_path,
+                            is_video,
+                            modified: metadata.and_then(|m| m.modified().ok()),
+                        });
                     }
                 }
             }
@@ -9549,6 +9680,12 @@ fn warm_gallery_thumbnails(
             break;
         }
     }
+    misses.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.filename.cmp(&b.filename))
+    });
+    misses
 }
 
 pub fn spawn_thumbnail_warmup(
@@ -9565,6 +9702,23 @@ pub fn spawn_thumbnail_warmup(
         let join = tokio::task::spawn_blocking(move || {
             let thumb_dir = server_thumbnail_dir();
             warm_gallery_thumbnails(&output_dir, &thumb_dir, &gallery_gate, &|_| {}, &|_| {});
+            // Tiles of purged or re-rendered prints can only be identified
+            // against what is on disk now, so the sweep rides the warmup —
+            // under the publication read gate, so a restore moving a print
+            // between `.trash/` and the live dir cannot slip between the two
+            // directory walks and have its valid tiles swept.
+            let _gallery_reader = gallery_gate.blocking_read();
+            match crate::thumbnails::sweep_orphans(
+                &output_dir,
+                &thumb_dir,
+                std::time::Duration::from_secs(24 * 60 * 60),
+            ) {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "swept orphaned gallery thumbnails")
+                }
+                Ok(_) => {}
+                Err(error) => tracing::debug!(%error, "thumbnail orphan sweep skipped"),
+            }
         })
         .await;
         if let Err(error) = join {

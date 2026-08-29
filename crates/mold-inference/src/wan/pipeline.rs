@@ -602,7 +602,7 @@ fn resolve_wan_solver(
             Scheduler::UniPc => Ok(WanSolverKind::UniPc),
             Scheduler::Euler => Ok(WanSolverKind::Euler),
             Scheduler::DpmPp => Ok(WanSolverKind::DpmPp),
-            Scheduler::Ddim | Scheduler::EulerAncestral => bail!(
+            Scheduler::Ddim | Scheduler::EulerAncestral | Scheduler::EdmDpmPp2m => bail!(
                 "Wan supports the uni-pc, euler, and dpm-pp sample solvers; '{scheduler}' is a \
                  UNet scheduler"
             ),

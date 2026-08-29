@@ -993,10 +993,51 @@ pub(crate) struct H3AdmissionDevice {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct H3HostMemory {
     pub total_bytes: u64,
+    /// `MemAvailable` (or the OS estimate) alone — never the credit below.
     pub available_bytes: u64,
+    /// Evictable ZFS ARC the same sample counted (#1439); `None` off ZFS.
+    pub reclaimable_zfs_arc_bytes: Option<u64>,
 }
 
 impl H3HostMemory {
+    /// A sample with no ZFS credit — the shape every non-ZFS host produces
+    /// and the one the existing pins are written against.
+    #[cfg(test)]
+    pub(crate) fn sampled(total_bytes: u64, available_bytes: u64) -> Self {
+        Self {
+            total_bytes,
+            available_bytes,
+            reclaimable_zfs_arc_bytes: None,
+        }
+    }
+
+    pub(crate) fn from_ram(ram: &mold_core::RamSnapshot) -> Self {
+        Self {
+            total_bytes: ram.total,
+            available_bytes: ram.available_or_estimate(),
+            reclaimable_zfs_arc_bytes: ram.reclaimable_zfs_arc,
+        }
+    }
+
+    /// What admission spends: `MemAvailable` plus the evictable ARC credit,
+    /// clamped to the machine exactly as `RamSnapshot` clamps it.
+    pub(crate) fn spendable_bytes(self) -> u64 {
+        self.available_bytes
+            .saturating_add(self.reclaimable_zfs_arc_bytes.unwrap_or(0))
+            .min(self.total_bytes)
+    }
+
+    /// The clause a refusal appends to a headroom figure this sample
+    /// produced, or nothing when the credit is absent or zero (#1439).
+    pub(crate) fn evictable_arc_clause(self) -> String {
+        match self.reclaimable_zfs_arc_bytes {
+            Some(credit) if credit > 0 => {
+                format!(" (the sample includes {credit} bytes of evictable ZFS ARC)")
+            }
+            _ => String::new(),
+        }
+    }
+
     pub(crate) fn safety_floor_bytes(self) -> u64 {
         let whole = self.total_bytes / 100;
         let remainder = self.total_bytes % 100;
@@ -1007,12 +1048,15 @@ impl H3HostMemory {
     }
 
     pub(crate) fn headroom_bytes(self) -> u64 {
-        self.available_bytes
+        self.spendable_bytes()
             .saturating_sub(self.safety_floor_bytes())
     }
 
     fn validate(self) -> Result<(), H3AdmissionError> {
-        if self.total_bytes == 0 || self.available_bytes > self.total_bytes {
+        if self.total_bytes == 0
+            || self.available_bytes > self.total_bytes
+            || self.spendable_bytes() > self.total_bytes
+        {
             return Err(H3AdmissionError::InvalidHostMemory {
                 total_bytes: self.total_bytes,
                 available_bytes: self.available_bytes,
@@ -1027,13 +1071,7 @@ impl H3HostMemory {
 /// raw available RAM, so the canonical 15%-or-8-GiB safety floor survives
 /// fresh external pressure after scheduler admission.
 pub(crate) fn current_h3_host_memory() -> H3HostMemory {
-    let ram = crate::resources::ram_snapshot();
-    H3HostMemory {
-        total_bytes: ram.total,
-        available_bytes: ram
-            .available
-            .unwrap_or_else(|| ram.total.saturating_sub(ram.used)),
-    }
+    H3HostMemory::from_ram(&crate::resources::ram_snapshot())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -2494,10 +2532,7 @@ mod tests {
                     checkpoint,
                     runtime,
                     devices: vec![cuda(24 * GIB)],
-                    host: H3HostMemory {
-                        total_bytes: 96 * GIB,
-                        available_bytes: 96 * GIB,
-                    },
+                    host: H3HostMemory::sampled(96 * GIB, 96 * GIB),
                     policy: H3AdmissionPolicy::default(),
                 })
             },
@@ -2525,10 +2560,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             std::slice::from_ref(&device),
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -2753,24 +2785,84 @@ mod tests {
         assert!(curated.total_file_bytes().unwrap() > 42_470_585_471);
     }
 
+    /// hal9000, 2026-08-27 (#1439): the Ref2VA print's 32.78 GB host charge
+    /// was refused at 26.20 GB of headroom while 15.08 GB of evictable ARC
+    /// sat beside `MemAvailable`. The credit lifts the headroom to 41.28 GB,
+    /// `available_bytes` stays `MemAvailable`, and the sample still validates.
+    #[test]
+    fn hal9000_ref2va_is_admitted_once_evictable_arc_counts() {
+        const REQUIRED: u64 = 32_775_178_178;
+        let zfs = H3HostMemory {
+            total_bytes: 67_149_967_360,
+            available_bytes: 36_272_495_104,
+            reclaimable_zfs_arc_bytes: Some(15_081_432_704),
+        };
+        zfs.validate()
+            .expect("a credited sample within the machine is valid");
+        assert_eq!(zfs.spendable_bytes(), 51_353_927_808);
+        assert_eq!(zfs.headroom_bytes(), 41_281_432_704);
+        assert!(zfs.headroom_bytes() >= REQUIRED);
+        assert_eq!(zfs.available_bytes, 36_272_495_104);
+        assert_eq!(
+            zfs.evictable_arc_clause(),
+            " (the sample includes 15081432704 bytes of evictable ZFS ARC)"
+        );
+
+        let blind = H3HostMemory::sampled(67_149_967_360, 36_272_495_104);
+        assert_eq!(blind.headroom_bytes(), 26_200_000_000);
+        assert!(blind.headroom_bytes() < REQUIRED);
+        assert_eq!(blind.evictable_arc_clause(), "");
+        assert_eq!(
+            H3HostMemory {
+                reclaimable_zfs_arc_bytes: Some(0),
+                ..blind
+            }
+            .evictable_arc_clause(),
+            "",
+            "a cold ARC on a ZFS host reads like any other host"
+        );
+
+        // The one composition rule: the same RamSnapshot through H3 and the
+        // snapshot's own method agree, and the clamp holds on both.
+        let ram = mold_core::RamSnapshot {
+            total: 67_149_967_360,
+            used: 30_000_000_000,
+            available: Some(36_272_495_104),
+            reclaimable_zfs_arc: None,
+            used_by_mold: 0,
+            used_by_other: 30_000_000_000,
+        }
+        .with_zfs_arc_credit(Some(15_081_432_704));
+        assert_eq!(H3HostMemory::from_ram(&ram), zfs);
+        assert_eq!(
+            H3HostMemory::from_ram(&ram).spendable_bytes(),
+            ram.available_with_evictable_arc()
+        );
+        let over = H3HostMemory {
+            total_bytes: 64 * GIB,
+            available_bytes: 60 * GIB,
+            reclaimable_zfs_arc_bytes: Some(10 * GIB),
+        };
+        assert_eq!(over.spendable_bytes(), 64 * GIB, "clamped to the machine");
+        assert!(over.validate().is_ok());
+        assert!(H3HostMemory {
+            total_bytes: 64 * GIB,
+            available_bytes: 65 * GIB,
+            reclaimable_zfs_arc_bytes: None,
+        }
+        .validate()
+        .is_err());
+    }
+
     #[test]
     fn host_floor_matches_scheduler_and_full_stack_cannot_fit_128_gib() {
-        let forty = H3HostMemory {
-            total_bytes: 40 * GIB,
-            available_bytes: 20 * GIB,
-        };
+        let forty = H3HostMemory::sampled(40 * GIB, 20 * GIB);
         assert_eq!(forty.safety_floor_bytes(), 8 * GIB);
         assert_eq!(forty.headroom_bytes(), 12 * GIB);
-        let eighty = H3HostMemory {
-            total_bytes: 80 * GIB,
-            available_bytes: 80 * GIB,
-        };
+        let eighty = H3HostMemory::sampled(80 * GIB, 80 * GIB);
         assert_eq!(eighty.safety_floor_bytes(), 12 * GIB);
         assert_eq!(eighty.headroom_bytes(), 68 * GIB);
-        let enormous = H3HostMemory {
-            total_bytes: u64::MAX,
-            available_bytes: u64::MAX,
-        };
+        let enormous = H3HostMemory::sampled(u64::MAX, u64::MAX);
         assert_eq!(
             enormous.safety_floor_bytes(),
             (u64::MAX / 100) * 15 + ((u64::MAX % 100) * 15 / 100)
@@ -2794,10 +2886,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(80 * GIB)],
-            H3HostMemory {
-                total_bytes: 128 * GIB,
-                available_bytes: 128 * GIB,
-            },
+            H3HostMemory::sampled(128 * GIB, 128 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -2820,10 +2909,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB + 1,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB + 1),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -2837,10 +2923,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -2861,10 +2944,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 160 * GIB,
-                available_bytes: 160 * GIB,
-            },
+            H3HostMemory::sampled(160 * GIB, 160 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -2904,10 +2984,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 160 * GIB,
-                available_bytes: 160 * GIB,
-            },
+            H3HostMemory::sampled(160 * GIB, 160 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -2932,10 +3009,7 @@ mod tests {
                 &gpu_checkpoint,
                 Some(&gpu_runtime),
                 &[cuda(24 * GIB)],
-                H3HostMemory {
-                    total_bytes: 160 * GIB,
-                    available_bytes: 160 * GIB,
-                },
+                H3HostMemory::sampled(160 * GIB, 160 * GIB),
                 H3AdmissionPolicy::default(),
             )
             .unwrap();
@@ -2956,10 +3030,7 @@ mod tests {
                 &cpu_checkpoint,
                 Some(&cpu_runtime),
                 &[cuda(8 * GIB)],
-                H3HostMemory {
-                    total_bytes: 160 * GIB,
-                    available_bytes: 160 * GIB,
-                },
+                H3HostMemory::sampled(160 * GIB, 160 * GIB),
                 H3AdmissionPolicy::default(),
             )
             .unwrap();
@@ -2997,10 +3068,7 @@ mod tests {
                 &checkpoint,
                 Some(&runtime),
                 &[cuda(if cpu_route { 8 * GIB } else { 24 * GIB })],
-                H3HostMemory {
-                    total_bytes: 160 * GIB,
-                    available_bytes: 160 * GIB,
-                },
+                H3HostMemory::sampled(160 * GIB, 160 * GIB),
                 H3AdmissionPolicy::default(),
             )
             .unwrap();
@@ -3037,10 +3105,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(8 * GIB)],
-            H3HostMemory {
-                total_bytes: 160 * GIB,
-                available_bytes: 160 * GIB,
-            },
+            H3HostMemory::sampled(160 * GIB, 160 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3075,10 +3140,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(available_without_output)],
-            H3HostMemory {
-                total_bytes: 160 * GIB,
-                available_bytes: 160 * GIB,
-            },
+            H3HostMemory::sampled(160 * GIB, 160 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -3099,10 +3161,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -3120,10 +3179,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -3157,10 +3213,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3202,10 +3255,7 @@ mod tests {
             &checkpoint,
             Some(&alternate_runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3231,10 +3281,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             std::slice::from_ref(&device),
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3380,10 +3427,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             std::slice::from_ref(&device),
-            H3HostMemory {
-                total_bytes: 160 * GIB,
-                available_bytes: 160 * GIB,
-            },
+            H3HostMemory::sampled(160 * GIB, 160 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3417,10 +3461,7 @@ mod tests {
             &cpu_checkpoint,
             Some(&cpu_runtime),
             std::slice::from_ref(&cpu_device),
-            H3HostMemory {
-                total_bytes: 160 * GIB,
-                available_bytes: 160 * GIB,
-            },
+            H3HostMemory::sampled(160 * GIB, 160 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3473,10 +3514,7 @@ mod tests {
             &source_undercharge,
             Some(&runtime),
             std::slice::from_ref(&device),
-            H3HostMemory {
-                total_bytes: 160 * GIB,
-                available_bytes: 160 * GIB,
-            },
+            H3HostMemory::sampled(160 * GIB, 160 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3506,10 +3544,7 @@ mod tests {
             &exact,
             Some(&runtime),
             std::slice::from_ref(&device),
-            H3HostMemory {
-                total_bytes: 160 * GIB,
-                available_bytes: 160 * GIB,
-            },
+            H3HostMemory::sampled(160 * GIB, 160 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3564,10 +3599,7 @@ mod tests {
             &cpu_overcharge,
             Some(&cpu_runtime),
             std::slice::from_ref(&cpu_device),
-            H3HostMemory {
-                total_bytes: 160 * GIB,
-                available_bytes: 160 * GIB,
-            },
+            H3HostMemory::sampled(160 * GIB, 160 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3616,10 +3648,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             std::slice::from_ref(&device),
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3661,10 +3690,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             std::slice::from_ref(&device),
-            H3HostMemory {
-                total_bytes: 512 * GIB,
-                available_bytes: 512 * GIB,
-            },
+            H3HostMemory::sampled(512 * GIB, 512 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3699,10 +3725,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             std::slice::from_ref(&device),
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap();
@@ -3762,10 +3785,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -3779,10 +3799,7 @@ mod tests {
             &checkpoint,
             None,
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -3800,10 +3817,7 @@ mod tests {
             &checkpoint,
             Some(&runtime),
             &[cuda(24 * GIB), cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();
@@ -3821,10 +3835,7 @@ mod tests {
             &missing_dequant,
             Some(&runtime),
             &[cuda(24 * GIB)],
-            H3HostMemory {
-                total_bytes: 96 * GIB,
-                available_bytes: 96 * GIB,
-            },
+            H3HostMemory::sampled(96 * GIB, 96 * GIB),
             H3AdmissionPolicy::default(),
         )
         .unwrap_err();

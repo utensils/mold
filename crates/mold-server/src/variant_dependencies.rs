@@ -1386,6 +1386,7 @@ pub(crate) async fn prepare_inputs_for_devices(
             grant,
             context.h3_resolved_references.clone(),
             context.preparation_progress.clone(),
+            context.queue_media_projection.as_ref(),
         )
         .await;
     }
@@ -2055,8 +2056,15 @@ async fn prepare_h3_private_inputs_for_devices(
     ingress_grant: crate::h3_private_bridge::H3PrivateIngressGrant,
     resolved_references: Option<crate::reference_uploads::ResolvedReferenceAdmissionView>,
     preparation_progress: Option<PreparationProgressSink>,
+    queue_media_projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Result<PreparedExecutionInputs, String> {
     use sha2::{Digest, Sha256};
+    // The row being re-prepared may be payload-free; the projection is what
+    // the queue-media store holds for it (a FL2VA first frame in particular).
+    let resolved_media = mold_core::minimax_h3::ResolvedMediaPresence {
+        source_image: request.source_image.is_some()
+            || queue_media_projection.is_some_and(|projection| projection.source_image),
+    };
 
     let devices = crate::execution_plan::eligible_devices_for_private_h3(config, request, &devices)
         .map_err(|error| error.to_string())?;
@@ -2076,6 +2084,10 @@ async fn prepare_h3_private_inputs_for_devices(
     };
     let mut available_host_headroom_bytes =
         h3_preparation_host_headroom(policy, host_memory, has_reclaimable_cached_model);
+    // The sample `available_host_headroom_bytes` was read from, carried
+    // beside it so a refusal names the evictable ZFS ARC THAT sample counted
+    // (#1439) rather than whatever a later sample happens to hold.
+    let mut host_sample = host_memory;
     let uat_paths =
         crate::h3_private_bridge::H3PrivateUatPathSet::resolve(config.resolved_models_dir());
     // The public runtime owns its MOLD_HOME-derived staging root; create it
@@ -2255,7 +2267,14 @@ async fn prepare_h3_private_inputs_for_devices(
                             device_shortfall = Some(shortfall);
                         }
                     }
-                    failures.insert(device.id, error.message());
+                    // A host shortfall names the credit its own sample
+                    // already counted; every other refusal is untouched.
+                    let clause = if error.host_shortfall().is_some() {
+                        host_sample.evictable_arc_clause()
+                    } else {
+                        String::new()
+                    };
+                    failures.insert(device.id, format!("{}{clause}", error.message()));
                     continue;
                 }
             };
@@ -2268,6 +2287,7 @@ async fn prepare_h3_private_inputs_for_devices(
             evidence
                 .validate_for(
                     &next_request,
+                    resolved_media,
                     &device.id,
                     device.ordinal,
                     compute_capability,
@@ -2294,14 +2314,15 @@ async fn prepare_h3_private_inputs_for_devices(
         if !evidence_by_device.is_empty() {
             break;
         }
-        let fresh_headroom = crate::h3_admission::current_h3_host_memory().headroom_bytes();
+        let fresh_sample = crate::h3_admission::current_h3_host_memory();
         if let Some(retry_headroom) = h3_fresh_retry_headroom(
             attempt,
             available_host_headroom_bytes,
             host_shortfall,
-            fresh_headroom,
+            fresh_sample.headroom_bytes(),
         ) {
             available_host_headroom_bytes = retry_headroom;
+            host_sample = fresh_sample;
             continue;
         }
         let (Some(required_host_bytes), Some(state)) = (
@@ -2333,8 +2354,8 @@ async fn prepare_h3_private_inputs_for_devices(
             elapsed_ms = reclaim_started.elapsed().as_millis() as u64,
             "MiniMax H3 host reclaim finished"
         );
-        available_host_headroom_bytes =
-            crate::h3_admission::current_h3_host_memory().headroom_bytes();
+        host_sample = crate::h3_admission::current_h3_host_memory();
+        available_host_headroom_bytes = host_sample.headroom_bytes();
         if available_host_headroom_bytes < required_host_bytes {
             break;
         }
@@ -2398,7 +2419,12 @@ async fn prepare_h3_private_inputs_for_devices(
                 crate::host_reclaim::host_shortfall_message(
                     &reclaim,
                     shortfall.required_host_bytes,
-                    shortfall.available_host_headroom_bytes,
+                    // The post-reclaim figure, from the SAME sample as the
+                    // ARC credit beside it: `available_host_headroom_bytes`
+                    // is assigned wherever `host_sample` is, while the
+                    // shortfall still holds the pre-reclaim attempt's number.
+                    available_host_headroom_bytes,
+                    host_sample.reclaimable_zfs_arc_bytes,
                 )
             )),
             (_, true) => {
@@ -2847,10 +2873,7 @@ mod tests {
     #[test]
     fn preview_can_prepare_against_only_cache_reclaimable_host_capacity() {
         const GIB: u64 = 1 << 30;
-        let host = crate::h3_admission::H3HostMemory {
-            total_bytes: 64 * GIB,
-            available_bytes: 20 * GIB,
-        };
+        let host = crate::h3_admission::H3HostMemory::sampled(64 * GIB, 20 * GIB);
         let sampled = host.headroom_bytes();
         let physical_ceiling = host.total_bytes - host.safety_floor_bytes();
 
