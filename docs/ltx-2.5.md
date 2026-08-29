@@ -80,6 +80,18 @@ Surfaces show this option only when the selected host advertises both
 `supports_duration_prediction: true` and `runtime_ready: true`. Saved metadata
 and Use as prompt preserve whether duration was explicit or predicted.
 
+### Video-only rendering
+
+`--video-only` (`GenerateRequest.video_only: true`, the Advanced "Video only"
+toggle on web and desktop) skips the audio-video transformer's audio branch
+entirely, the way upstream's video-only configurator omits it
+([#1037](https://github.com/utensils/mold/issues/1037)). It is
+output-changing, so it is never inferred or defaulted, and is refused
+alongside `enable_audio: true`, conditioning audio, the text-to-audio
+pipeline, and `extend_video`. Mold Sequence's chain wire does not carry
+`video_only` yet — a sequence clip always renders with its ordinary audio
+behavior.
+
 ## Native multishot and Mold Sequence
 
 LTX-2.5 native multishot is prompt/model behavior inside one generated clip.
