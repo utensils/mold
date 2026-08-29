@@ -344,6 +344,9 @@ generator_commit_of() {
 #     a process-wide OnceLock, one line for the life of the server.
 #   - `ltx2 int8 arm=...` (ltx2/convrot.rs `log_int8_arm_once`): "Log one
 #     INT8-arm literal at INFO, once per process per literal."
+#   - `ltx2 linear kind=...` (ltx2/gguf.rs `log_linear_kind_once`, the GGUF
+#     tiers' qmatmul/dequant arm): "mirroring `convrot::log_int8_arm_once`",
+#     same once-per-process-per-literal guard.
 #   - `ltx2 residency mode=...` (ltx2/provenance.rs `residency_mode_line`):
 #     "emitted once per transformer load" — never re-logged while the engine
 #     stays resident across consecutive renders of the same model.
@@ -353,6 +356,7 @@ process_scoped_provenance_prefixes() {
   printf '%s\n' \
     'attention backend selected backend=' \
     'ltx2 int8 arm=' \
+    'ltx2 linear kind=' \
     'ltx2 residency mode='
 }
 
