@@ -152,7 +152,7 @@ strip = true
 # TEMPORARY: mirror the root workspace's same-name compatibility patch because
 # this standalone Cargo root owns an independent dependency graph.
 [patch.crates-io]
-candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "cd0df80b99584b5c72606268da1703100e67bf35" }
-candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "cd0df80b99584b5c72606268da1703100e67bf35" }
-candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "cd0df80b99584b5c72606268da1703100e67bf35" }
+candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "4bf88883e339ab976784c2fe20e2b505315b71c3" }
+candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "4bf88883e339ab976784c2fe20e2b505315b71c3" }
+candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "4bf88883e339ab976784c2fe20e2b505315b71c3" }
 cudarc = { git = "https://github.com/utensils/cudarc", rev = "9b3b1bc276bc27c3e99343ee82db7f99705b9ed5" }

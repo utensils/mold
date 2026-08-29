@@ -1,0 +1,1 @@
+- **LTX-2.5 plain-bf16 diffusion-VAE decode now runs on CUDA.** The `neighborhood-attention-3d` custom op gained a CUDA kernel (a line-for-line port of the existing Metal kernel), so the diffusion video decoder no longer refuses with "no cuda implementation for neighborhood-attention-3d" on NVIDIA GPUs.
