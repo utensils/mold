@@ -1680,6 +1680,7 @@
         "frames": 9,
         "fps": 24,
         "audio": true,
+        "audio_sample_rate": 24000,
         "provenance": [
           "ltx2 attention path=ltx2-bf16-math",
           "attention backend selected backend=Math"
@@ -1687,7 +1688,8 @@
         "metadata": {
           "attention_path": "ltx2-bf16-math"
         }
-      }
+      },
+      "notes": "LTX-2 19B's audio spec is 24 kHz, not LTX-2.5's 48 kHz (verified via ffprobe on a passed render); every other row defaults to 48000 and this one names its own rate via expect.audio_sample_rate (engine finding #8). The sibling ltx-2.3-22b-distilled-fp8--regression_audio_mp4 row stays at the default 48000 -- verified via ffprobe on ITS passed render, LTX-2.3's audio is genuinely 48 kHz despite sharing the pre-2.5 lineage."
     },
     {
       "id": "ltx-2.3-22b-distilled-fp8--regression_silent_apng",
@@ -1984,15 +1986,11 @@
         "fps": null,
         "audio": "only",
         "provenance": [
-          "ltx2 attention path=ltx2-bf16-math",
-          "ltx2 linear kind=dequant",
-          "attention backend selected backend=Math"
+          "ltx2 audio branch=run"
         ],
-        "metadata": {
-          "attention_path": "ltx2-bf16-math"
-        }
+        "metadata": {}
       },
-      "notes": "Audio-only: 16-bit PCM WAV, 48 kHz stereo, no video stream. Steps below the non-distilled default are raised with a disclosed message."
+      "notes": "Audio-only: 16-bit PCM WAV, 48 kHz stereo, no video stream. Steps below the non-distilled default are raised with a disclosed message. T2A uses a separate, minimal loader (ltx2/model/audio_transformer.rs) that never runs video self-attention or the GGUF quantized-linear arm, so it logs none of the video-shaped provenance those lines describe (verified against a real render's server.log: no attention-path, linear-kind, or backend-selected line, but 'ltx2 audio branch=run' does fire) and its saved metadata_json carries no attention_path key (engine finding #9 -- this row's original expect block was cloned from a video-row template)."
     },
     {
       "id": "ltx-2.5-22b-distilled-q4--lora_gguf",

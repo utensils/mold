@@ -249,14 +249,19 @@ probe_media_against_expect() {
     echo "ffprobe could not decode $media"
     return 1
   }
-  local expect audio
+  local expect audio audio_sample_rate
   expect="$(jq -c '.expect' <<<"$row")"
   audio="$(jq -r '.expect.audio' <<<"$row")"
+  # Not every checkpoint's audio is 48 kHz (LTX-2 19B renders at 24 kHz);
+  # a row names its own rate via expect.audio_sample_rate and defaults to
+  # 48000 (LTX-2.5's rate, what every existing row was authored against)
+  # when absent.
+  audio_sample_rate="$(jq -r '.expect.audio_sample_rate // 48000' <<<"$row")"
   if [[ "$audio" == only ]]; then
-    jq -e '([.streams[] | select(.codec_type == "video")] | length == 0)
-      and (.streams[] | select(.codec_type == "audio" and .sample_rate == "48000" and .channels == 2))' \
+    jq -e --argjson rate "$audio_sample_rate" '([.streams[] | select(.codec_type == "video")] | length == 0)
+      and (.streams[] | select(.codec_type == "audio" and (.sample_rate | tonumber) == $rate and .channels == 2))' \
       "$probe" >/dev/null || {
-      echo "audio-only output is not stereo 48 kHz without a video stream"
+      echo "audio-only output is not stereo $audio_sample_rate Hz without a video stream"
       return 1
     }
     return 0
@@ -276,9 +281,9 @@ probe_media_against_expect() {
     return 1
   }
   if [[ "$audio" == true ]]; then
-    jq -e '.streams[] | select(.codec_type == "audio" and .codec_name == "aac"
-      and .sample_rate == "48000" and .channels == 2)' "$probe" >/dev/null || {
-      echo "missing stereo 48 kHz AAC"
+    jq -e --argjson rate "$audio_sample_rate" '.streams[] | select(.codec_type == "audio" and .codec_name == "aac"
+      and (.sample_rate | tonumber) == $rate and .channels == 2)' "$probe" >/dev/null || {
+      echo "missing stereo $audio_sample_rate Hz AAC"
       return 1
     }
   else
@@ -1068,6 +1073,16 @@ seal_mode() {
         | . + {manifest_path: $manifest, manifest_sha256: $sha})]' <<<"$rows")"
   done < <(jq -r '.rows[].id' "$matrix")
 
+  # $rows is now the full per-row array (one entry per matrix row, each
+  # carrying its manifest content) — at 51 rows this comfortably exceeds
+  # Linux's MAX_ARG_STRLEN (128 KiB, a single-argument cap independent of
+  # ulimit -s / RLIMIT_STACK), so every later consumer reads it from this
+  # file via --slurpfile rather than passing it as a --argjson command-line
+  # argument. --slurpfile wraps the file's one JSON value in an array, so
+  # every jq program below reads it back out as $rows_file[0].
+  local rows_file="$evidence_dir/.rows-payload.$$.json"
+  printf '%s' "$rows" >"$rows_file"
+
   # Assets: every (manifest, file) pair from the generated fixture, resolved
   # under MOLD_MODELS_DIR. A file may be absent only for a manifest with no
   # passed row; a present file must carry a matching verified marker, and
@@ -1083,7 +1098,7 @@ seal_mode() {
       present=true
       bytes="$(file_size "$path")"
       [[ -f "$path.sha256-verified" ]] || fail "$component of $manifest_name has no verified SHA marker: $path"
-      marker_sha="\"$(tr -d '[:space:]' <"$path.sha256-verified")\""
+      marker_sha="\"$(head -1 "$path.sha256-verified" | tr -d '[:space:]')\""
       [[ "$marker_sha" == "\"$expected_sha\"" ]] \
         || fail "$component of $manifest_name marker mismatch: expected $expected_sha, found $marker_sha"
       if [[ "$contract_test" == 1 ]]; then
@@ -1130,7 +1145,8 @@ seal_mode() {
   record_reference diffusers-upstream 95c0d467cc2a4770b71fa25a117320377e6eb08f
 
   local profiles
-  profiles="$(jq -c --argjson rows "$rows" '[.common.profiles | to_entries[] | .key as $name
+  profiles="$(jq -c --slurpfile rows_file "$rows_file" '.common.profiles as $profiles | $rows_file[0] as $rows
+    | [$profiles | to_entries[] | .key as $name
     | {name: $name, env: .value,
        rows_attempted: ([$rows[] | select(.profile == $name and .status != "not_run")] | length)}]' "$matrix")"
 
@@ -1198,10 +1214,11 @@ seal_mode() {
     --arg matrix_path "$matrix" --arg matrix_sha "$(file_sha256 "$matrix")" \
     --argjson matrix_rows "$(jq '.rows | length' "$matrix")" \
     --argjson host "$host" --argjson assets "$assets" --argjson references "$references" \
-    --argjson profiles "$profiles" --argjson rows "$rows" --argjson comfy_int8 "$comfy_int8" \
+    --argjson profiles "$profiles" --slurpfile rows_file "$rows_file" --argjson comfy_int8 "$comfy_int8" \
     --argjson comfy_gguf "$comfy_gguf" --argjson gates "$gates" --argjson summary "$summary" \
     --arg qualification_status "$qualification_status" \
-    '{schema_version: "mold.ltx25.cuda.verification.v1", captured_at: $captured_at,
+    '($rows_file[0]) as $rows
+      | {schema_version: "mold.ltx25.cuda.verification.v1", captured_at: $captured_at,
       source_commit: $source_commit, source_tree_state: $source_tree_state,
       mold_home: $mold_home, models_dir: $models_dir, backend_scope: "cuda",
       matrix: {path: $matrix_path, sha256: $matrix_sha, schema_version: "mold.ltx25.cuda.matrix.v1",
@@ -1211,6 +1228,7 @@ seal_mode() {
       summary: $summary, qualification_status: $qualification_status,
       preservation: {downloaded_models_deleted: false, rendered_media_deleted: false}}' >"$tmp_report"
   mv "$tmp_report" "$report"
+  rm -f "$rows_file"
   "$validator" "$report" --schema "$schema" >/dev/null
   echo "$report"
   if [[ "$qualification_status" == failed ]]; then
