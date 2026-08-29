@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const css = readFileSync("src/mobile/mobile.css", "utf8");
 const mobileHtml = readFileSync("index.mobile.html", "utf8");
+const mobileAppComponent = readFileSync("src/mobile/MobileApp.vue", "utf8");
 const preparedComponent = readFileSync("src/mobile/MobilePreparedExpansionBatch.vue", "utf8");
 const pullComponent = readFileSync("src/mobile/MobileExpansionPullStatus.vue", "utf8");
 const composerComponent = readFileSync("src/mobile/MobileSequenceComposer.vue", "utf8");
@@ -63,11 +64,20 @@ describe("mobile Library thumbnail sizing", () => {
   it("reserves the two-finger pinch while one-finger scrolling still works", () => {
     const base = css.match(/\.mobile-gallery-pinch-surface\s*\{([^}]*)\}/s);
     const tile = css.match(/\.gallery-item\s*\{([^}]*)\}/s);
+    const media = css.match(/\.gallery-item img,\s*\.gallery-item video\s*\{([^}]*)\}/s);
 
     expect(base?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
     expect(tile?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
+    expect(media?.[1]).toMatch(/touch-action:\s*pan-y\s*;/);
+    expect(media?.[1]).toMatch(/-webkit-user-drag:\s*none\s*;/);
     expect(base?.[1]).toMatch(/flex:\s*1 0 auto\s*;/);
     expect(base?.[1]).toMatch(/min-height:\s*42vh\s*;/);
+    expect(mobileAppComponent).toMatch(
+      /class="gallery-grid gallery-grid-virtual"[\s\S]*?'is-android-native': androidNativeRuntime[\s\S]*?@click="handleAndroidGalleryGridClick"/,
+    );
+    expect(css).toMatch(
+      /\.gallery-grid\.is-android-native\s+\.gallery-item\s*\{[^}]*pointer-events:\s*none\s*;/s,
+    );
   });
 });
 

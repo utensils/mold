@@ -642,6 +642,7 @@ const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
 const GALLERY_TAGS_KEY = "mold.mobile.gallery-tags.v1";
+const GALLERY_VIEWER_HISTORY_KEY = "mold.mobile.gallery-viewer";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 /** A broken WebView connection must not hold a thumbnail page forever. Five
@@ -7541,7 +7542,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     // was a gallery image its bytes are still on the print's host — fetch
     // them so the wells fill instead of demanding a reattach.
     void restoreReusedH3BoundaryMedia(print);
-    selectedPrint.value = null;
+    dismissSelectedPrint();
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.
     galleryRefreshDeferred = false;
@@ -7901,7 +7902,7 @@ async function useSelectedPrintAsSource(): Promise<void> {
       form.sourceFit = defaultSourceFitPolicy();
       setGenerationStatus("Gallery print selected as source");
     }
-    selectedPrint.value = null;
+    dismissSelectedPrint();
     galleryRefreshDeferred = false;
     tab.value = "generate";
   } catch (error) {
@@ -7926,6 +7927,12 @@ function galleryImageMimeType(print: GalleryImage, declared: string): string {
 function openPrint(print: GalleryPrint): void {
   reusePrintError.value = "";
   selectedPrint.value = print;
+  if (androidNativeRuntime && !window.history.state?.[GALLERY_VIEWER_HISTORY_KEY]) {
+    window.history.pushState(
+      { ...(window.history.state ?? {}), [GALLERY_VIEWER_HISTORY_KEY]: true },
+      "",
+    );
+  }
 }
 
 const galleryPrintKey = (print: Pick<GalleryPrint, "hostId" | "filename">) =>
@@ -9402,7 +9409,7 @@ async function restoreSelectedPrint(): Promise<void> {
     ...restored.map(({ trashed_at: _trashedAt, purge_at: _purgeAt, ...copy }) => copy),
   ].sort((a, b) => b.timestamp - a.timestamp);
   trashCopies = trashCopies.filter((copy) => !keys.has(galleryPrintKey(copy)));
-  selectedPrint.value = null;
+  dismissSelectedPrint();
   galleryRefreshDeferred = false;
   rebuildGalleryOrganization();
   await requeueGallery();
@@ -9419,7 +9426,7 @@ async function deleteSelectedPrintForever(): Promise<void> {
     copies.filter((copy) => !outcome.failedHostIds.has(copy.hostId)).map(galleryPrintKey),
   );
   if (keys.size === 0) return;
-  selectedPrint.value = null;
+  dismissSelectedPrint();
   galleryRefreshDeferred = false;
   await enqueueGalleryOperation(() => dropCopiesFromLibrary(keys, { purgeThumbnails: true }));
 }
@@ -9496,8 +9503,33 @@ function galleryPrintAtPoint(x: number, y: number): GalleryPrint | null {
   const tile = elements
     .map((element) => element?.closest<HTMLElement>("[data-gallery-print-key]") ?? null)
     .find((element) => element !== null);
-  const key = tile?.dataset.galleryPrintKey;
+  // Android tiles deliberately sit outside pointer hit-testing so Chrome can
+  // hand a vertical drag to the Library scroller. Recover the visual tile by
+  // bounds for delegated taps and select-mode drag painting.
+  const boundedTile =
+    tile ??
+    [
+      ...(galleryGridSurface.value?.querySelectorAll<HTMLElement>("[data-gallery-print-key]") ??
+        []),
+    ].find((element) => {
+      const bounds = element.getBoundingClientRect();
+      return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
+    });
+  const key = boundedTile?.dataset.galleryPrintKey;
   return key ? (gallery.value.find((print) => galleryPrintKey(print) === key) ?? null) : null;
+}
+
+function beginAndroidGalleryGridSelection(event: PointerEvent): void {
+  if (!androidNativeRuntime) return;
+  const print = galleryPrintAtPoint(event.clientX, event.clientY);
+  if (print) beginGallerySelectionDrag(event, print);
+}
+
+function handleAndroidGalleryGridClick(event: MouseEvent): void {
+  if (!androidNativeRuntime) return;
+  if (event.target instanceof Element && event.target.closest("[data-gallery-print-key]")) return;
+  const print = galleryPrintAtPoint(event.clientX, event.clientY);
+  if (print) handleGalleryTileClick(event, print);
 }
 
 function applyGalleryDragAtPoint(): void {
@@ -9672,7 +9704,7 @@ function selectAllGalleryPrints(): void {
   galleryDeleteConfirming.value = false;
 }
 
-function handleGalleryTileClick(event: MouseEvent, print: GalleryPrint): void {
+function handleGalleryTileClick(event: MouseEvent | KeyboardEvent, print: GalleryPrint): void {
   if (galleryPinchPendingClicks > 0 && event.detail !== 0) {
     galleryPinchPendingClicks -= 1;
     return;
@@ -9793,7 +9825,7 @@ function navigateSelectedPrint(delta: -1 | 1): void {
   selectedPrint.value = next;
 }
 
-function closePrint(): void {
+function closePrint(syncAndroidHistory = true): void {
   reusePrintEpoch += 1;
   reusePrintController?.abort();
   reusePrintController = null;
@@ -9803,7 +9835,7 @@ function closePrint(): void {
   sourceUseController = null;
   usingPrintAsSource.value = false;
   reusePrintError.value = "";
-  selectedPrint.value = null;
+  dismissSelectedPrint(syncAndroidHistory);
   if (galleryRefreshDeferred || galleryRefreshRequested) {
     galleryRefreshDeferred = false;
     // The viewer normally restores focus to its tile. A deferred refresh — or
@@ -9814,6 +9846,21 @@ function closePrint(): void {
       void refreshGallery();
     });
   }
+}
+
+function dismissSelectedPrint(syncAndroidHistory = true): void {
+  selectedPrint.value = null;
+  if (
+    syncAndroidHistory &&
+    androidNativeRuntime &&
+    window.history.state?.[GALLERY_VIEWER_HISTORY_KEY]
+  ) {
+    window.history.back();
+  }
+}
+
+function handleAndroidHistoryPop(): void {
+  if (androidNativeRuntime && selectedPrint.value) closePrint(false);
 }
 
 function reuseSelectedPrint(): void {
@@ -10333,6 +10380,7 @@ onMounted(async () => {
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
   window.addEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  window.addEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.addEventListener("scroll", scheduleMobileGalleryWindow, { passive: true });
   // The pinch tracks globally so a finger that slides off the grid mid-gesture
   // still reports, and so a lift outside the grid always ends it.
@@ -10432,6 +10480,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
   window.removeEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  window.removeEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.removeEventListener("scroll", scheduleMobileGalleryWindow);
   nativeGalleryContextKey = null;
   finishGallerySelectionDrag();
@@ -11857,11 +11906,16 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             >
               <div
                 class="gallery-grid gallery-grid-virtual"
-                :class="{ 'is-selecting': gallerySelectMode }"
+                :class="{
+                  'is-selecting': gallerySelectMode,
+                  'is-android-native': androidNativeRuntime,
+                }"
                 :style="{
                   '--mobile-gallery-columns': galleryColumns,
                   transform: `translateY(${mobileGalleryWindow.offset}px)`,
                 }"
+                @pointerdown="beginAndroidGalleryGridSelection"
+                @click="handleAndroidGalleryGridClick"
               >
                 <button
                   v-for="print in visibleGallery"

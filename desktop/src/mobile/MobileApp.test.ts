@@ -12911,6 +12911,67 @@ describe("MobileApp identity photo", () => {
     expect(invoke).not.toHaveBeenCalledWith("pick_identity_photo", expect.anything());
   });
 
+  it("keeps Android semantic tile activation and viewer history in sync", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    const { frames: _frames, fps: _fps, ...stillMetadata } = print.metadata;
+    const androidPrint: GalleryImage = {
+      ...print,
+      filename: "storm.png",
+      format: "png",
+      metadata: {
+        ...stillMetadata,
+        model: identityModel.name,
+        output_format: "png",
+      },
+    };
+    const historyBack = vi.spyOn(window.history, "back").mockImplementation(() => {});
+    serveIdentity([identityModel], [androidPrint]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    const semanticTile = wrapper.get("[data-test='gallery-item']");
+    vi.spyOn(semanticTile.element, "getBoundingClientRect").mockReturnValue({
+      left: 100,
+      right: 200,
+      top: 100,
+      bottom: 200,
+      width: 100,
+      height: 100,
+      x: 100,
+      y: 100,
+      toJSON: () => ({}),
+    });
+    await semanticTile.trigger("click", { detail: 0, clientX: 0, clientY: 0 });
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer']").exists()).toBe(false),
+    );
+    expect(historyBack).toHaveBeenCalledTimes(1);
+
+    // The real browser removes the marker when history.back() lands.
+    window.history.replaceState(null, "");
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click", {
+      detail: 0,
+      clientX: 0,
+      clientY: 0,
+    });
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
+    expect(historyBack).toHaveBeenCalledTimes(1);
+    window.history.replaceState(null, "");
+    historyBack.mockRestore();
+  });
+
   it("keeps an oversized Android pick inline and never stages its bytes", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);
     serveIdentity([identityModel]);
