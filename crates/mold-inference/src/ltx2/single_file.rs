@@ -34,6 +34,8 @@ use std::path::Path;
 use serde_json::Value;
 use thiserror::Error;
 
+const MAX_SAFETENSORS_HEADER_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Transformer key layout in the checkpoint file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LtxKeyFormat {
@@ -225,11 +227,32 @@ fn has_prefix(key: &str, prefix: &str) -> bool {
 /// Read just the safetensors header (the 8-byte length prefix + JSON
 /// payload) and return the parsed map — including `__metadata__`. Does
 /// not mmap or read tensor data.
+fn safetensors_header_len(prefix: [u8; 8], file_len: u64) -> Result<usize, LoadError> {
+    if &prefix[..4] == b"GGUF" {
+        return Err(LoadError::Header(
+            "GGUF checkpoint is not a safetensors bundle".to_string(),
+        ));
+    }
+    let header_len = u64::from_le_bytes(prefix);
+    if header_len == 0 || header_len > MAX_SAFETENSORS_HEADER_BYTES {
+        return Err(LoadError::Header(format!(
+            "implausible safetensors header length {header_len}"
+        )));
+    }
+    if header_len > file_len.saturating_sub(8) {
+        return Err(LoadError::Header(format!(
+            "safetensors header length {header_len} exceeds the file payload"
+        )));
+    }
+    usize::try_from(header_len)
+        .map_err(|_| LoadError::Header(format!("safetensors header length {header_len} overflows")))
+}
+
 fn read_header(path: &Path) -> Result<BTreeMap<String, Value>, LoadError> {
     let mut file = File::open(path)?;
     let mut len_buf = [0u8; 8];
     file.read_exact(&mut len_buf)?;
-    let header_len = u64::from_le_bytes(len_buf) as usize;
+    let header_len = safetensors_header_len(len_buf, file.metadata()?.len())?;
     let mut header_buf = vec![0u8; header_len];
     file.read_exact(&mut header_buf)?;
     serde_json::from_slice(&header_buf).map_err(|e| LoadError::Header(e.to_string()))
@@ -267,6 +290,30 @@ mod tests {
             );
         }
         serialize_to_file(&tensors, &None, path).unwrap();
+    }
+
+    #[test]
+    fn gguf_prefix_is_rejected_before_its_version_becomes_a_header_length() {
+        let mut prefix = [0_u8; 8];
+        prefix[..4].copy_from_slice(b"GGUF");
+        prefix[4..].copy_from_slice(&3_u32.to_le_bytes());
+
+        let error = safetensors_header_len(prefix, u64::MAX).unwrap_err();
+
+        assert!(error.to_string().contains("GGUF checkpoint"));
+    }
+
+    #[test]
+    fn audio_capability_probe_rejects_gguf_without_reading_a_tensor_payload() {
+        let p = temp_path("gguf-audio-probe");
+        let mut prefix = [0_u8; 8];
+        prefix[..4].copy_from_slice(b"GGUF");
+        prefix[4..].copy_from_slice(&3_u32.to_le_bytes());
+        std::fs::write(&p, prefix).unwrap();
+
+        assert!(!crate::ltx2::checkpoint_supports_audio_output(&p));
+
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]

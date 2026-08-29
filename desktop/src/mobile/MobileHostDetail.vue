@@ -86,6 +86,8 @@ const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
 const deviceError = ref("");
 const installed = ref<ModelEntry[]>([]);
+const modelsLoading = ref(false);
+const modelsError = ref("");
 const queue = ref<QueueEntry[]>([]);
 const queuePlan = ref<QueuePlan | null>(null);
 const queueApiAvailable = ref(false);
@@ -604,6 +606,8 @@ async function loadHost(): Promise<void> {
   deviceCapabilities.value = null;
   deviceError.value = "";
   installed.value = [];
+  modelsLoading.value = false;
+  modelsError.value = "";
   queue.value = [];
   queuePlan.value = null;
   queueApiAvailable.value = false;
@@ -631,10 +635,7 @@ async function loadHost(): Promise<void> {
   }
 
   try {
-    const [nextStatus, models] = await Promise.all([
-      apiJsonTo<ServerStatus>(target.value, "/api/status"),
-      apiJsonTo<ModelEntry[]>(target.value, "/api/models"),
-    ]);
+    const nextStatus = await apiJsonTo<ServerStatus>(target.value, "/api/status");
     if (epoch !== loadEpoch) return;
     const expectedInstanceId = props.host.instanceId?.trim();
     const reportedInstanceId = nextStatus.instance_id?.trim();
@@ -643,18 +644,52 @@ async function loadHost(): Promise<void> {
       throw new Error("This address now reports a different Mold server identity.");
     }
     status.value = nextStatus;
-    installed.value = models.filter((model) => model.downloaded);
     emit("status", { id: props.host.id, status: nextStatus });
-    await refreshDevicesSafely(epoch);
-    if (epoch !== loadEpoch) return;
-    void refreshLibraryCard(epoch);
-    startLiveServices(epoch);
+    void refreshModelInventory(epoch);
+    void refreshDevicesSafely(epoch).then(() => {
+      if (epoch !== loadEpoch) return;
+      void refreshLibraryCard(epoch);
+      startLiveServices(epoch);
+    });
   } catch (caught) {
     if (epoch !== loadEpoch) return;
     error.value = describeTransportError(caught, props.host.name);
     emit("status", { id: props.host.id, status: null });
   } finally {
     if (epoch === loadEpoch) loading.value = false;
+  }
+}
+
+async function refreshModelInventory(epoch = loadEpoch): Promise<void> {
+  if (props.host.connected === false || modelsLoading.value) return;
+  const requestTarget = target.value;
+  modelsLoading.value = true;
+  modelsError.value = "";
+  try {
+    const models = await apiJsonTo<ModelEntry[]>(requestTarget, "/api/models");
+    if (
+      epoch !== loadEpoch ||
+      requestTarget.baseUrl !== target.value.baseUrl ||
+      requestTarget.apiKey !== target.value.apiKey
+    )
+      return;
+    installed.value = models.filter((model) => model.downloaded);
+  } catch (caught) {
+    if (
+      epoch === loadEpoch &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    ) {
+      modelsError.value = describeTransportError(caught, props.host.name);
+    }
+  } finally {
+    if (
+      epoch === loadEpoch &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    ) {
+      modelsLoading.value = false;
+    }
   }
 }
 
@@ -665,10 +700,13 @@ async function refreshHostDetail(): Promise<void> {
   const epoch = loadEpoch;
   const requestTarget = target.value;
   error.value = "";
-  const [statusResult, modelsResult] = await Promise.allSettled([
+  void refreshModelInventory(epoch);
+  const statusResult = await Promise.resolve(
     apiJsonTo<ServerStatus>(requestTarget, "/api/status"),
-    apiJsonTo<ModelEntry[]>(requestTarget, "/api/models"),
-  ]);
+  ).then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (reason: unknown) => ({ status: "rejected" as const, reason }),
+  );
   if (
     epoch !== loadEpoch ||
     requestTarget.baseUrl !== target.value.baseUrl ||
@@ -687,10 +725,7 @@ async function refreshHostDetail(): Promise<void> {
     status.value = statusResult.value;
     emit("status", { id: props.host.id, status: statusResult.value });
   }
-  if (modelsResult.status === "fulfilled") {
-    installed.value = modelsResult.value.filter((model) => model.downloaded);
-  }
-  if (statusResult.status === "rejected" && modelsResult.status === "rejected") {
+  if (statusResult.status === "rejected") {
     error.value = describeTransportError(statusResult.reason, props.host.name);
     emit("status", { id: props.host.id, status: null });
   }
@@ -1339,7 +1374,16 @@ onBeforeUnmount(() => {
             Catalog ›
           </button>
         </div>
-        <ul v-if="installed.length" class="mobile-data-list" data-test="host-detail-models">
+        <p v-if="modelsLoading && !installed.length" class="mobile-empty-note">
+          Reading installed models…
+        </p>
+        <div v-else-if="modelsError && !installed.length" class="row-actions">
+          <p class="status-line error-text" role="alert">{{ modelsError }}</p>
+          <button class="secondary-button" type="button" @click="refreshModelInventory()">
+            Retry models
+          </button>
+        </div>
+        <ul v-else-if="installed.length" class="mobile-data-list" data-test="host-detail-models">
           <li v-for="model in installed" :key="model.name">
             <div>
               <strong>{{ modelDisplayName(model) }}</strong>

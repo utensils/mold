@@ -256,6 +256,28 @@ afterEach(() => {
 });
 
 describe("MobileHostDetail remote host data", () => {
+  it("renders server information without waiting for model inventory", async () => {
+    const pendingModels = deferred<ModelEntry[]>();
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) =>
+      path === "/api/models" ? pendingModels.promise : originalApi(target, path),
+    );
+
+    const view = await mountDetail();
+
+    expect(view.text()).not.toContain("Reading host…");
+    expect(view.text()).toContain("NVIDIA GeForce RTX 4090");
+    expect(view.text()).toContain("500.0 GB free");
+    expect(view.text()).toContain("Reading installed models…");
+    expect(stream("/api/resources/stream").options.target).toEqual(studioTarget);
+
+    pendingModels.resolve([model("flux-dev:q8", "flux")]);
+    await flushPromises();
+
+    expect(view.text()).toContain("flux-dev:q8");
+    expect(view.text()).not.toContain("Reading installed models…");
+  });
+
   it("shows active sequence stages instead of calling the machine queue empty", async () => {
     const originalApi = apiJsonTo.getMockImplementation()!;
     apiJsonTo.mockImplementation((target, path) => {
