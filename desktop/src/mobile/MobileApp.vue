@@ -131,6 +131,7 @@ import { profileConflictMessage, profileHashConflict } from "@studio/lib/profile
 import {
   MOBILE_AUTO_ROUTING_HINT,
   MOBILE_CAPABLE_ROUTING_HINT,
+  MOBILE_GENERATE_TARGET_KEY,
   loadMobileGenerateTarget,
   mobileGenerateTargetLabel,
   mobileAutoRoutingAvailable,
@@ -347,12 +348,14 @@ import {
   mobileHostHealthLabel,
   mobileHostMatchesRoute,
   mobileHostTarget,
+  mergeMobileHostsByInstanceId,
   normalizeRemoteAddress,
   recordMobileHostAuthorityRejection,
   recordMobileHostProbeFailure,
   recordMobileHostStatus,
   remoteHostId,
   type MobileHost,
+  type MobileHostAliasDrop,
 } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
 import {
@@ -473,6 +476,7 @@ import {
   claimMobileDurableTerminalEffect,
   createMobileDurableGenerationRecovery,
   loadMobileDurableGenerationRecoveries,
+  MOBILE_DURABLE_GENERATIONS_KEY,
   mergeMobileDurableHostStatus,
   mobileDurableAdmissionEffectKey,
   mobileDurableJobs,
@@ -537,6 +541,7 @@ interface DiscoveredHost {
   host: string;
   port: number;
   authRequired: boolean;
+  instanceId?: string;
 }
 
 interface GalleryPrint extends MobileGalleryImage {
@@ -675,6 +680,7 @@ const settingsButton = ref<HTMLButtonElement | null>(null);
 const settingsBackButton = ref<HTMLButtonElement | null>(null);
 const mobileSettings = reactive<MobileSettings>(loadMobileSettings());
 const appVersion = ref(import.meta.env.DEV ? "Development build" : "Current build");
+let pendingMobileHostAliasDrops: MobileHostAliasDrop[] = [];
 const hosts = ref<MobileHost[]>(loadHosts());
 function loadMobileActivity(): Record<string, ActivityHostSnapshot> {
   try {
@@ -1204,6 +1210,35 @@ const durableGenerationRetryConfirmations = new Set<string>();
 let nextDurableGenerationClientId = -1;
 let selectedDurableGenerationClientId: number | null = null;
 const mobileDownloads = useMobileDownloadsStore();
+
+function remapMobileHostAliases(dropped: readonly MobileHostAliasDrop[]): void {
+  for (const { loser, survivor } of dropped) {
+    cancelHostProbe(loser);
+    if (selectedHostId.value === loser) selectedHostId.value = survivor;
+    if (catalogHostId.value === loser) catalogHostId.value = survivor;
+    if (hostDetailId.value === loser) hostDetailId.value = survivor;
+    if (generateTargetPolicy.value === loser) {
+      generateTargetPolicy.value = survivor;
+      saveMobileGenerateTarget(survivor);
+    }
+    durableGenerationRecoveries.value = durableGenerationRecoveries.value.map((recovery) =>
+      recovery.tracker.hostId === loser
+        ? { ...recovery, tracker: { ...recovery.tracker, hostId: survivor } }
+        : recovery,
+    );
+    delete liveActivityHosts.value[loser];
+    delete liveQueues.value[loser];
+    delete liveActivityEpochs[loser];
+    retireMobileHostAuthority(loser);
+    pruneHostOrganization(loser);
+    knownHostReachability.delete(loser);
+    void invoke("keychain_delete_api_key", { hostId: loser }).catch(() => undefined);
+  }
+  if (dropped.length > 0) {
+    persistDurableGenerationRecoveries();
+    syncDurableGenerationJobs();
+  }
+}
 function loadLibrarySeenAt(): Record<string, number> {
   try {
     const parsed = JSON.parse(localStorage.getItem(LIBRARY_SEEN_AT_KEY) ?? "{}");
@@ -3596,7 +3631,8 @@ async function submitMobileDurableGeneration(input: {
 function loadHosts(): MobileHost[] {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as MobileHost[];
-    return raw.map((host) => ({
+    const merged = mergeMobileHostsByInstanceId(raw);
+    const normalized = merged.hosts.map((host) => ({
       ...host,
       connected: host.connected !== false,
       apiKey: "",
@@ -3606,6 +3642,49 @@ function loadHosts(): MobileHost[] {
       authorityRejected: false,
       instanceMismatch: undefined,
     }));
+    pendingMobileHostAliasDrops = merged.dropped;
+    for (const { loser, survivor } of merged.dropped) {
+      if (localStorage.getItem(SELECTED_KEY) === loser) localStorage.setItem(SELECTED_KEY, survivor);
+      if (localStorage.getItem(MOBILE_GENERATE_TARGET_KEY) === loser) {
+        localStorage.setItem(MOBILE_GENERATE_TARGET_KEY, survivor);
+      }
+      try {
+        const durable = JSON.parse(
+          localStorage.getItem(MOBILE_DURABLE_GENERATIONS_KEY) ?? "[]",
+        ) as Array<{ tracker?: { hostId?: string } }>;
+        for (const recovery of durable) {
+          if (recovery.tracker?.hostId === loser) recovery.tracker.hostId = survivor;
+        }
+        localStorage.setItem(MOBILE_DURABLE_GENERATIONS_KEY, JSON.stringify(durable));
+
+        const sequence = JSON.parse(localStorage.getItem(SEQUENCE_RECOVERY_KEY) ?? "null") as {
+          hostId?: string;
+        } | null;
+        if (sequence?.hostId === loser) {
+          sequence.hostId = survivor;
+          localStorage.setItem(SEQUENCE_RECOVERY_KEY, JSON.stringify(sequence));
+        }
+
+        const activity = JSON.parse(localStorage.getItem(LIVE_ACTIVITY_KEY) ?? "{}") as Record<
+          string,
+          unknown
+        >;
+        if (Object.hasOwn(activity, loser)) {
+          activity[survivor] ??= activity[loser];
+          delete activity[loser];
+          localStorage.setItem(LIVE_ACTIVITY_KEY, JSON.stringify(activity));
+        }
+      } catch {
+        // Each loader already rejects malformed recovery state safely.
+      }
+    }
+    if (merged.dropped.length > 0) {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify(normalized.map(({ apiKey: _apiKey, ...host }) => host)),
+      );
+    }
+    return normalized;
   } catch {
     return [];
   }
@@ -3633,13 +3712,34 @@ async function hydrateApiKeys(): Promise<void> {
   await Promise.all(
     hosts.value.map(async (host) => {
       try {
-        host.apiKey =
-          (await invoke<string | null>("keychain_get_api_key", { hostId: host.id })) ?? "";
+        let key = await invoke<string | null>("keychain_get_api_key", { hostId: host.id });
+        let migratedAliasKey = false;
+        if (!key) {
+          for (const alias of pendingMobileHostAliasDrops.filter(
+            ({ survivor }) => survivor === host.id,
+          )) {
+            key = await invoke<string | null>("keychain_get_api_key", { hostId: alias.loser });
+            if (key) {
+              migratedAliasKey = true;
+              break;
+            }
+          }
+        }
+        host.apiKey = key ?? "";
+        if (host.apiKey && migratedAliasKey) {
+          await invoke("keychain_set_api_key", { hostId: host.id, apiKey: host.apiKey });
+        }
       } catch {
         host.apiKey = "";
       }
     }),
   );
+  await Promise.all(
+    pendingMobileHostAliasDrops.map(({ loser }) =>
+      invoke("keychain_delete_api_key", { hostId: loser }).catch(() => undefined),
+    ),
+  );
+  pendingMobileHostAliasDrops = [];
 }
 
 async function connectHost(address?: string, discoveredName?: string): Promise<void> {
@@ -3648,25 +3748,27 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     const baseUrl = normalizeRemoteAddress(address ?? hostInput.address);
     const target = { baseUrl, apiKey: hostInput.apiKey.trim() || null };
     const status = await apiJsonTo<ServerStatus>(target, "/api/status");
-    const instanceId = status.instance_id ?? undefined;
+    const instanceId = status.instance_id?.trim() || undefined;
     const existing = hosts.value.find(
       (host) =>
-        host.baseUrl === baseUrl ||
-        (instanceId &&
-          (host.instanceId === instanceId || host.id === instanceId) &&
-          (!host.hostname || !status.hostname || host.hostname === status.hostname)),
+        (instanceId && host.instanceId?.trim() === instanceId) ||
+        (host.baseUrl === baseUrl && (!host.instanceId || !instanceId)),
     );
-    // URL identity keeps two machines that copied the same MOLD_HOME distinct;
-    // a compatible saved alias keeps its existing keychain id.
-    const id = existing?.id ?? remoteHostId(baseUrl);
+    const slug = remoteHostId(baseUrl);
+    const conflictingSlug = hosts.value.some(
+      (host) => host.id === slug && host.instanceId?.trim() !== instanceId,
+    );
+    const id = existing?.id ?? (conflictingSlug && instanceId ? instanceId : slug);
+    const successfulApiKey = hostInput.apiKey.trim() || existing?.apiKey || "";
     const saved: MobileHost = {
       id,
       name: hostInput.name.trim() || discoveredName || status.hostname || new URL(baseUrl).hostname,
       baseUrl,
-      apiKey: hostInput.apiKey.trim(),
+      apiKey: successfulApiKey,
       hostname: status.hostname ?? undefined,
       version: status.version,
       instanceId,
+      lastConnectedAtMs: Date.now(),
       connected: true,
       online: true,
       stale: false,
@@ -3674,8 +3776,27 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
       authorityRejected: false,
       instanceMismatch: undefined,
     };
-    if (existing) Object.assign(existing, saved);
-    else hosts.value.push(saved);
+    if (existing) {
+      if (existing.baseUrl !== baseUrl || existing.apiKey !== successfulApiKey) {
+        cancelHostProbe(existing.id);
+        retireMobileHostAuthority(existing.id);
+        pruneHostOrganization(existing.id);
+        knownHostReachability.delete(existing.id);
+      }
+      Object.assign(existing, saved);
+    }
+    else {
+      for (const host of hosts.value) {
+        if (host.baseUrl === baseUrl && host.instanceId?.trim() !== instanceId) {
+          host.connected = false;
+          host.online = false;
+        }
+      }
+      hosts.value.push(saved);
+    }
+    const aliases = mergeMobileHostsByInstanceId(hosts.value);
+    hosts.value = aliases.hosts;
+    remapMobileHostAliases(aliases.dropped);
     knownHostReachability.add(saved.id);
     if (saved.apiKey) {
       await invoke("keychain_set_api_key", { hostId: saved.id, apiKey: saved.apiKey });
@@ -3724,7 +3845,21 @@ async function discoverHosts(): Promise<void> {
   discovering.value = true;
   hostError.value = "";
   try {
-    discovered.value = await invoke<DiscoveredHost[]>("discover_mold_hosts", { timeoutMs: 2500 });
+    const found = await invoke<DiscoveredHost[]>("discover_mold_hosts", { timeoutMs: 2500 });
+    const reachableKnown = new Set(
+      hosts.value
+        .filter((host) => host.connected !== false && host.online && !host.stale)
+        .map((host) => host.instanceId?.trim())
+        .filter(Boolean),
+    );
+    const seen = new Set<string>();
+    discovered.value = found.filter((host) => {
+      const uuid = host.instanceId?.trim();
+      if (!uuid) return true;
+      if (reachableKnown.has(uuid) || seen.has(uuid)) return false;
+      seen.add(uuid);
+      return true;
+    });
   } catch (error) {
     hostError.value = describeTransportError(error);
   } finally {
@@ -3883,6 +4018,7 @@ function updateHostStatus(payload: {
   const host = hosts.value.find((candidate) => candidate.id === payload.id);
   if (!host) return false;
   if (payload.status) {
+    const priorInstanceId = host.instanceId?.trim() || null;
     const priorCacheKey = host.instanceId?.trim() || host.id;
     if (recordMobileHostStatus(host, payload.status) === "instance_mismatch") {
       retireMobileHostAuthority(host.id);
@@ -3893,6 +4029,14 @@ function updateHostStatus(payload: {
     const nextCacheKey = host.instanceId?.trim() || host.id;
     if (priorCacheKey !== nextCacheKey) void clearCachedGalleryHosts([priorCacheKey]);
     captureHostTelemetry(host.id, payload.status);
+    const aliases = mergeMobileHostsByInstanceId(hosts.value);
+    if (aliases.dropped.length > 0) {
+      hosts.value = aliases.hosts;
+      remapMobileHostAliases(aliases.dropped);
+    }
+    if (priorInstanceId !== (host.instanceId?.trim() || null) || aliases.dropped.length > 0) {
+      persistHosts();
+    }
   } else {
     const error = payload.error ?? new Error("Status probe failed");
     if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {

@@ -22,6 +22,7 @@ import {
   ORIGIN_HOST_ID,
   getGenerateTargetId,
   listHosts,
+  recordSuccessfulHostInstance,
   setGenerateTargetId,
   type HostEntry,
 } from "../lib/hostRegistry";
@@ -568,6 +569,8 @@ async function pollHost(entry: HostEntry): Promise<void> {
     const previousInstanceId =
       telemetry.value[entry.id]?.instanceId ?? entry.instanceId ?? null;
     const nextInstanceId = status.value.instance_id ?? null;
+    const canonical = recordSuccessfulHostInstance(entry.id, nextInstanceId);
+    if (!canonical) return;
     instanceChanged = previousInstanceId !== nextInstanceId;
     if (instanceChanged) {
       routingAuthorityGeneration += 1;

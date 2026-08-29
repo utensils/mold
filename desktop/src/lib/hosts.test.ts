@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   backendRank,
   hostIdFromUrl,
-  hostnamesCompatible,
   inferBackendFromGpuName,
   mergeSavedHostsByInstanceId,
   modelAvailabilityTag,
@@ -379,21 +378,18 @@ describe("mergeSavedHostsByInstanceId", () => {
     expect(hosts[0]).toMatchObject({ id: "a", name: "Render box" });
   });
 
-  it("keeps same-uuid entries apart when their hostnames differ (shared MOLD_HOME)", () => {
-    // Two RunPod pods on one network volume share a mold.db and thus one
-    // instance uuid — the reported hostname is what tells them apart.
-    const a = host({ id: "pod-a-7680", instanceId: "u", hostname: "pod-a", lastUsedMs: 2 });
-    const b = host({ id: "pod-b-7680", instanceId: "u", hostname: "pod-b", lastUsedMs: 1 });
+  it("merges same-uuid entries even when their reported hostnames differ", () => {
+    const a = host({ id: "pod-a-7680", instanceId: "u", lastUsedMs: 2 });
+    const b = host({ id: "pod-b-7680", instanceId: "u", lastUsedMs: 1 });
     const { hosts, dropped } = mergeSavedHostsByInstanceId([a, b]);
-    expect(hosts.map((h) => h.id)).toEqual(["pod-a-7680", "pod-b-7680"]);
-    expect(dropped).toEqual([]);
+    expect(hosts.map((h) => h.id)).toEqual(["pod-a-7680"]);
+    expect(dropped).toEqual([{ loser: "pod-b-7680", survivor: "pod-a-7680" }]);
   });
 
-  it("still merges when one side's hostname is unknown (older server / saved entry)", () => {
+  it("merges UUID aliases regardless of which address supplied the UUID", () => {
     const byName = host({
       id: "hal9000-7680",
       instanceId: "u",
-      hostname: "hal9000",
       lastUsedMs: 2,
     });
     const byIp = host({ id: "192-168-1-114-7680", instanceId: "u", lastUsedMs: 1 });
@@ -408,16 +404,6 @@ describe("mergeSavedHostsByInstanceId", () => {
     const { hosts, dropped } = mergeSavedHostsByInstanceId([a, b]);
     expect(hosts.map((h) => h.id)).toEqual(["hal9000-7680", "192-168-1-114-7680"]);
     expect(dropped).toEqual([]);
-  });
-});
-
-describe("hostnamesCompatible", () => {
-  it("treats unknown hostnames as compatible and distinct known ones as not", () => {
-    expect(hostnamesCompatible("hal9000", "hal9000")).toBe(true);
-    expect(hostnamesCompatible(null, "hal9000")).toBe(true);
-    expect(hostnamesCompatible("hal9000", undefined)).toBe(true);
-    expect(hostnamesCompatible(null, null)).toBe(true);
-    expect(hostnamesCompatible("pod-a", "pod-b")).toBe(false);
   });
 });
 

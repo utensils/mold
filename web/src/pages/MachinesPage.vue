@@ -19,11 +19,14 @@ import {
   ORIGIN_HOST_ID,
   getGenerateTargetId,
   listKnownHosts,
+  originHost,
+  reconcileOriginInstanceId,
   removeHost,
   setHostConnected,
   setGenerateTargetId,
   type HostEntry,
 } from "../lib/hostRegistry";
+import { hostStatus } from "../components/machines/hostClient";
 import { requestConfirm, toast } from "../lib/toasts";
 
 const router = useRouter();
@@ -66,6 +69,12 @@ onMounted(() => {
   window.addEventListener("storage", onStorage);
   document.addEventListener("pointerdown", onDocumentPointer);
   window.addEventListener("keydown", onWindowKey);
+  void hostStatus(originHost())
+    .then((status) => {
+      reconcileOriginInstanceId(status.instance_id ?? "");
+      refreshHosts();
+    })
+    .catch(() => undefined);
 });
 
 onBeforeUnmount(() => {

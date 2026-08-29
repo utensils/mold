@@ -9763,6 +9763,7 @@ describe("MobileApp gallery", () => {
       if (path === "/api/status") {
         return Promise.resolve({
           ...status,
+          instance_id: baseUrl === remoteTarget.baseUrl ? "remote-instance" : "studio-instance",
           hostname: baseUrl === remoteTarget.baseUrl ? "remote" : "studio",
         });
       }
@@ -10085,7 +10086,8 @@ describe("MobileApp host and catalog coordination", () => {
         (requestTarget: unknown, path: string, init?: { signal?: AbortSignal }) => {
           const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
           if (path === "/api/models") return Promise.resolve([model]);
-          if (path === "/api/status" && baseUrl === target.baseUrl) return Promise.resolve(status);
+          if (path === "/api/status" && baseUrl === target.baseUrl)
+            return Promise.resolve({ ...status, instance_id: "studio-instance" });
           if (path === "/api/status") {
             return new Promise<ServerStatus>((resolve, reject) => {
               remoteProbes.push({ resolve, reject, signal: init?.signal });
@@ -10103,7 +10105,12 @@ describe("MobileApp host and catalog coordination", () => {
       expect(remoteProbes).toHaveLength(2);
       expect(remoteProbes[0]?.signal?.aborted).toBe(true);
 
-      remoteProbes[1]?.resolve({ ...status, version: "0.19.0", hostname: "render" });
+      remoteProbes[1]?.resolve({
+        ...status,
+        instance_id: "render-instance",
+        version: "0.19.0",
+        hostname: "render",
+      });
       await flushPromises();
       remoteProbes[0]?.reject(new Error("stale timeout"));
       await flushPromises();
@@ -10137,6 +10144,7 @@ describe("MobileApp host and catalog coordination", () => {
       if (path === "/api/status") {
         return Promise.resolve({
           ...status,
+          instance_id: baseUrl === remoteTarget.baseUrl ? "render-instance" : "studio-instance",
           hostname: baseUrl === remoteTarget.baseUrl ? "render" : "studio",
         });
       }
