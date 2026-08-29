@@ -12,6 +12,7 @@ pub enum Family {
     Flux2,
     Sd15,
     Sdxl,
+    Sd3,
     ZImage,
     LtxVideo,
     Ltx2,
@@ -26,6 +27,7 @@ pub const ALL_FAMILIES: &[Family] = &[
     Family::Flux2,
     Family::Sd15,
     Family::Sdxl,
+    Family::Sd3,
     Family::ZImage,
     Family::LtxVideo,
     Family::Ltx2,
@@ -62,6 +64,7 @@ impl Family {
             Family::Flux2 => "flux2",
             Family::Sd15 => "sd15",
             Family::Sdxl => "sdxl",
+            Family::Sd3 => "sd3",
             Family::ZImage => "z-image",
             Family::LtxVideo => "ltx-video",
             Family::Ltx2 => "ltx2",
@@ -89,6 +92,7 @@ impl Family {
             | Family::Flux2
             | Family::Sd15
             | Family::Sdxl
+            | Family::Sd3
             | Family::ZImage
             | Family::QwenImage
             | Family::Wuerstchen => false,
@@ -102,6 +106,7 @@ impl Family {
             "flux2" => Family::Flux2,
             "sd15" => Family::Sd15,
             "sdxl" => Family::Sdxl,
+            "sd3" | "sd3.5" | "stable-diffusion-3" | "stable-diffusion-3.5" => Family::Sd3,
             "z-image" => Family::ZImage,
             "ltx-video" => Family::LtxVideo,
             "ltx2" => Family::Ltx2,
@@ -139,5 +144,16 @@ mod tests {
         let families = active_families().collect::<Vec<_>>();
         assert!(families.contains(&Family::MinimaxH3));
         assert!(families.contains(&Family::Flux));
+    }
+
+    #[test]
+    fn sd3_aliases_use_the_manifest_family_slug() {
+        for alias in ["sd3", "sd3.5", "stable-diffusion-3", "stable-diffusion-3.5"] {
+            let family = Family::from_str(alias).unwrap();
+            assert_eq!(family, Family::Sd3);
+            assert_eq!(family.as_str(), "sd3");
+            assert!(!family.is_video());
+        }
+        assert!(active_families().any(|family| family == Family::Sd3));
     }
 }

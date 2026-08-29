@@ -1,0 +1,1 @@
+- **Discover SD3.5 models.** Show Stable Diffusion 3.5 in the Models family picker and return matching installable Hugging Face models across desktop, web, and mobile.

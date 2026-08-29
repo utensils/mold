@@ -367,6 +367,10 @@ pub fn companions_for(
             push(&mut out, "clip-g");
             push(&mut out, "sdxl-vae");
         }
+        // Live SD3.5 discovery is limited to complete separated Diffusers
+        // repositories. Bundled checkpoints are marked unsupported until a
+        // reviewed SD3 companion graph exists.
+        Family::Sd3 => {}
         Family::ZImage => {
             push(&mut out, "z-image-te");
         }

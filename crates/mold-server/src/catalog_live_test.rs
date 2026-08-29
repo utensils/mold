@@ -747,6 +747,28 @@ fn flux2_dev_hugging_face_checkpoint_is_offered_as_one_builtin_download() {
 }
 
 #[test]
+fn sd3_hugging_face_support_is_limited_to_unambiguous_builtin_repositories() {
+    let mut built_in = hf_checkpoint("city96/stable-diffusion-3.5-medium-gguf");
+    built_in.family = mold_catalog::families::Family::Sd3;
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    assert!(super::hf_repo_has_one_builtin_model(&built_in.source_id));
+    assert!(super::entry_download_supported(&built_in));
+    assert_eq!(
+        super::live_entry_to_wire(&built_in, tmp.path())["supported"],
+        true
+    );
+
+    let mut arbitrary = hf_checkpoint("someone/arbitrary-sd3.5-diffusers");
+    arbitrary.family = mold_catalog::families::Family::Sd3;
+    assert!(!super::entry_download_supported(&arbitrary));
+    assert_eq!(
+        super::live_entry_to_wire(&arbitrary, tmp.path())["supported"],
+        false
+    );
+}
+
+#[test]
 fn named_ltx23_bf16_manifests_remain_downloadable() {
     for model in ["ltx-2.3-22b-dev:bf16", "ltx-2.3-22b-distilled:bf16"] {
         let entry = hf_checkpoint(model);
