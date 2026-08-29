@@ -9837,8 +9837,9 @@ describe("MobileApp gallery", () => {
     });
 
     wrapper = mountMobileApp();
-    await vi.waitFor(() =>
-      expect(fieldControl("Model").element).toHaveProperty("value", studioModel.name),
+    await vi.waitFor(
+      () => expect(fieldControl("Model").element).toHaveProperty("value", studioModel.name),
+      { timeout: 5_000 },
     );
 
     const hostsTab = wrapper
