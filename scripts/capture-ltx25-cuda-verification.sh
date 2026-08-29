@@ -330,15 +330,39 @@ generator_commit_of() {
   echo "$commit"
 }
 
-# Every expected provenance line must be in the row's server-log slice, except
-# the shared dispatcher's once-per-process line, which may sit anywhere in
-# that profile's full server log. Each process-scoped match is copied into the
-# row's own `server-process.log` so the evidence the seal relied on is itself
-# retained and hash-bound — the full server log is unhashed and mutable.
-# Prints the observed list as JSON.
-# The dispatcher emits its line with `backend` as a STRUCTURED tracing field
-# ("message":"attention backend selected","backend":"Math"), so a JSON log
-# never contains the flat pinned spelling; this regex matches both forms.
+# Every expected provenance line must be in the row's server-log slice,
+# except a small set of lines the engine itself documents as logged once —
+# per process, or per transformer load — rather than once per render. Those
+# may sit anywhere in that profile's full server log: a warm-resident render
+# (the common case once a model has been used once) never re-emits them.
+# Each process-scoped match is copied into the row's own `server-process.log`
+# so the evidence the seal relied on is itself retained and hash-bound — the
+# full server log is unhashed and mutable. Prints the observed list as JSON.
+#
+# Sources for the "logged once" claim (never taken on faith — grep it):
+#   - `attention backend selected backend=...` (mold_inference::attention):
+#     a process-wide OnceLock, one line for the life of the server.
+#   - `ltx2 int8 arm=...` (ltx2/convrot.rs `log_int8_arm_once`): "Log one
+#     INT8-arm literal at INFO, once per process per literal."
+#   - `ltx2 residency mode=...` (ltx2/provenance.rs `residency_mode_line`):
+#     "emitted once per transformer load" — never re-logged while the engine
+#     stays resident across consecutive renders of the same model.
+# `ltx2 attention path=...` and `ltx2 audio branch=...` are explicitly
+# documented as once-per-render and stay slice-only.
+process_scoped_provenance_prefixes() {
+  printf '%s\n' \
+    'attention backend selected backend=' \
+    'ltx2 int8 arm=' \
+    'ltx2 residency mode='
+}
+
+# The shared attention dispatcher emits its line with `backend` as a
+# STRUCTURED tracing field ("message":"attention backend selected",
+# "backend":"Math"), so a JSON log never contains the flat pinned spelling;
+# this regex matches both forms. The other process-scoped lines above are
+# logged as one `tracing::info!` message with the literal already baked in
+# (`"message":"ltx2 int8 arm=native-w8a8"`), so a plain fixed-string match
+# against the JSON line already works for those and needs no regex.
 dispatcher_line_regex() {
   local line="$1"
   local backend="${line##*backend=}"
@@ -347,17 +371,33 @@ dispatcher_line_regex() {
 }
 
 observe_provenance() {
-  local slice="$1" full="$2" expected="$3" dir="$4" observed='[]' line scope regex
+  local slice="$1" full="$2" expected="$3" dir="$4" observed='[]' line scope regex prefix process_scoped
   rm -f "$dir/server-process.log"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
-    if [[ "$line" == "attention backend selected backend="* ]]; then
-      regex="$(dispatcher_line_regex "$line")"
-      if grep -Eq -- "$regex" "$slice"; then
+    process_scoped=0
+    while IFS= read -r prefix; do
+      [[ "$line" == "$prefix"* ]] || continue
+      process_scoped=1
+      break
+    done < <(process_scoped_provenance_prefixes)
+    if [[ "$process_scoped" == 1 ]]; then
+      if [[ "$line" == "attention backend selected backend="* ]]; then
+        regex="$(dispatcher_line_regex "$line")"
+        if grep -Eq -- "$regex" "$slice"; then
+          scope=slice
+        elif [[ -n "$full" && -f "$full" ]] && grep -Eq -- "$regex" "$full"; then
+          scope=process
+          grep -E -- "$regex" "$full" | head -1 >>"$dir/server-process.log"
+        else
+          echo "expected provenance line is absent from the retained server log: $line" >&2
+          return 1
+        fi
+      elif grep -Fq -- "$line" "$slice"; then
         scope=slice
-      elif [[ -n "$full" && -f "$full" ]] && grep -Eq -- "$regex" "$full"; then
+      elif [[ -n "$full" && -f "$full" ]] && grep -Fq -- "$line" "$full"; then
         scope=process
-        grep -E -- "$regex" "$full" | head -1 >>"$dir/server-process.log"
+        grep -F -- "$line" "$full" | head -1 >>"$dir/server-process.log"
       else
         echo "expected provenance line is absent from the retained server log: $line" >&2
         return 1
