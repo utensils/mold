@@ -508,6 +508,7 @@ import {
 import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
+type RefreshableMobileView = { refresh(): Promise<void> };
 
 /** Deep-link payload for the Discover shelf; `token` re-fires the intent even
  *  when the (KeepAlive-cached) catalog is asked for the same filters twice. */
@@ -641,6 +642,7 @@ const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
 const GALLERY_TAGS_KEY = "mold.mobile.gallery-tags.v1";
+const GALLERY_VIEWER_HISTORY_KEY = "mold.mobile.gallery-viewer";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 /** A broken WebView connection must not hold a thumbnail page forever. Five
@@ -650,6 +652,7 @@ const GALLERY_THUMBNAIL_TIMEOUT_MS = 5_000;
 const GALLERY_THUMBNAIL_PLACEHOLDER = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
 const GALLERY_THUMBNAIL_RETRY_MAX_MS = 30_000;
 const MOBILE_LIBRARY_SCROLL_KEY = "mobile:library";
+const MOBILE_MACHINES_SCROLL_KEY = "mobile:machines";
 const REUSE_PRESENTATION_TIMEOUT_MS = 9_000;
 const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
@@ -664,6 +667,8 @@ const draft = useSequenceDraftStore();
 const licenseAcceptance = useLicenseAcceptance();
 draft.hydrate();
 const mobileContent = ref<HTMLElement | null>(null);
+const catalogView = ref<RefreshableMobileView | null>(null);
+const hostDetailView = ref<RefreshableMobileView | null>(null);
 const createHeading = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
 const settingsButton = ref<HTMLButtonElement | null>(null);
@@ -1025,13 +1030,19 @@ const gallery = ref<GalleryPrint[]>([]);
 const galleryByThumbnailKey = new Map<string, GalleryPrint>();
 const galleryLoading = ref(false);
 const galleryError = ref("");
-const galleryPullDistance = ref(0);
-const galleryPullRefreshing = ref(false);
-const GALLERY_PULL_THRESHOLD = 72;
-const GALLERY_PULL_MAX = 112;
-let galleryPullTouchId: number | null = null;
-let galleryPullStartX = 0;
-let galleryPullStartY = 0;
+const viewPullDistance = ref(0);
+const viewPullRefreshing = ref(false);
+const VIEW_PULL_THRESHOLD = 72;
+const VIEW_PULL_MAX = 112;
+let viewPullTouchId: number | null = null;
+let viewPullStartX = 0;
+let viewPullStartY = 0;
+const MAJOR_TABS: readonly Tab[] = ["generate", "gallery", "catalog", "hosts"];
+const MAJOR_SWIPE_DISTANCE = 64;
+const MAJOR_SWIPE_INTENT_RATIO = 1.2;
+let majorSwipeTouchId: number | null = null;
+let majorSwipeStartX = 0;
+let majorSwipeStartY = 0;
 const gallerySelectMode = ref(false);
 let nativeGalleryContextKey: string | null = null;
 const gallerySelection = ref<Set<string>>(new Set());
@@ -3709,6 +3720,7 @@ function clearDiscoveredHost() {
 }
 
 async function discoverHosts(): Promise<void> {
+  if (discovering.value) return;
   discovering.value = true;
   hostError.value = "";
   try {
@@ -3810,7 +3822,27 @@ async function selectHost(id: string): Promise<void> {
 }
 
 function showHostDetail(id: string): void {
+  const scroller = mobileContent.value;
+  const showingMachineList = Boolean(scroller?.querySelector("[data-test='mobile-host-row']"));
+  rememberSessionScroll(MOBILE_MACHINES_SCROLL_KEY, {
+    top: showingMachineList ? (scroller?.scrollTop ?? 0) : 0,
+    left: 0,
+  });
   hostDetailId.value = id;
+  void nextTick(() => {
+    if (mobileContent.value) mobileContent.value.scrollTop = 0;
+  });
+}
+
+function closeHostDetail(): void {
+  hostDetailId.value = "";
+  void nextTick(() => {
+    const scroller = mobileContent.value;
+    if (!scroller) return;
+    const position = sessionScrollPosition(MOBILE_MACHINES_SCROLL_KEY);
+    scroller.scrollTop = position.top;
+    scroller.scrollLeft = position.left;
+  });
 }
 
 function renameHost(payload: { id: string; name: string }): void {
@@ -7510,7 +7542,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     // was a gallery image its bytes are still on the print's host — fetch
     // them so the wells fill instead of demanding a reattach.
     void restoreReusedH3BoundaryMedia(print);
-    selectedPrint.value = null;
+    dismissSelectedPrint();
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.
     galleryRefreshDeferred = false;
@@ -7870,7 +7902,7 @@ async function useSelectedPrintAsSource(): Promise<void> {
       form.sourceFit = defaultSourceFitPolicy();
       setGenerationStatus("Gallery print selected as source");
     }
-    selectedPrint.value = null;
+    dismissSelectedPrint();
     galleryRefreshDeferred = false;
     tab.value = "generate";
   } catch (error) {
@@ -7895,6 +7927,12 @@ function galleryImageMimeType(print: GalleryImage, declared: string): string {
 function openPrint(print: GalleryPrint): void {
   reusePrintError.value = "";
   selectedPrint.value = print;
+  if (androidNativeRuntime && !window.history.state?.[GALLERY_VIEWER_HISTORY_KEY]) {
+    window.history.pushState(
+      { ...(window.history.state ?? {}), [GALLERY_VIEWER_HISTORY_KEY]: true },
+      "",
+    );
+  }
 }
 
 const galleryPrintKey = (print: Pick<GalleryPrint, "hostId" | "filename">) =>
@@ -9371,7 +9409,7 @@ async function restoreSelectedPrint(): Promise<void> {
     ...restored.map(({ trashed_at: _trashedAt, purge_at: _purgeAt, ...copy }) => copy),
   ].sort((a, b) => b.timestamp - a.timestamp);
   trashCopies = trashCopies.filter((copy) => !keys.has(galleryPrintKey(copy)));
-  selectedPrint.value = null;
+  dismissSelectedPrint();
   galleryRefreshDeferred = false;
   rebuildGalleryOrganization();
   await requeueGallery();
@@ -9388,7 +9426,7 @@ async function deleteSelectedPrintForever(): Promise<void> {
     copies.filter((copy) => !outcome.failedHostIds.has(copy.hostId)).map(galleryPrintKey),
   );
   if (keys.size === 0) return;
-  selectedPrint.value = null;
+  dismissSelectedPrint();
   galleryRefreshDeferred = false;
   await enqueueGalleryOperation(() => dropCopiesFromLibrary(keys, { purgeThumbnails: true }));
 }
@@ -9465,8 +9503,33 @@ function galleryPrintAtPoint(x: number, y: number): GalleryPrint | null {
   const tile = elements
     .map((element) => element?.closest<HTMLElement>("[data-gallery-print-key]") ?? null)
     .find((element) => element !== null);
-  const key = tile?.dataset.galleryPrintKey;
+  // Android tiles deliberately sit outside pointer hit-testing so Chrome can
+  // hand a vertical drag to the Library scroller. Recover the visual tile by
+  // bounds for delegated taps and select-mode drag painting.
+  const boundedTile =
+    tile ??
+    [
+      ...(galleryGridSurface.value?.querySelectorAll<HTMLElement>("[data-gallery-print-key]") ??
+        []),
+    ].find((element) => {
+      const bounds = element.getBoundingClientRect();
+      return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
+    });
+  const key = boundedTile?.dataset.galleryPrintKey;
   return key ? (gallery.value.find((print) => galleryPrintKey(print) === key) ?? null) : null;
+}
+
+function beginAndroidGalleryGridSelection(event: PointerEvent): void {
+  if (!androidNativeRuntime) return;
+  const print = galleryPrintAtPoint(event.clientX, event.clientY);
+  if (print) beginGallerySelectionDrag(event, print);
+}
+
+function handleAndroidGalleryGridClick(event: MouseEvent): void {
+  if (!androidNativeRuntime) return;
+  if (event.target instanceof Element && event.target.closest("[data-gallery-print-key]")) return;
+  const print = galleryPrintAtPoint(event.clientX, event.clientY);
+  if (print) handleGalleryTileClick(event, print);
 }
 
 function applyGalleryDragAtPoint(): void {
@@ -9641,7 +9704,7 @@ function selectAllGalleryPrints(): void {
   galleryDeleteConfirming.value = false;
 }
 
-function handleGalleryTileClick(event: MouseEvent, print: GalleryPrint): void {
+function handleGalleryTileClick(event: MouseEvent | KeyboardEvent, print: GalleryPrint): void {
   if (galleryPinchPendingClicks > 0 && event.detail !== 0) {
     galleryPinchPendingClicks -= 1;
     return;
@@ -9762,7 +9825,7 @@ function navigateSelectedPrint(delta: -1 | 1): void {
   selectedPrint.value = next;
 }
 
-function closePrint(): void {
+function closePrint(syncAndroidHistory = true): void {
   reusePrintEpoch += 1;
   reusePrintController?.abort();
   reusePrintController = null;
@@ -9772,7 +9835,7 @@ function closePrint(): void {
   sourceUseController = null;
   usingPrintAsSource.value = false;
   reusePrintError.value = "";
-  selectedPrint.value = null;
+  dismissSelectedPrint(syncAndroidHistory);
   if (galleryRefreshDeferred || galleryRefreshRequested) {
     galleryRefreshDeferred = false;
     // The viewer normally restores focus to its tile. A deferred refresh — or
@@ -9783,6 +9846,21 @@ function closePrint(): void {
       void refreshGallery();
     });
   }
+}
+
+function dismissSelectedPrint(syncAndroidHistory = true): void {
+  selectedPrint.value = null;
+  if (
+    syncAndroidHistory &&
+    androidNativeRuntime &&
+    window.history.state?.[GALLERY_VIEWER_HISTORY_KEY]
+  ) {
+    window.history.back();
+  }
+}
+
+function handleAndroidHistoryPop(): void {
+  if (androidNativeRuntime && selectedPrint.value) closePrint(false);
 }
 
 function reuseSelectedPrint(): void {
@@ -10022,58 +10100,186 @@ function handleForegroundResume(): void {
   }
 }
 
-function beginLibraryPull(event: TouchEvent): void {
+const currentRefreshLabel = computed(() => {
+  if (tab.value === "gallery") return "Library";
+  if (tab.value === "catalog") return "Models";
+  if (tab.value === "hosts") return hostDetail.value ? hostDetail.value.name : "Machines";
+  return "";
+});
+
+const pullRefreshAvailable = computed(
+  () => !settingsOpen.value && ["gallery", "catalog", "hosts"].includes(tab.value),
+);
+
+async function refreshCurrentView(): Promise<void> {
+  if (tab.value === "gallery") {
+    await refreshGallery();
+    return;
+  }
+  if (tab.value === "catalog") {
+    await catalogView.value?.refresh();
+    return;
+  }
+  if (tab.value !== "hosts") return;
+  if (hostDetail.value) {
+    await hostDetailView.value?.refresh();
+    return;
+  }
+  await Promise.all([...connectedHosts.value.map((host) => probeHost(host)), discoverHosts()]);
+}
+
+function beginViewPull(event: TouchEvent): void {
   const scroller = mobileContent.value;
   if (
-    tab.value !== "gallery" ||
-    galleryPullRefreshing.value ||
+    !pullRefreshAvailable.value ||
+    viewPullRefreshing.value ||
     !scroller ||
     scroller.scrollTop > 0 ||
     event.touches.length !== 1
   ) {
-    galleryPullTouchId = null;
+    viewPullTouchId = null;
     return;
   }
   const touch = event.touches[0];
   if (!touch) return;
-  galleryPullTouchId = touch.identifier;
-  galleryPullStartX = touch.clientX;
-  galleryPullStartY = touch.clientY;
+  viewPullTouchId = touch.identifier;
+  viewPullStartX = touch.clientX;
+  viewPullStartY = touch.clientY;
 }
 
-function moveLibraryPull(event: TouchEvent): void {
-  if (galleryPullTouchId === null || event.touches.length !== 1) return;
-  const touch = [...event.touches].find((candidate) => candidate.identifier === galleryPullTouchId);
+function moveViewPull(event: TouchEvent): void {
+  if (viewPullTouchId === null || event.touches.length !== 1) return;
+  const touch = [...event.touches].find((candidate) => candidate.identifier === viewPullTouchId);
   if (!touch) return;
-  const deltaX = touch.clientX - galleryPullStartX;
-  const deltaY = touch.clientY - galleryPullStartY;
+  const deltaX = touch.clientX - viewPullStartX;
+  const deltaY = touch.clientY - viewPullStartY;
   if (deltaY <= 0 || Math.abs(deltaX) >= deltaY) {
-    galleryPullDistance.value = 0;
+    viewPullDistance.value = 0;
     return;
   }
   // Resist the drag like a native refresh control while keeping the threshold
   // reachable with one ordinary thumb pull.
-  galleryPullDistance.value = Math.min(GALLERY_PULL_MAX, deltaY * 0.62);
+  viewPullDistance.value = Math.min(VIEW_PULL_MAX, deltaY * 0.62);
   event.preventDefault();
 }
 
-function finishLibraryPull(): void {
-  if (galleryPullTouchId === null) return;
-  galleryPullTouchId = null;
-  const shouldRefresh = galleryPullDistance.value >= GALLERY_PULL_THRESHOLD;
-  galleryPullDistance.value = 0;
-  if (!shouldRefresh || galleryPullRefreshing.value) return;
-  galleryPullRefreshing.value = true;
-  galleryPullDistance.value = 48;
-  void refreshGallery().finally(() => {
-    galleryPullRefreshing.value = false;
-    galleryPullDistance.value = 0;
+function finishViewPull(): void {
+  if (viewPullTouchId === null) return;
+  viewPullTouchId = null;
+  const shouldRefresh = viewPullDistance.value >= VIEW_PULL_THRESHOLD;
+  viewPullDistance.value = 0;
+  if (!shouldRefresh || viewPullRefreshing.value) return;
+  viewPullRefreshing.value = true;
+  viewPullDistance.value = 48;
+  void refreshCurrentView().finally(() => {
+    viewPullRefreshing.value = false;
+    viewPullDistance.value = 0;
   });
 }
 
-function cancelLibraryPull(): void {
-  galleryPullTouchId = null;
-  galleryPullDistance.value = 0;
+function cancelViewPull(): void {
+  viewPullTouchId = null;
+  viewPullDistance.value = 0;
+}
+
+function horizontalScrollOwnsGesture(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  if (
+    target.closest(
+      "input, textarea, select, video, audio, [contenteditable='true'], [role='dialog'], .swipe-row, .live-activity-row--has-actions, .mobile-library-sheet, .mobile-catalog-detail, .mobile-catalog-target-sheet",
+    )
+  )
+    return true;
+  let element: Element | null = target;
+  while (element && element !== mobileContent.value) {
+    const style = getComputedStyle(element);
+    if (
+      (style.overflowX === "auto" || style.overflowX === "scroll") &&
+      element.scrollWidth > element.clientWidth
+    )
+      return true;
+    element = element.parentElement;
+  }
+  return false;
+}
+
+function beginMajorSwipe(event: TouchEvent): void {
+  if (
+    pairingScannerOpen.value ||
+    gallerySelectMode.value ||
+    event.touches.length !== 1 ||
+    horizontalScrollOwnsGesture(event.target)
+  ) {
+    majorSwipeTouchId = null;
+    return;
+  }
+  const touch = event.touches[0];
+  if (!touch) return;
+  majorSwipeTouchId = touch.identifier;
+  majorSwipeStartX = touch.clientX;
+  majorSwipeStartY = touch.clientY;
+}
+
+function moveMajorSwipe(event: TouchEvent): void {
+  if (majorSwipeTouchId === null || event.touches.length !== 1) return;
+  const touch = [...event.touches].find((candidate) => candidate.identifier === majorSwipeTouchId);
+  if (!touch) return;
+  const deltaX = touch.clientX - majorSwipeStartX;
+  const deltaY = touch.clientY - majorSwipeStartY;
+  if (Math.abs(deltaX) > 12 && Math.abs(deltaX) >= Math.abs(deltaY) * MAJOR_SWIPE_INTENT_RATIO)
+    event.preventDefault();
+}
+
+function finishMajorSwipe(event: TouchEvent): void {
+  if (majorSwipeTouchId === null) return;
+  const touch = [...(event.changedTouches ?? [])].find(
+    (candidate) => candidate.identifier === majorSwipeTouchId,
+  );
+  majorSwipeTouchId = null;
+  if (!touch) return;
+  const deltaX = touch.clientX - majorSwipeStartX;
+  const deltaY = touch.clientY - majorSwipeStartY;
+  if (
+    Math.abs(deltaX) < MAJOR_SWIPE_DISTANCE ||
+    Math.abs(deltaX) < Math.abs(deltaY) * MAJOR_SWIPE_INTENT_RATIO
+  )
+    return;
+
+  if (settingsOpen.value) {
+    if (deltaX > 0) closeSettings();
+    return;
+  }
+  if (deltaX > 0 && tab.value === "hosts" && hostDetail.value) {
+    closeHostDetail();
+    return;
+  }
+  const current = MAJOR_TABS.indexOf(tab.value);
+  const next = current + (deltaX < 0 ? 1 : -1);
+  if (next >= 0 && next < MAJOR_TABS.length) tab.value = MAJOR_TABS[next]!;
+}
+
+function cancelMajorSwipe(): void {
+  majorSwipeTouchId = null;
+}
+
+function beginMobileTouch(event: TouchEvent): void {
+  beginViewPull(event);
+  beginMajorSwipe(event);
+}
+
+function moveMobileTouch(event: TouchEvent): void {
+  moveViewPull(event);
+  moveMajorSwipe(event);
+}
+
+function finishMobileTouch(event: TouchEvent): void {
+  finishViewPull();
+  finishMajorSwipe(event);
+}
+
+function cancelMobileTouch(): void {
+  cancelViewPull();
+  cancelMajorSwipe();
 }
 
 function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement {
@@ -10174,6 +10380,7 @@ onMounted(async () => {
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
   window.addEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  window.addEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.addEventListener("scroll", scheduleMobileGalleryWindow, { passive: true });
   // The pinch tracks globally so a finger that slides off the grid mid-gesture
   // still reports, and so a lift outside the grid always ends it.
@@ -10273,6 +10480,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
   window.removeEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  window.removeEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.removeEventListener("scroll", scheduleMobileGalleryWindow);
   nativeGalleryContextKey = null;
   finishGallerySelectionDrag();
@@ -10460,10 +10668,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       ref="mobileContent"
       class="mobile-content"
       :class="{ 'is-library': !settingsOpen && tab === 'gallery' }"
-      @touchstart="beginLibraryPull"
-      @touchmove="moveLibraryPull"
-      @touchend="finishLibraryPull"
-      @touchcancel="cancelLibraryPull"
+      @touchstart="beginMobileTouch"
+      @touchmove="moveMobileTouch"
+      @touchend="finishMobileTouch"
+      @touchcancel="cancelMobileTouch"
     >
       <MobileSettingsView
         v-if="settingsOpen"
@@ -10475,7 +10683,20 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
       />
-      <template v-else-if="tab === 'generate'">
+      <div
+        v-if="pullRefreshAvailable"
+        class="mobile-library-pull"
+        :class="{ 'is-refreshing': viewPullRefreshing }"
+        :style="{ height: `${viewPullDistance}px` }"
+        role="status"
+        aria-live="polite"
+        data-test="mobile-view-pull"
+      >
+        <span v-if="viewPullRefreshing">Refreshing {{ currentRefreshLabel }}…</span>
+        <span v-else-if="viewPullDistance >= VIEW_PULL_THRESHOLD">Release to refresh</span>
+        <span v-else-if="viewPullDistance > 0">Pull to refresh</span>
+      </div>
+      <template v-if="!settingsOpen && tab === 'generate'">
         <div v-if="!selectedHost" class="empty-state">
           <div>
             <h1 class="section-title">Connect a host</h1>
@@ -11325,18 +11546,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </template>
 
       <template v-else-if="tab === 'gallery'">
-        <div
-          class="mobile-library-pull"
-          :class="{ 'is-refreshing': galleryPullRefreshing }"
-          :style="{ height: `${galleryPullDistance}px` }"
-          role="status"
-          aria-live="polite"
-          data-test="mobile-library-pull"
-        >
-          <span v-if="galleryPullRefreshing">Refreshing…</span>
-          <span v-else-if="galleryPullDistance >= GALLERY_PULL_THRESHOLD">Release to refresh</span>
-          <span v-else-if="galleryPullDistance > 0">Pull to refresh</span>
-        </div>
         <div class="mobile-library-heading">
           <div>
             <h1 class="section-title">Library</h1>
@@ -11697,11 +11906,16 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             >
               <div
                 class="gallery-grid gallery-grid-virtual"
-                :class="{ 'is-selecting': gallerySelectMode }"
+                :class="{
+                  'is-selecting': gallerySelectMode,
+                  'is-android-native': androidNativeRuntime,
+                }"
                 :style="{
                   '--mobile-gallery-columns': galleryColumns,
                   transform: `translateY(${mobileGalleryWindow.offset}px)`,
                 }"
+                @pointerdown="beginAndroidGalleryGridSelection"
+                @click="handleAndroidGalleryGridClick"
               >
                 <button
                   v-for="print in visibleGallery"
@@ -12078,9 +12292,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       <template v-else-if="tab === 'hosts'">
         <MobileHostDetail
           v-if="hostDetail"
+          ref="hostDetailView"
           :host="hostDetail"
           :active="hostDetail.id === selectedHostId"
-          @back="hostDetailId = ''"
+          @back="closeHostDetail"
           @select="useHostForGenerations"
           @rename="renameHost"
           @disconnect="disconnectHost"
@@ -12275,6 +12490,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       <KeepAlive>
         <MobileCatalogView
           v-if="!settingsOpen && tab === 'catalog'"
+          ref="catalogView"
           :hosts="connectedHosts"
           :selected-host-id="catalogHostId"
           :filter-intent="catalogFilterIntent"

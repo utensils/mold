@@ -243,6 +243,8 @@ pushed screen opened from the header.
   content-addressed stash, disclosing the miss in the persistent inline status
   line when the stash no longer holds it — saved metadata carries the digest,
   never the face bytes.
+  A downward swipe from the top dismisses Info without affecting the viewer's
+  horizontal previous/next-print swipe.
   Every mutation fans out to each physical copy's exact Keychain-authenticated
   host via the shared `planOrganizationFanout` plan
   (`desktop/src/mobile/libraryOrganization.ts` holds the mobile state
@@ -329,9 +331,15 @@ pushed screen opened from the header.
   `https://utensils.io/mold/privacy` through the native external-browser opener.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
-overscroll. The Library viewer keeps its scoped horizontal swipe gesture, and
-the Library grid keeps a scoped two-finger pinch (`touch-action: pan-y`) that
-resizes thumbnails while one-finger scrolling is unaffected.
+overscroll. A horizontal swipe moves through Create → Library → Models →
+Machines, while a right swipe pops Machine Detail or Settings. Editable
+controls, horizontal scrollers, action rows, dialogs, and the full-screen
+Library viewer retain their own gesture authority. Pulling down at the top
+refreshes Library, Models, Machines, and Machine Detail; Create and Settings
+stay on their existing live polling/streaming paths so an in-progress form is
+never disrupted. The Library viewer keeps its scoped horizontal swipe gesture,
+and the Library grid keeps a scoped two-finger pinch (`touch-action: pan-y`)
+that resizes thumbnails while one-finger scrolling is unaffected.
 
 Prepared expansion always snapshots the selected remote host ID, endpoint,
 Keychain-provided key, and server instance. Batch is a directly editable

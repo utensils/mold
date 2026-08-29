@@ -744,10 +744,16 @@ async function loadFamilies(): Promise<void> {
   }
 }
 
-async function refreshModels(): Promise<void> {
+async function refreshModels(): Promise<string[]> {
   const epoch = ++modelsEpoch;
-  const next: Record<string, ModelEntry[]> = {};
-  const nextCapabilities: Record<string, ServerCapabilities> = {};
+  const currentHostIds = new Set(downloadHosts.value.map((host) => host.id));
+  const next = Object.fromEntries(
+    Object.entries(modelsByHost.value).filter(([hostId]) => currentHostIds.has(hostId)),
+  );
+  const nextCapabilities = Object.fromEntries(
+    Object.entries(capabilitiesByHost.value).filter(([hostId]) => currentHostIds.has(hostId)),
+  );
+  const failedHosts = new Set<string>();
   await Promise.all(
     downloadHosts.value.map(async (host) => {
       const target = mobileHostTarget(host);
@@ -763,9 +769,13 @@ async function refreshModels(): Promise<void> {
       if (modelResult.status === "fulfilled") {
         next[host.id] = modelResult.value;
         recordFamilies(modelResult.value.map((model) => model.family));
+      } else {
+        failedHosts.add(host.name);
       }
       if (capabilityResult.status === "fulfilled") {
         nextCapabilities[host.id] = capabilityResult.value;
+      } else {
+        failedHosts.add(host.name);
       }
     }),
   );
@@ -773,7 +783,28 @@ async function refreshModels(): Promise<void> {
     modelsByHost.value = next;
     capabilitiesByHost.value = nextCapabilities;
   }
+  return epoch === modelsEpoch ? [...failedHosts] : [];
 }
+
+/** User-initiated refresh for the whole Models destination. Keep the current
+ * rows mounted while all three independent authorities catch up. */
+async function refreshCatalog(): Promise<void> {
+  announce("Refreshing models…");
+  const [failedHosts] = await Promise.all([refreshModels(), loadFamilies(), runSearch(true)]);
+  if (failedHosts.length > 0) {
+    announce(
+      `Couldn’t refresh ${failedHosts.join(", ")}. Saved model information is still shown.`,
+      true,
+    );
+    return;
+  }
+  announce(
+    error.value ? "Models refreshed with some saved results." : "Models refreshed.",
+    Boolean(error.value),
+  );
+}
+
+defineExpose({ refresh: refreshCatalog });
 
 function handleDownloadEvent({
   host,

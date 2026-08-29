@@ -658,6 +658,52 @@ async function loadHost(): Promise<void> {
   }
 }
 
+/** Refresh every stale-capable card without clearing the screen or restarting
+ * its live streams. This is the Machine Detail pull-to-refresh authority. */
+async function refreshHostDetail(): Promise<void> {
+  if (props.host.connected === false) return;
+  const epoch = loadEpoch;
+  const requestTarget = target.value;
+  error.value = "";
+  const [statusResult, modelsResult] = await Promise.allSettled([
+    apiJsonTo<ServerStatus>(requestTarget, "/api/status"),
+    apiJsonTo<ModelEntry[]>(requestTarget, "/api/models"),
+  ]);
+  if (
+    epoch !== loadEpoch ||
+    requestTarget.baseUrl !== target.value.baseUrl ||
+    requestTarget.apiKey !== target.value.apiKey
+  )
+    return;
+
+  if (statusResult.status === "fulfilled") {
+    const expectedInstanceId = props.host.instanceId?.trim();
+    const reportedInstanceId = statusResult.value.instance_id?.trim();
+    if (expectedInstanceId && reportedInstanceId && expectedInstanceId !== reportedInstanceId) {
+      emit("status", { id: props.host.id, status: statusResult.value });
+      error.value = "This address now reports a different Mold server identity.";
+      return;
+    }
+    status.value = statusResult.value;
+    emit("status", { id: props.host.id, status: statusResult.value });
+  }
+  if (modelsResult.status === "fulfilled") {
+    installed.value = modelsResult.value.filter((model) => model.downloaded);
+  }
+  if (statusResult.status === "rejected" && modelsResult.status === "rejected") {
+    error.value = describeTransportError(statusResult.reason, props.host.name);
+    emit("status", { id: props.host.id, status: null });
+  }
+
+  await Promise.all([
+    requestQueueRefresh(epoch),
+    refreshDevicesSafely(epoch),
+    refreshLibraryCard(epoch),
+  ]);
+}
+
+defineExpose({ refresh: refreshHostDetail });
+
 async function toggleDevice(device: DeviceInfo): Promise<void> {
   if (!canMutateDevice(device, deviceCapabilities.value)) return;
   const enabled = !device.desired_enabled;
