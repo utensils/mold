@@ -183,19 +183,28 @@ else
 fi
 
 # --- Library access (python sqlite3 module; this host ships no sqlite3 CLI) --
+# A row id/output_dir pair is reused across every re-attempt of the same
+# matrix row (kind: cancellation rows in particular are re-run on every
+# invocation, never skipped), so a row that genuinely completed on an
+# EARLIER attempt at the same path stays in the Library forever. The
+# optional 4th arg is a `created_at_ms` floor so a caller checking "did THIS
+# attempt write a row" (cancellation) can exclude a stale row from a prior
+# attempt; callers checking "is there a row for the print that just passed"
+# (library_row_for) omit it and keep matching on filename+output_dir alone.
 db_query_generation() {
-  local filename="$1" output_dir="$2"
+  local filename="$1" output_dir="$2" min_created_at_ms="${3:-0}"
   [[ -s "$database" ]] || fail "missing Library database: $database"
-  python3 - "$database" "$filename" "$output_dir" <<'PY'
+  python3 - "$database" "$filename" "$output_dir" "$min_created_at_ms" <<'PY'
 import json, sqlite3, sys
-db, filename, output_dir = sys.argv[1:4]
+db, filename, output_dir, min_created_at_ms = sys.argv[1:5]
 conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 conn.row_factory = sqlite3.Row
 rows = conn.execute(
     "SELECT id, filename, output_dir, format, prompt, model, seed, steps, guidance, width,"
     " height, frames, fps, generation_time_ms, backend, hostname, source, metadata_synthetic,"
-    " file_size_bytes, metadata_json FROM generations WHERE filename = ? AND output_dir = ?",
-    (filename, output_dir)).fetchall()
+    " file_size_bytes, metadata_json FROM generations"
+    " WHERE filename = ? AND output_dir = ? AND created_at_ms >= ?",
+    (filename, output_dir, int(min_created_at_ms))).fetchall()
 if len(rows) == 1:
     print(json.dumps(dict(rows[0])))
 PY
@@ -903,7 +912,11 @@ run_cancellation_row() {
     settle=$((settle + 1))
   done
   local library_row
-  library_row="$(db_query_generation "output.mp4" "$dir")"
+  # A prior attempt at this same row (kind: cancellation rows always
+  # re-run) may have completed and saved before this fixture was tuned to
+  # stay under the auto-chain clip cap; exclude that stale row rather than
+  # reading it as evidence THIS attempt wrote one.
+  library_row="$(db_query_generation "output.mp4" "$dir" "$((started_epoch * 1000))")"
   local failure=""
   [[ -n "$job_id" ]] || failure="the job never reached the running state within 600 s"
   [[ -n "$failure" || "$cancel_exit" -eq 0 ]] || failure="mold queue cancel exited $cancel_exit"
