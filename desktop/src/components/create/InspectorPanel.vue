@@ -20,7 +20,13 @@ import {
 } from "@studio/lib/modelRuntimeAvailability";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
-import { buildRequest, resetFormToModelDefaults, seedMode } from "../../lib/generateForm";
+import {
+  buildRequest,
+  loraBindingMatchesRoute,
+  loraHostBinding,
+  resetFormToModelDefaults,
+  seedMode,
+} from "../../lib/generateForm";
 import type {
   Ltx2CameraControlInfo,
   Ltx2ControlAdapterInfo,
@@ -102,6 +108,16 @@ const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
 const gallery = useGalleryStore();
 const libraryPrefs = useLibraryPrefsStore();
+const loraRoute = computed(() => {
+  const binding = loraHostBinding(props.form.loras);
+  const selected =
+    binding.kind === "bound"
+      ? binding.hostId
+      : normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all);
+  const route = hosts.resolveRoute(selected, props.form.model || null);
+  if (binding.kind === "bound" && (!route || !loraBindingMatchesRoute(binding, route))) return null;
+  return route;
+});
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
 const cameraControls = ref<Ltx2CameraControlInfo[]>([]);
 const cameraControlsLoaded = ref(false);
@@ -1020,6 +1036,7 @@ function resetSettings() {
         :camera-controls="cameraControls"
         :camera-controls-loaded="cameraControlsLoaded"
         :camera-unsupported-reason="cameraUnsupportedReason"
+        :lora-route="loraRoute"
         @append-word="emit('append-word', $event)"
         @canvas-intent="emit('canvas-intent', $event)"
       />

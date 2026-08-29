@@ -5,27 +5,48 @@ import { MAX_LORA_STACK } from "../../lib/capabilities";
 import { fetchLoras } from "../../lib/api/loras";
 import type { LoraInfo } from "../../lib/api/types";
 import { cameraMotionLoraPath } from "@studio/lib/cameraMotion";
+import type { HostRoute } from "../../stores/hosts";
 
-const props = defineProps<{ form: GenerateForm; model: string }>();
+const props = defineProps<{ form: GenerateForm; model: string; route: HostRoute | null }>();
 const emit = defineEmits<{ (e: "append-word", word: string): void }>();
 
 const pickerOpen = ref(false);
 const available = ref<LoraInfo[]>([]);
 const loading = ref(false);
 const error = ref<string | null>(null);
+let loadEpoch = 0;
 
 async function openPicker() {
   pickerOpen.value = !pickerOpen.value;
-  if (!pickerOpen.value) return;
+  const epoch = ++loadEpoch;
+  if (!pickerOpen.value) {
+    loading.value = false;
+    return;
+  }
   loading.value = true;
   error.value = null;
-  try {
-    available.value = await fetchLoras(props.model);
-  } catch (err) {
-    error.value = String(err);
-    available.value = [];
-  } finally {
+  const route = props.route;
+  if (!route) {
     loading.value = false;
+    error.value = "The selected machine is unavailable.";
+    available.value = [];
+    return;
+  }
+  try {
+    const response = await fetchLoras(props.model, route.target);
+    if (
+      epoch === loadEpoch &&
+      props.route?.hostId === route.hostId &&
+      (props.route?.instanceId ?? null) === (route.instanceId ?? null)
+    )
+      available.value = response;
+  } catch (err) {
+    if (epoch === loadEpoch) {
+      error.value = String(err);
+      available.value = [];
+    }
+  } finally {
+    if (epoch === loadEpoch) loading.value = false;
   }
 }
 
@@ -34,8 +55,16 @@ function alreadyAdded(path: string): boolean {
 }
 
 function addLora(l: LoraInfo) {
-  if (props.form.loras.length >= MAX_LORA_STACK || alreadyAdded(l.path)) return;
-  props.form.loras.push({ path: l.path, name: l.name, scale: 1, trainedWords: l.trained_words });
+  if (!props.route || props.form.loras.length >= MAX_LORA_STACK || alreadyAdded(l.path)) return;
+  props.form.loras.push({
+    path: l.path,
+    name: l.name,
+    scale: 1,
+    trainedWords: l.trained_words,
+    hostId: props.route.hostId,
+    hostBaseUrl: props.route.target.baseUrl,
+    hostInstanceId: props.route.instanceId ?? null,
+  });
   pickerOpen.value = false;
 }
 
@@ -49,8 +78,16 @@ function removeLora(index: number) {
 
 // Close and reset the picker when the model changes — the family may differ.
 watch(
-  () => props.model,
+  () =>
+    [
+      props.model,
+      props.route?.hostId,
+      props.route?.instanceId,
+      props.route?.target.baseUrl,
+    ] as const,
   () => {
+    loadEpoch += 1;
+    loading.value = false;
     pickerOpen.value = false;
     available.value = [];
   },
@@ -61,6 +98,7 @@ watch(
   <div>
     <div class="mt-5 mb-2 flex items-center gap-2">
       <span class="edge-code">LoRAs</span>
+      <span v-if="route" class="text-caption text-ink-3">{{ route.label }}</span>
       <div class="border-edge h-px flex-1 border-t" />
     </div>
 

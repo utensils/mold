@@ -107,6 +107,7 @@ import { AUDIO_ONLY_PIPELINE, isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeli
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { attachPickedVideo } from "../../lib/sourceAttachment";
+import type { HostRoute } from "../../stores/hosts";
 
 const props = withDefaults(
   defineProps<{
@@ -119,6 +120,7 @@ const props = withDefaults(
     cameraControls?: Ltx2CameraControlInfo[];
     cameraControlsLoaded?: boolean;
     cameraUnsupportedReason?: string | null;
+    loraRoute?: HostRoute | null;
   }>(),
   {
     selectedModel: null,
@@ -127,6 +129,7 @@ const props = withDefaults(
     cameraControls: () => [],
     cameraControlsLoaded: false,
     cameraUnsupportedReason: null,
+    loraRoute: null,
   },
 );
 
@@ -739,7 +742,12 @@ function reset() {
         :header-interactive="false"
         data-test="section-lora"
       >
-        <LoraStack :form="form" :model="form.model" @append-word="emit('append-word', $event)" />
+        <LoraStack
+          :form="form"
+          :model="form.model"
+          :route="loraRoute"
+          @append-word="emit('append-word', $event)"
+        />
       </AccordionSection>
 
       <!-- 5 · Upscale after generate -->
