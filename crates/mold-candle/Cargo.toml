@@ -34,9 +34,9 @@ h3-private-uat = []
 flash-attn = ["dep:candle-flash-attn", "cuda"]
 
 [dependencies]
-candle = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "4bf88883e339ab976784c2fe20e2b505315b71c3" }
-candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "4bf88883e339ab976784c2fe20e2b505315b71c3" }
-candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "4bf88883e339ab976784c2fe20e2b505315b71c3" }
+candle = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4" }
+candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4" }
+candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4" }
 half = "2"
 # Already vendored transitively through candle-core, so this adds no new crates
 # to the Nix vendor set. `float8` must resolve to the same version candle uses
@@ -49,7 +49,7 @@ float8 = "0.7"
 # call site stops typechecking (#1399). The fork's payload at this revision is
 # upstream 0.11.0 with only that package rename applied, so the H3 runtime
 # fingerprint still qualifies the exact kernel it always did.
-candle-flash-attn = { git = "https://github.com/utensils/candle.git", rev = "4bf88883e339ab976784c2fe20e2b505315b71c3", optional = true }
+candle-flash-attn = { git = "https://github.com/utensils/candle.git", rev = "5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

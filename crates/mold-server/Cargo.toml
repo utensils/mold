@@ -137,6 +137,6 @@ mp4-rs = { package = "mp4", version = "0.14" }
 # Chain route tests build a synthetic motion-tail Tensor via the same
 # candle APIs the inference crate uses — keep this in lockstep with
 # Keep server tests on the same patched official Candle identity as inference.
-candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "4bf88883e339ab976784c2fe20e2b505315b71c3" }
+candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4" }
 # Live-search integration tests stub Civitai with a wiremock server.
 wiremock = "0.6"
