@@ -83,9 +83,7 @@ describe("mobile remote hosts", () => {
   });
 
   it("uses the HTTPS scheme default when a complete URL omits a port", () => {
-    expect(normalizeRemoteAddress("https://mold.example.com/")).toBe(
-      "https://mold.example.com",
-    );
+    expect(normalizeRemoteAddress("https://mold.example.com/")).toBe("https://mold.example.com");
   });
 
   it("creates a stable URL slug for legacy hosts without instance ids", () => {

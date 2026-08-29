@@ -2626,9 +2626,7 @@ describe("hosts store", () => {
     const second = await hosts.connect("http://pod-b:7680", null, null);
     expect(second.id).toBe(first.id);
     expect(second.baseUrl).toBe("http://pod-b:7680");
-    expect(hosts.all.filter((h) => h.kind === "remote").map((h) => h.id)).toEqual([
-      "pod-a-7680",
-    ]);
+    expect(hosts.all.filter((h) => h.kind === "remote").map((h) => h.id)).toEqual(["pod-a-7680"]);
   });
 
   it("reconcile does not clobber a settings write that lands during its secret IPC", async () => {

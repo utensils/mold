@@ -3644,7 +3644,8 @@ function loadHosts(): MobileHost[] {
     }));
     pendingMobileHostAliasDrops = merged.dropped;
     for (const { loser, survivor } of merged.dropped) {
-      if (localStorage.getItem(SELECTED_KEY) === loser) localStorage.setItem(SELECTED_KEY, survivor);
+      if (localStorage.getItem(SELECTED_KEY) === loser)
+        localStorage.setItem(SELECTED_KEY, survivor);
       if (localStorage.getItem(MOBILE_GENERATE_TARGET_KEY) === loser) {
         localStorage.setItem(MOBILE_GENERATE_TARGET_KEY, survivor);
       }
@@ -3784,8 +3785,7 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
         knownHostReachability.delete(existing.id);
       }
       Object.assign(existing, saved);
-    }
-    else {
+    } else {
       for (const host of hosts.value) {
         if (host.baseUrl === baseUrl && host.instanceId?.trim() !== instanceId) {
           host.connected = false;

@@ -1519,9 +1519,7 @@ export const useHostsStore = defineStore("hosts", {
             // current address. Persist it so the next launch does not retry a
             // dead hostname alias before showing the working IP.
             merged = merged.map((host) =>
-              host.id === survivor
-                ? { ...host, url: loserLive.url, lastUsedMs: Date.now() }
-                : host,
+              host.id === survivor ? { ...host, url: loserLive.url, lastUsedMs: Date.now() } : host,
             );
           } else {
             this.extras = this.extras.filter((h) => h.id !== loser);
