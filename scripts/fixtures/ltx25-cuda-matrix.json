@@ -314,8 +314,8 @@
         "mp4"
       ],
       "expect": {
-        "width": 512,
-        "height": 512,
+        "width": 256,
+        "height": 256,
         "frames": 9,
         "fps": 24,
         "audio": true,
@@ -330,7 +330,7 @@
           "int8_arm": "native-w8a8"
         }
       },
-      "notes": "Stage-2 audio is discarded per upstream ti2vid_two_stages.py:270,283-295; the exported track is stage 1's."
+      "notes": "--spatial-upscale x2 halves STAGE 1 and keeps the requested output size (derive_stage1_render_shape); a 256x256 request outputs 256x256, not a doubled canvas. Stage-2 audio is discarded per upstream ti2vid_two_stages.py:270,283-295; the exported track is stage 1's."
     },
     {
       "id": "ltx-2.5-22b-distilled-int8-conv--two_stage_temporal_x2",
@@ -347,7 +347,7 @@
         "--height",
         "256",
         "--frames",
-        "9",
+        "17",
         "--fps",
         "24",
         "--steps",
@@ -379,7 +379,7 @@
           "int8_arm": "native-w8a8"
         }
       },
-      "notes": "derive_stage1_render_shape halves the stage-1 frame count and fps; the output doubles it back to 17 @ 24 fps."
+      "notes": "Temporal x2 buys resolution, not duration: output frames = requested. 17 halves to 9 for stage 1 (on the 8k+1 grid); a 9-frame request halved to 5 is off-grid and, per engine finding #1 (engine-findings.md), silently snaps to a 1-frame render instead of refusing — this row is moved off that degenerate size rather than exercising it."
     },
     {
       "id": "ltx-2.5-22b-distilled-int8-conv--residency_adaptive",
@@ -396,7 +396,7 @@
         "--height",
         "704",
         "--frames",
-        "121",
+        "97",
         "--fps",
         "24",
         "--steps",
@@ -410,7 +410,7 @@
       "expect": {
         "width": 1216,
         "height": 704,
-        "frames": 121,
+        "frames": 97,
         "fps": 24,
         "audio": true,
         "provenance": [
@@ -424,7 +424,7 @@
           "int8_arm": "native-w8a8"
         }
       },
-      "notes": "After cuda-core the INT8 ConvRot pack stays packed-resident W8A8 on CUDA, so the planner reaches Adaptive instead of the pre-#1398 forced Streaming."
+      "notes": "After cuda-core the INT8 ConvRot pack stays packed-resident W8A8 on CUDA, so the planner reaches Adaptive instead of the pre-#1398 forced Streaming. 97 frames is the single-clip routing ceiling (LTX2_DEFAULT_CLIP_FRAMES) so this row exercises adaptive residency at a real production shape without triggering CLI auto-chaining; a 121-frame request auto-chains and, per engine finding #2 (engine-findings.md), over-delivers 177 frames instead of exact-fitting to 121."
     },
     {
       "id": "ltx-2.5-22b-distilled-int8-conv--video_only",
