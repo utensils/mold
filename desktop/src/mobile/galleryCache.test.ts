@@ -4,12 +4,16 @@ import type { GalleryImage } from "../lib/api/types";
 import type { MobileGalleryImage } from "./libraryOrganization";
 import {
   captureCachedHostFence,
+  createThumbnailRouteGenerationRegistry,
+  type CachedGalleryMediaRef,
   loadCachedGallery,
   loadCachedGalleryMedia,
   loadCachedHostPresentation,
   clearCachedGalleryHosts,
   patchCachedGalleryPrints,
+  probeCachedGalleryMedia,
   removeCachedGalleryPrints,
+  removeCachedGalleryRows,
   storeCachedGallery,
   storeCachedGalleryMedia,
   storeCachedHostPresentation,
@@ -33,6 +37,19 @@ function print(filename: string, timestamp: number): GalleryImage {
   };
 }
 
+function mediaRef(
+  hostId: string,
+  filename: string,
+  mediaVersion = "1:8",
+  tier: 256 | 512 = 256,
+): CachedGalleryMediaRef {
+  return { hostId, filename, mediaVersion, tier };
+}
+
+function thumbnail(label = "thumbnail"): Blob {
+  return new Blob([Uint8Array.of(0x89, 0x50, 0x4e, 0x47), label], { type: "image/png" });
+}
+
 beforeEach(() => {
   Object.defineProperty(globalThis, "indexedDB", {
     configurable: true,
@@ -41,25 +58,49 @@ beforeEach(() => {
 });
 
 describe("mobile gallery cache", () => {
+  it("keeps route generations stable when an old route reports after its replacement", () => {
+    const generationFor = createThumbnailRouteGenerationRegistry();
+    const oldRoute = { baseUrl: "http://old-host:7680", apiKey: "old-key" };
+    const newRoute = { baseUrl: "http://new-host:7680", apiKey: "new-key" };
+    const oldGeneration = generationFor("studio-instance", oldRoute);
+    const newGeneration = generationFor("studio-instance", newRoute);
+
+    // A late completion/retry from the superseded route must not mutate the
+    // replacement route's identity and strand its in-flight tile.
+    expect(generationFor("studio-instance", oldRoute)).toBe(oldGeneration);
+    expect(generationFor("studio-instance", newRoute)).toBe(newGeneration);
+    expect(newGeneration).not.toBe(oldGeneration);
+  });
+
   it("persists a bounded newest-first gallery without connection secrets", async () => {
-    const prints = Array.from({ length: 505 }, (_, index) => print(`${index}.png`, index));
+    const prints = Array.from({ length: 4_005 }, (_, index) => print(`${index}.png`, index));
     await storeCachedGallery("studio", prints);
 
     const restored = await loadCachedGallery("studio");
-    expect(restored).toHaveLength(500);
-    expect(restored[0]?.filename).toBe("504.png");
+    expect(restored).toHaveLength(4_000);
+    expect(restored[0]?.filename).toBe("4004.png");
     expect(restored.at(-1)?.filename).toBe("5.png");
     expect(JSON.stringify(restored)).not.toContain("apiKey");
   });
 
   it("round-trips thumbnail blobs for offline browsing", async () => {
-    const thumbnail = new Blob(["thumbnail"], { type: "image/webp" });
+    const blob = thumbnail();
+    const ref = mediaRef("studio", "one.png");
 
-    await storeCachedGalleryMedia("studio", "one.png", "thumbnail", thumbnail);
+    await storeCachedGalleryMedia(ref, blob);
 
-    expect(await (await loadCachedGalleryMedia("studio", "one.png", "thumbnail"))?.text()).toBe(
-      "thumbnail",
-    );
+    expect((await loadCachedGalleryMedia(ref))?.size).toBe(blob.size);
+    expect(await probeCachedGalleryMedia([ref])).toEqual([true]);
+  });
+
+  it("separates content versions and rendition tiers", async () => {
+    const v1 = mediaRef("studio", "one.png", "1:8", 256);
+    const v2 = mediaRef("studio", "one.png", "2:8", 256);
+    const retina = mediaRef("studio", "one.png", "1:8", 512);
+    await storeCachedGalleryMedia(v1, thumbnail("v1"));
+    await storeCachedGalleryMedia(retina, thumbnail("retina"));
+
+    expect(await probeCachedGalleryMedia([v1, v2, retina])).toEqual([true, false, true]);
   });
 
   it("persists non-secret model presentation data under the server identity", async () => {
@@ -105,49 +146,61 @@ describe("mobile gallery cache", () => {
   });
 
   it("removes metadata and thumbnail bytes after a successful delete", async () => {
+    const ref = mediaRef("studio", "delete.png");
     await storeCachedGallery("studio", [print("keep.png", 2), print("delete.png", 1)]);
-    await storeCachedGalleryMedia("studio", "delete.png", "thumbnail", new Blob(["thumb"]));
+    await storeCachedGalleryMedia(ref, thumbnail("delete"));
 
     await removeCachedGalleryPrints([{ hostId: "studio", filename: "delete.png" }]);
 
     expect((await loadCachedGallery("studio")).map((entry) => entry.filename)).toEqual([
       "keep.png",
     ]);
-    expect(await loadCachedGalleryMedia("studio", "delete.png", "thumbnail")).toBeNull();
+    expect(await loadCachedGalleryMedia(ref)).toBeNull();
+  });
+
+  it("removes live metadata but preserves every thumbnail when moving to Trash", async () => {
+    const ref = mediaRef("studio", "trash.png");
+    await storeCachedGallery("studio", [print("trash.png", 1)]);
+    await storeCachedGalleryMedia(ref, thumbnail("trash"));
+
+    await removeCachedGalleryRows([{ hostId: "studio", filename: "trash.png" }]);
+
+    expect(await loadCachedGallery("studio")).toEqual([]);
+    expect(await loadCachedGalleryMedia(ref)).not.toBeNull();
   });
 
   it("does not resurrect thumbnail bytes when delete wins a pending cache write", async () => {
     let finishBytes!: (bytes: ArrayBuffer) => void;
-    const pendingBlob = {
-      size: 5,
-      type: "image/webp",
-      arrayBuffer: () =>
+    const pendingBlob = thumbnail("pending");
+    Object.defineProperty(pendingBlob, "arrayBuffer", {
+      value: () =>
         new Promise<ArrayBuffer>((resolve) => {
           finishBytes = resolve;
         }),
-    } as Blob;
-    const write = storeCachedGalleryMedia("studio", "delete.png", "thumbnail", pendingBlob);
+    });
+    const ref = mediaRef("studio", "delete.png");
+    const write = storeCachedGalleryMedia(ref, pendingBlob);
     await Promise.resolve();
 
     await removeCachedGalleryPrints([{ hostId: "studio", filename: "delete.png" }]);
-    finishBytes(new TextEncoder().encode("thumb").buffer);
+    finishBytes(new Uint8Array(await thumbnail("late").arrayBuffer()).buffer);
     await write;
 
-    expect(await loadCachedGalleryMedia("studio", "delete.png", "thumbnail")).toBeNull();
+    expect(await loadCachedGalleryMedia(ref)).toBeNull();
   });
 
   it("purges instance-scoped metadata and media without allowing pending writes back", async () => {
     await storeCachedGallery("old-instance", [print("old.png", 1)]);
     let finishBytes!: (bytes: ArrayBuffer) => void;
-    const pendingBlob = {
-      size: 5,
-      type: "image/webp",
-      arrayBuffer: () =>
+    const pendingBlob = thumbnail("pending");
+    Object.defineProperty(pendingBlob, "arrayBuffer", {
+      value: () =>
         new Promise<ArrayBuffer>((resolve) => {
           finishBytes = resolve;
         }),
-    } as Blob;
-    const write = storeCachedGalleryMedia("old-instance", "old.png", "thumbnail", pendingBlob);
+    });
+    const ref = mediaRef("old-instance", "old.png");
+    const write = storeCachedGalleryMedia(ref, pendingBlob);
     await storeCachedHostPresentation({
       hostId: "old-instance",
       updatedAt: 1,
@@ -159,11 +212,11 @@ describe("mobile gallery cache", () => {
     await Promise.resolve();
 
     await clearCachedGalleryHosts(["old-instance"]);
-    finishBytes(new TextEncoder().encode("thumb").buffer);
+    finishBytes(new Uint8Array(await thumbnail("late").arrayBuffer()).buffer);
     await write;
 
     expect(await loadCachedGallery("old-instance")).toEqual([]);
-    expect(await loadCachedGalleryMedia("old-instance", "old.png", "thumbnail")).toBeNull();
+    expect(await loadCachedGalleryMedia(ref)).toBeNull();
     expect(await loadCachedHostPresentation("old-instance")).toBeNull();
   });
 });

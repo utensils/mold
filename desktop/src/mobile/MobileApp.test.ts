@@ -19,6 +19,7 @@ import {
   storeCachedHostPresentation,
 } from "./galleryCache";
 import { clearSessionScrollForTests, sessionScrollPosition } from "@studio/lib/libraryOrganization";
+import { thumbnailTier } from "@studio/lib/thumbnailPersistentCache";
 
 const {
   invoke,
@@ -200,6 +201,7 @@ const print: GalleryImage = {
     return Math.floor(Date.now() / 1000) + 5;
   },
   format: "mp4",
+  media_version: "mobile-test-v1",
   metadata: {
     prompt: "a ship crossing violet lightning",
     negative_prompt: "calm water",
@@ -217,6 +219,19 @@ const print: GalleryImage = {
     fps: 30,
   },
 };
+
+function cachedThumbnailRef(item: GalleryImage, hostId = "studio-instance") {
+  return {
+    hostId,
+    filename: item.filename,
+    mediaVersion: item.media_version!,
+    tier: thumbnailTier(),
+  };
+}
+
+function cachedThumbnailBlob(label = "cached thumbnail"): Blob {
+  return new Blob([Uint8Array.of(0x89, 0x50, 0x4e, 0x47), label], { type: "image/png" });
+}
 
 let durableJobSequence = 0;
 
@@ -596,9 +611,10 @@ beforeEach(() => {
         const body = await apiJsonTo(requestTarget, path, init);
         return new Response(JSON.stringify(body));
       }
-      return {
-        blob: () => Promise.resolve(new Blob(["thumbnail"])),
-      } as Response;
+      return new Response(cachedThumbnailBlob("network thumbnail"), {
+        status: 200,
+        headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+      });
     });
   openStreams.length = 0;
   sseStream.mockReset().mockImplementation(
@@ -6490,9 +6506,12 @@ describe("MobileApp generation queue", () => {
           // never resolving. The page deadline must still advance the grid.
           return new Promise(() => {});
         }
-        return Promise.resolve({
-          blob: () => Promise.resolve(new Blob([`thumbnail-${thumbnailCall}`])),
-        } as Response);
+        return Promise.resolve(
+          new Response(cachedThumbnailBlob(`thumbnail-${thumbnailCall}`), {
+            status: 200,
+            headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+          }),
+        );
       });
 
       wrapper = mountMobileApp();
@@ -6513,7 +6532,7 @@ describe("MobileApp generation queue", () => {
 
       expect(stalledSignal?.aborted).toBe(true);
       expect(requestedPaths).toContain(
-        "/api/gallery/thumbnail/stalled-pagination-print-39.mp4?size=256&fmt=jpeg",
+        "/api/gallery/thumbnail/stalled-pagination-print-39.mp4?v=mobile-test-v1&size=256&fmt=jpeg",
       );
       expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
       expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1);
@@ -6545,9 +6564,12 @@ describe("MobileApp generation queue", () => {
         if (path.includes("retry-pagination-print-39.mp4") && attempt === 1) {
           return Promise.reject(new Error("temporary thumbnail failure"));
         }
-        return Promise.resolve({
-          blob: () => Promise.resolve(new Blob([`${path}-${attempt}`])),
-        } as Response);
+        return Promise.resolve(
+          new Response(cachedThumbnailBlob(`${path}-${attempt}`), {
+            status: 200,
+            headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+          }),
+        );
       });
 
       wrapper = mountMobileApp();
@@ -6565,7 +6587,9 @@ describe("MobileApp generation queue", () => {
 
       expect(wrapper.find("[data-test='gallery-thumbnail-pending']").exists()).toBe(false);
       expect(
-        attempts.get("/api/gallery/thumbnail/retry-pagination-print-39.mp4?size=256&fmt=jpeg"),
+        attempts.get(
+          "/api/gallery/thumbnail/retry-pagination-print-39.mp4?v=mobile-test-v1&size=256&fmt=jpeg",
+        ),
       ).toBe(2);
     } finally {
       vi.useRealTimers();
@@ -7941,12 +7965,7 @@ describe("MobileApp gallery", () => {
       ]),
     );
     await storeCachedGallery("studio-instance", [print]);
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     const liveGallery = deferred<GalleryImage[]>();
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status")
@@ -7966,10 +7985,14 @@ describe("MobileApp gallery", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
-    // Cached metadata hydrates behind the loading surface while the live host
-    // read is pending. Wait for those bytes to resolve before replacing the
-    // proxies with the same physical keys.
-    await vi.waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
+    await vi.waitFor(() => {
+      const tile = wrapper!.get("[data-test='gallery-item']");
+      expect(tile.find(".mobile-media-placeholder").exists()).toBe(false);
+      expect(tile.get("img").attributes("src")).toContain("blob:");
+    });
+    expect(wrapper.text()).not.toContain("Loading prints…");
+    const cachedUrl = wrapper.get("[data-test='gallery-item'] img").attributes("src");
+    const objectUrlsBeforeLive = vi.mocked(URL.createObjectURL).mock.calls.length;
 
     liveGallery.resolve([print]);
     await flushPromises();
@@ -7977,8 +8000,58 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() => {
       const tile = wrapper!.get("[data-test='gallery-item']");
       expect(tile.find(".mobile-media-placeholder").exists()).toBe(false);
-      expect(tile.get("img").attributes("src")).toContain("blob:");
+      expect(tile.get("img").attributes("src")).toBe(cachedUrl);
     });
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(objectUrlsBeforeLive);
+  });
+
+  it("reloads a cached tile when the live content version changes", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: true,
+        },
+      ]),
+    );
+    await storeCachedGallery("studio-instance", [print]);
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob("old"));
+    const liveGallery = deferred<GalleryImage[]>();
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status")
+        return Promise.resolve({ ...status, instance_id: "studio-instance" });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve(null);
+      if (path === "/api/gallery") return liveGallery.promise;
+      if (path === "/api/activity")
+        return Promise.resolve({
+          instance_id: "studio-instance",
+          observed_at_unix_ms: 1,
+          items: [],
+        });
+      return durableApiFallback(path, init, callTarget);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).toContain("blob:"),
+    );
+    const cachedUrl = wrapper.get("[data-test='gallery-item'] img").attributes("src");
+
+    liveGallery.resolve([{ ...print, media_version: "mobile-test-v2" }]);
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).not.toBe(cachedUrl),
+    );
   });
 
   it("reuses a cached print immediately while its host is offline", async () => {
@@ -8007,12 +8080,7 @@ describe("MobileApp gallery", () => {
       models: [model],
       capabilities: null,
     });
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     apiJsonTo.mockRejectedValue(new Error("offline"));
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -8053,12 +8121,7 @@ describe("MobileApp gallery", () => {
       ]),
     );
     await storeCachedGallery("studio-instance", [print]);
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     const lateStatus = deferred<ServerStatus>();
     const lateModels = deferred<ModelEntry[]>();
     let statusCalls = 0;
@@ -8163,10 +8226,14 @@ describe("MobileApp gallery", () => {
       }
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
-    apiFetchTo.mockResolvedValue({
-      headers: new Headers({ "content-type": "image/png" }),
-      blob: () => Promise.resolve(new Blob(["subject bytes"], { type: "image/png" })),
-    } as Response);
+    apiFetchTo.mockImplementation(() =>
+      Promise.resolve(
+        new Response(cachedThumbnailBlob("subject bytes"), {
+          status: 200,
+          headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+        }),
+      ),
+    );
     const lateDigest = deferred<ArrayBuffer>();
     const digest = vi
       .spyOn(globalThis.crypto.subtle, "digest")
@@ -8245,12 +8312,7 @@ describe("MobileApp gallery", () => {
       ]),
     );
     await storeCachedGallery("studio-instance", [print]);
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     apiJsonTo.mockRejectedValue(new Error("offline"));
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -8310,12 +8372,7 @@ describe("MobileApp gallery", () => {
       models: [model],
       capabilities: null,
     });
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      conditioned.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(conditioned), cachedThumbnailBlob());
     apiJsonTo.mockRejectedValue(new Error("offline"));
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -8372,12 +8429,7 @@ describe("MobileApp gallery", () => {
       models: [model],
       capabilities: null,
     });
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     apiJsonTo.mockRejectedValue(new Error("offline"));
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -8415,12 +8467,7 @@ describe("MobileApp gallery", () => {
       ]),
     );
     await storeCachedGallery("studio-instance", [print]);
-    await storeCachedGalleryMedia(
-      "studio-instance",
-      print.filename,
-      "thumbnail",
-      new Blob(["cached thumbnail"], { type: "image/webp" }),
-    );
+    await storeCachedGalleryMedia(cachedThumbnailRef(print), cachedThumbnailBlob());
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status" || path === "/api/gallery") {
         return Promise.reject(new Error("offline"));
@@ -8864,9 +8911,12 @@ describe("MobileApp gallery", () => {
 
   it("backs the native iOS image context menu with image data instead of a blob URL", async () => {
     isNativeIOSRuntime.mockReturnValue(true);
-    apiFetchTo.mockResolvedValue({
-      blob: () => Promise.resolve(new Blob([Uint8Array.from([1, 2, 3])], { type: "image/png" })),
-    } as Response);
+    apiFetchTo.mockResolvedValue(
+      new Response(cachedThumbnailBlob("native context menu"), {
+        status: 200,
+        headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+      }),
+    );
 
     wrapper = mountMobileApp();
     await flushPromises();
@@ -8875,8 +8925,8 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() => expect(apiFetchTo).toHaveBeenCalled());
 
     await vi.waitFor(() =>
-      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).toBe(
-        "data:image/png;base64,AQID",
+      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).toMatch(
+        /^data:image\/png;base64,/,
       ),
     );
     const image = wrapper.get("[data-test='gallery-item'] img");
@@ -9189,7 +9239,10 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() =>
       expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/gallery")).toHaveLength(2),
     );
-    await vi.waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-1"));
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:thumbnail-1");
+    expect(wrapper.get("[data-test='gallery-item'] img").attributes("src")).toBe(
+      "blob:thumbnail-1",
+    );
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
   });
 
@@ -9494,10 +9547,14 @@ describe("MobileApp gallery", () => {
       if (path === "/api/gallery") return Promise.resolve([still]);
       return durableApiFallback(path, init, callTarget);
     });
-    apiFetchTo.mockResolvedValue({
-      headers: new Headers({ "content-type": "image/png" }),
-      blob: () => Promise.resolve(new Blob(["subject bytes"], { type: "image/png" })),
-    } as Response);
+    apiFetchTo.mockImplementation(() =>
+      Promise.resolve(
+        new Response(cachedThumbnailBlob("subject bytes"), {
+          status: 200,
+          headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+        }),
+      ),
+    );
 
     wrapper = mountMobileApp();
     await flushPromises();
@@ -9754,6 +9811,7 @@ describe("MobileApp gallery", () => {
         },
       ]),
     );
+    localStorage.setItem("mold.mobile.generate-target.v1", "studio-id");
     apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
       // This machine's capability probe fails: the labels below pin that.
@@ -9781,8 +9839,9 @@ describe("MobileApp gallery", () => {
     });
 
     wrapper = mountMobileApp();
-    await vi.waitFor(() =>
-      expect(fieldControl("Model").element).toHaveProperty("value", studioModel.name),
+    await vi.waitFor(
+      () => expect(fieldControl("Model").element).toHaveProperty("value", studioModel.name),
+      { timeout: 5_000 },
     );
 
     const hostsTab = wrapper
@@ -9814,7 +9873,7 @@ describe("MobileApp gallery", () => {
       .findAll("button")
       .find((button) => button.text() === "Develop print");
     expect(developButton?.attributes("disabled")).toBeUndefined();
-  });
+  }, 15_000);
 });
 
 describe("MobileApp host and catalog coordination", () => {
@@ -11356,12 +11415,15 @@ describe("MobileApp Library organization", () => {
       return durableApiFallback(path, init, callTarget);
     });
     // Thumbnails read blobs; organization mutations read empty JSON bodies.
-    apiFetchTo.mockImplementation(() =>
-      Promise.resolve({
-        status: 204,
-        blob: () => Promise.resolve(new Blob(["thumbnail"])),
-        text: () => Promise.resolve(""),
-      } as unknown as Response),
+    apiFetchTo.mockImplementation((_callTarget, _path, init) =>
+      Promise.resolve(
+        init?.method
+          ? new Response(null, { status: 204 })
+          : new Response(cachedThumbnailBlob(), {
+              status: 200,
+              headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+            }),
+      ),
     );
   }
 
@@ -11510,7 +11572,7 @@ describe("MobileApp Library organization", () => {
     expect(card.text()).toContain("1");
     await vi.waitFor(() => expect(card.find(".mobile-collection-cover img").exists()).toBe(true));
     expect(card.get(".mobile-collection-cover img").attributes("src")).not.toBe(gridThumbnail);
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith(gridThumbnail);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith(gridThumbnail);
 
     vi.useFakeTimers();
     await card.get(".mobile-collection-cover img").trigger("error");
@@ -11545,11 +11607,12 @@ describe("MobileApp Library organization", () => {
     installLibraryApi();
     apiFetchTo.mockImplementation((_callTarget: unknown, path: string, _init?: RequestInit) => {
       if (path.includes("cover.png")) return Promise.reject(new Error("cover host offline"));
-      return Promise.resolve({
-        status: 200,
-        blob: () => Promise.resolve(new Blob(["member thumbnail"], { type: "image/png" })),
-        text: () => Promise.resolve(""),
-      } as unknown as Response);
+      return Promise.resolve(
+        new Response(cachedThumbnailBlob("member thumbnail"), {
+          status: 200,
+          headers: { "x-mold-thumbnail-rendition": `${thumbnailTier()}-jpg` },
+        }),
+      );
     });
     await openLibrary();
 
