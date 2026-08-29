@@ -137,6 +137,8 @@ import {
   chainFilingFields,
   cloneGenerateForm,
   keepingPrintIdentity,
+  loraBindingMatchesRoute,
+  loraHostBinding,
   normalizeLegacyNegativeSnapshot,
 } from "../lib/generateForm";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
@@ -3484,6 +3486,35 @@ async function generate() {
       preliminaryRouting.kind === "chain"
         ? buildAutoChainRequest(preliminaryRequest, preliminaryRouting)
         : preliminaryRequest;
+    const loraBinding = loraHostBinding(draft.loras);
+    if (loraBinding.kind === "conflict") {
+      toasts.push(
+        "The selected LoRAs have mixed or missing machine provenance. Remove them and choose the stack again from one machine.",
+        "error",
+      );
+      return;
+    }
+    if (loraBinding.kind === "bound") {
+      const boundRoute = hosts.resolveRoute(loraBinding.hostId, draft.model);
+      if (!boundRoute || !loraBindingMatchesRoute(loraBinding, boundRoute)) {
+        toasts.push(
+          "The machine that supplied the selected LoRA is no longer the same server. Reconnect it or remove the LoRA.",
+          "error",
+        );
+        return;
+      }
+      if (route && !loraBindingMatchesRoute(loraBinding, route)) {
+        toasts.push(
+          "The prepared print is frozen to a different machine than the selected LoRA. Re-expand it or remove the LoRA.",
+          "error",
+        );
+        return;
+      }
+    }
+    const generateTarget =
+      loraBinding.kind === "bound"
+        ? loraBinding.hostId
+        : (appPrefs.settings?.generateTargetHost ?? null);
     if (route) {
       // Prepared work already froze the concrete host. Preserve that
       // authority through source preprocessing and perform exactly one
@@ -3504,12 +3535,9 @@ async function generate() {
       }
       route = feasible;
     } else {
-      const feasibility = await hosts.resolveFeasible(
-        appPrefs.settings?.generateTargetHost ?? null,
-        planningRequest,
-        batch,
-        { signal: submitSignal },
-      );
+      const feasibility = await hosts.resolveFeasible(generateTarget, planningRequest, batch, {
+        signal: submitSignal,
+      });
       if (!submissionGuard.isCurrent(submitToken)) return;
       if (feasibility.kind !== "route") {
         // Nothing can run this print. When the only thing in the way is the

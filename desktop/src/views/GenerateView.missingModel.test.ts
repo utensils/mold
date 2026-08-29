@@ -188,6 +188,168 @@ describe("GenerateView missing-model pull before submit", () => {
     expect(toasts.items.some((item) => item.kind === "error")).toBe(false);
   });
 
+  it("routes a picked LoRA back to the machine that supplied its path", async () => {
+    addRemoteHost();
+    const hosts = useHostsStore();
+    const resolveFeasible = vi.spyOn(hosts, "resolveFeasible").mockResolvedValue({
+      kind: "route",
+      route: remoteRoute,
+      preview: null,
+    });
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const form = useGenerateFormStore().form;
+    form.family = "z-image";
+    form.loras = [
+      {
+        path: "/storage/mold/models/alien.safetensors",
+        name: "Alien Xenomorph",
+        scale: 1,
+        trainedWords: [],
+        hostId: remoteRoute.hostId,
+        hostBaseUrl: remoteRoute.target.baseUrl,
+        hostInstanceId: remoteRoute.instanceId ?? null,
+      },
+    ];
+    const wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+
+    expect(resolveFeasible).toHaveBeenCalledWith(
+      remoteRoute.hostId,
+      expect.objectContaining({
+        model: model.name,
+        loras: [{ path: "/storage/mold/models/alien.safetensors", scale: 1 }],
+      }),
+      1,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(submit).toHaveBeenCalledWith(
+      expect.any(Object),
+      1,
+      expect.objectContaining({ hostId: remoteRoute.hostId }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+  });
+
+  it("refuses a LoRA whose source machine was forgotten instead of falling back to Auto", async () => {
+    const hosts = useHostsStore();
+    const resolveFeasible = vi.spyOn(hosts, "resolveFeasible");
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const form = useGenerateFormStore().form;
+    form.family = "z-image";
+    form.loras = [
+      {
+        path: "/forgotten/lora.safetensors",
+        name: "Forgotten LoRA",
+        scale: 1,
+        trainedWords: [],
+        hostId: "forgotten-7680",
+        hostBaseUrl: "http://forgotten:7680",
+        hostInstanceId: "forgotten-instance",
+      },
+    ];
+    const wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+
+    expect(resolveFeasible).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    expect(useToastStore().items.at(-1)?.message).toContain(
+      "machine that supplied the selected LoRA is no longer the same server",
+    );
+  });
+
+  it("refuses a LoRA when its host ID has been reused by another server instance", async () => {
+    addRemoteHost();
+    const hosts = useHostsStore();
+    const resolveFeasible = vi.spyOn(hosts, "resolveFeasible");
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const form = useGenerateFormStore().form;
+    form.family = "z-image";
+    form.loras = [
+      {
+        path: "/retired/lora.safetensors",
+        name: "Retired Server LoRA",
+        scale: 1,
+        trainedWords: [],
+        hostId: remoteRoute.hostId,
+        hostBaseUrl: remoteRoute.target.baseUrl,
+        hostInstanceId: "retired-instance",
+      },
+    ];
+    const wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+
+    expect(resolveFeasible).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    expect(useToastStore().items.at(-1)?.message).toContain(
+      "machine that supplied the selected LoRA is no longer the same server",
+    );
+  });
+
+  it("accepts later instance telemetry for the same LoRA host and endpoint", async () => {
+    addRemoteHost();
+    const hosts = useHostsStore();
+    const resolveFeasible = vi.spyOn(hosts, "resolveFeasible").mockResolvedValue({
+      kind: "route",
+      route: remoteRoute,
+      preview: null,
+    } as FeasibleRouteResult);
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const form = useGenerateFormStore().form;
+    form.family = "z-image";
+    form.loras = [
+      {
+        path: "/storage/mold/models/alien.safetensors",
+        name: "Alien LoRA",
+        scale: 1,
+        trainedWords: [],
+        hostId: remoteRoute.hostId,
+        hostBaseUrl: remoteRoute.target.baseUrl,
+        hostInstanceId: null,
+      },
+    ];
+    const wrapper = mountView();
+    await flushPromises();
+
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    await flushPromises();
+
+    expect(resolveFeasible).toHaveBeenCalledWith(
+      remoteRoute.hostId,
+      expect.any(Object),
+      1,
+      expect.any(Object),
+    );
+    expect(submit).toHaveBeenCalledWith(
+      expect.any(Object),
+      1,
+      expect.objectContaining({ hostId: remoteRoute.hostId }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+  });
+
   it("asks which machine to pull onto when more than one could run it", async () => {
     addRemoteHost();
     const hosts = useHostsStore();
