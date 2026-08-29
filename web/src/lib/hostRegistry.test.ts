@@ -201,7 +201,11 @@ describe("dedupe by instance id", () => {
   });
 
   it("persists a polled UUID, selects that working address, and remaps recovery state", () => {
-    const hostname = addHost({ url: "hal9000:7680", name: "hal9000", instanceId: "uuid-1" });
+    const hostname = addHost({
+      url: "hal9000:7680",
+      name: "hal9000",
+      instanceId: "uuid-1",
+    });
     const ip = addHost({ url: "100.123.198.98:7681", name: "hal9000 IP" });
     localStorage.setItem(
       "mold.create.tracked-sequences.v1",
@@ -219,16 +223,27 @@ describe("dedupe by instance id", () => {
 
     const canonical = recordSuccessfulHostInstance(ip.id, " uuid-1 ");
 
-    expect(canonical).toMatchObject({ id: ip.id, url: "http://100.123.198.98:7681" });
+    expect(canonical).toMatchObject({
+      id: ip.id,
+      url: "http://100.123.198.98:7681",
+    });
     expect(listStoredHosts()).toHaveLength(1);
     expect(getGenerateTargetId()).toBe(ip.id);
-    expect(localStorage.getItem("mold.create.tracked-sequences.v1")).toContain(ip.id);
+    expect(localStorage.getItem("mold.create.tracked-sequences.v1")).toContain(
+      ip.id,
+    );
     expect(localStorage.getItem("mold.generate.jobs")).toContain(ip.id);
-    expect(localStorage.getItem("mold.generate.jobs.recovery.batch-1")).toContain(ip.id);
+    expect(
+      localStorage.getItem("mold.generate.jobs.recovery.batch-1"),
+    ).toContain(ip.id);
   });
 
   it("keeps different UUIDs separate even when the URL slug is reused", () => {
-    const old = addHost({ url: "render:7680", name: "Old", instanceId: "uuid-old" });
+    const old = addHost({
+      url: "render:7680",
+      name: "Old",
+      instanceId: "uuid-old",
+    });
     const replacement = addHost({
       url: "render:7680",
       name: "Replacement",
@@ -236,7 +251,9 @@ describe("dedupe by instance id", () => {
     });
     expect(replacement.id).not.toBe(old.id);
     expect(listStoredHosts()).toHaveLength(2);
-    expect(listStoredHosts().find((host) => host.id === old.id)?.connected).toBe(false);
+    expect(
+      listStoredHosts().find((host) => host.id === old.id)?.connected,
+    ).toBe(false);
   });
 
   it("removes a stored alias when its UUID is the browser origin", () => {

@@ -97,7 +97,8 @@ function isHostEntry(value: unknown): value is HostEntry {
     typeof c.url === "string" &&
     (c.apiKey === undefined || typeof c.apiKey === "string") &&
     (c.instanceId === undefined || typeof c.instanceId === "string") &&
-    (c.lastConnectedAtMs === undefined || typeof c.lastConnectedAtMs === "number") &&
+    (c.lastConnectedAtMs === undefined ||
+      typeof c.lastConnectedAtMs === "number") &&
     (c.connected === undefined || typeof c.connected === "boolean") &&
     c.id !== ORIGIN_HOST_ID
   );
@@ -137,12 +138,14 @@ export function mergeStoredHostsByInstanceId(hosts: readonly HostEntry[]): {
       const fallbackKey = uuid
         ? hosts.find(
             (candidate) =>
-              normalizedInstanceId(candidate.instanceId) === uuid && Boolean(candidate.apiKey),
+              normalizedInstanceId(candidate.instanceId) === uuid &&
+              Boolean(candidate.apiKey),
           )?.apiKey
         : undefined;
-      merged.push(fallbackKey && !host.apiKey ? { ...host, apiKey: fallbackKey } : host);
-    }
-    else dropped.push({ loser: host.id, survivor: winner.id });
+      merged.push(
+        fallbackKey && !host.apiKey ? { ...host, apiKey: fallbackKey } : host,
+      );
+    } else dropped.push({ loser: host.id, survivor: winner.id });
   }
   return { hosts: merged, dropped };
 }
@@ -151,7 +154,9 @@ function remapPersistedHostIds(
   dropped: ReadonlyArray<{ loser: string; survivor: string }>,
 ): void {
   if (dropped.length === 0) return;
-  const remap = new Map(dropped.map(({ loser, survivor }) => [loser, survivor]));
+  const remap = new Map(
+    dropped.map(({ loser, survivor }) => [loser, survivor]),
+  );
   const remapJson = (key: string, arrayRoot: boolean): void => {
     const raw = localStorage.getItem(key);
     if (!raw) return;
@@ -186,14 +191,18 @@ function remapPersistedHostIds(
   }
   const legacyHost = localStorage.getItem(LEGACY_SEQUENCE_HOST_KEY);
   const legacySurvivor = legacyHost ? remap.get(legacyHost) : null;
-  if (legacySurvivor) localStorage.setItem(LEGACY_SEQUENCE_HOST_KEY, legacySurvivor);
+  if (legacySurvivor)
+    localStorage.setItem(LEGACY_SEQUENCE_HOST_KEY, legacySurvivor);
 }
 
-function applyAliasRemap(dropped: ReadonlyArray<{ loser: string; survivor: string }>): void {
+function applyAliasRemap(
+  dropped: ReadonlyArray<{ loser: string; survivor: string }>,
+): void {
   if (dropped.length === 0) return;
   const target = getGenerateTargetId();
   const targetRemap = dropped.find(({ loser }) => loser === target);
-  if (targetRemap) localStorage.setItem(GENERATE_TARGET_STORAGE_KEY, targetRemap.survivor);
+  if (targetRemap)
+    localStorage.setItem(GENERATE_TARGET_STORAGE_KEY, targetRemap.survivor);
   remapPersistedHostIds(dropped);
 }
 
@@ -253,7 +262,9 @@ export function dedupeByInstanceId(instanceId: string): HostEntry | null {
   const normalized = normalizedInstanceId(instanceId);
   if (!normalized) return null;
   return (
-    listStoredHosts().find((host) => normalizedInstanceId(host.instanceId) === normalized) ?? null
+    listStoredHosts().find(
+      (host) => normalizedInstanceId(host.instanceId) === normalized,
+    ) ?? null
   );
 }
 
@@ -279,17 +290,24 @@ export function addHost(input: AddHostInput): HostEntry {
   const stored = listStoredHosts();
   const instanceId = normalizedInstanceId(input.instanceId);
   const byInstance = instanceId
-    ? stored.find((host) => normalizedInstanceId(host.instanceId) === instanceId)
+    ? stored.find(
+        (host) => normalizedInstanceId(host.instanceId) === instanceId,
+      )
     : undefined;
   const slug = hostIdFromUrl(url);
   const bySlug = stored.find((host) => host.id === slug);
   const slugInstanceId = normalizedInstanceId(bySlug?.instanceId);
-  const slugConflict = Boolean(bySlug && instanceId && slugInstanceId && instanceId !== slugInstanceId);
+  const slugConflict = Boolean(
+    bySlug && instanceId && slugInstanceId && instanceId !== slugInstanceId,
+  );
   const existing = byInstance ?? (slugConflict ? undefined : bySlug);
   const id =
     existing?.id ??
     (slugConflict && instanceId
-      ? `${slug}-${instanceId.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 12)}`
+      ? `${slug}-${instanceId
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .slice(0, 12)}`
       : slug);
 
   const entry: HostEntry = {
@@ -305,7 +323,9 @@ export function addHost(input: AddHostInput): HostEntry {
   else if (existing?.instanceId) entry.instanceId = existing.instanceId;
 
   const retired = slugConflict
-    ? stored.map((host) => (host.id === bySlug?.id ? { ...host, connected: false } : host))
+    ? stored.map((host) =>
+        host.id === bySlug?.id ? { ...host, connected: false } : host,
+      )
     : stored;
   const next = existing
     ? retired.map((h) => (h.id === existing.id ? entry : h))
@@ -325,7 +345,9 @@ export function reconcileOriginInstanceId(instanceId: string): void {
   if (aliases.length === 0) return;
   const aliasIds = new Set(aliases.map((host) => host.id));
   writeStoredHosts(stored.filter((host) => !aliasIds.has(host.id)));
-  applyAliasRemap(aliases.map((host) => ({ loser: host.id, survivor: ORIGIN_HOST_ID })));
+  applyAliasRemap(
+    aliases.map((host) => ({ loser: host.id, survivor: ORIGIN_HOST_ID })),
+  );
 }
 
 /** Persist a UUID learned from a successful exact-authority status poll.
@@ -351,11 +373,17 @@ export function recordSuccessfulHostInstance(
   );
   const stamped = stored.map((host) =>
     host.id === id
-      ? { ...host, instanceId: normalized, connected: true, lastConnectedAtMs: successfulAt }
+      ? {
+          ...host,
+          instanceId: normalized,
+          connected: true,
+          lastConnectedAtMs: successfulAt,
+        }
       : host,
   );
   const merged = mergeStoredHostsByInstanceId(stamped);
-  const survivorId = merged.dropped.find(({ loser }) => loser === id)?.survivor ?? id;
+  const survivorId =
+    merged.dropped.find(({ loser }) => loser === id)?.survivor ?? id;
   writeStoredHosts(merged.hosts);
   applyAliasRemap(merged.dropped);
   return merged.hosts.find((host) => host.id === survivorId) ?? null;
