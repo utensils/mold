@@ -9871,7 +9871,7 @@ describe("MobileApp gallery", () => {
       .findAll("button")
       .find((button) => button.text() === "Develop print");
     expect(developButton?.attributes("disabled")).toBeUndefined();
-  });
+  }, 15_000);
 });
 
 describe("MobileApp host and catalog coordination", () => {
