@@ -705,7 +705,21 @@ run_render_row() {
   fi
   local generation="" commit="" observed=""
   if [[ -z "$failure" ]]; then
-    generation="$(library_row_for "$output" "$row" 2>"$dir/library.err")" || failure="$(cat "$dir/library.err")"
+    # The client records its Library row right after saving the file, but the
+    # scratch server writes its own row to the same mold.db concurrently, so
+    # the client's upsert can land moments after `mold run` exits. Poll
+    # briefly before calling the row absent or stale.
+    local library_wait=0
+    while :; do
+      if generation="$(library_row_for "$output" "$row" 2>"$dir/library.err")"; then
+        failure=""
+        break
+      fi
+      failure="$(cat "$dir/library.err")"
+      [[ "$library_wait" -lt 15 ]] || break
+      sleep 3
+      library_wait=$((library_wait + 3))
+    done
   fi
   if [[ -z "$failure" ]]; then
     commit="$(generator_commit_of "$generation" 2>"$dir/library.err")" || failure="$(cat "$dir/library.err")"
