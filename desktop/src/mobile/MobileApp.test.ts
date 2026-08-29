@@ -9821,7 +9821,6 @@ describe("MobileApp gallery", () => {
         return Promise.resolve({
           ...status,
           hostname: baseUrl === remoteTarget.baseUrl ? "remote" : "studio",
-          instance_id: baseUrl === remoteTarget.baseUrl ? "remote-id" : "studio-id",
         });
       }
       if (path === "/api/models") {
