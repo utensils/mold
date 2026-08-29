@@ -2665,14 +2665,35 @@ fn build_client(api_key: Option<&str>) -> (Client, bool) {
 /// - Host with port: `hal9000:8080` → `http://hal9000:8080`
 /// - Full URL: `http://hal9000:7680` → unchanged
 /// - URL without port: `http://hal9000` → unchanged (uses scheme default 80/443)
+fn has_http_scheme(input: &str) -> bool {
+    input
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || input
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+}
+
 pub fn normalize_host(input: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/');
-    if trimmed.contains("://") {
+    let has_scheme = has_http_scheme(trimmed);
+    let bare_ipv6 = !has_scheme
+        && !trimmed.starts_with('[')
+        && trimmed.bytes().filter(|byte| *byte == b':').count() > 1;
+    let candidate = if has_scheme {
         trimmed.to_string()
-    } else if trimmed.contains(':') {
-        format!("http://{trimmed}")
+    } else if bare_ipv6 {
+        format!("http://[{trimmed}]")
     } else {
-        format!("http://{trimmed}:7680")
+        format!("http://{trimmed}")
+    };
+    if let Ok(mut url) = reqwest::Url::parse(&candidate) {
+        if !has_scheme && url.port().is_none() {
+            let _ = url.set_port(Some(7680));
+        }
+        url.to_string().trim_end_matches('/').to_string()
+    } else {
+        candidate
     }
 }
 
@@ -2895,6 +2916,12 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_scheme_case_insensitively() {
+        let client = MoldClient::new("HTTP://hal9000");
+        assert_eq!(client.host(), "http://hal9000");
+    }
+
+    #[test]
     fn test_normalize_localhost() {
         let client = MoldClient::new("localhost");
         assert_eq!(client.host(), "http://localhost:7680");
@@ -2908,14 +2935,35 @@ mod tests {
 
     #[test]
     fn test_normalize_ip_address() {
-        let client = MoldClient::new("192.168.1.100");
-        assert_eq!(client.host(), "http://192.168.1.100:7680");
+        let client = MoldClient::new("100.123.198.98");
+        assert_eq!(client.host(), "http://100.123.198.98:7680");
     }
 
     #[test]
     fn test_normalize_ip_with_port() {
         let client = MoldClient::new("192.168.1.100:9090");
         assert_eq!(client.host(), "http://192.168.1.100:9090");
+    }
+
+    #[test]
+    fn test_normalize_bare_ipv6() {
+        let client = MoldClient::new("::1");
+        assert_eq!(client.host(), "http://[::1]:7680");
+    }
+
+    #[test]
+    fn test_normalize_host_is_idempotent() {
+        for input in [
+            "100.123.198.98",
+            "100.123.198.98:9000",
+            "http://100.123.198.98",
+            "https://studio.tailnet.ts.net",
+            "https://studio.tailnet.ts.net:443",
+            "::1",
+        ] {
+            let once = normalize_host(input);
+            assert_eq!(normalize_host(&once), once, "{input}");
+        }
     }
 
     #[test]

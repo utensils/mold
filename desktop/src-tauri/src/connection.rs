@@ -69,28 +69,17 @@ pub fn host_id(url: &str) -> String {
     id
 }
 
-/// Normalize a user-entered host: default scheme/port, strip trailing slashes.
+/// Normalize a user-entered host: default omitted scheme/port, strip trailing slashes.
 pub fn normalize_host_url(input: &str) -> Result<String, String> {
-    let trimmed = input.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
+    if input.trim().trim_end_matches('/').is_empty() {
         return Err("Enter a host, like hal9000".into());
     }
-    let has_explicit_scheme = trimmed.starts_with("http://") || trimmed.starts_with("https://");
-    let with_scheme = if has_explicit_scheme {
-        trimmed.to_string()
-    } else {
-        format!("http://{trimmed}")
-    };
-    let mut url =
-        reqwest::Url::parse(&with_scheme).map_err(|_| "Enter a valid host.".to_string())?;
+    let normalized = mold_core::client::normalize_host(input);
+    let url = reqwest::Url::parse(&normalized).map_err(|_| "Enter a valid host.".to_string())?;
     if url.host_str().is_none() {
         return Err("Enter a valid host.".into());
     }
-    if !has_explicit_scheme && url.port().is_none() {
-        url.set_port(Some(7680))
-            .map_err(|_| "Enter a valid host.".to_string())?;
-    }
-    Ok(url.to_string().trim_end_matches('/').to_string())
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -129,26 +118,39 @@ mod tests {
 
     #[test]
     fn normalizes_host_urls() {
-        assert_eq!(
-            normalize_host_url("hal9000").unwrap(),
-            "http://hal9000:7680"
-        );
-        assert_eq!(
-            normalize_host_url("studio.local:7680").unwrap(),
-            "http://studio.local:7680"
-        );
+        for (input, expected) in [
+            ("hal9000", "http://hal9000:7680"),
+            ("100.123.198.98", "http://100.123.198.98:7680"),
+            ("100.123.198.98:9000", "http://100.123.198.98:9000"),
+            ("http://100.123.198.98", "http://100.123.198.98"),
+            ("HTTP://100.123.198.98", "http://100.123.198.98"),
+            (
+                "https://studio.tailnet.ts.net",
+                "https://studio.tailnet.ts.net",
+            ),
+            (
+                "https://studio.tailnet.ts.net:443",
+                "https://studio.tailnet.ts.net",
+            ),
+            ("::1", "http://[::1]:7680"),
+        ] {
+            assert_eq!(normalize_host_url(input).unwrap(), expected, "{input}");
+        }
         assert_eq!(
             normalize_host_url("http://studio.local:7680///").unwrap(),
             "http://studio.local:7680"
         );
-        assert_eq!(
-            normalize_host_url("https://mold.example.com/").unwrap(),
-            "https://mold.example.com"
-        );
-        assert_eq!(
-            normalize_host_url("http://mold.example.com/").unwrap(),
-            "http://mold.example.com"
-        );
+        for input in [
+            "100.123.198.98",
+            "100.123.198.98:9000",
+            "http://100.123.198.98",
+            "https://studio.tailnet.ts.net",
+            "https://studio.tailnet.ts.net:443",
+            "::1",
+        ] {
+            let once = normalize_host_url(input).unwrap();
+            assert_eq!(normalize_host_url(&once).unwrap(), once, "{input}");
+        }
         assert!(normalize_host_url("   ").is_err());
     }
 }

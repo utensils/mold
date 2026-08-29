@@ -82,6 +82,17 @@ describe("ConnectMachineModal", () => {
     expect(confirm.text()).toContain("online and ready");
   });
 
+  it("probes a bare IP through the default protocol and port", async () => {
+    const wrapper = await mountModal();
+    await wrapper.get("[data-test='connect-continue']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='connect-address']").setValue("100.123.198.98");
+    await wrapper.get("[data-test='connect-continue']").trigger("click");
+    await flushPromises();
+
+    expect(testRemoteHost).toHaveBeenCalledWith("http://100.123.198.98:7680", null);
+  });
+
   it("hands the RunPod type off to the provisioning view and closes", async () => {
     const wrapper = await mountModal();
     await wrapper.get("[data-test='connect-type-runpod']").trigger("click");
