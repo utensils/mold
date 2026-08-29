@@ -142,11 +142,28 @@ def validate_row(row: dict[str, Any], evidence_dir: Path, matrix_ids: set[str]) 
         process_path = manifest.get("server_process_log_path")
         if isinstance(process_path, str) and Path(process_path).is_file():
             process_text = Path(process_path).read_text(encoding="utf-8", errors="replace")
+        def line_present(line: str, corpus: str) -> bool:
+            if line in corpus:
+                return True
+            # The dispatcher logs `backend` as a structured tracing field, so
+            # a JSON-formatted log carries the two halves separately.
+            prefix = "attention backend selected backend="
+            if line.startswith(prefix):
+                backend = line[len(prefix):]
+                needle = '"message":"attention backend selected"'
+                return any(
+                    needle in candidate and f'"backend":"{backend}"' in candidate
+                    for candidate in corpus.splitlines()
+                )
+            return False
+
         for item in observed:
             line = item["line"]
-            if item["scope"] == "slice" and line not in text:
+            if item["scope"] == "slice" and not line_present(line, text):
                 raise ValidationFailure(f"{label}: {line!r} is absent from the retained server log slice")
-            if item["scope"] == "process" and line not in text and line not in process_text:
+            if item["scope"] == "process" and not line_present(line, text) and not line_present(
+                line, process_text
+            ):
                 raise ValidationFailure(
                     f"{label}: {line!r} is absent from the retained slice and server-process.log"
                 )

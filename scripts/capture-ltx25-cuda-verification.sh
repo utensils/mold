@@ -336,17 +336,34 @@ generator_commit_of() {
 # row's own `server-process.log` so the evidence the seal relied on is itself
 # retained and hash-bound — the full server log is unhashed and mutable.
 # Prints the observed list as JSON.
+# The dispatcher emits its line with `backend` as a STRUCTURED tracing field
+# ("message":"attention backend selected","backend":"Math"), so a JSON log
+# never contains the flat pinned spelling; this regex matches both forms.
+dispatcher_line_regex() {
+  local line="$1"
+  local backend="${line##*backend=}"
+  printf '"message":"attention backend selected".*"backend":"%s"|attention backend selected backend=%s' \
+    "$backend" "$backend"
+}
+
 observe_provenance() {
-  local slice="$1" full="$2" expected="$3" dir="$4" observed='[]' line scope
+  local slice="$1" full="$2" expected="$3" dir="$4" observed='[]' line scope regex
   rm -f "$dir/server-process.log"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
-    if grep -Fq -- "$line" "$slice"; then
+    if [[ "$line" == "attention backend selected backend="* ]]; then
+      regex="$(dispatcher_line_regex "$line")"
+      if grep -Eq -- "$regex" "$slice"; then
+        scope=slice
+      elif [[ -n "$full" && -f "$full" ]] && grep -Eq -- "$regex" "$full"; then
+        scope=process
+        grep -E -- "$regex" "$full" | head -1 >>"$dir/server-process.log"
+      else
+        echo "expected provenance line is absent from the retained server log: $line" >&2
+        return 1
+      fi
+    elif grep -Fq -- "$line" "$slice"; then
       scope=slice
-    elif [[ "$line" == "attention backend selected "* && -n "$full" && -f "$full" ]] \
-      && grep -Fq -- "$line" "$full"; then
-      scope=process
-      grep -F -- "$line" "$full" | head -1 >>"$dir/server-process.log"
     else
       echo "expected provenance line is absent from the retained server log: $line" >&2
       return 1
