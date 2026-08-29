@@ -4209,6 +4209,25 @@ impl Coordinator {
                     .map_or(0, |preferred| u8::from(preferred != worker.gpu.ordinal))
             }))
         };
+        let post_upscale_has_viable_accelerator =
+            owner.kind == WorkKind::PostUpscale
+                && utility_plans.iter().any(|plan| {
+                    let UtilityPlacement::Device { backend, ordinal } = plan.placement() else {
+                        return false;
+                    };
+                    let Some(worker) = self.state.gpu_pool.workers.iter().find(|worker| {
+                        worker.gpu.backend == backend && worker.gpu.ordinal == ordinal
+                    }) else {
+                        return false;
+                    };
+                    device_snapshots
+                        .iter()
+                        .find(|device| device.id.as_str() == worker_device_id(worker.as_ref()))
+                        .is_some_and(|device| {
+                            device.is_schedulable()
+                                && device.available_vram_bytes >= plan.predicted_vram_bytes()
+                        })
+                });
         let candidates = if !utility_plans.is_empty() {
             utility_plans
                 .iter()
@@ -4223,6 +4242,9 @@ impl Coordinator {
                             !owner.kind.releases_resources(),
                             "releasing work is priced at zero and cannot carry a utility plan"
                         );
+                        if post_upscale_has_viable_accelerator {
+                            return None;
+                        }
                         let device_id = DeviceId::new(CPU_UTILITY_DEVICE_ID);
                         authoritative_available_vram
                             .contains_key(&device_id)
@@ -17218,6 +17240,73 @@ mod tests {
                     .len(),
                 count + 1,
                 "every exact backend/ordinal plan needs a distinct fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn post_upscale_prefers_a_viable_accelerator_and_restores_cpu_fallback() {
+        let state = utility_state_with_workers(1);
+        let worker = state.gpu_pool.worker_by_ordinal(0).unwrap();
+        let device_id = worker_device_id(&worker);
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+        let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights, None).unwrap();
+        let coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let snapshot = |devices: &[DeviceSnapshot]| {
+            coordinator.owner_work_snapshot(
+                OwnerWorkSchedulingView {
+                    id: "post-upscale",
+                    model_fingerprint: "real-esrgan-x4plus:fp16",
+                    estimated_vram_bytes: 1,
+                    estimated_host_ram_bytes: 1,
+                    hard_ordinal: None,
+                    priority: PriorityClass::User,
+                    queue_rank: 0,
+                    ready_at_ms: 0,
+                    bypass_count: 0,
+                    warm_wait_started_ms: None,
+                    kind: WorkKind::PostUpscale,
+                    shape_bucket: "512x512:tile:auto",
+                    preferred_ordinal: None,
+                    resolved_plans: &[],
+                    requires_exact_plan: false,
+                },
+                &plans,
+                devices,
+            )
+        };
+        let cpu = DeviceSnapshot::idle(CPU_UTILITY_DEVICE_ID, u64::MAX).with_backend(Backend::Cpu);
+
+        let viable = snapshot(&[
+            cpu.clone(),
+            DeviceSnapshot::busy(device_id.clone(), 24 << 30, 30_000),
+        ]);
+        assert!(
+            viable
+                .candidate_placements
+                .iter()
+                .all(|candidate| candidate.device_id.as_str() != CPU_UTILITY_DEVICE_ID),
+            "a post-upscale must wait for a viable accelerator instead of starting on CPU"
+        );
+
+        for unavailable in [
+            DeviceSnapshot::busy(device_id.clone(), 24 << 30, 30_000)
+                .with_health(DeviceHealth::Degraded),
+            DeviceSnapshot::busy(device_id.clone(), 1, 30_000),
+        ] {
+            let fallback = snapshot(&[cpu.clone(), unavailable]);
+            assert!(
+                fallback
+                    .candidate_placements
+                    .iter()
+                    .any(|candidate| candidate.device_id.as_str() == CPU_UTILITY_DEVICE_ID),
+                "CPU fallback must return when every accelerator plan becomes unavailable"
             );
         }
     }
