@@ -95,8 +95,15 @@ fn unit_rms_norm(xs: &Tensor, eps: f64) -> CandleResult<Tensor> {
 }
 
 impl Module for RmsNorm {
+    /// Gemma 4 Unified scales by the stored weight directly. That is the one
+    /// place it parts company with Gemma 3, whose weights are offsets applied
+    /// as `1 + w` (see `encoder.rs`): upstream's `rms_norm_add` is `False` for
+    /// every Gemma 4 variant (`comfy/text_encoders/gemma4.py:52`), none of the
+    /// text-stack norms is built with `add=` (`:163`, `:165`, `:309-312`,
+    /// `:395`), and `RMSNorm.forward` adds one only under that flag
+    /// (`comfy/text_encoders/llama.py:436-441`).
     fn forward(&self, xs: &Tensor) -> CandleResult<Tensor> {
-        unit_rms_norm(xs, self.eps)?.broadcast_mul(&(&self.weight + 1.0)?)
+        unit_rms_norm(xs, self.eps)?.broadcast_mul(&self.weight)
     }
 }
 
@@ -514,10 +521,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use candle_core::{DType, Device, Tensor};
+    use candle_core::{DType, Device, Module, Tensor};
     use candle_nn::VarBuilder;
 
-    use super::{Gemma4Config, Gemma4HiddenStateEncoder};
+    use super::{Gemma4Config, Gemma4HiddenStateEncoder, RmsNorm};
 
     #[test]
     fn ltx_12b_layer_pattern_and_dimensions_match_upstream() {
@@ -623,6 +630,8 @@ mod tests {
                 cfg.hidden_size,
                 cfg.intermediate_size,
             );
+            // Non-unit norm weights so the fixture pins the Gemma 4 scale
+            // convention (`x * w`) rather than passing under either reading.
             for norm in [
                 "input_layernorm",
                 "post_attention_layernorm",
@@ -631,13 +640,14 @@ mod tests {
             ] {
                 tensors.insert(
                     format!("{prefix}.{norm}.weight"),
-                    Tensor::zeros(cfg.hidden_size, DType::F32, &Device::Cpu).unwrap(),
+                    (Tensor::ones(cfg.hidden_size, DType::F32, &Device::Cpu).unwrap() * 2.0)
+                        .unwrap(),
                 );
             }
             for norm in ["q_norm", "k_norm"] {
                 tensors.insert(
                     format!("{prefix}.self_attn.{norm}.weight"),
-                    Tensor::zeros(head_dim, DType::F32, &Device::Cpu).unwrap(),
+                    (Tensor::ones(head_dim, DType::F32, &Device::Cpu).unwrap() * 2.0).unwrap(),
                 );
             }
             tensors.insert(
@@ -647,9 +657,54 @@ mod tests {
         }
         tensors.insert(
             "model.norm.weight".into(),
-            Tensor::zeros(cfg.hidden_size, DType::F32, &Device::Cpu).unwrap(),
+            (Tensor::ones(cfg.hidden_size, DType::F32, &Device::Cpu).unwrap() * 2.0).unwrap(),
         );
         VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
+    }
+
+    /// Gemma 4 Unified stores ABSOLUTE RMSNorm scales, unlike Gemma 3, whose
+    /// weights are offsets applied as `1 + w`. Upstream reads them unchanged:
+    /// `Gemma4Config.rms_norm_add` is `False`
+    /// (`comfy/text_encoders/gemma4.py:52`), every norm in the text stack is
+    /// built without `add=` (`:163`, `:165`, `:309-312`, `:395`), and
+    /// `RMSNorm.forward` only adds one when that flag is set
+    /// (`comfy/text_encoders/llama.py:436-441`). The LTX-2.5 checkpoint agrees:
+    /// `self_attn.q_norm.weight` is a constant 1.0234 and `model.norm.weight`
+    /// runs to 600, which are scales, not offsets. Reading them as offsets
+    /// leaves every channel the checkpoint means to suppress at unit gain,
+    /// which collapsed distinct prompts onto one conditioning attractor.
+    #[test]
+    fn rms_norm_applies_the_gemma4_weight_as_an_absolute_scale() {
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "weight".to_string(),
+            Tensor::new(&[2.0f32, 4.0, 0.0, 1.0], &Device::Cpu).unwrap(),
+        );
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu);
+        let norm = RmsNorm::new(4, 1e-6, vb).unwrap();
+
+        let xs = Tensor::new(&[[[1.0f32, 2.0, 3.0, 4.0]]], &Device::Cpu).unwrap();
+        let actual = norm
+            .forward(&xs)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+
+        let denominator = (30.0f32 / 4.0 + 1e-6).sqrt();
+        let expected = [
+            1.0 / denominator * 2.0,
+            2.0 / denominator * 4.0,
+            0.0,
+            4.0 / denominator,
+        ];
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "{actual} != {expected}: the weight must scale, never offset"
+            );
+        }
     }
 
     #[test]
@@ -673,7 +728,9 @@ mod tests {
 
         let final_values = states[2].flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let denominator = (30.0f32 + cfg.rms_norm_eps as f32).sqrt();
-        let expected = [2.0, 4.0, 6.0, 8.0].map(|value| value / denominator);
+        // `model.norm.weight` is 2.0 in the fixture and Gemma 4 scales by it
+        // directly, so a `1 + w` reading would land on 3.0 here.
+        let expected = [2.0, 4.0, 6.0, 8.0].map(|value| value / denominator * 2.0);
         for (actual, expected) in final_values.iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
         }
