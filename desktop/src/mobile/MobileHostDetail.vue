@@ -21,7 +21,13 @@ import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/que
 import type { SwipeRowAction } from "@studio/lib/swipeAction";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
-import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
+import {
+  buildQueueStatusIndex,
+  queueRuntimeCode,
+  queueStatusFor,
+  queueWaitCode,
+  resolveQueueWait,
+} from "@studio/lib/queuePosition";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
 import { compareNewestQueueEntry } from "@studio/lib/activityOrder";
 import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
@@ -148,6 +154,16 @@ const runtimeWindow = computed(() => {
     : null;
 });
 const queueEntryIds = computed(() => queue.value.map((entry) => entry.id));
+const queueStatus = computed(() =>
+  buildQueueStatusIndex([
+    {
+      hostId: props.host.id,
+      entries: queue.value,
+      plan: queuePlan.value,
+      paused: status.value?.queue_paused === true,
+    },
+  ]),
+);
 const displayQueue = computed(() => [...queue.value].sort(compareNewestQueueEntry));
 const planOnlyWork = computed(() => queuePlanOnlyWork(queuePlan.value, queueEntryIds.value));
 const queueSummary = computed(() => {
@@ -1014,12 +1030,22 @@ async function unload(name: string): Promise<void> {
 }
 
 function queueCode(entry: QueueEntry): string {
-  if (entry.state === "running")
+  if (entry.state === "running") {
+    const runtime = queueRuntimeCode(queuePlan.value, entry.id);
+    if (runtime) return runtime;
     return entry.gpu == null ? "RUNNING" : `RUNNING · GPU ${entry.gpu}`;
+  }
   if (dispatchPaused.value && entry.state === "queued") return "PAUSED";
   // Same waiting vocabulary as the Create queue, resolved once in studio —
   // a held row reads HELD, never a place in line.
-  return queueWaitCode(resolveQueueWait({ state: entry.state, position: entry.position }));
+  return queueWaitCode(
+    resolveQueueWait(
+      queueStatusFor(queueStatus.value, props.host.id, entry.id) ?? {
+        state: entry.state,
+        position: entry.position,
+      },
+    ),
+  );
 }
 
 function downloadPercent(done: number, total: number): number {

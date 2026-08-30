@@ -890,6 +890,7 @@ export const useGenerationStore = defineStore("generation", {
               if (url) job.previewUrl = url;
               if (progress.step !== null) job.step = progress.step;
               if (progress.total !== null) job.total = progress.total;
+              if (progress.stage) job.stage = progress.stage;
             },
           );
         } else {

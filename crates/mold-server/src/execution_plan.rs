@@ -12,6 +12,7 @@ use mold_scheduler::ExecutionEquivalenceFingerprint;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(any(unix, windows)))]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -2070,6 +2071,7 @@ pub(crate) fn warm_execution_equivalence_cache(
     config: &Config,
     request: &GenerateRequest,
     prepared: &PreparedExecutionInputs,
+    preparation_progress: Option<&crate::variant_dependencies::PreparationProgressSink>,
 ) {
     let family = config
         .resolved_model_config(&request.model)
@@ -2092,8 +2094,39 @@ pub(crate) fn warm_execution_equivalence_cache(
             .into_values(),
         );
     }
+    let total_bytes = paths
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+        .fold(0_u64, u64::saturating_add);
+    let mut completed_bytes = 0_u64;
+    crate::variant_dependencies::publish_preparation_progress(
+        preparation_progress,
+        "Verifying model files",
+        completed_bytes,
+        total_bytes,
+    );
     for path in paths {
-        let _ = artifact_facts_path_with_policy(&path, false);
+        let artifact_bytes = std::fs::metadata(&path)
+            .ok()
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        let mut progress = |done: u64, _total: u64| {
+            crate::variant_dependencies::publish_preparation_progress(
+                preparation_progress,
+                "Verifying model files",
+                completed_bytes.saturating_add(done.min(artifact_bytes)),
+                total_bytes,
+            );
+            Ok(())
+        };
+        let _ = artifact_facts_path_with_policy_and_progress(&path, false, Some(&mut progress));
+        completed_bytes = completed_bytes.saturating_add(artifact_bytes);
+        crate::variant_dependencies::publish_preparation_progress(
+            preparation_progress,
+            "Verifying model files",
+            completed_bytes,
+            total_bytes,
+        );
     }
     // LTX-2 admission needs the checkpoint's per-block weight layout. Reading
     // the safetensors header is blocking work, so it is warmed here (already
@@ -4197,6 +4230,14 @@ impl Drop for ArtifactFactOwnerGuard {
 }
 
 fn artifact_facts_path_with_policy(path: &Path, cache_only: bool) -> ArtifactFacts {
+    artifact_facts_path_with_policy_and_progress(path, cache_only, None)
+}
+
+fn artifact_facts_path_with_policy_and_progress(
+    path: &Path,
+    cache_only: bool,
+    mut progress: Option<&mut dyn FnMut(u64, u64) -> anyhow::Result<()>>,
+) -> ArtifactFacts {
     let Ok(before_metadata) = std::fs::metadata(path) else {
         return ArtifactFacts {
             content: unknown_equivalence_content(path, None),
@@ -4282,8 +4323,12 @@ fn artifact_facts_path_with_policy(path: &Path, cache_only: bool) -> ArtifactFac
     let facts = {
         let _permit = artifact_read_limiter().acquire();
         note_artifact_physical_read(path);
-        let content = hash_equivalence_artifact_contents(path)
-            .unwrap_or_else(|_| unknown_equivalence_content(path, Some(&before)));
+        let content = hash_equivalence_artifact_contents_with_progress(path, |done, total| {
+            progress
+                .as_mut()
+                .map_or(Ok(()), |callback| callback(done, total))
+        })
+        .unwrap_or_else(|_| unknown_equivalence_content(path, Some(&before)));
         let format = match mold_inference::artifact_format::probe(path) {
             Ok(format) => ArtifactFormatFact::Known(format),
             Err(error) => ArtifactFormatFact::ProbeFailure(error),
@@ -4309,37 +4354,22 @@ fn artifact_facts_path_with_policy(path: &Path, cache_only: bool) -> ArtifactFac
     owner.finish(published, stable, before)
 }
 
+#[cfg(test)]
 fn hash_equivalence_artifact_contents(path: &Path) -> std::io::Result<EquivalenceContentIdentity> {
-    // Pull completion writes this marker only after hashing the complete
-    // artifact, and model discovery already treats it as the installed-byte
-    // authority. Reusing it keeps an authoritative placement preview from
-    // synchronously rereading tens of gigabytes before the job can queue.
-    if let Some(digest) = verified_sha256_marker_digest(path) {
-        return Ok(EquivalenceContentIdentity::Sha256(digest));
-    }
-    let mut file = std::fs::File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
-    }
-    Ok(EquivalenceContentIdentity::Sha256(format!(
-        "{:x}",
-        hash.finalize()
-    )))
+    hash_equivalence_artifact_contents_with_progress(path, |_, _| Ok(()))
+        .map_err(std::io::Error::other)
 }
 
-fn verified_sha256_marker_digest(path: &Path) -> Option<String> {
-    // The marker's first line is the digest; a second `len=` line (added so
-    // `Config::file_is_complete` can tell a marker that still describes the
-    // file from a stale one) is read and discarded by the shared helper.
-    let digest = mold_core::download::recorded_sha256_marker(path)?;
-    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| digest.to_ascii_lowercase())
+fn hash_equivalence_artifact_contents_with_progress(
+    path: &Path,
+    progress: impl FnMut(u64, u64) -> anyhow::Result<()>,
+) -> anyhow::Result<EquivalenceContentIdentity> {
+    // Use the retained-descriptor verifier shared with downloads. It refuses
+    // symlinks and path replacement, single-flights concurrent callers, and
+    // persists an owner-private identity-bound attestation so an unchanged
+    // legacy artifact is read only once across process restarts.
+    mold_core::download::pinned_file_digest_with_progress(path, progress)
+        .map(EquivalenceContentIdentity::Sha256)
 }
 
 fn unknown_equivalence_content(
@@ -6996,17 +7026,19 @@ mod tests {
     }
 
     #[test]
-    fn verified_digest_marker_is_the_artifact_content_identity() {
+    fn legacy_verified_digest_marker_cannot_override_current_artifact_bytes() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("weights.safetensors");
         std::fs::write(&path, b"already verified model bytes").unwrap();
-        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        mold_core::download::write_sha256_marker(&path, digest).unwrap();
+        let forged = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        mold_core::download::write_sha256_marker(&path, forged).unwrap();
+        let file = mold_core::secure_file::open_regular_file_no_follow(&path).unwrap();
+        let expected = mold_core::secure_file::sha256_open_file(&file).unwrap();
 
         assert_eq!(
             hash_equivalence_artifact_contents(&path).unwrap(),
-            EquivalenceContentIdentity::Sha256(digest.to_string()),
-            "placement preparation should trust the digest attested by the download verifier"
+            EquivalenceContentIdentity::Sha256(expected),
+            "placement preparation must authenticate current bytes through the durable pinned-digest authority"
         );
     }
 
@@ -7360,7 +7392,14 @@ mod tests {
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_admission_by_device: BTreeMap::new(),
         };
-        warm_execution_equivalence_cache(&config, &request, &prepared);
+        let progress = crate::variant_dependencies::PreparationProgressSink::default();
+        warm_execution_equivalence_cache(&config, &request, &prepared, Some(&progress));
+        let progress = progress
+            .snapshot()
+            .expect("warm pass reports its byte progress");
+        assert_eq!(progress.component, "Verifying model files");
+        assert!(progress.bytes_total > 0);
+        assert_eq!(progress.bytes_done, progress.bytes_total);
 
         let reads = Arc::new(AtomicUsize::new(0));
         let _guards = concrete_artifacts_for_family(

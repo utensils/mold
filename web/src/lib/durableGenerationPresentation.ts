@@ -52,7 +52,7 @@ export function applyDurablePresentation(
       return;
     case "running":
       // A retry can move a held child straight to running; the hold is over.
-      job.progress.stage = p.label;
+      if (!job.workStarted || !job.progress.stage) job.progress.stage = p.label;
       job.workStarted = true;
       job.progress.queuePosition = null;
       clearHold(job);

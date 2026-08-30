@@ -8,13 +8,17 @@ export function queuePlanOnlyWork(
 ): QueueWorkItem[] {
   const excluded = new Set(excludeIds);
   return [...(plan?.work_items ?? [])]
-    .filter(
-      (item) =>
+    .filter((item) => {
+      const rawReason = item.blocked_reason ?? item.reason;
+      const reason = normalizeBlockedReason(rawReason);
+      const preparing = rawReason === "preparing";
+      return (
         !excluded.has(item.work_id) &&
         !excluded.has(item.parent_id) &&
-        item.activity_phase !== "blocked" &&
-        normalizeBlockedReason(item.blocked_reason ?? item.reason) === null,
-    )
+        (item.activity_phase !== "blocked" || preparing) &&
+        (reason === null || preparing)
+      );
+    })
     .sort(
       (a, b) =>
         a.queue_rank - b.queue_rank ||

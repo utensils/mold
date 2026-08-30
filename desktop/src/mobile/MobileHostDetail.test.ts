@@ -256,6 +256,87 @@ afterEach(() => {
 });
 
 describe("MobileHostDetail remote host data", () => {
+  it("shows dependency preparation component and progress on a queued row", async () => {
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path === "/api/queue?limit=8") {
+        return Promise.resolve({
+          entries: [queueEntries[1]],
+          plan: {
+            plan_version: 1,
+            state_version: 1,
+            optimizer_state: "settled",
+            dirty_since_unix_ms: null,
+            next_replan_at_unix_ms: null,
+            work_items: [
+              {
+                work_id: "job-queued",
+                parent_id: "job-queued",
+                work_kind: "generation",
+                priority_class: "user",
+                queue_rank: 0,
+                bypass_count: 0,
+                estimate_confidence: "low",
+                blocked_reason: "preparing",
+                preparation_progress: {
+                  component: "Verifying model files",
+                  bytes_done: 27,
+                  bytes_total: 100,
+                },
+              },
+            ],
+          },
+        });
+      }
+      return originalApi(target, path);
+    });
+
+    const view = await mountDetail();
+
+    expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).toContain(
+      "PREPARING · VERIFYING MODEL FILES 27%",
+    );
+  });
+
+  it("shows the host's runtime loading stage on a running queue row", async () => {
+    const running = { ...queueEntries[1]!, state: "running" };
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path === "/api/queue?limit=8") {
+        return Promise.resolve({
+          entries: [running],
+          plan: {
+            plan_version: 1,
+            state_version: 1,
+            optimizer_state: "settled",
+            dirty_since_unix_ms: null,
+            next_replan_at_unix_ms: null,
+            work_items: [
+              {
+                work_id: running.id,
+                parent_id: running.id,
+                work_kind: "generation",
+                priority_class: "user",
+                queue_rank: 0,
+                bypass_count: 0,
+                estimate_confidence: "low",
+                activity_phase: "active",
+                runtime_phase: "loading",
+                runtime_stage: "Loading Flux.2 transformer",
+              },
+            ],
+          },
+        });
+      }
+      return originalApi(target, path);
+    });
+
+    const view = await mountDetail();
+    const row = view.get("[data-test='host-detail-queue-row-job-queued']");
+    expect(row.text()).toContain("LOADING FLUX.2 TRANSFORMER");
+    expect(row.text()).not.toContain("NEXT UP");
+  });
+
   it("renders server information without waiting for model inventory", async () => {
     const pendingModels = deferred<ModelEntry[]>();
     const originalApi = apiJsonTo.getMockImplementation()!;

@@ -265,15 +265,25 @@ fn format_work_item(item: &QueueWorkItem) -> String {
         .estimated_finish_unix_ms
         .map(|finish| format!(" finish={finish}"))
         .unwrap_or_default();
+    let preparation = item
+        .preparation_label()
+        .map(|label| format!(" preparation={label}"))
+        .unwrap_or_default();
+    let runtime = item
+        .runtime_label()
+        .map(|label| format!(" stage={label}"))
+        .unwrap_or_default();
     format!(
-        "{} {} phase={} lane={} confidence={}{}{}",
+        "{} {} phase={} lane={} confidence={}{}{}{}{}",
         item.work_id,
         item.work_kind,
-        item.activity_phase,
+        item.presentation_phase(),
         lane,
         item.estimate_confidence,
         blocked,
-        eta
+        eta,
+        preparation,
+        runtime
     )
 }
 
@@ -332,6 +342,25 @@ mod tests {
         let formatted = format_work_item(&item);
         assert!(formatted.contains("host-utility/1"));
         assert!(!formatted.contains("cpu:utility:0"));
+    }
+
+    #[test]
+    fn preparation_formats_as_active_work_with_component_progress() {
+        let formatted = format_work_item(&QueueWorkItem {
+            work_id: "print-1".into(),
+            activity_phase: mold_core::QueueActivityPhase::Blocked,
+            blocked_reason: Some(mold_core::QueueBlockedReason::Preparing),
+            preparation_progress: Some(mold_core::QueuePreparationProgress {
+                component: "Verifying model files".into(),
+                bytes_done: 27,
+                bytes_total: 100,
+                phase_elapsed_ms: Some(10),
+            }),
+            ..Default::default()
+        });
+
+        assert!(formatted.contains("phase=preparing"));
+        assert!(formatted.contains("preparation=Verifying model files 27%"));
     }
 
     #[test]

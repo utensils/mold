@@ -312,10 +312,18 @@ fn append_queue_plan_status_lines(lines: &mut Vec<String>, queue: &mold_core::Qu
                 .clone()
                 .unwrap_or_else(|| "unassigned".into()),
         };
+        let preparation = item
+            .preparation_label()
+            .map(|label| format!(" preparation={label}"))
+            .unwrap_or_default();
+        let runtime = item
+            .runtime_label()
+            .map(|label| format!(" stage={label}"))
+            .unwrap_or_default();
         lines.push(format!(
-            "work {}: phase={} lane={}/{} blocked={} finish={} confidence={}",
+            "work {}: phase={} lane={}/{} blocked={} finish={} confidence={}{}{}",
             item.work_id,
-            item.activity_phase,
+            item.presentation_phase(),
             lane,
             item.lane_order
                 .map(|value| value.to_string())
@@ -328,6 +336,8 @@ fn append_queue_plan_status_lines(lines: &mut Vec<String>, queue: &mold_core::Qu
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".into()),
             item.estimate_confidence,
+            preparation,
+            runtime,
         ));
     }
 }

@@ -17,7 +17,13 @@ import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
 import type { QueuePlan } from "@studio/api/queuePlan";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
-import { queueWaitLabel, resolveQueueWait } from "@studio/lib/queuePosition";
+import {
+  buildQueueStatusIndex,
+  queueRuntimeLabel,
+  queueStatusFor,
+  queueWaitLabel,
+  resolveQueueWait,
+} from "@studio/lib/queuePosition";
 import { compareNewestQueueEntry } from "@studio/lib/activityOrder";
 
 const props = withDefaults(
@@ -81,6 +87,16 @@ const visibleWorkCount = computed(
   () =>
     props.entries.length + queuePlanOnlyWork(props.plan, entryIds.value).length,
 );
+const queueStatus = computed(() =>
+  buildQueueStatusIndex([
+    {
+      hostId: "host",
+      entries: props.entries,
+      plan: props.plan,
+      paused: props.paused,
+    },
+  ]),
+);
 
 function laneValue(entry: QueueEntry): string {
   const lane = entry.target_gpu ?? null;
@@ -88,13 +104,16 @@ function laneValue(entry: QueueEntry): string {
 }
 
 function entryStateLabel(entry: QueueEntry): string {
+  if (entry.state === "running") {
+    return queueRuntimeLabel(props.plan, entry.id) ?? "Running";
+  }
   return queueWaitLabel(
-    resolveQueueWait({
-      state: entry.state,
-      position: entry.position,
-      blockedReason:
-        props.paused && entry.state === "queued" ? "queue_paused" : null,
-    }),
+    resolveQueueWait(
+      queueStatusFor(queueStatus.value, "host", entry.id) ?? {
+        state: entry.state,
+        position: entry.position,
+      },
+    ),
   );
 }
 

@@ -17,6 +17,7 @@ import { useToastStore } from "../stores/toasts";
 import { useDownloadsStore } from "../stores/downloads";
 import { useUiStore } from "../stores/ui";
 import { useAppPrefsStore } from "../stores/appPrefs";
+import { useJobsStore } from "../stores/jobs";
 import { useComposerStore } from "../stores/composer";
 import { expandPrompt } from "../lib/api/expand";
 import { remixPrompt } from "../lib/api/remix";
@@ -256,6 +257,73 @@ describe("GenerateView prepared expansion batches", () => {
       "data:image/png;base64,UFJFVklFVw==",
     );
     expect(wrapper.get('[data-test="generation-live-status"]').text()).toBe("Developing 8/20");
+  });
+
+  it("shows active dependency preparation instead of plain Queued", async () => {
+    const generation = useGenerationStore();
+    const queued = newJob({
+      model: model.name,
+      prompt: "queue lighthouse",
+      width: 1024,
+      height: 1024,
+      steps: 20,
+    });
+    Object.assign(queued, {
+      clientId: 1,
+      batchId: 1,
+      id: "preparing-print",
+      hostId: "local",
+      hostLabel: "This device",
+    });
+    generation.jobs.push(queued);
+    generation.selectedClientId = queued.clientId;
+    useJobsStore().queues.local = {
+      hostId: "local",
+      entries: [
+        {
+          id: queued.id,
+          model: queued.model,
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 0,
+        },
+      ],
+      paused: false,
+      error: null,
+      caps: null,
+      gpuOrdinals: [0],
+      plan: {
+        plan_version: 1,
+        state_version: 1,
+        optimizer_state: "settled",
+        dirty_since_unix_ms: null,
+        next_replan_at_unix_ms: null,
+        work_items: [
+          {
+            work_id: queued.id,
+            parent_id: queued.id,
+            work_kind: "generation",
+            priority_class: "user",
+            queue_rank: 0,
+            bypass_count: 0,
+            estimate_confidence: "low",
+            blocked_reason: "preparing",
+            preparation_progress: {
+              component: "Verifying model files",
+              bytes_done: 27,
+              bytes_total: 100,
+            },
+          },
+        ],
+      },
+    };
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="generation-live-status"]').text()).toBe(
+      "Preparing · Verifying model files 27%",
+    );
   });
 
   it("expands in Auto when model owners differ only by patch version", async () => {

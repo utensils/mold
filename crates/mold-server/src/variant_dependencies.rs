@@ -1716,11 +1716,13 @@ pub(crate) async fn prepare_inputs_for_devices(
     let warm_config = config.clone();
     let warm_request = request.clone();
     let warm_prepared = prepared.clone();
+    let warm_progress = context.preparation_progress.clone();
     tokio::task::spawn_blocking(move || {
         crate::execution_plan::warm_execution_equivalence_cache(
             &warm_config,
             &warm_request,
             &warm_prepared,
+            warm_progress.as_ref(),
         );
     })
     .await
@@ -2530,11 +2532,63 @@ pub struct PreparationProgressState {
 
 /// What a running dependency preparation is currently working through.
 ///
-/// A shared cell rather than a channel: the scheduler reads the LATEST value
-/// when it projects the queue, and a pass that emits a progress event per
-/// megabyte of a ~37 GB artifact set must not queue thirty-seven thousand
-/// messages nobody is going to read.
-pub type PreparationProgressSink = Arc<std::sync::Mutex<Option<PreparationProgressState>>>;
+/// The latest observation stays in one shared cell. A throttled callback only
+/// wakes the scheduler when enough time passed (or the component changed), so
+/// a multi-gigabyte artifact does not turn one-megabyte reads into an unbounded
+/// queue of plan events.
+pub struct PreparationProgressCell {
+    latest: std::sync::Mutex<Option<PreparationProgressState>>,
+    notifier: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    last_notification_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Default for PreparationProgressCell {
+    fn default() -> Self {
+        Self {
+            latest: Default::default(),
+            notifier: Default::default(),
+            last_notification_ms: std::sync::atomic::AtomicU64::new(u64::MAX),
+        }
+    }
+}
+
+impl std::fmt::Debug for PreparationProgressCell {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparationProgressCell")
+            .field("latest", &self.snapshot())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparationProgressCell {
+    pub(crate) fn clear(&self) {
+        *self
+            .latest
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.last_notification_ms
+            .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> Option<PreparationProgressState> {
+        self.latest
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn set_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .notifier
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(notifier);
+    }
+}
+
+pub type PreparationProgressSink = Arc<PreparationProgressCell>;
+
+const PREPARATION_PROGRESS_NOTIFY_INTERVAL_MS: u64 = 250;
 
 /// Advance the published observation, keeping a phase's own start time.
 ///
@@ -2569,14 +2623,50 @@ pub(crate) fn publish_preparation_progress(
     bytes_total: u64,
 ) {
     let Some(sink) = sink else { return };
-    let mut slot = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    *slot = Some(advance_preparation_progress(
-        slot.take(),
-        component,
-        bytes_done,
-        bytes_total,
-        crate::scheduler::monotonic_ms(),
-    ));
+    let now_ms = crate::scheduler::monotonic_ms();
+    let should_notify = {
+        let mut slot = sink
+            .latest
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.as_ref().is_some_and(|current| {
+            current.component == component
+                && current.bytes_done == bytes_done
+                && current.bytes_total == bytes_total
+        }) {
+            return;
+        }
+        let component_changed = slot
+            .as_ref()
+            .is_none_or(|current| current.component != component);
+        *slot = Some(advance_preparation_progress(
+            slot.take(),
+            component,
+            bytes_done,
+            bytes_total,
+            now_ms,
+        ));
+        let previous = sink
+            .last_notification_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        component_changed
+            || (bytes_total > 0 && bytes_done >= bytes_total)
+            || previous == u64::MAX
+            || now_ms.saturating_sub(previous) >= PREPARATION_PROGRESS_NOTIFY_INTERVAL_MS
+    };
+    if !should_notify {
+        return;
+    }
+    sink.last_notification_ms
+        .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+    let notify = sink
+        .notifier
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(notify) = notify {
+        notify();
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2747,6 +2837,35 @@ mod tests {
         assert_eq!(
             next_phase.started_ms, 9_500,
             "a new phase must not inherit the previous phase's age"
+        );
+    }
+
+    #[test]
+    fn preparation_progress_notifies_on_open_component_change_and_completion() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let sink = PreparationProgressSink::default();
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&notifications);
+        sink.set_notifier(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        publish_preparation_progress(Some(&sink), "Verifying model files", 0, 100);
+        publish_preparation_progress(Some(&sink), "Verifying model files", 1, 100);
+        assert_eq!(
+            notifications.load(Ordering::SeqCst),
+            1,
+            "byte-level updates inside the throttle window must coalesce"
+        );
+
+        publish_preparation_progress(Some(&sink), "Loading references", 0, 10);
+        publish_preparation_progress(Some(&sink), "Loading references", 10, 10);
+        assert_eq!(notifications.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            sink.snapshot()
+                .map(|state| (state.component, state.bytes_done)),
+            Some(("Loading references".to_string(), 10))
         );
     }
 

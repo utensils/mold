@@ -702,7 +702,12 @@ fn short_device_id(id: &str) -> String {
 }
 
 fn queue_plan_detail(work: &mold_core::QueueWorkItem) -> String {
-    let mut parts = vec![work.activity_phase.to_string().replace('_', " ")];
+    let mut parts = vec![work.presentation_phase().replace('_', " ")];
+    if let Some(label) = work.preparation_label() {
+        parts.push(label);
+    } else if let Some(label) = work.runtime_label() {
+        parts.push(label.to_string());
+    }
     let order = work
         .lane_order
         .map(|order| order.to_string())
@@ -1239,6 +1244,24 @@ mod tests {
         });
         assert!(detail.contains("host utility lane 0"));
         assert!(!detail.contains("internal-id-must-not-render"));
+    }
+
+    #[test]
+    fn queue_plan_detail_surfaces_dependency_preparation_progress() {
+        let detail = queue_plan_detail(&mold_core::QueueWorkItem {
+            activity_phase: mold_core::QueueActivityPhase::Blocked,
+            blocked_reason: Some(mold_core::QueueBlockedReason::Preparing),
+            preparation_progress: Some(mold_core::QueuePreparationProgress {
+                component: "Verifying model files".into(),
+                bytes_done: 27,
+                bytes_total: 100,
+                phase_elapsed_ms: Some(10),
+            }),
+            ..Default::default()
+        });
+
+        assert!(detail.starts_with("preparing · Verifying model files 27%"));
+        assert!(!detail.starts_with("blocked"));
     }
 
     #[test]

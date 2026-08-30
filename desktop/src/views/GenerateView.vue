@@ -42,6 +42,13 @@ import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { useLiveActivityStore } from "../stores/liveActivity";
+import { useJobsStore } from "../stores/jobs";
+import {
+  buildQueueStatusIndex,
+  queueStatusFor,
+  queueWaitLabel,
+  resolveQueueWait,
+} from "@studio/lib/queuePosition";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { attachPickedImage } from "../lib/sourceAttachment";
 import {
@@ -275,6 +282,7 @@ const downloads = useDownloadsStore();
 const pullResume = usePullResumeStore();
 const licenseAcceptance = useLicenseAcceptance();
 const liveActivity = useLiveActivityStore();
+const jobsStore = useJobsStore();
 
 function placementFailureMessage(result: Exclude<FeasibleRouteResult, { kind: "route" }>): string {
   if (result.kind === "profile_mismatch") {
@@ -2203,6 +2211,17 @@ const selectedQueuePreviewSrc = computed(() =>
     : null,
 );
 
+const queueStatus = computed(() =>
+  buildQueueStatusIndex(
+    Object.values(jobsStore.queues).map((snapshot) => ({
+      hostId: snapshot.hostId,
+      entries: snapshot.entries,
+      plan: snapshot.plan,
+      paused: snapshot.paused,
+    })),
+  ),
+);
+
 const liveGenerationStatus = computed(() => {
   const selected = selectedQueueRender.value;
   if (selected) {
@@ -2214,7 +2233,11 @@ const liveGenerationStatus = computed(() => {
   }
   const j = job.value;
   if (!j || j.status === "complete" || j.status === "error") return "";
-  if (j.status === "queued") return "Queued";
+  if (j.status === "queued") {
+    return queueWaitLabel(
+      resolveQueueWait(queueStatusFor(queueStatus.value, j.hostId ?? hosts.primaryHost?.id, j.id)),
+    );
+  }
   if (j.status === "loading") return `${j.stage ?? "Preparing"}…`;
   const copy = jobProgressCopy(j);
   return j.status === "finishing" ? `${copy}…` : copy;

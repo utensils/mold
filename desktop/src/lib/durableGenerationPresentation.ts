@@ -54,8 +54,9 @@ export function applyDurablePresentation(job: Job, p: GenerationChildPresentatio
       return;
     case "running":
       // A retry can move a held child straight to running; the hold is over.
+      const alreadyRunning = job.status === "loading";
       job.status = "loading";
-      job.stage = p.label;
+      if (!alreadyRunning || !job.stage) job.stage = p.label;
       clearHold(job);
       return;
     case "complete":

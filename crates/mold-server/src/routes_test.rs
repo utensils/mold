@@ -3417,14 +3417,93 @@ mod tests {
             .await
             .unwrap();
         state.job_registry.register("queued-a", "flux-dev:q4");
+        state
+            .job_registry
+            .register("preparing-d", "flux2-klein-9b:bf16");
+        state
+            .job_registry
+            .register("batch-child", "flux2-klein-9b:bf16");
         state.job_registry.register("running-b", "sdxl:q8");
         state.job_registry.mark_running("running-b", Some(1));
+        state.job_registry.record_progress(
+            "running-b",
+            &mold_core::types::SseProgressEvent::StageStart {
+                name: "Loading Flux.2 transformer".into(),
+            },
+        );
+        state.job_registry.register("denoising-e", "sdxl:q8");
+        state.job_registry.mark_running("denoising-e", Some(0));
+        state.job_registry.record_progress(
+            "denoising-e",
+            &mold_core::types::SseProgressEvent::DenoiseStep {
+                step: 2,
+                total: 4,
+                elapsed_ms: 1_000,
+            },
+        );
         state.scheduled_work.set_queue_work_items_for_tests(vec![
             mold_core::QueueWorkItem {
-                work_id: "running-b:child".into(),
+                work_id: "queued-a".into(),
+                parent_id: "queued-a".into(),
+                work_kind: "generation".into(),
+                activity_phase: mold_core::QueueActivityPhase::Queued,
+                ..Default::default()
+            },
+            mold_core::QueueWorkItem {
+                work_id: "preparing-d".into(),
+                parent_id: "preparing-d".into(),
+                work_kind: "generation".into(),
+                blocked_reason: Some(mold_core::QueueBlockedReason::Preparing),
+                preparation_progress: Some(mold_core::QueuePreparationProgress {
+                    component: "Verifying model files".into(),
+                    bytes_done: 27,
+                    bytes_total: 100,
+                    phase_elapsed_ms: Some(4_200),
+                }),
+                activity_phase: mold_core::QueueActivityPhase::Blocked,
+                ..Default::default()
+            },
+            mold_core::QueueWorkItem {
+                work_id: "batch-child".into(),
+                parent_id: "batch-parent".into(),
+                work_kind: "prepared_sibling".into(),
+                blocked_reason: Some(mold_core::QueueBlockedReason::Preparing),
+                preparation_progress: Some(mold_core::QueuePreparationProgress {
+                    component: "Loading reference images".into(),
+                    bytes_done: 41,
+                    bytes_total: 100,
+                    phase_elapsed_ms: Some(900),
+                }),
+                activity_phase: mold_core::QueueActivityPhase::Blocked,
+                ..Default::default()
+            },
+            mold_core::QueueWorkItem {
+                work_id: "running-b".into(),
                 parent_id: "running-b".into(),
                 work_kind: "generation".into(),
-                activity_phase: mold_core::QueueActivityPhase::Dispatching,
+                activity_phase: mold_core::QueueActivityPhase::Active,
+                ..Default::default()
+            },
+            mold_core::QueueWorkItem {
+                work_id: "denoising-e".into(),
+                parent_id: "denoising-e".into(),
+                work_kind: "generation".into(),
+                activity_phase: mold_core::QueueActivityPhase::Active,
+                ..Default::default()
+            },
+            mold_core::QueueWorkItem {
+                work_id: "sequence-c:stage:0".into(),
+                parent_id: "sequence-c".into(),
+                work_kind: "chain_stage".into(),
+                chain_stage: Some(0),
+                activity_phase: mold_core::QueueActivityPhase::Active,
+                ..Default::default()
+            },
+            mold_core::QueueWorkItem {
+                work_id: "upscale-f".into(),
+                parent_id: "upscale-f".into(),
+                work_kind: "standalone_upscale".into(),
+                activity_phase: mold_core::QueueActivityPhase::Active,
                 ..Default::default()
             },
             mold_core::QueueWorkItem {
@@ -3454,17 +3533,35 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         let items = body["items"].as_array().unwrap();
-        assert_eq!(items.len(), 5);
+        assert_eq!(items.len(), 9);
         let item = |id: &str| items.iter().find(|item| item["id"] == id).unwrap();
         assert_eq!(item("queued-a")["kind"], "generation");
         assert_eq!(item("queued-a")["phase"], "queued");
         assert_eq!(item("queued-a")["can_cancel"], true);
         assert_eq!(item("running-b")["phase"], "loading");
+        assert_eq!(item("running-b")["stage"], "Loading Flux.2 transformer");
         assert_eq!(item("running-b")["can_cancel"], true);
+        assert_eq!(item("denoising-e")["phase"], "running");
+        assert_eq!(item("denoising-e")["current"], 2);
+        assert_eq!(item("denoising-e")["total"], 4);
+        assert_eq!(item("preparing-d")["phase"], "preparing");
+        assert_eq!(
+            item("preparing-d")["preparation_progress"]["component"],
+            "Verifying model files"
+        );
+        assert_eq!(item("preparing-d")["current"], 27);
+        assert_eq!(item("preparing-d")["total"], 100);
+        assert_eq!(item("batch-child")["phase"], "preparing");
+        assert_eq!(item("batch-child")["current"], 41);
+        assert_eq!(item("batch-child")["total"], 100);
         assert_eq!(item("expand-parent")["kind"], "prompt_expand");
         assert_eq!(item("expand-parent")["phase"], "running");
         assert_eq!(item("sequence-c")["kind"], "sequence");
         assert_eq!(item("sequence-c")["phase"], "running");
+        assert!(item("sequence-c").get("stage").is_none());
+        assert_eq!(item("upscale-f")["kind"], "standalone_upscale");
+        assert_eq!(item("upscale-f")["phase"], "running");
+        assert!(item("upscale-f").get("stage").is_none());
         assert!(
             items.iter().all(|item| item["id"] != "one-shot-chain"),
             "an auto-chained one-shot is represented by its generation row, not a second sequence"
@@ -3473,6 +3570,23 @@ mod tests {
         assert_eq!(item(&download_id)["phase"], "queued");
         assert_eq!(body["instance_id"], instance_id);
         assert!(body["observed_at_unix_ms"].as_u64().unwrap() > 0);
+
+        let queue_body = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/queue/running-b")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(queue_body["work_item"]["runtime_phase"], "loading");
+        assert_eq!(
+            queue_body["work_item"]["runtime_stage"],
+            "Loading Flux.2 transformer"
+        );
 
         registry.remove("queued-a");
         registry.remove("running-b");

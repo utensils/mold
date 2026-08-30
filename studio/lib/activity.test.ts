@@ -386,6 +386,13 @@ describe("withLiveQueueStatus", () => {
       hostId: "local",
       entries: [
         {
+          id: "srv-prep",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 2,
+          position: 1,
+        },
+        {
           id: "srv-run",
           model: "m",
           state: "running",
@@ -414,6 +421,22 @@ describe("withLiveQueueStatus", () => {
         dirty_since_unix_ms: null,
         next_replan_at_unix_ms: null,
         work_items: [
+          {
+            work_id: "w-prep",
+            parent_id: "srv-prep",
+            work_kind: "generation",
+            priority_class: "normal",
+            queue_rank: 2,
+            bypass_count: 0,
+            estimate_confidence: "low",
+            blocked_reason: "preparing",
+            preparation_elapsed_ms: 4_200,
+            preparation_progress: {
+              component: "Verifying model files",
+              bytes_done: 27,
+              bytes_total: 100,
+            },
+          },
           {
             work_id: "w3",
             parent_id: "srv-3",
@@ -477,6 +500,20 @@ describe("withLiveQueueStatus", () => {
     const vm = withLiveQueueStatus(print() as PrintActivityVM, index, "srv-3");
     expect(vm.blockedReason).toBe("insufficient_host_ram");
     expect(queueStatusLabel(vm)).toBe("Waiting for memory");
+  });
+
+  it("carries live preparation detail into the shared activity label", () => {
+    const vm = withLiveQueueStatus(
+      print() as PrintActivityVM,
+      index,
+      "srv-prep",
+    );
+    expect(vm.preparation).toEqual({
+      component: "Verifying model files",
+      fraction: 0.27,
+      elapsedMs: 4_200,
+    });
+    expect(queueStatusLabel(vm)).toBe("Preparing · Verifying model files 27%");
   });
 
   it("names the job at the head of the queue", () => {

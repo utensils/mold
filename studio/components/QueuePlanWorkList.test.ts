@@ -71,4 +71,18 @@ describe("QueuePlanWorkList", () => {
       false,
     );
   });
+
+  it("shows live preparation detail for plan-only work", () => {
+    const preparing = plan();
+    preparing.work_items[0]!.activity_phase = "blocked";
+    preparing.work_items[0]!.blocked_reason = "preparing";
+    preparing.work_items[0]!.preparation_progress = {
+      component: "Verifying model files",
+      bytes_done: 27,
+      bytes_total: 100,
+    };
+    const wrapper = mount(QueuePlanWorkList, { props: { plan: preparing } });
+
+    expect(wrapper.text()).toContain("Preparing · Verifying model files 27%");
+  });
 });
