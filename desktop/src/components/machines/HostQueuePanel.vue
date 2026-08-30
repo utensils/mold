@@ -63,6 +63,7 @@ const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const jobs = useJobsStore();
 const cancellingIds = ref<string[]>([]);
+const retryingIds = ref<string[]>([]);
 const composer = useComposerStore();
 const toasts = useToastStore();
 const contextMenu = useContextMenuStore();
@@ -79,7 +80,13 @@ const caps = computed(() => snapshot.value?.caps ?? null);
 const lanes = computed(() => {
   const snap = snapshot.value;
   const entries = snap
-    ? enrichQueueEntries(snap.entries, props.host.id, generation.jobs, primaryId.value)
+    ? enrichQueueEntries(
+        snap.entries,
+        props.host.id,
+        generation.jobs,
+        primaryId.value,
+        (clientBatchId) => generation.ownsDurableBatch(clientBatchId),
+      )
     : [];
   return computeQueueLanes(entries, snap?.gpuOrdinals ?? []);
 });
@@ -158,16 +165,43 @@ function onLaneDrop(laneKey: LaneKey) {
   }
 }
 
-/** Accessible non-drag fallback: right-click → Move to GPU N. */
+/** Queue actions live on every row. GPU reassignment is appended when the
+ * selected queued row has real device lanes. */
 function openEntryMenu(entry: EnrichedQueueEntry, event: MouseEvent) {
   const ordinals = laneOrdinals();
-  if (entry.state !== "queued" || ordinals.length === 0) return;
-  const current = laneForEntry(entry);
-  const items: MenuEntry[] = ordinals.map((ordinal) => ({
-    label: `Move to GPU ${ordinal}`,
-    disabled: ordinal === current,
-    action: () => void jobs.reassignGpu(props.host.id, entry.id, ordinal),
-  }));
+  const items: MenuEntry[] = [
+    { label: "Show details", action: () => void openQueueDetail(entry) },
+    { label: "Reuse settings", action: () => void reuseEntry(entry) },
+    { separator: true },
+  ];
+  if (caps.value?.canPause || resumeNeeded.value) {
+    items.push({
+      label: resumeNeeded.value ? "Resume queue" : "Pause queue",
+      action: () => void togglePause(),
+    });
+  }
+  if (entry.state === "held" && entry.retryable === true) {
+    items.push({ label: "Retry job", action: () => void retryFromMenu(entry) });
+  }
+  items.push({
+    label: entry.state === "running" ? "Stop job" : "Cancel job",
+    danger: true,
+    disabled: entry.state === "running" && caps.value?.canCancelRunning !== true,
+    action: () => {
+      confirmCancel.value = entry;
+    },
+  });
+  if (entry.state === "queued" && ordinals.length > 0) {
+    const current = laneForEntry(entry);
+    items.push(
+      { separator: true },
+      ...ordinals.map((ordinal) => ({
+        label: `Move to GPU ${ordinal}`,
+        disabled: ordinal === current,
+        action: () => void jobs.reassignGpu(props.host.id, entry.id, ordinal),
+      })),
+    );
+  }
   contextMenu.open(event, items);
 }
 
@@ -230,6 +264,7 @@ async function togglePause() {
 // ── Row info drawer (everything the host says about one queued job) ───────
 const queueDetail = ref<EnrichedQueueEntry | null>(null);
 const detailError = ref<string | null>(null);
+let detailRequestVersion = 0;
 const detailPreview = ref<QueueJobProgress | null>(null);
 const detailNowMs = ref(Date.now());
 let stopPreview: (() => void) | null = null;
@@ -242,11 +277,73 @@ watch(flatEntries, (entries) => {
   const open = queueDetail.value;
   if (!open) return;
   const updated = entries.find((entry) => entry.id === open.id);
-  queueDetail.value = updated ?? null;
+  queueDetail.value = updated
+    ? {
+        ...open,
+        ...updated,
+        // Hot queue polling is intentionally payload-free. Once an explicit
+        // row read hydrates settings, keep them while merging live state.
+        ...(updated.metadata !== undefined
+          ? { metadata: updated.metadata }
+          : open.metadata !== undefined
+            ? { metadata: open.metadata }
+            : {}),
+        ...(updated.batch_id !== undefined
+          ? { batch_id: updated.batch_id }
+          : open.batch_id !== undefined
+            ? { batch_id: open.batch_id }
+            : {}),
+        ...(updated.client_batch_id !== undefined
+          ? { client_batch_id: updated.client_batch_id }
+          : open.client_batch_id !== undefined
+            ? { client_batch_id: open.client_batch_id }
+            : {}),
+        ...(updated.batch_index !== undefined
+          ? { batch_index: updated.batch_index }
+          : open.batch_index !== undefined
+            ? { batch_index: open.batch_index }
+            : {}),
+      }
+    : null;
 });
 
 function closeDetail(): void {
+  detailRequestVersion += 1;
   queueDetail.value = null;
+}
+
+async function hydratedEntry(entry: EnrichedQueueEntry): Promise<EnrichedQueueEntry> {
+  try {
+    const job = await jobs.queueJob(props.host.id, entry.id);
+    return {
+      ...entry,
+      ...job,
+      mine: entry.mine || generation.ownsDurableBatch(job.client_batch_id),
+    };
+  } catch (error) {
+    // Older hosts have no single-job detail route. A row already owned by
+    // this app still has its request and retry authority in local recovery.
+    if (ownJob(entry)) return entry;
+    throw error;
+  }
+}
+
+async function openQueueDetail(entry: EnrichedQueueEntry): Promise<void> {
+  const requestVersion = ++detailRequestVersion;
+  detailError.value = null;
+  // Open synchronously so keyboard/click activation preserves the existing
+  // desktop interaction even while the authoritative row is fetched.
+  queueDetail.value = entry;
+  try {
+    const hydrated = await hydratedEntry(entry);
+    if (requestVersion === detailRequestVersion && queueDetail.value?.id === entry.id) {
+      queueDetail.value = hydrated;
+    }
+  } catch (error) {
+    if (requestVersion === detailRequestVersion && queueDetail.value?.id === entry.id) {
+      detailError.value = error instanceof Error ? error.message : String(error);
+    }
+  }
 }
 
 /** A row this app submitted carries its exact request here, which is the one
@@ -255,9 +352,17 @@ function localMetadataFor(entry: EnrichedQueueEntry): QueueDetailMetadata | null
   return (ownJob(entry)?.request as QueueDetailMetadata | undefined) ?? null;
 }
 
-/** Retry needs the durable batch authority, which lives with the client that
- *  submitted the job — the generation store owns it, keyed by clientId. */
-function retryAuthorityFor(entry: EnrichedQueueEntry): number | null {
+/** Current servers expose durable retry authority on the selected row. Keep
+ * this app's in-memory authority as a compatibility path for older listings. */
+function retryAuthorityFor(entry: EnrichedQueueEntry): unknown | null {
+  if (
+    entry.state === "held" &&
+    entry.retryable === true &&
+    entry.batch_id &&
+    entry.client_batch_id
+  ) {
+    return entry;
+  }
   const job = ownJob(entry);
   return job && job.retryable && !job.retrying ? job.clientId : null;
 }
@@ -346,6 +451,20 @@ function reuseFromDrawer(): void {
   loadQueueSettings(metadata);
 }
 
+async function reuseEntry(entry: EnrichedQueueEntry): Promise<void> {
+  try {
+    const hydrated = await hydratedEntry(entry);
+    const metadata =
+      (hydrated.metadata as OutputMetadata | null | undefined) ??
+      (localMetadataFor(hydrated) as OutputMetadata | null);
+    if (!metadata) throw new Error("The machine did not return settings for this job.");
+    queueDetail.value = hydrated;
+    loadQueueSettings(metadata);
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
 // Cancelling from the drawer is destructive and names the job, so it takes the
 // shared plain ConfirmDialog rather than the row's inline two-step.
 const confirmCancel = ref<EnrichedQueueEntry | null>(null);
@@ -372,13 +491,38 @@ async function cancelConfirmed(): Promise<void> {
 async function retryFromDrawer(): Promise<void> {
   const entry = queueDetail.value;
   if (!entry) return;
-  const clientId = retryAuthorityFor(entry);
-  if (clientId === null) return;
   detailError.value = null;
   try {
-    await generation.retryHeld(clientId);
+    await retryEntry(entry);
   } catch (error) {
     detailError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function retryEntry(entry: EnrichedQueueEntry): Promise<void> {
+  if (retryingIds.value.includes(entry.id)) return;
+  retryingIds.value = [...retryingIds.value, entry.id];
+  try {
+    const hydrated = await hydratedEntry(entry);
+    if (hydrated.batch_id && hydrated.client_batch_id) {
+      await jobs.retryJob(props.host.id, hydrated);
+    } else {
+      const clientId = ownJob(hydrated)?.clientId ?? null;
+      if (clientId === null) throw new Error("This held generation is not retryable.");
+      await generation.retryHeld(clientId);
+    }
+    toasts.push("Retry queued");
+    if (queueDetail.value?.id === entry.id) queueDetail.value = null;
+  } finally {
+    retryingIds.value = retryingIds.value.filter((id) => id !== entry.id);
+  }
+}
+
+async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
+  try {
+    await retryEntry(entry);
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
   }
 }
 </script>
@@ -447,8 +591,8 @@ async function retryFromDrawer(): Promise<void> {
             @dragstart="onDragStart(entry, $event)"
             @dragend="dragged = null"
             @contextmenu="openEntryMenu(entry, $event)"
-            @click="queueDetail = entry"
-            @keydown.enter="queueDetail = entry"
+            @click="openQueueDetail(entry)"
+            @keydown.enter="openQueueDetail(entry)"
           >
             <div
               v-if="thumbnails"
@@ -556,7 +700,7 @@ async function retryFromDrawer(): Promise<void> {
       :model="queueDetailModel"
       :preview="detailPreview"
       :cancelling="queueDetail ? cancellingIds.includes(queueDetail.id) : false"
-      :retrying="queueDetail ? ownJob(queueDetail)?.retrying === true : false"
+      :retrying="queueDetail ? retryingIds.includes(queueDetail.id) : false"
       :error="detailError"
       @close="closeDetail"
       @reuse="reuseFromDrawer"

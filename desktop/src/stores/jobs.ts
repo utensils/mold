@@ -1,12 +1,15 @@
 import { defineStore } from "pinia";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
 import {
+  getQueueJob,
   mergeQueueEntries,
   parseQueueListing,
   predictedCompletionUnixMs,
   queueListingPath,
   queuePageRequestForCapacity,
   type QueuePlan,
+  type QueueJobAuthority,
+  retryQueueJobRecoveringAmbiguity,
 } from "@studio/api/queuePlan";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { OutputMetadata, ServerStatus } from "../lib/api/types";
@@ -38,6 +41,14 @@ export interface QueueEntry {
   metadata?: OutputMetadata | null;
   /** Why the host parked this job. Present only for `state: "held"`. */
   held_reason?: string | null;
+  error?: string | null;
+  retryable?: boolean | null;
+  batch_id?: string | null;
+  client_batch_id?: string | null;
+  batch_index?: number | null;
+  durable?: boolean | null;
+  replayed?: boolean | null;
+  dispatch_attempts?: number | null;
 }
 
 /** Queue controls a host supports (from `GET /api/capabilities`). */
@@ -131,12 +142,17 @@ export function enrichQueueEntries(
   hostId: string,
   localJobs: Job[],
   primaryHostId: string | null,
+  ownsDurableBatch: (clientBatchId: string | null | undefined) => boolean = () => false,
 ): EnrichedQueueEntry[] {
   return entries.map((entry) => {
     const owner = localJobs.find(
       (j) => j.id === entry.id && (j.hostId ?? primaryHostId) === hostId,
     );
-    return { ...entry, mine: !!owner, clientId: owner?.clientId ?? null };
+    return {
+      ...entry,
+      mine: !!owner || ownsDurableBatch(entry.client_batch_id),
+      clientId: owner?.clientId ?? null,
+    };
   });
 }
 
@@ -174,7 +190,13 @@ export const useJobsStore = defineStore("jobs", {
         if (!snap) continue;
         const canReorder = snap.caps?.canReorder ?? false;
         const canCancelRunning = snap.caps?.canCancelRunning ?? false;
-        for (const entry of enrichQueueEntries(snap.entries, host.id, generation.jobs, primaryId)) {
+        for (const entry of enrichQueueEntries(
+          snap.entries,
+          host.id,
+          generation.jobs,
+          primaryId,
+          (clientBatchId) => generation.ownsDurableBatch(clientBatchId),
+        )) {
           rows.push({
             hostId: host.id,
             hostLabel: host.label,
@@ -397,6 +419,50 @@ export const useJobsStore = defineStore("jobs", {
         snapshot.tailEntries = snapshot.tailEntries?.filter(({ id }) => id !== jobId) ?? [];
       }
       void this.refresh();
+    },
+    /** Read the selected row's persisted request. Queue polling stays
+     * payload-free; this explicit path powers details and Reuse settings. */
+    async queueJob(hostId: string, jobId: string): Promise<QueueEntry> {
+      const hosts = useHostsStore();
+      const host = hosts.all.find((candidate) => candidate.id === hostId);
+      const target = host ? this.targetFor(host) : null;
+      if (!host || !target || host.status !== "ready") {
+        throw new Error("The selected machine is not connected.");
+      }
+      return (await getQueueJob(target, jobId)).job as QueueEntry;
+    },
+    /** Retry a server-authorized durable hold even after this app restarted.
+     * Authority lives on the row and host, not in an ephemeral clientId. */
+    async retryJob(hostId: string, entry: QueueEntry): Promise<void> {
+      const hosts = useHostsStore();
+      const host = hosts.all.find((candidate) => candidate.id === hostId);
+      const target = host ? this.targetFor(host) : null;
+      if (!host || !target || host.status !== "ready") {
+        throw new Error("The selected machine identity is unavailable.");
+      }
+      if (
+        entry.state !== "held" ||
+        entry.retryable !== true ||
+        !entry.batch_id ||
+        !entry.client_batch_id
+      ) {
+        throw new Error("This held generation is not retryable.");
+      }
+      const instanceId =
+        host.instanceId ??
+        (await apiJsonTo<{ instance_id?: string }>(target, "/api/status")).instance_id ??
+        null;
+      if (!instanceId) throw new Error("The selected machine identity is unavailable.");
+      const authority: QueueJobAuthority = {
+        instanceId,
+        batchId: entry.batch_id,
+        clientBatchId: entry.client_batch_id,
+        jobId: entry.id,
+      };
+      const outcome = await retryQueueJobRecoveringAmbiguity(target, authority);
+      if (outcome.kind === "uncertain") throw new Error(outcome.error);
+      await this.refreshHost(host);
+      void useGenerationStore().reconcileDurableHost(hostId);
     },
     /**
      * Move a queued job to another GPU lane on its OWNING host via

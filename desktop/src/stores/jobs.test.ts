@@ -537,4 +537,25 @@ describe("enrichQueueEntries", () => {
     const enriched = enrichQueueEntries(entries, "local", [mine], "local");
     expect(enriched[0]?.mine).toBe(false);
   });
+
+  it("recognizes a durable client batch after the app restarts", () => {
+    const entries = [
+      {
+        id: "srv-held",
+        model: "m",
+        state: "held" as const,
+        started_at_unix_ms: 1,
+        position: 0,
+        client_batch_id: "client-recovered",
+      },
+    ];
+    const enriched = enrichQueueEntries(
+      entries,
+      "local",
+      [],
+      "local",
+      (clientBatchId) => clientBatchId === "client-recovered",
+    );
+    expect(enriched[0]).toMatchObject({ mine: true, clientId: null });
+  });
 });
