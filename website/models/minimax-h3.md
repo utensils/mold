@@ -9,7 +9,7 @@ Mold does not bundle or mirror the weights.
 
 ## Generated Examples
 
-Both clips contain synchronized audio generated with the video. Press play to
+Every clip contains synchronized audio generated with the video. Press play to
 hear the model output.
 
 <div class="gallery-grid">

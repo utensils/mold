@@ -955,6 +955,8 @@ The original LTX Video checkpoints use a DiT architecture with T5-XXL text
 encoding and a 3D causal video VAE. They generate silent clips from text and
 remain available for compatibility, but new users should start with LTX-2.5 or
 LTX-2.3 for synchronized audio-video and the broader conditioning surface.
+The former [LTX Video 0.9.x route](./ltx-video.md) redirects to this section so
+existing bookmarks continue to work.
 
 <div class="gallery-grid">
 <figure>
