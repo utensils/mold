@@ -140,14 +140,14 @@ describe("ActivityStrip", () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
-  it("lists queued siblings with a working cancel", async () => {
+  it("shows one compact queued print with a working cancel", async () => {
     const generation = useGenerationStore();
     const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(true);
     generation.jobs = [{ ...baseJob(), clientId: 7, status: "queued", prompt: "queued one" }];
     const wrapper = mount(ActivityStrip);
     const pill = wrapper.get("[data-test='activity-queued']");
     expect(pill.text()).toContain("queued one");
-    await pill.get("button").trigger("click");
+    await pill.findAll("button").at(-1)!.trigger("click");
     expect(cancel).toHaveBeenCalledWith(7);
     expect(useToastStore().items.map((item) => item.message)).toContain("Cancelled");
   });
@@ -158,22 +158,22 @@ describe("ActivityStrip", () => {
     generation.jobs = [{ ...baseJob(), clientId: 7, status: "queued" }];
     const wrapper = mount(ActivityStrip);
 
-    await wrapper.get("[data-test='activity-queued'] button").trigger("click");
+    await wrapper.get("[data-test='activity-queued']").findAll("button").at(-1)!.trigger("click");
 
     expect(useToastStore().items).toHaveLength(0);
   });
 
-  it("selects queued prints with Space", async () => {
+  it("selects the compact queued print", async () => {
     const generation = useGenerationStore();
     generation.jobs = [{ ...baseJob(), clientId: 7, status: "queued", prompt: "queued one" }];
     const wrapper = mount(ActivityStrip);
 
-    await wrapper.get("[data-test='activity-queued']").trigger("keydown", { key: " " });
+    await wrapper.get("[data-test='activity-queued'] button").trigger("click");
 
     expect(generation.selectedClientId).toBe(7);
   });
 
-  it("bounds queued pills and summarizes the remainder", () => {
+  it("keeps one queued print and summarizes the remainder", () => {
     const generation = useGenerationStore();
     generation.jobs = Array.from({ length: 20 }, (_, index) => ({
       ...baseJob(),
@@ -183,8 +183,41 @@ describe("ActivityStrip", () => {
 
     const wrapper = mount(ActivityStrip);
 
-    expect(wrapper.findAll("[data-test='activity-queued']")).toHaveLength(4);
-    expect(wrapper.get("[data-test='activity-queued-overflow']").text()).toBe("+16 queued");
+    expect(wrapper.findAll("[data-test='activity-queued']")).toHaveLength(1);
+    expect(wrapper.get("[data-test='activity-queued-summary']").text()).toContain("19 queued");
+  });
+
+  it("opens the next hidden queued print from the compact summary", async () => {
+    const generation = useGenerationStore();
+    generation.jobs = [
+      { ...baseJob(), clientId: 1, prompt: "oldest", submittedAtUnixMs: 1_000 },
+      { ...baseJob(), clientId: 2, prompt: "newest", submittedAtUnixMs: 3_000 },
+      { ...baseJob(), clientId: 3, prompt: "next hidden", submittedAtUnixMs: 2_000 },
+    ];
+
+    const wrapper = mount(ActivityStrip);
+
+    expect(wrapper.get("[data-test='activity-queued']").text()).toContain("newest");
+    await wrapper.get("[data-test='activity-queued-summary']").trigger("click");
+    expect(generation.selectedClientId).toBe(3);
+  });
+
+  it("collapses queued siblings behind the summary while a print develops", async () => {
+    const generation = useGenerationStore();
+    generation.jobs = [
+      { ...baseJob(), clientId: 1, status: "denoising", prompt: "developing", step: 2 },
+      { ...baseJob(), clientId: 2, prompt: "queued older", submittedAtUnixMs: 2_000 },
+      { ...baseJob(), clientId: 3, prompt: "queued newest", submittedAtUnixMs: 3_000 },
+    ];
+
+    const wrapper = mount(ActivityStrip);
+
+    expect(wrapper.find("[data-test='activity-queued']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='activity-running-select']").text()).toContain("developing");
+    expect(wrapper.get("[data-test='activity-queued-summary']").text()).toContain("2 queued");
+
+    await wrapper.get("[data-test='activity-queued-summary']").trigger("click");
+    expect(generation.selectedClientId).toBe(3);
   });
 
   it("shows accrued RunPod cost for a job routed to a live pod", () => {

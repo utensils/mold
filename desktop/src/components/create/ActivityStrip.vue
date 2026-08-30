@@ -113,19 +113,21 @@ function retainQueuePoll(want: boolean) {
 watch(() => queued.value.length > 0, retainQueuePoll, { immediate: true });
 onBeforeUnmount(() => retainQueuePoll(false));
 
-const MAX_QUEUED_PILLS = 4;
-const visibleQueued = computed(() =>
-  [...queued.value]
-    .sort((a, b) =>
-      compareNewestSubmitted(
-        { createdAtMs: a.submittedAtUnixMs },
-        { createdAtMs: b.submittedAtUnixMs },
-      ),
-    )
-    .slice(0, MAX_QUEUED_PILLS),
+/** Create has one compact print row. The global Now developing rail remains the
+ * detailed, actionable queue, so repeating every queued sibling here only
+ * steals height from the composer. Keep the newest-first ordering used by the
+ * rail and fleet activity, including when nothing is developing yet. */
+const orderedQueued = computed(() =>
+  [...queued.value].sort((a, b) =>
+    compareNewestSubmitted(
+      { createdAtMs: a.submittedAtUnixMs },
+      { createdAtMs: b.submittedAtUnixMs },
+    ),
+  ),
 );
-const hiddenQueuedCount = computed(() =>
-  Math.max(0, queued.value.length - visibleQueued.value.length),
+const primaryPrint = computed<Job | null>(() => running.value ?? orderedQueued.value[0] ?? null);
+const summarizedQueuedCount = computed(() =>
+  Math.max(0, queued.value.length - (running.value ? 0 : primaryPrint.value ? 1 : 0)),
 );
 const runningPct = computed(() =>
   running.value ? Math.round(jobProgress(running.value) * 100) : 0,
@@ -212,6 +214,11 @@ function queuedLabel(job: Job): string {
   return queueLabelByKey.value.get(`print:${job.clientId}`) ?? "Queued";
 }
 
+function selectNextQueued() {
+  const next = orderedQueued.value[running.value ? 0 : 1];
+  if (next) selectPrint(next);
+}
+
 /** The presentation's own label for a settled print whose outcome is not
  *  knowable here; `null` for a real failure. */
 const advisoryByKey = computed(
@@ -293,22 +300,16 @@ const activeRows = computed<DesktopActivityRow[]>(() =>
       kind: "shared",
       shared,
     })),
-    ...(running.value
+    ...(primaryPrint.value
       ? [
           {
-            key: `print:${running.value.clientId}`,
-            createdAtMs: running.value.submittedAtUnixMs,
+            key: `print:${primaryPrint.value.clientId}`,
+            createdAtMs: primaryPrint.value.submittedAtUnixMs,
             kind: "print" as const,
-            print: running.value,
+            print: primaryPrint.value,
           },
         ]
       : []),
-    ...visibleQueued.value.map((print): DesktopActivityRow => ({
-      key: `print:${print.clientId}`,
-      createdAtMs: print.submittedAtUnixMs,
-      kind: "print",
-      print,
-    })),
     ...sequenceRows.value.map((sequence): DesktopActivityRow => ({
       key: sequence.key,
       createdAtMs: sequence.createdAtMs,
@@ -389,13 +390,6 @@ function deleteConfirmed() {
     <div class="ms-activity__row">
       <span class="ms-activity__kicker">Activity</span>
       <div class="ms-activity__idle-spacer" />
-      <span
-        v-if="hiddenQueuedCount > 0"
-        class="ms-activity__overflow data-mono"
-        data-test="activity-queued-overflow"
-      >
-        +{{ hiddenQueuedCount }} queued
-      </span>
       <button
         v-if="digest"
         type="button"
@@ -448,6 +442,17 @@ function deleteConfirmed() {
             />
           </button>
           <button
+            v-if="summarizedQueuedCount > 0"
+            type="button"
+            class="ms-activity__queue-summary"
+            data-test="activity-queued-summary"
+            :aria-label="`Open next of ${summarizedQueuedCount} queued prints`"
+            title="Open the next queued print. The full queue is in Now developing."
+            @click="selectNextQueued"
+          >
+            {{ summarizedQueuedCount }} queued <span aria-hidden="true">›</span>
+          </button>
+          <button
             type="button"
             class="ms-activity__cancel"
             data-test="activity-running-cancel"
@@ -461,26 +466,31 @@ function deleteConfirmed() {
           </button>
         </div>
 
-        <div
-          v-else-if="row.kind === 'print'"
-          class="ms-activity__pill"
-          data-test="activity-queued"
-          role="button"
-          tabindex="0"
-          :title="`${queuedLabel(row.print)} · ${row.print.prompt}`"
-          @click="selectPrint(row.print)"
-          @keydown.enter.prevent="selectPrint(row.print)"
-          @keydown.space.prevent="selectPrint(row.print)"
-        >
-          <span class="ms-activity__pill-text">
-            <span class="ms-activity__pill-queue" data-test="activity-queued-position">{{
-              queuedLabel(row.print)
-            }}</span>
-            · {{ row.print.prompt }}
-            <span v-if="row.print.holdError" class="ms-activity__seq-error">
-              · {{ row.print.holdError }}
+        <div v-else-if="row.kind === 'print'" class="ms-activity__row" data-test="activity-queued">
+          <span class="ms-activity__thumb" aria-hidden="true" />
+          <button
+            type="button"
+            class="ms-activity__queued-main text-left"
+            :title="`${queuedLabel(row.print)} · ${row.print.prompt}`"
+            @click="selectPrint(row.print)"
+          >
+            <span class="ms-activity__prompt">{{ row.print.prompt }}</span>
+            <span class="ms-activity__queued-status data-mono">
+              <span data-test="activity-queued-position">{{ queuedLabel(row.print) }}</span>
+              <template v-if="row.print.holdError"> · {{ row.print.holdError }}</template>
             </span>
-          </span>
+          </button>
+          <button
+            v-if="summarizedQueuedCount > 0"
+            type="button"
+            class="ms-activity__queue-summary"
+            data-test="activity-queued-summary"
+            :aria-label="`Open next of ${summarizedQueuedCount} additional queued prints`"
+            title="Open the next queued print. The full queue is in Now developing."
+            @click="selectNextQueued"
+          >
+            {{ summarizedQueuedCount }} queued <span aria-hidden="true">›</span>
+          </button>
           <button
             v-if="row.print.retryable"
             type="button"
@@ -653,36 +663,35 @@ function deleteConfirmed() {
   flex: 0 0 auto;
   font-size: 9.5px;
 }
-.ms-activity__pill {
-  flex: 1 1 120px;
-  min-width: 0;
-  max-width: 166px;
+.ms-activity__queued-main {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bath);
-  border: 1px solid var(--edge);
-  border-radius: 20px;
-  padding: 5px 5px 5px 11px;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
 }
-.ms-activity__overflow {
-  flex: 0 0 auto;
-  color: var(--ink-3);
+.ms-activity__queued-status {
   font-size: 9.5px;
-  white-space: nowrap;
-}
-.ms-activity__pill-text {
-  font-size: 11px;
-  color: var(--ink-2);
-  max-width: 150px;
+  color: var(--safelight);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ms-activity__pill-queue {
+.ms-activity__queue-summary {
+  flex: 0 0 auto;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-pill);
+  background: var(--bath);
+  padding: 5px 9px;
+  color: var(--ink-2);
   font-family: var(--f-mono);
   font-size: 9.5px;
-  color: var(--safelight);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ms-activity__queue-summary:hover {
+  border-color: var(--safelight);
+  color: var(--rebate);
 }
 .ms-activity__cancel {
   width: 18px;
