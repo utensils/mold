@@ -875,6 +875,26 @@ lightweight `webm` previews so the examples load quickly in the browser.
 <div class="gallery-grid">
 <figure>
 
+<video controls loop playsinline preload="metadata" poster="/gallery/ltx25-mold-speech-poster.webp" src="/gallery/ltx25-mold-speech.webm"></video>
+
+**ltx-2.5-22b-distilled:q6**: 121 frames, 768x512, 24 fps, seed 83007
+
+_A single continuous presenter shot with generated speech, lip synchronization,
+and room ambience. “With Mold, your ideas render right here.”_
+
+</figure>
+<figure>
+
+<video controls loop playsinline preload="metadata" poster="/gallery/ltx25-terrarium-poster.webp" src="/gallery/ltx25-terrarium.webm"></video>
+
+**ltx-2.5-22b-distilled:q6**: 97 frames, 640x384, 12 fps, seed 83003
+
+_A glass terrarium breathing with tiny plant motion, delicate water sounds, and
+a restrained indoor soundscape._
+
+</figure>
+<figure>
+
 <video controls muted loop playsinline preload="metadata" src="/gallery/ltx2/ltx2-docs-candidate-lighthouse-640x384-97f-12fps-seed424301.webm"></video>
 
 **ltx-2-19b-distilled:fp8**: 97 frames, 640x384, 12 fps

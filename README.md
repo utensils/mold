@@ -144,6 +144,10 @@ run:
 mold skill install --detected
 ```
 
+The installed bundle includes family-specific prompt recipes for every image
+and video family, including the distinct dialogue/audio grammars used by
+LTX-2.x and MiniMax H3.
+
 ## Project
 
 Mold is a Rust workspace built on

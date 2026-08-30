@@ -4,9 +4,12 @@ description: Generate and manage AI images and video with the mold CLI. Use when
 allowed-tools: Bash, Read, Glob, Grep
 ---
 
-# mold — Local AI Image Generation CLI
+# mold — Local AI Media Generation CLI
 
-Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein and Dev, Qwen-Image, LTX Video, LTX-2 / LTX-2.3, Wan 2.1/2.2, and Wuerstchen diffusion models running on local GPU hardware.
+Generate images and audio-video from text prompts using FLUX, SD1.5, SDXL,
+SD3.5, Z-Image, Flux.2 Klein and Dev, Qwen-Image, LTX Video, LTX-2 / LTX-2.3 /
+LTX-2.5, Wan 2.1/2.2, MiniMax H3, and Wuerstchen models on local or remote GPU
+hardware.
 
 MiniMax H3's reviewed compact manifest IDs — FL2VA, Ref2VA, and the Turbo tags `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` (9 steps), `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` (5 steps), and `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step` (5 steps), each its own task's compact stack plus one pinned LoRA adapter reviewed for that task alone — are ordinary model identities on every build; list, download, repair, and auto-pull work like any registered model, and remaining execution limits (the CPU backend) are reported as real capability limits, not license gates. Since #825 the compact Ref2VA tag EXECUTES wherever the H3 engine is built: it renders video with synchronized audio from an ordered set of up to 12 references (at most 9 images, 3 videos, 3 audio), each 2-15 s and at most 15 s of video and 15 s of audio in aggregate, presented as `<Picture n>` / `<Video n>` / `<Audio n>` in the order supplied, with the frozen plan carrying a reference fingerprint over that order — so the same files in a different order are a different render. Its runtime qualification is minted PER REQUEST from the set's own preprocessing shapes rather than from a reviewed list, so the conditioner sequence, conditioning latents, and every memory bound scale with what was attached and an unaffordable set is refused with numbers. CLI: `mold run minimax-h3-ref2va:comfy-pruned-int8 "…" --reference image=a.png --reference video=b.mp4 --reference audio=c.wav`; references stream through the authenticated reference-upload endpoints, so `MOLD_API_KEY` is required and no reference byte reaches the request body, the queue journal, or saved metadata; admission seals the bytes into the encrypted queue-media store beside the descriptor-only request, so a queued Ref2VA print survives a restart like any other. An upload session binds one request, so `--batch N` with uploaded references is refused above 1 — submit siblings one at a time. An IMAGE reference may carry a user crop (a rectangle in source pixels, applied client-side at the original resolution before digest/upload; web/desktop/iPhone offer it as the **Crop** action on the reference row with Free / 1:1 / 4:3 / 3:2 / 16:9 presets and a vision-pad cost hint) recorded as additive `references[].provenance.crop { x, y, width, height, source_width, source_height, source_sha256 }`, which the server validates as a non-degenerate rect inside its source whose size equals the reference's own `width`/`height` (`MINIMAX_H3_REFERENCE_CROP`) and keeps in `metadata.references[].crop` so Reuse settings restores it; it is never a fit-to-canvas policy, because the server normalizes every image reference onto its own 2048-short-edge canvas regardless. Since #1319, `minimax-h3-fl2va:comfy-pruned-nvfp4` and `minimax-h3-ref2va:comfy-pruned-nvfp4` (a third-party pruned NVFP4 transformer over the same shared stack) also list, download, verify, inventory, and remove like registered models, but generation is refused as `MINIMAX_H3_RUNTIME_UNAVAILABLE` (HTTP 501, `/api/models[].runtime_available: false`) rather than a licensing error — mold has no engine arm for that weight layout yet, so a pull succeeds and a run does not. The pinned `official-bf16` references now refuse the same honest way. Since #1276 `runtime_available` answers for THIS BUILD rather than for the layout alone, and the additive `/api/models[].runtime_unavailable_reason` names which of the three obstacles applies: no engine arm for the weight layout (the `official-bf16` and NVFP4 tags, unrunnable everywhere), no runtime for the task partition (no released identity reports this today — both compact partitions execute — but the axis survives for a future task), or this binary compiled without the `h3` feature (the macOS and Linux sm89 releases carry it; sm86, sm100, sm120, and Windows ship every H3 row download-only). One authority answers everywhere — `mold_core::minimax_h3::model_runtime_availability`, which `model_activation`, the `/api/models` row, and the HTTP 501 refusal all read, so the sentence a client shows before the 21-42 GB pull is byte-identical to the one generation returns. Acquisition is untouched: pull, verify, inventory, repair, and `mold rm` work on every build. `mold pull` prints that reason instead of the `mold run` hint, `mold run --local` refuses before opening a checkpoint, and web/desktop/iPhone render a `Download only` badge plus the sentence on Discover rows and detail panes without disabling Pull. Every H3 render carries synchronized audio and no request can disable it, and `/api/models[].supports_audio` (plus the profile recipe's `supports_audio`) advertises that for every reviewed identity, downloaded or not — read the field rather than inferring the family's AV behaviour from its name. The reviewed FL2VA request envelope budgets a prompt of roughly 1,000 tokens beside the required first-frame image; a longer prompt is refused immediately, with the exact budget named, rather than after artifact verification. The compact FL2VA runtime admits a RULE rather than a pinned list: any canvas whose axes are both multiples of 32, each at least 256 px, totalling at most 1,032,192 pixels (the area of `1344x768`), with aspect between 1:4 and 4:1; 107 to 345 frames on the `17n+5` grid at 24 fps (124 default); and 2 to 50 sampler grid points for the base tag (21 default), while a Turbo tag keeps its distilled adapter's exact count. `1344x768` and `768x768` stay the recommended defaults because they carry real hardware evidence (`1344x768`: 1216 s at 21 steps, 759.5 s on `-turbo-8step`, 10.8-14.6 GB VRAM on an RTX 4090; `768x768` #1033: 937 s and 664 s, 7.4-9.2 GB VRAM, 16.4 GB peak host RSS). Every other shape is priced by scaling those measurements — the denoise workspaces with the packed sequence, the audio decode with the clip length, the video decode with the canvas area — so a long clip is refused with numbers rather than by a rule (345 frames at `1344x768` asks for a ~24.3 GB device floor against 9.7 GB at the default). A first-frame image attached without explicit `--width`/`--height` renders the source's own aspect at the largest size the area ceiling allows (a 16:9 source gets `1312x736`, a square one `992x992`); the free-form short-edge canvas applies only to the hidden `official-bf16` reference. The `MOLD_H3_TURBO_ADAPTER`/`MOLD_H3_TURBO_TIER` pair is a capture-scope UAT override honored only under `h3-private-uat`; select a Turbo model tag instead. Apple Metal is a correctness-only path in progress (#1164): the candle execution route exists — chunked dense attention, family-scoped BF16, the portable INT8 arm, fp8 refused by name — `mold-core::minimax_h3` advertises `metal: CorrectnessOnly`, admission accepts a Metal device, the public runtime profile is `supported-compact-fl2va-cuda-sm89-or-metal`, and the released macOS builds ship the `h3` feature. What is missing is hardware qualification: no H3 checkpoint has completed a render on Metal, because the compact stack's ~42.5 GB unified working set needs a 64 GB-class Apple Silicon host. `h3-cuda` is the shipping CUDA edge; the macOS recipe is `h3` + `metal`. Everything outside those exact IDs stays fail-closed through `mold-core::model_policy`: raw `hf:` identities and metadata-resolved `cv:` identities must both pass it, and no environment variable, client flag, or local weight can activate an unreviewed H3 identity. The completed #831 governance decision permits H3 use in every territory and workflow (local, remote, hosted, redistribution) with no H3-specific clickthrough, geolocation, labeling, or surface control; the README and H3 user guide carry the full user-facing license/attribution/disclosure text. Re-review `docs/architecture/minimax-h3-authorization.md` before any release that touches H3.
 
@@ -16,6 +19,11 @@ iPhone Settings → About surfaces. Keep the page and app links aligned when dat
 practices change.
 
 ## Quick Reference
+
+Before authoring a generation prompt, read the matching family section in
+[`references/model-prompting.md`](references/model-prompting.md). It contains
+family-specific prompt structure, audio/dialogue syntax, examples, and known
+boundaries. Do not transplant one video family's prompt grammar into another.
 
 ```bash
 mold run "a cat on a skateboard"                    # Generate with default model
@@ -156,7 +164,9 @@ The expansion model is dropped from memory before diffusion begins, so it doesn'
 
 ### LoRA Adapters
 
-Apply LoRA (Low-Rank Adaptation) fine-tuned adapters on top of FLUX BF16 base models:
+Apply LoRA (Low-Rank Adaptation) fine-tuned adapters to a compatible model.
+Compatibility is family-, checkpoint-, and runtime-specific; inspect
+`/api/models` or use `mold info <model>` rather than assuming BF16-only support.
 
 ```bash
 # Basic LoRA usage
@@ -762,8 +772,8 @@ Default model if none specified: `flux2-klein:q8`
 | `qwen-image-edit-lightning`    | 4     | 1.0      | 1024x1024                                      |
 | `ltx-video-0.9.6-distilled`    | 8     | 1.0      | 1216x704 (25 frames, 30fps)                    |
 | `ltx-video-0.9.8-2b-distilled` | 7+3   | 1.0      | 1216x704 (25 frames, 30fps, multiscale refine) |
-| `ltx-2-19b-distilled`          | 8     | 3.0      | 1216x704 (97 frames, 24fps, mp4 default)       |
-| `ltx-2.3-22b-distilled`        | 8     | 3.0      | 1216x704 (97 frames, 24fps, mp4 default)       |
+| `ltx-2-19b-distilled`          | 8     | 1.0      | 1216x704 (97 frames, 24fps, mp4 default)       |
+| `ltx-2.3-22b-distilled`        | 8     | 1.0      | 1216x704 (97 frames, 24fps, mp4 default)       |
 
 ### Available Models
 
@@ -1697,9 +1707,16 @@ Models auto-pull if not downloaded: `mold run flux2-klein "a cat"` will download
 - LTX-2 output ladder: 1280x704, 1920x1088, 2560x1408, 3840x2112 (4K UHD), each with its portrait transpose. Every rung is /64 so the halved stage-1 shape lands on the VAE's /32 grid. Generation is admitted to 4096px — that is where the halved stage 1 itself leaves the trained span — but the ladder stops at 3840 because the bundled OpenH264 encoder refuses past 3840x2160, so 3840x2176 renders and then fails at save time. The 4096px ceiling belongs to the default x2 rung: `--spatial-upscale x1.5` divides by 1.5 and so reaches only 3072px, while explicitly choosing a single-pass pipeline (`one-stage`, `retake`, `lip-dub`) drops it back to 2048px. **4K needs `--spatial-tile 768` on a 24 GB card** (measured RTX 4090, 19B fp8, 25 frames: 1080p 18.4 GB / 1440p 18.1 GB / 4K 18.2 GB; 4K with the default 1280px tile OOMs in the VAE decode rather than rendering smaller)
 - For img2img, source images auto-resize to fit the model's native resolution (preserving aspect ratio). A 1024x1024 source with SD1.5 (512x512 native) generates at 512x512; a 1920x1080 source generates at 512x288. Use `--width`/`--height` to override
 - Set `MOLD_HOME` to relocate all mold data (config, cache, models)
-- LoRA adapters require FLUX BF16 models; use `--lora-scale 0.5-0.8` for subtle effects
+- LoRA compatibility is model-specific; use `/api/models` or `mold info <model>`
+  before choosing an adapter. `--lora-scale 0.5-0.8` is a useful subtle-effect
+  starting range, not a universal model requirement
 - LTX-2 `--spatial-tile` (= `MOLD_LTX2_SPATIAL_TILE`) splits stage-2 refinement and the VAE decode into overlapping spatial tiles. `auto` (default) engages only past the 2048-px axis span the checkpoints were trained on, so no currently renderable shape changes; `off` refuses a render past the span rather than degrading it quietly; `<px>` / `<px>:<overlap>` forces a tile size, which is how a tiled render is compared against an untiled one. A tiled stage 2 refines video only and carries stage 1's audio through unrefined, matching upstream `hdr_ic_lora.py:504-507`.
-- On 24GB cards, use `--offload` with BF16 FLUX / Flux.2 / Z-Image / Qwen-Image / SD3 when quantization is not acceptable, and with LTX-2 when you want the conservative full-streaming path. FLUX / Flux.2 / Z-Image / Qwen-Image keep fitting blocks resident; LTX-2 and SD3 full-stream.
+- On 24GB cards, local generation can use `--offload` with BF16 FLUX / Flux.2 /
+  Z-Image / Qwen-Image / SD3 when quantization is not acceptable, and with LTX-2
+  for conservative full streaming. FLUX / Flux.2 / Z-Image / Qwen-Image keep
+  fitting blocks resident; LTX-2 and SD3 full-stream. The CLI flag does not yet
+  cross HTTP to a remote server; remote placement remains server-adaptive until
+  [#1462](https://github.com/utensils/mold/issues/1462) is fixed
 
 ## Discord Bot
 
@@ -1881,8 +1898,9 @@ mold skill show                              # Print the embedded SKILL.md
 
 Installation requires agent names, `--detected`, or `--all`; a bare install
 writes nothing. Shared project paths are written once. Install atomically
-replaces only `mold/SKILL.md`. Uninstall removes only that file and removes the
-`mold/` directory only when it is empty.
+replaces the Mold-managed `SKILL.md` and `references/model-prompting.md` files.
+Uninstall removes those managed files and preserves unrelated files and
+non-empty directories.
 
 ## Updating This Skill
 

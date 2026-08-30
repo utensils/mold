@@ -3,6 +3,27 @@
 Qwen2.5-VL text encoder with a 3D causal VAE (2D temporal-slice) and
 flow-matching with classifier-free guidance.
 
+<div class="gallery-grid">
+<figure>
+
+![Arctic observatory, base Qwen-Image](/gallery/qwen-image-observatory.png)
+
+_"An open-air Arctic observatory beneath the aurora, astronomers studying
+luminous star maps, monumental brass telescope, deep blue snow and warm library
+light"_; **qwen-image:q8**, 50 steps, seed 83001
+
+</figure>
+<figure>
+
+![Aurora observatory edit, Qwen-Image-Edit](/gallery/qwen-image-edit-aurora-observatory.png)
+
+_"Open the observatory roof to the aurora and extend the snowy cliffside while
+preserving the telescope and library"_; **qwen-image-edit-2511:q8**, 50 steps,
+seed 83006
+
+</figure>
+</div>
+
 ![Winter cabin, Qwen-Image 2512 Q4](/gallery/qwen-image-cabin.png)
 _"A snowy mountain cabin at twilight, warm orange light pouring from the windows, aurora borealis in the sky above"_; **qwen-image-2512:q4**, 50 steps, seed 888
 

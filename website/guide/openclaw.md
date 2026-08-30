@@ -27,7 +27,10 @@ mold skill install openclaw
 
 For a project-local workspace, run `mold skill install openclaw --project` from
 its root or pass `--dir <PATH>`. Mold writes `.agents/skills/mold/SKILL.md` for
-project installs and `~/.openclaw/skills/mold/SKILL.md` user-wide.
+project installs and `~/.openclaw/skills/mold/SKILL.md` user-wide, together
+with `references/model-prompting.md`. That routed reference teaches agents the
+prompt structure for each model family, including LTX-2.x and MiniMax H3
+speech/audio prompts.
 
 ## Configure the Connection
 

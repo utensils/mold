@@ -167,7 +167,8 @@ For the latest rolling CLI build from `main`, install with
 
 ## Gallery
 
-All images generated locally with mold; click any to see the model and prompt.
+Every example below was generated with mold on our own hardware. Video cards
+with a speaker icon include model-generated audio; press play to hear them.
 
 <div class="gallery-grid">
 <figure>
@@ -186,6 +187,24 @@ pine trees covered in snow, peaceful winter scene"_
 **qwen-image-2512:q4**: 50 steps, seed 2024 _"An abandoned greenhouse
 overgrown with exotic flowers and vines, cracked glass roof letting in shafts
 of golden light, butterflies and hummingbirds, lush and magical"_
+
+</figure>
+<figure>
+
+![Arctic observatory, base Qwen-Image](/gallery/qwen-image-observatory.png)
+
+**qwen-image:q8**: 50 steps, seed 83001 _"An open-air Arctic observatory beneath
+the aurora, astronomers studying luminous star maps, monumental brass telescope,
+deep blue snow and warm library light"_
+
+</figure>
+<figure>
+
+![Aurora observatory edit, Qwen-Image-Edit](/gallery/qwen-image-edit-aurora-observatory.png)
+
+**qwen-image-edit-2511:q8**: 50 steps, seed 83006. Edited the observatory into a
+surreal open-roof scene while preserving its telescope, library, and winter
+setting.
 
 </figure>
 <figure>
@@ -286,6 +305,41 @@ reflected in the ice, stars visible, time-lapse photography"_
 **ltx-video-0.9.6-distilled:bf16**: 8 steps, 33 frames, seed 707 _"Underwater
 footage of a jellyfish pulsing through deep blue water, bioluminescent glow,
 particles floating, ethereal slow motion"_
+
+</figure>
+<figure>
+
+<video autoplay muted loop playsinline poster="/gallery/wan22-winter-fox-poster.webp" aria-label="Red fox walking through fresh snow, Wan 2.2" src="/gallery/wan22-winter-fox.webm"></video>
+
+**wan22-t2v-a14b:q4**: 4 steps, 49 frames, seed 83005 _"A red fox walks through
+fresh snow beneath frost-covered pines as the camera tracks alongside it"_. Wan
+T2V output is silent by design.
+
+</figure>
+<figure>
+
+<video controls loop playsinline preload="metadata" poster="/gallery/minimax-h3-mold-speech-poster.webp" aria-label="Mold presenter speaking with synchronized MiniMax H3 audio" src="/gallery/minimax-h3-mold-speech.webm"></video>
+
+**minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p**: 124 frames, 24 fps,
+seed 83009. Generated synchronized speech: _"With Mold, your ideas render right
+here."_
+
+</figure>
+<figure>
+
+<video controls loop playsinline preload="metadata" poster="/gallery/minimax-h3-balloon-poster.webp" aria-label="A Mold hot-air balloon moving through a misty sunrise valley with generated audio" src="/gallery/minimax-h3-balloon.webm"></video>
+
+**minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p**: 992x992, 124 frames,
+24 fps, seed 83004. First-frame conditioning preserves the balloon layout and
+the word “MOLD” while adding camera motion and a generated soundscape.
+
+</figure>
+<figure>
+
+<video controls loop playsinline preload="metadata" poster="/gallery/ltx25-mold-speech-poster.webp" aria-label="Mold presenter speaking with synchronized LTX 2.5 audio" src="/gallery/ltx25-mold-speech.webm"></video>
+
+**ltx-2.5-22b-distilled:q6**: 121 frames, 24 fps, seed 83007. A continuous
+presenter shot with generated voice, room ambience, and lip synchronization.
 
 </figure>
 </div>

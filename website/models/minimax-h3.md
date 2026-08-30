@@ -7,6 +7,32 @@ seven compact Comfy tags, plus two official BF16 qualification references. The
 files are downloaded directly from their pinned Hugging Face repositories;
 Mold does not bundle or mirror the weights.
 
+## Generated Examples
+
+Both clips contain synchronized audio generated with the video. Press play to
+hear the model output.
+
+<div class="gallery-grid">
+<figure>
+
+<video controls loop playsinline preload="metadata" poster="/gallery/minimax-h3-mold-speech-poster.webp" aria-label="A presenter turns toward the camera and speaks about Mold" src="/gallery/minimax-h3-mold-speech.webm"></video>
+
+**minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p**: 992x992, 124 frames,
+24 fps, seed 83009. The prompt uses H3's timed `<d>[English] ...</d>` dialogue
+grammar: _"With Mold, your ideas render right here."_
+
+</figure>
+<figure>
+
+<video controls loop playsinline preload="metadata" poster="/gallery/minimax-h3-balloon-poster.webp" aria-label="A Mold hot-air balloon moving through a misty sunrise valley with generated audio" src="/gallery/minimax-h3-balloon.webm"></video>
+
+**minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p**: 992x992, 124 frames,
+24 fps, seed 83004. First-frame conditioning preserves the balloon layout and
+the word “MOLD” while adding camera motion and a generated soundscape.
+
+</figure>
+</div>
+
 ::: warning CUDA is the supported runtime
 Both compact variants can be downloaded on any Mold host. Mold's SM89 CUDA
 release can run the compact FL2VA **and** Ref2VA models for the supported
