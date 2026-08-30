@@ -294,14 +294,14 @@ A `--features cuda,flash-attn` build routes the Wan DiT's self- and cross-attent
 
 So flash is worth **2.1x on speed** and only ~900 MiB on peak. The speed is why it is the default; the small memory delta is why it is not, on its own, what unlocks longer clips.
 
-Where it *does* change memory is the estimate. `device::wan_activation_budget_bytes` charges a per-token score matrix of `2 x heads x 512 x 2` bytes — 81,920 B/token at A14B, as much as the whole rest of the block — and FlashAttention materializes none of it. That estimate drives both admission and the block-offload policy, so an estimate blind to the backend parks blocks against a shortfall the running render does not have. The two calibrations are therefore fitted separately, and the flash pair must never inherit math's slope: dropping the score term shrinks the derived sum 44% while the residual the slope stands in for does not, so a shared slope under-estimates by gigabytes and OOMs.
+Where it _does_ change memory is the estimate. `device::wan_activation_budget_bytes` charges a per-token score matrix of `2 x heads x 512 x 2` bytes — 81,920 B/token at A14B, as much as the whole rest of the block — and FlashAttention materializes none of it. That estimate drives both admission and the block-offload policy, so an estimate blind to the backend parks blocks against a shortfall the running render does not have. The two calibrations are therefore fitted separately, and the flash pair must never inherit math's slope: dropping the score term shrinks the derived sum 44% while the residual the slope stands in for does not, so a shared slope under-estimates by gigabytes and OOMs.
 
 Measured on an RTX 4090 with `wan22-t2v-a14b:q5` at 832x480, before and after the backend-aware estimate:
 
-| Frames | `need_mib` before | after | blocks parked before | after | Wall clock |
-| -----: | ----------------: | ----: | -------------------: | ----: | ---------: |
-| 53 | 10,516 | 8,176 | 5 / 40 | **0 / 40** | 193.5 s -> 79.5 s |
-| 81 | 14,624 | 11,290 | **40 / 40** | 15 / 40 | -> 111.5 s |
+| Frames | `need_mib` before |  after | blocks parked before |      after |        Wall clock |
+| -----: | ----------------: | -----: | -------------------: | ---------: | ----------------: |
+|     53 |            10,516 |  8,176 |               5 / 40 | **0 / 40** | 193.5 s -> 79.5 s |
+|     81 |            14,624 | 11,290 |          **40 / 40** |    15 / 40 |        -> 111.5 s |
 
 Every parked block is a host round-trip on the critical path of every step, so the 81-frame render was paying full weight streaming for a shortfall that was largely an artifact of pricing the wrong backend. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that among release artifacts only the sm89 (`h3-cuda`) binary compiles `flash-attn` — `MOLD_ATTN=flash` opts in there; on every other artifact this remains a source-build configuration.
 
