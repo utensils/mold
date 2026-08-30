@@ -117,7 +117,7 @@ const base = (filename: string, timestamp: number, seed: number): GalleryImage =
 });
 
 const smurf04: GalleryImage = {
-  ...base("mold-flux-1~smurf-04.png", 40, 4),
+  ...base("mold-ltx-1~smurf-04.mp4", 40, 4),
   title: "smurf 04",
   favorite: true,
   tags: ["smurf", "blue"],
@@ -167,9 +167,19 @@ const historyDrawerStub = { name: "HistoryDrawer", props: ["open"], template: "<
 
 async function mountView(
   route = "/library",
-  options: { organize?: boolean; trash?: boolean; trashItems?: GalleryImage[] } = {},
+  options: {
+    organize?: boolean;
+    trash?: boolean;
+    trashItems?: GalleryImage[];
+    hiddenCollection?: boolean;
+  } = {},
 ) {
-  const { organize = true, trash = true, trashItems = [trashed] } = options;
+  const {
+    organize = true,
+    trash = true,
+    trashItems = [trashed],
+    hiddenCollection = false,
+  } = options;
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -220,7 +230,10 @@ async function mountView(
     if (path.startsWith("/api/gallery/collections/")) return { filenames: [] };
     return undefined;
   });
-  org.listCollections.mockResolvedValue([{ ...smurfs }, { ...riverStudies }]);
+  org.listCollections.mockResolvedValue([
+    { ...smurfs, hidden: hiddenCollection },
+    { ...riverStudies },
+  ]);
   org.listTags.mockResolvedValue([
     { name: "smurf", count: 2 },
     { name: "blue", count: 1 },
@@ -993,6 +1006,23 @@ describe("Lightbox wiring", () => {
     expect(gallery.scope).toBe("prints");
     expect(gallery.favoritesOnly).toBe(false);
     expect(wrapper.getComponent({ name: "Lightbox" }).props("item").filename).toBe(plain.filename);
+    wrapper.unmount();
+  });
+
+  it("a notification deep link opens a video inside its hidden collection", async () => {
+    const { wrapper, gallery, router } = await mountView(
+      `/library?print=${encodeURIComponent(smurf04.filename)}`,
+      { hiddenCollection: true },
+    );
+
+    expect(gallery.scope).toBe("collections");
+    expect(gallery.collectionSlug).toBe("smurfs");
+    expect(wrapper.getComponent({ name: "Lightbox" }).props("item").filename).toBe(
+      smurf04.filename,
+    );
+    await vi.waitFor(() =>
+      expect(router.currentRoute.value.query).toEqual({ scope: "collections", c: "smurfs" }),
+    );
     wrapper.unmount();
   });
 });
