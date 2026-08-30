@@ -1,11 +1,22 @@
 # LTX Video
 
-Mold's LTX Video family covers three generations from Lightricks: the legacy
-[LTX Video 0.9.x checkpoints](./ltx-video.md), LTX-2 / LTX-2.3, and LTX-2.5.
-Use the legacy models for a straightforward text-to-video path, or the newer
-LTX-2 models for joint audio-video generation and advanced conditioning.
+Mold's LTX Video family covers LTX-2, LTX-2.3, LTX-2.5, and the legacy LTX
+Video 0.9.x checkpoints on one page. Start with **LTX-2.5** for the newest
+split-pack architecture and synchronized audio-video generation. LTX-2.3 and
+LTX-2 remain useful for their mature conditioning and LoRA workflows; the
+older silent 0.9.x family is documented
+[lower on this page](#legacy-ltx-video-0-9-x).
 
-## LTX-2, LTX-2.3, and LTX-2.5
+## Choose a generation
+
+| Generation  | Best fit today                                       | Mold family |
+| ----------- | ---------------------------------------------------- | ----------- |
+| **LTX-2.5** | Newest architecture, joint audio-video, compact INT8 | `ltx2`      |
+| **LTX-2.3** | Mature 22B audio-video and control workflows         | `ltx2`      |
+| **LTX-2**   | Mature 19B audio-video path and 24 GB offload        | `ltx2`      |
+| LTX 0.9.x   | Legacy silent text-to-video checkpoints              | `ltx-video` |
+
+## Current generations: LTX-2.5, LTX-2.3, and LTX-2
 
 LTX-2 is Lightricks' joint audio-video family. In mold it is exposed as a
 separate `ltx2` family from the older `ltx-video` checkpoints, with defaults
@@ -937,3 +948,80 @@ floats, propeller engine, wind, and water hiss._
 - `--lora` is repeatable for this family. The single legacy `lora` request
   field is still populated for backward compatibility, but the LTX-2 runtime
   uses the stacked `loras` list.
+
+## Legacy LTX Video 0.9.x
+
+The original LTX Video checkpoints use a DiT architecture with T5-XXL text
+encoding and a 3D causal video VAE. They generate silent clips from text and
+remain available for compatibility, but new users should start with LTX-2.5 or
+LTX-2.3 for synchronized audio-video and the broader conditioning surface.
+
+<div class="gallery-grid">
+<figure>
+
+<video autoplay muted loop playsinline aria-label="Northern lights, LTX Video 0.9.6 distilled" src="/gallery/ltx-aurora.webm"></video>
+
+**ltx-video-0.9.6-distilled:bf16**: 8 steps, 33 frames, seed 1234
+
+_Northern lights over a frozen Icelandic lake, reflected in the ice._
+
+</figure>
+<figure>
+
+<video autoplay muted loop playsinline aria-label="Jellyfish, LTX Video 0.9.6 distilled" src="/gallery/ltx-jellyfish.webm"></video>
+
+**ltx-video-0.9.6-distilled:bf16**: 8 steps, 33 frames, seed 707
+
+_A bioluminescent jellyfish pulsing through deep blue water._
+
+</figure>
+</div>
+
+### Legacy variants
+
+| Model                                | Steps | Approx total pull | Notes                                                                |
+| ------------------------------------ | ----- | ----------------- | -------------------------------------------------------------------- |
+| `ltx-video-0.9.6:bf16`               | 40    | ~17.4 GB          | Higher-quality 2B path, 30 FPS defaults                              |
+| `ltx-video-0.9.6-distilled:bf16`     | 8     | ~17.4 GB          | Fast default single-pass path                                        |
+| `ltx-video-0.9.8-2b-distilled:bf16`  | 7+3   | ~17.8 GB          | 0.9.8 checkpoint plus spatial upscaler asset                         |
+| `ltx-video-0.9.8-13b-dev:bf16`       | 30    | ~38.5 GB          | Highest-quality 13B multiscale dev path; 40 GB-class GPU, no offload |
+| `ltx-video-0.9.8-13b-distilled:bf16` | 7+3   | ~38.5 GB          | Faster 13B checkpoint; 40 GB-class GPU, no offload                   |
+
+::: warning 13B BF16 tiers need a 40 GB-class GPU
+The legacy 13B checkpoints keep the transformer resident and have no block
+offload path. On a 24 GB card, use an LTX-2 generation or
+`ltx-video-0.9.8-2b-distilled:bf16` instead.
+:::
+
+### Legacy defaults and constraints
+
+- **Default model**: `ltx-video-0.9.6-distilled:bf16`
+- **Resolution**: 1216x704; both axes must be multiples of 32
+- **Frames**: 25 by default and always `8n+1`
+- **FPS**: 30
+- **Steps**: 8 on 0.9.6 distilled, 40 on 0.9.6, and 7+3 on 0.9.8 distilled
+- **Output**: MP4 by default; GIF, WebP, and APNG are silent alternatives
+
+The sequential pipeline loads the shared T5-XXL encoder, the LTX Video
+transformer, and the causal video VAE one at a time to keep peak memory
+manageable. The 2B variants fit comfortably on a 24 GB GPU; the 13B variants
+do not.
+
+```bash
+# Fast legacy path
+mold run ltx-video-0.9.6-distilled:bf16 \
+  "A cat walking across a sunlit windowsill" --frames 25
+
+# Legacy 0.9.8 multiscale refinement
+mold run ltx-video-0.9.8-2b-distilled:bf16 \
+  "a humanoid robot walking" --frames 49
+```
+
+- **Developer**: [Lightricks](https://huggingface.co/Lightricks)
+- **License**: LTXV Open Weights License (custom, revenue-gated at $10M)
+- **Weights**: [Lightricks/LTX-Video](https://huggingface.co/Lightricks/LTX-Video)
+- **Implementation provenance**: mold's legacy transformer, VAE, and scheduler
+  were ported from
+  [FerrisMind/candle-video](https://github.com/FerrisMind/candle-video), itself
+  a Rust port of Hugging Face diffusers. The Apache-2.0 portions are recorded
+  in `THIRD_PARTY_NOTICES.md`.

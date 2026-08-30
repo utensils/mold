@@ -43,16 +43,6 @@ ideas become living images."_
 </figure>
 <figure>
 
-<video controls loop playsinline preload="metadata" poster="/gallery/minimax-h3-bottle-ship-poster.webp" aria-label="A ship inside a bottle crossing a lightning storm with generated ocean audio" src="/gallery/minimax-h3-bottle-ship.webm"></video>
-
-**minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p**: 768x768, 175 frames,
-24 fps, seed 83042. A locked-camera prompt keeps the bottle sealed and the ship
-miniature while a storm develops inside the glass with synchronized waves,
-rigging, rain, and thunder.
-
-</figure>
-<figure>
-
 <video controls loop playsinline preload="metadata" poster="/gallery/minimax-h3-greenhouse-poster.webp" aria-label="Flowers opening inside a magical greenhouse with generated botanical audio" src="/gallery/minimax-h3-greenhouse.webm"></video>
 
 **minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p**: 992x992, 175 frames,
