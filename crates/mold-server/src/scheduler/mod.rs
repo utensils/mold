@@ -4288,12 +4288,43 @@ impl Coordinator {
                         .gpu_pool
                         .worker_by_ordinal(plan.device_ordinal)
                         .map(|worker| {
+                            // Owner work — a chain stage above all — asks the
+                            // same host question an ordinary generation does,
+                            // and must be charged the same way. Two things
+                            // were wrong with charging
+                            // `predicted_host_increment_bytes` here.
+                            //
+                            // It is the RAW figure, which `admission_host_
+                            // demand_bytes` exists to replace: on Metal the
+                            // host claim already rides the unified device
+                            // gate, so charging it again to the host ledger is
+                            // the #1038 double-count. Every generation path
+                            // goes through the accessor; this one did not.
+                            //
+                            // And it is the COLD figure, unconditionally. A
+                            // sequence is a run of stages against one model on
+                            // one worker: stage 2 onward finds the engine
+                            // already resident, its CPU-parked encoder already
+                            // counted out of `MemAvailable`, and pays only the
+                            // per-request transients. Charging each stage as
+                            // if it were loading from cold is what refused
+                            // long sequences on a host with the RAM to run
+                            // them — the user-visible half of this being that
+                            // the refusal arrives at stage N of N, after the
+                            // earlier stages already rendered.
+                            let warm_resident =
+                                worker.holds_execution_fingerprint(&plan.execution_fingerprint);
+                            let host_bytes = if warm_resident {
+                                plan.admission_warm_host_demand_bytes()
+                            } else {
+                                plan.admission_host_demand_bytes()
+                            };
                             estimate_candidate(
                                 DeviceId::new(plan.device_id.clone()),
                                 Some(worker.as_ref()),
                                 &plan.execution_fingerprint,
                                 plan.predicted_vram_peak_bytes,
-                                plan.predicted_host_increment_bytes,
+                                host_bytes,
                                 true,
                             )
                         })

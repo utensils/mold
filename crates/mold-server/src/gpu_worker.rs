@@ -1586,6 +1586,51 @@ fn process_legacy_owner_work(
     }
 }
 
+/// Turn a chain-stage failure into the message a user sees.
+///
+/// Chain stages bypass `process_job`, and with it every piece of CUDA error
+/// handling that path has had for years. A stage that ran out of memory
+/// reported the bare `DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")`
+/// — no shape advice, no reduced grant for the next attempt, and no device
+/// synchronize, so the next stage inherited a context still holding the failed
+/// allocation's state. Two chain jobs on the production host failed at stage 0
+/// with exactly that string and nothing else.
+///
+/// This is the same classification `process_job` performs, in the same order:
+/// a fatal context error quarantines the worker and says so; an ordinary OOM
+/// synchronizes and then produces the shape-aware message (which also records
+/// the reduced grant, so the next submission of this shape plans smaller);
+/// anything else is passed through unchanged.
+fn chain_stage_failure_message(
+    worker: &GpuWorker,
+    model_name: &str,
+    request: &mold_core::GenerateRequest,
+    plan: &crate::execution_plan::ResolvedExecutionPlan,
+    error: anyhow::Error,
+) -> String {
+    if is_fatal_cuda_error(&error) {
+        quarantine_poisoned_worker(worker);
+        return fatal_cuda_user_message(model_name);
+    }
+    if !is_cuda_oom(&error) {
+        return format!("{error:#}");
+    }
+    // A synchronize that does not come back means the context is gone; report
+    // it as fatal rather than inviting a retry onto a dead device.
+    if !synchronize_after_oom(worker) {
+        return fatal_cuda_user_message(model_name);
+    }
+    cuda_oom_user_message_with_plan(
+        worker,
+        model_name,
+        Some(plan.model_family.as_str()),
+        Some(request),
+        Some(&plan.engine_paths),
+        Some(plan.predicted_vram_peak_bytes),
+    )
+    .0
+}
+
 fn process_scheduled_chain_stage(
     worker: &GpuWorker,
     mut job: crate::chain_job_runner::ScheduledChainStageWork,
@@ -1690,8 +1735,8 @@ fn process_scheduled_chain_stage(
             fence_chain_stage_render(render, cancellation_seen, cancelled())
         },
     )
-    .map_err(|error| format!("{error:#}"))?
-    .map_err(|error| format!("{error:#}"))?;
+    .map_err(|error| chain_stage_failure_message(worker, &model, &job.stage_req, &plan, error))?
+    .map_err(|error| chain_stage_failure_message(worker, &model, &job.stage_req, &plan, error))?;
     drop(memory_watchdog);
     Ok(crate::chain_job_runner::StageExecution {
         outcome: result,

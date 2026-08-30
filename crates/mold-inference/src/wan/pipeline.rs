@@ -1198,6 +1198,64 @@ pub struct WanEngine {
     /// Encoder retained between requests under `MOLD_KEEP_TE_RAM=1`, parked on
     /// host RAM. `None` in the default drop-and-reload mode.
     retained_encoder: Option<WanTextEncoder>,
+    /// The last prompt encoding this engine produced, kept so a repeat of the
+    /// same prompt never opens the encoder at all. See [`CachedPromptEncoding`].
+    cached_encoding: Option<CachedPromptEncoding>,
+}
+
+/// One prompt's UMT5 output, retained across renders.
+///
+/// **This is the cheap half of encoder retention, and it is the half that
+/// matters for sequences.** `MOLD_KEEP_TE_RAM=1` keeps the 11.37 GB encoder in
+/// host RAM; the rule against making that a default is a good one — an
+/// unbounded encoder cache is what pinned FLUX's t5xxl_fp16 for the life of a
+/// process and made a 64 GB host refuse H3. But what a chain stage actually
+/// needs is not the encoder, it is the ~4 MB `[1, 512, 4096]` BF16 tensor the
+/// encoder produced from a prompt that has not changed since the previous
+/// stage.
+///
+/// So this caches the output, not the machine that made it: an authored
+/// sequence encodes once and every later stage skips the disk read, the
+/// upload, the forward, and the drop. It is the same trade `Ltx2RuntimeSession`
+/// already makes for Gemma (`ltx2/runtime.rs` — "retains only the cached
+/// prompt encoding"), sized here at two tensors instead of one because Wan's
+/// CFG path carries an unconditional branch beside the conditional one.
+///
+/// Exactly one entry, replaced on any miss. A cache big enough to need
+/// eviction would be a cache big enough to need an admission charge, and the
+/// access pattern that matters — N stages of one sequence sharing one prompt —
+/// is served completely by one.
+struct CachedPromptEncoding {
+    /// Everything that changes the tensors. Compared in full on every lookup:
+    /// a hit that is wrong conditions a render on the previous prompt, which
+    /// is worse than any load it saves.
+    prompt: String,
+    negative: String,
+    needs_cfg: bool,
+    encoder_paths: Vec<PathBuf>,
+    device: String,
+    dtype: DType,
+    cond: Tensor,
+    uncond: Option<Tensor>,
+}
+
+impl CachedPromptEncoding {
+    fn matches(
+        &self,
+        prompt: &str,
+        negative: &str,
+        needs_cfg: bool,
+        encoder_paths: &[PathBuf],
+        device: &Device,
+        dtype: DType,
+    ) -> bool {
+        self.prompt == prompt
+            && self.negative == negative
+            && self.needs_cfg == needs_cfg
+            && self.encoder_paths == encoder_paths
+            && self.device == format!("{device:?}")
+            && self.dtype == dtype
+    }
 }
 
 impl WanEngine {
@@ -1215,6 +1273,7 @@ impl WanEngine {
             selected_umt5_path: None,
             pending_placement: None,
             retained_encoder: None,
+            cached_encoding: None,
         }
     }
 
@@ -1724,16 +1783,6 @@ impl WanEngine {
         // ------------------------------------------------------------------
         // 2. Prompt encoding, then drop the encoder before denoise
         // ------------------------------------------------------------------
-        progress.stage_start("Loading UMT5-XXL encoder");
-        let encoder_start = Instant::now();
-        let tokenizer_path = self.tokenizer_path()?;
-        let tokenizer = match &self.shared_pool {
-            Some(pool) => pool.lock().unwrap().load_tokenizer(&tokenizer_path)?,
-            None => Arc::new(
-                tokenizers::Tokenizer::from_file(&tokenizer_path)
-                    .map_err(|e| anyhow::anyhow!("Wan: loading UMT5 tokenizer failed: {e}"))?,
-            ),
-        };
         let placement_device = crate::device::resolve_device(
             Some(
                 self.pending_placement
@@ -1746,85 +1795,133 @@ impl WanEngine {
         // Which UMT5 weights to read. The GGUF loader has existed and been
         // tested since the family landed; what was missing was a way to select
         // one, so every wan render read the 11.4 GB FP16 file.
+        //
+        // Resolved BEFORE the encoding cache is consulted because the selected
+        // weights are part of the cache key: the same prompt through a
+        // different encoder tier is a different embedding.
         let (encoder_paths, encoder_on_gpu) = self.resolve_umt5_weights(progress, &device)?;
         let text_device = encode_device(placement_device, &device, encoder_on_gpu);
         let encoder_dtype = encoder_dtype_for(&text_device, dtype);
-        // Reuse the parked encoder when this render was planned for the same
-        // weights, device, and dtype; otherwise the retained one is stale and
-        // is dropped before the fresh load so both are never resident.
-        let retained = self.retained_encoder.take();
-        let mut encoder = match retained {
-            Some(retained) if retained.matches(&encoder_paths, &text_device, encoder_dtype) => {
-                retained
-            }
-            stale => {
-                // Explicit: a `_` arm would keep the stale encoder's ~11.4 GB
-                // alive until the end of the match, i.e. across the fresh load.
-                drop(stale);
-                WanTextEncoder::load_with_tokenizer(
-                    &encoder_paths,
-                    &text_device,
-                    encoder_dtype,
-                    tokenizer,
-                )?
-            }
-        };
-        encoder.unpark()?;
-        progress.phase_done(
-            ProgressPhase::ModelLoad,
-            "Loading UMT5-XXL encoder",
-            encoder_start.elapsed(),
-        );
-
-        progress.stage_start("Encoding prompt");
-        let encode_start = Instant::now();
         let negative = resolve_negative_prompt(req.negative_prompt.as_deref());
-        let prompts: Vec<&str> = if needs_cfg {
-            vec![req.prompt.as_str(), negative]
-        } else {
-            vec![req.prompt.as_str()]
-        };
-        let embeds = encoder
-            .encode(&prompts)?
-            .to_device(&device)?
-            .to_dtype(dtype)?;
-        let cond_embeds = embeds.narrow(0, 0, 1)?.contiguous()?;
-        let uncond_embeds = if needs_cfg {
-            Some(embeds.narrow(0, 1, 1)?.contiguous()?)
-        } else {
-            None
-        };
-        drop(embeds);
-        progress.phase_done(
-            ProgressPhase::PromptEncode,
-            "Encoding prompt",
-            encode_start.elapsed(),
-        );
 
-        // The encoder is 11.4 GB at fp16; it must be gone from the compute
-        // device before the DiT loads. Under `MOLD_KEEP_TE_RAM=1` it moves to
-        // host RAM instead of vanishing, so the next request skips the disk
-        // read; the VRAM is released either way.
-        // Metal is unified memory: "parking on CPU" copies within the same
-        // physical RAM, so every other family skips it there and so does wan.
-        if crate::device::keep_te_in_ram() && !text_device.is_metal() {
-            encoder.park_to_cpu()?;
-            let parked = encoder.is_parked();
-            self.retained_encoder = Some(encoder);
-            device.synchronize()?;
-            progress.info(if parked {
-                "UMT5 encoder parked on host RAM, VRAM freed"
-            } else {
-                // GGUF: device-tied storage parks by dropping, so the next
-                // request reloads — cheaper than the FP16 path's read anyway.
-                "UMT5 encoder dropped, VRAM freed"
-            });
+        let cached = self.cached_encoding.as_ref().filter(|cached| {
+            cached.matches(
+                &req.prompt,
+                negative,
+                needs_cfg,
+                &encoder_paths,
+                &device,
+                dtype,
+            )
+        });
+
+        let (cond_embeds, uncond_embeds) = if let Some(cached) = cached {
+            // The whole point: an authored sequence runs N stages against one
+            // prompt, and stages 2..N have no reason to re-read 11.4 GB from
+            // disk, upload it, run one forward, and drop it again to recompute
+            // a tensor this engine is already holding.
+            progress.info("Reusing the cached prompt encoding (UMT5 not loaded)");
+            (cached.cond.clone(), cached.uncond.clone())
         } else {
-            encoder.drop_weights();
-            drop(encoder);
-            device.synchronize()?;
-            progress.info("UMT5 encoder dropped, VRAM freed");
-        }
+            progress.stage_start("Loading UMT5-XXL encoder");
+            let encoder_start = Instant::now();
+            let tokenizer_path = self.tokenizer_path()?;
+            let tokenizer = match &self.shared_pool {
+                Some(pool) => pool.lock().unwrap().load_tokenizer(&tokenizer_path)?,
+                None => Arc::new(
+                    tokenizers::Tokenizer::from_file(&tokenizer_path)
+                        .map_err(|e| anyhow::anyhow!("Wan: loading UMT5 tokenizer failed: {e}"))?,
+                ),
+            };
+            // Reuse the parked encoder when this render was planned for the same
+            // weights, device, and dtype; otherwise the retained one is stale and
+            // is dropped before the fresh load so both are never resident.
+            let retained = self.retained_encoder.take();
+            let mut encoder = match retained {
+                Some(retained) if retained.matches(&encoder_paths, &text_device, encoder_dtype) => {
+                    retained
+                }
+                stale => {
+                    // Explicit: a `_` arm would keep the stale encoder's ~11.4 GB
+                    // alive until the end of the match, i.e. across the fresh load.
+                    drop(stale);
+                    WanTextEncoder::load_with_tokenizer(
+                        &encoder_paths,
+                        &text_device,
+                        encoder_dtype,
+                        tokenizer,
+                    )?
+                }
+            };
+            encoder.unpark()?;
+            progress.phase_done(
+                ProgressPhase::ModelLoad,
+                "Loading UMT5-XXL encoder",
+                encoder_start.elapsed(),
+            );
+
+            progress.stage_start("Encoding prompt");
+            let encode_start = Instant::now();
+            let prompts: Vec<&str> = if needs_cfg {
+                vec![req.prompt.as_str(), negative]
+            } else {
+                vec![req.prompt.as_str()]
+            };
+            let embeds = encoder
+                .encode(&prompts)?
+                .to_device(&device)?
+                .to_dtype(dtype)?;
+            let cond_embeds = embeds.narrow(0, 0, 1)?.contiguous()?;
+            let uncond_embeds = if needs_cfg {
+                Some(embeds.narrow(0, 1, 1)?.contiguous()?)
+            } else {
+                None
+            };
+            drop(embeds);
+            progress.phase_done(
+                ProgressPhase::PromptEncode,
+                "Encoding prompt",
+                encode_start.elapsed(),
+            );
+
+            // The encoder is 11.4 GB at fp16; it must be gone from the compute
+            // device before the DiT loads. Under `MOLD_KEEP_TE_RAM=1` it moves to
+            // host RAM instead of vanishing, so the next request skips the disk
+            // read; the VRAM is released either way.
+            // Metal is unified memory: "parking on CPU" copies within the same
+            // physical RAM, so every other family skips it there and so does wan.
+            if crate::device::keep_te_in_ram() && !text_device.is_metal() {
+                encoder.park_to_cpu()?;
+                let parked = encoder.is_parked();
+                self.retained_encoder = Some(encoder);
+                device.synchronize()?;
+                progress.info(if parked {
+                    "UMT5 encoder parked on host RAM, VRAM freed"
+                } else {
+                    // GGUF: device-tied storage parks by dropping, so the next
+                    // request reloads — cheaper than the FP16 path's read anyway.
+                    "UMT5 encoder dropped, VRAM freed"
+                });
+            } else {
+                encoder.drop_weights();
+                drop(encoder);
+                device.synchronize()?;
+                progress.info("UMT5 encoder dropped, VRAM freed");
+            }
+
+            self.cached_encoding = Some(CachedPromptEncoding {
+                prompt: req.prompt.clone(),
+                negative: negative.to_string(),
+                needs_cfg,
+                encoder_paths: encoder_paths.clone(),
+                device: format!("{device:?}"),
+                dtype,
+                cond: cond_embeds.clone(),
+                uncond: uncond_embeds.clone(),
+            });
+
+            (cond_embeds, uncond_embeds)
+        };
 
         // ------------------------------------------------------------------
         // 2. Denoise
@@ -2173,6 +2270,9 @@ impl crate::engine::InferenceEngine for WanEngine {
         // survive it — the cache evicting this engine, or an explicit unload,
         // releases it.
         self.retained_encoder = None;
+        // A few MB, but "give the resources back" means all of them, and a
+        // reloaded engine must not answer from the previous one's prompt.
+        self.cached_encoding = None;
         self.base.unload();
     }
 
@@ -2451,6 +2551,62 @@ impl crate::chain::ChainStageRenderer for WanEngine {
 
 #[cfg(test)]
 mod tests {
+
+    /// The prompt-encoding cache must miss on every field that changes the
+    /// tensors. A false hit is not a slow render, it is a render conditioned
+    /// on the *previous* prompt — which is exactly the failure a cache keyed
+    /// on the prompt alone would produce for a sequence whose stages differ
+    /// only in their negative, their CFG arm, or their encoder tier.
+    #[test]
+    fn the_prompt_encoding_cache_misses_on_every_key_field() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let paths = vec![PathBuf::from("/models/umt5-xxl-fp16.safetensors")];
+        let tensor = Tensor::zeros((1, 4, 8), dtype, &device).expect("tensor");
+        let cached = CachedPromptEncoding {
+            prompt: "a neon alley".to_string(),
+            negative: "blurry".to_string(),
+            needs_cfg: true,
+            encoder_paths: paths.clone(),
+            device: format!("{device:?}"),
+            dtype,
+            cond: tensor.clone(),
+            uncond: Some(tensor),
+        };
+
+        // The exact same render hits.
+        assert!(cached.matches("a neon alley", "blurry", true, &paths, &device, dtype));
+
+        // Every field that feeds the encoder must miss.
+        assert!(
+            !cached.matches("a different alley", "blurry", true, &paths, &device, dtype),
+            "a changed prompt must miss"
+        );
+        assert!(
+            !cached.matches("a neon alley", "grainy", true, &paths, &device, dtype),
+            "a changed negative must miss — it is half the encoded batch"
+        );
+        assert!(
+            !cached.matches("a neon alley", "blurry", false, &paths, &device, dtype),
+            "dropping the CFG arm changes what was encoded"
+        );
+        assert!(
+            !cached.matches(
+                "a neon alley",
+                "blurry",
+                true,
+                &[PathBuf::from("/models/umt5-xxl-q8.gguf")],
+                &device,
+                dtype
+            ),
+            "a different encoder tier produces a different embedding"
+        );
+        assert!(
+            !cached.matches("a neon alley", "blurry", true, &paths, &device, DType::BF16),
+            "a changed compute dtype must miss"
+        );
+    }
+
     use super::*;
 
     #[derive(Debug)]
