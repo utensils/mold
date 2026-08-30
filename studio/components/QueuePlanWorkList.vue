@@ -2,10 +2,7 @@
 import { computed } from "vue";
 import type { QueuePlan, QueueWorkItem } from "../api/queuePlan";
 import { queuePlanOnlyWork } from "../lib/queuePlanPresentation";
-import {
-  preparationForWorkItem,
-  preparationLabel,
-} from "../lib/queuePosition";
+import { preparationForWorkItem, preparationLabel } from "../lib/queuePosition";
 
 const props = withDefaults(
   defineProps<{

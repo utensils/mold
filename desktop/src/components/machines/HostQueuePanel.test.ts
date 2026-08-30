@@ -181,9 +181,7 @@ describe("HostQueuePanel", () => {
       ],
     });
 
-    expect(wrapper.get("[data-test='queue-row']").text()).toContain(
-      "LOADING FLUX.2 TRANSFORMER",
-    );
+    expect(wrapper.get("[data-test='queue-row']").text()).toContain("LOADING FLUX.2 TRANSFORMER");
     expect(wrapper.get("[data-test='queue-row']").text()).not.toContain("NEXT UP");
   });
 

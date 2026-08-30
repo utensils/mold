@@ -144,7 +144,9 @@ function phase(row: FleetActiveWork): string {
           <strong>{{ title(row) }}</strong>
           <span>
             {{ row.hostLabel }} · {{ phase(row) }}
-            <template v-if="progress(row) !== null"> · {{ progress(row) }}%</template>
+            <template v-if="progress(row) !== null">
+              · {{ progress(row) }}%</template
+            >
             <template v-if="row.stale">
               · Last seen active ·
               {{ row.hostError ?? "Waiting to reconnect" }}</template

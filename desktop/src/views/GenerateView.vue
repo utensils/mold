@@ -2235,13 +2235,7 @@ const liveGenerationStatus = computed(() => {
   if (!j || j.status === "complete" || j.status === "error") return "";
   if (j.status === "queued") {
     return queueWaitLabel(
-      resolveQueueWait(
-        queueStatusFor(
-          queueStatus.value,
-          j.hostId ?? hosts.primaryHost?.id,
-          j.id,
-        ),
-      ),
+      resolveQueueWait(queueStatusFor(queueStatus.value, j.hostId ?? hosts.primaryHost?.id, j.id)),
     );
   }
   if (j.status === "loading") return `${j.stage ?? "Preparing"}…`;

@@ -140,9 +140,7 @@ describe("ActivityStrip", () => {
     };
 
     const text = mount(ActivityStrip).get("[data-test='shared-live-activity']").text();
-    expect(text).toMatch(
-      /HAL 9000 · Preparing · Verifying model files\s+· 27%/,
-    );
+    expect(text).toMatch(/HAL 9000 · Preparing · Verifying model files\s+· 27%/);
   });
 
   it("is hidden when nothing is in flight", () => {
