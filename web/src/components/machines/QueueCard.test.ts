@@ -112,7 +112,9 @@ describe("QueueCard reorder index", () => {
     expect(wrapper.get("[data-test='queue-row']").text()).toContain(
       "Denoising · 2/4",
     );
-    expect(wrapper.get("[data-test='queue-row']").text()).not.toContain("Next up");
+    expect(wrapper.get("[data-test='queue-row']").text()).not.toContain(
+      "Next up",
+    );
   });
 
   it("exposes advertised queue controls and disables lane changes for running jobs", async () => {
