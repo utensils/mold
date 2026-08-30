@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import type { FleetActiveWork } from "@studio/api/activity";
+import { resolveSwipeAxis, type SwipePhase } from "@studio/lib/swipeAction";
 
 const props = withDefaults(
   defineProps<{
@@ -26,8 +27,12 @@ const emit = defineEmits<{
 }>();
 
 const openActionKey = ref<string | null>(null);
-let swipe: { key: string; x: number; y: number; horizontal: boolean } | null =
-  null;
+let swipe: {
+  key: string;
+  x: number;
+  y: number;
+  phase: Exclude<SwipePhase, "idle">;
+} | null = null;
 
 function beginSwipe(row: FleetActiveWork, event: TouchEvent): void {
   if (!props.swipeActions || !props.canSwipe(row) || event.touches.length !== 1)
@@ -38,7 +43,7 @@ function beginSwipe(row: FleetActiveWork, event: TouchEvent): void {
       key: row.key,
       x: touch.clientX,
       y: touch.clientY,
-      horizontal: false,
+      phase: "undecided",
     };
 }
 
@@ -47,17 +52,15 @@ function moveSwipe(event: TouchEvent): void {
   if (!swipe || !touch) return;
   const dx = touch.clientX - swipe.x;
   const dy = touch.clientY - swipe.y;
-  if (!swipe.horizontal && Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
-    swipe.horizontal = true;
-  }
-  if (swipe.horizontal) event.preventDefault();
+  if (swipe.phase === "undecided") swipe.phase = resolveSwipeAxis(dx, dy);
+  if (swipe.phase === "horizontal") event.preventDefault();
 }
 
 function finishSwipe(event: TouchEvent): void {
   const gesture = swipe;
   swipe = null;
   const touch = event.changedTouches[0];
-  if (!gesture || !gesture.horizontal || !touch) return;
+  if (!gesture || gesture.phase !== "horizontal" || !touch) return;
   const dx = touch.clientX - gesture.x;
   if (dx <= -36) openActionKey.value = gesture.key;
   else if (dx >= 36) openActionKey.value = null;

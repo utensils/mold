@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   SWIPE_AXIS_LOCK_PX,
+  SWIPE_AXIS_INTENT_RATIO,
   SWIPE_COMMIT_FRACTION,
   beginSwipe,
   createSwipeState,
   endSwipe,
   moveSwipe,
+  resolveSwipeAxis,
   swipeIsOpen,
   type SwipeGestureConfig,
 } from "./swipeAction";
@@ -38,6 +40,26 @@ describe("swipe gesture math", () => {
     const state = drag(-20, -60);
     expect(state.phase).toBe("vertical");
     expect(state.offset).toBe(0);
+  });
+
+  it("keeps early diagonal scroll jitter inert until vertical intent wins", () => {
+    let state = beginSwipe(createSwipeState(), { x: 300, y: 100 });
+    state = moveSwipe(state, { x: 287, y: 111 }, config);
+    expect(state.phase).toBe("undecided");
+    expect(state.offset).toBe(0);
+    expect(state.captured).toBe(false);
+
+    state = moveSwipe(state, { x: 280, y: 160 }, config);
+    expect(state.phase).toBe("vertical");
+    expect(state.offset).toBe(0);
+    expect(state.captured).toBe(false);
+  });
+
+  it("requires clear axis dominance after crossing the travel threshold", () => {
+    expect(resolveSwipeAxis(-20, 18)).toBe("undecided");
+    expect(resolveSwipeAxis(-30, 20)).toBe("horizontal");
+    expect(resolveSwipeAxis(-20, 30)).toBe("vertical");
+    expect(SWIPE_AXIS_INTENT_RATIO).toBeGreaterThan(1);
   });
 
   it("stays vertical for the rest of the gesture once the scroll wins", () => {

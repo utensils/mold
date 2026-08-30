@@ -130,6 +130,21 @@ describe("SwipeActionRow", () => {
     ).toContain("translateX(0px)");
   });
 
+  it("never exposes the tray during ambiguous diagonal scroll startup", async () => {
+    const wrapper = mountRow();
+    const surface = wrapper.get(
+      '[data-test="swipe-action-row"] > div:last-child',
+    );
+    await pointer(wrapper, "pointerdown", 300, 100);
+    await pointer(wrapper, "pointermove", 287, 111);
+    expect(surface.attributes("style")).toContain("translateX(0px)");
+
+    await pointer(wrapper, "pointermove", 280, 160);
+    await pointer(wrapper, "pointerup", 280, 160);
+    expect(surface.attributes("style")).toContain("translateX(0px)");
+    expect(wrapper.emitted("act")).toBeUndefined();
+  });
+
   it("restores rather than acting when the gesture is cancelled", async () => {
     const wrapper = mountRow();
     vi.spyOn(

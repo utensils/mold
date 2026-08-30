@@ -293,9 +293,10 @@ pushed screen opened from the header.
   takes two deliberate moves, and the tray is
   equally reachable from the row's **Actions** button so VoiceOver and hardware
   keyboards never depend on the gesture. The horizontal pan is scoped to the
-  row (`touch-action: pan-y`), leaving the list scroll, the Library grid's
-  column pinch, and the gallery viewer's swipe untouched, and the settle
-  animation honours `prefers-reduced-motion`. A host advertising
+  row (`touch-action: pan-y`) and stays visually closed until horizontal travel
+  clearly dominates early diagonal scroll jitter, leaving the list scroll, the
+  Library grid's column pinch, and the gallery viewer's swipe untouched. The
+  settle animation honours `prefers-reduced-motion`. A host advertising
   `capabilities.queue.can_reorder` adds a non-destructive **To back**, which
   sends `PATCH /api/queue/:id {position}` — the server clamps a large index to
   the tail, so the phone never has to read a queue depth its bounded page
