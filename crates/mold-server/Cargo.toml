@@ -70,11 +70,11 @@ nvml = ["dep:nvml-wrapper"]
 test-support = []
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.25.0" }
-mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.25.0" }
-mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.25.0" }
-mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.25.0" }
-mold-scheduler = { path = "../mold-scheduler", package = "mold-ai-scheduler", version = "0.25.0" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.26.0" }
+mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.26.0" }
+mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.26.0" }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.26.0" }
+mold-scheduler = { path = "../mold-scheduler", package = "mold-ai-scheduler", version = "0.26.0" }
 anyhow = "1"
 libc = "0.2"
 axum = "0.7"
@@ -130,7 +130,7 @@ windows-sys = { version = "0.59", features = [
 [dev-dependencies]
 # Test-only feature unification lets the server prove its frozen H3 authority
 # against the private loader without exposing that loader on a runnable feature.
-mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.25.0", features = ["h3-private-uat"] }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.26.0", features = ["h3-private-uat"] }
 filetime = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
