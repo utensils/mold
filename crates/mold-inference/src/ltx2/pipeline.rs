@@ -1480,12 +1480,6 @@ impl Ltx2Engine {
         // identity drift compounds stage-over-stage because each clip's
         // only long-range reference is its own drifted last-frame carry.
         if let Some(tail) = carry {
-            if req.source_image.is_some() {
-                tracing::warn!(
-                    "smooth continuation received source_image; it will be repurposed as a soft \
-                     identity anchor. Use transition: cut|fade to seed the stage with a fresh i2v."
-                );
-            }
             if tail.tail_rgb_frames.is_empty() {
                 bail!(
                     "render_chain_stage: carry.tail_rgb_frames is empty; caller must provide at least one frame"
@@ -1493,22 +1487,14 @@ impl Ltx2Engine {
             }
 
             // Re-route any frame-0 staged image into the soft-anchor
-            // append slot. The anchor frame is the first pixel past the
-            // motion-tail pin, so the reference token's RoPE sits exactly
-            // where new content starts — cross-attention propagates
-            // identity into the free region most directly from there.
-            // `CHAIN_SOFT_ANCHOR_STRENGTH = 0.4` gives the denoise mask a
-            // value of `1 - 0.4 = 0.6` at the anchor token, so the
-            // denoiser blends ~60% generated / ~40% reference every step.
-            // Seeded two-clip UAT revalidated this value after the soft
-            // appended-token noiser was aligned with upstream semantics.
-            let anchor_frame = motion_tail_pixel_frames;
-            for image in plan.conditioning.images.iter_mut() {
-                if image.frame == 0 {
-                    image.frame = anchor_frame;
-                    image.strength = CHAIN_SOFT_ANCHOR_STRENGTH;
-                }
-            }
+            // append slot — or drop it, on a checkpoint that was trained
+            // to read an appended single-frame token as a keyframe target.
+            // See `route_continuation_opening_images`.
+            route_continuation_opening_images(
+                &mut plan.conditioning.images,
+                motion_tail_pixel_frames,
+                plan.preset.transformer.use_keyframes_abs_pos_embedding,
+            );
 
             plan.conditioning.latents.push(StagedLatent {
                 tail_rgb_frames: tail.tail_rgb_frames.clone(),
@@ -1583,6 +1569,64 @@ impl Ltx2Engine {
             attention_path,
             int8_arm,
         })
+    }
+}
+
+/// Decide what a smooth continuation does with the chain's repeated opening
+/// image, whose frame-0 slot the motion-tail carry already owns.
+///
+/// LTX-2 / LTX-2.3: the image is re-routed into the soft-anchor append slot.
+/// The anchor frame is the first pixel past the motion-tail pin, so the
+/// reference token's RoPE sits exactly where new content starts —
+/// cross-attention propagates identity into the free region most directly
+/// from there. `CHAIN_SOFT_ANCHOR_STRENGTH = 0.4` gives the denoise mask a
+/// value of `1 - 0.4 = 0.6` at the anchor token, so the denoiser blends ~60%
+/// generated / ~40% reference every step. Seeded two-clip UAT revalidated
+/// this value after the soft appended-token noiser was aligned with upstream
+/// semantics.
+///
+/// LTX-2.5 (`use_keyframes_abs_pos_embedding`): the image is DROPPED. That
+/// checkpoint generation was trained with keyframe conditioning — upstream's
+/// `VideoConditionByKeyframeIndex` (`ltx-core/conditioning/types/keyframe_cond.py`)
+/// is exactly "append a single-pixel-frame token at `frame_idx` with
+/// `denoise_mask = 1 - strength`", which is byte-for-byte the shape of the
+/// soft anchor — so the model reads the anchor as a keyframe it must reach at
+/// `motion_tail` and every continuation cut back to the opening shot right
+/// where the new content began (the report was "each generation resets to the
+/// input image"). Upstream has no identity-reference item for video: the
+/// tail carry is the only continuity authority a keyframe-trained checkpoint
+/// gets, which is the same rule wan's chain already follows.
+fn route_continuation_opening_images(
+    images: &mut Vec<conditioning::StagedImage>,
+    motion_tail_pixel_frames: u32,
+    keyframe_trained: bool,
+) {
+    if keyframe_trained {
+        let before = images.len();
+        images.retain(|image| image.frame != 0);
+        if images.len() != before {
+            tracing::info!(
+                "smooth continuation on a keyframe-trained LTX checkpoint: dropping the repeated \
+                 opening image rather than appending it (an appended single-frame token is a \
+                 keyframe target on this generation; the motion tail carries continuity)"
+            );
+        }
+        return;
+    }
+    let anchor_frame = motion_tail_pixel_frames;
+    let mut rerouted = false;
+    for image in images.iter_mut() {
+        if image.frame == 0 {
+            image.frame = anchor_frame;
+            image.strength = CHAIN_SOFT_ANCHOR_STRENGTH;
+            rerouted = true;
+        }
+    }
+    if rerouted {
+        tracing::warn!(
+            "smooth continuation received source_image; it will be repurposed as a soft \
+             identity anchor. Use transition: cut|fade to seed the stage with a fresh i2v."
+        );
     }
 }
 
@@ -3426,6 +3470,69 @@ mod tests {
         assert!(
             msg.contains("motion_tail_pixel_frames"),
             "error must name the motion_tail constraint, got: {msg}",
+        );
+    }
+
+    fn staged_opening_image(strength: f64) -> Vec<conditioning::StagedImage> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut req = request(OutputFormat::Mp4, Some(false));
+        req.source_image = Some(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        req.strength = strength;
+        let staged = conditioning::stage_conditioning(&req, dir.path()).unwrap();
+        let images = staged.images.clone();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].frame, 0);
+        images
+    }
+
+    /// LTX-2 / LTX-2.3 keep the soft identity anchor: the repeated opening
+    /// image moves to the first frame past the motion tail at the soft
+    /// strength, and a genuine keyframe (non-zero frame) is untouched.
+    #[test]
+    fn continuation_opening_image_becomes_a_soft_anchor_on_a_legacy_checkpoint() {
+        let mut images = staged_opening_image(0.9);
+        route_continuation_opening_images(&mut images, 17, false);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].frame, 17);
+        assert_eq!(images[0].strength, CHAIN_SOFT_ANCHOR_STRENGTH);
+    }
+
+    /// LTX-2.5 was trained with keyframe conditioning, and an appended
+    /// single-frame token at the motion tail is exactly upstream's
+    /// `VideoConditionByKeyframeIndex` — the checkpoint rendered the anchor
+    /// as a keyframe and every continuation reset to the opening image. The
+    /// image is dropped; the motion-tail carry alone owns continuity.
+    #[test]
+    fn continuation_opening_image_is_dropped_on_a_keyframe_trained_checkpoint() {
+        let mut images = staged_opening_image(0.9);
+        route_continuation_opening_images(&mut images, 17, true);
+        assert!(
+            images.is_empty(),
+            "a keyframe-trained checkpoint must not receive the opening image as an appended token"
+        );
+    }
+
+    /// The preset table is the authority the router reads: LTX-2.5 is the
+    /// only generation whose transformer carries the keyframe marker.
+    #[test]
+    fn keyframe_trained_gate_follows_the_preset_table() {
+        assert!(
+            preset::preset_for_model("ltx-2.5-22b-distilled:bf16")
+                .unwrap()
+                .transformer
+                .use_keyframes_abs_pos_embedding
+        );
+        assert!(
+            !preset::preset_for_model("ltx-2-19b-distilled:fp8")
+                .unwrap()
+                .transformer
+                .use_keyframes_abs_pos_embedding
+        );
+        assert!(
+            !preset::preset_for_model("ltx-2.3-22b-distilled:fp8")
+                .unwrap()
+                .transformer
+                .use_keyframes_abs_pos_embedding
         );
     }
 

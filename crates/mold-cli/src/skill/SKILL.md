@@ -1135,7 +1135,11 @@ desktop, and iPhone Create pickers contain only sequence-capable installed
 models and select one when available. A new Sequence starts with two required clip
 descriptions, uses Smooth / Cut / Fade seam labels for context-capable
 LTX-2 and Join clips for LTX-Video's zero-tail fallback, and keeps frame
-choices strictly above the active motion tail. Seed, source, audio, and TOML tools stay under
+choices strictly above the active motion tail. An opening image conditions clip 1;
+LTX-2 / LTX-2.3 also append it to every smooth continuation as a soft identity
+anchor, while LTX-2.5 (keyframe-trained) drops it there and carries the motion
+tail alone, because that generation reads the anchor as a keyframe to cut back
+to. Seed, source, audio, and TOML tools stay under
 progressive disclosure. Durable sequence creation, events, previews, and
 actions follow the selected machine with its API key in headers rather than
 falling back to another engine. iPhone persists only the host identity and

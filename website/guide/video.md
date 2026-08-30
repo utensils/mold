@@ -12,6 +12,11 @@ renders its clips through the two-stage pipeline, so expect roughly twice the
 wall time per clip as a distilled one; stage 1 runs classifier-free guidance
 as two sequential forward passes.
 
+An opening image conditions the first clip only. On LTX-2 and LTX-2.3 the
+same image also rides every smooth continuation as a soft identity anchor;
+on LTX-2.5, which was trained with keyframe conditioning and would read that
+anchor as a keyframe to cut back to, continuations carry the motion tail alone.
+
 ### Wan sequences
 
 What crosses a wan clip boundary depends on the checkpoint, not the family:
