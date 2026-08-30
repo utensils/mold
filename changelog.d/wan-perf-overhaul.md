@@ -61,3 +61,10 @@
   attempted first, and only an OOM falls back to a spatially tiled decode with
   ComfyUI's own geometry: 256x256 pixel tiles, a quarter-tile overlap, and a
   linearly ramped blend mask.
+- **The Wan DiT's RMS norms use candle's fused kernel, which is also the
+  faithful one.** The hand-rolled version kept F32 across the weight multiply;
+  upstream is `self._norm(x.float()).type_as(x) * self.weight`
+  (`Wan2.2/wan/modules/model.py:82`), which casts back to the compute dtype
+  first — exactly what `candle_nn::ops::rms_norm` does. It also stops
+  materializing four full-size F32 temporaries per norm, per block, per step
+  (~671 MB apiece at A14B over an 81-frame clip).

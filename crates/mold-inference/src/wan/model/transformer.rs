@@ -739,12 +739,28 @@ impl WanRmsNorm {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let dtype = x.dtype();
-        let x32 = x.to_dtype(DType::F32)?;
-        let variance = x32.sqr()?.mean_keepdim(D::Minus1)?;
-        x32.broadcast_div(&variance.affine(1.0, self.eps)?.sqrt()?)?
-            .broadcast_mul(&self.weight.to_dtype(DType::F32)?)?
-            .to_dtype(dtype)
+        // candle's fused kernel, not a hand-rolled chain, and the fused one is
+        // also the FAITHFUL one.
+        //
+        // Upstream is `self._norm(x.float()).type_as(x) * self.weight`
+        // (`Wan2.2/wan/modules/model.py:82`): normalize in F32, cast back to
+        // the input dtype, and only THEN apply the weight.
+        // `candle_nn::ops::rms_norm` does exactly that — its reference
+        // spelling `rms_norm_slow` ends `x_normed.to_dtype(x_dtype)?
+        // .broadcast_mul(alpha)`. The previous hand-rolled version kept F32
+        // across the weight multiply, which is one rounding LESS than
+        // upstream performs, so this moves toward the reference rather than
+        // away from it.
+        //
+        // It is also four fewer full-size buffers. The chain materialized
+        // `x32`, its square, the divided tensor, and the weighted tensor —
+        // at A14B's 5120-wide hidden state over an 81-frame clip that is
+        // ~671 MB apiece, per norm, per block, per step. The fused kernel
+        // reads the input once and writes the output once.
+        //
+        // The weight is stored in the compute dtype and `rms_norm` requires a
+        // rank-1 alpha matching the last axis, which is how it is loaded.
+        candle_nn::ops::rms_norm(x, &self.weight, self.eps as f32)
     }
 }
 
