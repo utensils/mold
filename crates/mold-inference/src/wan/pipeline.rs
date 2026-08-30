@@ -2262,6 +2262,21 @@ fn video_frames_to_images(video: &Tensor, width: u32, height: u32) -> Result<Vec
 impl crate::engine::InferenceEngine for WanEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.base.progress.checkpoint()?;
+        // An ordinary render is the end of any sequence this engine was
+        // serving, so the chain-scoped encoder retention stops here.
+        //
+        // Without this the ~11.4 GB stays parked until the model cache
+        // happens to evict the engine, and with `MOLD_MAX_CACHED_MODELS`
+        // defaulting to 3 that is three encoders' worth of host RAM held for
+        // sequences that finished. `MOLD_KEEP_TE_RAM=1` is unaffected: that is
+        // an explicit request to keep it, and `keep_te_in_ram()` is re-read on
+        // the next render anyway.
+        if self.rendering_chain {
+            self.rendering_chain = false;
+            if !crate::device::keep_te_in_ram() {
+                self.retained_encoder = None;
+            }
+        }
         self.pending_placement = req.placement.clone();
         let result = if req.is_extend() {
             self.extend_inner(req)
