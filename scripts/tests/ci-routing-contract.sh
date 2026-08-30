@@ -8,6 +8,7 @@ ios="$repo_root/.github/workflows/ios.yml"
 android="$repo_root/.github/workflows/android.yml"
 android_gradle="$repo_root/apps/mobile/src-tauri/gen/android/build.gradle.kts"
 release_workflow="$repo_root/.github/workflows/release.yml"
+testflight="$repo_root/.github/workflows/testflight-ios.yml"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -57,6 +58,16 @@ require_text "$ci" \
   "root CI does not cancel superseded PR runs"
 require_text "$ci" 'CARGO_INCREMENTAL: "0"' \
   "root CI enables incremental compilation even though sccache rejects it"
+
+for workflow in "$android" "$release_workflow" "$testflight"; do
+  require_text "$workflow" \
+    "if ! cargo tauri --version 2>/dev/null | grep -Fq '2.11.4'; then" \
+    "Tauri CLI install does not tolerate a binary restored by Rust cache: $workflow"
+  require_text "$workflow" \
+    "cargo install tauri-cli --version 2.11.4 --locked --force" \
+    "Tauri CLI install cannot replace a stale restored binary: $workflow"
+done
+
 if grep -Fq 'CARGO_INCREMENTAL: "1"' "$release_workflow"; then
   fail "release builds enable incremental compilation while using sccache"
 fi
