@@ -586,6 +586,7 @@ function imagePreview(
 
 <style scoped>
 .h3-authoring {
+  container-type: inline-size;
   display: grid;
   min-width: 0;
   max-width: 100%;
@@ -743,6 +744,7 @@ function imagePreview(
 .h3-authoring__actions {
   display: flex;
   flex-wrap: wrap;
+  min-width: 0;
   gap: 4px;
 }
 .h3-authoring__errors {
@@ -755,13 +757,16 @@ function imagePreview(
 .h3-authoring--touch input {
   min-height: 44px;
 }
-@media (max-width: 520px) {
+/* The desktop Create inspector is narrow even when the app window is wide, so
+ * this must follow the component's own width rather than the viewport. */
+@container (max-width: 520px) {
   .h3-authoring__reference {
     grid-template-columns: 28px 56px minmax(0, 1fr);
   }
   .h3-authoring__actions {
     grid-column: 2 / -1;
-    justify-content: flex-end;
+    grid-row: 2;
+    justify-content: flex-start;
   }
 }
 </style>
