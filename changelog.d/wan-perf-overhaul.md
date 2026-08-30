@@ -6,12 +6,6 @@
   Image families are unchanged and still default to `math`, so an archived
   still renders the same bytes it always did; `MOLD_ATTN=math` restores the old
   arithmetic everywhere.
-- **Wan step caching is on by default.** `MOLD_WAN_STEP_CACHE` now defaults to
-  `auto` rather than `off`. First-block residual reuse was already measured at
-  **1.85x** on the non-distilled tiers (605.6 s to 327.4 s, `wan22-t2v-a14b:q8`
-  33 frames at 832x480, 20 steps) and already refuses itself on distilled
-  adapters and schedules under 12 steps, so the default only engages where it
-  was qualified. `MOLD_WAN_STEP_CACHE=off` disables it.
 - **Wan admission and block offload now price the attention backend that
   actually runs.** The activation model charged a math-attention score matrix
   — 44% of the per-token budget at A14B — on every render, including one using
@@ -32,13 +26,13 @@
   surfaced a bare `DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")` with
   no shape advice, no device synchronize, and no reduced grant for the next
   attempt. They now classify the failure exactly as `process_job` does.
-- **Chain stages are charged the host memory they actually need.** A stage
-  whose worker already holds the engine was charged the full cold-load host
-  increment, so a long sequence could be refused for host RAM partway through
-  on a machine with plenty free. It now takes the warm-resident credit every
-  ordinary generation already took, through the same accessor — which also
-  fixes a Metal double-count, since the raw increment was being charged beside
-  the unified device gate.
+- **Chain stages no longer double-charge host memory on Metal.** The owner-work
+  candidate charged the plan's raw `predicted_host_increment_bytes` rather than
+  going through `admission_host_demand_bytes`, so on Metal the host claim was
+  counted both against the unified device gate and again on the host ledger.
+  It now uses the same accessor every generation path does. It deliberately does
+  NOT take the warm-resident credit: a matching execution fingerprint proves the
+  engine is warm, not its text encoder, and Wan drops UMT5 after every render.
 - **Cancelling a render no longer makes its shape look too big for the card.**
   A stopped generation or chain stage was recorded as a memory *failure*, which
   wrote the cancel-time VRAM high-water into that shape's estimate bucket; while

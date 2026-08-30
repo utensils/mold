@@ -167,6 +167,25 @@ fn requested_backend_env() -> Option<AttentionBackend> {
     })
 }
 
+/// The attention policy a manifest family slug renders under.
+///
+/// The families listed here are exactly the ones whose call sites pass
+/// `AttentionPolicy::Video` — the Wan DiT and LTX-2's BF16 dispatch. Anything
+/// else, known or not, keeps `Image`, which is the conservative direction: a
+/// family that renders under `Math` but is frozen as `Math` is consistent,
+/// while the reverse is not.
+///
+/// This exists because `FrozenEngineConfig` records the backend a plan will
+/// execute under, and its fingerprint is what execution-plan equivalence is
+/// built from. Freezing the image answer for a video render would describe
+/// different arithmetic from the one the renderer runs.
+pub fn policy_for_family(family: &str) -> AttentionPolicy {
+    match family {
+        "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => AttentionPolicy::Video,
+        _ => AttentionPolicy::Image,
+    }
+}
+
 /// Pure function used by [`requested_backend_env`] and unit tests so we can
 /// exercise the env parser without poisoning the global `OnceLock`.
 ///
@@ -1117,6 +1136,37 @@ mod tests {
     /// kernel compiled in, an unset `MOLD_ATTN` reaches a video DiT as
     /// `Flash`. Without the kernel it must stay `Math` — not a `Flash` that
     /// falls back per block and warns about a request nobody made.
+    /// The frozen plan and the renderer must agree on which arithmetic runs,
+    /// so the family mapping has to cover exactly the call sites that pass
+    /// `Video` — no more, and no less.
+    #[test]
+    fn the_family_policy_covers_the_video_call_sites() {
+        for family in ["wan", "ltx2", "ltx-2", "ltx-2.3"] {
+            assert_eq!(
+                policy_for_family(family),
+                AttentionPolicy::Video,
+                "{family} renders through the video dispatch"
+            );
+        }
+        for family in [
+            "flux",
+            "flux2",
+            "sdxl",
+            "sd15",
+            "sd3",
+            "qwen-image",
+            "z-image",
+            "ltx-video",
+            "unknown",
+        ] {
+            assert_eq!(
+                policy_for_family(family),
+                AttentionPolicy::Image,
+                "{family} must keep the image default"
+            );
+        }
+    }
+
     #[test]
     fn video_default_is_flash_exactly_when_the_kernel_is_compiled() {
         let expected = if AttentionBackend::flash_compiled() {

@@ -1502,6 +1502,14 @@ impl WanVideoVae {
         };
 
         let device = latents.device().clone();
+        // The accumulators live on the CPU, not on the device that just ran
+        // out of memory. They are full-video F32 buffers — about 1.6 GiB
+        // together at 1280x704 x 121 before a single tile temporary — and
+        // holding them on the constrained device is how a recovery path
+        // reproduces the failure it is recovering from. `crate::vae_tiling`
+        // accumulates on the host for the same reason. Only one tile's decode
+        // is on the device at a time.
+        let accumulator_device = Device::Cpu;
         let mut acc: Option<Tensor> = None;
         let mut weight: Option<Tensor> = None;
 
@@ -1523,12 +1531,12 @@ impl WanVideoVae {
                     acc = Some(Tensor::zeros(
                         (1, 3, frames, lat_h * scale, lat_w * scale),
                         DType::F32,
-                        &device,
+                        &accumulator_device,
                     )?);
                     weight = Some(Tensor::zeros(
                         (1, 1, frames, lat_h * scale, lat_w * scale),
                         DType::F32,
-                        &device,
+                        &accumulator_device,
                     )?);
                 }
 
@@ -1560,6 +1568,7 @@ impl WanVideoVae {
         // is never zero; the clamp is belt and braces against a degenerate
         // mask rather than a real case.
         acc.broadcast_div(&weight.clamp(1e-6, f64::INFINITY)?)?
+            .to_device(&device)?
             .to_dtype(self.dtype)?
             .clamp(-1.0, 1.0)
     }

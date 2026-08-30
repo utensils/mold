@@ -4558,24 +4558,23 @@ impl Coordinator {
                             // the #1038 double-count. Every generation path
                             // goes through the accessor; this one did not.
                             //
-                            // And it is the COLD figure, unconditionally. A
-                            // sequence is a run of stages against one model on
-                            // one worker: stage 2 onward finds the engine
-                            // already resident, its CPU-parked encoder already
-                            // counted out of `MemAvailable`, and pays only the
-                            // per-request transients. Charging each stage as
-                            // if it were loading from cold is what refused
-                            // long sequences on a host with the RAM to run
-                            // them — the user-visible half of this being that
-                            // the refusal arrives at stage N of N, after the
-                            // earlier stages already rendered.
-                            let warm_resident =
-                                worker.holds_execution_fingerprint(&plan.execution_fingerprint);
-                            let host_bytes = if warm_resident {
-                                plan.admission_warm_host_demand_bytes()
-                            } else {
-                                plan.admission_host_demand_bytes()
-                            };
+                            // It is deliberately NOT given the warm-resident
+                            // credit an ordinary generation gets. That credit
+                            // is sound for FLUX, whose CPU-parked encoder
+                            // stays resident for the engine's life so
+                            // `MemAvailable` already excludes it. It is NOT
+                            // sound for the video families a chain stage
+                            // actually runs: Wan drops UMT5 after every render
+                            // by default, and LTX-2's session "holds almost
+                            // nothing" and explicitly permits no
+                            // admission-side residency credit
+                            // (`.claude/rules/inference.md`). A matching
+                            // execution fingerprint proves the ENGINE is warm,
+                            // not that its text encoder is — and a later stage
+                            // with a different prompt re-loads it. Crediting
+                            // the warm figure here would admit those stages
+                            // without the host RAM their prompt encode needs.
+                            let host_bytes = plan.admission_host_demand_bytes();
                             estimate_candidate(
                                 DeviceId::new(plan.device_id.clone()),
                                 Some(worker.as_ref()),
@@ -5676,7 +5675,15 @@ impl Coordinator {
         // from here — and inside the generation guard this never ran for
         // exactly the case it exists to bound, leaving the stage waiting
         // forever with its reclaim already settled.
+        //
+        // The plan cache is refreshed FIRST. Settlement answers from the
+        // recorded `MemoryBlock`, and `owner_plan_cache_and_settle_errors` is
+        // what clears that block when the work resolves again — so bounding
+        // before the refresh can reject a stage that an external process has
+        // just made schedulable, using a block that the very next line would
+        // have cleared.
         if !self.pending_owner_work.is_empty() {
+            let _ = self.owner_plan_cache_and_settle_errors();
             self.settle_unschedulable_owner_work();
         }
         if self.pending.is_empty() && self.pending_owner_work.is_empty() {

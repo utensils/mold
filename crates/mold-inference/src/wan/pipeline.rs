@@ -895,6 +895,15 @@ fn decode_with_tiled_fallback(
             let scale = vae.config().spatial_compression().max(1);
             let tile = (256 / scale).max(1);
             let overlap = (tile / 4).max(1);
+            // Synchronize before retrying. The allocations released while the
+            // failing decode unwound are not necessarily back with the
+            // allocator yet, and starting to carve tiles out of a device that
+            // has not settled can reproduce the very OOM the smaller working
+            // set exists to avoid. `crate::vae_tiling`'s shared fallback runs
+            // an explicit recovery callback for exactly this reason.
+            if let Err(error) = latents.device().synchronize() {
+                tracing::warn!(%error, "device synchronize before the tiled decode retry failed");
+            }
             progress.info(&format!(
                 "VAE decode ran out of memory; retrying tiled at {}x{} pixels",
                 tile * scale,
