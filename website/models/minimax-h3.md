@@ -289,8 +289,11 @@ conditioning side is the set:
 - 1 to 12 references in total, at most 9 images, 3 videos, and 3 audio files
 - each reference between 1 and 15 seconds where it has a duration; video and
   soundtrack references are truncated to the generated clip's own length
-- images are normalized onto their own 2048-short-edge canvas, videos onto the
-  reference canvas, and every soundtrack is resampled to 32 kHz stereo
+- images larger than a 2048 short edge are scaled down onto their own
+  2048-short-edge canvas and smaller ones keep their native geometry (never
+  upscaled, matching ComfyUI); videos are likewise scaled down onto the
+  reference canvas only when they exceed it; every soundtrack is resampled to
+  32 kHz stereo
 - **order is authority.** The set is presented to the conditioner as
   `<Picture n>`, `<Video n>`, and `<Audio n>` in the order you supply, and the
   frozen plan carries a reference fingerprint over that order. The same
@@ -299,14 +302,14 @@ conditioning side is the set:
 An image reference can be **cropped** before it is sent: the reference row's
 **Crop** action on web, desktop, and iPhone opens a drag rectangle with Free,
 1:1, 4:3, 3:2, and 16:9 presets, a 64 px minimum per axis, and a live
-vision-pad cost hint (a 1:1 crop of a 16:9 photograph is 4,096 pads instead of
-7,296). The crop is applied at the photograph's original resolution before the
+vision-pad cost hint (a 1:1 crop of a 1080p photograph is 1,156 pads instead
+of 2,040). The crop is applied at the photograph's original resolution before the
 reference is digested and uploaded, so the server only ever sees the cropped
 image; it is recorded in the print's metadata as `references[].crop` and Reuse
 settings restores it when you reattach the same original. This is a choice of
 _which part of the photograph is the reference_, never a fit to the output
-canvas; Mold still normalizes the cropped image onto its own 2048-short-edge
-canvas, and the generated print's size is unchanged.
+canvas; Mold still scales an oversized cropped image down onto its own
+2048-short-edge canvas (never up), and the generated print's size is unchanged.
 
 There is no reviewed list of reference sets. The runtime qualification is
 minted per request from the set's own preprocessing shapes: the conditioner

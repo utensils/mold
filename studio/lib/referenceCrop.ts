@@ -3,7 +3,8 @@
  * for web, desktop, and iPhone.
  *
  * This is deliberately NOT a fit-to-canvas policy. The server normalizes
- * every image reference onto its OWN 2048-short-edge canvas
+ * every oversized image reference DOWN onto its own 2048-short-edge canvas
+ * and keeps a smaller one at native geometry — never upscaling
  * (`mold_core::minimax_h3::reference_image_dimensions`), so the `SourceFitPolicy`
  * modes are architecturally wrong for references; the only client-side
  * decision that exists is "which part of this photograph is the reference".
@@ -258,7 +259,7 @@ export interface ReferencePadEstimate {
 
 /**
  * Preview of the reference's admission cost — the TS mirror of
- * `reference_image_dimensions` (2048-short-edge, 32-aligned) followed by
+ * `reference_image_dimensions` (down-only 2048-short-edge, 32-aligned) followed by
  * `rows_per_video_latent` (`(w/32)*(h/32)`). A hint only; the server's
  * `reference_prepared_shapes_for_target` stays the authority.
  */
@@ -267,7 +268,13 @@ export function referencePadEstimate(
   crop?: ReferenceCrop | null,
 ): ReferencePadEstimate {
   const size = crop ?? source;
-  const scale = REFERENCE_SHORT_EDGE / Math.min(size.width, size.height);
+  // Down-only, mirroring the server (and ComfyUI's `min(1.0, 2048/short)`):
+  // a reference already inside the 2048-short-edge canvas keeps its native
+  // geometry rather than being upscaled onto it.
+  const scale = Math.min(
+    1,
+    REFERENCE_SHORT_EDGE / Math.min(size.width, size.height),
+  );
   const normalizedWidth = alignedDimension(size.width * scale);
   const normalizedHeight = alignedDimension(size.height * scale);
   return {

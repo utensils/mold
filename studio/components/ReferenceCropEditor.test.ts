@@ -27,8 +27,8 @@ describe("ReferenceCropEditor", () => {
     const wrapper = mountEditor({ x: 420, y: 0, width: 1080, height: 1080 });
     const hint = wrapper.get('[data-test="crop-hint"]').text();
     expect(hint).toContain("1080×1080");
-    expect(hint).toContain("4,096");
-    expect(hint).toContain("7,296");
+    expect(hint).toContain("1,156");
+    expect(hint).toContain("2,040");
     expect(
       wrapper.get('[data-test="crop-aspect-1:1"]').attributes("aria-checked"),
     ).toBe("true");
@@ -78,7 +78,7 @@ describe("ReferenceCropEditor", () => {
   it("centers a preset, nudges with the keyboard, and Reset applies as no crop", async () => {
     const wrapper = mountEditor();
     await wrapper.get('[data-test="crop-aspect-1:1"]').trigger("click");
-    expect(wrapper.get('[data-test="crop-hint"]').text()).toContain("4,096");
+    expect(wrapper.get('[data-test="crop-hint"]').text()).toContain("1,156");
     await wrapper
       .get('[data-test="crop-box"]')
       .trigger("keydown", { key: "ArrowRight" });
