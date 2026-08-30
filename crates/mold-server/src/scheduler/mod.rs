@@ -217,6 +217,18 @@ pub enum WorkerEvent {
         owner_epoch: u64,
         worker_generation: u64,
         successful: bool,
+        /// Whether the work stopped because someone asked it to.
+        ///
+        /// Separate from `successful` because the estimate store must not read
+        /// a cancellation as memory evidence. A user who cancels a slow render
+        /// has said nothing about whether the shape fits, but recording it as
+        /// `EstimateOutcome::Failure` writes the cancel-time VRAM high-water
+        /// into the bucket — and while that bucket still has no successful
+        /// sample, `failure_only_vram_floor` then plans every later attempt at
+        /// that shape against the floor. Cancelling a slow Wan sequence and
+        /// re-queueing it is exactly how a user reaches "it says it ran out of
+        /// memory" for a render the card can hold.
+        cancelled: bool,
         phase_timings: EstimatePhaseTimings,
         /// Actor-only result authority transferred from the GPU owner. The
         /// coordinator settles it only after the matching lease, memory
@@ -2752,6 +2764,7 @@ impl Coordinator {
                 owner_epoch,
                 worker_generation,
                 successful,
+                cancelled,
                 phase_timings,
                 completion,
             } => {
@@ -2784,6 +2797,14 @@ impl Coordinator {
                                 .host_incremental_high_water_bytes,
                             outcome: if successful {
                                 EstimateOutcome::Success
+                            } else if cancelled {
+                                // Not evidence. `Invalidated` records that the
+                                // observation happened without counting a
+                                // failure or setting `last_outcome`, which is
+                                // what keeps `failure_only_vram_floor` off a
+                                // shape whose only "failure" was a human
+                                // pressing stop.
+                                EstimateOutcome::Invalidated
                             } else {
                                 EstimateOutcome::Failure
                             },
@@ -11366,6 +11387,7 @@ mod tests {
                     owner_epoch: 1,
                     worker_generation: 1,
                     successful,
+                    cancelled: false,
                     phase_timings: EstimatePhaseTimings {
                         cold_load_ms: Some(250),
                         ..Default::default()
@@ -13538,6 +13560,7 @@ mod tests {
                     owner_epoch: 1,
                     worker_generation: 1,
                     successful: true,
+                    cancelled: false,
                     phase_timings: EstimatePhaseTimings::default(),
                     completion: None,
                 },
@@ -13753,6 +13776,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: true,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: None,
             },
@@ -13846,6 +13870,7 @@ mod tests {
             owner_epoch: 1,
             worker_generation: 1,
             successful: false,
+            cancelled: false,
             phase_timings: EstimatePhaseTimings::default(),
             completion: Some(Box::new(completion)),
         };
@@ -14014,6 +14039,7 @@ mod tests {
                     owner_epoch: 1,
                     worker_generation: 1,
                     successful,
+                    cancelled: false,
                     phase_timings: EstimatePhaseTimings::default(),
                     completion: Some(Box::new(completion)),
                 },
@@ -14137,6 +14163,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: true,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: Some(Box::new(completion)),
             },
@@ -14289,6 +14316,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: true,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: Some(Box::new(completion)),
             },
@@ -14723,6 +14751,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: false,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: None,
             },
@@ -14944,6 +14973,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: false,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: None,
             },

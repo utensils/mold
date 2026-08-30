@@ -396,6 +396,7 @@ fn run_cpu_utility_owner(
             owner_epoch,
             worker_generation: generation,
             successful: matches!(outcome, Ok(true)),
+            cancelled: false,
             phase_timings,
             completion: None,
         });
@@ -763,6 +764,7 @@ fn run_gpu_owner_loop(
         match outcome {
             Ok(OwnerProcessOutcome::Completed {
                 successful,
+                cancelled,
                 chain_result,
             }) => {
                 worker.release_in_flight();
@@ -783,6 +785,7 @@ fn run_gpu_owner_loop(
                     successful: successful
                         && !worker.poisoned.load(Ordering::SeqCst)
                         && !worker.fatal_cuda_error.load(Ordering::SeqCst),
+                    cancelled,
                     phase_timings,
                     completion: completion.map(Box::new),
                 });
@@ -823,6 +826,7 @@ fn run_gpu_owner_loop(
                     owner_epoch: worker.owner_epoch,
                     worker_generation: generation,
                     successful: false,
+                    cancelled: false,
                     phase_timings,
                     completion: completion.map(Box::new),
                 });
@@ -1109,6 +1113,10 @@ impl Drop for DeferredOwnerCompletion {
 enum OwnerProcessOutcome {
     Completed {
         successful: bool,
+        /// The work stopped because it was asked to, not because it failed.
+        /// Kept separate from `successful` so the scheduler can record it as
+        /// `EstimateOutcome::Invalidated` rather than memory evidence.
+        cancelled: bool,
         chain_result: Option<Result<crate::chain_job_runner::StageExecution, String>>,
     },
     PlanInvalidated {
@@ -1168,6 +1176,7 @@ fn process_owner_work(
         }
         return OwnerProcessOutcome::Completed {
             successful: false,
+            cancelled: false,
             chain_result,
         };
     }
@@ -1258,6 +1267,7 @@ fn process_owner_work(
             let chain_result = Some(Err(error));
             return OwnerProcessOutcome::Completed {
                 successful: false,
+                cancelled: false,
                 chain_result,
             };
         }
@@ -1271,9 +1281,15 @@ fn process_owner_work(
                 });
                 return OwnerProcessOutcome::Completed {
                     successful,
+                    cancelled: false,
                     chain_result: None,
                 };
             }
+            // Captured before the job moves into `process_job`, so an
+            // unsuccessful outcome can be attributed. A cancel that arrives
+            // after a successful render is not a cancellation of anything.
+            let job_id = job.id.clone();
+            let registry = job.registry.clone();
             let successful = process_job(
                 worker,
                 *job,
@@ -1281,8 +1297,10 @@ fn process_owner_work(
                 current_worker_generation,
                 h3_attempt,
             );
+            let cancelled = !successful && registry.cancel_requested(&job_id);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled,
                 chain_result: None,
             }
         }
@@ -1296,8 +1314,17 @@ fn process_owner_work(
                     ..
                 })
             );
+            // A stage someone stopped is not a stage that did not fit.
+            let cancelled = matches!(
+                &result,
+                Ok(crate::chain_job_runner::StageExecution {
+                    outcome: crate::chain_job_runner::StageRenderOutcome::Cancelled,
+                    ..
+                })
+            );
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled,
                 chain_result: Some(result),
             }
         }
@@ -1306,6 +1333,7 @@ fn process_owner_work(
             let successful = process_prompt_expansion(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1314,6 +1342,7 @@ fn process_owner_work(
             let successful = process_post_generation_upscale(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1322,6 +1351,7 @@ fn process_owner_work(
             let successful = process_standalone_upscale(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1332,6 +1362,7 @@ fn process_owner_work(
             let _ = job.result_tx.send(result);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1340,6 +1371,7 @@ fn process_owner_work(
             let successful = process_admin_unload(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1349,6 +1381,7 @@ fn process_owner_work(
             run();
             OwnerProcessOutcome::Completed {
                 successful: true,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1365,6 +1398,7 @@ fn complete_h3_claim_failure(grant: LeaseGrant, error: String) -> OwnerProcessOu
     });
     OwnerProcessOutcome::Completed {
         successful,
+        cancelled: false,
         chain_result: None,
     }
 }
@@ -6879,6 +6913,7 @@ mod tests {
             outcome,
             OwnerProcessOutcome::Completed {
                 successful: false,
+                cancelled: false,
                 chain_result: None,
             }
         ));
@@ -8710,6 +8745,7 @@ mod tests {
                 device_id,
                 worker_generation: 1,
                 successful,
+                cancelled: false,
                 phase_timings,
                 ..
             }) => {
@@ -10476,6 +10512,7 @@ mod tests {
                         owner_epoch: 0,
                         worker_generation: 0,
                         successful: false,
+                        cancelled: false,
                         phase_timings: mold_scheduler::EstimatePhaseTimings::default(),
                         completion: None,
                     })
@@ -10838,6 +10875,7 @@ mod tests {
         let completion = match event_rx.blocking_recv() {
             Some(crate::scheduler::WorkerEvent::Completed {
                 successful: false,
+                cancelled: false,
                 completion: Some(completion),
                 ..
             }) => completion,
@@ -11942,6 +11980,7 @@ mod tests {
                     event_rx.blocking_recv(),
                     Some(crate::scheduler::WorkerEvent::Completed {
                         successful: true,
+                        cancelled: false,
                         ..
                     })
                 ));

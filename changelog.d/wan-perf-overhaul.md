@@ -38,3 +38,10 @@
   ordinary generation already took, through the same accessor — which also
   fixes a Metal double-count, since the raw increment was being charged beside
   the unified device gate.
+- **Cancelling a render no longer makes its shape look too big for the card.**
+  A stopped generation or chain stage was recorded as a memory *failure*, which
+  wrote the cancel-time VRAM high-water into that shape's estimate bucket; while
+  the bucket had no successful sample, every later attempt at the same shape was
+  then planned against that floor. Cancelling a slow sequence and re-queueing it
+  is exactly how a render the card can hold came back as "not enough memory".
+  Cancellations are now recorded as `invalidated` — an observation, not evidence.
