@@ -25,8 +25,13 @@ mold run "a cat" | mold upscale -
 | `real-esrgan-x4plus:fp16`       | RRDBNet (23 blocks) | 4x    | 32 MB  | Medium  | Best          |
 | `real-esrgan-x4plus:fp32`       | RRDBNet (23 blocks) | 4x    | 64 MB  | Medium  | Best          |
 | `real-esrgan-x2plus:fp16`       | RRDBNet (23 blocks) | 2x    | 32 MB  | Medium  | Best          |
+| `real-esrgan-x2plus:fp32`       | RRDBNet (23 blocks) | 2x    | 64 MB  | Medium  | Best          |
 | `real-esrgan-x4plus-anime:fp16` | RRDBNet (6 blocks)  | 4x    | 8.5 MB | Fast    | Great (anime) |
+| `real-esrgan-x4plus-anime:fp32` | RRDBNet (6 blocks)  | 4x    | 17 MB  | Fast    | Great (anime) |
 | `real-esrgan-anime-v3:fp32`     | SRVGGNetCompact     | 4x    | 2.4 MB | Fastest | Good (anime)  |
+
+These seven are the whole upscaler catalog; see
+[Upscalers](/models/upscalers) for sources, licenses, and per-file detail.
 
 ### Choosing a Model
 
@@ -52,13 +57,19 @@ Arguments:
   <IMAGE>  Input image file path (or - for stdin)
 
 Options:
-  -m, --model <MODEL>      Upscaler model [default: real-esrgan-x4plus:fp16]
+  -m, --model <MODEL>      Upscaler model (see below for the resolved default)
   -o, --output <PATH>      Output file path [default: <input>_upscaled.<ext>]
       --format <FORMAT>     Output format: png or jpeg [default: png]
       --tile-size <N>       Tile size for tiled inference (0 to disable) [default: 512]
       --host <URL>          Server URL override
       --local               Skip server, run inference locally
+      --preview             Display the upscaled image inline in the terminal
 ```
+
+`--model` has no fixed default. Mold resolves it in three steps:
+`MOLD_UPSCALE_MODEL` if it is set, otherwise the first already-downloaded
+upscaler in manifest order, and only then `real-esrgan-x4plus:fp16`. On a
+machine that has only `real-esrgan-anime-v3:fp32` installed, that is what runs.
 
 ## Tiled Inference
 

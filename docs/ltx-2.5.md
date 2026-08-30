@@ -3,8 +3,8 @@
 Mold runs the official LTX-2.5 split checkpoints natively through Candle. The
 same request and capability contract serves the CLI, HTTP API, web, desktop,
 TUI, and the shared iPhone/Android surface. This qualification covers the
-compact distilled INT8 ConvRot pack on Apple Metal. CUDA qualification is
-completed separately on an NVIDIA host.
+compact distilled INT8 ConvRot pack on Apple Metal. CUDA qualification runs
+separately on a dedicated NVIDIA host and is still pending.
 
 ## Pick a model
 
@@ -76,9 +76,11 @@ mold run ltx-2.5-22b-distilled "a complete product reveal" \
   --predict-duration --fps 24 --audio --format mp4
 ```
 
-Surfaces show this option only when the selected host advertises both
-`supports_duration_prediction: true` and `runtime_ready: true`. Saved metadata
-and Use as prompt preserve whether duration was explicit or predicted.
+Surfaces show this option only when the selected host advertises
+`supports_duration_prediction: true` and does not explicitly report
+`runtime_ready: false`; `runtime_ready` is optional, so a host that omits it
+still offers the switch. Saved metadata and Use as prompt preserve whether
+duration was explicit or predicted.
 
 ### Video-only rendering
 
@@ -160,6 +162,20 @@ reference also retains its decoded clip; a run that exceeds the guarded budget
 is recorded as operator-deferred with the blocking operator and sampler
 progress instead of being reported as passing. Neither capture deletes models
 or renders.
+
+The CUDA campaign has the same two halves on its dedicated NVIDIA host, and is
+still pending: `scripts/capture-ltx25-cuda-verification.sh` runs (`--run`) and
+then seals (`--seal`, the default) every
+`scripts/fixtures/ltx25-cuda-matrix.json` row into a
+`mold.ltx25.cuda.verification.v1` report, checked by
+`scripts/validate-ltx25-cuda-report.py` against
+`docs/qualification/ltx25-cuda-verification.schema.json`, which re-hashes every
+retained log, manifest, and media file.
+`scripts/capture-ltx25-comfy-cuda-reference.sh` retains the exact-weight
+ComfyUI CUDA oracle for those rows, and
+`scripts/provision-ltx25-comfy-oracle.sh` provisions its pinned clone and venv
+under the gitignored `tmp/`. Like the Metal capture, these are UAT tooling: they
+ship nothing and delete no models or renders.
 
 The compact-checkpoint reference row is Mold versus ComfyUI on MPS. On the
 qualification host, ComfyUI loaded the exact INT8 ConvRot weights and reached

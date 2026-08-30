@@ -27,10 +27,22 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"
 
 ## Systemd Service
 
-A sample systemd unit is at `contrib/mold-server.service`:
+Two sample units ship in `contrib/`. Pick one.
+
+System-wide (`contrib/mold-server.service`), for a dedicated service user:
 
 ```bash
-cp contrib/mold-server.service ~/.config/systemd/user/
+sudo cp contrib/mold-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mold-server
+```
+
+User mode (`contrib/mold-server.user.service`), for a single-user GPU box:
+
+```bash
+cp contrib/mold-server.user.service ~/.config/systemd/user/mold-server.service
+sudo loginctl enable-linger "$USER"   # survive logout; once per box
+systemctl --user daemon-reload
 systemctl --user enable --now mold-server
 ```
 

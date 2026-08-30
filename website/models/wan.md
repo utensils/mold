@@ -342,11 +342,11 @@ on the **checkpoint**, never the family, because wan has no latent motion tail:
 its smooth handoff is last-frame image conditioning, which only an
 image-conditioned checkpoint accepts.
 
-| Checkpoint                        | Seam                   | Why                                               |
-| --------------------------------- | ---------------------- | ------------------------------------------------- |
-| `wan22-ti2v-5b:*`                 | Continues              | The latent inpaint pins the seeded frame          |
-| `wan22-i2v-a14b:*`                | Continues              | The 36-channel mask+latent concat takes the frame |
-| `wan21-t2v-*`, `wan22-t2v-a14b:*` | Join / Cut / Crossfade | No conditioning channel at all                    |
+| Checkpoint                        | Seam              | Why                                               |
+| --------------------------------- | ----------------- | ------------------------------------------------- |
+| `wan22-ti2v-5b:*`                 | Continues         | The latent inpaint pins the seeded frame          |
+| `wan22-i2v-a14b:*`                | Continues         | The 36-channel mask+latent concat takes the frame |
+| `wan21-t2v-*`, `wan22-t2v-a14b:*` | Join / Cut / Fade | No conditioning channel at all                    |
 
 That classification is exactly the `source_image` contract `/api/models`
 already advertises, so a picker can never offer a seam the checkpoint would
@@ -361,9 +361,10 @@ and reusing the number would discard sixteen good frames at every seam.
 
 Clip lengths sit on wan's `4k+1` grid. The auto-chaining default is a VRAM
 envelope rather than a ceiling, and it is the selected tier's own default frame
-count — 81 on the Q5/Q4 A14B tiers, 73 on `:q8`, 45 on `:fp8`, 121 on the
-single-expert 5B — with a family floor of 53 for A14B and 121 for everything
-else, which is what an opaque `cv:` / `hf:` ID with no manifest gets.
+count raised to a family floor — 81 on the Q5/Q4 A14B tiers, 73 on `:q8`, 121
+on the single-expert 5B — where the floor is 53 for A14B (which is what
+`:fp8`, whose 45-frame manifest default sits below it, actually routes at) and
+121 for everything else, including an opaque `cv:` / `hf:` ID with no manifest.
 `--clip-frames` overrides it, clamped to the real 257-frame request cap.
 
 ```bash

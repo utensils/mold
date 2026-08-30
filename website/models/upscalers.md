@@ -1,6 +1,6 @@
 # Upscaler Models
 
-mold supports Real-ESRGAN super-resolution models for image upscaling. These models enhance image resolution by 2x or 4x using neural networks trained on image restoration tasks.
+mold supports Real-ESRGAN super-resolution models for image upscaling. These models enhance image resolution by 2x or 4x using neural networks trained on image restoration tasks. Seven upscalers ship in the manifest: six RRDBNet builds and one SRVGGNetCompact build.
 
 ## Model List
 
@@ -8,12 +8,14 @@ mold supports Real-ESRGAN super-resolution models for image upscaling. These mod
 
 The Residual-in-Residual Dense Block Network uses deep convolutional layers with dense connections for maximum quality.
 
-| Model                           | Scale | Params | Size (FP16) | Description                             |
-| ------------------------------- | ----- | ------ | ----------- | --------------------------------------- |
-| `real-esrgan-x4plus:fp16`       | 4x    | 16.7M  | 32 MB       | General-purpose, best quality           |
-| `real-esrgan-x4plus:fp32`       | 4x    | 16.7M  | 64 MB       | Same model, FP32 precision              |
-| `real-esrgan-x2plus:fp16`       | 2x    | 16.7M  | 32 MB       | 2x upscale, best quality                |
-| `real-esrgan-x4plus-anime:fp16` | 4x    | 4.5M   | 8.5 MB      | Anime/illustration optimized (6 blocks) |
+| Model                           | Scale | Params | Size   | Description                             |
+| ------------------------------- | ----- | ------ | ------ | --------------------------------------- |
+| `real-esrgan-x4plus:fp16`       | 4x    | 16.7M  | 32 MB  | General-purpose, best quality           |
+| `real-esrgan-x4plus:fp32`       | 4x    | 16.7M  | 64 MB  | Same model, FP32 precision              |
+| `real-esrgan-x2plus:fp16`       | 2x    | 16.7M  | 32 MB  | 2x upscale, best quality                |
+| `real-esrgan-x2plus:fp32`       | 2x    | 16.7M  | 64 MB  | Same model, FP32 precision              |
+| `real-esrgan-x4plus-anime:fp16` | 4x    | 4.5M   | 8.5 MB | Anime/illustration optimized (6 blocks) |
+| `real-esrgan-x4plus-anime:fp32` | 4x    | 4.5M   | 17 MB  | Same model, FP32 precision              |
 
 ### SRVGGNetCompact Architecture (Fast)
 
@@ -68,8 +70,10 @@ mold list
 
 All upscaler models are sourced from trusted HuggingFace repositories:
 
-- **RRDBNet models**: [Comfy-Org/Real-ESRGAN_repackaged](https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged) (safetensors)
-- **x2plus model**: [hlky/RealESRGAN_x2plus](https://huggingface.co/hlky/RealESRGAN_x2plus) (safetensors)
+- **x4plus**: [hlky/RealESRGAN_x4plus](https://huggingface.co/hlky/RealESRGAN_x4plus) (safetensors)
+- **x4plus-anime**: [hlky/RealESRGAN_x4plus_anime_6B](https://huggingface.co/hlky/RealESRGAN_x4plus_anime_6B) (safetensors)
+- **x2plus**: [hlky/RealESRGAN_x2plus](https://huggingface.co/hlky/RealESRGAN_x2plus) (safetensors)
+- **anime-v3 (SRVGGNetCompact)**: [wkrettek/real-esrgan-models](https://huggingface.co/wkrettek/real-esrgan-models) (safetensors)
 
 ## Comparison
 

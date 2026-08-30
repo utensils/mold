@@ -39,11 +39,23 @@ mold run ltx-2.5-22b-distilled:int8-conv \
   "a cat walks through autumn leaves" --frames 97
 ```
 
-The compact LTX-2.5 INT8 ConvRot split pack is the recommended Apple Metal
-path. It is gated on Hugging Face and includes the matching Gemma 4 encoder,
-audio/video VAEs, duration head, and latent upscalers. See
-[LTX Video](/models/ltx2) for download size, qualified workflows, and
-the currently deferred BF16 and CUDA paths.
+The compact LTX-2.5 INT8 ConvRot split pack is the recommended path on Apple
+Metal, where it is qualified; on CUDA it is implemented and runs, but its
+qualification campaign is still pending (see `docs/ltx-2.5.md`). It is gated on Hugging Face and includes the matching
+Gemma 4 encoder, audio/video VAEs, duration head, and latent upscalers. On CUDA
+its blocks stay resident in packed W8A8 form and execute a native INT8 GEMM.
+
+Seven pinned distilled GGUF tiers run natively beside it and are the smaller
+option on a 24 GB card — `ltx-2.5-22b-distilled` in tags `q3-k-s`, `q3`,
+`q4-k-s`, `q4`, `q5`, `q6`, and `q8`, of which Q4_K_M (`q4`) sits fully
+resident:
+
+```bash
+mold run ltx-2.5-22b-distilled:q4 "a cat walks through autumn leaves" --frames 97
+```
+
+See [LTX Video](/models/ltx2) for per-tier download sizes, qualified workflows,
+and the BF16 packs, whose execution remains operator-deferred on Metal.
 
 ## Wan Video
 
@@ -241,7 +253,7 @@ Press `c` from Create's navigation mode in `mold tui` to author a
 ### Capabilities endpoint
 
 ```
-GET /api/capabilities/chain-limits?model=<name>
+GET /api/capabilities/chain-limits?model=<name>[&fps=<n>]
 ```
 
 Returns per-model caps used by every sequence UI:
@@ -250,6 +262,8 @@ Returns per-model caps used by every sequence UI:
 {
   "model": "ltx-2-19b-distilled:fp8",
   "frames_per_clip_cap": 97,
+  "fps": 24,
+  "frames_per_clip_runtime_seconds": 20,
   "frames_per_clip_recommended": 97,
   "max_stages": 16,
   "max_total_frames": 1552,
@@ -266,6 +280,10 @@ renders when a long one-shot request is chained automatically (97 for LTX-2;
 for Wan the checkpoint's own manifest default over a 53-frame A14B /
 121-frame floor, e.g. 121 for TI2V-5B)) so a sequence clip can never be longer
 than the clips the Duration slider would have produced.
+`fps` echoes the frame rate the cap was computed at; it defaults to the
+model's own default fps when the query omits it. It matters because LTX-2's
+family ceiling is a runtime duration (`frames_per_clip_runtime_seconds`, 20 s),
+so pass the fps you will actually render at and the cap moves with it.
 `frames_per_clip_recommended` follows the model's own default frame count (97
 for LTX-2, 25 for LTX-Video) so clients do not have to hardcode one.
 `supports_sequence` is model-specific and is also advertised per model on

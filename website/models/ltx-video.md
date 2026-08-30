@@ -87,7 +87,10 @@ compatible `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported.
 | 1216  | 704    | current mold default |
 | 1024  | 576    | 16:9                 |
 | 768   | 512    | 3:2                  |
+| 704   | 480    | 22:15 (480p)         |
+| 768   | 768    | 1:1 (square)         |
 | 512   | 768    | 2:3 (portrait)       |
+| 576   | 1024   | 9:16 (portrait)      |
 | 512   | 512    | 1:1 (square)         |
 
 Dimensions must be multiples of 32. Frame count must be 8n+1.

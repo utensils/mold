@@ -124,7 +124,7 @@ multimodal stack resident between requests.
 ### Tier 1 knobs
 
 For edge cases, mold exposes opt-in runtime knobs in
-[Configuration → Performance knobs](/guide/configuration#performance-knobs):
+[Configuration → Generation](/guide/configuration#generation):
 `MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`, `MOLD_ATTN`, and
 `MOLD_ATTN_CHUNK`. Treat them as targeted controls after you have tried model
 quantization, `--device-text-encoders cpu`, and `--offload`.

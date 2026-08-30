@@ -4,11 +4,19 @@
 > and InvokeAI against mold's current architecture to define a clean implementation path.
 >
 > **Updated 2026-04-01** with codebase-validated findings from agent team research.
+>
+> **Status (2026-08-30): a 2026-04 snapshot, kept for the reference-implementation
+> comparison.** Section 1's description of the codebase no longer matches
+> `state.rs` or `model_cache.rs`, and three of its recommendations shipped: the
+> CPU parking tier (`ModelResidency` is `Gpu`/`Parked`), per-request LoRA in
+> server mode, and server-side expansion routing. Treat sections 2 and 3 as the
+> durable content and CLAUDE.md as the authority on what mold does today.
 
 ## Executive Summary
 
-mold already has a multi-model LRU cache on the server (up to 3 models), but LoRA is still
-locked to sequential (CLI-only) mode, expansion routing is partially implemented (server-side
+mold already has a multi-model LRU cache on the server (`MOLD_MAX_CACHED_MODELS`,
+default 3), but — as of this snapshot — LoRA was still
+locked to sequential (CLI-only) mode, expansion routing was partially implemented (server-side
 exists but CLI defers when remote), and text encoders are not shared across engines. This
 document synthesizes deep-dive research into three mature reference implementations and
 codebase-validated findings to chart a path toward:
@@ -26,21 +34,26 @@ codebase-validated findings to chart a path toward:
 ### Server State (mold-server)
 
 ```
-crates/mold-server/src/state.rs (lines 87-146)
+crates/mold-server/src/state.rs
 
 AppState {
-    model_cache: Arc<Mutex<ModelCache>>,                     // LRU multi-model cache (cap: 3)
-    engine_snapshot: Arc<RwLock<EngineSnapshot>>,             // Read-only view of GPU-loaded model
-    model_load_lock: Arc<Mutex<()>>,                          // Serializes concurrent loads
-    pull_lock: Arc<Mutex<()>>,                                // Serializes concurrent pulls
+    instance_id, discovery,
+    gpu_pool, generation_unavailable_reason, device_registry, queue_capacity,
+    model_cache: Arc<Mutex<ModelCache>>,                     // LRU multi-model cache
     active_generation: Arc<RwLock<Option<ActiveGenerationSnapshot>>>,
+    config, reference_uploads, output_disabled_override,
 }
 ```
 
-**ModelCache** (`model_cache.rs:1-179`): LRU cache of `CachedEngine` structs, max 3 models.
-Each entry tracks `engine: Box<dyn InferenceEngine>`, `residency: ModelResidency` (Gpu or
-Unloaded), `last_used: Instant`, `vram_bytes: u64`. Operations: `insert()`, `get_mut()` (with
-LRU touch), `unload_active()`, `remove()`.
+The 2026-04 snapshot listed `engine_snapshot`, `model_load_lock`, and
+`pull_lock` here; none of them survives — the multi-GPU pool and the scheduler
+own that serialization now.
+
+**ModelCache** (`model_cache.rs`): LRU cache of `CachedEngine` structs, capped by
+`MOLD_MAX_CACHED_MODELS` (default 3, range 1–16).
+Each entry tracks `engine: Box<dyn InferenceEngine>`, `residency: ModelResidency`
+(`Gpu` or `Parked`), `last_used: Instant`, `vram_bytes: u64`. Operations: `insert()`,
+`get_mut()` (with LRU touch), `unload_active()`, `remove()`.
 
 **Key invariant**: At most ONE engine has `residency == Gpu` at a time.
 
@@ -62,17 +75,22 @@ being assumed reclaimable.
 
 ### LoRA (mold-inference)
 
-Two paths, both requiring sequential mode:
+> **Superseded.** Per-request LoRA works in server mode on both paths, including
+> with block offloading: the server validates `request.lora` / `loras` paths,
+> serves `GET /api/loras`, and re-validates `lora.path` at durable dispatch. The
+> "requires sequential mode" refusal below no longer exists.
+
+Two paths, described here as they stood in 2026-04:
 
 | Path | File | Mechanism |
 |------|------|-----------|
 | **BF16** | `flux/lora.rs` `LoraBackend` | Implements `SimpleBackend` trait; intercepts `vb.get()` during model construction, loads from mmap, applies `W' = W + scale * (B @ A)` inline |
 | **GGUF** | `flux/lora.rs` `gguf_lora_var_builder()` | Dequantizes affected tensors to F32 on CPU, merges LoRA deltas, re-quantizes to original GGML dtype |
 
-**Why LoRA requires sequential mode**: Both paths apply deltas *during model construction*
-(the `VarBuilder` phase). In eager mode the model is already constructed and weights are
-loaded — there's no construction phase to hook into. The server runs eager, so LoRA requests
-are rejected with "LoRA adapters require sequential loading mode."
+**Why LoRA required sequential mode**: both paths apply deltas *during model construction*
+(the `VarBuilder` phase), and the eager server path of the time had no construction phase to
+hook into. That was resolved by rebuilding the transformer per LoRA fingerprint instead, with
+`LoraDeltaCache` keeping the computed deltas across rebuilds.
 
 LoRA resolution in CLI (`run.rs:473-484`): priority chain is CLI `--lora` flag → per-model
 config default → global config → None. Path sent as-is in `GenerateRequest`; server assumes
@@ -154,9 +172,11 @@ advanced VRAM optimization. InvokeAI's per-tensor partial loading is the most gr
 (`flux/offload.rs:557-575`) would yield only ~5-10% speedup. The bottleneck is block data
 dependencies (block N+1 input = block N output), limiting overlap to prefetching N+1 while
 computing N. Per-block cost: ~5ms H2D transfer + ~10ms compute + ~2ms drop. Overlap saves
-only the transfer time (~5ms) against a ~17ms total. Additionally, candle-core-mold 0.9.3
-hardcodes a single CUDA stream per device (`CudaDevice.stream: Arc<CudaStream>`, line 39
-of `cuda_backend/device.rs`). Adding secondary stream support would require forking candle's
+only the transfer time (~5ms) against a ~17ms total. Additionally, the pinned
+`candle-core-mold` revision hardcodes a single CUDA stream per device
+(`CudaDevice.stream: Arc<CudaStream>` in `cuda_backend/device.rs`; re-check it
+against the revision `crates/mold-inference/Cargo.toml` names before acting on
+this). Adding secondary stream support would require forking candle's
 `to_device()` to accept a stream parameter. **Recommendation: deprioritize until candle adds
 native stream parameter support.**
 
@@ -216,11 +236,11 @@ T5/CLIP/VAE independently would save ~10GB reload when switching FLUX variants.
 
 ### 4.1 ModelCache (Enhance Existing)
 
-The server already has `ModelCache` (`model_cache.rs:1-179`) with LRU eviction and
-`Gpu`/`Unloaded` residency states. Enhance it with:
+The server already has `ModelCache` (`model_cache.rs`) with LRU eviction. Enhance it with:
 
-1. **CPU parking tier** — Add `Parked` state alongside existing `Gpu`/`Unloaded`. Parked
-   engines hold weights in CPU RAM for fast reload (~1-2s vs ~30-60s from disk).
+1. **CPU parking tier** — ~~Add `Parked` state alongside existing `Gpu`/`Unloaded`.~~
+   **Shipped.** `ModelResidency` is `Gpu`/`Parked`; eviction removes the entry rather than
+   adding a third state. Parked engines hold weights in CPU RAM for fast reload.
 2. **RAM budget enforcement** — Track `ram_bytes` per entry, drop oldest Parked entries
    when budget exceeded. Use InvokeAI formula: `min(max(50% RAM - 2GB, 4GB), 1x VRAM)`.
 3. **Lock-based eviction protection** — Add `lock_count: u32` to prevent evicting
@@ -449,7 +469,7 @@ the transformer.
 **Status**: Deprioritized based on codebase research. Expected speedup is only ~5-10% due to:
 - Block data dependencies (block N+1 input = block N output) limit overlap to prefetch only
 - Per-block breakdown: ~5ms H2D + ~10ms compute + ~2ms drop = ~17ms; overlap saves ~5ms max
-- candle-core-mold 0.9.3 hardcodes single CUDA stream per device (`device.rs:39`)
+- the pinned `candle-core-mold` revision hardcodes a single CUDA stream per device (`device.rs`)
 - Adding secondary stream support requires forking `to_device()` — maintenance burden
 
 **Better alternatives**: GGUF quantization (already reduces offload overhead dramatically),

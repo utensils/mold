@@ -7,7 +7,8 @@ run, this says so rather than omitting it.
 
 > **Historical qualification snapshot:** the model lists below record what was
 > tested when PuLID first shipped. Current admission is family-wide for FLUX.1
-> and SDXL, with `sdxl-turbo:fp16` as the sole SDXL exception.
+> and SDXL, with `sdxl-turbo:fp16` as the sole SDXL exception — see
+> `website/guide/identity.md` (`/guide/identity`) for the canonical statement.
 
 ## Hosts
 
@@ -191,6 +192,10 @@ $ MOLD_HOST=http://127.0.0.1:7681 mold run z-image-turbo:q4 "…" --id-image fac
 error: z-image-turbo:q4 does not support face-identity conditioning; identity is qualified only for flux-dev:q4 and flux-dev:q8
 ```
 
+Captured before #1228. The shipping sentence
+(`identity::identity_model_gate_message`) now ends "identity is supported for
+FLUX.1 and SDXL checkpoints except sdxl-turbo:fp16".
+
 **Invalid start step, raw API:**
 
 ```console
@@ -198,8 +203,10 @@ $ curl -X POST …/api/generate -d '{… "id_start_step": 99, "steps": 4}'
 {"error":"id_start_step (99) must be less than steps (4)","code":"VALIDATION_ERROR"}
 ```
 
-**`/api/models[].supports_identity`** — advertised for exactly the two qualified
-tiers and nothing else, on a `pulid` build:
+**`/api/models[].supports_identity`** — as captured before #1228, advertised for
+exactly the two qualified tiers and nothing else on a `pulid` build. It is
+family-wide today: every `flux` manifest and every `sdxl` manifest except
+`sdxl-turbo:fp16`.
 
 ```
 supports_identity == true for: ['flux-dev:q8', 'flux-dev:q4']
@@ -500,6 +507,12 @@ on plato, `/Volumes/ExternalStorage/pulid-dev/uat-sdxl/` on halcyon.
 | 23 | Refusals: `--true-cfg` on SDXL, `sdxl-turbo`, `playground-v2.5`, `--image`, `--lora` | **PASS** — five refusals, nothing rendered | **PASS** — identical messages |
 | 24 | `/api/models` `supports_identity` per SDXL entry | **PASS** — `true` for exactly `sdxl-base`, `dreamshaper-xl`, `juggernaut-xl`, `realvis-xl`; `false` for `playground-v2.5`, `pony-v6`, `cyberrealistic-pony`, `sdxl-turbo` | **PASS** — same eight |
 | 25 | `/api/capabilities.identity` | `{multi_photo: true, max_photos: 4, true_cfg: true}` (server-wide; `true_cfg` names the FLUX capability) | same |
+
+Rows 23 and 24 record the exclusion list as it stood during this run. It was
+narrowed before #1228 landed: `IDENTITY_EXCLUDED_SDXL_MODELS` is
+`["sdxl-turbo:fp16"]` alone, so `playground-v2.5:fp16`, `pony-v6:fp16`, and
+`cyberrealistic-pony:fp16` are identity-qualified today and are no longer
+refused.
 
 ### 22. The cosine sweep
 

@@ -25,32 +25,25 @@ separate from this gate. See [Licenses](#licenses) below.
 
 ## Which models
 
-Being an SDXL checkpoint is not enough on its own: qualification is an
-enumerated list, not a family match, because a checkpoint's own fine-tuning can
-retrain the conditioning PuLID was trained against.
+Qualification is family-wide, with one exception. Every FLUX.1 checkpoint
+takes PuLID-FLUX v0.9.1; every SDXL checkpoint except `sdxl-turbo:fp16` takes
+PuLID v1.1. Qualification is derived from the manifest family, so a new FLUX or
+SDXL entry inherits it automatically.
 
-| Model                 | Family | Bundle       |
-| --------------------- | ------ | ------------ |
-| `flux-dev:q4`         | FLUX   | `pulid-flux` |
-| `flux-dev:q8`         | FLUX   | `pulid-flux` |
-| `sdxl-base:fp16`      | SDXL   | `pulid-sdxl` |
-| `juggernaut-xl:fp16`  | SDXL   | `pulid-sdxl` |
-| `realvis-xl:fp16`     | SDXL   | `pulid-sdxl` |
-| `dreamshaper-xl:fp16` | SDXL   | `pulid-sdxl` |
+| Checkpoint                                   | Family | Bundle       | Adapter           |
+| -------------------------------------------- | ------ | ------------ | ----------------- |
+| Any FLUX.1 checkpoint                        | FLUX   | `pulid-flux` | PuLID-FLUX v0.9.1 |
+| Any SDXL checkpoint except `sdxl-turbo:fp16` | SDXL   | `pulid-sdxl` | PuLID v1.1        |
 
-Every other SDXL checkpoint refuses an identity request rather than rendering
-one badly:
-
-- **Turbo / Lightning tiers**: distilled for few-step sampling, a different
-  training objective than PuLID's adapter was fit against.
-- **Playground v2/v2.5**: trained with an EDM objective rather than SDXL's own.
-- **The two Pony derivatives**: retrained conditioning that PuLID's SDXL
-  adapter was never fit against.
+`sdxl-turbo:fp16` is the sole exclusion — PuLID v1.1's release note reports
+degraded behaviour on the distilled Turbo base. Everything else routed through
+mold's standard SDXL UNet loads the same adapter, `playground-v2.5:fp16`,
+`pony-v6:fp16`, and `cyberrealistic-pony:fp16` included.
 
 The live, authoritative answer is always the server's own
-`GET /api/models[].supports_identity`; this table is a convenience, not a
+`GET /api/models[].supports_identity`; the rule above is a convenience, not a
 second source of truth, and a client should read that field rather than
-hard-code this list.
+restate it.
 
 ## Setup
 
@@ -350,15 +343,15 @@ stays either way; `mold licenses` shows it, and it is what lets a later
 
 ## Licenses
 
-| Artifact                                                                         | License                                                                                  |
-| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `pulid_flux_v0.9.1.safetensors`                                                  | Apache-2.0 ([guozinan/PuLID](https://huggingface.co/guozinan/PuLID))                     |
-| `pulid_v1.1.safetensors`                                                         | Apache-2.0 ([guozinan/PuLID](https://huggingface.co/guozinan/PuLID))                     |
-| `EVA02_CLIP_L_336_psz14_s6B.pt`                                                  | MIT ([QuanSun/EVA-CLIP](https://huggingface.co/QuanSun/EVA-CLIP))                        |
-| `scrfd_10g_bnkps.onnx`, `glintr100.onnx`                                         | InsightFace pretrained models; **non-commercial research only**                          |
-| `parsing_bisenet.pth`                                                            | MIT ([facexlib](https://github.com/xinntao/facexlib))                                    |
-| `flux-dev:q4` / `flux-dev:q8`                                                    | FLUX.1-dev Non-Commercial License                                                        |
-| `sdxl-base:fp16`, `juggernaut-xl:fp16`, `realvis-xl:fp16`, `dreamshaper-xl:fp16` | Each checkpoint's own license; see the [model catalog](https://utensils.io/mold/models/) |
+| Artifact                                     | License                                                                                  |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `pulid_flux_v0.9.1.safetensors`              | Apache-2.0 ([guozinan/PuLID](https://huggingface.co/guozinan/PuLID))                     |
+| `pulid_v1.1.safetensors`                     | Apache-2.0 ([guozinan/PuLID](https://huggingface.co/guozinan/PuLID))                     |
+| `EVA02_CLIP_L_336_psz14_s6B.pt`              | MIT ([QuanSun/EVA-CLIP](https://huggingface.co/QuanSun/EVA-CLIP))                        |
+| `scrfd_10g_bnkps.onnx`, `glintr100.onnx`     | InsightFace pretrained models; **non-commercial research only**                          |
+| `parsing_bisenet.pth`                        | MIT ([facexlib](https://github.com/xinntao/facexlib))                                    |
+| `flux-dev:q4` / `flux-dev:q8`                | FLUX.1-dev Non-Commercial License                                                        |
+| Any SDXL checkpoint except `sdxl-turbo:fp16` | Each checkpoint's own license; see the [model catalog](https://utensils.io/mold/models/) |
 
 Mold ships none of these; it downloads them on request, and refuses the
 InsightFace pair until acceptance is recorded. The InsightFace _code_ is MIT;

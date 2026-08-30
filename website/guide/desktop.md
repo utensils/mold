@@ -56,9 +56,11 @@ Linux builds are currently source/CI distributions: `nix build
 `desktop-build` produces the native package on NixOS and a CUDA AppImage on
 conventional Linux. Tagged releases do not publish the AppImage yet.
 
-Windows currently ships through the rolling nightly release. The `Desktop`
-workflow attaches a self-signed x64 installer and its public certificate to
-successful `main` runs.
+Windows currently ships through the rolling nightly release. The
+`Windows Nightly` workflow (`.github/workflows/windows-nightly.yml`) publishes
+the self-signed installer, the CLI zip, and the public certificate to the
+rolling `latest` prerelease; the `Desktop` workflow additionally keeps a
+14-day CI artifact of the same installer.
 There is not yet a publicly trusted Windows installer; see [Windows](#windows)
 below for the toolchain, trust steps, and the capabilities that are still
 absent.
@@ -259,12 +261,14 @@ surface powers it, so anything the app does maps to a documented endpoint.
   cancellation, and queue capacity live with the host that owns them. The old
   standalone `/jobs` URL redirects to Machines.
 - **Settings**: a single-column preferences workspace. Appearance
-  (the website-aligned Mold palette by default or the original Safelight,
-  each with System/Dark/Light; media never inverts), Updates, and About sit up
+  (the original Safelight by default or the website-aligned Mold palette,
+  each with System/Dark/Light — a fresh install starts on Safelight Dark;
+  media never inverts), Updates, and About sit up
   top; a **Hosts** link jumps to the **Machines** workspace, where host,
   API-key, and network-discovery management now live. The deeper controls
   collapse into accordion sections: Performance (the `MOLD_*` engine knobs as
-  real controls, applied on engine restart), Generation defaults, a Prompt
+  real controls, applied on engine restart), Generation defaults, Saved media,
+  Library (this device's trash retention and the title auto-tag), a Prompt
   expansion form, Accounts & tokens (Hugging Face / Civitai keys in an
   owner-only local file under the app's data directory (no Keychain prompts;
   exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Profiles (switch or
@@ -387,8 +391,9 @@ use the View menu and keyboard shortcuts. The selected level is restored on
 the next launch.
 
 Appearance offers the Mold Studio theme families (Mold and Safelight) in
-System, Light, or Dark mode. New iPhone installs start with Safelight and System;
-existing saved choices are preserved. All combinations keep text and interactive boundaries at WCAG AA
+System, Light, or Dark mode. New iPhone installs start with Safelight and Dark
+(see [iPhone → Settings](/guide/iphone)); existing saved choices are preserved.
+All combinations keep text and interactive boundaries at WCAG AA
 contrast; an empty generation canvas follows the selected chrome, while actual
 generated media remains on a color-stable viewing surface.
 
@@ -445,7 +450,7 @@ wire types as the CLI and web UI:
 - **Existing server**: auto-detects a running `mold serve` on
   `localhost:7680`.
 - **Machines** (remote GPU boxes (e.g. a Linux CUDA machine for LTX-2) are
-  added in the **Machines** workspace: an **Add host** row with Test connection, a
+  added in the **Machines** workspace: an **Add machine** row with Test connection, a
   **Connected** list, **Remembered** hosts for one-click reconnect (each with
   its own API key, stored in an owner-only file under the app's data
   directory) never the macOS Keychain, so connecting never triggers Keychain
@@ -501,13 +506,13 @@ wire types as the CLI and web UI:
   inactive** and **Clean up disk** maintenance). The tab is in the URL, so
   `?panel=history&tab=sequences` opens straight onto it.
 - **Remote prints saved locally**: generations from remote hosts and RunPod
-  are also written into this Mac's output directory (Settings → App → "Save
-  remote prints locally", on by default), with embedded metadata intact, so
-  your local Library stays the complete record even when the GPU lives
+  are also written into this Mac's output directory (Settings → Appearance &
+  app → "Save remote prints locally", on by default), with embedded metadata
+  intact, so your local Library stays the complete record even when the GPU lives
   elsewhere. The Library's right-click menu adds **Save to this Mac** for
   pulling any older remote print down on demand.
 - **Several hosts at once**: alongside this device, any number of remote
-  hosts can be live simultaneously (**Add host** in the Machines workspace, or
+  hosts can be live simultaneously (**Add machine** in the Machines workspace, or
   the **+** next to a detected server in Machines). With more than one live
   host, the Create inspector grows a
   **Host** selector: pick one explicitly, leave it on **Auto** to route
@@ -579,7 +584,9 @@ scripts\windows.ps1 ui       # frontend-only Vite server
 scripts\windows.ps1 check    # rustfmt, clippy -D warnings, vue-tsc, prettier
 scripts\windows.ps1 test     # cargo test (CPU) + vitest
 scripts\windows.ps1 build    # NSIS installer plus the standalone Mold.exe
+scripts\windows.ps1 bundle   # alias of build
 scripts\windows.ps1 clean    # drop the desktop build outputs
+scripts\windows.ps1 features # print the feature recipe resolved for this machine
 ```
 
 The `main` artifact is `mold-desktop-windows-x64-self-signed`. It contains the
@@ -670,6 +677,13 @@ ios-dev            # iPhone app with Tauri hot reload (Vite on :1431)
 ios-run            # production-mode run on an iPhone or simulator
 ios-check          # Rust check for the Apple Silicon simulator target
 ios-build          # archive/export for App Store Connect
+android-dev        # Android app with Tauri hot reload
+android-run        # production-mode run on a device or emulator
+android-check      # debug ARM64 APK from the shared mobile shell
+android-test       # native instrumentation tests on an emulator
+android-build      # ARM64/ARMv7 app bundles for Google Play
+android-emulator   # boot the external-storage Mold_API_37 emulator
+android-doctor     # verify Android Studio, SDK, NDK, AVD, and cache paths
 ```
 
 On Linux, `nix build .#mold-desktop` builds the sm_89 native package,
@@ -681,12 +695,14 @@ sign/notarize path and intentionally exits on Linux.
 The Rust crate under `desktop/src-tauri` is its own cargo root (excluded from
 the workspace); the frontend lives in `desktop/src`. CI runs the `desktop-check`
 and `desktop-test` gates via `.github/workflows/desktop.yml`, which also carries
-a `windows-latest` job running clippy and the tests on every relevant pull
-request and building the NSIS installer on `main`.
+a `windows-latest` job that runs clippy, the tests, and the signing contracts,
+and builds the NSIS installer after merge on `main` (or on manual/nightly runs)
+— never on pull requests; PR-native feedback comes from the macOS desktop gate.
 
 The separate remote-only iOS crate lives under `apps/mobile/src-tauri`; its
 shared frontend entry is `desktop/src/mobile`. Mobile CI runs through
-`.github/workflows/ios.yml`. See the repository's
+`.github/workflows/ios.yml` and `.github/workflows/android.yml`. See the
+repository's
 [`apps/mobile/README.md`](https://github.com/utensils/mold/blob/main/apps/mobile/README.md)
 for native setup, simulator validation, icon guards, and TestFlight maintenance.
 

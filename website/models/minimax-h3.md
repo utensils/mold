@@ -265,7 +265,7 @@ When a first-frame image is attached without explicit `--width`/`--height`, the
 CLI and Discord builders render the source's own aspect at the largest size the
 area ceiling allows; a 16:9 source gets `1312x736`, a square one `992x992`;
 and the engine fits the frame internally. The free-form aspect-derived
-short-edge canvas applies only to the hidden official BF16 reference.
+short-edge canvas applies only to the download-only official BF16 references.
 
 Create on web, desktop, and iPhone offers the recommended canvases as shape
 chips and a live frame slider, and a request outside the rule is still refused
@@ -287,7 +287,7 @@ same 2-50 sampler grid points, MP4 with synchronized audio) and the
 conditioning side is the set:
 
 - 1 to 12 references in total, at most 9 images, 3 videos, and 3 audio files
-- each reference between 1 and 15 seconds where it has a duration; video and
+- each reference between 2 and 15 seconds where it has a duration; video and
   soundtrack references are truncated to the generated clip's own length
 - images larger than a 2048 short edge are scaled down onto their own
   2048-short-edge canvas and smaller ones keep their native geometry (never
@@ -333,7 +333,9 @@ mold run minimax-h3-ref2va:comfy-pruned-int8 "a slow dolly through the scene" \
 References are uploaded through the authenticated streaming reference-upload
 endpoints, so `MOLD_API_KEY` must be configured; Mold never puts reference
 bytes in the request body, the queue journal, or saved metadata; only their
-redacted metadata and digests.
+redacted metadata and digests. An upload session binds one request, so
+`--batch N` above 1 is refused with uploaded references — submit siblings one
+at a time.
 
 ## License and support boundary
 

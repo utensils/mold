@@ -94,8 +94,11 @@ for this investigation. Metal keeps `QMatMul`.
 
 ## Where the code is
 
-Fork branch: **`fix/mold-compat-0.11`** of <https://github.com/utensils/candle>
-(what `[patch]` in the repo-root `Cargo.toml` pins).
+Fork: <https://github.com/utensils/candle> at revision
+**`5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4`** — the revision every crate's
+`candle-*` git dependency pins (see `crates/mold-inference/Cargo.toml`). Candle
+is not patched from the repo-root `Cargo.toml`; that `[patch.crates-io]` table
+holds only `cudarc`.
 
 | Thing | Path |
 | --- | --- |

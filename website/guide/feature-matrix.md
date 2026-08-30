@@ -69,8 +69,12 @@ They do not enable arbitrary request-time LoRA stacks.
 | Qwen-Image      | Yes              | No                 |
 | Qwen-Image-Edit | Yes              | No                 |
 | LTX Video       | No               | No                 |
-| Wan Video       | Yes              | No                 |
+| Wan Video       | Yes              | Yes¹               |
 | MiniMax H3      | No               | No                 |
+
+¹ Wan's solver set is disjoint from the UNet schedulers: it takes
+`--sample-solver unipc|euler|dpm++`, which travels in the same `scheduler` wire
+slot. See [Wan](/models/wan).
 
 ## Video Generation
 
@@ -159,7 +163,7 @@ uses the same remote-only Studio surface and native bridge described in the
 | Area      | Desktop                                                                                                                                                                                                                   | iPhone                                                                                                                                                                                                                                                                                                           |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Platforms | macOS, Linux, and Windows (x64 and ARM64)                                                                                                                                                                                 | iPhone and iPad                                                                                                                                                                                                                                                                                                  |
-| Engine    | Built-in local engine (Metal on macOS, CUDA on Linux and x64 Windows, otherwise CPU) plus remote hosts                                                                                                                    | Remote hosts only                                                                                                                                                                                                                                                                                                |
+| Engine    | Built-in local engine (Metal on macOS, CUDA on Linux and on x64 Windows when built with a CUDA toolkit, otherwise CPU; the published Windows nightly is CPU/remote-client only) plus remote hosts                         | Remote hosts only                                                                                                                                                                                                                                                                                                |
 | Create    | Capability-driven image/video controls, review-first prepared expansion batches, estimates                                                                                                                                | Same exact-N, frozen-host review lifecycle and independent siblings, full-screen Advanced sheet, optimized for touch                                                                                                                                                                                             |
 | Library   | Unified local/remote grid with persisted top-bar thumbnail sizing, host filters, deduplication, batch provenance, History drawer, and desktop file actions                                                                | Merged saved-host library with persisted pinch-to-resize thumbnail sizing, Prints/Collections/Trash scopes, favorites/tag chips, titles via the viewer Info sheet, per-host trash retention on host detail, batch/source provenance, full-screen image/video, swipe navigation, Use as prompt, and Use as source |
 | Models    | Installed/Discover, kind and explicit 18+ NSFW badges, rich detail, install onto any machine still missing the model (Repair once all have it), download progress                                                         | Installed/live union, matching kind/18+ badges and detail, same install-or-repair host picker, pull progress, cancel, load/unload/remove                                                                                                                                                                         |
@@ -184,7 +188,10 @@ complete workflows.
   adapter stacks rather than re-round their weights.
 - LTX-2 adds stacked LoRAs plus camera-control presets for the published 19B
   adapters.
-- `--scheduler` applies only to SD 1.5 and SDXL.
+- `--scheduler` selects the UNet scheduler for SD 1.5 and SDXL
+  (`edm-dpm-pp-2m` is Playground v2.5 only). Wan selects its flow solver with
+  `--sample-solver unipc|euler|dpm++`, which travels in the same `scheduler`
+  wire slot; the two sets are mutually exclusive and rejected off-family.
 - Negative prompts are meaningful for CFG-based families and ignored by FLUX,
   Z-Image, and Flux.2 Klein. Wan checkpoints were tuned against a specific
   negative prompt, which mold applies automatically when a request leaves it

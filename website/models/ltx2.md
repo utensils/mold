@@ -25,9 +25,9 @@ image-to-video, audio-to-video, keyframe, retake, lip dub, public IC-LoRA,
 spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`).
 
 LTX-2.5 adds a 22B split-pack architecture with a Gemma 4 Unified encoder,
-separate audio and video VAEs, duration prediction, and latent upscalers. On
-Apple Silicon, mold defaults bare LTX-2.5 names to the compact distilled INT8
-ConvRot + convolutional-VAE pack. That exact-weight route is Metal-qualified;
+separate audio and video VAEs, duration prediction, and latent upscalers. Mold
+defaults bare LTX-2.5 names to the compact distilled INT8 ConvRot +
+convolutional-VAE pack on every host. That exact-weight route is Metal-qualified;
 the approximately 71 GB BF16 pack remains downloadable but operator-deferred,
 and CUDA qualification is intentionally tracked on a separate host.
 :::
@@ -159,6 +159,10 @@ should compare generated contact sheets or clips from that fixed seed.
   Metal with the distilled INT8 ConvRot + Conv-VAE pack. Image conditioning,
   automatic duration, and the published spatial/temporal upscalers are wired
   to the 2.5 split-pack contract and covered by deterministic planning tests.
+  `mold run --predict-duration` lets a qualified LTX-2.5 duration head choose a
+  1-20 second clip; it omits `frames` from the request and conflicts with
+  `--frames` and `--duration`. `/api/models[].supports_duration_prediction`
+  advertises which checkpoints ship the head.
 - LTX-2.5 BF16 execution is operator-deferred on Metal. The assets remain
   downloadable and checksum-qualified; mold fails closed instead of claiming
   a completed BF16 runtime qualification.
@@ -216,8 +220,7 @@ signal; an ordinary 8-bit export throws away the range the adapter exists to
 produce. Ask for an EXR sequence alongside the video:
 
 ```bash
-mold run "a neon alley at dusk" \
-  --model ltx-2.3-22b-distilled:fp8 \
+mold run ltx-2.3-22b-distilled:fp8 "a neon alley at dusk" \
   --pipeline ic-lora --ic-lora-control hdr \
   --video reference.mp4 \
   --hdr-exr-dir ./shot_exr
@@ -701,15 +704,18 @@ as a durable chain job (`POST /api/chain-jobs`), whose stage progress the CLI
 follows over `GET /api/chain-jobs/{id}/events`. Chaining supports the LTX-2
 generation pipelines (`one-stage`, `distilled`, `two-stage`, and `two-stage-hq`),
 legacy LTX Video as independent clips, and Wan with checkpoint-dependent seams.
-Specialized keyframe, audio-to-video, IC-LoRA, retake, lip-dub, and audio-only
-modes render single clips only. See the [Wan page](./wan.md#sequences) for its
-seam behavior.
+Only the audio-only pipeline (`t2a`) is never chained — its `frames` is a
+duration, not a render shape. Chained IC-LoRA is supported for the HDR control
+(see [HDR output](#hdr-output)); the other specialized conditioning inputs
+(keyframes, `--audio-file`, `--retake`, lip dub) are not carried on the chain
+wire, so keep those renders inside one clip. See the
+[Wan page](./wan.md#sequences) for its seam behavior.
 Image-family models reject `--frames` past their single-request ceiling with an
 actionable error rather than silently over-producing. `/api/models` advertises
 `supports_sequence` per model.
 
 ::: tip 97 is a routing default, not the model's ceiling
-LTX-2's real single-request limit is a **20-second runtime budget**: 484 frames
+LTX-2's real single-request limit is a **20-second runtime budget**: 481 frames
 at 24 fps (see [Frame ceiling](#frame-ceiling) below). 97 is simply the clip
 size that fits comfortably on one consumer GPU, so auto-chaining uses it. Raise
 `--clip-frames` to render one long coherent clip instead of a stitched
@@ -803,15 +809,18 @@ normalized in seconds; the pixel-frame coordinate is divided by fps before
 `max_pos` normalization. So the budget is 20 seconds of runtime:
 
 ```
-max_frames = 20 * fps + 4      (capped at 604 frames)
+max_frames = min(20 * fps + 4, 604)    snapped down onto the 8k+1 grid
 ```
 
 | fps | Ceiling    | Runtime |
 | --- | ---------- | ------- |
-| 6   | 124 frames | ~20 s   |
-| 12  | 244 frames | ~20 s   |
-| 24  | 484 frames | ~20 s   |
-| 30  | 604 frames | ~20 s   |
+| 6   | 121 frames | ~20 s   |
+| 12  | 241 frames | ~20 s   |
+| 24  | 481 frames | ~20 s   |
+| 30  | 601 frames | ~20 s   |
+
+The snap matters: `20 * 24 + 4` is 484, which is off the `8k+1` grid the
+validator enforces, so the requestable ceiling at 24 fps is 481.
 
 `GET /api/models` advertises `max_frames` at the model's own `default_fps`,
 plus `max_runtime_seconds` so clients can recompute it when the user changes
@@ -830,16 +839,19 @@ at the head stays intact.
 
 ### v1 constraints
 
-- **Video families only.** The LTX-2 `one-stage`, `distilled`, `two-stage`,
-  and `two-stage-hq` pipelines chain (specialized keyframe, A2V, IC-LoRA,
-  retake, lip-dub, and audio-only modes do not); LTX-Video concatenates
+- **Video families only.** Every LTX-2 video pipeline chains; only the
+  audio-only `t2a` pipeline is declined outright, and the keyframe, A2V,
+  retake, and lip-dub conditioning inputs are not carried on the chain wire
+  (chained IC-LoRA is supported for the HDR control); LTX-Video concatenates
   independent clips; Wan chains per checkpoint (see
   [Wan sequences](./wan.md#sequences)). Image-family models reject `--frames`
   above their single-clip budget.
 - **Single GPU per chain.** Every stage runs on the GPU the engine was loaded
   onto; multi-GPU stage fan-out is a v2 movie-maker feature.
-- **Fail-closed.** If any stage errors, the whole chain returns `502` and
-  nothing is written to the gallery. There is no partial-resume in v1.
+- **Resumable.** A failed stage settles the durable chain job as `failed`; its
+  artifacts are retained and the job can be resumed with
+  `mold jobs resume <id>` or `POST /api/chain-jobs/{id}/resume`. Auto-chained
+  (ephemeral) one-shots refuse resume.
 - **Multiple CLI authoring modes.** A large `--frames` request still replicates
   the main prompt across stages, but `mold run --prompt ... --prompt ...` builds
   one stage per prompt and `mold run --script shot.toml` sends the canonical
@@ -898,6 +910,10 @@ floats, propeller engine, wind, and water hiss._
 - `--audio` and `--no-audio` control whether the returned MP4 keeps the audio
   track. If you explicitly choose `gif`, `apng`, or `webp`, mold exports a
   silent animation.
+- `--video-only` skips the LTX-2 audio branch entirely. It is output-changing
+  (the branch feeds the video stream, so this is not the same as `--no-audio`),
+  conflicts with `--audio` and `--audio-file`, and is refused for a `--frames`
+  value that auto-chains, because the sequence wire does not carry it.
 - `--lora` is repeatable for this family. The single legacy `lora` request
   field is still populated for backward compatibility, but the LTX-2 runtime
   uses the stacked `loras` list.

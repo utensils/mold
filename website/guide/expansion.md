@@ -28,13 +28,15 @@ motion, camera behavior, environment, and continuity. Image-to-video and
 video-to-video treat the source as visual and temporal authority and describe
 only the intended change. Retakes preserve everything outside the corrected
 interval, keyframe interpolation treats each anchor as fixed, and audio-driven
-video follows the source audio's timing and events. Text-to-audio expansion does
-not introduce camera or image language.
+video follows the source audio's timing and events. Reference-to-audio-video
+(MiniMax H3 Ref2VA) follows its ordered references rather than inventing a new
+subject. Text-to-audio expansion does not introduce camera or image language.
 
 The additive `/api/expand` `task` values are `text-to-image`, `text-to-video`,
 `image-to-video`, `video-to-video`, `retake`, `keyframe-interpolation`,
-`audio-driven-video`, and `text-to-audio`. Only this semantic value is sent for
-preview expansion; source media stays on the generation request.
+`audio-driven-video`, `reference-to-audio-video`, and `text-to-audio`. Only this
+semantic value is sent for preview expansion; source media stays on the
+generation request.
 
 ## Generate with Expansion
 
@@ -122,6 +124,18 @@ mold run "a cat" --expand \
   --expand-model llama3
 ```
 
+`mold expand` takes the same overrides under different names — the backend flag
+is `--backend`, not `--expand-backend`:
+
+```bash
+mold expand "a cat" \
+  --backend http://localhost:11434/v1 \
+  --expand-model llama3
+```
+
+With a non-`local` backend, `--expand-model` (and `MOLD_EXPAND_MODEL`) writes
+`api_model`; `model` is only read on the local GGUF path.
+
 ## Configuration
 
 Set `MOLD_EXPAND=1` to enable expansion by default.
@@ -130,11 +144,17 @@ Set `MOLD_EXPAND=1` to enable expansion by default.
 [expand]
 enabled = true
 backend = "local"
-model = "qwen3-expand:q8"
+model = "qwen3-expand:q8"     # read on the local GGUF backend
+api_model = "qwen2.5:3b"      # read when `backend` is an OpenAI-compatible URL
 temperature = 0.7
+top_p = 0.9
+max_tokens = 300
+thinking = false              # Qwen3 thinking mode: higher quality, slower
 
-# Custom system prompt (placeholders: {WORD_LIMIT}, {MODEL_NOTES})
+# Custom system prompts (placeholders: {WORD_LIMIT}, {MODEL_NOTES};
+# batch_prompt also takes {N})
 # system_prompt = "You are an image prompt writer..."
+# batch_prompt = "Write {N} distinct variations..."
 
 # Per-family tuning
 [expand.families.sd15]

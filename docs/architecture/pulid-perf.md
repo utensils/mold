@@ -168,6 +168,13 @@ the anchor decode, NMS, alignment, and warp code the ONNX graphs feed into
 are already plain candle/host Rust with no such constraint
 (`identity/scrfd.rs`, `identity/align.rs`, `identity/warp.rs`).
 
+> **Superseded (phases 1 and 2).** There is no CPU assertion any more, and
+> there never was one in the arithmetic: `IdentityExtractor::load(paths,
+> device)` takes and honours a device, `from_paths` merely defaults to
+> `Device::Cpu`. Phase 1 replaced the evaluator with resident candle ports and
+> phase 2 supplied the leased device, so the "hard external prerequisite" this
+> paragraph names never had to land.
+
 ### Cost of A under the drop-and-reload rule
 
 SCRFD's weights are 17 MB; `glintr100`'s are 261 MB (f32, per the manifest
@@ -267,13 +274,24 @@ out to dominate SCRFD/ArcFace entirely.
 
 ### Where it lives
 
+> **SHIPPED, one layer lower than proposed.** The cache lives inside
+> `mold_inference::identity::extraction::extract_identity_embeddings` (§5), not
+> in the server. `resolve_identity_embedding` and `ExtractionSlot` are both
+> gone — #1227 phase 2 retired the slot with the call site — and the server
+> entry point is now
+> `mold_server::identity_extraction::resolve_identity_for_lease`. Everything
+> below about key composition, invalidation, and the memory bound shipped as
+> written; references to `EXTRACTION_SLOT` describe the admission-side
+> substrate phase 2 retired.
+
+The proposal was
 `crates/mold-server/src/identity_extraction.rs::resolve_identity_embedding`,
-immediately before `ExtractionSlot::acquire()` (line 192) — a cache hit skips
+immediately before `ExtractionSlot::acquire()` — a cache hit skips
 the slot, the host-memory gate, and the extraction entirely; nothing is
-serialized or counted for a hit, because nothing is computed. This is the
-single call site every admission path already funnels through
+serialized or counted for a hit, because nothing is computed. This was the
+single call site every admission path already funnelled through
 (`request_resolves_identity`, `EXTRACTIONS`, the `#[cfg(test)] test_stub`
-seam), so the cache needs no second integration point.
+seam), so the cache needed no second integration point.
 
 ### Key composition
 
@@ -283,28 +301,32 @@ version constants involved:
 | Component | Source | Available before extraction runs? |
 | --- | --- | --- |
 | `sha256(id_image bytes)` | `mold_core::identity::id_image_sha256` (`identity.rs:517-522`) | Yes — pure function of the request |
-| **A new `IDENTITY_PIPELINE_VERSION: u32`** | Does not exist today; add to `mold_core::identity` | Yes — a compiled constant |
-| Adapter SHA | `mold_core::pulid_assets::pulid_manifest()`'s pin for `ModelComponent::IdentityAdapter` — the same read `extraction.rs::adapter_sha256()` (lines 133-141) already performs | Yes — a manifest pin, no file read |
+| **`IDENTITY_PIPELINE_VERSION: u32`** | Shipped in `mold_core::identity` (currently `1`) | Yes — a compiled constant |
+| Adapter SHA | `mold_core::pulid_assets::pulid_manifest_for(family)`'s pin for `ModelComponent::IdentityAdapter` — the same read `extraction.rs::adapter_sha256()` (lines 133-141) already performs | Yes — a manifest pin, no file read |
 | Vision (derived tower) SHA | `crate::encoders::pickle_convert::EVA_DERIVED_SHA256` — a compiled constant | Yes |
 | Face-detector SHA | `onnx_graph::pinned_artifact(ModelComponent::FaceDetector)`'s pin | Yes — the manifest pin, not the post-load `det.sha256` (which is checked equal to the pin or the load fails, so they never disagree) |
 | Face-recognizer SHA | `onnx_graph::pinned_artifact(ModelComponent::FaceRecognizer)`'s pin | Yes, same reasoning |
+| Face-parser (derived BiSeNet) SHA | `crate::encoders::pickle_convert`'s compiled derived digest, added with #1225 | Yes |
 
-This is deliberately the same four-asset shape `IdentityAssetDigests` already
-carries (`identity.rs:380-391`) — but that struct is populated **after**
-extraction, from what actually ran. The cache key needs the same four
-digests **before** extraction runs, which is why the table above resolves
-each one from its manifest/compiled-constant source rather than from an
+This is deliberately the same shape `IdentityAssetDigests` already carries —
+five digests since #1225 added the derived BiSeNet parser — but that struct is
+populated **after** extraction, from what actually ran. The cache key needs the
+same five digests **before** extraction runs, which is why the table above
+resolves each one from its manifest/compiled-constant source rather than from an
 `IdentityAssetDigests` a request hasn't produced yet. Compose the key exactly
 as `fingerprint_of` already composes the *output* fingerprint
 (`identity.rs:496-513`) — domain-separated, newline/NUL-joined SHA-256 — but
-over these six inputs instead of the extracted values:
+over the photograph, the version, and the five asset digests instead of the
+extracted values. It shipped as `mold_core::identity::identity_cache_key`, fed
+by `extraction::pinned_asset_digests(family)`:
 
 ```
 sha256("mold.identity.cache.v1\0"
        || id_image_sha256 || "\0"
        || IDENTITY_PIPELINE_VERSION.to_le_bytes() || "\0"
        || adapter_sha || "\0" || vision_sha || "\0"
-       || face_detector_sha || "\0" || face_recognizer_sha)
+       || face_detector_sha || "\0" || face_recognizer_sha || "\0"
+       || face_parser_sha)
 ```
 
 **Never key on `id_image` bytes alone** (the task's own framing, and the

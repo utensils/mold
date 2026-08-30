@@ -17,16 +17,24 @@ and classifier-free guidance.
 | `dreamshaper-xl:fp16`      | 8     | 5.1 GB | Fantasy, concept art    |
 | `juggernaut-xl:fp16`       | 30    | 5.1 GB | Photorealism, cinematic |
 | `realvis-xl:fp16`          | 25    | 5.1 GB | Photorealism, versatile |
-| `playground-v2.5:fp16`     | 25    | 5.1 GB | Artistic, aesthetic     |
+| `playground-v2.5:fp16`     | 50    | 5.1 GB | Artistic, aesthetic     |
 | `sdxl-base:fp16`           | 25    | 5.1 GB | Official base model     |
 | `pony-v6:fp16`             | 25    | 5.1 GB | Anime, art, stylized    |
 | `cyberrealistic-pony:fp16` | 25    | 5.1 GB | Photorealistic Pony     |
 
 ## Defaults
 
-- **Resolution**: 1024x1024
-- **Guidance**: 7.5 (0.0 for turbo)
-- **Scheduler**: DDIM (also supports euler-ancestral, uni-pc)
+Defaults are per model:
+
+- **Resolution**: 1024x1024, except `sdxl-turbo:fp16` at 512x512
+- **Guidance**: 7.5 (`sdxl-base`, `realvis-xl`), 7.0 (`juggernaut-xl`,
+  `pony-v6`, `cyberrealistic-pony`), 3.0 (`playground-v2.5`), 2.0
+  (`dreamshaper-xl`), 0.0 (`sdxl-turbo`)
+- **Scheduler**: `ddim` (`sdxl-base`, `juggernaut-xl`, `realvis-xl`),
+  `euler-ancestral` (`dreamshaper-xl`, `pony-v6`, `cyberrealistic-pony`,
+  `sdxl-turbo`), `edm-dpm-pp-2m` (`playground-v2.5`). `--scheduler` accepts
+  `ddim`, `euler-ancestral`, `uni-pc`, and `edm-dpm-pp-2m` (Playground v2.5
+  only).
 
 ## Recommended Dimensions
 

@@ -28,68 +28,76 @@ other run, including img2img on an image family, still errors with
 
 ### Options
 
-| Flag                                                                                         | Description                                                                                                                 |
-| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `-o, --output <PATH>`                                                                        | Output path; `-` writes media bytes to stdout                                                                               |
-| `--format <FMT>`                                                                             | `png`, `jpeg`/`jpg`, `gif`, `apng`, `webp`, `mp4`, or `wav` (LTX-2 `--pipeline t2a`)                                        |
-| `--width <N>`, `--height <N>`                                                                | Output dimensions                                                                                                           |
-| `--steps <N>`, `--guidance <N>`, `--seed <N>`, `--batch <N>`                                 | Core generation controls                                                                                                    |
-| `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan)                                                            |
-| `--frames-per-clip <N>`                                                                      | Per-stage frame count for repeated `--prompt`                                                                               |
-| `--script <PATH>`                                                                            | Submit a `mold.chain.v1` TOML chain script                                                                                  |
-| `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                              |
-| `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                            |
-| `--duration <SECONDS>`                                                                       | MiniMax H3 duration from 4–15 seconds; resolves to its exact `17n+5` frame grid at 24 fps                                   |
-| `--predict-duration`                                                                         | Let a qualified LTX-2.5 model choose a clip length from 1–20 seconds                                                        |
-| `--clip-frames <N>`                                                                          | Per-clip cap for chained video renders                                                                                      |
-| `--motion-tail <N>`                                                                          | Overlap frames reused between chained clips                                                                                 |
-| `--extend <PATH>`                                                                            | Continue an existing video clip (LTX-2 and image-conditioned Wan); mutually exclusive with `--video`/`--image`/`--keyframe` |
-| `--extend-overlap <N>`                                                                       | Source-tail frames reused as motion context for `--extend`; family grid (8k+1 LTX-2, exactly 1 for Wan)                     |
-| `--audio`, `--no-audio`                                                                      | Keep or strip synchronized LTX-2 MP4 audio                                                                                  |
-| `--audio-file <PATH>`                                                                        | LTX-2 audio-to-video conditioning                                                                                           |
-| `--video <PATH>`                                                                             | LTX-2 source video for retake/video-conditioning                                                                            |
-| `--ic-lora-control <ID>`                                                                     | Official compatible LTX-2 reference control; requires `--video` and selects `ic-lora` (or `lip-dub` for `lipdub`)           |
-| `--keyframe <FRAME:PATH>`                                                                    | Repeatable LTX-2 keyframe conditioning; current H3 uses the required `--first-frame` instead                                |
-| `--last-image <PATH>`                                                                        | Closing frame for a Wan first/last-frame render; pairs with `--image`                                                       |
-| `--first-frame <PATH>`                                                                       | MiniMax H3 FL2VA opening frame; required by the current compact runtime                                                     |
-| `--last-frame <PATH>`                                                                        | MiniMax H3 closing endpoint flag; the current compact runtime refuses this not-yet-qualified route                          |
-| `--reference <KIND=PATH>`                                                                    | Repeatable ordered MiniMax H3 Ref2VA image/video/audio input; remote upload requires `MOLD_API_KEY`                         |
-| `--pipeline <MODE>`                                                                          | `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`, `lip-dub`, or `t2a`       |
-| `--retake <START:END>`                                                                       | LTX-2 retake range in seconds                                                                                               |
-| `--camera-control <NAME\|PATH>`                                                              | LTX-2 camera-control preset or `.safetensors` path                                                                          |
-| `--spatial-upscale <MODE>`                                                                   | LTX-2 spatial upscaling, such as `x1.5` or `x2`                                                                             |
-| `--temporal-upscale <MODE>`                                                                  | LTX-2 temporal upscaling, currently `x2`                                                                                    |
-| `--stg-scale <SCALE>`, `--stg-blocks <BLOCKS>`                                               | LTX-2 spatiotemporal guidance strength and the perturbed transformer blocks                                                 |
-| `--rescale-scale <SCALE>`, `--modality-scale <SCALE>`                                        | LTX-2 CFG-rescale factor and audio/video cross-modality guidance                                                            |
-| `--guidance-skip-step <N>`                                                                   | Apply LTX-2 guidance every `N + 1` steps instead of every step                                                              |
-| `--spatial-tile <off\|auto\|PX[:OVERLAP]>`                                                   | LTX-2 spatial tiling for stage 2 and VAE decode (env: `MOLD_LTX2_SPATIAL_TILE`)                                             |
-| `--sample-solver <SOLVER>`                                                                   | Wan denoise solver: `unipc` (default), `euler`, or `dpm++`                                                                  |
-| `--sample-shift <SHIFT>`                                                                     | Wan flow shift; overrides the per-tier default                                                                              |
-| `--distill-strength <SPEC>`                                                                  | Wan Lightning distill strength: `high=X,low=Y` or one number for both experts                                               |
-| `-i, --image <PATH>`                                                                         | Source image; repeat for `qwen-image-edit`; `-` is stdin for single-image families                                          |
-| `--strength <FLOAT>`, `--mask <PATH>`                                                        | img2img/inpainting controls                                                                                                 |
-| `--control <PATH>`, `--control-model <NAME>`, `--control-scale <FLOAT>`                      | SD1.5 ControlNet controls                                                                                                   |
-| `-n, --negative-prompt <TEXT>`, `--no-negative`                                              | CFG-family negative prompt controls                                                                                         |
-| `--lora <PATH>`, `--lora-scale <FLOAT>`                                                      | LoRA adapter path and scale; `--lora` is repeatable; suffix `@high`/`@low` binds an adapter to one Wan 2.2 A14B expert      |
-| `--upscale <MODEL>`                                                                          | Apply a Real-ESRGAN upscaler after generation                                                                               |
-| `--no-metadata`                                                                              | Disable embedded PNG metadata for this run                                                                                  |
-| `--title <TEXT>`                                                                             | Print title (≤ 120 chars): embedded in metadata, seeded into the gallery row, slugged into the default filename             |
-| `--tag <TAG>`                                                                                | File the print under a tag; repeatable, up to 20 tags of 1–64 chars, matched case-insensitively                             |
-| `--collection <NAME>`                                                                        | File the print into a collection, creating it if absent; collections merge across machines by name                          |
-| `--no-auto-tag`                                                                              | Do not add the title as a tag, whatever `generate.auto_tag_title` says                                                      |
-| `--preview`                                                                                  | Display output inline in the terminal                                                                                       |
-| `--expand`, `--no-expand`, `--expand-backend <URL>`, `--expand-model <MODEL>`                | Prompt expansion controls                                                                                                   |
-| `--local`                                                                                    | Skip the server and run local inference                                                                                     |
-| `--host <URL>`                                                                               | Override `MOLD_HOST`                                                                                                        |
-| `--gpus <SPEC>`                                                                              | Local GPUs: `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs                                           |
-| `--eager`, `--offload`                                                                       | VRAM/performance placement modes                                                                                            |
-| `--t5-variant <TAG>`, `--qwen3-variant <TAG>`, `--qwen2-variant <TAG>`                       | Text encoder variant overrides                                                                                              |
-| `--qwen2-text-encoder-mode <MODE>`                                                           | `auto`, `gpu`, `cpu-stage`, or `cpu`                                                                                        |
-| `--scheduler <SCHED>`                                                                        | `ddim`, `euler-ancestral`, or `uni-pc`                                                                                      |
-| `--cfg-plus`                                                                                 | Enable CFG++ on supported SD-family paths                                                                                   |
-| `--device-text-encoders <DEV>`                                                               | Place all text encoders on `auto`, `cpu`, `gpu:N`, or an exact `/api/devices` ID                                            |
-| `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides; accepts the same device forms                                                          |
-| `--device-t5 <DEV>`, `--device-clip-l <DEV>`, `--device-clip-g <DEV>`, `--device-qwen <DEV>` | Per-encoder placement overrides                                                                                             |
+| Flag                                                                                         | Description                                                                                                                           |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `-o, --output <PATH>`                                                                        | Output path; `-` writes media bytes to stdout                                                                                         |
+| `--format <FMT>`                                                                             | `png`, `jpeg`/`jpg`, `gif`, `apng`, `webp`, `mp4`, or `wav` (LTX-2 `--pipeline t2a`)                                                  |
+| `--width <N>`, `--height <N>`                                                                | Output dimensions                                                                                                                     |
+| `--steps <N>`, `--guidance <N>`, `--seed <N>`, `--batch <N>`                                 | Core generation controls                                                                                                              |
+| `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan)                                                                      |
+| `--frames-per-clip <N>`                                                                      | Per-stage frame count for repeated `--prompt`                                                                                         |
+| `--script <PATH>`                                                                            | Submit a `mold.chain.v1` TOML chain script                                                                                            |
+| `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                                        |
+| `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                                      |
+| `--duration <SECONDS>`                                                                       | MiniMax H3 duration from 4–15 seconds; resolves to its exact `17n+5` frame grid at 24 fps                                             |
+| `--predict-duration`                                                                         | Let a qualified LTX-2.5 model choose a clip length from 1–20 seconds                                                                  |
+| `--clip-frames <N>`                                                                          | Per-clip cap for chained video renders                                                                                                |
+| `--motion-tail <N>`                                                                          | Overlap frames reused between chained clips                                                                                           |
+| `--extend <PATH>`                                                                            | Continue an existing video clip (LTX-2 and image-conditioned Wan); mutually exclusive with `--video`/`--image`/`--keyframe`           |
+| `--extend-overlap <N>`                                                                       | Source-tail frames reused as motion context for `--extend`; family grid (8k+1 LTX-2, exactly 1 for Wan)                               |
+| `--audio`, `--no-audio`                                                                      | Keep or strip synchronized LTX-2 MP4 audio                                                                                            |
+| `--video-only`                                                                               | Skip the LTX-2 audio branch entirely; output-changing, and conflicts with `--audio` / `--audio-file`                                  |
+| `--audio-file <PATH>`                                                                        | LTX-2 audio-to-video conditioning                                                                                                     |
+| `--video <PATH>`                                                                             | LTX-2 source video for retake/video-conditioning                                                                                      |
+| `--ic-lora-control <ID>`                                                                     | Official compatible LTX-2 reference control; requires `--video` and selects `ic-lora` (or `lip-dub` for `lipdub`)                     |
+| `--keyframe <FRAME:PATH>`                                                                    | Repeatable LTX-2 keyframe conditioning; current H3 uses the required `--first-frame` instead                                          |
+| `--last-image <PATH>`                                                                        | Closing frame for a Wan first/last-frame render; pairs with `--image`                                                                 |
+| `--first-frame <PATH>`                                                                       | MiniMax H3 FL2VA opening frame; required by the current compact runtime                                                               |
+| `--last-frame <PATH>`                                                                        | MiniMax H3 closing endpoint flag; the current compact runtime refuses this not-yet-qualified route                                    |
+| `--reference <KIND=PATH>`                                                                    | Repeatable ordered MiniMax H3 Ref2VA image/video/audio input; remote upload requires `MOLD_API_KEY`                                   |
+| `--pipeline <MODE>`                                                                          | `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`, `lip-dub`, or `t2a`                 |
+| `--retake <START:END>`                                                                       | LTX-2 retake range in seconds                                                                                                         |
+| `--camera-control <NAME\|PATH>`                                                              | LTX-2 camera-control preset or `.safetensors` path                                                                                    |
+| `--spatial-upscale <MODE>`                                                                   | LTX-2 spatial upscaling, such as `x1.5` or `x2`                                                                                       |
+| `--temporal-upscale <MODE>`                                                                  | LTX-2 temporal upscaling, currently `x2`                                                                                              |
+| `--stg-scale <SCALE>`, `--stg-blocks <BLOCKS>`                                               | LTX-2 spatiotemporal guidance strength and the perturbed transformer blocks                                                           |
+| `--rescale-scale <SCALE>`, `--modality-scale <SCALE>`                                        | LTX-2 CFG-rescale factor and audio/video cross-modality guidance                                                                      |
+| `--guidance-skip-step <N>`                                                                   | Apply LTX-2 guidance every `N + 1` steps instead of every step                                                                        |
+| `--spatial-tile <off\|auto\|PX[:OVERLAP]>`                                                   | LTX-2 spatial tiling for stage 2 and VAE decode (env: `MOLD_LTX2_SPATIAL_TILE`)                                                       |
+| `--hdr-exr-dir <DIR>`                                                                        | Also write the render as a scene-referred linear OpenEXR sequence in this directory; requires `--ic-lora-control hdr`                 |
+| `--hdr-exr-full-float`                                                                       | Write EXR samples at 32-bit float instead of 16-bit half; requires `--hdr-exr-dir`                                                    |
+| `--sample-solver <SOLVER>`                                                                   | Wan denoise solver: `unipc` (default), `euler`, or `dpm++`                                                                            |
+| `--sample-shift <SHIFT>`                                                                     | Wan flow shift; overrides the per-tier default                                                                                        |
+| `--distill-strength <SPEC>`                                                                  | Wan Lightning distill strength: `high=X,low=Y` or one number for both experts                                                         |
+| `-i, --image <PATH>`                                                                         | Source image; repeat for `qwen-image-edit`; `-` is stdin for single-image families                                                    |
+| `--strength <FLOAT>`, `--mask <PATH>`                                                        | img2img/inpainting controls                                                                                                           |
+| `--control <PATH>`, `--control-model <NAME>`, `--control-scale <FLOAT>`                      | SD1.5 ControlNet controls                                                                                                             |
+| `-n, --negative-prompt <TEXT>`, `--no-negative`                                              | CFG-family negative prompt controls                                                                                                   |
+| `--lora <PATH>`, `--lora-scale <FLOAT>`                                                      | LoRA adapter path and scale; `--lora` is repeatable; suffix `@high`/`@low` binds an adapter to one Wan 2.2 A14B expert                |
+| `--upscale <MODEL>`                                                                          | Apply a Real-ESRGAN upscaler after generation                                                                                         |
+| `--no-metadata`                                                                              | Disable embedded PNG metadata for this run                                                                                            |
+| `--title <TEXT>`                                                                             | Print title (≤ 120 chars): embedded in metadata, seeded into the gallery row, slugged into the default filename                       |
+| `--tag <TAG>`                                                                                | File the print under a tag; repeatable, up to 20 tags of 1–64 chars, matched case-insensitively                                       |
+| `--collection <NAME>`                                                                        | File the print into a collection, creating it if absent; collections merge across machines by name                                    |
+| `--no-auto-tag`                                                                              | Do not add the title as a tag, whatever `generate.auto_tag_title` says                                                                |
+| `--preview`                                                                                  | Display output inline in the terminal                                                                                                 |
+| `--expand`, `--no-expand`, `--expand-backend <URL>`, `--expand-model <MODEL>`                | Prompt expansion controls                                                                                                             |
+| `--local`                                                                                    | Skip the server and run local inference                                                                                               |
+| `--host <URL>`                                                                               | Override `MOLD_HOST`                                                                                                                  |
+| `--gpus <SPEC>`                                                                              | Local GPUs: `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs                                                     |
+| `--eager`, `--offload`                                                                       | VRAM/performance placement modes                                                                                                      |
+| `--t5-variant <TAG>`, `--qwen3-variant <TAG>`, `--qwen2-variant <TAG>`                       | Text encoder variant overrides                                                                                                        |
+| `--qwen2-text-encoder-mode <MODE>`                                                           | `auto`, `gpu`, `cpu-stage`, or `cpu`                                                                                                  |
+| `--scheduler <SCHED>`                                                                        | `ddim`, `euler-ancestral`, `uni-pc`, or `edm-dpm-pp-2m` (Playground v2.5 only); Wan uses `--sample-solver`                            |
+| `--cfg-plus`                                                                                 | Enable CFG++ on supported SD-family paths                                                                                             |
+| `--device-text-encoders <DEV>`                                                               | Place all text encoders on `auto`, `cpu`, `gpu:N`, or an exact `/api/devices` ID                                                      |
+| `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides; accepts the same device forms                                                                    |
+| `--device-t5 <DEV>`, `--device-clip-l <DEV>`, `--device-clip-g <DEV>`, `--device-qwen <DEV>` | Per-encoder placement overrides                                                                                                       |
+| `--id-image <PATH>`                                                                          | Face reference photograph (PuLID); repeat up to 4 times to average several references of one person — see [Identity](/guide/identity) |
+| `--id-weight <FLOAT>`                                                                        | Identity strength, `0.0`–`3.0` (default `1.0`); exactly `0.0` renders the unconditioned print                                         |
+| `--id-start-step <N>`                                                                        | First denoise step identity is applied from (default `0`)                                                                             |
+| `--true-cfg <SCALE>`                                                                         | True classifier-free guidance scale, `1.0`–`10.0` (default `1.0` = off); FLUX only                                                    |
+| `--cfg-start-step <N>`                                                                       | First denoise step the true-CFG negative branch runs at (default `1`); requires `--true-cfg`                                          |
 
 For video, the `--output` extension outranks the family's container default:
 `mold run <video-model> "…" -o clip.gif` writes a real GIF even where the family
@@ -294,17 +302,17 @@ Start the HTTP inference server.
 mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-size N] [--log-format json|text] [--log-file] [--discord] [--no-mdns]
 ```
 
-| Flag                  | Description                                                                                   |
-| --------------------- | --------------------------------------------------------------------------------------------- |
-| `--port <N>`          | Port, defaults to `7680` or `MOLD_PORT`                                                       |
-| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                                                           |
-| `--models-dir <PATH>` | Override the models directory                                                                 |
-| `--gpus <SPEC>`       | `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs; defaults to `all`      |
-| `--queue-size <N>`    | Max queued jobs; overflow returns HTTP 503 + `Retry-After`                                    |
-| `--log-format <FMT>`  | `json` or `text`                                                                              |
-| `--log-file`          | Enable rotated logs under `~/.mold/logs/`                                                     |
-| `--discord`           | Start the built-in Discord bot in the same process                                            |
-| `--no-mdns`           | Disable LAN advertising and server-assisted peer browsing (`mdns` builds; also `MOLD_MDNS=0`) |
+| Flag                  | Description                                                                                                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--port <N>`          | Port, defaults to `7680` or `MOLD_PORT`                                                                                                                                                          |
+| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                                                                                                                                                              |
+| `--models-dir <PATH>` | Override the models directory                                                                                                                                                                    |
+| `--gpus <SPEC>`       | `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs; defaults to `all`                                                                                                         |
+| `--queue-size <N>`    | Jobs hydrated into the runtime window (overflow returns HTTP 503 `QUEUE_FULL` + `Retry-After`); the durable SQLite backlog itself is uncapped — see [Configuration](/guide/configuration#server) |
+| `--log-format <FMT>`  | `json` or `text`                                                                                                                                                                                 |
+| `--log-file`          | Enable rotated logs under `~/.mold/logs/`                                                                                                                                                        |
+| `--discord`           | Start the built-in Discord bot in the same process                                                                                                                                               |
+| `--no-mdns`           | Disable LAN advertising and server-assisted peer browsing (`mdns` builds; also `MOLD_MDNS=0`)                                                                                                    |
 
 `GET /api/status` returns `gpus[]` with per-worker state and
 `queue_depth`/`queue_capacity` for queue health.
@@ -361,11 +369,11 @@ instances that advertise themselves. Available in builds compiled with the
 mold server discover [--timeout-secs N] [--json] [--probe]
 ```
 
-| Flag                 | Description                                                   |
-| -------------------- | ------------------------------------------------------------- |
-| `--timeout-secs <N>` | How long to browse before reporting (default `3`)             |
-| `--json`             | Emit the raw list of discovered servers as JSON               |
-| `--probe`            | Also time each server's `/health` and show a `LATENCY` column |
+| Flag                 | Description                                                                    |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `--timeout-secs <N>` | How long to browse before reporting (default `3`)                              |
+| `--json`             | Emit the raw list of discovered servers as JSON                                |
+| `--probe`            | Also probe each server's `/health` + `/api/status` and show a `LATENCY` column |
 
 The table lists NAME, URL, VERSION, AUTH (whether an API key is required), and a
 GPU summary, followed by a `export MOLD_HOST=…` hint for the first result.
@@ -381,21 +389,27 @@ Start a stdio Model Context Protocol server that proxies to `mold serve`.
 mold mcp [--host URL]
 ```
 
-MCP exposes generation, async generation, gallery lookup, installed LoRA
-listing, model listing, and server status. It intentionally proxies the server
+MCP exposes nine tools: generation, async generation with job status and
+retry, gallery listing and lookup, installed LoRA listing, model listing, and
+server status. It intentionally proxies the server
 surface instead of embedding local inference.
 
 ## `mold pull`, `mold list`, `mold info`
 
 ```bash
 mold pull flux-schnell:q8
+mold pull pulid-flux --accept-license insightface-antelopev2
 mold list
 mold info
 mold info flux-dev:q4
 mold info flux-dev:q4 --verify
 ```
 
-`mold pull` downloads manifest models locally or through the reachable server.
+`mold pull <MODEL> [--skip-verify] [--accept-license <ID>]` downloads manifest
+models locally or through the reachable server. `--skip-verify` skips the
+SHA-256 pass after the download; `--accept-license` records a third-party
+model-license acceptance before pulling (see
+[Configuration](/guide/configuration#third-party-model-licenses)).
 `mold info <model> --verify` verifies checksums for that model.
 
 ## `mold config`
@@ -415,9 +429,12 @@ mold config edit
 
 | Section   | Keys                                                                                                                                                                                                                               |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| General   | `default_model`, `models_dir`, `output_dir`, `server_port`, `default_width`, `default_height`, `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`, `umt5_variant`, `default_negative_prompt`                         |
+| General   | `default_model`, `models_dir`, `output_dir`, `server_port`, `default_width`, `default_height`, `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`, `default_negative_prompt`                                         |
 | Expand    | `expand.enabled`, `expand.backend`, `expand.model`, `expand.api_model`, `expand.temperature`, `expand.top_p`, `expand.max_tokens`, `expand.thinking`                                                                               |
+| Scheduler | `scheduler.replan_debounce_ms`, `scheduler.replan_max_delay_ms`, `scheduler.warm_wait_max_ms`                                                                                                                                      |
 | Gallery   | `gallery.trash_retention_days` (days a trashed print is kept before the sweeper purges it; `0` = forever, default 30, stored in `mold.db`)                                                                                         |
+| Queue     | `queue.held_retention_days` (days a held queue row is kept before the sweeper purges it; `0` = forever, default 30, stored in `mold.db`)                                                                                           |
+| Generate  | `generate.auto_tag_title` (add the print title as a tag by default; on unless set to `false`)                                                                                                                                      |
 | Logging   | `logging.level`, `logging.file`, `logging.dir`, `logging.max_days`                                                                                                                                                                 |
 | RunPod    | `runpod.api_key`, `runpod.default_gpu`, `runpod.default_datacenter`, `runpod.default_network_volume_id`, `runpod.auto_teardown`, `runpod.auto_teardown_idle_mins`, `runpod.cost_alert_usd`, `runpod.endpoint`                      |
 | Lambda    | `lambda.api_key`, `lambda.endpoint`, `lambda.image_repository`, `lambda.ssh_key_name`, `lambda.ssh_private_key_path`, `lambda.filesystem_prefix`, `lambda.filesystem_mount_path`, `lambda.confirm_hourly_usd`, `lambda.local_port` |
@@ -425,7 +442,12 @@ mold config edit
 
 `config.toml` owns bootstrap paths, ports, credentials, logging, and model path
 overrides. The SQLite settings DB owns user preferences and per-model
-generation defaults.
+generation defaults. The TUI's own `tui.*` preferences are DB-backed too, but
+are written by the TUI rather than listed in the static key registry.
+`umt5_variant` is registered as a key name only: it has no read/write arm and no
+DB slot ([#778](https://github.com/utensils/mold/issues/778)), and it is
+stripped whenever mold rewrites `config.toml`, so set
+the Wan UMT5 encoder variant with `MOLD_UMT5_VARIANT` instead.
 
 ## `mold tui`
 
@@ -510,19 +532,20 @@ Common subcommands are `doctor`, `availability`, `deploy`, `status`, `logs`,
 
 ## Other Commands
 
-| Command                                                       | Purpose                                                         |
-| ------------------------------------------------------------- | --------------------------------------------------------------- |
-| `mold default [MODEL]`                                        | Get or set the default model                                    |
-| `mold stats [--json]`                                         | Show disk usage for models, output, logs, and shared components |
-| `mold clean [--force] [--older-than DURATION]`                | Remove stale downloads, orphaned files, and old outputs         |
-| `mold server start/status/stop`                               | Manage a background server daemon                               |
-| `mold server discover`                                        | Find mold servers advertised on the local network (mDNS)        |
-| `mold rm <MODELS...> [--force]`                               | Remove downloaded models                                        |
-| `mold ps`                                                     | Show server status or local mold processes                      |
-| `mold unload`                                                 | Unload the current server model                                 |
-| `mold update [--check] [--force] [--nightly] [--version TAG]` | Update a stable, nightly, or exact release binary               |
-| `mold skill <COMMAND>`                                        | Manage Mold's embedded Agent Skill                              |
-| `mold version`                                                | Show version, build date, and git SHA                           |
+| Command                                                       | Purpose                                                                                           |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `mold default [MODEL]`                                        | Get or set the default model                                                                      |
+| `mold stats [--json]`                                         | Show disk usage for models, output, logs, and shared components                                   |
+| `mold clean [--force] [--older-than DURATION]`                | Report stale downloads, orphaned files, and old outputs (dry run); `--force` deletes them         |
+| `mold server start/status/stop`                               | Manage a background server daemon                                                                 |
+| `mold server discover`                                        | Find mold servers advertised on the local network (mDNS)                                          |
+| `mold rm <MODELS...> [--force]`                               | Remove downloaded models                                                                          |
+| `mold ps`                                                     | Show server status or local mold processes                                                        |
+| `mold unload`                                                 | Unload the current server model                                                                   |
+| `mold update [--check] [--force] [--nightly] [--version TAG]` | Update a stable, nightly, or exact release binary                                                 |
+| `mold licenses [--local]`                                     | Show third-party model licenses and whether the machine that would run the pull has accepted them |
+| `mold skill <COMMAND>`                                        | Manage Mold's embedded Agent Skill                                                                |
+| `mold version`                                                | Show version, build date, and git SHA                                                             |
 
 ## Running commands without `mold serve`
 
@@ -530,15 +553,15 @@ The CLI does not need a daemon for work whose authority already exists on disk,
 in the local runtime, or in a named cloud API. Server-first commands fall back
 only when doing so preserves the target the user asked about.
 
-| Behavior without a local server    | Commands                                                                      | Result                                                                                                               |
-| ---------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Fully standalone, local files      | `list`, `info`, `default`, `config`, `stats`, `clean`, `rm`, `chain validate` | Reads or changes `MOLD_HOME` directly                                                                                |
-| Fully standalone, local runtime    | `gpu list`, `gpu enable`, `gpu disable`, `ps`, `unload`                       | Lists local devices, persists next-start device preferences, reports processes, or completes an already-empty unload |
-| Server-first with local execution  | `run`, `pull`, `upscale`                                                      | Uses the server when reachable, otherwise executes or downloads locally                                              |
-| Standalone prompt tooling          | `expand`, `remix`                                                             | Uses the configured local expansion model or external API backend                                                    |
-| Standalone lifecycle/discovery     | `serve`, `server start`, `server status`, `server stop`, `server discover`    | Starts or inspects processes, or browses mDNS directly                                                               |
-| Standalone utility/network clients | `version`, `update`, `completions`, `skill`, `runpod`, `lambda`               | Uses embedded data, GitHub, agent paths, or the explicitly named cloud API                                           |
-| Requires a live Mold server        | `jobs`, `trash`, `mcp`, `discord`; `tui` unless `--local` is used             | These operate on server-owned queue, gallery, tool, or UI state and do not substitute a different local authority    |
+| Behavior without a local server    | Commands                                                                                                              | Result                                                                                                               |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Fully standalone, local files      | `list`, `info`, `default`, `config`, `stats`, `clean`, `rm`, `chain validate`                                         | Reads or changes `MOLD_HOME` directly                                                                                |
+| Fully standalone, local runtime    | `gpu list`, `gpu enable`, `gpu disable`, `ps`, `unload`                                                               | Lists local devices, persists next-start device preferences, reports processes, or completes an already-empty unload |
+| Server-first with local execution  | `run`, `pull`, `upscale`                                                                                              | Uses the server when reachable, otherwise executes or downloads locally                                              |
+| Standalone prompt tooling          | `expand`, `remix`                                                                                                     | Uses the configured local expansion model or external API backend                                                    |
+| Standalone lifecycle/discovery     | `serve`, `server start`, `server status`, `server stop`, `server discover`                                            | Starts or inspects processes, or browses mDNS directly                                                               |
+| Standalone utility/network clients | `version`, `update`, `completions`, `skill`, `runpod`, `lambda`                                                       | Uses embedded data, GitHub, agent paths, or the explicitly named cloud API                                           |
+| Requires a live Mold server        | `jobs`, `queue`, `library` (except `library grid --local`), `trash`, `mcp`, `discord`; `tui` unless `--local` is used | These operate on server-owned queue, gallery, tool, or UI state and do not substitute a different local authority    |
 
 An unreachable non-loopback `MOLD_HOST` remains an error for host-administration
 commands. In particular, `gpu`, `ps`, and `unload` do not answer with this

@@ -38,7 +38,10 @@ requirements.
 - **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
 - **License**: Apache 2.0
 - **HuggingFace**:
-  [black-forest-labs/FLUX.2-Klein](https://huggingface.co/black-forest-labs/FLUX.2-Klein)
+  [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)
+  (BF16 transformer, Qwen3 encoder shards, VAE, tokenizer);
+  [unsloth/FLUX.2-klein-4B-GGUF](https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF)
+  (quantized tiers)
 
 ## Variants
 

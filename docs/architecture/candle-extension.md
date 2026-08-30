@@ -73,10 +73,12 @@ the fork and left `crates/mold-candle`'s `candle-flash-attn` at
 `scripts/tests/candle-single-identity.sh` enforces this on the release-contract
 CI route (it runs on pull requests; the `--features flash-attn` compile job does
 not). It asserts that every declared Candle dependency names the same fork URL
-and revision, that none carries a crates.io version requirement, and — the
-assertion that actually holds, because a manifest audit cannot see a transitive
-consumer — that neither `Cargo.lock` resolves any `candle-*` package from a
-registry or from a second revision.
+and revision, that none names a `branch`, `tag`, or `path` source (a `version`
+key beside `git`+`rev` is permitted, because cargo ignores it while the git
+source wins locally and a published manifest requires one), and — the assertion
+that actually holds, because a manifest audit cannot see a transitive consumer —
+that no `Cargo.lock` resolves any `candle-*` package from a registry, a path, or
+a second revision.
 
 Do not add a second Candle source, a duplicate git revision, or a local copy of
 a Candle backend. `cargo tree -d` should not report Candle packages from
@@ -84,12 +86,15 @@ multiple sources, and Flash Attention must compile without a private cfg flag.
 
 ## crates.io boundary
 
-Cargo applies `[patch]` only from the top-level build root. The patch is not
-embedded in `mold-ai-candle` or any other published Mold crate, so crates.io
-consumers resolve the declared Candle `0.11` dependencies from crates.io. Keep
-`mold-ai-candle` independently packageable against that unpatched public API;
-backend behavior that depends on the compatibility branch is available only to
-workspace/source builds until the corresponding upstream release lands.
+Every Candle dependency in the tree is a bare `git`+`rev` pin with no `version`
+key, and cargo refuses to publish a crate whose dependencies carry no version
+requirement. `mold-ai-candle` is therefore publishable only once each of its
+`candle-*` lines gains a `version` beside `git`/`rev` — the one shape
+`candle-single-identity.sh` deliberately permits, since the git source still
+wins for every local build. Keep `mold-ai-candle` independently packageable
+against Candle's public API; backend behavior that depends on the fork
+revision is available only to workspace/source builds until the corresponding
+upstream release lands.
 
 `scripts/release/publish-crates.sh` is the publication authority. It lists every
 publishable Mold workspace crate in dependency order, skips an exact version
@@ -98,23 +103,27 @@ is resolvable from the crates.io index before publishing a dependent. Adding a
 workspace crate requires adding it to that list; the crates publication
 contract test checks completeness and topological order.
 
-## Compatibility branch lifecycle
+## Compatibility revision lifecycle
 
-The current compatibility source is
-`utensils/candle:fix/mold-compat-0.11`, based on upstream Candle rather than the
-old renamed fork. Its commits are intentionally independent by concern. For
-each remaining patch:
+The current compatibility source is revision
+`5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4` of `utensils/candle`, which publishes
+the renamed `candle-core-mold` / `candle-nn-mold` / `candle-transformers-mold`
+packages every Mold cargo root pins. No manifest names a branch — the identity
+script rejects a `branch =` source outright — so moving the compatibility source
+means moving that revision. Its commits are intentionally independent by
+concern. For each remaining patch:
 
 1. Add or retain a focused regression test.
 2. Open a narrowly scoped upstream PR.
-3. Update the compatibility branch to the upstream revision that contains it.
+3. Move the pin to the fork revision that contains the upstream commit.
 4. Remove the local commit and verify CPU plus the affected GPU backend.
-5. Once no compatibility commits remain, delete all Candle patch entries and
-   resolve directly from crates.io or an upstream revision.
+5. Once no compatibility commits remain, resolve directly from an upstream
+   revision or, if the rename is retired too, from crates.io.
 
-Until the branch is empty, updating its base requires root and desktop lockfile
-updates together. A branch rewrite is prohibited after a Mold release consumes
-it; create a new compatibility branch or pin an immutable revision instead.
+Updating the pin requires editing every manifest that declares a Candle crate
+and refreshing the root and desktop lockfiles together. A force-push that
+rewrites a revision a Mold release consumed is prohibited; publish a new
+revision instead.
 
 ## Upgrade checklist
 

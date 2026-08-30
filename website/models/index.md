@@ -19,7 +19,7 @@ community checkpoints and LoRAs. See the
 | Smallest checkpoint | `flux2-klein:q4`                      | 2.6 GB transformer, 4 steps                           |
 | Classic ecosystem   | `sd15:fp16` or `dreamshaper-v8`       | Huge model library, ControlNet                        |
 | Fast + great        | `z-image-turbo:q8`                    | 9 steps, excellent quality                            |
-| SDXL                | `sdxl-turbo:fp16`                     | 4 steps, 1024x1024                                    |
+| SDXL                | `sdxl-turbo:fp16`                     | 4 steps, 512x512 default (1024x1024 presets)          |
 | **LTX Video**       | `ltx-video-0.9.6-distilled:bf16`      | Broad text-to-video default; LTX-2.x adds joint audio |
 | **Wan video**       | `wan22-ti2v-5b:q8`                    | Text/image-to-video with broad Wan workflow support   |
 | **Reference AV**    | `minimax-h3-ref2va:comfy-pruned-int8` | Ordered image/video/audio references; SM89 CUDA build |
@@ -55,9 +55,9 @@ simultaneously for faster inference but needs more VRAM.
 | `z-image-turbo:q8`   | Q8      | ~9 GB        | ~13 GB     | Fast, 9 steps      | Excellent                    |
 | `sdxl-turbo:fp16`    | FP16    | ~8 GB        | ~11 GB     | Very fast, 4 steps | Good                         |
 | `sd15:fp16`          | FP16    | ~6 GB        | ~6 GB      | Medium, 25 steps   | Good, broad ecosystem        |
-| `sd35-large:q8`      | Q8      | ~12 GB       | ~22 GB     | Medium, 28 steps   | Excellent                    |
+| `sd3.5-large:q8`     | Q8      | ~12 GB       | ~22 GB     | Medium, 28 steps   | Excellent                    |
 | `qwen-image:q4`      | Q4      | ~14 GB       | ~22 GB     | Slow, 50 steps     | Good, validated at 1024      |
-| `qwen-image-2512:q4` | Q4      | ~14 GB       | ~22 GB     | Slow, 50 steps     | Good, validated at 1024      |
+| `qwen-image-2512:q4` | Q4      | ~14 GB       | ~22 GB     | Slow, 50 steps     | Good, validated at 1328      |
 | `qwen-image:q8`      | Q8      | ~22 GB       | ~24+ GB    | Slow, 50 steps     | Best GGUF, validated at 768  |
 
 ::: tip Sequential vs Eager
@@ -66,8 +66,9 @@ transformer → VAE) one at a time, freeing GPU memory between phases. This
 reduces peak VRAM by 30-50% but adds 10-20% to generation time.
 
 Use `--eager` to keep all components loaded simultaneously for faster inference
-on high-VRAM cards. FLUX.1 also supports `--offload` for block-level CPU↔GPU
-streaming (~4-5 GB peak, 2-4x slower).
+on high-VRAM cards. FLUX.1, FLUX.2, Z-Image, Qwen-Image, SD 3.5, LTX-2, and Wan
+also support `--offload` for block-level CPU↔GPU streaming (~24 GB down to
+~2-4 GB peak, 3-5x slower).
 :::
 
 <div class="gallery-grid">

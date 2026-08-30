@@ -21,8 +21,8 @@ MOLD_API_KEY='choose-a-long-secret' mold serve --bind 0.0.0.0 --port 7680
 Open **Machines** on the iPhone and use one of these paths:
 
 - Recommended: open **Settings → Mobile pairing** in Mold desktop or web,
-  confirm the LAN, MagicDNS, or HTTPS address the phone can reach, tap **Pair an
-  iPhone**, then tap **Scan pairing code** on iPhone. The code is single-use,
+  confirm the LAN, MagicDNS, or HTTPS address the phone can reach, tap **Create
+  pairing code**, then tap **Scan pairing code** on iPhone. The code is single-use,
   expires after two minutes, and contains no API key; the redeemed key goes
   directly into the iOS Keychain.
 - Tap **Discover nearby** to browse `_mold._tcp` services on the current LAN.
@@ -84,10 +84,11 @@ chip off without touching prints you already made.
 
 Under either policy the model list is the union of every reachable machine's
 installed models, and a model that is not on all of them is tagged with the
-machine that has it. Mold asks each candidate machine for a placement plan
-before queueing, then freezes the machine it chose for that print, so recovery,
-prepared expansion, and durable sequences all stay on the exact machine that ran
-the work. If no machine can run the print, nothing is queued and the message
+machine that has it. Mold ranks the reachable machines from their cached
+model, queue, and GPU telemetry and freezes the winner before queueing, so
+recovery, prepared expansion, and durable sequences all stay on the exact
+machine that ran the work. Only a sequence asks each candidate machine for a
+placement plan first. If no machine can run the print, nothing is queued and the message
 names each machine. Your choice is remembered; it falls back to the browsed
 machine while only one is reachable.
 
@@ -176,7 +177,7 @@ hold the face, or is running a Mold old enough to ignore the photo, Mold says
 so and queues nothing rather than returning a print of someone else.
 
 Choose resolution through proportionally drawn shape tiles (the canonical
-families (1:1, 4:3, 3:2, 16:9, 21:9 and their portrait twins) the selected
+families (1:1, 5:4, 4:3, 3:2, 16:9, 21:9 and their portrait twins) the selected
 model can actually express, plus **Source** when an image is attached) then a
 **Size** row that lists that family's authored sizes as exact pixels with
 their megapixels underneath. Explicit custom dimensions stay available. One
@@ -410,16 +411,17 @@ cover:
 - **Appearance:** System, Dark, or Light
 - **Photos:** automatically save newly generated stills to the iPhone photo
   library (on by default)
+- **Model licenses:** review and accept the selected host's model licenses
 - **Library:** **Tag new prints with their title**; offer a titled print its
   own title slug as a tag in Create (on by default)
 - **Remote hosts:** saved-host count and a shortcut to manage them
-- **GPUs:** enable or disable each GPU on the selected host; a busy GPU
-  finishes its current stage before disabling
+- **Compute devices:** enable or disable each GPU on the selected host; a busy
+  GPU finishes its current stage before disabling
 - **About:** app version, remote-only processing, TestFlight updates, and equal
   project-owner credit for core contributors James Brink and Jeffrey Dilley,
   plus an external link to the [Mold privacy policy](/privacy)
 
-Fresh installs start with the Safelight color family, System appearance, and
+Fresh installs start with the Safelight color family, Dark appearance, and
 Photos auto-save and title tagging enabled. Existing users keep any valid saved
 choices, with auto-save and title tagging enabled when upgrading from a
 settings record that predates either option.

@@ -5,8 +5,9 @@ by a short in-process cache and the installed-state sidecars in your models
 directory. It is not an offline shard database and there is no separate catalog
 CLI surface.
 
-Use it from the web UI, desktop app, or iPhone app's **Catalog** view, or call
-the `/api/catalog/*` routes from a running `mold serve` instance.
+Use it from the **Models** workspace's **Discover** segment on web, desktop,
+and the iPhone app, or call the `/api/catalog/*` routes from a running
+`mold serve` instance.
 
 ## What You Can Install
 
@@ -28,8 +29,10 @@ Examples include text encoders, tokenizers, VAEs, and LTX-2 companion assets.
 
 1. Start the server with `mold serve`.
 2. Open `http://localhost:7680/models`.
-3. Search or filter by family, kind, source, rating, and downloads. Catalog
-   searches include NSFW rows by default; every mature result is explicitly
+3. Search or filter by family, kind, source, rating, and downloads. The
+   **Include NSFW** box is off by default and the client sends
+   `include_nsfw=false`; a raw `GET /api/catalog/search` that omits the
+   parameter defaults it to true instead. Every mature result is explicitly
    labeled `18+ NSFW`.
 4. Click **Install** on the entry you want.
 
@@ -49,9 +52,9 @@ and show descriptions, tags, license, source, format, and popularity only when
 the upstream catalog supplied them. Pulled Civitai entries retain that
 presentation metadata in their install sidecar.
 
-The iPhone Catalog browses one selected host while allowing Pull to target any
-ready saved host. Choosing a pull target does not change the host selected in
-Generate. Its card, detail sheet, and host picker share one download state:
+The iPhone **Models** tab browses one selected host while allowing Pull to
+target any ready saved host. Choosing a pull target does not change the host
+selected in Generate. Its card, detail sheet, and host picker share one download state:
 **Connecting...**, **Starting...**, **Queued**, then **Pulling N%**. Active
 downloads pin above the results and can be cancelled. Installed details route
 Load on GPU, Unload from GPU, guarded Remove, and Repair actions to the host
@@ -125,5 +128,6 @@ tokens, so its selected remote host must be configured for gated content.
 Set `MOLD_CATALOG_DISABLE=1` to report catalog functionality as unavailable in
 `/api/capabilities` and disable catalog-backed UI flows.
 
-The test-only upstream override variables (`MOLD_CATALOG_HF_BASE` and
-`MOLD_CATALOG_CIVITAI_BASE`) are intentionally not normal user configuration.
+Upstream Hugging Face and Civitai base URLs are not user configuration: tests
+override them in-process through `AppState` builder fields, not environment
+variables.

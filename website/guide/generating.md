@@ -60,7 +60,8 @@ Need a quick answer on family capabilities or expected speed? See
 
 Each model family has a set of recommended dimensions that produce the best
 results. Using non-recommended dimensions will trigger a warning (generation
-still proceeds). All dimensions must be multiples of 16.
+still proceeds). Image families use a 16px grid; LTX Video, LTX-2, MiniMax H3,
+and `wan22-ti2v-5b` use 32px.
 
 ```bash
 # Square (works with all families)
@@ -196,11 +197,10 @@ Identity conditioning is deliberately narrow today. It is offered only for
 source image. Every other model, and every server that was not built with the
 feature, refuses the request with a named reason rather than rendering a print
 with no face in it. The live, authoritative list is whatever the server
-advertises per model as `supports_identity`. Today that means FLUX's
-`flux-dev:q4` / `flux-dev:q8` and SDXL's `sdxl-base:fp16`,
-`juggernaut-xl:fp16`, `realvis-xl:fp16`, and `dreamshaper-xl:fp16`; see the
-[Identity Photos guide](/guide/identity) for the full list and why an SDXL
-fine-tune isn't automatically included.
+advertises per model as `supports_identity`. Qualification is family-wide:
+every FLUX.1 checkpoint and every SDXL checkpoint except `sdxl-turbo:fp16`; see
+[Which models](/guide/identity#which-models) for the rule and its one
+exception.
 
 The identity assets (an adapter, a shared vision tower, and the InsightFace
 face detector/recognizer) install as one of two hidden bundles (`pulid-flux`
@@ -218,9 +218,9 @@ mold pull pulid-sdxl --accept-license insightface-antelopev2
 See [Third-party model licenses](/guide/configuration#third-party-model-licenses)
 for the full rule.
 
-In Mold Studio on web and desktop, Create shows an **Identity** well directly
-below the source-image wells whenever the selected model and the machine you
-are generating on both support it. When they do not, the control is not there
+In Mold Studio on web, desktop, and iPhone, Create shows an **Identity** well
+directly beside the source-image wells whenever the selected model and the
+machine you are generating on both support it. When they do not, the control is not there
 at all, rather than present and disabled. Drop or pick a PNG or JPEG (at most
 16 MiB, 8192 px per side, 32 MP) and the print takes that likeness.
 
@@ -317,7 +317,7 @@ mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
 ```
 
 Wan checkpoints were tuned against a specific negative prompt; mold applies it
-automatically when `--negative` is not given. A14B is a two-expert mixture
+automatically when `--negative-prompt` is not given. A14B is a two-expert mixture
 with one 14B expert resident at a time. The `:q5`/`:q4` tiers default to the
 checkpoint's trained 81 frames (automatic partial block offload fits them on
 a 24 GB card) while `:q8` defaults to 73 frames and `:fp8` to 45, their
@@ -388,6 +388,8 @@ or `--extend`). It saves no VRAM and usually yields near-static motion; see
 LTX-2 also adds:
 
 - `--audio` / `--no-audio`
+- `--video-only` (skip the audio branch entirely; output-changing, conflicts
+  with `--audio` and `--audio-file`)
 - `--audio-file`
 - `--video`
 - repeatable `--keyframe <frame:path>`
@@ -403,8 +405,9 @@ Catalog checkpoints may contain the LTX-2 transformer without `vae.*` weights.
 LTX-2.3 video VAE automatically. Diffusion-only LTX-2.3 exports also fetch the
 separate Gemma hidden-state projection. The resolved assets are pinned in each
 chain stage, so multi-prompt chains do not fall back to the transformer file.
-ConvRot W4A4 exports use automatic full block streaming because their packed
-on-disk byte size understates the BF16 weights reconstructed by the runtime.
+ConvRot exports stream blocks on Metal and CPU, where every block must be
+widened to BF16 on materialize; on CUDA they stay resident in packed form and
+are priced that way by admission and the adaptive planner.
 If the Gemma prompt encoder exhausts VRAM, Mold retries only Gemma on CPU while
 keeping the transformer and video VAE on CUDA.
 Multi-prompt chains support every source-free LTX-2 pipeline, two-stage
@@ -438,7 +441,7 @@ and Flux.2 Klein.
 
 ```bash
 mold run sd15:fp16 "a portrait" -n "blurry, watermark, ugly, bad anatomy"
-mold run sdxl:fp16 "a landscape" --negative-prompt "low quality, jpeg artifacts"
+mold run sdxl-base:fp16 "a landscape" --negative-prompt "low quality, jpeg artifacts"
 
 # Disable every default negative: config defaults and Wan's tuned model
 # default alike: by sending an explicit empty negative
@@ -476,8 +479,8 @@ mold run flux-dev:bf16 "anime style" --lora style.safetensors --lora-scale 0.7
 mold run flux-dev:q4 "a portrait" --lora style.safetensors --lora-scale 0.8
 
 # Same flag syntax across families
-mold run sdxl:fp16    "a sunset" --lora sdxl-style.safetensors
-mold run z-image:bf16 "anime"    --lora cv:2904324
+mold run sdxl-base:fp16      "a sunset" --lora sdxl-style.safetensors
+mold run z-image-turbo:bf16 "anime"     --lora cv:2904324
 ```
 
 ::: tip LoRA requirements
@@ -486,7 +489,7 @@ Kohya/sd-scripts, OneTrainer, and PEFT default-adapter naming. BF16 FLUX on
 24 GB cards can adaptive-offload, keeping fitting blocks on GPU and streaming
 only overflow blocks; LTX-2 can use the conservative full-streaming offload path.
 Wuerstchen and legacy LTX-Video are not yet wired; attaching a LoRA there
-returns a 400 with the supported-family list.
+returns a 422 `VALIDATION_ERROR` with the supported-family list.
 :::
 
 ## Inline Preview
@@ -622,8 +625,8 @@ such as `/generate` and `/catalog` render Page Not Found:
   decode) and tag the finished image with the GPU ordinal that produced it.
 - Fire multiple prompts in quick succession; the server queues them and the UI
   surfaces HTTP 503 / `Retry-After` cleanly when `--queue-size` is reached.
-- img2img works via upload or the From Gallery picker; video-family models are
-  grouped with a 🎬 badge and frames are clamped to 8n+1 automatically.
+- img2img works via upload or the From Gallery picker; installed models are
+  grouped by family in the picker and frames are clamped to 8n+1 automatically.
 - Library's print viewer keeps media bound to its owning host, restores the
   saved model family on **Reuse settings** (a print a sequence produced reloads
   its clips onto the Create clip rail instead, with **Edit sequence** offered
@@ -664,8 +667,9 @@ such as `/generate` and `/catalog` render Page Not Found:
   and **Reuse settings** restores what a print was actually filed under.
   **Settings ▸ Library ▸ Tag new prints with their title** (stored in this
   browser) turns the title chip off.
-- Shortcuts: **F** favorite · **T** tag · **⌘⇧N** new collection · **⌫** trash
-  (undo for 6 s) · **⌘⌫** delete forever (confirm).
+- Shortcuts: **⌘K** / **Ctrl+K** opens the command palette from anywhere;
+  the print viewer binds **Esc** to close and **←** / **→** to step between
+  prints.
 - Destructive copy stays plain: **Empty trash**, **Delete forever**, and
   **Delete collection** use the app confirm dialog with a danger button and
   never a typed phrase; single and selected Trash are optimistic with a 6 s

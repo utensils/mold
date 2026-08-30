@@ -176,19 +176,20 @@ curl "$MOLD_HOST/api/status" | jq
 # Generate
 mold run "a cinematic portrait"
 
-# Open the bundled web gallery
-open "$MOLD_HOST/"   # macOS; use `xdg-open` on Linux
+# Open the bundled Mold Studio (gallery lives at /library)
+open "$MOLD_HOST/library"   # macOS; use `xdg-open` on Linux
 ```
 
-::: tip Web gallery is bundled
-The image includes a Vue 3 gallery SPA at `/opt/mold/web`; visiting
-`https://${POD}-7680.proxy.runpod.net/` in a browser lists every output
-in the server's output directory with real thumbnails (MP4 first frames
-included), metadata panels, and download / copy-prompt / delete actions.
+::: tip Mold Studio is bundled
+The image includes the Vue 3 Mold Studio SPA at `/opt/mold/web`; visiting
+`https://${POD}-7680.proxy.runpod.net/` in a browser opens the Create
+workspace. The gallery lives at `/library` (Prints | Collections | Trash),
+with real thumbnails (MP4 first frames included), metadata panels, and
+download / copy-prompt / delete actions.
 :::
 
 ::: warning Proxy Timeout
-RunPod's Cloudflare proxy has a **100-second timeout**. `mold runpod generate`
+RunPod's Cloudflare proxy has a **100-second timeout**. `mold runpod run`
 avoids holding that proxy request open: it durably admits work through
 `/api/generation-batches`, then polls and downloads the finished gallery
 output. `/api/generate/stream` holds the request open and is subject to the
@@ -219,18 +220,18 @@ pod on a different GPU without re-downloading 10+ GB of weights.
 
 ### Environment Variables
 
-| Variable                | Default         | Description                                                      |
-| ----------------------- | --------------- | ---------------------------------------------------------------- |
-| `MOLD_HOME`             | auto            | Base mold directory (auto-detected from `/workspace`)            |
-| `MOLD_PORT`             | `7680`          | Server port                                                      |
-| `MOLD_LOG`              | `info`          | Log level                                                        |
-| `MOLD_DEFAULT_MODEL`    | --              | Default model tag (**not pre-pulled**; fetched on first request) |
-| `MOLD_MODELS_DIR`       | --              | Override models path                                             |
-| `MOLD_API_KEY`          | --              | API key for authentication (`X-Api-Key` header required)         |
-| `MOLD_RATE_LIMIT`       | --              | Per-IP rate limit (e.g., `10/min`)                               |
-| `MOLD_RATE_LIMIT_BURST` | --              | Burst allowance override (defaults to 2x rate)                   |
-| `HF_TOKEN`              | --              | HuggingFace token for gated model repos                          |
-| `MOLD_WEB_DIR`          | `/opt/mold/web` | Path to the bundled web gallery SPA                              |
+| Variable                | Default          | Description                                                            |
+| ----------------------- | ---------------- | ---------------------------------------------------------------------- |
+| `MOLD_HOME`             | auto             | Base mold directory (auto-detected from `/workspace`)                  |
+| `MOLD_PORT`             | `7680`           | Server port                                                            |
+| `MOLD_LOG`              | `info`           | Log level                                                              |
+| `MOLD_DEFAULT_MODEL`    | `flux2-klein:q8` | Image default model tag (**not pre-pulled**; fetched on first request) |
+| `MOLD_MODELS_DIR`       | --               | Override models path                                                   |
+| `MOLD_API_KEY`          | --               | API key for authentication (`X-Api-Key` header required)               |
+| `MOLD_RATE_LIMIT`       | --               | Per-IP rate limit (e.g., `10/min`)                                     |
+| `MOLD_RATE_LIMIT_BURST` | --               | Burst allowance override (defaults to 2x rate)                         |
+| `HF_TOKEN`              | --               | HuggingFace token for gated model repos                                |
+| `MOLD_WEB_DIR`          | `/opt/mold/web`  | Path to the bundled Mold Studio SPA                                    |
 
 ### HuggingFace Token (`HF_TOKEN`)
 
@@ -238,10 +239,13 @@ Some models are gated on HuggingFace and require a token:
 
 - **LTX-2 / LTX-2.3**: Gemma 3 text encoder is gated
 - **FLUX.1-dev**: non-schnell FLUX weights are gated
+- **FLUX.1-schnell**: the BFL repo is gated too — every FLUX manifest pulls
+  the shared VAE (`black-forest-labs/FLUX.1-schnell/ae.safetensors`), and
+  `flux-schnell:bf16`'s own transformer comes from that same gated repo
 - Any model whose manifest points at a gated HF repo
 
-Public models (`flux-schnell`, `flux2-klein`, `sd15`, `sdxl`, `qwen-image`,
-`z-image`, `wuerstchen`) work without a token.
+Public models (`flux2-klein`, `sd15`, `sdxl`, `qwen-image`, `z-image`,
+`wuerstchen`) work without a token.
 
 Generate a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
 Use a **fine-grained token** with `Read access to public gated repos you've been
@@ -281,7 +285,7 @@ token is redacted in pod listings.
 runpodctl pod create \
   --image ghcr.io/utensils/mold:latest-sm120 \
   --gpu-id "NVIDIA GeForce RTX 5090" \
-  --env '{"HF_TOKEN":"hf_abcdef...","MOLD_DEFAULT_MODEL":"ltx-2"}' \
+  --env '{"HF_TOKEN":"hf_abcdef...","MOLD_DEFAULT_MODEL":"ltx-2-19b-distilled:fp8"}' \
   ...
 ```
 

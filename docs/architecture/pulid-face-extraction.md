@@ -197,17 +197,20 @@ change, a candle regression, or a busier host could push it over, and the
   change, and the budget is met without it.
 * **GPU execution.** `candle-onnx` is CPU-only by construction — `get_tensor`
   places every initializer on `Device::Cpu` (`eval.rs:191-232`) and the `Gemm`
-  arm builds its `alpha`/`beta` tensors there too (`:1794-1798`).
-  `IdentityExtractor::load` rejects a non-CPU device explicitly rather than
-  demoting silently.
+  arm builds its `alpha`/`beta` tensors there too (`:1794-1798`). #1227 phase 1
+  removed that constraint by replacing the evaluator with the resident
+  `identity::scrfd_net` / `identity::arcface_net` ports, so
+  `IdentityExtractor::load(paths, device)` takes and honours a device today;
+  phase 2 supplies the render's leased one.
 
 ### Build-system consequence
 
 `candle-onnx`'s build script drives `prost-build`, which shells out to
-`protoc`. `pkgs.protobuf` was added to the flake devshell. **No release recipe
-enables `pulid` yet**; whichever issue first ships it must also add `protobuf`
-to the crane `nativeBuildInputs` in `flake.nix` and to any CI job that builds
-with the feature.
+`protoc`. `pulid` now ships in every release recipe — the Nix CLI and desktop
+feature strings in `flake.nix` and every `cargo build --release` in
+`.github/workflows/release.yml` — so `pkgs.protobuf` is in the crane
+`nativeBuildInputs` as well as the devshell, and the release jobs install
+`protobuf-compiler`.
 
 ---
 
@@ -277,8 +280,9 @@ expected length **+ 1**, so a file that grows between the stat and the read
 overshoots and is refused rather than silently truncated to a prefix that
 happens to parse. Loads without a pin — the inventory and benchmark tools,
 which take arbitrary paths by design — get the same treatment at
-`UNPINNED_MAX_BYTES` (1 GiB, four times the largest graph mold loads). The pin comes from `mold_core::pulid_assets::pulid_manifest()` via
-`onnx_graph::pinned_sha256`, never a second copy in this crate.
+`UNPINNED_MAX_BYTES` (1 GiB, four times the largest graph mold loads). The pin
+comes from `mold_core::pulid_assets::pulid_manifest_for(IdentityFamily::Flux)`
+via `onnx_graph::pinned_sha256`, never a second copy in this crate.
 
 The downloader's `.sha256-verified` marker is not a substitute: it records that
 the bytes were correct *when they landed*, and says nothing about the bytes
@@ -691,8 +695,12 @@ second network, not the tower's setup — and it is included in that command's
 | path | what |
 | --- | --- |
 | `identity/mod.rs` | `IdentityExtractor`, `IdentityFeatures`, oriented decode, face selection, typed errors |
+| `identity/extraction.rs` | the whole-stack composer, the per-photograph cache, and the single-flight |
 | `identity/onnx_inventory.rs` | Step 0's op/attribute gate |
 | `identity/onnx_graph.rs` | descriptor-fenced load, pin verification, `Resize` normalization |
+| `identity/onnx_weights.rs` | graph-ordered initializer reader (`WeightTape`) behind the resident ports |
+| `identity/scrfd_net.rs` | the resident candle port of the SCRFD graph |
+| `identity/arcface_net.rs` | the resident candle port of the ArcFace graph |
 | `identity/scrfd.rs` | letterbox blob, anchor decode, NMS, detection |
 | `identity/align.rs` | both templates, Umeyama fit, residuals |
 | `identity/arcface.rs` | `norm_crop`, blob, 512-d embedding |

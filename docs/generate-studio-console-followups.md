@@ -4,11 +4,22 @@ This is the consolidated, de-duplicated backlog from UAT feedback on the
 Generate Studio Console in PR #326. Treat each top-level section as a likely
 follow-up PR slice unless an item explicitly depends on another section.
 
-Implementation status: all checklist items in this file are covered by the
-`feature/generate-studio-followups` branch. Named templates are web-local and
-intentionally omit binary media payloads while preserving safe path references;
-the Catalog remains the install/repair surface for missing models and
-components.
+**Status (2026-08-30):** closed historical backlog. Every checklist item here
+is already `[x]`, and the web surface has since been rebuilt on the
+five-workspace IA (`/create`, `/library`, `/models`, `/machines`,
+`/settings`), so most of the "Likely files" pointers below name paths that no
+longer exist. `GeneratePage.vue`, `GalleryPage.vue`, `ModelPicker.vue`,
+`GenerateParamsPanel.vue`, `Composer.vue`, `RunningStrip.vue`,
+`RunningJobCard.vue`, `TopBar.vue`, and `useHideMode.ts` are gone, replaced by
+`web/src/pages/CreatePage.vue`, `web/src/pages/LibraryPage.vue`, and
+`web/src/components/create/` (`CreateModelPicker.vue`, `ControlsAside.vue`,
+`AdvancedDrawer.vue`, `ComposerCard.vue`, `ActivityStrip.vue`); hide/blur mode
+and the top bar were removed outright. Read the pointers as historical
+provenance, not as current locations.
+
+Named templates are web-local and intentionally omit binary media payloads
+while preserving safe path references; **Models ▸ Discover** (route `/models`)
+is the install/repair surface for missing models and components.
 
 ## 1. Model Selection
 
@@ -24,7 +35,7 @@ components.
 - [x] Default the Generate model picker to downloaded generation models only.
   - Remove `Show all` and `Download` actions from the picker.
   - If no downloaded generation models exist, show an empty state with a link
-    to the model catalog.
+    to Models ▸ Discover.
   - Use the same downloaded-generation filter for first-run auto-selection.
   - Likely files: `web/src/components/ModelPicker.vue`,
     `web/src/pages/GeneratePage.vue`, `web/src/router.ts`.
@@ -80,7 +91,7 @@ components.
     capability map.
   - Add tests to prevent frontend/backend capability drift.
   - Likely files: `web/src/types.ts`, new
-    `web/src/lib/generationCapabilities.ts`,
+    `studio/lib/generationCapabilities.ts`,
     `web/src/components/GenerateParamsPanel.vue`.
 
 - [x] Show scheduler and other model-specific options only when valid.
@@ -89,7 +100,7 @@ components.
   - Ensure flow models do not show controls that the backend ignores.
   - Depends on centralized generation capabilities.
   - Likely files: `web/src/components/GenerateParamsPanel.vue`,
-    `web/src/lib/generationCapabilities.ts`.
+    `studio/lib/generationCapabilities.ts`.
 
 - [x] Move or mirror placement controls into the Controls rail.
   - `PlacementPanel` currently lives in the composer, while users expect CLIP,
@@ -104,7 +115,7 @@ components.
   - Show which CLIP/text encoder/VAE/transformer/etc. components are used.
   - For components that can be changed, show available options in dropdowns.
   - If required components are missing, highlight the field with an error and
-    provide a path to repair/download from the model catalog.
+    provide a path to repair/download from Models ▸ Discover.
   - Requires backend metadata such as `components: [{ kind, name, present,
     path?, repair_model? }]` or a dedicated model-components endpoint.
   - Likely files: `crates/mold-core/src/types.rs`,
@@ -320,7 +331,11 @@ components.
 ## Verification Checklist For Follow-Up PRs
 
 - Web unit tests for each touched component/composable.
-- `cd web && bun run fmt:check && bun run test && bun run build`.
+- The frontend is one repo-root Bun workspace, so run `bun install
+  --frozen-lockfile` at the root, then `bun run check:architecture && bun run
+  check:dead-code` and `bun run test:studio` (the shared `studio`/`ui` gates
+  CI's `web` job runs), then the web-local
+  `cd web && bun run fmt:check && bun run test && bun run build`.
 - Rust tests for any API/server contract changes.
 - `cargo fmt --all -- --check`.
 - `cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4`.

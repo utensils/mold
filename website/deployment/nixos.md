@@ -49,8 +49,9 @@ the exact CI-built package instead of compiling Mold locally:
 
 Only store paths signed by that key are accepted. The cache is an optimization:
 Nix falls back to a local source build when CI has not published the exact
-revision and package variant. CI currently publishes the default Ada/sm89
-package; the other architecture variants fall back to a local build.
+revision and package variant. On release tags CI publishes `mold`,
+`mold-sm86`, `mold-sm100`, and `mold-desktop-sm86`; other variants (such as
+`mold-sm120`) fall back to a local build.
 
 ## Minimal Configuration
 
@@ -67,12 +68,13 @@ package; the other architecture variants fall back to a local build.
 This starts `mold serve` on port 7680 with sensible defaults, creates a `mold`
 system user, and manages the data directory at `/var/lib/mold`.
 
-::: tip Web gallery is bundled
+::: tip Mold Studio is bundled
 
-Since v0.8.1 the Vue 3 gallery SPA is embedded directly into the `mold` binary
-at compile time; visiting `http://<host>:7680/` opens the gallery with no
-extra configuration. Earlier versions required staging `web/dist/` into
-`~/.mold/web` or pointing `MOLD_WEB_DIR` at a built SPA. That override still
+Since v0.8.1 the Vue 3 Mold Studio SPA is embedded directly into the `mold`
+binary at compile time; visiting `http://<host>:7680/` opens the Create
+workspace, and the gallery is at `/library`, with no extra configuration.
+Earlier versions required staging `web/dist/` into `~/.mold/web` or pointing
+`MOLD_WEB_DIR` at a built SPA. That override still
 works for SPA hot-iteration without recompiling Rust.
 
 :::
@@ -110,7 +112,8 @@ works for SPA hot-iteration without recompiling Rust.
 
     # Multi-GPU: pin the server to specific cards (null = use all visible)
     # gpus = "0,1";
-    # queueSize = 200; # max queued jobs; overflow returns HTTP 503
+    # queueSize = 200; # hydrated runtime window; overflow returns HTTP 503
+    #                  # (the durable backlog itself is uncapped)
 
     # Stop budget: the running generation is aborted at its next checkpoint
     # and requeued; queued work is retained and replayed on the next start.
@@ -161,33 +164,40 @@ works for SPA hot-iteration without recompiling Rust.
 
 ### Server Options
 
-| Option                  | Type        | Default             | Description                                                          |
-| ----------------------- | ----------- | ------------------- | -------------------------------------------------------------------- |
-| `enable`                | bool        | `false`             | Enable the mold server                                               |
-| `package`               | package     | --                  | The mold package (must set explicitly)                               |
-| `cudaArch`              | null/enum   | `null`              | See the exact advisory architecture-to-package mapping below         |
-| `port`                  | port        | `7680`              | HTTP server port                                                     |
-| `bindAddress`           | string      | `"0.0.0.0"`         | Address to bind                                                      |
-| `homeDir`               | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                                           |
-| `modelsDir`             | string      | `homeDir + /models` | Model storage directory                                              |
-| `logLevel`              | enum        | `"info"`            | Log level (trace/debug/info/warn/error)                              |
-| `corsOrigin`            | null/string | `null`              | CORS origin restriction (null = permissive)                          |
-| `openFirewall`          | bool        | `false`             | Open firewall port (also UDP 5353 when `mdns` is on)                 |
-| `mdns`                  | bool        | `true`              | Advertise and browse `_mold._tcp`; `false` sets `MOLD_MDNS=0`        |
-| `defaultModel`          | null/string | `null`              | Default model name                                                   |
-| `gpus`                  | null/string | `null`              | `all`, `none`, ordinals, or stable CUDA/Metal/NVIDIA UUID IDs        |
-| `queueSize`             | null/int    | `null`              | Max queued generation jobs (null = default 200)                      |
-| `shutdown.abortSeconds` | int         | `45`                | Seconds the server waits for its GPU workers on stop (see below)     |
-| `outputDir`             | null/string | `null`              | Image output directory (default: `homeDir/output`)                   |
-| `hfTokenFile`           | null/path   | `null`              | Path to overridable default HuggingFace token                        |
-| `civitaiTokenFile`      | null/path   | `null`              | Path to overridable default Civitai token                            |
-| `apiKeyFile`            | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret) |
-| `rateLimit`             | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                                  |
-| `rateLimitBurst`        | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                       |
-| `logToFile`             | bool        | `false`             | Enable file logging (in addition to journal)                         |
-| `logDir`                | string      | `homeDir + /logs`   | Directory for log files when `logToFile` is enabled                  |
-| `logRetentionDays`      | int         | `7`                 | Days to retain rotated log files                                     |
-| `environment`           | attrs       | `{}`                | Extra environment variables                                          |
+| Option                  | Type        | Default             | Description                                                                          |
+| ----------------------- | ----------- | ------------------- | ------------------------------------------------------------------------------------ |
+| `enable`                | bool        | `false`             | Enable the mold server                                                               |
+| `package`               | package     | --                  | The mold package (must set explicitly)                                               |
+| `cudaArch`              | null/enum   | `null`              | See the exact advisory architecture-to-package mapping below                         |
+| `port`                  | port        | `7680`              | HTTP server port                                                                     |
+| `bindAddress`           | string      | `"0.0.0.0"`         | Address to bind                                                                      |
+| `homeDir`               | string      | `"/var/lib/mold"`   | Base directory (MOLD_HOME)                                                           |
+| `modelsDir`             | string      | `homeDir + /models` | Model storage directory                                                              |
+| `logLevel`              | enum        | `"info"`            | Log level (trace/debug/info/warn/error)                                              |
+| `corsOrigin`            | null/string | `null`              | CORS origin restriction (null = permissive)                                          |
+| `openFirewall`          | bool        | `false`             | Open firewall port (also UDP 5353 when `mdns` is on)                                 |
+| `mdns`                  | bool        | `true`              | Advertise and browse `_mold._tcp`; `false` sets `MOLD_MDNS=0`                        |
+| `defaultModel`          | null/string | `null`              | Default model name                                                                   |
+| `gpus`                  | null/string | `null`              | `all`, `none`, ordinals, or stable CUDA/Metal/NVIDIA UUID IDs                        |
+| `queueSize`             | null/int    | `null`              | Jobs hydrated into the runtime window (null = default 200); durable backlog uncapped |
+| `shutdown.abortSeconds` | int         | `45`                | Seconds the server waits for its GPU workers on stop (see below)                     |
+| `outputDir`             | null/string | `null`              | Image output directory (default: `homeDir/output`)                                   |
+| `hfTokenFile`           | null/path   | `null`              | Path to overridable default HuggingFace token                                        |
+| `civitaiTokenFile`      | null/path   | `null`              | Path to overridable default Civitai token                                            |
+| `apiKeyFile`            | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret)                 |
+| `runpodApiKeyFile`      | null/path   | `null`              | Path to file with the RunPod API key, loaded at service start                        |
+| `metadataDb.enable`     | bool        | `true`              | SQLite gallery metadata DB; `false` sets `MOLD_DB_DISABLE=1`                         |
+| `metadataDb.path`       | null/string | `null`              | Override the metadata DB path (sets `MOLD_DB_PATH`)                                  |
+| `rateLimit`             | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                                                  |
+| `rateLimitBurst`        | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                                       |
+| `logToFile`             | bool        | `false`             | Enable file logging (in addition to journal)                                         |
+| `logDir`                | string      | `homeDir + /logs`   | Directory for log files when `logToFile` is enabled                                  |
+| `logRetentionDays`      | int         | `7`                 | Days to retain rotated log files                                                     |
+| `environment`           | attrs       | `{}`                | Extra environment variables                                                          |
+
+`queueSize` bounds only the hydrated runtime window; the durable backlog
+itself is uncapped — see
+[Configuration](/guide/configuration#server).
 
 `cudaArch` does not select a package automatically. Set `package` to the
 matching flake output:
@@ -251,7 +261,9 @@ so Prometheus/Grafana Agent can scrape it without an API key.
   - `video` and `render` supplementary groups for GPU access
   - Hardened: `NoNewPrivileges`, `ProtectSystem=full`, `ProtectHome`,
     `PrivateTmp`
-  - HuggingFace token loaded via `EnvironmentFile` (never in process env)
+  - HuggingFace token loaded from a runtime-only `0600` file written by
+    `ExecStartPre` and read back via `EnvironmentFile` (never written into
+    the Nix store)
 - **Systemd service** `mold-discord.service` (if `discord.enable`); runs
   `mold discord`, depends on `mold.service`, further hardened with
   `ProtectSystem=strict` and `PrivateDevices` (no GPU needed)

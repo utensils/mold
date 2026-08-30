@@ -1,8 +1,10 @@
 # mold Desktop and mobile — Tauri 2 Architecture
 
-Mold ships native macOS (Apple Silicon / Metal) and x86_64 Linux (CUDA)
-desktop apps plus a remote-only iPhone companion and an Android foundation. The backend and shared
-frontend logic stay platform-neutral; Tauri platform configs and thin native
+Mold ships native macOS (Apple Silicon / Metal), x86_64 Linux (CUDA), and
+Windows desktop apps plus a remote-only iPhone companion and an Android
+foundation (`website/guide/desktop.md` and `website/guide/android.md` are the
+canonical user-facing statements of what each platform ships). The backend and
+shared frontend logic stay platform-neutral; Tauri platform configs and thin native
 bridges own window chrome, device capabilities, and bundle details. The Mold
 Studio Mold and Safelight theme families are shared without changing
 generated-media color.
@@ -106,12 +108,12 @@ manual verification workflow.
 
 ## 1. Location & workspace strategy — DECISION: `desktop/` at repo root, own cargo root, root `[workspace] exclude`
 
-**Pick:** New top-level `desktop/` directory. The frontend lives at `desktop/` (package.json, src/), the Rust crate at `desktop/src-tauri/` with its **own `Cargo.toml` + `Cargo.lock`** (a standalone single-crate workspace). Add to `/Users/jamesbrink/Projects/utensils/mold/Cargo.toml`:
+**Pick:** New top-level `desktop/` directory (the iPhone/Android crate at `apps/mobile/src-tauri` is excluded the same way). The frontend lives at `desktop/` (package.json, src/), the Rust crate at `desktop/src-tauri/` with its **own `Cargo.toml` + `Cargo.lock`** (a standalone single-crate workspace). Add to the root `Cargo.toml`:
 
 ```toml
 [workspace]
 members = [ ... unchanged ... ]
-exclude = ["desktop/src-tauri"]
+exclude = ["desktop/src-tauri", "apps/mobile/src-tauri"]
 resolver = "2"
 ```
 
@@ -124,7 +126,7 @@ resolver = "2"
 
 ## 2. Backend integration — DECISION: embed `mold-ai-server` in-process, plus first-class remote mode; **all app data flows over HTTP+SSE in both modes**
 
-**Pick:** The Tauri process links `mold-server` (package `mold-ai-server`) with `metal` (+ `expand`, `webp`, `mp4`) features and keeps a local server online as the app's permanent primary engine. It reuses a Mold server already answering on `localhost:7680`; otherwise it spawns `mold_server::run_server("0.0.0.0", port, models_dir, GpuSelection::All, queue_size)` on a dedicated thread with its own tokio runtime. The webview still uses `http://127.0.0.1:<port>`, while other machines reach the advertised LAN address. Local and remote hosts share the same HTTP + SSE wire contract.
+**Pick:** The Tauri process links `mold-server` (package `mold-ai-server`) with `expand` and `mdns` always on, `mp4` on every non-Windows target (a `cfg(not(windows))` dependency entry — `fdk-aac-sys` cannot build with MSVC), and the GPU backends as opt-in features of `mold-desktop` itself (`metal`, `cuda`, `nvml`, `h3`/`h3-cuda`, `pulid`; `default = []` so CI runs CPU-only) and keeps a local server online as the app's permanent primary engine. It reuses a Mold server already answering on `localhost:7680`; otherwise it spawns `mold_server::run_server("0.0.0.0", port, models_dir, GpuSelection::All, queue_size)` on a dedicated thread with its own tokio runtime. The webview still uses `http://127.0.0.1:<port>`, while other machines reach the advertised LAN address. Local and remote hosts share the same HTTP + SSE wire contract.
 
 **Why not sidecar / external server:**
 
@@ -140,7 +142,7 @@ resolver = "2"
 
 **Shutdown:** the embedded handle is owned separately from host connections; app exit or an explicit local-engine restart POSTs `/api/shutdown` and joins the thread with a 5s timeout. User-run external servers are never shut down by the app.
 
-**Machines UI (no modes):** there is no connection switcher — the built-in/local engine is permanently the internal primary (**This device**) and every remote server is a list entry managed in the Machines workspace (This-device card, Add host, Connected, Remembered, On your network). Hosts dedupe by the server's instance UUID (`/api/status.instance_id`, mDNS `id` TXT record) with display names from the server's hostname; a one-shot Rust boot migration (`settings::migrate_remote_primary`) re-homes old remote-primary installs into the host list, carrying the API key into the per-host secret slot and pinning the generation target. Routing is generation-time only: the Host selector's Auto / Most capable / sticky pick covers every connected host. LTX-2 is performance-qualified on CUDA and correctness-only on the local Metal engine; drive the distinction from the family capability map rather than disabling the family.
+**Machines UI (no modes):** there is no connection switcher — the built-in/local engine is permanently the internal primary (**This device**) and every remote server is a list entry managed in the Machines workspace (This-device card, Add host, Connected, Remembered, On your network). Hosts dedupe by the server's instance UUID (`/api/status.instance_id`, mDNS `id` TXT record) with display names from the server's hostname; a one-shot Rust boot migration (`settings::migrate_remote_primary`) re-homes old remote-primary installs into the host list, carrying the API key into the per-host secret slot and pinning the generation target. Routing is generation-time only: the Host selector's Auto / Most capable / sticky pick covers every connected host. LTX-2 is performance-qualified on CUDA and Apple Metal, and correctness-only on CPU; drive the distinction from the family capability map rather than disabling the family.
 
 ## 3. Frontend stack — one shared Vue workspace
 
@@ -187,16 +189,17 @@ the Mold Studio spec. Tauri imports and legacy normalization may not enter
         "title": "Mold",
         "width": 1360,
         "height": 860,
-        "minWidth": 1024,
+        "minWidth": 1080,
         "minHeight": 700,
         "center": true,
+        "maximized": true,
+        "fullscreen": false,
         "visible": false, // shown after frontend mounts (no white flash)
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
+        // titleBarStyle/hiddenTitle live in tauri.macos.conf.json
       },
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' blob: data: http://127.0.0.1:* https:; media-src 'self' blob: http://127.0.0.1:* https:; connect-src 'self' http://127.0.0.1:* http://localhost:* https:; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self'; img-src 'self' blob: data: http: https: mold-local: mold-thumb:; media-src 'self' blob: http: https: mold-local:; connect-src 'self' ipc: http://ipc.localhost http: https: mold-local:; style-src 'self' 'unsafe-inline'; font-src 'self' data:",
     },
   },
   "bundle": {
@@ -217,6 +220,12 @@ the Mold Studio spec. Tauri imports and legacy normalization may not enter
 }
 ```
 
+The sketch above is the shared base. Platform chrome and bundling are overlaid
+by `tauri.{macos,linux,windows}.conf.json`: the macOS overlay owns
+`titleBarStyle: "Overlay"` / `hiddenTitle`, `minimumSystemVersion` 12.0 and
+`Entitlements.plist`; Windows bundles NSIS. `tauri.windows-self-signed.conf.json`
+exists for unsigned proofs.
+
 - **Not transparent, no `macOSPrivateApi`** — vibrancy via private API risks App Store/notarization pain and fights a color-accurate image app (translucent surfaces behind generated images distort perceived color). The dark, opaque custom chrome is the design.
 - `minimumSystemVersion` 12.0 (Metal path + modern WKWebView; mold is Apple-Silicon-targeted anyway).
 
@@ -233,13 +242,13 @@ The checked-in config deliberately leaves `createUpdaterArtifacts` false so unsi
 **IPC vs HTTP split (the rule):** _HTTP+SSE for anything the remote server can also answer; IPC only for what must run in the app process._
 
 - **Trash flow (Library organization):** the desktop never owns organization state. A delete anywhere in the Library is `DELETE /api/gallery/image/:filename` on the print's origin host (the server moves the file to `<output_dir>/.trash/`, writes a tombstone, flags the row, and publishes `gallery_trashed`); the 6 s undo toast is purely client-side limbo (undo = cancel, no server call). Restore is `POST /api/gallery/trash/restore`, permanent delete is `DELETE …?permanent=true`, and Empty trash is `DELETE /api/gallery/trash` behind the plain shared `ConfirmDialog`. Retention is the host's own `gallery.trash_retention_days` config key — Settings ▸ Library edits the primary's via the settings store, Machines ▸ host ▸ Storage edits a remote's via `lib/api/hostConfig.ts`. For **this device** the singular-authority rule applies: while the lifecycle mutex says the local server runs, `local_gallery_list/trash_list/delete/restore/delete_forever` in `src-tauri/src/gallery.rs` route over authenticated HTTP; only a proven `LocalServer::Off` performs the `.trash/` move + `mold_db::trash` tombstone/row flag on disk (and `mold-local:` media resolves trashed files into `.trash/`).
-- **IPC commands:** `get_connection() -> {base_url, api_key, mode}`, `start_local_engine`, `stop_local_engine`, `test_remote_host` (probe returning version/auth plus `instance_id` + `hostname` from `/api/status`), `engine_status` (thread alive, port, `models_dir`), `get_mold_home` / `change_mold_home` (native bootstrap root selection with optional staged migration and process relaunch), `pick_files{kind}` + `read_file_b64{path}` (feeding `source_image`/`edit_images`/`mask_image`/`control_image`/keyframes/audio as base64 into `GenerateRequest`), `save_bytes_as{path}` (export), `reveal_in_finder{path}`, local-gallery list/trash-list/delete (→ trash)/restore/delete-forever/read commands, `clipboard_write_image` (decode PNG/JPEG/GIF/WebP to RGBA before native clipboard write), `fetch_gallery_thumbnail` / `fetch_gallery_media` (bounded, semaphore-limited native reads of a host's gallery thumbnail or full-size still/audio bytes so WebKit's per-host pool cannot starve them; the webview HTTP route remains the fallback), `send_native_notification` (macOS notification identity image; returns false for the plugin fallback elsewhere), RunPod credential/account/inventory/pod/network-volume commands, `check_for_updates` / `install_pending_update`, and `app_settings_get/set` (window prefs, RunPod selections, update channel, UI scale, last mode — stored in a small `settings.json` under `app_data_dir`, **not** in mold's config.toml, which stays engine-owned).
+- **IPC commands:** `get_connection() -> {base_url, api_key, mode}`, `start_local_engine`, `stop_local_engine`, `test_remote_host` (probe returning version/auth plus `instance_id` + `hostname` from `/api/status`), `ensure_local_server` (resolve or start the local engine and report its target), `forget_remote_host`, `discover_servers`, `get_output_dir`, `get_mold_home` / `change_mold_home` (native bootstrap root selection with optional staged migration and process relaunch), `import_source_image` (feeding `source_image`/`edit_images`/`mask_image`/`control_image`/keyframes/audio as base64 into `GenerateRequest`) with `source_stash_put` / `source_stash_get` for content-addressed reuse, `save_output_bytes` / `save_media_bytes` / `save_gallery_media` plus `media_save_directory` (export), `reveal_output_file` / `reveal_saved_media` / `open_logs_dir`, `local_output_file_path`, `secret_get` / `secret_set` / `secret_clear` (per-host API keys in the owner-only secrets file), `set_dock_badge`, `take_notification_action`, `prepare_gallery_thumbnail` / `probe_gallery_thumbnails` / `cancel_gallery_thumbnail` / `forget_gallery_thumbnail`, local-gallery list/trash-list/delete (→ trash)/restore/delete-forever/read commands, `clipboard_write_image` (decode PNG/JPEG/GIF/WebP to RGBA before native clipboard write), `fetch_gallery_thumbnail` / `fetch_gallery_media` (bounded, semaphore-limited native reads of a host's gallery thumbnail or full-size still/audio bytes so WebKit's per-host pool cannot starve them; the webview HTTP route remains the fallback), `send_native_notification` (macOS notification identity image; returns false for the plugin fallback elsewhere), RunPod credential/account/inventory/pod/network-volume commands, `check_for_updates` / `install_pending_update`, and `app_settings_get/set` (window prefs, RunPod selections, update channel, UI scale, last mode — stored in a small `settings.json` under `app_data_dir`, **not** in mold's config.toml, which stays engine-owned).
 
 The Mold-home selection is a tiny shared bootstrap pointer outside the selected root, resolved by `mold-core` before `Config`, the metadata DB hook, tracing, gallery paths, or the embedded server. Precedence is an explicit `MOLD_HOME` environment variable, then the saved local selection, then `~/.mold`. Changing it performs read-only validation before stopping the embedded server, rejects a separately owned `mold serve`, resolves symlink identities, optionally copies the complete current root through a sibling staging directory, persists the new bootstrap path only after success, and relaunches. Failed post-shutdown work restores the old embedded engine. If a saved external drive is absent, Desktop uses recovery logging outside that root, keeps This Mac offline, and leaves Settings available to retry or choose a replacement without creating a fresh tree at the missing mount. CLI, TUI, server/web, and desktop therefore share `Config::mold_dir()`; mobile continues to use its selected remote host's root.
 
 - **HTTP (webview → server):** literally everything else — generate/stream, estimate, expand, upscale, gallery CRUD + Range video (thumbnails and full-size stills/audio go native-first, see above), models list/pull/rm/load/unload/components, loras, catalog families/search/installed/download, downloads queue + stream, chain-jobs full surface + events + stage previews, queue list/patch, resources stream, status, capabilities, chain-limits, placement PUT/DELETE.
 
-**Capabilities file** (`capabilities/default.json`): main window; permissions: `core:default` plus `core:webview:allow-set-webview-zoom`, `dialog:default`, `opener:default` (+ `opener:allow-reveal-item-in-dir`), `notification:default`, `clipboard-manager:allow-write-text`, `clipboard-manager:allow-write-image`, `window-state:default`, `process:allow-restart`. No updater or fs scope is exposed to JavaScript: Mold's Rust commands own the trusted updater object, channel allowlist, and file IO.
+**Capabilities file** (`capabilities/default.json`): main window; permissions: `core:default` plus `core:window:allow-show`, `core:window:allow-set-focus`, `core:window:allow-start-dragging`, `core:window:allow-internal-toggle-maximize`, `core:webview:allow-set-webview-zoom`, `dialog:default`, `opener:default` (+ `opener:allow-reveal-item-in-dir`), `notification:default`, `clipboard-manager:allow-write-text`, `clipboard-manager:allow-write-image`, `window-state:default`, `process:allow-restart`. No updater or fs scope is exposed to JavaScript: Mold's Rust commands own the trusted updater object, channel allowlist, and file IO.
 
 **LAN discovery** (the Machines workspace "On your network"): the `discover_servers{timeout_ms?}` IPC command runs `mold_server::mdns::discover` (the `mdns` feature is enabled on the embedded `mold-ai-server` dep) inside `spawn_blocking`, then maps each hit to a camelCase `DiscoveredHost {name, url, host, port, version, authRequired, isThisMachine, instanceId}` (`instanceId` from the `id` TXT record; discovery lists dedupe against connected hosts by URL slug and instance id). `isThisMachine` is computed by intersecting the advertised addresses with the machine's own interface addresses (`if-addrs`), falling back to a hostname-prefix match — so the app's own embedded/local server is flagged rather than offered as a remote. The frontend wraps it as `ipc.discoverServers()` (browser fallback `[]`); pure sort/dedupe/label helpers live in `lib/discovery.ts`. Because the app is not sandboxed, no multicast entitlement is needed, but macOS 15 still gates the browse behind Local Network permission — `src-tauri/Info.plist` supplies `NSLocalNetworkUsageDescription` and `NSBonjourServices = ["_mold._tcp"]` (a browse silently returns nothing without the latter). `Entitlements.plist` is unchanged.
 
@@ -253,10 +262,24 @@ The shared devshell exposes cross-platform desktop helpers:
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `desktop-dev`       | Installs locked frontend dependencies, clears a stale Vite listener, and runs Tauri as `Mold - dev` with Metal on macOS or CUDA on Linux |
 | `desktop-build`     | Builds the macOS application bundle or the native Linux desktop package and AppImage; optional signing secrets remain macOS-only         |
+| `desktop-release`   | macOS only — builds, notarizes, staples, and verifies the signed app and DMG from `.secrets/signing.env`                                 |
 | `desktop-check`     | Runs Rust formatting and warning-denied clippy plus frontend format and type checks                                                      |
 | `desktop-test`      | Runs the CPU-only Rust test suite, embedded-engine boot test, and frontend Vitest suite                                                  |
 | `desktop-ui`        | Runs the frontend-only Vite server against a running `mold serve`                                                                        |
 | `frontend-bun-lock` | Refreshes the repo-root Bun lock and Nix dependency set for every frontend target                                                        |
+
+The devshell does not run on Windows, so `scripts/windows.ps1` is the peer of
+those commands: `doctor`, `setup`, `dev`, `ui`, `check`, `test`, `build`,
+`bundle`, `clean`, and `features`. It resolves the feature recipe per machine —
+CPU-only by default, `cuda` on an x64 host with a toolkit, `pulid` when
+`protoc` is on PATH, overridable through `MOLD_WINDOWS_FEATURES` /
+`MOLD_WINDOWS_CUDA` / `MOLD_WINDOWS_NO_PULID`. Windows bundles an NSIS
+installer and has exactly two named absences rather than silent degradation:
+in-app updates stay macOS-only, and the `mp4` feature is off (video renders and
+muxes normally; only a generated AAC track is refused, by name). CI runs the
+`desktop-windows` job in `.github/workflows/desktop.yml` after merge on `main`
+or from a manual/nightly workflow — never on pull requests, where the macOS
+desktop gate provides the feedback.
 
 The devshell includes `cargo-tauri`, Bun tooling, `lsof`, and ImageMagick. Linux adds WebKitGTK, GTK, Soup, GStreamer, CUDA, and the runtime library paths required by the launched binary. macOS uses system WKWebView and scopes the system C compiler linker variables to desktop commands so the existing Apple build and signing flow is unchanged.
 
@@ -277,7 +300,7 @@ nightlies use the corresponding rolling `latest*` map.
 ## 6. Testing strategy (repo TDD rule)
 
 - **Rust (`desktop/src-tauri`):** unit tests for `settings.rs` (round-trip, migration), `server.rs` port allocation + API-key generation, connection-state machine (local/remote/off transitions), updater endpoint allowlisting, bounded requests, complete archive extraction, archive/bundle identity binding, unsafe install-location rejection, and replaceability preflight. One `#[tokio::test]` integration test boots the embedded server on an ephemeral port **without GPU features** (CPU build in CI) and asserts `/health`, `/api/capabilities`, and auth rejection without `X-Api-Key`. Feature-gate metal so `cargo test` runs CPU-only.
-- **Frontend:** vitest 4 + `@vue/test-utils` + `@testing-library/vue`, `happy-dom`. Priority coverage: capability-matrix-driven form logic (ported `generateCapabilities` + `GenerateForm` enable/disable per family), SSE reducer (progress event stream → job card states, including dropped-stream reconciliation via `/api/queue`), chain composer stage editing, updater startup/banner/manual-check/install/error states, and api client (mocked `fetch`, header injection, error envelope parsing). Tauri IPC mocked with `@tauri-apps/api/mocks`.
+- **Frontend:** vitest 4 + `@vue/test-utils`, `happy-dom`. Priority coverage: capability-matrix-driven form logic (ported `generateCapabilities` + `GenerateForm` enable/disable per family), SSE reducer (progress event stream → job card states, including dropped-stream reconciliation via `/api/queue`), chain composer stage editing, updater startup/banner/manual-check/install/error states, and api client (mocked `fetch`, header injection, error envelope parsing). Tauri IPC mocked with `@tauri-apps/api/mocks`.
 - **E2E (WebDriver on macOS is a dead end — pragmatic substitute):**
   1. _Browser-level E2E_ (primary): run the Vue app in a real browser (`bun run dev`) against a live `mold serve` (CPU, tiny model or a stub server built from `mold-server::test_support`), driven by **playwright-cli** — covers generate→progress→gallery→delete, model pull, chain job lifecycle. This tests 95% of the app (everything but the native shell).
   2. _Native smoke_ (manual/local, scripted): `desktop-build`, launch the .app, screenshot + basic interaction via the **computer-use** skill; a launch-smoke script asserting the window appears and `/health` of the embedded engine goes green.
@@ -307,7 +330,7 @@ Desktop work follows the repository's normal feature-branch and pull-request wor
 4. **Binary size / build time:** the .app embeds all of candle + pipelines (release binary similar to `mold` CLI, hundreds of MB with fat LTO). Accept for experimental branch; use `lto = "thin"`, `codegen-units = 16` in the desktop release profile to keep CI < 30 min on macos-14.
 5. **EventSource header limitation** — solved by fetch-event-source everywhere (decided in §3); do not regress to native EventSource.
 6. **WKWebView loopback fetch/CSP:** `tauri://localhost` → `http://127.0.0.1` requires the explicit `connect-src`/`media-src`/`img-src` CSP above; verify Range-request video scrubbing in WKWebView in M2 (the server already supports 206).
-7. **LTX-2 Metal is correctness-only:** keep the qualification visible and prefer a capable remote CUDA host for performance without disabling local execution.
+7. **Resolved — LTX-2 Metal is performance-qualified** (#597, measured on the 19B/22B distilled FP8 tiers). CPU is the correctness-only backend; keep the qualification visible rather than disabling local execution.
 8. **Global process state:** `Config::install_runtime_models_dir_override`, `MOLD_API_KEY` env, tracing init are process-global one-shots — enforce "engine starts at most once per process; restart = app relaunch" (plugin-process `restart`), which sidesteps re-init hazards.
 9. **nixpkgs `cargo-tauri` version drift** vs `tauri-build` 2.x: pin check in `desktop-check` (`cargo tauri --version`); worst case override the hook's cargo-tauri like Aethon overrides its cargo.
 
@@ -353,7 +376,20 @@ desktop/
 
 ## Key code sketches
 
-**`src-tauri/Cargo.toml` (exact deps):**
+> **Status (2026-08-30):** the sketches below are the original M0 design
+> snapshot, kept for the reasoning. They are not the shipped code — read
+> `desktop/src-tauri/Cargo.toml`, `src/lib.rs`, and `src/commands.rs` for that.
+> Notably: the crate is at the workspace version (0.26.0) with `mold-core` /
+> `mold-db` / `mold-server` pinned to it, `tauri` carries `devtools`,
+> `tauri-plugin-updater` is a dependency, the macOS target block carries
+> `mdns-sd-discovery` / `block2` / `objc2*` rather than a `mold-server` feature
+> override, and a `[patch.crates-io]` block mirrors the root workspace's candle
+> and cudarc revision pins because this is a standalone cargo root. Of the
+> commands named in the `lib.rs` sketch, `set_remote_host`, `engine_status`,
+> `pick_files`, `read_file_b64`, `save_bytes_as`, and `reveal_in_finder` were
+> never shipped under those names — see the IPC list in §4.
+
+**`src-tauri/Cargo.toml` (original M0 sketch):**
 
 ```toml
 [package]
@@ -482,10 +518,10 @@ pub async fn get_connection(state: tauri::State<'_, AppState>) -> Result<Connect
 
 **Frontend deps:** exact browser-safe versions are owned by the root `package.json` and `bun.lock`: Vue, Vue Router, Pinia, Vite, Tailwind, TypeScript, Vitest, Vue Test Utils, happy-dom, Prettier, `smol-toml`, fetch-event-source, and the retained shared UI packages. `desktop/package.json` owns only the Tauri API, plugins, and CLI required by the native shell. TanStack Query and unused Tauri plugins are intentionally absent.
 
-### Critical Files for Implementation
+### Critical files (repo-relative)
 
-- /Users/jamesbrink/Projects/utensils/mold/Cargo.toml — add `[workspace] exclude = ["desktop/src-tauri"]`
-- /Users/jamesbrink/Projects/utensils/mold/flake.nix — devshell `desktop-*` commands, cargo-tauri, `mold-desktop` package
-- /Users/jamesbrink/Projects/utensils/mold/crates/mold-server/src/lib.rs — embedding entry point; M1 upstream `run_server_with_listener`
-- /Users/jamesbrink/Projects/utensils/mold/web/src/lib/generateCapabilities.ts — capability matrix to port verbatim
-- /Users/jamesbrink/Projects/utensils/aethon/flake.nix — Tauri-on-Nix packaging recipe + Darwin linker pins to copy
+- `Cargo.toml` — `[workspace] exclude = ["desktop/src-tauri", "apps/mobile/src-tauri"]`
+- `flake.nix` — devshell `desktop-*` commands, cargo-tauri, the `mold-desktop` packages
+- `scripts/windows.ps1` — the Windows peer of the `desktop-*` commands
+- `crates/mold-server/src/lib.rs` — embedding entry point (`run_server`)
+- `studio/lib/generationCapabilities.ts` — the shared capability matrix (`web/src/lib/generateCapabilities.ts` is a thin re-export)

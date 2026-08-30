@@ -72,6 +72,13 @@ features:
     link: /guide/iphone
     linkText: Explore the iPhone app
   - icon:
+      src: /icons/grid.svg
+    title: Android Remote Studio
+    details: The same remote-only Mold Studio surface on Android, with a signed
+      universal APK published on every nightly and tagged release.
+    link: /guide/android
+    linkText: Explore the Android app
+  - icon:
       src: /icons/discord.svg
     title: Discord Bot
     details:

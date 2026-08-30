@@ -12,10 +12,13 @@ surface, local or remote client, shared or hosted server, generated-output
 flow, and distribution or redistribution scenario. H3 is therefore treated
 like other supported model families. It does not require a per-user
 authorization file, private runtime record, location check, license-acceptance
-dialog, or H3-specific downstream control. Ordinary builds may advertise the
-two compact Comfy manifests, download their exact revision-pinned files
-directly from Hugging Face, verify their recorded SHA-256 identities, retain
-them in the user's model store, and expose supported generation capabilities.
+dialog, or H3-specific downstream control. Ordinary builds may advertise every
+registered H3 manifest identity — the two compact Comfy FL2VA and Ref2VA
+graphs, the three reviewed Turbo LoRA tags built on them, and the
+download-only `official-bf16` and `comfy-pruned-nvfp4` tags — download their
+exact revision-pinned files directly from Hugging Face, verify their recorded
+SHA-256 identities, retain them in the user's model store, and expose supported
+generation capabilities.
 Mold's current releases do not bundle or mirror model payloads.
 
 Execution remains capability-gated for technical reasons. The supported
@@ -80,13 +83,23 @@ configured models root and do not expose or copy that private evidence.
 
 The current decision permits:
 
-- public listing of the two compact Comfy FL2VA and Ref2VA manifests in Mold's
-  Models surfaces;
+- public listing of every registered H3 manifest identity in Mold's Models
+  surfaces: the two compact Comfy FL2VA and Ref2VA graphs; the three reviewed
+  Turbo tags built on them (`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`,
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, and
+  `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, each the compact stack of
+  its own task plus one pinned adapter from `loras/` at
+  `COMFY_TURBO_LORA_REVISION`, stored once and shared); and the pinned
+  download-only tiers (`minimax-h3-{fl2va,ref2va}:official-bf16` and
+  `:comfy-pruned-nvfp4`), which acquire, verify, inventory, and remove normally
+  but are refused at generation as `MINIMAX_H3_RUNTIME_UNAVAILABLE`;
 - user-initiated, upstream-direct download of their revision-pinned files from
   `Comfy-Org/MiniMax-H3` and required support files from
-  `MiniMaxAI/MiniMax-H3`, with existing SHA-256 verification and repair flows;
+  `MiniMaxAI/MiniMax-H3`, plus the pruned NVFP4 transformers from
+  `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`, with existing SHA-256
+  verification and repair flows;
 - no raw repository, arbitrary live-catalog recipe, configured alias, or
-  caller-authored manifest may substitute for those two registered graphs;
+  caller-authored manifest may substitute for those registered graphs;
 - local storage, inventory, deletion, and repair of those downloaded artifacts;
 - public distribution of Mold's H3 integration, manifests, documentation, and
   loader/runtime code;

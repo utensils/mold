@@ -143,9 +143,10 @@ comma-separation; no more flipping back to the Civitai page to copy/paste.
 
 - Supported families: **FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image
   (+ Qwen-Image-Edit), Wan, Z-Image**. Wuerstchen and LTX-Video are not yet wired;
-  attaching a LoRA there returns a 400 with the current supported-family list.
+  attaching a LoRA there returns a 422 `VALIDATION_ERROR` with the current
+  supported-family list.
   (Source of truth: `mold-core::validation::require_lora_capable_family`.)
-- `.safetensors` only
+- `.safetensors` files, or an LTX-2 `camera-control:` preset id
 - scale must be between `0.0` and `2.0`
 - the server resolves the path on the machine doing inference
 
