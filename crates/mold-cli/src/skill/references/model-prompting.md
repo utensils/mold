@@ -108,9 +108,9 @@ describe its placement. Base/2512 at 50 steps are the quality reference; few-ste
 distills need simpler prompts and their fixed guidance/step recipe.
 
 ```bash
-mold run qwen-image:q8 \
-  "An observatory library carved into a red sandstone cliff at blue hour, an enormous brass telescope aimed through the open dome, four astronomers studying luminous star charts below, warm lamplight, intricate architectural photography" \
-  --seed 83001
+mold run qwen-image-2512:q8 \
+  'Straight-on editorial architectural photograph of a tiny artisan bakery named "MOLD & FLOUR" on a quiet European corner, deep teal facade, three arched windows, striped awning, vintage delivery bicycle, sunny spring morning, crisp realistic detail, balanced symmetrical composition' \
+  --seed 251201
 ```
 
 ### Qwen-Image Edit
@@ -121,8 +121,8 @@ references, ordered by role.
 
 ```bash
 mold run qwen-image-edit-2511:q8 \
-  "Change the scene to a snowy aurora night. Preserve the exact architecture, telescope, people, camera position, and warm interior lamps." \
-  --image observatory.png --seed 83006
+  "Change the sunny spring morning into a cozy snowy winter blue hour. Add fresh snow to the exterior and turn on warm interior lights. Preserve the exact teal facade, readable MOLD & FLOUR sign, windows, door, bread displays, bicycle, crates, camera position, geometry, and composition." \
+  --image bakery.png --seed 251111
 ```
 
 ## LTX-Video 0.9.x

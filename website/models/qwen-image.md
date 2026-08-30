@@ -6,20 +6,23 @@ flow-matching with classifier-free guidance.
 <div class="gallery-grid">
 <figure>
 
-![Arctic observatory, base Qwen-Image](/gallery/qwen-image-observatory.png)
+![Teal artisan bakery, base Qwen-Image 2512](/gallery/qwen-image-bakery.png)
 
-_"An open-air Arctic observatory beneath the aurora, astronomers studying
-luminous star maps, monumental brass telescope, deep blue snow and warm library
-light"_; **qwen-image:q8**, 50 steps, seed 83001
+_"Straight-on editorial architectural photograph of a tiny artisan bakery named
+MOLD & FLOUR on a quiet European corner, deep teal facade, arched windows,
+striped awning, vintage delivery bicycle, sunny spring morning"_;
+**qwen-image-2512:q8**, 50 steps, seed 251201
 
 </figure>
 <figure>
 
-![Aurora observatory edit, Qwen-Image-Edit](/gallery/qwen-image-edit-aurora-observatory.png)
+![Snowy bakery edit, Qwen-Image-Edit](/gallery/qwen-image-edit-winter-bakery.png)
 
-_"Open the observatory roof to the aurora and extend the snowy cliffside while
-preserving the telescope and library"_; **qwen-image-edit-2511:q8**, 50 steps,
-seed 83006
+_"Change the sunny spring morning into a cozy snowy winter blue hour. Add fresh
+snow to the exterior and turn on warm interior lights. Preserve the exact teal
+facade, readable MOLD & FLOUR sign, windows, door, bread displays, bicycle,
+crates, camera position, geometry, and composition"_;
+**qwen-image-edit-2511:q8**, 50 steps, seed 251111
 
 </figure>
 </div>

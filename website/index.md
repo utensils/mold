@@ -191,20 +191,20 @@ of golden light, butterflies and hummingbirds, lush and magical"_
 </figure>
 <figure>
 
-![Arctic observatory, base Qwen-Image](/gallery/qwen-image-observatory.png)
+![Teal artisan bakery, base Qwen-Image 2512](/gallery/qwen-image-bakery.png)
 
-**qwen-image:q8**: 50 steps, seed 83001 _"An open-air Arctic observatory beneath
-the aurora, astronomers studying luminous star maps, monumental brass telescope,
-deep blue snow and warm library light"_
+**qwen-image-2512:q8**: 50 steps, seed 251201 _"A tiny artisan bakery named
+MOLD & FLOUR, deep teal facade, arched windows, striped awning, vintage delivery
+bicycle, sunny spring morning"_
 
 </figure>
 <figure>
 
-![Aurora observatory edit, Qwen-Image-Edit](/gallery/qwen-image-edit-aurora-observatory.png)
+![Snowy bakery edit, Qwen-Image-Edit](/gallery/qwen-image-edit-winter-bakery.png)
 
-**qwen-image-edit-2511:q8**: 50 steps, seed 83006. Edited the observatory into a
-surreal open-roof scene while preserving its telescope, library, and winter
-setting.
+**qwen-image-edit-2511:q8**: 50 steps, seed 251111. Changed the spring storefront
+to snowy blue hour while preserving its readable sign, architecture, displays,
+bicycle, and composition.
 
 </figure>
 <figure>
