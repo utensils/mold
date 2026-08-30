@@ -16,6 +16,7 @@ import QueueColumn from "./QueueColumn.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useGenerationStore, type Job } from "../../stores/generation";
 import { useJobsStore, type HostQueueCaps, type QueueEntry } from "../../stores/jobs";
+import { useContextMenuStore } from "../../stores/contextMenu";
 
 function entry(over: Partial<QueueEntry> = {}): QueueEntry {
   return {
@@ -142,6 +143,27 @@ describe("QueueColumn", () => {
     const text = wrapper.get("[data-test='queue-surface-row']").text();
     expect(text).toContain("held");
     expect(text).not.toContain("queued");
+  });
+
+  it("opens row controls on right-click and keeps retry actionable", async () => {
+    const { wrapper, jobs } = await mountColumn();
+    jobs.queues.local!.entries = [
+      entry({
+        state: "held",
+        retryable: true,
+        batch_id: "batch-1",
+        client_batch_id: "client-1",
+      }),
+    ];
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-surface-row']").trigger("contextmenu", {
+      clientX: 10,
+      clientY: 10,
+    });
+    const items = useContextMenuStore().entries.filter((item) => "label" in item);
+    expect(items.map((item) => item.label)).toEqual(["Pause queue", "Retry job", "Cancel job"]);
+    expect(items.find((item) => item.label === "Retry job")?.disabled).not.toBe(true);
   });
 
   it("cancels a queued row against its owning host", async () => {

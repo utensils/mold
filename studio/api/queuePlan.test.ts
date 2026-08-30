@@ -3,6 +3,7 @@ import { IncompatibleHostError } from "./client";
 import {
   cancelQueueJob,
   findQueueEntryById,
+  getQueueJob,
   listQueue,
   mergeQueueEntries,
   mutateQueueJobOnExpectedInstance,
@@ -302,6 +303,44 @@ describe("queue plan contract", () => {
       "https://gpu.example/api/queue?limit=1",
       "https://gpu.example/api/queue?limit=1&cursor=next",
     ]);
+  });
+
+  it("reads one queue job with persisted settings and retry authority", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        job: {
+          id: "held/1",
+          model: "flux-dev:q8",
+          state: "held",
+          started_at_unix_ms: 1,
+          position: 0,
+          retryable: true,
+          batch_id: "batch-1",
+          client_batch_id: "client-1",
+          metadata: { prompt: "a lighthouse" },
+        },
+        work_item: null,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getQueueJob(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        "held/1",
+      ),
+    ).resolves.toMatchObject({
+      job: {
+        id: "held/1",
+        retryable: true,
+        batch_id: "batch-1",
+        client_batch_id: "client-1",
+        metadata: { prompt: "a lighthouse" },
+      },
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://gpu.example/api/queue/held%2F1",
+    );
   });
 
   it("preserves typed host lanes without treating them as device identities", () => {

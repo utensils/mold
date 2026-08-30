@@ -561,6 +561,11 @@ export const useGenerationStore = defineStore("generation", {
     },
   },
   actions: {
+    /** Durable client ownership survives a WebView/app restart even when the
+     * reconstructed visual Job has not reconciled its server id yet. */
+    ownsDurableBatch(clientBatchId: string | null | undefined): boolean {
+      return typeof clientBatchId === "string" && durableRecords.has(clientBatchId);
+    },
     /** Restore secret/media-free durable authority after a desktop reload. */
     resumeDurableGenerations(): void {
       if (!durableRecoveryLoaded) {

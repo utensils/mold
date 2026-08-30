@@ -39,6 +39,15 @@ export interface QueueEntry {
   error?: string | null;
   /** Exact opt-in fence for POST /api/queue/{id}/retry. */
   retryable?: boolean | null;
+  /** Durable retry authority exposed by current servers. */
+  batch_id?: string | null;
+  client_batch_id?: string | null;
+  batch_index?: number | null;
+}
+
+export interface QueueJobEntry {
+  job: QueueEntry;
+  work_item?: QueueWorkItem | null;
 }
 
 export interface QueueWorkItem {
@@ -340,6 +349,29 @@ export async function findQueueEntryById(
     seenCursors.add(cursor);
     listing = await listQueue(target, { limit, cursor }, signal);
   }
+}
+
+/** Read one queue row with its persisted request settings and retry authority.
+ * The paginated listing deliberately omits durable request bodies; explicit
+ * inspection is the bounded path that makes Reuse settings work after a
+ * desktop restart and before the worker has hydrated the row. */
+export async function getQueueJob(
+  target: ApiTarget,
+  id: string,
+): Promise<QueueJobEntry> {
+  const value = await apiJsonTo<unknown>(
+    target,
+    `/api/queue/${encodeURIComponent(id)}`,
+  );
+  const root = record(value);
+  if (!root) throw new IncompatibleHostError(["job"]);
+  const [job] = queueEntries([root.job], "job");
+  return {
+    job: job!,
+    ...(root.work_item === undefined
+      ? {}
+      : { work_item: root.work_item as QueueWorkItem | null }),
+  };
 }
 
 /** Cancel work that is still waiting in the explicit host's generation queue. */

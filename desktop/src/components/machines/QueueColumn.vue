@@ -13,11 +13,14 @@ import { useGenerationStore, jobProgress } from "../../stores/generation";
 import { useJobsStore, type QueueSurfaceRow } from "../../stores/jobs";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
+import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 
 const generation = useGenerationStore();
 const jobs = useJobsStore();
 const toasts = useToastStore();
+const contextMenu = useContextMenuStore();
 const cancellingIds = ref<string[]>([]);
+const retryingIds = ref<string[]>([]);
 
 const rows = computed(() => jobs.queueSurface);
 const hostsWithMore = computed(() => {
@@ -80,6 +83,58 @@ async function cancel(row: QueueSurfaceRow) {
   }
 }
 
+async function togglePause(row: QueueSurfaceRow) {
+  const snapshot = jobs.queues[row.hostId];
+  try {
+    if (snapshot?.paused || snapshot?.entries.some((entry) => entry.state === "paused")) {
+      await jobs.resume(row.hostId);
+      toasts.push(`Queue resumed on ${row.hostLabel}`);
+    } else {
+      await jobs.pause(row.hostId);
+      toasts.push(`Queue paused on ${row.hostLabel} — running job finishes`);
+    }
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function retry(row: QueueSurfaceRow) {
+  if (retryingIds.value.includes(row.entry.id)) return;
+  retryingIds.value = [...retryingIds.value, row.entry.id];
+  try {
+    const entry = await jobs.queueJob(row.hostId, row.entry.id);
+    await jobs.retryJob(row.hostId, entry);
+    toasts.push("Retry queued");
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  } finally {
+    retryingIds.value = retryingIds.value.filter((id) => id !== row.entry.id);
+  }
+}
+
+function openQueueMenu(row: QueueSurfaceRow, event: MouseEvent) {
+  const snapshot = jobs.queues[row.hostId];
+  const paused =
+    snapshot?.paused === true || snapshot?.entries.some((entry) => entry.state === "paused");
+  const items: MenuEntry[] = [];
+  if (snapshot?.caps?.canPause || paused) {
+    items.push({
+      label: paused ? "Resume queue" : "Pause queue",
+      action: () => void togglePause(row),
+    });
+  }
+  if (row.entry.state === "held" && row.entry.retryable === true) {
+    items.push({ label: "Retry job", action: () => void retry(row) });
+  }
+  items.push({
+    label: row.entry.state === "running" ? "Stop job" : "Cancel job",
+    danger: true,
+    disabled: row.entry.state === "running" && !row.canCancelRunning,
+    action: () => void cancel(row),
+  });
+  contextMenu.open(event, items);
+}
+
 /** This job's slot among its host's QUEUED rows — the index space the reorder
  *  PATCH uses. `entry.position` counts running jobs too, so nudging against it
  *  is off-by-N (or a no-op) the moment anything on the host is running. */
@@ -107,6 +162,7 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
         :key="`${row.hostId}:${row.entry.id}`"
         data-test="queue-surface-row"
         class="border-edge rounded-chrome border bg-bench p-3.5 shadow-[inset_0_1px_0_var(--card-hi)]"
+        @contextmenu="openQueueMenu(row, $event)"
       >
         <div class="flex items-center gap-3">
           <span
