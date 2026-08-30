@@ -1,1 +1,0 @@
-- **Pause queued work after restart.** Persisted generation and sequence jobs now return in a paused state after a server or desktop restart, so work resumes only after an explicit Resume action.

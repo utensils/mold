@@ -1,1 +1,0 @@
-- **Responsive mobile wide layouts.** Android tablets and iPhones in landscape now use the full available width with notch-aware navigation, cleaner multi-column controls, and matching Android system-bar colors ([#1395](https://github.com/utensils/mold/pull/1395)).

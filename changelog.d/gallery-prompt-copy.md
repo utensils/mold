@@ -1,1 +1,0 @@
-- **Reusable gallery prompts.** Print prompts are now selectable and have a visible copy-to-clipboard action in the web, desktop, iPhone, and Android gallery viewers.

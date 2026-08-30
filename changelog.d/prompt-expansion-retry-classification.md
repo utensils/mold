@@ -1,1 +1,0 @@
-- **Keep prompt expansion retryable after short responses.** Exact-count failures now stay in the retry flow instead of incorrectly asking users to download an already installed expansion model.

@@ -1,1 +1,0 @@
-- **Mobile Library opens from a persistent thumbnail cache.** iPhone and Android now paint the last saved grid before refreshing connected hosts, retain unchanged thumbnails, and prewarm older prints within bounded storage so large Libraries return instantly without caching full originals.

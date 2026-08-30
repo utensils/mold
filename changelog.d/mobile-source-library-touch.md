@@ -1,1 +1,0 @@
-- **Mobile source and Library touch controls now stay consistent.** iPhone and Android use the same replaceable source-image wells everywhere, Library tags stay above thumbnails, natural full-width scrolling and pull-to-refresh work, and queued work exposes Pause or Resume beside Cancel ([#1420](https://github.com/utensils/mold/pull/1420)).

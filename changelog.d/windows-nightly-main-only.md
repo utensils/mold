@@ -1,1 +1,0 @@
-- **Restrict Windows Nightly publication to main.** Prevent manual runs from signing or publishing non-main refs, and reject sources outside current main history before they update the rolling release.

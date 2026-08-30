@@ -1,1 +1,0 @@
-- **Instant large libraries.** Desktop, web, iPhone, iPad, and terminal galleries now virtualize large collections, prioritize visible previews, cancel abandoned thumbnail work, and reuse bounded version-aware caches so scrolling stays responsive without stale or blank tiles ([#1344](https://github.com/utensils/mold/pull/1344)).
