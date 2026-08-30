@@ -1,4 +1,5 @@
 import { blobToBase64 } from "@studio/lib/base64";
+import type { GalleryImage } from "./api/types";
 
 export { blobToBase64 };
 
@@ -28,4 +29,19 @@ export function base64ToDataUrl(b64: string, mime = "image/png"): string {
  */
 export function isStillImageFile(filename: string): boolean {
   return /\.(png|jpe?g)$/i.test(filename.trim());
+}
+
+/**
+ * Gallery metadata is an independent authority from the stored filename.
+ * Require both to describe a still image so a legacy/mislabelled video row
+ * cannot enter an image-only source picker merely because its poster or
+ * filename ends in `.png`.
+ */
+export function isStillImageGalleryItem(
+  item: Pick<GalleryImage, "filename" | "format" | "metadata">,
+): boolean {
+  if (!isStillImageFile(item.filename)) return false;
+  const format = item.format?.toLowerCase();
+  if (format && format !== "png" && format !== "jpeg") return false;
+  return !item.metadata.frames && !item.metadata.video_frames;
 }
