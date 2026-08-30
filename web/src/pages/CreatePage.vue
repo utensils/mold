@@ -134,6 +134,7 @@ import {
   imageUrl,
   listGallery,
   upscaleStream,
+  type ChainLimits,
   type StreamTarget,
 } from "../api";
 import { apiJsonTo } from "@studio/api/client";
@@ -1924,6 +1925,7 @@ const sharedParams = computed<SequenceSharedParams>(() =>
 const sequenceTarget = computed<StreamTarget | undefined>(
   () => routing.resolve(form.state.value.model || null)?.target,
 );
+const sequenceChainLimits = ref<ChainLimits | null>(null);
 
 // Edit sessions snapshot the shared params at load so shape/detail changes
 // mark every clip as re-rendering in the rail's plan badges.
@@ -5315,6 +5317,7 @@ onBeforeUnmount(() => {
               :last-seed="lastSeedUsed"
               :output="sequenceMode ? 'sequence' : 'single'"
               :clip-count="sequenceMode ? draft.clips.length : 0"
+              :chain-limits="sequenceMode ? sequenceChainLimits : null"
               data-test="phone-sequence-controls"
               @update:output="setOutput"
               @open-advanced="openAdvanced"
@@ -5336,6 +5339,7 @@ onBeforeUnmount(() => {
             :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
             :playing-clip-id="playingSequenceClipId"
             :submitting="sequenceSubmitInFlight"
+            @limits-change="sequenceChainLimits = $event"
             @submit="onSubmitSequence"
             @cancel="cancelSequenceSubmit"
             @duplicate-as-new="onDuplicateAsNew"
@@ -5525,6 +5529,7 @@ onBeforeUnmount(() => {
                   :last-seed="lastSeedUsed"
                   :output="sequenceMode ? 'sequence' : 'single'"
                   :clip-count="sequenceMode ? draft.clips.length : 0"
+                  :chain-limits="sequenceMode ? sequenceChainLimits : null"
                   @update:output="setOutput"
                   @open-advanced="openAdvanced"
                   @reset-settings="onResetSettings"
@@ -5781,6 +5786,7 @@ onBeforeUnmount(() => {
           :last-seed="lastSeedUsed"
           :output="sequenceMode ? 'sequence' : 'single'"
           :clip-count="sequenceMode ? draft.clips.length : 0"
+          :chain-limits="sequenceMode ? sequenceChainLimits : null"
           @update:output="setOutput"
           @open-advanced="openAdvanced"
           @reset-settings="onResetSettings"

@@ -95,12 +95,15 @@ function submitOrCancel(): void {
 const draft = useSequenceDraftStore();
 const guidanceCaps = computed(() =>
   generationCapabilitiesForFamily(
-    props.form.family,
-    props.form.model,
+    props.selectedModel?.family ?? props.form.family,
+    props.selectedModel?.name ?? props.form.model,
     props.form.pipeline,
     props.selectedModel?.guidance_capabilities,
   ),
 );
+const offersAudioControl = computed(() => guidanceCaps.value.offersAudioControl);
+const audioOutputSupported = computed(() => props.chainLimits?.supports_audio === true);
+const audioOutputUnavailable = computed(() => props.chainLimits?.supports_audio === false);
 
 const motionTail = computed(() => sequenceMotionTailFrames(props.selectedModel));
 const maxStages = computed(() => props.chainLimits?.max_stages ?? 16);
@@ -483,13 +486,20 @@ function removeClip(id: string): void {
     </button>
 
     <label
-      v-if="chainLimits?.supports_audio"
+      v-if="offersAudioControl"
       class="mobile-sequence-check"
       data-test="mobile-sequence-audio"
     >
-      <input v-model="draft.enableAudio" type="checkbox" :disabled="locked" />
+      <input
+        v-model="draft.enableAudio"
+        type="checkbox"
+        :disabled="locked || !audioOutputSupported"
+      />
       Generate audio
     </label>
+    <p v-if="offersAudioControl && audioOutputUnavailable" class="mobile-sequence-error">
+      Audio assets are not included with this checkpoint. Video generation remains available.
+    </p>
 
     <p
       v-if="blockingReason"

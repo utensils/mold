@@ -1540,6 +1540,16 @@ const caps = computed(() =>
     effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
   ),
 );
+const generatedAudioSupported = computed(
+  () => caps.value.supportsAudio && selectedGenerationModel.value?.supports_audio !== false,
+);
+const generatedAudioUnavailableReason = computed(() => {
+  if (!caps.value.offersAudioControl || generatedAudioSupported.value) return null;
+  if (selectedGenerationModel.value?.supports_audio === false) {
+    return "Audio assets are not included with this checkpoint. Video generation remains available.";
+  }
+  return caps.value.outputDeliveryReason ?? "Generated audio is unavailable for this recipe.";
+});
 /** The model's image-attachment shape — one shared policy (`sourceMediaPlan`).
  * Only `none` hides the primary conditioning editor. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));
@@ -11614,7 +11624,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             <MobileBatchControl :form="form" :selected-model="selectedGenerationModel" />
 
             <label
-              v-if="caps.supportsAudio && !isMinimaxH3Identity(form.family, form.model)"
+              v-if="caps.offersAudioControl"
               class="mobile-generate-toggle-row"
               data-test="mobile-generate-audio-control"
             >
@@ -11625,20 +11635,12 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               <input
                 v-model="form.enableAudio"
                 type="checkbox"
-                :disabled="selectedGenerationModel?.supports_audio === false"
+                :disabled="!generatedAudioSupported"
                 data-test="mobile-enable-audio"
               />
             </label>
-            <p
-              v-if="
-                caps.supportsAudio &&
-                !isMinimaxH3Identity(form.family, form.model) &&
-                selectedGenerationModel?.supports_audio === false
-              "
-              class="mobile-generate-validation"
-            >
-              Audio assets are not included with this checkpoint. Video generation remains
-              available.
+            <p v-if="generatedAudioUnavailableReason" class="mobile-generate-validation">
+              {{ generatedAudioUnavailableReason }}
             </p>
 
             <div class="mobile-advanced-row">

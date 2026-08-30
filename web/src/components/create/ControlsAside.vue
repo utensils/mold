@@ -42,7 +42,7 @@ import {
 import HostRoutingPicker from "./HostRoutingPicker.vue";
 import { useHostRouting } from "../../composables/useHostRouting";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
+import type { ChainLimits } from "../../api";
 
 const props = withDefaults(
   defineProps<{
@@ -66,6 +66,8 @@ const props = withDefaults(
     /** Clips currently parked on the composer rail (sequence caption). */
     clipCount?: number;
     routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
+    /** Authoritative limits from the host selected for this sequence. */
+    chainLimits?: ChainLimits | null;
   }>(),
   {
     advCount: 0,
@@ -100,6 +102,7 @@ const capabilities = computed(() =>
     props.modelValue.pipeline,
     props.model?.guidance_capabilities,
     props.model?.source_image ?? props.modelValue.sourceImageCapability,
+    effectiveGenerationRecipe(props.model, props.modelValue.pipeline),
   ),
 );
 const activeRecipe = computed(() =>
@@ -139,23 +142,32 @@ function setPredictDuration(value: boolean) {
   });
 }
 const draft = useSequenceDraftStore();
-const showGenerateAudio = computed(() =>
-  sequenceMode.value
-    ? props.family === "ltx2" && props.model?.supports_audio !== false
-    : capabilities.value.supportsAudio &&
-      !isMinimaxH3Identity(
-        props.family,
-        props.model?.name ?? props.modelValue.model,
-      ),
-);
+const showGenerateAudio = computed(() => capabilities.value.offersAudioControl);
 const generateAudio = computed(() =>
   sequenceMode.value
     ? draft.enableAudio
     : props.modelValue.enableAudio !== false,
 );
-const audioOutputSupported = computed(
-  () => props.model?.supports_audio !== false,
+const audioOutputSupported = computed(() =>
+  sequenceMode.value
+    ? props.chainLimits?.supports_audio === true
+    : capabilities.value.supportsAudio && props.model?.supports_audio !== false,
 );
+const audioOutputUnavailableReason = computed(() => {
+  if (!showGenerateAudio.value || audioOutputSupported.value) return null;
+  if (sequenceMode.value) {
+    return props.chainLimits?.supports_audio === false
+      ? "Generated audio is unavailable for this sequence on the selected host."
+      : null;
+  }
+  if (props.model?.supports_audio === false) {
+    return "Audio assets are not included with this checkpoint. Video generation remains available.";
+  }
+  return (
+    capabilities.value.outputDeliveryReason ??
+    "Generated audio is unavailable for this recipe."
+  );
+});
 function setGenerateAudio(value: boolean) {
   if (sequenceMode.value) draft.enableAudio = value;
   else patch({ enableAudio: value });
@@ -427,16 +439,15 @@ function lockLastSeed() {
       >
       <SwitchToggle
         :model-value="generateAudio"
-        :disabled="!sequenceMode && !audioOutputSupported"
+        :disabled="!audioOutputSupported"
         label="Generate audio"
         @update:model-value="setGenerateAudio"
       />
       <p
-        v-if="!sequenceMode && !audioOutputSupported"
+        v-if="audioOutputUnavailableReason"
         class="controls__hint controls__hint--full"
       >
-        Audio assets are not included with this checkpoint. Video generation
-        remains available.
+        {{ audioOutputUnavailableReason }}
       </p>
     </div>
 

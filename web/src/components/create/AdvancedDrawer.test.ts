@@ -471,6 +471,34 @@ describe("AdvancedDrawer video suite", () => {
     );
   });
 
+  it("keeps the LTX-2 suite visible when the active recipe cannot deliver audio", async () => {
+    const model = {
+      name: "ltx-2.5-22b-distilled:q4",
+      family: "ltx2",
+      downloaded: true,
+      generation_profile: {
+        default_recipe_id: "default",
+        recipes: [
+          {
+            id: "default",
+            request_selector: {},
+            capabilities: { supports_audio: false },
+          },
+        ],
+      },
+    } as ModelInfoExtended;
+    const wrapper = factory(
+      "ltx2",
+      { model: model.name, modelFamily: "ltx2" },
+      { models: [model] },
+    );
+    await wrapper
+      .get("[data-test='section-video'] .ms-acc__head")
+      .trigger("click");
+
+    expect(wrapper.find("[data-test='ltx2-suite']").exists()).toBe(true);
+  });
+
   it("hides the video suite entirely for flux", () => {
     expect(sections("flux").video).toBe(false);
   });

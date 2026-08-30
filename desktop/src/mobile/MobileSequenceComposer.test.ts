@@ -494,9 +494,11 @@ describe("MobileSequenceComposer guardrails", () => {
     );
   });
 
-  it("surfaces audio only when the routed checkpoint bundles it", async () => {
+  it("keeps audio visible and explains when the routed checkpoint lacks it", async () => {
     mountComposer();
-    expect(wrapper!.find("[data-test='mobile-sequence-audio']").exists()).toBe(false);
+    const unavailable = wrapper!.get("[data-test='mobile-sequence-audio'] input");
+    expect((unavailable.element as HTMLInputElement).disabled).toBe(true);
+    expect(wrapper!.text()).toContain("Audio assets are not included with this checkpoint");
 
     wrapper!.unmount();
     mountComposer({ chainLimits: { ...limits, supports_audio: true } });

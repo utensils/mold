@@ -94,6 +94,7 @@ const emit = defineEmits<{
   "expand-clip": [clipId: string, prompt: string];
   "import-shared": [shared: Partial<SequenceSharedParams>];
   "play-clip": [clipId: string];
+  "limits-change": [limits: ChainLimits | null];
 }>();
 
 const draft = useSequenceDraftStore();
@@ -147,6 +148,7 @@ let limitsFetch = 0;
 async function loadLimits() {
   const version = ++limitsFetch;
   limitsLoaded.value = false;
+  emit("limits-change", null);
   const next = await fetchChainLimits(
     props.model,
     props.target,
@@ -155,6 +157,7 @@ async function loadLimits() {
   if (version !== limitsFetch) return;
   limits.value = next;
   limitsLoaded.value = true;
+  emit("limits-change", next);
   // A non-AV model must not carry a stale audio request onto the wire.
   if (!limits.value?.supports_audio) draft.enableAudio = false;
   if (!draft.editing && limits.value) {

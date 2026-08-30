@@ -359,10 +359,13 @@ function addNegative(word: string) {
 }
 
 // LTX-2 / LTX-2.3 own the full advanced video suite (pipeline, conditioning,
-// keyframes, retake, spatial/temporal). `supportsAudio` is true for
-// exactly those families, so it doubles as the suite gate; plain
-// ltx-video keeps just frames/fps/GIF.
-const showLtx2 = computed(() => caps.value.supportsAudio && !h3Family.value);
+// keyframes, retake, spatial/temporal). The family-level control capability
+// remains true for a checkpoint whose audio assets are absent; the resolved
+// recipe may correctly set `supportsAudio` false without hiding this suite.
+// Plain ltx-video keeps just frames/fps/GIF.
+const showLtx2 = computed(
+  () => caps.value.offersAudioControl && !h3Family.value,
+);
 
 // ── Output & seed: exact size follows the active recipe grid ──────────
 /** Advisory beside the exact-size inputs — a size the recipe would refuse

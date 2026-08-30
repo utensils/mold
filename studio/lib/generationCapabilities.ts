@@ -55,6 +55,11 @@ export interface BaseGenerationCapabilities {
   supportsCfgPlus: boolean;
   supportsVideo: boolean;
   supportsAudio: boolean;
+  /** Whether the family exposes a user-controlled generated-audio switch.
+   * This remains true for a video-only LTX checkpoint so clients can render
+   * the disabled control and explain which checkpoint asset is missing.
+   * H3 always generates audio and therefore has no switch. */
+  offersAudioControl: boolean;
   supportsLora: boolean;
   maxLoraStack: number;
   supportsControlNet: boolean;
@@ -357,6 +362,7 @@ export function baseGenerationCapabilities(
     supportsVideo,
     supportsAudio:
       profileCaps?.supports_audio ?? (h3 || AUDIO_FAMILIES.has(normalized)),
+    offersAudioControl: ADVANCED_VIDEO_FAMILIES.has(normalized),
     supportsLora: profileCaps?.lora
       ? profileControlVisible(profileCaps.lora.mode)
       : !flux2Dev &&
