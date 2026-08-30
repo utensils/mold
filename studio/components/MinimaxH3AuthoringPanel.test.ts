@@ -132,6 +132,36 @@ describe("MinimaxH3AuthoringPanel", () => {
     );
   });
 
+  it("keeps unavailable image copy and its complete action row as separate layout regions", () => {
+    const value = state();
+    value.references = [
+      {
+        reference: {
+          kind: "image",
+          media: { authority: "descriptor" },
+          provenance: { name: "missing-subject.png", sha256: "d".repeat(64) },
+          mime_type: "image/png",
+          width: 1_024,
+          height: 768,
+        },
+      },
+    ];
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: { modelValue: value },
+    });
+
+    const row = wrapper.get('[data-test="h3-reference-0"]');
+    expect(row.get(".h3-authoring__reference-copy").text()).toContain(
+      "Reattach original media before generating.",
+    );
+    expect(row.get('[aria-label="Reference 1 controls"]')).toBeTruthy();
+    expect(row.get('[data-test="h3-reference-reattach-0"]')).toBeTruthy();
+    expect(
+      row.get('[data-test="h3-reference-crop-0"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(row.get('[data-test="h3-reference-remove-0"]')).toBeTruthy();
+  });
+
   it("offers accessible 44pt reorder alternatives without regrouping kinds", async () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
       props: { modelValue: state(), touchFriendly: true },

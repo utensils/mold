@@ -2075,6 +2075,7 @@ const asString = (value: unknown): string | null =>
   typeof value === "string" && value.length > 0 ? value : null;
 
 let syncingFromRoute = false;
+let openingPrintDeepLink = false;
 watch(
   () => [route.query.scope, route.query.c, route.query.tag, route.query.fav] as const,
   ([scopeParam, c, tag, fav]) => {
@@ -2108,7 +2109,7 @@ watch(
       gallery.favoritesOnly,
     ] as const,
   ([scopeValue, slug, tags, fav]) => {
-    if (syncingFromRoute || route.path !== "/library") return;
+    if (syncingFromRoute || openingPrintDeepLink || route.path !== "/library") return;
     const query: Record<string, string | undefined> = {
       ...(route.query as Record<string, string | undefined>),
     };
@@ -2142,17 +2143,54 @@ watch(
 );
 
 // Deep link: /library?print=<filename> (a ⌘K result or native notification)
-// reveals that print — filters reset so it can't be hidden, then selection +
-// lightbox open once the buckets deliver it. One-shot: the param drops after
-// use so closing the lightbox doesn't re-open it.
+// reveals that print. A print filed only in a hidden collection must open in
+// that collection: the Prints scope deliberately excludes it, and selection
+// is resolved from the current grid. Wait for the relevant collection listing
+// before consuming the one-shot param so a fast gallery response cannot race
+// the slower organization response.
 watch(
-  [() => route.query.print, () => gallery.merged.length],
+  [
+    () => route.query.print,
+    () => {
+      const print = route.query.print;
+      return typeof print === "string"
+        ? gallery.merged.some((entry) => entry.item.filename === print)
+        : false;
+    },
+    () =>
+      gallery.sources
+        .map((source) => `${source.key}:${gallery.organizeCapable(source.key)}`)
+        .join("|"),
+    () =>
+      Object.entries(gallery.collectionsByHost)
+        .map(([key, bucket]) => `${key}:${bucket.loading}:${bucket.loaded}:${bucket.error ?? ""}`)
+        .join("|"),
+  ],
   ([print]) => {
     if (typeof print !== "string" || !print) return;
     const entry = gallery.merged.find((e) => e.item.filename === print);
     if (!entry) return;
-    gallery.scope = "prints";
-    gallery.collectionSlug = null;
+
+    const unsettledCollectionCopy = (
+      entry.copies ?? [{ sourceKey: entry.sourceKey, item: entry.item }]
+    ).some((copy) => {
+      // A non-empty collection id is itself evidence that this host supports
+      // organization. Its capability snapshot may still be in flight after
+      // the host becomes ready, so do not consume the one-shot route until
+      // the listing resolves those ids to slugs and hidden state.
+      if (!copy.item.collections?.length) return false;
+      const bucket = gallery.collectionsByHost[copy.sourceKey];
+      return !bucket || bucket.loading || (!bucket.loaded && bucket.error === null);
+    });
+    if (unsettledCollectionCopy) return;
+
+    const memberships = new Set(gallery.organizationOf(entry).collections);
+    const hiddenCollection = gallery.mergedCollections.find(
+      (collection) => collection.hidden && memberships.has(collection.slug),
+    );
+    openingPrintDeepLink = true;
+    gallery.scope = hiddenCollection ? "collections" : "prints";
+    gallery.collectionSlug = hiddenCollection?.slug ?? null;
     gallery.favoritesOnly = false;
     gallery.tagFilter = [];
     gallery.filter = "all";
@@ -2161,7 +2199,19 @@ watch(
     searchInput.value = "";
     select(entry);
     lightboxOpen.value = true;
-    void router.replace({ query: { ...route.query, print: undefined } });
+    const query = { ...route.query };
+    delete query.print;
+    delete query.host;
+    delete query.tag;
+    delete query.fav;
+    if (hiddenCollection) {
+      query.scope = "collections";
+      query.c = hiddenCollection.slug;
+    } else {
+      delete query.scope;
+      delete query.c;
+    }
+    void router.replace({ path: "/library", query }).finally(() => (openingPrintDeepLink = false));
   },
   { immediate: true },
 );
