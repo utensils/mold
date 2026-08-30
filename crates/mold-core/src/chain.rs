@@ -1267,8 +1267,12 @@ fn build_auto_expand_stages(
 
     let mut stages = Vec::with_capacity(count_usize);
     for idx in 0..stage_count {
-        // LTX-2 consumes the repeated starting image as a soft identity
-        // anchor alongside the motion tail. Wan has no such append path: a
+        // LTX-2 / LTX-2.3 consume the repeated starting image as a soft
+        // identity anchor alongside the motion tail; the LTX-2.5 stage
+        // renderer drops it again on continuations because that
+        // keyframe-trained checkpoint reads the appended token as a keyframe
+        // target (`ltx2::pipeline::route_continuation_opening_images`) — the
+        // repeat is harmless there. Wan has no such append path at all: a
         // stage-local source image is its hard frame-0 authority, and its
         // renderer deliberately refuses to replace one with the preceding
         // stage's tail. Repeating the opening still therefore restarted every
