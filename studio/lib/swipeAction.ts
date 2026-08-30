@@ -12,6 +12,8 @@
 
 /** Pointer travel before the gesture picks an axis. */
 export const SWIPE_AXIS_LOCK_PX = 12;
+/** Required dominance before a row claims horizontal or vertical intent. */
+export const SWIPE_AXIS_INTENT_RATIO = 1.5;
 /** Fraction of the row width at which a full swipe commits. */
 export const SWIPE_COMMIT_FRACTION = 0.6;
 /** Resistance applied past the tray so the row never tracks the finger 1:1. */
@@ -80,6 +82,25 @@ export function swipeIsOpen(state: SwipeGestureState): boolean {
   return state.offset < 0;
 }
 
+/**
+ * Resolve a pan only after one axis clearly dominates. Mobile scroll events
+ * commonly report a few diagonal samples before the browser commits to its
+ * native vertical pan; treating the first one-pixel lead as horizontal makes
+ * the action tray flash under an otherwise vertical scroll.
+ */
+export function resolveSwipeAxis(
+  dx: number,
+  dy: number,
+): Exclude<SwipePhase, "idle"> {
+  const absX = Math.abs(dx);
+  const absY = Math.abs(dy);
+  if (absX < SWIPE_AXIS_LOCK_PX && absY < SWIPE_AXIS_LOCK_PX)
+    return "undecided";
+  if (absX >= absY * SWIPE_AXIS_INTENT_RATIO) return "horizontal";
+  if (absY >= absX * SWIPE_AXIS_INTENT_RATIO) return "vertical";
+  return "undecided";
+}
+
 export function beginSwipe(
   state: SwipeGestureState,
   point: { x: number; y: number },
@@ -112,11 +133,10 @@ export function moveSwipe(
   const dy = point.y - state.startY;
   let phase: SwipePhase = state.phase;
   if (phase === "undecided") {
-    if (Math.abs(dx) < SWIPE_AXIS_LOCK_PX && Math.abs(dy) < SWIPE_AXIS_LOCK_PX)
-      return { ...state, phase, captured: false };
-    // The list scroll wins a tie: a row that stole an ambiguous drag would
-    // make the queue impossible to scroll past.
-    phase = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical";
+    phase = resolveSwipeAxis(dx, dy);
+    // Keep ambiguous diagonal travel visually inert. The browser can continue
+    // deciding its native pan without a red action tray flashing underneath.
+    if (phase === "undecided") return { ...state, phase, captured: false };
     if (phase === "vertical")
       return {
         ...state,
