@@ -5670,6 +5670,13 @@ impl Coordinator {
         if !self.pending.is_empty() {
             self.reject_terminal_generation_plan_errors();
             self.settle_unschedulable_generations();
+        }
+        // Gated on its OWN map, not on `pending`. A chain stage is very often
+        // the only thing queued — that is what a `--script` run looks like
+        // from here — and inside the generation guard this never ran for
+        // exactly the case it exists to bound, leaving the stage waiting
+        // forever with its reclaim already settled.
+        if !self.pending_owner_work.is_empty() {
             self.settle_unschedulable_owner_work();
         }
         if self.pending.is_empty() && self.pending_owner_work.is_empty() {
@@ -11850,6 +11857,33 @@ mod tests {
         assert_eq!(
             coordinator.device_snapshots()[0].available_vram_bytes,
             5 << 30
+        );
+    }
+
+    /// Owner-work settlement must be gated on owner work, not on queued
+    /// generations.
+    ///
+    /// A chain stage is very often the only thing queued — that is what a
+    /// `--script` run looks like from here — so leaving the call inside the
+    /// `!self.pending.is_empty()` block made it unreachable for exactly the
+    /// case it exists to bound, and a memory-blocked stage waited forever with
+    /// its reclaim already settled.
+    #[test]
+    fn owner_settlement_is_gated_on_owner_work_not_on_generations() {
+        let whole = include_str!("mod.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        let call = source
+            .find("self.settle_unschedulable_owner_work();")
+            .expect("owner settlement call");
+        // Walk back to the nearest enclosing guard and check which map it asks
+        // about.
+        let guard = source[..call]
+            .rfind("if !self.")
+            .expect("owner settlement must sit under a guard");
+        let guard_line = &source[guard..call];
+        assert!(
+            guard_line.contains("pending_owner_work.is_empty()"),
+            "owner settlement must be reachable when no generation is queued"
         );
     }
 
