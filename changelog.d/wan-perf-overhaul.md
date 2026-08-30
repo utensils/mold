@@ -68,13 +68,3 @@
   first — exactly what `candle_nn::ops::rms_norm` does. It also stops
   materializing four full-size F32 temporaries per norm, per block, per step
   (~671 MB apiece at A14B over an 81-frame clip).
-- **A finished render gives its GPU memory back, so the next one is not refused
-  for it.** candle allocates through CUDA's stream-ordered memory pool, where
-  freeing a tensor returns its bytes to the pool rather than to the driver — and
-  `cuMemGetInfo`, which every admission decision reads, counts pool reservations
-  as used. A completed render therefore left the card looking fuller than it
-  was: on an RTX 4090, `wan22-t2v-a14b:q5` at 81 frames rendered on a fresh
-  server and the immediate repeat of the same shape was refused at "requires
-  23.20 GB, 22.19 GB available", for a render whose real peak is 22,475 MiB.
-  Unused pool reservations are now returned when a render or chain stage ends,
-  the device twin of the existing host-side `malloc_trim`.

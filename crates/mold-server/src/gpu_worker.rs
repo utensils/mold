@@ -1787,36 +1787,6 @@ fn process_scheduled_chain_stage(
 /// pages via `madvise(MADV_DONTNEED)`. Cheap (~ms), glibc-only, gated so we can
 /// A/B with `MOLD_MALLOC_TRIM=0`. `None` means the trim was disabled and no RSS
 /// was sampled.
-/// Return unused CUDA memory-pool reservations to the driver, and report the
-/// device-free reading before and after.
-///
-/// The device twin of [`trim_malloc_arenas`]. candle allocates through
-/// cudarc's `cuMemAllocAsync`, so freeing a tensor returns its bytes to a
-/// stream-ordered POOL rather than to the driver — and `cuMemGetInfo`, which
-/// every admission decision reads, counts pool reservations as used. Without
-/// this, a finished render leaves the card looking fuller than it is and the
-/// next request at the same shape is refused for memory nothing is using.
-///
-/// Measured on an RTX 4090: `wan22-t2v-a14b:q5` at 81 frames renders on a
-/// fresh server and the immediate repeat was refused at "requires 23.20 GB,
-/// 22.19 GB available" — for a shape whose real peak is 22,475 MiB.
-fn trim_device_pool(ordinal: usize) -> Option<(u64, u64)> {
-    let before = mold_inference::device::usable_free_vram_bytes(ordinal)?;
-    if !mold_inference::device::trim_device_memory_pool(ordinal) {
-        return None;
-    }
-    let after = mold_inference::device::usable_free_vram_bytes(ordinal)?;
-    if after > before {
-        tracing::info!(
-            gpu = ordinal,
-            released_mib = (after - before) / (1024 * 1024),
-            free_after_mib = after / (1024 * 1024),
-            "returned unused CUDA pool reservations to the driver"
-        );
-    }
-    Some((before, after))
-}
-
 pub(crate) fn trim_malloc_arenas() -> Option<u64> {
     let enabled = std::env::var("MOLD_MALLOC_TRIM")
         .map(|value| value != "0")
@@ -1899,7 +1869,6 @@ impl Drop for ChainStageMemoryWatchdog {
             let _ = handle.join();
         }
         let rss_pre_trim = trim_malloc_arenas();
-        trim_device_pool(self.ordinal);
         let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
         tracing::info!(
             gpu = self.ordinal,
@@ -4393,7 +4362,6 @@ fn process_job_with_sink(
     let _ = watchdog_handle.join();
 
     let rss_pre_trim = trim_malloc_arenas();
-    trim_device_pool(ordinal);
 
     let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
     let rss_delta = rss_after as i64 - rss_before as i64;
