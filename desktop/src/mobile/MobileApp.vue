@@ -2097,7 +2097,11 @@ const developBlockerReason = computed<string | null>(() => {
 const developDisabled = computed(() => promptMissing.value || developBlockerReason.value !== null);
 const estimateRequest = computed(() => {
   if (!form.model) return null;
-  return buildGenerationEstimateRequest(buildRequest(form), form.family);
+  return buildGenerationEstimateRequest(
+    buildRequest(form),
+    form.family,
+    selectedGenerationModel.value,
+  );
 });
 
 function durableGenerationKey(clientBatchId: string, childIndex: number): string {
@@ -6545,6 +6549,12 @@ async function generate(): Promise<void> {
   // on for every other path.
   let route: HostRoute = initialRoute;
   const draft = applyFileUnderPolicy(cloneGenerateForm(form));
+  const routingModel = selectedGenerationModel.value
+    ? {
+        default_frames: selectedGenerationModel.value.default_frames,
+        source_image: selectedGenerationModel.value.source_image,
+      }
+    : null;
   const originalSource = draft.sourceImage
     ? {
         base64: draft.sourceImage,
@@ -6697,7 +6707,7 @@ async function generate(): Promise<void> {
     }
   }
 
-  const chainRouting = decideGenerateRequestRouting(request, draft.family);
+  const chainRouting = decideGenerateRequestRouting(request, draft.family, routingModel);
   if (chainRouting.kind === "reject") {
     setGenerationStatus(chainRouting.reason);
     generationAnnouncement.value = chainRouting.reason;

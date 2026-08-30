@@ -288,6 +288,22 @@ describe("model-specific audio capability", () => {
     expect(form.fps).toBe(24);
     expect(form.outputFormat).toBe("mp4");
   });
+
+  it("resets a carried duration to an image-to-video model's one-generation default", () => {
+    const form = newGenerateForm();
+    form.frames = 97;
+    applyModelDefaults(form, {
+      ...ltx2Model(),
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      source_image: "required",
+      default_frames: 81,
+      default_fps: 16,
+      frame_step: 4,
+    });
+
+    expect(form.frames).toBe(81);
+  });
 });
 
 describe("advertised default negative prompt (#787)", () => {

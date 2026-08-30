@@ -4091,12 +4091,18 @@ describe("MobileApp generation queue", () => {
   it("snapshots form and host before asynchronous source preprocessing", async () => {
     const studioModel: ModelEntry = {
       ...model,
-      name: "flux:studio",
-      family: "flux",
-      default_width: 1024,
-      default_height: 1024,
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      source_image: "required",
+      default_frames: 81,
+      default_fps: 16,
+      frame_step: 4,
     };
-    const renderModel: ModelEntry = { ...studioModel, name: "flux:render" };
+    const renderModel: ModelEntry = {
+      ...studioModel,
+      name: "wan22-i2v-a14b:q8",
+      default_frames: 73,
+    };
     const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
     localStorage.setItem(
       "mold.mobile.hosts.v1",
@@ -4172,6 +4178,7 @@ describe("MobileApp generation queue", () => {
     expect(admittedRequests()[0]).toMatchObject({
       prompt: "first prompt",
       model: studioModel.name,
+      frames: 81,
     });
     expect(admittedRequests()[0]?.source_image).toMatch(/^fitted:/);
   });

@@ -962,7 +962,7 @@ const chainValidationError = computed<string | null>(() => {
   if (formValidationError.value) return formValidationError.value;
   if (!caps.value.supportsVideo) return null;
   const request = buildRequest(form);
-  const decision = decideGenerateRequestRouting(request, form.family);
+  const decision = decideGenerateRequestRouting(request, form.family, selectedEntry.value);
   if (decision.kind === "reject") return decision.reason;
   const unsupported = decision.kind === "chain" ? unsupportedAutoChainFields(request) : [];
   return unsupported.length
@@ -998,7 +998,7 @@ const showStarterCards = computed(() =>
 /** The request the estimate badge previews — null until a model is chosen. */
 const estimateRequest = computed(() => {
   if (!form.model) return null;
-  return buildGenerationEstimateRequest(buildRequest(form), form.family);
+  return buildGenerationEstimateRequest(buildRequest(form), form.family, selectedEntry.value);
 });
 
 /** True when submits (and the estimate preflight) must resolve a route:
@@ -3413,6 +3413,12 @@ async function generate() {
   submissionPlanning.value = true;
   try {
     const draft = cloneGenerateForm(form);
+    const routingModel = selectedEntry.value
+      ? {
+          default_frames: selectedEntry.value.default_frames,
+          source_image: selectedEntry.value.source_image,
+        }
+      : null;
     const originalSource = draft.sourceImage
       ? {
           base64: draft.sourceImage,
@@ -3467,7 +3473,11 @@ async function generate() {
       sourcePreprocessed = true;
     }
     const preliminaryRequest = buildRequest(draft);
-    const preliminaryRouting = decideGenerateRequestRouting(preliminaryRequest, draft.family);
+    const preliminaryRouting = decideGenerateRequestRouting(
+      preliminaryRequest,
+      draft.family,
+      routingModel,
+    );
     if (preliminaryRouting.kind === "reject") {
       toasts.push(preliminaryRouting.reason, "error");
       return;
@@ -3612,7 +3622,7 @@ async function generate() {
         height: decoded?.height ?? null,
       });
     }
-    const chainRouting = decideGenerateRequestRouting(request, draft.family);
+    const chainRouting = decideGenerateRequestRouting(request, draft.family, routingModel);
     if (chainRouting.kind === "reject") {
       toasts.push(chainRouting.reason, "error");
       return;

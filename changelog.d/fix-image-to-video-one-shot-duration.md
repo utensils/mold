@@ -1,0 +1,1 @@
+- **One-shot image-to-video duration.** Fixed image-to-video models opening above their one-generation duration across web, desktop, iPhone, and Android.

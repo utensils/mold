@@ -57,6 +57,12 @@ export type GenerateRoutingRequest = {
   guidance_overrides?: object | null;
 };
 
+/** Model-row fields that refine routing beyond the request wire itself. */
+export type GenerateRoutingModel = {
+  default_frames?: number | null | undefined;
+  source_image?: string | null | undefined;
+};
+
 export type AutoChainUnsupportedField =
   | "negative_prompt"
   | "loras"
@@ -223,6 +229,7 @@ function canonicalizeFamily(family: string | null | undefined): string {
 export function decideGenerateRequestRouting(
   req: GenerateRoutingRequest,
   family: string | null | undefined,
+  model: GenerateRoutingModel | null = null,
   motionTail: number = DEFAULT_MOTION_TAIL,
 ): ChainRoutingDecision {
   const frames = req.frames;
@@ -248,6 +255,8 @@ export function decideGenerateRequestRouting(
     req.model,
     motionTail,
     req.fps,
+    model?.source_image,
+    model?.default_frames,
   );
   if (decision.kind !== "chain") return decision;
 
@@ -285,6 +294,9 @@ export function decideChainRouting(
    * older server that does not advertise the field gets.
    */
   sourceImage: string | null | undefined = undefined,
+  /** `/api/models.default_frames`; wan tiers may raise their one-generation
+   * routing size above the family floor. */
+  tierDefault: number | null | undefined = undefined,
 ): ChainRoutingDecision {
   if (!frames || frames <= 0) return { kind: "single" };
 
@@ -311,7 +323,7 @@ export function decideChainRouting(
 
   const isWan = normalizedFamily === "wan";
   const clipFrames = isWan
-    ? wanDefaultClipFrames(model)
+    ? wanRoutingClipFrames(model, tierDefault)
     : LTX2_DEFAULT_CLIP_FRAMES;
   if (frames <= clipFrames) return { kind: "single" };
 

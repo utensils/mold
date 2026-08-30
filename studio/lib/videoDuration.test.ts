@@ -79,6 +79,27 @@ describe("video duration controls", () => {
     expect(videoFramesForModelSelection(125, wan)).toBe(125);
   });
 
+  it("enters an image-to-video model at its one-generation default", () => {
+    const wanI2v = {
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      source_image: "required",
+      default_frames: 81,
+      default_fps: 16,
+      max_frames: 257,
+      frame_step: 4,
+    };
+
+    expect(videoFramesForModelSelection(97, wanI2v)).toBe(81);
+    expect(videoGenerationCount(81, 16, wanI2v)).toBe(1);
+    expect(videoGenerationCount(85, 16, wanI2v)).toBe(2);
+    expect(videoGenerationMarks(16, wanI2v)[0]).toEqual({
+      frames: 81,
+      generations: 1,
+      label: "1×",
+    });
+  });
+
   it("validates frame counts against the selected model grid", () => {
     expect(videoFramesError(45, { family: "wan" })).toBeNull();
     expect(videoFramesError(45, { family: "ltx2" })).toBe(

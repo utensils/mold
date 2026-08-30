@@ -82,6 +82,23 @@ describe("useGenerateForm", () => {
     expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
   });
 
+  it("resets a carried duration to an image-to-video model's one-generation default", () => {
+    const form = useGenerateForm();
+    form.state.value.frames = 97;
+    form.applyModelDefaults(
+      makeModel({
+        name: "wan22-i2v-a14b:q5",
+        family: "wan",
+        source_image: "required",
+        default_frames: 81,
+        default_fps: 16,
+        frame_step: 4,
+      }),
+    );
+
+    expect(form.state.value.frames).toBe(81);
+  });
+
   it("serializes a host-provided IC-LoRA control without replacing custom LoRAs", () => {
     const form = useGenerateForm();
     form.state.value.model = "ltx-2.3-22b-distilled:fp8";

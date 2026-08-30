@@ -3,7 +3,11 @@
  * chain-routing authority.
  */
 
-import { decideGenerateRequestRouting, type ChainRoutingDecision } from "@studio/lib/chainRouting";
+import {
+  decideGenerateRequestRouting,
+  type ChainRoutingDecision,
+  type GenerateRoutingModel,
+} from "@studio/lib/chainRouting";
 import type { AutoChainRequest, GenerateRequest } from "./api/types";
 
 export {
@@ -61,8 +65,9 @@ export function buildAutoChainRequest(
 export function buildGenerationEstimateRequest(
   req: GenerateRequest,
   family: string | null | undefined,
+  model: GenerateRoutingModel | null = null,
 ): GenerateRequest {
-  const decision = decideGenerateRequestRouting(req, family);
+  const decision = decideGenerateRequestRouting(req, family, model);
   const estimate = { ...req };
   // Optional properties must be absent, not merely `undefined`: aside from
   // satisfying the exact wire type, omission guarantees JSON serializers do
