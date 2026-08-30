@@ -281,8 +281,10 @@ pushed screen opened from the header.
   then retains Bonjour discovery, manual IP/hostname/HTTPS entry, and Tailscale
   MagicDNS as fallbacks. Desktop and web Settings mint a random, one-use,
   two-minute ticket containing the reachable host address but never the durable
-  API key. iPhone redeems it against the exact instance before host dedupe and
-  Keychain storage. Host detail shows telemetry, models-disk usage, queue,
+  API key. iPhone and Android redeem it against the exact instance before host
+  dedupe and secure credential storage. Android owns its CameraX session in the
+  Mold native bridge so Cancel always releases the camera and settles the
+  pending scan before another scan can begin. Host detail shows telemetry, models-disk usage, queue,
   downloads, loaded models, and installed models (all using catalog display
   names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
   unload, open-in-Models, and forget actions. Queue rows are swipe-to-act
@@ -541,7 +543,9 @@ minutes. Both responses are `no-store`; the QR must never contain the durable
 API key. Pairing QR codes use the registered `mold://pair` scheme so the mobile
 Camera app offers to open them directly in Mold; cold-launch and already-open
 links share the same claim, instance-verification, and Keychain path as Mold's
-in-app scanner.
+in-app scanner. Android's in-app scanner releases CameraX before resolving the
+scanned payload, then completes that same claim, verification, secure storage,
+and host-selection path.
 
 An authenticated claim receives a distinct `mold_pair_...` credential, not the
 host's operator key. The host stores only its digest in `mold.db`; web and
@@ -580,9 +584,9 @@ android-build              # ARM64/ARMv7 Google Play AAB
 `/Volumes/ExternalStorage/Android/Android Studio.app`. Open the generated
 project with `./scripts/android.sh studio`. The helper defaults to NDK
 `27.0.12077973`, which is pinned by the generated Tauri project; change it only
-with a deliberate template/toolchain upgrade. The generated Gradle root replaces
-the scanner plugin's direct thin dependency with ML Kit's bundled barcode model,
-so first-run and offline QR pairing never waits for a Google Play module download.
+with a deliberate template/toolchain upgrade. Mold's Android native scanner
+uses ML Kit's bundled barcode model, so first-run and offline QR pairing never
+waits for a Google Play module download.
 
 ### iOS
 

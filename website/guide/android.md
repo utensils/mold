@@ -29,7 +29,10 @@ after installation if you do not sideload other apps.
 Open **Machines** and scan the one-use pairing code shown by Mold Studio on the
 server, discover `_mold._tcp` machines on the local network, or enter a LAN,
 DNS, HTTPS, or Tailscale MagicDNS address manually. Pairing transfers a
-two-minute one-use ticket, not the durable API key.
+two-minute one-use ticket, not the durable API key. A successful scan closes
+the camera, verifies the exact server, saves its credential in Android Keystore,
+and selects that machine. **Cancel** releases the camera immediately; you can
+open the scanner again without restarting Mold.
 
 ## Identity photos (PuLID)
 

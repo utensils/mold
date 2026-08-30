@@ -6,6 +6,7 @@ import android.content.res.Configuration
 import android.content.Intent
 import android.graphics.Color
 import android.os.Build
+import android.webkit.WebView
 import androidx.activity.result.ActivityResult
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
@@ -86,6 +87,12 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
     private val identityPhoto = AndroidIdentityPhoto(hostActivity.applicationContext)
     private var pendingIdentityCamera: AndroidIdentityPhoto.CameraTarget? = null
     private var pendingLegacyMedia: PendingLegacyMedia? = null
+    private lateinit var pairingScanner: AndroidPairingScanner
+
+    override fun load(webView: WebView) {
+        super.load(webView)
+        pairingScanner = AndroidPairingScanner(hostActivity, webView)
+    }
 
     @Command
     fun setApiKey(invoke: Invoke) {
@@ -214,6 +221,16 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
             return
         }
         startActivityForResult(invoke, intent, "identityPhotoResult")
+    }
+
+    @Command
+    fun scanPairingCode(invoke: Invoke) {
+        pairingScanner.scan(invoke)
+    }
+
+    @Command
+    fun cancelPairingScan(invoke: Invoke) {
+        pairingScanner.cancel(invoke)
     }
 
     @ActivityCallback

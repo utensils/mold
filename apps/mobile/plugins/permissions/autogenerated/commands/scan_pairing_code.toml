@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-scan-pairing-code"
+description = "Enables the scan_pairing_code command without any pre-configured scope."
+commands.allow = ["scan_pairing_code"]
+
+[[permission]]
+identifier = "deny-scan-pairing-code"
+description = "Denies the scan_pairing_code command without any pre-configured scope."
+commands.deny = ["scan_pairing_code"]

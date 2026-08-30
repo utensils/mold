@@ -96,4 +96,18 @@ impl<R: Runtime> MoldMobileNative<R> {
             .await
             .map_err(Into::into)
     }
+
+    pub async fn scan_pairing_code(&self) -> crate::Result<PairingScanResponse> {
+        self.0
+            .run_mobile_plugin_async("scanPairingCode", ())
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn cancel_pairing_scan(&self) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin_async("cancelPairingScan", ())
+            .await
+            .map_err(Into::into)
+    }
 }

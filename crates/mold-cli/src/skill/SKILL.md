@@ -1838,7 +1838,8 @@ Android ships from the same remote-only Tauri crate and `desktop/src/mobile`
 Vue surface as the iPhone app; never fork a second product UI or import the
 desktop local-engine graph. Its native bridge lives in `apps/mobile/plugins`:
 API keys are AES-GCM encrypted under a non-exportable Android Keystore key, QR
-pairing redeems the same one-use ticket, NSD discovers `_mold._tcp`, and
+pairing redeems the same one-use ticket through Mold's CameraX bridge (which
+releases the camera and settles the pending scan on Cancel), NSD discovers `_mold._tcp`, and
 MediaStore/clipboard/share intents provide the native media actions. Release CI
 publishes one signed universal `Mold-android.apk` on the rolling nightly and on
 every tag, listed in `SHA256SUMS`. Canonical: `website/guide/android.md`.

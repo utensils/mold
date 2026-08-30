@@ -3952,11 +3952,13 @@ function scanPairingCode(): Promise<void> {
     pairingScannerOpen.value = true;
     await nextTick();
     try {
-      const result = await scan({
-        cameraDirection: "back",
-        formats: [Format.QRCode],
-        windowed: true,
-      });
+      const result = androidNativeRuntime
+        ? await invoke<{ content: string }>("scan_android_pairing_code")
+        : await scan({
+            cameraDirection: "back",
+            formats: [Format.QRCode],
+            windowed: true,
+          });
       return result.content;
     } finally {
       pairingScannerOpen.value = false;
@@ -3968,7 +3970,8 @@ async function cancelPairingScan(): Promise<void> {
   if (!pairingScannerOpen.value) return;
   pairingScannerCancelled = true;
   try {
-    await cancelBarcodeScanner();
+    if (androidNativeRuntime) await invoke("cancel_android_pairing_scan");
+    else await cancelBarcodeScanner();
   } catch (error) {
     pairingScannerCancelled = false;
     hostError.value = describeTransportError(error, "Pairing scanner");
@@ -10890,7 +10893,10 @@ onBeforeUnmount(() => {
   sourceUseController?.abort();
   if (pairingScannerOpen.value) {
     pairingScannerCancelled = true;
-    void cancelBarcodeScanner().catch(() => undefined);
+    const cancelScan = androidNativeRuntime
+      ? invoke("cancel_android_pairing_scan")
+      : cancelBarcodeScanner();
+    void cancelScan.catch(() => undefined);
   }
   preparationGuard.invalidate();
   submissionAttempts.invalidate();

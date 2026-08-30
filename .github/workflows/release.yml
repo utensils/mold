@@ -608,7 +608,10 @@ jobs:
           key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-2.11.4
       - name: Install Tauri CLI
         if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
-        run: cargo install tauri-cli --version 2.11.4 --locked
+        run: |
+          if ! cargo tauri --version 2>/dev/null | grep -Fq '2.11.4'; then
+            cargo install tauri-cli --version 2.11.4 --locked --force
+          fi
       - name: Verify Tauri CLI
         run: cargo tauri --version | grep -F '2.11.4'
       - name: Install frontend dependencies

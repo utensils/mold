@@ -9,6 +9,7 @@ mod discovery;
 mod identity;
 mod keychain;
 mod media;
+mod pairing_scanner;
 mod viewport;
 
 #[cfg(target_os = "android")]
@@ -62,6 +63,8 @@ pub fn run() {
             media::save_image_to_photos,
             media::save_video_to_photos,
             media::share_exported_animation,
+            pairing_scanner::scan_android_pairing_code,
+            pairing_scanner::cancel_android_pairing_scan,
             viewport::restore_mobile_viewport,
         ])
         .run(app_context())
