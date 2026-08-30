@@ -1,0 +1,1 @@
+- **Faster, image-only desktop library picker.** Choosing a source image from a large Library now renders only the visible rows, reuses the Library's persistent prioritized thumbnail cache, and excludes gallery rows whose metadata identifies them as video even when their stored filename looks like an image.

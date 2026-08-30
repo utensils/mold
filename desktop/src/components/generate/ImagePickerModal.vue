@@ -3,10 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { galleryMediaPath } from "../../lib/gallery/media";
 import { readGalleryMediaBase64 } from "../../lib/gallery/sourceMedia";
-import { fileToBase64, isStillImageFile } from "../../lib/image";
+import { fileToBase64, isStillImageFile, isStillImageGalleryItem } from "../../lib/image";
 import { inTauri, ipc } from "../../lib/ipc";
 import type { PickedImage } from "../../lib/generateForm";
 import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
+import { virtualGridWindow } from "@studio/lib/virtualGrid";
+import type { ThumbnailPriority } from "@studio/lib/thumbnailScheduler";
 
 const props = withDefaults(
   defineProps<{
@@ -37,7 +39,9 @@ const closeBtn = ref<HTMLButtonElement | null>(null);
 const fallbackFileInput = ref<HTMLInputElement | null>(null);
 const selectedGallery = ref<MergedPrint[]>([]);
 const pickingGallery = ref(false);
+const galleryScrollEl = ref<HTMLElement | null>(null);
 let restoreFocusEl: HTMLElement | null = null;
+let galleryResizeObserver: ResizeObserver | null = null;
 
 // The gallery tab is the same unified multi-host view as the Gallery's All
 // section: every connected host's bucket, merged and deduped by the store.
@@ -57,7 +61,7 @@ function loadGallery() {
 // Only PNG/JPEG are valid as source_image / mask / keyframe conditioning;
 // hide video and animated outputs so a pick can't fail at generation time.
 const entries = computed<MergedPrint[]>(() =>
-  gallery.merged.filter((entry) => isStillImageFile(entry.item.filename)),
+  gallery.merged.filter((entry) => isStillImageGalleryItem(entry.item)),
 );
 const loading = computed(() => entries.value.length === 0 && !gallery.loaded);
 /** Bucket fetch failures, shown only when there is nothing to render —
@@ -67,6 +71,199 @@ const galleryError = computed(() =>
 );
 /** Per-tile origin labels only matter with more than one gallery source. */
 const showHostLabels = computed(() => gallery.sources.length > 1);
+
+// The full Library virtualizes its justified rows. This picker uses a simpler
+// square grid, but it must keep the same bounded-DOM contract: mounting every
+// AuthedMedia at once queues every thumbnail, decodes off-screen images, and
+// makes opening/scrolling increasingly expensive as the Library grows.
+const PICKER_GRID_GAP = 8;
+const PICKER_GRID_FALLBACK_WIDTH = 720;
+const PICKER_GRID_FALLBACK_HEIGHT = 600;
+const galleryViewport = ref({
+  width: PICKER_GRID_FALLBACK_WIDTH,
+  height: PICKER_GRID_FALLBACK_HEIGHT,
+  scrollTop: 0,
+});
+const focusedGalleryIndex = ref(0);
+
+function syncGalleryViewport() {
+  const element = galleryScrollEl.value;
+  if (!element) return;
+  galleryViewport.value = {
+    width: element.clientWidth || PICKER_GRID_FALLBACK_WIDTH,
+    height: element.clientHeight || PICKER_GRID_FALLBACK_HEIGHT,
+    scrollTop: element.scrollTop,
+  };
+}
+
+function bindGalleryViewport() {
+  galleryResizeObserver?.disconnect();
+  galleryResizeObserver = null;
+  void nextTick(() => {
+    const element = galleryScrollEl.value;
+    if (!element) return;
+    syncGalleryViewport();
+    if (typeof ResizeObserver !== "undefined") {
+      galleryResizeObserver = new ResizeObserver(syncGalleryViewport);
+      galleryResizeObserver.observe(element);
+    }
+  });
+}
+
+const pickerLayout = computed(() =>
+  virtualGridWindow({
+    itemCount: entries.value.length,
+    containerWidth: galleryViewport.value.width,
+    minimumItemWidth: 120,
+    minimumColumns: 3,
+    maximumColumns: 5,
+    gap: PICKER_GRID_GAP,
+    viewportStart: 0,
+    viewportSize: 0,
+    overscanRows: 0,
+  }),
+);
+const clampedGalleryScrollTop = computed(() =>
+  Math.min(
+    galleryViewport.value.scrollTop,
+    Math.max(0, pickerLayout.value.totalSize - galleryViewport.value.height),
+  ),
+);
+const pickerGrid = computed(() =>
+  virtualGridWindow({
+    itemCount: entries.value.length,
+    containerWidth: galleryViewport.value.width,
+    minimumItemWidth: 120,
+    minimumColumns: 3,
+    maximumColumns: 5,
+    gap: PICKER_GRID_GAP,
+    viewportStart: clampedGalleryScrollTop.value,
+    viewportSize: galleryViewport.value.height,
+    overscanRows: 2,
+  }),
+);
+const pickerVisibleGrid = computed(() =>
+  virtualGridWindow({
+    itemCount: entries.value.length,
+    containerWidth: galleryViewport.value.width,
+    minimumItemWidth: 120,
+    minimumColumns: 3,
+    maximumColumns: 5,
+    gap: PICKER_GRID_GAP,
+    viewportStart: clampedGalleryScrollTop.value,
+    viewportSize: galleryViewport.value.height,
+    overscanRows: 0,
+  }),
+);
+const galleryTabStopIndex = computed(() => {
+  const window = pickerGrid.value;
+  return focusedGalleryIndex.value >= window.startIndex &&
+    focusedGalleryIndex.value < window.endIndex
+    ? focusedGalleryIndex.value
+    : window.startIndex;
+});
+
+interface PickerTile {
+  entry: MergedPrint;
+  index: number;
+  x: number;
+  y: number;
+  priority: ThumbnailPriority;
+  mediaVersion: string;
+}
+
+const visibleEntries = computed<PickerTile[]>(() => {
+  const window = pickerGrid.value;
+  const visible = pickerVisibleGrid.value;
+  return entries.value.slice(window.startIndex, window.endIndex).map((entry, offset) => {
+    const index = window.startIndex + offset;
+    const row = Math.floor(index / window.columns);
+    return {
+      entry,
+      index,
+      x: (index % window.columns) * window.rowStep,
+      y: row * window.rowStep,
+      priority:
+        row >= visible.startRow && row < visible.endRow ? ("visible" as const) : ("near" as const),
+      mediaVersion:
+        entry.item.media_version ?? `${entry.item.timestamp}:${entry.item.size_bytes ?? "unknown"}`,
+    };
+  });
+});
+
+async function focusGalleryIndex(index: number) {
+  if (entries.value.length === 0) return;
+  const target = Math.max(0, Math.min(entries.value.length - 1, index));
+  focusedGalleryIndex.value = target;
+
+  const element = galleryScrollEl.value;
+  if (element) {
+    const layout = pickerLayout.value;
+    const row = Math.floor(target / layout.columns);
+    const top = row * layout.rowStep;
+    const bottom = top + layout.itemSize;
+    const viewportTop = clampedGalleryScrollTop.value;
+    const viewportBottom = viewportTop + galleryViewport.value.height;
+    if (top < viewportTop) element.scrollTop = top;
+    else if (bottom > viewportBottom) {
+      element.scrollTop = Math.max(0, bottom - galleryViewport.value.height);
+    }
+    syncGalleryViewport();
+  }
+
+  await nextTick();
+  document.querySelector<HTMLButtonElement>(`[data-picker-index="${target}"]`)?.focus();
+}
+
+function onGalleryItemKeydown(event: KeyboardEvent, index: number) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    const entry = entries.value[index];
+    if (entry) void pickFromGallery(entry);
+    return;
+  }
+
+  const columns = pickerLayout.value.columns;
+  const pageRows = Math.max(
+    1,
+    Math.floor(galleryViewport.value.height / pickerLayout.value.rowStep),
+  );
+  const moves: Partial<Record<string, number>> = {
+    ArrowLeft: index - 1,
+    ArrowRight: index + 1,
+    ArrowUp: index - columns,
+    ArrowDown: index + columns,
+    PageUp: index - pageRows * columns,
+    PageDown: index + pageRows * columns,
+    Home: 0,
+    End: entries.value.length - 1,
+  };
+  const target = moves[event.key];
+  if (target === undefined) return;
+  event.preventDefault();
+  void focusGalleryIndex(target);
+}
+
+watch(
+  [
+    () => entries.value.length,
+    () => pickerLayout.value.totalSize,
+    () => galleryViewport.value.height,
+  ],
+  () => {
+    focusedGalleryIndex.value = Math.min(
+      focusedGalleryIndex.value,
+      Math.max(0, entries.value.length - 1),
+    );
+    void nextTick(() => {
+      const element = galleryScrollEl.value;
+      if (!element) return;
+      const clamped = clampedGalleryScrollTop.value;
+      if (element.scrollTop !== clamped) element.scrollTop = clamped;
+      if (galleryViewport.value.scrollTop !== clamped) syncGalleryViewport();
+    });
+  },
+);
 
 // Escape must close the dialog wherever focus sits: WKWebView (Tauri on
 // macOS) does not focus clicked buttons, so a keydown handler scoped to the
@@ -81,6 +278,7 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", onDocumentKeydown);
+  galleryResizeObserver?.disconnect();
 });
 watch(
   () => props.open,
@@ -95,6 +293,9 @@ watch(
     }
   },
 );
+watch([() => props.open, tab], ([open, activeTab]) => {
+  if (open && activeTab === "gallery") bindGalleryViewport();
+});
 
 async function ingestFiles(files: File[]) {
   // Same constraint as the gallery tab: the engine only accepts PNG/JPEG for
@@ -279,7 +480,13 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
           </p>
         </div>
 
-        <div v-else class="mt-4 flex-1 overflow-y-auto">
+        <div
+          v-else
+          ref="galleryScrollEl"
+          class="mt-4 flex-1 overflow-y-auto"
+          data-test="picker-gallery-scroll"
+          @scroll.passive="syncGalleryViewport"
+        >
           <p v-if="loading" class="text-caption text-ink-3">Loading…</p>
           <p v-else-if="error" class="text-caption text-stop">{{ error }}</p>
           <p
@@ -292,51 +499,71 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
           <p v-else-if="entries.length === 0" class="text-caption text-ink-3">
             No prints in the gallery yet.
           </p>
-          <ul v-else class="grid grid-cols-3 gap-2 sm:grid-cols-5">
-            <li v-for="entry in entries" :key="`${entry.sourceKey}:${entry.item.filename}`">
+          <ul
+            v-else
+            class="relative"
+            :style="{ height: `${pickerGrid.totalSize}px` }"
+            data-test="picker-gallery-grid"
+          >
+            <li
+              v-for="tile in visibleEntries"
+              :key="`${tile.entry.sourceKey}:${tile.entry.item.filename}`"
+              class="absolute top-0 left-0"
+              :style="{
+                width: `${pickerGrid.itemSize}px`,
+                height: `${pickerGrid.itemSize}px`,
+                transform: `translate(${tile.x}px, ${tile.y}px)`,
+              }"
+            >
               <button
                 type="button"
                 class="border-edge relative aspect-square w-full overflow-hidden rounded-media border transition hover:brightness-110"
                 :class="
-                  galleryEntrySelected(entry)
+                  galleryEntrySelected(tile.entry)
                     ? 'ring-2 ring-safelight ring-offset-2 ring-offset-bench'
                     : ''
                 "
                 data-test="picker-gallery-item"
-                :aria-label="entry.item.filename"
+                :data-picker-index="tile.index"
+                :aria-label="tile.entry.item.filename"
                 :disabled="pickingGallery"
-                :aria-pressed="multiple ? galleryEntrySelected(entry) : undefined"
-                @click="pickFromGallery(entry)"
+                :tabindex="tile.index === galleryTabStopIndex ? 0 : -1"
+                :aria-pressed="multiple ? galleryEntrySelected(tile.entry) : undefined"
+                @click="pickFromGallery(tile.entry)"
+                @focus="focusedGalleryIndex = tile.index"
+                @keydown="onGalleryItemKeydown($event, tile.index)"
               >
                 <AuthedMedia
                   :path="
                     galleryMediaPath(
-                      entry.item.filename,
-                      gallery.mediaSourceOf(entry.sourceKey),
+                      tile.entry.item.filename,
+                      gallery.mediaSourceOf(tile.entry.sourceKey),
                       true,
                     )
                   "
-                  :target="gallery.targetOf(entry.sourceKey)"
-                  :cache-key="entry.sourceKey"
-                  :alt="entry.item.filename"
+                  :target="gallery.targetOf(tile.entry.sourceKey)"
+                  :cache-key="tile.entry.sourceKey"
+                  :media-version="tile.mediaVersion"
+                  :priority="tile.priority"
+                  :alt="tile.entry.item.filename"
                 />
                 <span
                   v-if="showHostLabels"
                   class="edge-code absolute bottom-1 left-1 rounded-control bg-black/60 px-1 !text-on-media"
                   data-test="picker-item-host"
                 >
-                  {{ entry.hostLabel }}
+                  {{ tile.entry.hostLabel }}
                 </span>
                 <span
-                  v-if="multiple && galleryEntrySelected(entry)"
+                  v-if="multiple && galleryEntrySelected(tile.entry)"
                   class="absolute top-1 right-1 grid h-6 w-6 place-items-center rounded-full bg-safelight text-caption font-bold text-on-accent"
                   aria-hidden="true"
                 >
                   {{
                     selectedGallery.findIndex(
                       (selected) =>
-                        selected.sourceKey === entry.sourceKey &&
-                        selected.item.filename === entry.item.filename,
+                        selected.sourceKey === tile.entry.sourceKey &&
+                        selected.item.filename === tile.entry.item.filename,
                     ) + 1
                   }}
                 </span>

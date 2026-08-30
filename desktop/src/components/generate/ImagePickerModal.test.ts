@@ -138,6 +138,134 @@ describe("ImagePickerModal", () => {
     expect(wrapper.emitted("close")).toBeTruthy();
   });
 
+  it("excludes video rows even when their stored filename looks like an image", async () => {
+    const gallery = seedTwoHostGallery();
+    gallery.buckets.local = loadedBucket([
+      img("still.png", 4),
+      { ...img("mislabelled.png", 3), format: "mp4" },
+      {
+        ...img("legacy-video.png", 2),
+        metadata: { ...meta, video_frames: 25 },
+      },
+      {
+        ...img("current-video.png", 1),
+        format: null,
+        metadata: { ...meta, frames: 97 },
+      },
+    ]);
+    gallery.buckets["hal9000-7680"] = loadedBucket([]);
+
+    mount(ImagePickerModal, {
+      props: { open: true, galleryOnly: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+
+    const labels = Array.from(
+      document.body.querySelectorAll("[data-test='picker-gallery-item']"),
+    ).map((tile) => tile.getAttribute("aria-label"));
+    expect(labels).toEqual(["still.png"]);
+  });
+
+  it("keeps a 2,000-print library bounded to the visible picker rows", async () => {
+    const gallery = seedTwoHostGallery();
+    gallery.buckets.local = loadedBucket(
+      Array.from({ length: 2_000 }, (_, index) => ({
+        ...img(`print-${index}.png`, 2_000 - index),
+        size_bytes: 100_000 + index,
+      })),
+    );
+    gallery.buckets["hal9000-7680"] = loadedBucket([]);
+
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true, galleryOnly: true, multiple: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+
+    const tiles = document.body.querySelectorAll("[data-test='picker-gallery-item']");
+    expect(tiles.length).toBeGreaterThan(0);
+    expect(tiles.length).toBeLessThanOrEqual(80);
+
+    const media = wrapper.findAllComponents({ name: "AuthedMedia" });
+    expect(media.length).toBe(tiles.length);
+    expect(media.every((component) => component.props("mediaVersion") != null)).toBe(true);
+
+    const firstBeforeScroll = tiles[0]!.getAttribute("aria-label");
+    const scroller = bodyGet<HTMLElement>("[data-test='picker-gallery-scroll']");
+    scroller.element.scrollTop = 10_000;
+    await scroller.trigger("scroll");
+    await nextTick();
+
+    const scrolledTiles = document.body.querySelectorAll("[data-test='picker-gallery-item']");
+    expect(scrolledTiles.length).toBeLessThanOrEqual(80);
+    expect(scrolledTiles[0]!.getAttribute("aria-label")).not.toBe(firstBeforeScroll);
+    await new DOMWrapper(scrolledTiles[0] as HTMLElement).trigger("click");
+    expect(scrolledTiles[0]!.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("moves keyboard focus to and selects an item outside the mounted window", async () => {
+    const gallery = seedTwoHostGallery();
+    gallery.buckets.local = loadedBucket(
+      Array.from({ length: 2_000 }, (_, index) => img(`print-${index}.png`, 2_000 - index)),
+    );
+    gallery.buckets["hal9000-7680"] = loadedBucket([]);
+
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true, galleryOnly: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+
+    const first = bodyGet<HTMLButtonElement>("[data-test='picker-gallery-item']");
+    first.element.focus();
+    await first.trigger("keydown", { key: "End" });
+    await nextTick();
+
+    const last = bodyGet<HTMLButtonElement>("[aria-label='print-1999.png']");
+    expect(document.activeElement).toBe(last.element);
+    await last.trigger("keydown", { key: "Enter" });
+    await vi.waitFor(() => expect(wrapper.emitted("pick")).toBeTruthy());
+    const picked = wrapper.emitted("pick")?.[0]?.[0] as Array<{ filename: string }>;
+    expect(picked[0]!.filename).toBe("print-1999.png");
+  });
+
+  it("keeps a shortened gallery visible after the prior list was deeply scrolled", async () => {
+    const gallery = seedTwoHostGallery();
+    gallery.buckets.local = loadedBucket(
+      Array.from({ length: 2_000 }, (_, index) => img(`print-${index}.png`, 2_000 - index)),
+    );
+    gallery.buckets["hal9000-7680"] = loadedBucket([]);
+
+    mount(ImagePickerModal, {
+      props: { open: true, galleryOnly: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    const scroller = bodyGet<HTMLElement>("[data-test='picker-gallery-scroll']");
+    scroller.element.scrollTop = 10_000;
+    await scroller.trigger("scroll");
+    await nextTick();
+
+    gallery.buckets.local!.items = Array.from({ length: 10 }, (_, index) =>
+      img(`short-${index}.png`, 10 - index),
+    );
+    await nextTick();
+
+    const labels = Array.from(
+      document.body.querySelectorAll("[data-test='picker-gallery-item']"),
+    ).map((tile) => tile.getAttribute("aria-label"));
+    expect(labels).toHaveLength(10);
+    expect(labels[0]).toBe("short-0.png");
+  });
+
   it("keeps multi-host gallery picks in the order selected until confirmation", async () => {
     apiFetchTo.mockImplementation(() =>
       Promise.resolve(

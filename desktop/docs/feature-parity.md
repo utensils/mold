@@ -201,6 +201,8 @@ and clears terminal, error, null-id, removed-host, and unmount state for retry.
 
 ## 4. Gallery / media management
 
+The desktop **Choose from gallery…** square grid follows the Library's performance contract: it virtualizes to visible rows plus overscan, keeps off-screen rows keyboard-reachable, and passes each print's media-version identity and visible/near priority into the shared persistent thumbnail path. Its image-only filter requires the stored filename and gallery metadata to agree on PNG/JPEG, so a mislabelled video cannot be attached to an image input.
+
 - **Browse** (web `LibraryPage.vue` + `gallery/GalleryGrid.vue`, `GET /api/gallery`): returns `GalleryImage[]` = `{filename, metadata (OutputMetadata), timestamp, format, size_bytes, metadata_synthetic, media_version}` — `media_version` is the key every persistent thumbnail cache is keyed on, plus the organization fields below.
 - **Image/thumbnail** URLs: `GET /api/gallery/image/:filename`, `/api/gallery/preview/:filename`, thumbnail endpoint.
 - **Delete**: `DELETE /api/gallery/image/:filename` — always enabled (`capabilities.gallery.can_delete: true`); pair with `MOLD_API_KEY` if exposed. On current servers it moves the print to the host's trash (`<output_dir>/.trash/` + `generations.trashed_at_ms` + tombstone); `?permanent=true` hard-deletes as before.
