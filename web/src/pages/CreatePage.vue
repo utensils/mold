@@ -1753,6 +1753,7 @@ const chainDecision = computed(() =>
   decideGenerateRequestRouting(
     form.toRequest(currentModel.value),
     currentModel.value?.family ?? null,
+    currentModel.value,
   ),
 );
 const singleShotPreservationNote = computed(() => {

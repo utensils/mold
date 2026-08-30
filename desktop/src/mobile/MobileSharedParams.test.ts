@@ -100,6 +100,40 @@ describe("MobileSharedParams video duration", () => {
     expect(form.frames).toBe(241);
   });
 
+  it("shows an image-to-video tier default at one generation", () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      model: "wan22-i2v-a14b:q5",
+      family: "wan",
+      frames: 81,
+      fps: 16,
+    });
+    const model = {
+      name: form.model,
+      family: form.family,
+      source_image: "required",
+      default_frames: 81,
+      default_fps: 16,
+      max_frames: 257,
+      frame_step: 4,
+    } as ModelEntry;
+    const wrapper = mount(MobileSharedParams, {
+      props: { form, durationModel: model, lastSeed: null },
+      global: {
+        stubs: { MobileResolutionPicker: true, MobileSeedPicker: true },
+      },
+    });
+
+    expect(wrapper.get("[data-test='mobile-duration']").text()).toContain(
+      "81 frames · 16 fps · 5.1s · 1 generation",
+    );
+    expect(
+      wrapper
+        .findAll("[data-test='mobile-duration'] .ms-slider__mark b")
+        .map((mark) => mark.text())[0],
+    ).toBe("1×");
+  });
+
   it("keeps sequence FPS visible without duplicating the duration control", () => {
     const form = reactive({
       ...newGenerateForm(),

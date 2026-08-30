@@ -242,7 +242,7 @@ watch(
 const generationRequest = computed(() => buildRequest(props.form));
 const chainDecision = computed<ChainRoutingDecision>(() =>
   caps.value.supportsVideo
-    ? decideGenerateRequestRouting(generationRequest.value, props.form.family)
+    ? decideGenerateRequestRouting(generationRequest.value, props.form.family, props.selectedModel)
     : { kind: "single" },
 );
 const singleShotPreservationNote = computed(() => {

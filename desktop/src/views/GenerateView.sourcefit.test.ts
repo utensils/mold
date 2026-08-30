@@ -484,6 +484,22 @@ describe("GenerateView source-fit submit path", () => {
   });
 
   it("submits the tapped form snapshot when preprocessing is still running", async () => {
+    const firstModel = {
+      ...model,
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      source_image: "required",
+      default_frames: 81,
+      default_fps: 16,
+      frame_step: 4,
+    } as ModelEntry;
+    const nextModel = {
+      ...firstModel,
+      name: "wan22-i2v-a14b:q8",
+      default_frames: 73,
+    } as ModelEntry;
+    apiJsonTo.mockResolvedValue([firstModel, nextModel]);
+    useModelStore().all = [firstModel, nextModel];
     setupMultiHost();
     const submitBatch = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
       jobs: [],
@@ -500,6 +516,11 @@ describe("GenerateView source-fit submit path", () => {
     mount(GenerateView, { shallow: true, attachTo: document.body });
     await flushPromises();
     const form = primeForm();
+    form.model = firstModel.name;
+    form.family = firstModel.family;
+    form.frames = 81;
+    form.fps = 16;
+    form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
     // Batch N now requires a reviewed prepared expansion set. This regression
     // isolates the ordinary Batch 1 source-preprocess snapshot boundary.
     form.batchSize = 1;
@@ -509,12 +530,18 @@ describe("GenerateView source-fit submit path", () => {
 
     form.prompt = "a different live prompt";
     form.batchSize = 3;
+    form.model = nextModel.name;
     finishPreprocess();
     await flushPromises();
 
     expect(submitBatch).toHaveBeenCalledTimes(1);
     const [request, batch] = submitBatch.mock.calls[0]!;
-    expect(request).toMatchObject({ prompt: "a lighthouse", source_image: "FIT" });
+    expect(request).toMatchObject({
+      prompt: "a lighthouse",
+      model: firstModel.name,
+      frames: 81,
+      source_image: "FIT",
+    });
     expect(batch).toBe(1);
   });
 

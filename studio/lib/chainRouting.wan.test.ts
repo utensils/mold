@@ -80,6 +80,22 @@ describe("wan chain routing", () => {
     );
   });
 
+  it("treats a tier's advertised default as one generation", () => {
+    const model = "wan22-i2v-a14b:q5";
+    expect(
+      decideChainRouting(81, "wan", model, undefined, 16, "required", 81),
+    ).toEqual({ kind: "single" });
+
+    expect(
+      decideChainRouting(85, "wan", model, undefined, 16, "required", 81),
+    ).toMatchObject({
+      kind: "chain",
+      clipFrames: 81,
+      motionTail: WAN_HANDOFF_DUPLICATED_FRAMES,
+      stageCount: 2,
+    });
+  });
+
   it("keeps every clip length on wan's 4k+1 grid", () => {
     for (const model of ["wan22-t2v-a14b:q5", "wan22-ti2v-5b:fp16"]) {
       const decision = decideChainRouting(

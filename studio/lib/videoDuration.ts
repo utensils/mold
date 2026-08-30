@@ -212,6 +212,12 @@ export function videoFramesForModelSelection(
   const rate = fixedVideoFps(model) ?? model?.default_fps ?? 24;
   const normalizedDefault = clampVideoFrames(fallback, rate, model);
 
+  // Required-source checkpoints are image-to-video models. Selecting one is
+  // a fresh default boundary: carrying a longer duration from the previous
+  // checkpoint can silently enter automatic sequencing instead of the model's
+  // advertised one-generation clip.
+  if (model?.source_image === "required") return normalizedDefault;
+
   if (frames == null || videoFrameGridError(frames, model)) {
     return normalizedDefault;
   }
@@ -267,6 +273,7 @@ export function videoGenerationCount(
       model: model?.name ?? routingRequest.model ?? "",
     },
     model?.family,
+    model,
   );
   return decision.kind === "chain" ? decision.stageCount : 1;
 }
