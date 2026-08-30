@@ -292,16 +292,31 @@ The decode is also _not_ where this family runs out of memory. Its transient is
 bounded to one latent frame at a time by construction, so `1280x704 x 121`
 decodes on a 24 GB card; the denoise is the memory wall.
 
+### When the VAE decode does not fit
+
+The full decode is attempted first. Only an out-of-memory failure falls back to a spatially tiled decode — 256x256 pixel tiles with a quarter-tile overlap and a linearly ramped blend, the same geometry ComfyUI's own `decode_tiled_3d` uses. Wan's decoder already streams the temporal axis one latent frame at a time, so tiling bounds the one thing that was left unbounded: the spatial working set at full output resolution. A render that fits keeps the untiled path, which is faster and free of any seam approximation.
+
 ### FlashAttention on Wan
 
-A `--features cuda,flash-attn` build can route the Wan DiT's self- and cross-attention through candle-flash-attn v2; set `MOLD_ATTN=flash` to opt in (the default is `math` in every build, see [#736](https://github.com/utensils/mold/issues/736)). Measured on an RTX 4090 with the same binary, only the backend varying (`wan22-t2v-a14b:q5`, 53 frames at 832x480):
+A `--features cuda,flash-attn` build routes the Wan DiT's self- and cross-attention through candle-flash-attn v2, and **that is now the default for video families** — an unset `MOLD_ATTN` reaches the Wan DiT as `flash` wherever the kernel is compiled in. `MOLD_ATTN=math` restores the previous arithmetic. Image families keep `math` as their default, so the bytes an archived still renders are unchanged (see [#736](https://github.com/utensils/mold/issues/736) for why that split exists). Measured on an RTX 4090 with the same binary, only the backend varying (`wan22-t2v-a14b:q5`, 53 frames at 832x480):
 
 | Backend | Peak VRAM  | Wall clock |
 | ------- | ---------- | ---------- |
 | `flash` | 21,354 MiB | 75.3 s     |
 | `math`  | 22,250 MiB | 158.4 s    |
 
-So flash is worth **2.1x on speed** and only ~900 MiB on peak. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that among release artifacts only the sm89 (`h3-cuda`) binary compiles `flash-attn` — `MOLD_ATTN=flash` opts in there; on every other artifact this remains a source-build configuration.
+So flash is worth **2.1x on speed** and only ~900 MiB on peak. The speed is why it is the default; the small memory delta is why it is not, on its own, what unlocks longer clips.
+
+Where it _does_ change memory is the estimate. `device::wan_activation_budget_bytes` charges a per-token score matrix of `2 x heads x 512 x 2` bytes — 81,920 B/token at A14B, as much as the whole rest of the block — and FlashAttention materializes none of it. That estimate drives both admission and the block-offload policy, so an estimate blind to the backend parks blocks against a shortfall the running render does not have. The two calibrations are therefore fitted separately, and the flash pair must never inherit math's slope: dropping the score term shrinks the derived sum 44% while the residual the slope stands in for does not, so a shared slope under-estimates by gigabytes and OOMs.
+
+Measured on an RTX 4090 with `wan22-t2v-a14b:q5` at 832x480, before and after the backend-aware estimate:
+
+| Frames | `need_mib` before |  after | blocks parked before |      after |        Wall clock |
+| -----: | ----------------: | -----: | -------------------: | ---------: | ----------------: |
+|     53 |            10,516 |  8,176 |               5 / 40 | **0 / 40** | 193.5 s -> 79.5 s |
+|     81 |            14,624 | 11,290 |          **40 / 40** |    15 / 40 |        -> 111.5 s |
+
+Every parked block is a host round-trip on the critical path of every step, so the 81-frame render was paying full weight streaming for a shortfall that was largely an artifact of pricing the wrong backend. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that among release artifacts only the sm89 (`h3-cuda`) binary compiles `flash-attn` — `MOLD_ATTN=flash` opts in there; on every other artifact this remains a source-build configuration.
 
 At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
 the default there), the image embeds the same `mold:parameters` provenance as
@@ -385,6 +400,12 @@ on the single-expert 5B — where the floor is 53 for A14B (which is what
 mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
   --frames 100 --clip-frames 49
 ```
+
+A Wan engine caches the prompt encoding it produced — the ~4 MB `[1, 512, 4096]` tensor, not the 11.37 GB encoder — so a stage repeating a prompt skips the encoder load and the forward entirely. That covers an auto-chained long video, a re-roll, and a batch child; an authored sequence gives every stage its own prompt and still pays one encoder load per stage.
+
+Retaining the encoder itself across a sequence was built and measured, and then removed: the load is 15.3 s cold but only ~5 s once the file is in the page cache, against a ~90 s stage, and holding it costs 11.37 GB of host RAM for the length of the sequence. Five percent of a stage is not worth that much headroom on the axis where video renders are already tight. `MOLD_KEEP_TE_RAM=1` remains for anyone who wants the trade, and installing a quantized encoder is the better lever — the Q8 GGUF loads in 3.2 s on the GPU.
+
+Measured: a 3-stage 159-frame `wan22-t2v-a14b:q5` sequence at 832x480 renders in 257 s on an RTX 4090.
 
 Authored sequences work through the same `mold.chain.v1` script the LTX
 families use — per-stage prompts, frames, and transitions — with `mold chain

@@ -12,10 +12,19 @@
 //!   warning only exists in a build without the feature).
 //!
 //! Selection is env-driven via `MOLD_ATTN={flash,math}` and cached in a
-//! `OnceLock` so we don't re-read the environment on every block. The
-//! default is `Math` in every build — compiling `flash-attn` makes the kernel
-//! available but never switches it on (#736), so a shipped artifact cannot
-//! silently change seed reproducibility.
+//! `OnceLock` so we don't re-read the environment on every block. An explicit
+//! `MOLD_ATTN` always wins; with nothing set, the default is **per family**
+//! ([`AttentionPolicy`]):
+//!
+//! * [`AttentionPolicy::Image`] — `Math`, in every build. Compiling
+//!   `flash-attn` makes the kernel available but never switches it on for a
+//!   still (#736), so a shipped artifact cannot silently change the bytes an
+//!   archived image seed renders.
+//! * [`AttentionPolicy::Video`] — `Flash` wherever the kernel is compiled in.
+//!   A clip is not a seed-archival artifact the way a still is, and FA2 is
+//!   worth a measured **2.1x** on the Wan DiT (158.4 s -> 75.3 s,
+//!   `wan22-t2v-a14b:q5` 53f at 832x480 on an RTX 4090; see
+//!   `website/models/wan.md`). `MOLD_ATTN=math` is the escape hatch.
 //!
 //! [`attention_with_bias`] adds an optional additive `[B, H, Q, K]` bias for
 //! callers that must mask keys (Qwen-Image's joint stream when the two batched
@@ -34,6 +43,24 @@ pub enum AttentionBackend {
     Math,
     /// `candle-flash-attn` (flash-attention v2). CUDA + fp16/bf16 only.
     Flash,
+}
+
+/// Which family is asking, and therefore which default applies when the
+/// operator has expressed no preference through `MOLD_ATTN`.
+///
+/// This exists because the seed-reproducibility argument that made `Math` the
+/// universal default (#736) is a statement about **stills**, not about
+/// arithmetic. An archived image seed is expected to re-render the same bytes
+/// forever; a video clip is re-rendered for its content, and paying 2.1x wall
+/// clock to keep a byte-identical 81-frame render nobody diffs is the wrong
+/// trade. Mirrors the family-scoped compute-dtype precedent in
+/// `wan::backend::compute_dtype` and `ltx2::backend::compute_dtype`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionPolicy {
+    /// Stills. Always `Math`, in every build.
+    Image,
+    /// Video DiTs (Wan, LTX-2). `Flash` wherever the kernel is compiled in.
+    Video,
 }
 
 /// Process-frozen override for math-attention query chunking. `Auto` retains
@@ -56,19 +83,33 @@ pub enum AttentionChunkPolicy {
 static FLASH_FALLBACK_WARNED: OnceLock<()> = OnceLock::new();
 
 impl AttentionBackend {
-    /// Resolve the backend once, cache forever.
+    /// Resolve the backend for a still. Equivalent to
+    /// `resolve_for(AttentionPolicy::Image)`; retained because most call sites
+    /// are image families and never needed to name a policy.
+    pub fn resolve() -> AttentionBackend {
+        Self::resolve_for(AttentionPolicy::Image)
+    }
+
+    /// Resolve the backend for `policy`, honouring `MOLD_ATTN` above it.
     ///
     /// Precedence:
-    /// 1. `MOLD_ATTN` env (`flash` / `math`, case-insensitive).
-    /// 2. Otherwise → `Math`, in every build. The `flash-attn` cargo feature
-    ///    only makes `flash` *available*; it never changes the default.
-    pub fn resolve() -> AttentionBackend {
-        static CACHED: OnceLock<AttentionBackend> = OnceLock::new();
-        *CACHED.get_or_init(|| {
-            let backend = parse_backend_env(crate::runtime_env::value("MOLD_ATTN").as_deref());
-            tracing::info!(backend = ?backend, "attention backend selected");
-            backend
-        })
+    /// 1. `MOLD_ATTN` env (`flash` / `math`, case-insensitive) — applies to
+    ///    every family, so one variable still turns the whole process back to
+    ///    math for a bisect.
+    /// 2. Otherwise the family default: `Math` for [`AttentionPolicy::Image`],
+    ///    `Flash` for [`AttentionPolicy::Video`] wherever the kernel is
+    ///    compiled in.
+    pub fn resolve_for(policy: AttentionPolicy) -> AttentionBackend {
+        Self::resolve_for_request(requested_backend_env(), policy)
+    }
+
+    /// Pure composition behind [`Self::resolve_for`], so the precedence is
+    /// testable without poisoning the process-frozen `MOLD_ATTN` cache.
+    pub fn resolve_for_request(
+        requested: Option<AttentionBackend>,
+        policy: AttentionPolicy,
+    ) -> AttentionBackend {
+        requested.unwrap_or_else(|| default_backend_for(policy))
     }
 
     /// Whether the FlashAttention kernels are compiled into this binary.
@@ -76,14 +117,25 @@ impl AttentionBackend {
         cfg!(feature = "flash-attn")
     }
 
-    /// The backend that will actually execute for an eligible tensor.
+    /// The backend that will actually execute for an eligible still.
+    pub fn resolve_effective() -> AttentionBackend {
+        Self::resolve_effective_for(AttentionPolicy::Image)
+    }
+
+    /// The backend that will actually execute for an eligible tensor under
+    /// `policy`.
     ///
     /// A resolved `Flash` in a build without the kernels downgrades to
     /// `Math` — the dispatcher warns once and falls back — so any memory
     /// estimate keyed on the requested backend would under-charge the math
-    /// score tile. Admission must read this, never `resolve()` alone.
-    pub fn resolve_effective() -> AttentionBackend {
-        Self::effective(Self::resolve())
+    /// score tile. Admission must read this, never `resolve_for()` alone.
+    ///
+    /// This is what `mold_inference::device`'s wan activation model consults:
+    /// the math score matrix is the dominant per-token term there and flash
+    /// materializes none of it, so an estimate blind to the backend prices a
+    /// render that is not the one running.
+    pub fn resolve_effective_for(policy: AttentionPolicy) -> AttentionBackend {
+        Self::effective(Self::resolve_for(policy))
     }
 
     /// Pure half of [`Self::resolve_effective`], testable without the env
@@ -96,31 +148,71 @@ impl AttentionBackend {
     }
 }
 
-/// Pure function used by `resolve()` and unit tests so we can exercise the env
-/// parser without poisoning the global `OnceLock`.
-fn parse_backend_env(raw: Option<&str>) -> AttentionBackend {
-    if let Some(value) = raw {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "flash" => return AttentionBackend::Flash,
-            "math" => return AttentionBackend::Math,
-            // `sdpa` was removed in the Tier 1 review followup — it was a
-            // no-op alias for `math` with no signal to the user. Anyone
-            // still setting it gets the math path with a one-time warning.
-            "sdpa" => {
-                tracing::warn!(
-                    "MOLD_ATTN=sdpa was removed (it was a no-op alias for math); using math"
-                );
-                return AttentionBackend::Math;
-            }
-            other if !other.is_empty() => {
-                tracing::warn!(
-                    "MOLD_ATTN={other} is not one of flash/math; falling back to default"
-                );
-            }
-            _ => {}
-        }
+/// Parse `MOLD_ATTN` once per process.
+///
+/// `None` means the operator expressed no preference — which is exactly what
+/// lets the per-family default apply. Caching the *request* rather than a
+/// resolved backend is what makes one `OnceLock` serve both policies.
+fn requested_backend_env() -> Option<AttentionBackend> {
+    static CACHED: OnceLock<Option<AttentionBackend>> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let requested = parse_backend_env(crate::runtime_env::value("MOLD_ATTN").as_deref());
+        tracing::info!(
+            requested = ?requested,
+            image_default = ?default_backend_for(AttentionPolicy::Image),
+            video_default = ?default_backend_for(AttentionPolicy::Video),
+            "attention backend policy resolved"
+        );
+        requested
+    })
+}
+
+/// The attention policy a manifest family slug renders under.
+///
+/// The families listed here are exactly the ones whose call sites pass
+/// `AttentionPolicy::Video` — the Wan DiT and LTX-2's BF16 dispatch. Anything
+/// else, known or not, keeps `Image`, which is the conservative direction: a
+/// family that renders under `Math` but is frozen as `Math` is consistent,
+/// while the reverse is not.
+///
+/// This exists because `FrozenEngineConfig` records the backend a plan will
+/// execute under, and its fingerprint is what execution-plan equivalence is
+/// built from. Freezing the image answer for a video render would describe
+/// different arithmetic from the one the renderer runs.
+pub fn policy_for_family(family: &str) -> AttentionPolicy {
+    match family {
+        "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => AttentionPolicy::Video,
+        _ => AttentionPolicy::Image,
     }
-    default_backend()
+}
+
+/// Pure function used by [`requested_backend_env`] and unit tests so we can
+/// exercise the env parser without poisoning the global `OnceLock`.
+///
+/// Returns the *request*, not a resolved backend: `None` is "the operator said
+/// nothing", which is a different answer from "the operator asked for math"
+/// and is what the per-family default keys on. An unparseable value is also
+/// `None` — a typo must not silently pin a family to the other backend.
+fn parse_backend_env(raw: Option<&str>) -> Option<AttentionBackend> {
+    let value = raw?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "flash" => Some(AttentionBackend::Flash),
+        "math" => Some(AttentionBackend::Math),
+        // `sdpa` was removed in the Tier 1 review followup — it was a
+        // no-op alias for `math` with no signal to the user. Anyone
+        // still setting it gets the math path with a one-time warning.
+        "sdpa" => {
+            tracing::warn!(
+                "MOLD_ATTN=sdpa was removed (it was a no-op alias for math); using math"
+            );
+            Some(AttentionBackend::Math)
+        }
+        other if !other.is_empty() => {
+            tracing::warn!("MOLD_ATTN={other} is not one of flash/math; using the family default");
+            None
+        }
+        _ => None,
+    }
 }
 
 pub fn resolved_chunk_policy() -> AttentionChunkPolicy {
@@ -170,18 +262,29 @@ pub(crate) fn flash_fallback_warned() -> bool {
     FLASH_FALLBACK_WARNED.get().is_some()
 }
 
-/// The backend used when `MOLD_ATTN` is unset or unparseable.
+/// The backend used when `MOLD_ATTN` is unset or unparseable, per family.
 ///
-/// Always `Math`, in every build. Compiling the `flash-attn` feature makes
-/// the FlashAttention kernel *available*; it does not make it the default
-/// (#736). FA2 is mathematically equivalent to the math path but not
-/// bit-identical (fp32 online-softmax accumulator versus an input-dtype
+/// **Image: always `Math`, in every build.** Compiling the `flash-attn`
+/// feature makes the FlashAttention kernel *available*; it does not make it
+/// the default (#736). FA2 is mathematically equivalent to the math path but
+/// not bit-identical (fp32 online-softmax accumulator versus an input-dtype
 /// reduce), so a build-time default would change the image a CUDA user gets
 /// for a given seed based on which artifact they downloaded — against the
 /// cross-backend seed determinism the CPU-noise path exists to preserve.
-/// `MOLD_ATTN=flash` is the one opt-in.
-fn default_backend() -> AttentionBackend {
-    AttentionBackend::Math
+///
+/// **Video: `Flash` wherever the kernel is compiled in.** The argument above
+/// is about archived stills; a clip is re-rendered for its content, and the
+/// math path costs a measured 2.1x on the Wan DiT. The `flash_compiled()`
+/// guard is load-bearing rather than cosmetic: without it, a build lacking the
+/// kernel would take the `flash_attention_eligible` fallback on every block of
+/// every step and fire the "requested but not compiled" warning for a request
+/// nobody made.
+fn default_backend_for(policy: AttentionPolicy) -> AttentionBackend {
+    match policy {
+        AttentionPolicy::Image => AttentionBackend::Math,
+        AttentionPolicy::Video if AttentionBackend::flash_compiled() => AttentionBackend::Flash,
+        AttentionPolicy::Video => AttentionBackend::Math,
+    }
 }
 
 /// Scaled dot-product attention.
@@ -193,7 +296,22 @@ fn default_backend() -> AttentionBackend {
 /// than recomputing) lets callers reuse a value they already have, and keeps
 /// the test surface deterministic.
 pub fn attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
-    match AttentionBackend::resolve() {
+    attention_for(AttentionPolicy::Image, q, k, v, scale)
+}
+
+/// [`attention`] under an explicit family policy.
+///
+/// Video DiTs call this so an unset `MOLD_ATTN` reaches them as `Flash` rather
+/// than the image families' `Math`. The dispatch below is otherwise identical,
+/// including the silent math fallback for an ineligible tensor.
+pub fn attention_for(
+    policy: AttentionPolicy,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+) -> Result<Tensor> {
+    match AttentionBackend::resolve_for(policy) {
         AttentionBackend::Flash => flash_attention(q, k, v, scale),
         AttentionBackend::Math => math_attention(q, k, v, scale),
     }
@@ -507,8 +625,22 @@ const fn flash_compiled() -> bool {
 /// build that asked for flash still runs math for a CPU tensor, an F32
 /// tensor, or a head dim the kernel refuses.
 pub fn effective_backend(device: &Device, dtype: DType, head_dim: usize) -> AttentionBackend {
+    effective_backend_under(AttentionPolicy::Image, device, dtype, head_dim)
+}
+
+/// [`effective_backend`] under an explicit family policy.
+///
+/// The wan/LTX-2 provenance lines and the wan activation estimate both read
+/// this, so "which arithmetic rendered this print" and "how much memory did we
+/// price" cannot disagree with what actually ran.
+pub fn effective_backend_under(
+    policy: AttentionPolicy,
+    device: &Device,
+    dtype: DType,
+    head_dim: usize,
+) -> AttentionBackend {
     effective_backend_for(
-        AttentionBackend::resolve(),
+        AttentionBackend::resolve_for(policy),
         flash_compiled(),
         flash_eligible_for(device, dtype, head_dim),
     )
@@ -885,13 +1017,23 @@ mod tests {
     #[test]
     fn test_resolve_backend_from_env() {
         // OnceLock-free parser: covers the env contract exhaustively.
-        assert_eq!(parse_backend_env(Some("flash")), AttentionBackend::Flash);
-        assert_eq!(parse_backend_env(Some("FLASH")), AttentionBackend::Flash);
-        assert_eq!(parse_backend_env(Some("math")), AttentionBackend::Math);
-        // Unknown values warn and fall back.
-        assert_eq!(parse_backend_env(Some("xformers")), default_backend());
-        assert_eq!(parse_backend_env(Some("")), default_backend());
-        assert_eq!(parse_backend_env(None), default_backend());
+        assert_eq!(
+            parse_backend_env(Some("flash")),
+            Some(AttentionBackend::Flash)
+        );
+        assert_eq!(
+            parse_backend_env(Some("FLASH")),
+            Some(AttentionBackend::Flash)
+        );
+        assert_eq!(
+            parse_backend_env(Some("math")),
+            Some(AttentionBackend::Math)
+        );
+        // Unknown values warn and express no preference, so the family default
+        // applies rather than a typo pinning the process to one backend.
+        assert_eq!(parse_backend_env(Some("xformers")), None);
+        assert_eq!(parse_backend_env(Some("")), None);
+        assert_eq!(parse_backend_env(None), None);
     }
 
     /// `Sdpa` is gone from the public enum (T1.5 review followup): it was a
@@ -901,15 +1043,24 @@ mod tests {
     /// `AttentionBackend::Sdpa` variant exists for callers to match on.
     #[test]
     fn resolve_returns_only_known_backends() {
-        assert_eq!(parse_backend_env(Some("sdpa")), AttentionBackend::Math);
-        assert_eq!(parse_backend_env(Some("SDPA")), AttentionBackend::Math);
-        assert_eq!(parse_backend_env(Some(" sdpa ")), AttentionBackend::Math);
+        assert_eq!(
+            parse_backend_env(Some("sdpa")),
+            Some(AttentionBackend::Math)
+        );
+        assert_eq!(
+            parse_backend_env(Some("SDPA")),
+            Some(AttentionBackend::Math)
+        );
+        assert_eq!(
+            parse_backend_env(Some(" sdpa ")),
+            Some(AttentionBackend::Math)
+        );
         // Spot-check that the supported set is the documented two:
         for value in ["flash", "math"] {
             let backend = parse_backend_env(Some(value));
             assert!(matches!(
                 backend,
-                AttentionBackend::Flash | AttentionBackend::Math
+                Some(AttentionBackend::Flash) | Some(AttentionBackend::Math)
             ));
         }
     }
@@ -962,10 +1113,89 @@ mod tests {
     /// must not silently change the image every CUDA user gets for a seed.
     #[test]
     fn default_backend_is_math_regardless_of_feature() {
-        assert_eq!(default_backend(), AttentionBackend::Math);
-        assert_eq!(parse_backend_env(None), AttentionBackend::Math);
-        assert_eq!(parse_backend_env(Some("")), AttentionBackend::Math);
-        assert_eq!(parse_backend_env(Some("xformers")), AttentionBackend::Math);
+        assert_eq!(
+            default_backend_for(AttentionPolicy::Image),
+            AttentionBackend::Math
+        );
+        // An absent or unparseable request must resolve to the *image* default
+        // for an image caller, in every build.
+        assert_eq!(
+            AttentionBackend::resolve_for_request(None, AttentionPolicy::Image),
+            AttentionBackend::Math
+        );
+        assert_eq!(
+            AttentionBackend::resolve_for_request(
+                parse_backend_env(Some("xformers")),
+                AttentionPolicy::Image
+            ),
+            AttentionBackend::Math
+        );
+    }
+
+    /// The video default is the whole point of `AttentionPolicy`: with the
+    /// kernel compiled in, an unset `MOLD_ATTN` reaches a video DiT as
+    /// `Flash`. Without the kernel it must stay `Math` — not a `Flash` that
+    /// falls back per block and warns about a request nobody made.
+    /// The frozen plan and the renderer must agree on which arithmetic runs,
+    /// so the family mapping has to cover exactly the call sites that pass
+    /// `Video` — no more, and no less.
+    #[test]
+    fn the_family_policy_covers_the_video_call_sites() {
+        for family in ["wan", "ltx2", "ltx-2", "ltx-2.3"] {
+            assert_eq!(
+                policy_for_family(family),
+                AttentionPolicy::Video,
+                "{family} renders through the video dispatch"
+            );
+        }
+        for family in [
+            "flux",
+            "flux2",
+            "sdxl",
+            "sd15",
+            "sd3",
+            "qwen-image",
+            "z-image",
+            "ltx-video",
+            "unknown",
+        ] {
+            assert_eq!(
+                policy_for_family(family),
+                AttentionPolicy::Image,
+                "{family} must keep the image default"
+            );
+        }
+    }
+
+    #[test]
+    fn video_default_is_flash_exactly_when_the_kernel_is_compiled() {
+        let expected = if AttentionBackend::flash_compiled() {
+            AttentionBackend::Flash
+        } else {
+            AttentionBackend::Math
+        };
+        assert_eq!(default_backend_for(AttentionPolicy::Video), expected);
+        assert_eq!(
+            AttentionBackend::resolve_for_request(None, AttentionPolicy::Video),
+            expected
+        );
+    }
+
+    /// An explicit `MOLD_ATTN` outranks the family default in both
+    /// directions, so one variable still takes the whole process back to math
+    /// for a bisect — and can still force flash on a still.
+    #[test]
+    fn an_explicit_request_outranks_the_family_default() {
+        for policy in [AttentionPolicy::Image, AttentionPolicy::Video] {
+            assert_eq!(
+                AttentionBackend::resolve_for_request(Some(AttentionBackend::Math), policy),
+                AttentionBackend::Math
+            );
+            assert_eq!(
+                AttentionBackend::resolve_for_request(Some(AttentionBackend::Flash), policy),
+                AttentionBackend::Flash
+            );
+        }
     }
 
     /// The provenance answer is the conjunction of request, build, and
@@ -983,23 +1213,35 @@ mod tests {
                 assert_eq!(effective_backend_for(Math, compiled, eligible), Math);
             }
         }
-        // A CPU tensor is never flash-eligible, whatever the build.
+        // A CPU tensor is never flash-eligible, whatever the build or policy —
+        // so even a video caller reports math there.
         assert_eq!(
             effective_backend(&Device::Cpu, DType::BF16, 128),
             Math,
             "CPU must report the math backend"
         );
+        assert_eq!(
+            effective_backend_under(AttentionPolicy::Video, &Device::Cpu, DType::BF16, 128),
+            Math,
+            "a video caller on CPU must still report math"
+        );
         assert!(!flash_eligible_for(&Device::Cpu, DType::BF16, 128));
         assert!(!flash_eligible_for(&Device::Cpu, DType::F32, 128));
-        // With the default policy the answer is math on every device.
-        assert_eq!(parse_backend_env(None), Math);
+        // No request expressed.
+        assert_eq!(parse_backend_env(None), None);
     }
 
     /// Opting in still works in both builds: the parser returns `Flash`, and
     /// the dispatcher (not the parser) decides whether the kernel exists.
     #[test]
     fn flash_is_opt_in_via_env() {
-        assert_eq!(parse_backend_env(Some("flash")), AttentionBackend::Flash);
-        assert_eq!(parse_backend_env(Some(" Flash ")), AttentionBackend::Flash);
+        assert_eq!(
+            parse_backend_env(Some("flash")),
+            Some(AttentionBackend::Flash)
+        );
+        assert_eq!(
+            parse_backend_env(Some(" Flash ")),
+            Some(AttentionBackend::Flash)
+        );
     }
 }

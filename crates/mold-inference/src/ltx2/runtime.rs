@@ -1260,7 +1260,12 @@ fn ltx2_attention_path(
     if !device.is_cuda() || super::model::video_transformer::ltx2_attention_f32_forced() {
         return provenance::ATTENTION_PATH_F32_CHUNKED;
     }
-    match crate::attention::effective_backend(device, dtype, head_dim) {
+    match crate::attention::effective_backend_under(
+        crate::attention::AttentionPolicy::Video,
+        device,
+        dtype,
+        head_dim,
+    ) {
         crate::attention::AttentionBackend::Flash => provenance::ATTENTION_PATH_BF16_FLASH,
         crate::attention::AttentionBackend::Math => provenance::ATTENTION_PATH_BF16_MATH,
     }
@@ -9796,8 +9801,12 @@ mod tests {
         if let Ok(device) = candle_core::Device::new_cuda(0) {
             let expected = if super::super::model::video_transformer::ltx2_attention_f32_forced() {
                 provenance::ATTENTION_PATH_F32_CHUNKED
-            } else if crate::attention::effective_backend(&device, DType::BF16, 128)
-                == crate::attention::AttentionBackend::Flash
+            } else if crate::attention::effective_backend_under(
+                crate::attention::AttentionPolicy::Video,
+                &device,
+                DType::BF16,
+                128,
+            ) == crate::attention::AttentionBackend::Flash
             {
                 provenance::ATTENTION_PATH_BF16_FLASH
             } else {

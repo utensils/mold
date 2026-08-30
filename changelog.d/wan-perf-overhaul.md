@@ -1,0 +1,64 @@
+- **Video families now default to FlashAttention.** Wan and LTX-2 resolve their
+  attention backend through a new per-family policy: with the FlashAttention v2
+  kernel compiled in, an unset `MOLD_ATTN` reaches a video DiT as `flash`
+  instead of the hand-rolled math path. Measured **2.1x** on the Wan DiT
+  (158.4 s to 75.3 s, `wan22-t2v-a14b:q5` 53 frames at 832x480 on an RTX 4090).
+  Image families are unchanged and still default to `math`, so an archived
+  still renders the same bytes it always did; `MOLD_ATTN=math` restores the old
+  arithmetic everywhere.
+- **Wan admission and block offload now price the attention backend that
+  actually runs.** The activation model charged a math-attention score matrix
+  — 44% of the per-token budget at A14B — on every render, including one using
+  FlashAttention, which materializes no such tile. Since the engine's
+  block-offload policy reads the same estimate, an 81-frame 832x480 render was
+  parking all 40 transformer blocks against a shortfall it did not have. The
+  math and flash calibrations are fitted separately, because the residual the
+  slope stands in for does not shrink when attention stops writing its tile.
+- **A Wan render that repeats a prompt no longer re-encodes it.** The engine
+  keeps the ~4 MB prompt encoding it produced and reuses it when the prompt,
+  negative, CFG arm, encoder weights, device, and dtype all match, skipping both
+  the 11.37 GB UMT5-XXL load and the forward. That covers an auto-chained long
+  video, a re-roll, and a batch child; an authored sequence gives every stage
+  its own prompt and still pays one encoder load per stage. This caches the
+  encoder's output, not the encoder, which is still dropped after use.
+- **A chain stage that runs out of GPU memory now says so.** Chain stages
+  bypassed every piece of CUDA error handling ordinary generations have, and
+  surfaced a bare `DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")` with
+  no shape advice, no device synchronize, and no reduced grant for the next
+  attempt. They now classify the failure exactly as `process_job` does.
+- **Chain stages no longer double-charge host memory on Metal.** The owner-work
+  candidate charged the plan's raw `predicted_host_increment_bytes` rather than
+  going through `admission_host_demand_bytes`, so on Metal the host claim was
+  counted both against the unified device gate and again on the host ledger.
+  It now uses the same accessor every generation path does. It deliberately does
+  NOT take the warm-resident credit: a matching execution fingerprint proves the
+  engine is warm, not its text encoder, and Wan drops UMT5 after every render.
+- **Cancelling a render no longer makes its shape look too big for the card.**
+  A stopped generation or chain stage was recorded as a memory *failure*, which
+  wrote the cancel-time VRAM high-water into that shape's estimate bucket; while
+  the bucket had no successful sample, every later attempt at the same shape was
+  then planned against that floor. Cancelling a slow sequence and re-queueing it
+  is exactly how a render the card can hold came back as "not enough memory".
+  Cancellations are now recorded as `invalidated` — an observation, not evidence.
+- **A chain stage blocked on GPU memory now gets an answer instead of hanging.**
+  An `InsufficientVram` from the plan resolver was silently discarded for owner
+  work, so a blocked stage contributed no candidates, reported no reason, never
+  asked mold's own idle model cache for the missing bytes, and was retried
+  forever — indistinguishable from a hang, with the earlier stages of the
+  sequence already rendered. Blocked owner work now records a typed memory
+  block, triggers the same idle-scheduler cache reclaim queued generations get,
+  and is bounded with the post-eviction numbers if the shortfall survives.
+- **A Wan VAE decode that runs out of memory now tiles instead of failing.**
+  Wan was the only family with no decode fallback at all — every other engine
+  goes through `vae_tiling`, while an exhausted Wan decode failed the render
+  after the whole denoise had already been paid for. The full decode is still
+  attempted first, and only an OOM falls back to a spatially tiled decode with
+  ComfyUI's own geometry: 256x256 pixel tiles, a quarter-tile overlap, and a
+  linearly ramped blend mask.
+- **The Wan DiT's RMS norms use candle's fused kernel, which is also the
+  faithful one.** The hand-rolled version kept F32 across the weight multiply;
+  upstream is `self._norm(x.float()).type_as(x) * self.weight`
+  (`Wan2.2/wan/modules/model.py:82`), which casts back to the compute dtype
+  first — exactly what `candle_nn::ops::rms_norm` does. It also stops
+  materializing four full-size F32 temporaries per norm, per block, per step
+  (~671 MB apiece at A14B over an 81-frame clip).

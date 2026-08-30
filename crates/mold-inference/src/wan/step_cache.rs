@@ -141,9 +141,44 @@ pub(crate) fn parse_threshold(raw: &str) -> Result<Option<f64>> {
 }
 
 /// Resolve the policy from the process environment.
+///
+/// **Unset means `auto`, not `off`.** The two guards in
+/// [`WanStepCachePolicy::resolve`] are what make that safe: the configurations
+/// where reuse cannot help — a distilled adapter, or a schedule under
+/// [`MIN_CACHEABLE_STEPS`] — refuse themselves and say so, so the default only
+/// ever engages on the long non-distilled schedules it was measured on
+/// (`wan22-t2v-a14b:q8`, 33f at 832x480, 20 steps: 605.6 s -> 327.4 s, a
+/// **1.85x** speedup with no visible artifacting).
+///
+/// Defaulting to `off` made the feature effectively unreachable: it shipped,
+/// was measured, and then every production render paid full price because
+/// nothing set the variable. `MOLD_WAN_STEP_CACHE=off` is the escape hatch.
 pub(crate) fn requested_threshold() -> Result<Option<f64>> {
-    match crate::runtime_env::value("MOLD_WAN_STEP_CACHE") {
-        Some(raw) => parse_threshold(&raw),
+    threshold_for_env(crate::runtime_env::value("MOLD_WAN_STEP_CACHE").as_deref())
+}
+
+/// Pure half of [`requested_threshold`], so the default is testable without
+/// touching the process environment.
+pub(crate) fn threshold_for_env(raw: Option<&str>) -> Result<Option<f64>> {
+    match raw {
+        Some(raw) => parse_threshold(raw),
+        // Back to `off` until admission charges what the cache holds.
+        //
+        // The 1.85x is real and the guards are right, but engaging the cache
+        // allocates two persistent token-shaped tensors PER TRAJECTORY that no
+        // estimate accounts for — `[1, T, dim]` each, so ~447 MB per
+        // trajectory at A14B 53f/832x480 and ~894 MB once CFG makes it two.
+        // `wan_calibrated_activation_bytes` does not know about them, and the
+        // block-offload policy reads that same figure, so a near-capacity plan
+        // would park too few blocks and OOM on memory nothing told it about.
+        //
+        // That is exactly the defect this branch exists to remove, so the
+        // default cannot land before the charge does. Charging it is
+        // straightforward and needs no calibration — the tensors are an exact,
+        // nameable allocation like the attention score tile, not a fitted
+        // residual — but the budget function would have to learn the step
+        // count and whether a distill adapter is active, which is what decides
+        // whether the cache engages at all.
         None => Ok(None),
     }
 }
@@ -240,6 +275,61 @@ impl WanStepCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unset `MOLD_WAN_STEP_CACHE` stays `off` until admission charges the
+    /// two persistent token-shaped tensors per trajectory that engaging the
+    /// cache allocates (~894 MB with CFG at A14B 53f/832x480). Turning it on
+    /// before then lets the block-offload policy park too few blocks against a
+    /// budget that does not know about them.
+    #[test]
+    fn an_unset_env_stays_off_until_the_cache_is_charged() {
+        assert_eq!(threshold_for_env(None).expect("unset is valid"), None);
+    }
+
+    /// `off` is still the escape hatch, and still means off.
+    #[test]
+    fn off_still_disables() {
+        for raw in ["off", "OFF", "0", "", "  "] {
+            assert_eq!(
+                threshold_for_env(Some(raw)).expect("valid"),
+                None,
+                "{raw:?} must disable the cache"
+            );
+        }
+    }
+
+    /// An explicit threshold still wins over the new default.
+    #[test]
+    fn an_explicit_threshold_outranks_the_default() {
+        assert_eq!(threshold_for_env(Some("0.25")).expect("valid"), Some(0.25));
+        assert_eq!(
+            threshold_for_env(Some("auto")).expect("valid"),
+            Some(AUTO_THRESHOLD)
+        );
+    }
+
+    /// `auto` must never engage where the measurement says it cannot help: a
+    /// distilled adapter, or a schedule under `MIN_CACHEABLE_STEPS`. That
+    /// refusal is what will make a default safe once the allocation is
+    /// charged.
+    #[test]
+    fn auto_refuses_itself_on_distilled_and_short_schedules() {
+        let requested = threshold_for_env(Some("auto")).expect("auto is valid");
+
+        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 20, true);
+        assert_eq!(policy, WanStepCachePolicy::Off);
+        assert_eq!(refusal, Some(WanStepCacheRefusal::Distilled));
+
+        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 4, false);
+        assert_eq!(policy, WanStepCachePolicy::Off);
+        assert_eq!(refusal, Some(WanStepCacheRefusal::TooFewSteps));
+
+        // ...and does engage on the shape it was measured on.
+        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 20, false);
+        assert_eq!(policy, WanStepCachePolicy::Threshold(AUTO_THRESHOLD));
+        assert_eq!(refusal, None);
+    }
+
     use candle_core::{DType, Device};
 
     #[test]

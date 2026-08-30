@@ -98,8 +98,9 @@ impl FrozenEngineConfig {
     pub fn resolve(model_name: &str, config: &Config) -> Self {
         let model_cfg = config.resolved_model_config(model_name);
         let runtime_environment = crate::runtime_env::snapshot();
+        let family = resolve_family(model_name, config);
         Self {
-            family: resolve_family(model_name, config),
+            family: family.clone(),
             artifact_root: config.resolved_models_dir(),
             is_schnell: model_cfg.is_schnell,
             is_turbo: model_cfg.is_turbo,
@@ -137,7 +138,13 @@ impl FrozenEngineConfig {
             identity_assets: None,
             h3_factory_authority: None,
             runtime_environment,
-            attention_backend: crate::attention::AttentionBackend::resolve(),
+            // Resolved from the FAMILY, not the image default: a video
+            // render executes under `AttentionPolicy::Video`, and freezing
+            // `Math` here would make the plan and its equivalence fingerprint
+            // describe different arithmetic from the renderer.
+            attention_backend: crate::attention::AttentionBackend::resolve_for(
+                crate::attention::policy_for_family(&family),
+            ),
             attention_chunk: crate::attention::resolved_chunk_policy(),
             vae_tiling: crate::vae_tiling::resolve_mode(),
             vae_dtype: crate::device::resolved_vae_dtype_policy(),
@@ -550,7 +557,11 @@ where
             Some(&frozen.family),
         )?;
     }
-    let current_attention = crate::attention::AttentionBackend::resolve();
+    // Compared against the SAME family policy the freeze used, or every video
+    // plan would look like drift the moment it was frozen.
+    let current_attention = crate::attention::AttentionBackend::resolve_for(
+        crate::attention::policy_for_family(&frozen.family),
+    );
     let current_chunk = crate::attention::resolved_chunk_policy();
     let current_vae_tiling = crate::vae_tiling::resolve_mode();
     let current_vae_dtype = crate::device::resolved_vae_dtype_policy();

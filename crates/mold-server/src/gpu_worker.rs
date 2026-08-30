@@ -20,6 +20,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 thread_local! {
+    /// Whether the generation that just ran on this lease stopped because
+    /// someone asked it to.
+    ///
+    /// It has to be recorded HERE, where the failure is classified, rather
+    /// than read back from the job registry afterwards: `GenerationCleanup` is
+    /// an RAII guard that removes the registry entry, and it drops before
+    /// `process_job` returns. A `cancel_requested` lookup in the caller is
+    /// therefore always false, which silently turned every cancelled render
+    /// back into an `EstimateOutcome::Failure` — the exact memory-floor ratchet
+    /// the `cancelled` flag exists to prevent.
+    static LEASE_CANCELLED: Cell<bool> = const { Cell::new(false) };
     /// Activation time accumulated by model-ready calls on one GPU owner
     /// thread during the current lease.
     static LEASE_LOAD_MS: Cell<u64> = const { Cell::new(0) };
@@ -53,6 +64,14 @@ fn add_lease_load_ms(elapsed: Duration) {
         .unwrap_or(u64::MAX)
         .max(1);
     LEASE_LOAD_MS.set(LEASE_LOAD_MS.get().saturating_add(millis));
+}
+
+/// Take and clear this lease's cancellation flag.
+///
+/// Reset on read so the next generation on this owner thread starts clean —
+/// the same discipline `take_lease_load_ms` follows.
+fn take_lease_cancelled() -> bool {
+    LEASE_CANCELLED.with(|flag| flag.replace(false))
 }
 
 fn take_lease_load_ms() -> Option<u64> {
@@ -396,6 +415,7 @@ fn run_cpu_utility_owner(
             owner_epoch,
             worker_generation: generation,
             successful: matches!(outcome, Ok(true)),
+            cancelled: false,
             phase_timings,
             completion: None,
         });
@@ -763,6 +783,7 @@ fn run_gpu_owner_loop(
         match outcome {
             Ok(OwnerProcessOutcome::Completed {
                 successful,
+                cancelled,
                 chain_result,
             }) => {
                 worker.release_in_flight();
@@ -783,6 +804,7 @@ fn run_gpu_owner_loop(
                     successful: successful
                         && !worker.poisoned.load(Ordering::SeqCst)
                         && !worker.fatal_cuda_error.load(Ordering::SeqCst),
+                    cancelled,
                     phase_timings,
                     completion: completion.map(Box::new),
                 });
@@ -823,6 +845,7 @@ fn run_gpu_owner_loop(
                     owner_epoch: worker.owner_epoch,
                     worker_generation: generation,
                     successful: false,
+                    cancelled: false,
                     phase_timings,
                     completion: completion.map(Box::new),
                 });
@@ -1109,6 +1132,10 @@ impl Drop for DeferredOwnerCompletion {
 enum OwnerProcessOutcome {
     Completed {
         successful: bool,
+        /// The work stopped because it was asked to, not because it failed.
+        /// Kept separate from `successful` so the scheduler can record it as
+        /// `EstimateOutcome::Invalidated` rather than memory evidence.
+        cancelled: bool,
         chain_result: Option<Result<crate::chain_job_runner::StageExecution, String>>,
     },
     PlanInvalidated {
@@ -1168,6 +1195,7 @@ fn process_owner_work(
         }
         return OwnerProcessOutcome::Completed {
             successful: false,
+            cancelled: false,
             chain_result,
         };
     }
@@ -1258,6 +1286,7 @@ fn process_owner_work(
             let chain_result = Some(Err(error));
             return OwnerProcessOutcome::Completed {
                 successful: false,
+                cancelled: false,
                 chain_result,
             };
         }
@@ -1271,6 +1300,7 @@ fn process_owner_work(
                 });
                 return OwnerProcessOutcome::Completed {
                     successful,
+                    cancelled: false,
                     chain_result: None,
                 };
             }
@@ -1281,8 +1311,14 @@ fn process_owner_work(
                 current_worker_generation,
                 h3_attempt,
             );
+            // Read from the lease flag, NOT from the job registry: the
+            // registry entry is gone by now (`GenerationCleanup` drops inside
+            // `process_job`), so asking it here always answered false. See
+            // `LEASE_CANCELLED`.
+            let cancelled = !successful && take_lease_cancelled();
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled,
                 chain_result: None,
             }
         }
@@ -1296,8 +1332,17 @@ fn process_owner_work(
                     ..
                 })
             );
+            // A stage someone stopped is not a stage that did not fit.
+            let cancelled = matches!(
+                &result,
+                Ok(crate::chain_job_runner::StageExecution {
+                    outcome: crate::chain_job_runner::StageRenderOutcome::Cancelled,
+                    ..
+                })
+            );
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled,
                 chain_result: Some(result),
             }
         }
@@ -1306,6 +1351,7 @@ fn process_owner_work(
             let successful = process_prompt_expansion(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1314,6 +1360,7 @@ fn process_owner_work(
             let successful = process_post_generation_upscale(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1322,6 +1369,7 @@ fn process_owner_work(
             let successful = process_standalone_upscale(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1332,6 +1380,7 @@ fn process_owner_work(
             let _ = job.result_tx.send(result);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1340,6 +1389,7 @@ fn process_owner_work(
             let successful = process_admin_unload(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1349,6 +1399,7 @@ fn process_owner_work(
             run();
             OwnerProcessOutcome::Completed {
                 successful: true,
+                cancelled: false,
                 chain_result: None,
             }
         }
@@ -1365,6 +1416,7 @@ fn complete_h3_claim_failure(grant: LeaseGrant, error: String) -> OwnerProcessOu
     });
     OwnerProcessOutcome::Completed {
         successful,
+        cancelled: false,
         chain_result: None,
     }
 }
@@ -1586,6 +1638,51 @@ fn process_legacy_owner_work(
     }
 }
 
+/// Turn a chain-stage failure into the message a user sees.
+///
+/// Chain stages bypass `process_job`, and with it every piece of CUDA error
+/// handling that path has had for years. A stage that ran out of memory
+/// reported the bare `DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")`
+/// — no shape advice, no reduced grant for the next attempt, and no device
+/// synchronize, so the next stage inherited a context still holding the failed
+/// allocation's state. Two chain jobs on the production host failed at stage 0
+/// with exactly that string and nothing else.
+///
+/// This is the same classification `process_job` performs, in the same order:
+/// a fatal context error quarantines the worker and says so; an ordinary OOM
+/// synchronizes and then produces the shape-aware message (which also records
+/// the reduced grant, so the next submission of this shape plans smaller);
+/// anything else is passed through unchanged.
+fn chain_stage_failure_message(
+    worker: &GpuWorker,
+    model_name: &str,
+    request: &mold_core::GenerateRequest,
+    plan: &crate::execution_plan::ResolvedExecutionPlan,
+    error: anyhow::Error,
+) -> String {
+    if is_fatal_cuda_error(&error) {
+        quarantine_poisoned_worker(worker);
+        return fatal_cuda_user_message(model_name);
+    }
+    if !is_cuda_oom(&error) {
+        return format!("{error:#}");
+    }
+    // A synchronize that does not come back means the context is gone; report
+    // it as fatal rather than inviting a retry onto a dead device.
+    if !synchronize_after_oom(worker) {
+        return fatal_cuda_user_message(model_name);
+    }
+    cuda_oom_user_message_with_plan(
+        worker,
+        model_name,
+        Some(plan.model_family.as_str()),
+        Some(request),
+        Some(&plan.engine_paths),
+        Some(plan.predicted_vram_peak_bytes),
+    )
+    .0
+}
+
 fn process_scheduled_chain_stage(
     worker: &GpuWorker,
     mut job: crate::chain_job_runner::ScheduledChainStageWork,
@@ -1690,8 +1787,8 @@ fn process_scheduled_chain_stage(
             fence_chain_stage_render(render, cancellation_seen, cancelled())
         },
     )
-    .map_err(|error| format!("{error:#}"))?
-    .map_err(|error| format!("{error:#}"))?;
+    .map_err(|error| chain_stage_failure_message(worker, &model, &job.stage_req, &plan, error))?
+    .map_err(|error| chain_stage_failure_message(worker, &model, &job.stage_req, &plan, error))?;
     drop(memory_watchdog);
     Ok(crate::chain_job_runner::StageExecution {
         outcome: result,
@@ -4529,6 +4626,11 @@ fn process_job_with_sink(
             let is_oom = is_cuda_oom(&e);
             let user_cancelled = mold_inference::is_inference_cancelled(&e)
                 && job.registry.cancel_requested(&job_id);
+            // Recorded while the registry entry still exists; see
+            // `LEASE_CANCELLED`.
+            if user_cancelled {
+                LEASE_CANCELLED.with(|flag| flag.set(true));
+            }
             let (err_msg, count_worker_failure) = if fatal_cuda {
                 (fatal_cuda_user_message(&model_name), false)
             } else if is_oom {
@@ -6834,6 +6936,7 @@ mod tests {
             outcome,
             OwnerProcessOutcome::Completed {
                 successful: false,
+                cancelled: false,
                 chain_result: None,
             }
         ));
@@ -8665,6 +8768,7 @@ mod tests {
                 device_id,
                 worker_generation: 1,
                 successful,
+                cancelled: false,
                 phase_timings,
                 ..
             }) => {
@@ -10431,6 +10535,7 @@ mod tests {
                         owner_epoch: 0,
                         worker_generation: 0,
                         successful: false,
+                        cancelled: false,
                         phase_timings: mold_scheduler::EstimatePhaseTimings::default(),
                         completion: None,
                     })
@@ -10793,6 +10898,7 @@ mod tests {
         let completion = match event_rx.blocking_recv() {
             Some(crate::scheduler::WorkerEvent::Completed {
                 successful: false,
+                cancelled: false,
                 completion: Some(completion),
                 ..
             }) => completion,
@@ -11897,6 +12003,7 @@ mod tests {
                     event_rx.blocking_recv(),
                     Some(crate::scheduler::WorkerEvent::Completed {
                         successful: true,
+                        cancelled: false,
                         ..
                     })
                 ));
@@ -12635,6 +12742,48 @@ mod tests {
     /// as an ordinary generation, and neither had a trim to return them. The
     /// claimed-H3 residue is what made an identical H3 rerun fail host
     /// admission (#1214).
+    /// A cancelled generation must be attributed from the lease flag, never
+    /// from the job registry.
+    ///
+    /// `GenerationCleanup` is an RAII guard that removes the registry entry,
+    /// and it drops before `process_job` returns — so a `cancel_requested`
+    /// lookup in the owner arm is always false. The first version of this fix
+    /// did exactly that and was silently inert: every cancelled render kept
+    /// being recorded as an `EstimateOutcome::Failure` together with its VRAM
+    /// high-water, which is the memory-floor ratchet the flag exists to stop.
+    #[test]
+    fn a_cancelled_generation_is_attributed_before_registry_cleanup() {
+        let whole = include_str!("gpu_worker.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        let start = source
+            .find("OwnerWork::Generation(mut job) => {")
+            .expect("generation owner arm");
+        let end = source[start..]
+            .find("OwnerWork::PromptExpansion(")
+            .map(|offset| start + offset)
+            .expect("generation owner arm boundary");
+        let arm = &source[start..end];
+        assert!(
+            arm.contains("take_lease_cancelled()"),
+            "the generation arm must read the lease flag"
+        );
+        assert!(
+            !arm.contains("cancel_requested("),
+            "the registry entry is gone by here; asking it always answers false"
+        );
+    }
+
+    /// Taking the flag clears it, so one cancelled render cannot mark the next
+    /// generation on the same owner thread as cancelled too.
+    #[test]
+    fn the_lease_cancellation_flag_resets_on_read() {
+        let _ = take_lease_cancelled();
+        assert!(!take_lease_cancelled(), "starts clear");
+        LEASE_CANCELLED.with(|flag| flag.set(true));
+        assert!(take_lease_cancelled(), "reads the recorded cancellation");
+        assert!(!take_lease_cancelled(), "and clears it for the next lease");
+    }
+
     #[test]
     fn every_generation_path_reclaims_glibc_arenas_through_one_gate() {
         let whole = include_str!("gpu_worker.rs");

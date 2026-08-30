@@ -217,6 +217,18 @@ pub enum WorkerEvent {
         owner_epoch: u64,
         worker_generation: u64,
         successful: bool,
+        /// Whether the work stopped because someone asked it to.
+        ///
+        /// Separate from `successful` because the estimate store must not read
+        /// a cancellation as memory evidence. A user who cancels a slow render
+        /// has said nothing about whether the shape fits, but recording it as
+        /// `EstimateOutcome::Failure` writes the cancel-time VRAM high-water
+        /// into the bucket — and while that bucket still has no successful
+        /// sample, `failure_only_vram_floor` then plans every later attempt at
+        /// that shape against the floor. Cancelling a slow Wan sequence and
+        /// re-queueing it is exactly how a user reaches "it says it ran out of
+        /// memory" for a render the card can hold.
+        cancelled: bool,
         phase_timings: EstimatePhaseTimings,
         /// Actor-only result authority transferred from the GPU owner. The
         /// coordinator settles it only after the matching lease, memory
@@ -865,6 +877,19 @@ struct PendingOwnerWork {
     warm_wait_started_ms: Option<u64>,
     retry_not_before_ms: Option<u64>,
     utility_plans: Vec<UtilityExecutionPlan>,
+    /// The memory shortfall that is keeping this work unplaced, if any.
+    ///
+    /// Owner work — a chain stage above all — had none of this. An
+    /// `InsufficientVram` from the resolver was `continue`d, so the stage
+    /// contributed no candidates, reported no reason, never asked mold's own
+    /// idle cache for the bytes, and was never bounded. A sequence blocked
+    /// that way waits forever with nothing to show the user, which is the
+    /// worst shape a memory problem can take: indistinguishable from a hang.
+    memory_block: Option<MemoryBlock>,
+    /// When this work first became unplaceable while the scheduler was idle.
+    /// Reset the moment it can be planned again, so work queued behind a real
+    /// render is never bounded.
+    unschedulable_since_ms: Option<u64>,
     work: OwnerWork,
 }
 
@@ -1961,6 +1986,8 @@ impl Coordinator {
                 warm_wait_started_ms: None,
                 retry_not_before_ms: None,
                 utility_plans: submission.utility_plans,
+                memory_block: None,
+                unschedulable_since_ms: None,
                 work: submission.work,
             },
         );
@@ -2756,6 +2783,8 @@ impl Coordinator {
                                     warm_wait_started_ms: retry.warm_wait_started_ms,
                                     retry_not_before_ms,
                                     utility_plans: retry.utility_plans,
+                                    memory_block: None,
+                                    unschedulable_since_ms: None,
                                     work,
                                 },
                             );
@@ -2772,6 +2801,7 @@ impl Coordinator {
                 owner_epoch,
                 worker_generation,
                 successful,
+                cancelled,
                 phase_timings,
                 completion,
             } => {
@@ -2804,6 +2834,14 @@ impl Coordinator {
                                 .host_incremental_high_water_bytes,
                             outcome: if successful {
                                 EstimateOutcome::Success
+                            } else if cancelled {
+                                // Not evidence. `Invalidated` records that the
+                                // observation happened without counting a
+                                // failure or setting `last_outcome`, which is
+                                // what keeps `failure_only_vram_floor` off a
+                                // shape whose only "failure" was a human
+                                // pressing stop.
+                                EstimateOutcome::Invalidated
                             } else {
                                 EstimateOutcome::Failure
                             },
@@ -3622,6 +3660,7 @@ impl Coordinator {
         &mut self,
     ) -> BTreeMap<String, Vec<crate::execution_plan::ResolvedExecutionPlan>> {
         let now_ms = monotonic_ms();
+        let device_facts = self.device_facts();
         let resolutions = self
             .pending_owner_work
             .iter()
@@ -3637,15 +3676,39 @@ impl Coordinator {
         for (id, resolution) in resolutions {
             let error = match resolution {
                 Ok(plans) => {
+                    // Planable again: whatever was holding it is gone, so the
+                    // block and the idle clock are void. Never let a stale
+                    // block bound work that can now run.
+                    if let Some(pending) = self.pending_owner_work.get_mut(&id) {
+                        if pending.memory_block.take().is_some() {
+                            changed = true;
+                        }
+                        pending.unschedulable_since_ms = None;
+                    }
                     cache.insert(id, plans);
                     continue;
                 }
                 Err(error) => error,
             };
-            if matches!(
-                error,
-                crate::execution_plan::ExecutionPlanError::InsufficientVram { .. }
-            ) {
+            if let crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                required_peak_bytes,
+                eligible_device_ids,
+                ..
+            } = &error
+            {
+                // Not terminal — the running work gives the VRAM back — but it
+                // must stop being SILENT. Recording the shortfall is what lets
+                // `next_memory_reclaim` ask mold's own idle cache for the
+                // bytes, and what lets `settle_unschedulable_owner_work` bound
+                // the wait with numbers instead of leaving a sequence hanging.
+                changed |= self.record_owner_vram_block(
+                    &id,
+                    &VramShortfall {
+                        required_peak_bytes: *required_peak_bytes,
+                        eligible_device_ids: eligible_device_ids.clone(),
+                    },
+                    &device_facts,
+                );
                 continue;
             }
             if let crate::execution_plan::ExecutionPlanError::PlanInvalidated(_) = &error {
@@ -3869,6 +3932,64 @@ impl Coordinator {
     /// Record a device block the RESOLVER raised — the plan never reached the
     /// planner, so `record_memory_blocks` cannot see it — against the eligible
     /// device with the most room, which is the one an eviction would free.
+    /// [`Self::record_resolver_vram_block`]'s twin for owner work.
+    ///
+    /// Same shape, different map. Kept as a sibling rather than generalised
+    /// because the two maps hold different job types and the warn line names a
+    /// different thing; a shared generic would have to take a closure for the
+    /// model name and gain nothing.
+    /// Returns whether anything actually changed, so a block that is simply
+    /// still true does not bump `state_version` on every scheduler tick.
+    fn record_owner_vram_block(
+        &mut self,
+        work_id: &str,
+        shortfall: &VramShortfall,
+        device_facts: &[crate::execution_plan::DeviceFact],
+    ) -> bool {
+        let Some(device) = device_facts
+            .iter()
+            .filter(|fact| shortfall.eligible_device_ids.contains(&fact.id))
+            .max_by_key(|fact| fact.available_vram_bytes)
+        else {
+            return false;
+        };
+        let Some(pending) = self.pending_owner_work.get_mut(work_id) else {
+            return false;
+        };
+        let kind = MemoryBlockKind::Device {
+            device_id: device.id.clone(),
+            ordinal: device.ordinal,
+            backend: device.backend,
+        };
+        match pending.memory_block.as_mut() {
+            Some(block) if block.kind == kind => {
+                let moved = block.required_bytes != shortfall.required_peak_bytes
+                    || block.headroom_bytes != device.available_vram_bytes;
+                block.required_bytes = shortfall.required_peak_bytes;
+                block.headroom_bytes = device.available_vram_bytes;
+                moved
+            }
+            _ => {
+                tracing::warn!(
+                    work_id,
+                    model = %pending.model_fingerprint,
+                    memory = kind.noun(),
+                    required_bytes = shortfall.required_peak_bytes,
+                    headroom_bytes = device.available_vram_bytes,
+                    "owner work is blocked on memory"
+                );
+                pending.memory_block = Some(MemoryBlock {
+                    kind,
+                    required_bytes: shortfall.required_peak_bytes,
+                    headroom_bytes: device.available_vram_bytes,
+                    reclaimable_zfs_arc_bytes: None,
+                    reclaim: ReclaimAttempt::NotStarted,
+                });
+                true
+            }
+        }
+    }
+
     fn record_resolver_vram_block(
         &mut self,
         job_id: &str,
@@ -3970,6 +4091,59 @@ impl Coordinator {
         })
     }
 
+    /// The same reclaim, for blocked owner work.
+    ///
+    /// Asked only when no queued generation is blocked, so a print and a chain
+    /// stage never evict against each other in the same tick. Owner work is
+    /// deliberately second: a generation is a whole print waiting, while a
+    /// chain stage belongs to a job that has already produced output and can
+    /// resume.
+    fn next_owner_memory_reclaim(&mut self) -> Option<ReclaimRequest> {
+        if !self.scheduler_is_idle() {
+            return None;
+        }
+        if self.pending_owner_work.values().any(|pending| {
+            matches!(
+                pending.memory_block.as_ref().map(|block| &block.reclaim),
+                Some(ReclaimAttempt::InFlight)
+            )
+        }) {
+            return None;
+        }
+        let (id, pending) = self
+            .pending_owner_work
+            .iter_mut()
+            .filter(|(_, pending)| {
+                matches!(
+                    pending.memory_block.as_ref().map(|block| &block.reclaim),
+                    Some(ReclaimAttempt::NotStarted)
+                        | Some(ReclaimAttempt::Done(
+                            crate::host_reclaim::HostReclaimOutcome {
+                                sample_failed: true,
+                                ..
+                            }
+                        ))
+                )
+            })
+            .min_by_key(|(_, pending)| pending.queue_rank)?;
+        let block = pending.memory_block.as_mut()?;
+        block.reclaim = ReclaimAttempt::InFlight;
+        tracing::info!(
+            work_id = %id,
+            model = %pending.model_fingerprint,
+            memory = block.kind.noun(),
+            required_bytes = block.required_bytes,
+            headroom_bytes = block.headroom_bytes,
+            "memory is short for owner work on an idle scheduler; releasing idle models before bounding the wait"
+        );
+        Some(ReclaimRequest {
+            job_id: id.clone(),
+            model: pending.model_fingerprint.clone(),
+            required_bytes: block.required_bytes,
+            kind: block.kind.clone(),
+        })
+    }
+
     /// Whether the reclaim running for `job_id` still has a job to serve.
     ///
     /// A cancelled or dispatched job leaves `pending` (or loses its block),
@@ -3977,12 +4151,19 @@ impl Coordinator {
     /// on the machine for a print nobody is waiting on; the run loop aborts
     /// the task the moment this answers false.
     fn memory_reclaim_still_wanted(&self, job_id: &str) -> bool {
-        self.pending.get(job_id).is_some_and(|pending| {
+        let in_flight = |block: Option<&MemoryBlock>| {
             matches!(
-                pending.memory_block.as_ref().map(|block| &block.reclaim),
+                block.map(|block| &block.reclaim),
                 Some(ReclaimAttempt::InFlight)
             )
-        })
+        };
+        self.pending
+            .get(job_id)
+            .is_some_and(|pending| in_flight(pending.memory_block.as_ref()))
+            || self
+                .pending_owner_work
+                .get(job_id)
+                .is_some_and(|pending| in_flight(pending.memory_block.as_ref()))
     }
 
     /// A reclaim finished: keep what it gave back beside the block so a
@@ -4006,9 +4187,85 @@ impl Coordinator {
             .and_then(|pending| pending.memory_block.as_mut())
         {
             block.reclaim = ReclaimAttempt::Done(outcome);
+        } else if let Some(block) = self
+            .pending_owner_work
+            .get_mut(job_id)
+            .and_then(|pending| pending.memory_block.as_mut())
+        {
+            // A reclaim started for owner work settles onto owner work. The
+            // two maps never share an id, so the `else` is exact rather than
+            // a guess.
+            block.reclaim = ReclaimAttempt::Done(outcome);
         }
         self.collect_host_memory();
         self.mutate(immediate);
+    }
+
+    /// Bound a memory-blocked piece of owner work, the way
+    /// [`Self::settle_unschedulable_generations`] bounds a queued generation.
+    ///
+    /// A chain stage that could not be placed for VRAM had no ending at all:
+    /// the resolver's `InsufficientVram` was swallowed, so the stage produced
+    /// no candidates, reported no reason, and was retried on every tick
+    /// forever. From outside that is indistinguishable from a hang, and it is
+    /// the shape the "sequences run out of memory" reports take — the job
+    /// stops, mid-sequence, with earlier stages already rendered and nothing
+    /// said about why.
+    ///
+    /// The bound is the same one generations get, and for the same reason: it
+    /// accrues ONLY while the scheduler is idle, so work waiting behind a real
+    /// render is never bounded — that work is waiting for something that will
+    /// finish. And it only fires after reclaim has been tried, so the numbers
+    /// in the refusal already account for every byte mold could return.
+    fn settle_unschedulable_owner_work(&mut self) -> bool {
+        let idle = self.scheduler_is_idle();
+        let now_ms = monotonic_ms();
+        let mut expired: Vec<(String, String)> = Vec::new();
+
+        for (id, pending) in self.pending_owner_work.iter_mut() {
+            let Some(block) = pending.memory_block.as_ref() else {
+                pending.unschedulable_since_ms = None;
+                continue;
+            };
+            if !idle {
+                // Busy: the running work gives the memory back. Restart the
+                // clock so a job that waited through a long render is not
+                // charged for that wait.
+                pending.unschedulable_since_ms = None;
+                continue;
+            }
+            // Never answer before mold has asked its own cache.
+            if !matches!(block.reclaim, ReclaimAttempt::Done(_)) {
+                continue;
+            }
+            let since = *pending.unschedulable_since_ms.get_or_insert(now_ms);
+            if now_ms.saturating_sub(since) < UNSCHEDULABLE_IDLE_GRACE_MS {
+                continue;
+            }
+            expired.push((
+                id.clone(),
+                format!(
+                    "not enough {} for '{}': needs ~{:.1} GB against ~{:.1} GB free, \
+                     and nothing else is running",
+                    block.kind.noun(),
+                    pending.model_fingerprint,
+                    block.required_bytes as f64 / 1_000_000_000.0,
+                    block.headroom_bytes as f64 / 1_000_000_000.0,
+                ),
+            ));
+        }
+
+        if expired.is_empty() {
+            return false;
+        }
+        for (id, message) in expired {
+            if let Some(pending) = self.pending_owner_work.remove(&id) {
+                tracing::warn!(work_id = %id, %message, "bounding memory-blocked owner work");
+                pending.work.reject(message);
+            }
+        }
+        self.state_version = self.state_version.saturating_add(1);
+        true
     }
 
     fn settle_unschedulable_generations(&mut self) -> bool {
@@ -4308,12 +4565,42 @@ impl Coordinator {
                         .gpu_pool
                         .worker_by_ordinal(plan.device_ordinal)
                         .map(|worker| {
+                            // Owner work — a chain stage above all — asks the
+                            // same host question an ordinary generation does,
+                            // and must be charged the same way. Two things
+                            // were wrong with charging
+                            // `predicted_host_increment_bytes` here.
+                            //
+                            // It is the RAW figure, which `admission_host_
+                            // demand_bytes` exists to replace: on Metal the
+                            // host claim already rides the unified device
+                            // gate, so charging it again to the host ledger is
+                            // the #1038 double-count. Every generation path
+                            // goes through the accessor; this one did not.
+                            //
+                            // It is deliberately NOT given the warm-resident
+                            // credit an ordinary generation gets. That credit
+                            // is sound for FLUX, whose CPU-parked encoder
+                            // stays resident for the engine's life so
+                            // `MemAvailable` already excludes it. It is NOT
+                            // sound for the video families a chain stage
+                            // actually runs: Wan drops UMT5 after every render
+                            // by default, and LTX-2's session "holds almost
+                            // nothing" and explicitly permits no
+                            // admission-side residency credit
+                            // (`.claude/rules/inference.md`). A matching
+                            // execution fingerprint proves the ENGINE is warm,
+                            // not that its text encoder is — and a later stage
+                            // with a different prompt re-loads it. Crediting
+                            // the warm figure here would admit those stages
+                            // without the host RAM their prompt encode needs.
+                            let host_bytes = plan.admission_host_demand_bytes();
                             estimate_candidate(
                                 DeviceId::new(plan.device_id.clone()),
                                 Some(worker.as_ref()),
                                 &plan.execution_fingerprint,
                                 plan.predicted_vram_peak_bytes,
-                                plan.predicted_host_increment_bytes,
+                                host_bytes,
                                 true,
                             )
                         })
@@ -5403,6 +5690,22 @@ impl Coordinator {
             self.reject_terminal_generation_plan_errors();
             self.settle_unschedulable_generations();
         }
+        // Gated on its OWN map, not on `pending`. A chain stage is very often
+        // the only thing queued — that is what a `--script` run looks like
+        // from here — and inside the generation guard this never ran for
+        // exactly the case it exists to bound, leaving the stage waiting
+        // forever with its reclaim already settled.
+        //
+        // The plan cache is refreshed FIRST. Settlement answers from the
+        // recorded `MemoryBlock`, and `owner_plan_cache_and_settle_errors` is
+        // what clears that block when the work resolves again — so bounding
+        // before the refresh can reject a stage that an external process has
+        // just made schedulable, using a block that the very next line would
+        // have cleared.
+        if !self.pending_owner_work.is_empty() {
+            let _ = self.owner_plan_cache_and_settle_errors();
+            self.settle_unschedulable_owner_work();
+        }
         if self.pending.is_empty() && self.pending_owner_work.is_empty() {
             let published_work_remains = self
                 .state
@@ -5793,6 +6096,8 @@ impl Coordinator {
                                     warm_wait_started_ms: retry.warm_wait_started_ms,
                                     retry_not_before_ms: retry.retry_not_before_ms,
                                     utility_plans: retry.utility_plans,
+                                    memory_block: None,
+                                    unschedulable_since_ms: None,
                                     work: returned.work,
                                 },
                             );
@@ -6064,6 +6369,8 @@ impl Coordinator {
                                     warm_wait_started_ms: metadata.10,
                                     retry_not_before_ms: metadata.11,
                                     utility_plans: metadata.12,
+                                    memory_block: None,
+                                    unschedulable_since_ms: None,
                                     work: returned.work,
                                 },
                             );
@@ -6599,7 +6906,10 @@ pub async fn run_scheduler_coordinator(
             host_reclaim = None;
         }
         if host_reclaim.is_none() {
-            if let Some(request) = coordinator.next_memory_reclaim() {
+            let reclaim = coordinator
+                .next_memory_reclaim()
+                .or_else(|| coordinator.next_owner_memory_reclaim());
+            if let Some(request) = reclaim {
                 let state = coordinator.state.clone();
                 let job_id = request.job_id.clone();
                 host_reclaim = Some((
@@ -11384,6 +11694,7 @@ mod tests {
                     owner_epoch: 1,
                     worker_generation: 1,
                     successful,
+                    cancelled: false,
                     phase_timings: EstimatePhaseTimings {
                         cold_load_ms: Some(250),
                         ..Default::default()
@@ -11602,6 +11913,33 @@ mod tests {
         assert_eq!(
             coordinator.device_snapshots()[0].available_vram_bytes,
             5 << 30
+        );
+    }
+
+    /// Owner-work settlement must be gated on owner work, not on queued
+    /// generations.
+    ///
+    /// A chain stage is very often the only thing queued — that is what a
+    /// `--script` run looks like from here — so leaving the call inside the
+    /// `!self.pending.is_empty()` block made it unreachable for exactly the
+    /// case it exists to bound, and a memory-blocked stage waited forever with
+    /// its reclaim already settled.
+    #[test]
+    fn owner_settlement_is_gated_on_owner_work_not_on_generations() {
+        let whole = include_str!("mod.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        let call = source
+            .find("self.settle_unschedulable_owner_work();")
+            .expect("owner settlement call");
+        // Walk back to the nearest enclosing guard and check which map it asks
+        // about.
+        let guard = source[..call]
+            .rfind("if !self.")
+            .expect("owner settlement must sit under a guard");
+        let guard_line = &source[guard..call];
+        assert!(
+            guard_line.contains("pending_owner_work.is_empty()"),
+            "owner settlement must be reachable when no generation is queued"
         );
     }
 
@@ -13556,6 +13894,7 @@ mod tests {
                     owner_epoch: 1,
                     worker_generation: 1,
                     successful: true,
+                    cancelled: false,
                     phase_timings: EstimatePhaseTimings::default(),
                     completion: None,
                 },
@@ -13771,6 +14110,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: true,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: None,
             },
@@ -13864,6 +14204,7 @@ mod tests {
             owner_epoch: 1,
             worker_generation: 1,
             successful: false,
+            cancelled: false,
             phase_timings: EstimatePhaseTimings::default(),
             completion: Some(Box::new(completion)),
         };
@@ -14032,6 +14373,7 @@ mod tests {
                     owner_epoch: 1,
                     worker_generation: 1,
                     successful,
+                    cancelled: false,
                     phase_timings: EstimatePhaseTimings::default(),
                     completion: Some(Box::new(completion)),
                 },
@@ -14155,6 +14497,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: true,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: Some(Box::new(completion)),
             },
@@ -14307,6 +14650,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: true,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: Some(Box::new(completion)),
             },
@@ -14741,6 +15085,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: false,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: None,
             },
@@ -14962,6 +15307,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: false,
+                cancelled: false,
                 phase_timings: EstimatePhaseTimings::default(),
                 completion: None,
             },
@@ -17439,6 +17785,8 @@ mod tests {
             warm_wait_started_ms: None,
             retry_not_before_ms: None,
             utility_plans: plans.clone(),
+            memory_block: None,
+            unschedulable_since_ms: None,
             work,
         };
         let coordinator = Coordinator::with_preparer_and_memory(

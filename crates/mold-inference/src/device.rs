@@ -1282,6 +1282,31 @@ pub fn wan_activation_budget_bytes(
     frames: u32,
     geometry: WanActivationGeometry,
 ) -> u64 {
+    wan_activation_budget_bytes_for(
+        width,
+        height,
+        frames,
+        geometry,
+        crate::attention::AttentionBackend::Math,
+    )
+}
+
+/// [`wan_activation_budget_bytes`] against an explicit attention backend.
+///
+/// The score matrix is the single largest per-token term on the math path and
+/// **flash materializes none of it** — FA2 keeps the score tile in registers
+/// and shared memory and never writes an `[heads, chunk, T]` buffer to global
+/// memory. An estimate blind to the backend therefore prices a render that is
+/// not the one running, which matters twice over: admission decides whether
+/// the shape is feasible, and `wan::block_offload` decides how many blocks to
+/// park to make it so. Both read this.
+pub fn wan_activation_budget_bytes_for(
+    width: u32,
+    height: u32,
+    frames: u32,
+    geometry: WanActivationGeometry,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
     let dim = geometry.dim;
     let residual = WAN_RESIDUAL_LIVE_BUFFERS * dim * BF16_BYTES;
     let gated = WAN_GATED_RESIDUAL_LIVE_BUFFERS * dim * BF16_BYTES;
@@ -1295,7 +1320,16 @@ pub fn wan_activation_budget_bytes(
     // (`crates/mold-inference/src/attention.rs:235`) and `softmax_last_dim`
     // preserves it, and the wan compute dtype on CUDA is BF16
     // (`gpu_dtype`).
-    let scores = 2 * geometry.num_heads * WAN_ATTENTION_QUERY_CHUNK * BF16_BYTES;
+    //
+    // Zero under flash: the kernel's online softmax never materializes the
+    // tile. This is the term the two calibrations differ over, which is why
+    // they are fitted separately rather than sharing a slope.
+    let scores = match backend {
+        crate::attention::AttentionBackend::Math => {
+            2 * geometry.num_heads * WAN_ATTENTION_QUERY_CHUNK * BF16_BYTES
+        }
+        crate::attention::AttentionBackend::Flash => 0,
+    };
     // `math_attention_chunked_flat` accumulates every chunk's `[heads, len,
     // head_dim]` output and then `Tensor::cat` allocates the joined copy
     // (`attention.rs:240-251`), so the output is live twice at the seam.
@@ -1342,6 +1376,67 @@ pub const WAN_FIXED_WORKSPACE_BYTES: u64 = 2301 * 1024 * 1024;
 /// Extra device memory a CFG step holds beyond a single forward.
 pub const WAN_CFG_RESIDENT_BYTES: u64 = 256 * 1024 * 1024;
 
+/// The same fit, re-measured on the flash path.
+///
+/// **This pair cannot be inherited from the math one, and getting that wrong
+/// is an OOM rather than a slow render.** Dropping the score term shrinks the
+/// derived per-token sum by ~44% at A14B (184,320 B to 102,400 B), so keeping
+/// the 2.14 slope would under-estimate the real peak by several GB, park too
+/// few blocks, and hand the driver a shape it cannot hold. The residual the
+/// slope covers — LayerNorm F32 copies, RoPE application, the q/k RMS norms,
+/// statement-scoped temporaries — does not shrink when attention stops
+/// materializing its tile, so the *ratio* has to rise even though the absolute
+/// per-token cost falls.
+///
+/// Same protocol and hardware as the math fit — RTX 4090,
+/// `wan22-t2v-a14b:q5`, 832x480, CFG off, two renders differing only in frame
+/// count so every fixed cost cancels — with `MOLD_ATTN=flash`:
+///
+/// | Frames | Tokens | Peak |
+/// | -----: | -----: | ---: |
+/// | 17 | 7,800 | 15,011 MiB |
+/// | 53 | 21,840 | 19,011 MiB |
+///
+/// 4,000 MiB over 14,040 tokens is 298,740 B/token against the derived flash
+/// sum of 102,400, i.e. **2.92** — higher than math's 2.14 exactly because the
+/// derived sum shrank 44% while the residual it stands in for did not. The
+/// cross-check that this is a real re-fit and not an artifact: the measured
+/// per-token costs are 298,740 (flash) against 394,336 (math), a ratio of
+/// 0.757, and the two calibrated models predict 0.758. The slope moved because
+/// the formula changed, not because the hardware did.
+///
+/// Both points were taken with `MOLD_WAN_OFFLOAD_BLOCKS=0`. That is not
+/// optional: parking blocks lowers the peak, so a fit taken while the policy
+/// was engaged measures the policy rather than the render, and the resulting
+/// slope would then tell the policy to park less — which is the wrong
+/// direction and OOMs.
+pub const WAN_FLASH_MEASURED_SLOPE_NUMERATOR: u64 = 292;
+pub const WAN_FLASH_MEASURED_SLOPE_DENOMINATOR: u64 = 100;
+/// Token-independent denoise workspace on the flash path, the intercept of
+/// that pair. Larger than the math intercept is expected and not a mistake:
+/// FA2 allocates its own fixed workspace, and the terms the derived formula no
+/// longer names have to land somewhere.
+pub const WAN_FLASH_FIXED_WORKSPACE_BYTES: u64 = 1949 * 1024 * 1024;
+
+/// The calibration pair for `backend`.
+///
+/// One accessor so a caller cannot pair one backend's slope with the other's
+/// intercept — the two are fitted together and are meaningless apart.
+fn wan_calibration_for(backend: crate::attention::AttentionBackend) -> (u64, u64, u64) {
+    match backend {
+        crate::attention::AttentionBackend::Math => (
+            WAN_MEASURED_SLOPE_NUMERATOR,
+            WAN_MEASURED_SLOPE_DENOMINATOR,
+            WAN_FIXED_WORKSPACE_BYTES,
+        ),
+        crate::attention::AttentionBackend::Flash => (
+            WAN_FLASH_MEASURED_SLOPE_NUMERATOR,
+            WAN_FLASH_MEASURED_SLOPE_DENOMINATOR,
+            WAN_FLASH_FIXED_WORKSPACE_BYTES,
+        ),
+    }
+}
+
 /// [`wan_activation_budget_bytes`] with the measured calibration applied.
 ///
 /// The derived sum counts the tensors a block visibly materializes; this is
@@ -1353,13 +1448,47 @@ pub fn wan_calibrated_activation_bytes(
     geometry: WanActivationGeometry,
     cfg: bool,
 ) -> u64 {
-    let derived = wan_activation_budget_bytes(width, height, frames, geometry);
-    let transformer =
-        derived.saturating_mul(WAN_MEASURED_SLOPE_NUMERATOR) / WAN_MEASURED_SLOPE_DENOMINATOR;
+    wan_calibrated_activation_bytes_for(
+        width,
+        height,
+        frames,
+        geometry,
+        cfg,
+        wan_effective_attention_backend(),
+    )
+}
+
+/// The attention backend a wan render on this process will actually execute.
+///
+/// Reads the *video* policy, because that is the one the Wan DiT resolves
+/// (`wan::model::transformer`), and the *effective* answer, because a `Flash`
+/// request in a build without the kernels runs as math and would otherwise be
+/// priced with no score tile at all.
+///
+/// Device-blind on purpose. The estimate is computed at admission, before a
+/// device is leased, and every device this family runs on is CUDA; a CPU wan
+/// render is a correctness path nobody admits against a VRAM budget.
+pub fn wan_effective_attention_backend() -> crate::attention::AttentionBackend {
+    crate::attention::AttentionBackend::resolve_effective_for(
+        crate::attention::AttentionPolicy::Video,
+    )
+}
+
+/// [`wan_calibrated_activation_bytes`] against an explicit backend, so the two
+/// calibrations are testable without the process-frozen `MOLD_ATTN` cache.
+pub fn wan_calibrated_activation_bytes_for(
+    width: u32,
+    height: u32,
+    frames: u32,
+    geometry: WanActivationGeometry,
+    cfg: bool,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    let (slope_num, slope_den, workspace) = wan_calibration_for(backend);
+    let derived = wan_activation_budget_bytes_for(width, height, frames, geometry, backend);
+    let transformer = derived.saturating_mul(slope_num) / slope_den;
     let cfg = if cfg { WAN_CFG_RESIDENT_BYTES } else { 0 };
-    transformer
-        .saturating_add(cfg)
-        .saturating_add(WAN_FIXED_WORKSPACE_BYTES)
+    transformer.saturating_add(cfg).saturating_add(workspace)
 }
 
 /// Map a manifest family slug (e.g. `"flux"`, `"sdxl"`, `"qwen-image"`) to the
@@ -3054,6 +3183,98 @@ pub fn memory_status_string() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two Wan calibrations must each reproduce the renders they were
+    /// fitted to, on an RTX 4090 with `wan22-t2v-a14b:q5` at 832x480 and CFG
+    /// off. Both pairs are two renders differing only in frame count, so every
+    /// fixed cost cancels and the pair pins the slope; the intercept is then
+    /// the token-independent workspace plus the UMT5 floor charged elsewhere.
+    ///
+    /// This test exists because the flash pair is the easy thing to get wrong:
+    /// dropping the score term shrinks the derived sum 44%, and a flash
+    /// estimate that inherited math's 2.14 slope would under-charge by several
+    /// GB, park too few blocks, and OOM. A change to either calibration that
+    /// stops predicting its own measurements fails here.
+    #[test]
+    fn both_wan_calibrations_reproduce_their_measured_fits() {
+        use crate::attention::AttentionBackend;
+
+        const UMT5_FLOOR_MIB: u64 = 10_840;
+        const MIB: u64 = 1024 * 1024;
+        let a14b = WanActivationGeometry::a14b();
+
+        // (backend, frames, measured whole-render peak in MiB)
+        let fits = [
+            (AttentionBackend::Math, 17u32, 16_074u64),
+            (AttentionBackend::Math, 53, 21_354),
+            (AttentionBackend::Flash, 17, 15_011),
+            (AttentionBackend::Flash, 53, 19_011),
+        ];
+
+        for (backend, frames, measured_peak_mib) in fits {
+            let budget =
+                wan_calibrated_activation_bytes_for(832, 480, frames, a14b, false, backend);
+            let predicted_mib = budget / MIB + UMT5_FLOOR_MIB;
+            let measured = measured_peak_mib as i64;
+            let predicted = predicted_mib as i64;
+            assert!(
+                (predicted - measured).abs() <= 300,
+                "{backend:?} at {frames}f: predicted {predicted} MiB against a measured \
+                 {measured} MiB — the calibration no longer reproduces its own fit"
+            );
+        }
+    }
+
+    /// Flash must always price BELOW math at the same shape, and the gap must
+    /// grow with the clip. If a change ever inverted this, the backend-aware
+    /// estimate would be charging for a tile that is not allocated.
+    #[test]
+    fn flash_prices_below_math_and_the_gap_grows_with_frames() {
+        use crate::attention::AttentionBackend;
+        let a14b = WanActivationGeometry::a14b();
+        let mut previous_gap = 0u64;
+        for frames in [17u32, 53, 81, 121] {
+            let math = wan_calibrated_activation_bytes_for(
+                832,
+                480,
+                frames,
+                a14b,
+                false,
+                AttentionBackend::Math,
+            );
+            let flash = wan_calibrated_activation_bytes_for(
+                832,
+                480,
+                frames,
+                a14b,
+                false,
+                AttentionBackend::Flash,
+            );
+            assert!(
+                flash < math,
+                "{frames}f: flash ({flash}) must price below math ({math})"
+            );
+            let gap = math - flash;
+            assert!(
+                gap > previous_gap,
+                "{frames}f: the flash saving must grow with the clip"
+            );
+            previous_gap = gap;
+        }
+    }
+
+    /// The score term is the whole difference between the two derived sums,
+    /// and it is exactly the math-attention tile: `2 * heads * chunk * bf16`.
+    #[test]
+    fn the_derived_difference_is_exactly_the_score_tile() {
+        use crate::attention::AttentionBackend;
+        let a14b = WanActivationGeometry::a14b();
+        let tokens = wan_token_count(832, 480, 53, a14b);
+        let math = wan_activation_budget_bytes_for(832, 480, 53, a14b, AttentionBackend::Math);
+        let flash = wan_activation_budget_bytes_for(832, 480, 53, a14b, AttentionBackend::Flash);
+        let per_token_tile = 2 * a14b.num_heads * WAN_ATTENTION_QUERY_CHUNK * BF16_BYTES;
+        assert_eq!(math - flash, tokens * per_token_tile);
+    }
 
     fn identified_gpu(ordinal: usize, uuid: [u8; 16]) -> DiscoveredGpu {
         DiscoveredGpu {
