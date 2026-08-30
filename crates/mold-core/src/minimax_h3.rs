@@ -562,9 +562,16 @@ pub const MAX_INLINE_REFERENCE_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_REFERENCE_UPLOAD_HANDLE_BYTES: usize = 256;
 pub const MAX_REFERENCE_PATH_BYTES: usize = 4096;
 pub const MAX_REFERENCE_NAME_BYTES: usize = 255;
-/// Version 2 corrects official always-upscale image/video geometry and binds
-/// video row counts to the exact decoded frame count plus target truncation.
-pub const REFERENCE_PREPROCESS_VERSION: u32 = 2;
+/// Version 3 stops upscaling reference media: images scale DOWN to the 2048
+/// short edge and videos DOWN to the 768-short-edge area-capped canvas, but a
+/// source already inside those bounds keeps its native geometry (ComfyUI
+/// `comfy_extras/nodes_minimax_h3.py:298-303` — `min(1.0, 2048/short)`,
+/// "never upscaled" — and `:318-323`; the released processor config bounds
+/// pixel AREA, `shortest_edge: 65536`/`longest_edge: 16777216`, and forces no
+/// short edge). Version 2's unconditional scale blew two ~600x1200 phone
+/// photos up to 2048x4224 canvases — 33k ViT patches each — and held the
+/// render on an 82.7 GB host demand no 64 GB box can meet.
+pub const REFERENCE_PREPROCESS_VERSION: u32 = 3;
 pub const MAX_REFERENCE_DIMENSION: u32 = 65_535;
 pub const MAX_REFERENCE_IMAGE_PIXELS: u64 = 100_000_000;
 pub const MAX_REFERENCE_FPS: f64 = 240.0;
@@ -1526,11 +1533,18 @@ fn reference_image_dimensions(
 ) -> Result<(u32, u32), ReferenceContractError> {
     const SHORT_EDGE: f64 = 2048.0;
     let short = f64::from(width.min(height));
-    // The released Ref2VA checkpoint always puts image references on their
-    // own 2048-short-edge canvas, including upscaling.  The down-only 2048
-    // shortcut belongs to Comfy's deployment path and must not leak into the
-    // official placement authority.
-    let scale = SHORT_EDGE / short;
+    // Down-only: an image larger than the 2048-short-edge canvas scales onto
+    // it; a smaller one keeps its native geometry. ComfyUI's reference node is
+    // explicit — `scale = min(1.0, REF_IMAGE_SHORT_EDGE / min(w, h))`, with
+    // the input tooltip reading "never upscaled"
+    // (`comfy_extras/nodes_minimax_h3.py:298-303`, `:267`) — and the released
+    // processor bounds pixel AREA (`preprocessor_config.json`:
+    // `shortest_edge: 65536`, `longest_edge: 16777216`), forcing no short
+    // edge at all. Unconditional upscaling turned a 582x1200 phone photo into
+    // a 2048x4224 canvas whose ViT patch count made the host admission demand
+    // unmeetable on any 64 GB machine, and handed the conditioner a 3.5x
+    // lanczos blow-up no reference implementation would produce.
+    let scale = (SHORT_EDGE / short).min(1.0);
     Ok((
         aligned_dimension(f64::from(width) * scale)?,
         aligned_dimension(f64::from(height) * scale)?,
@@ -1558,6 +1572,15 @@ fn reference_video_dimensions(
         let scale = (CANVAS_MAX_PIXELS as f64 / pixels).sqrt();
         nominal_width *= scale;
         nominal_height *= scale;
+    }
+    // Down-only, by area: a source video already smaller than the canvas the
+    // aspect rule would hand it keeps its native geometry instead of being
+    // upscaled onto it (ComfyUI `comfy_extras/nodes_minimax_h3.py:318-323` —
+    // `if vw * vh < cw * ch:` round the NATIVE axes to the 32 grid).
+    let native_pixels = f64::from(width) * f64::from(height);
+    if native_pixels < nominal_width * nominal_height {
+        nominal_width = f64::from(width);
+        nominal_height = f64::from(height);
     }
     let normalized = (
         aligned_dimension(nominal_width)?,
@@ -3865,13 +3888,16 @@ mod tests {
 
     #[test]
     fn prepared_reference_shapes_match_the_official_ref2va_policy() {
+        // 1920x1080 sits inside the 2048 short edge, so it keeps its native
+        // geometry on the 32 grid instead of being upscaled to 3648x2048
+        // (ComfyUI `nodes_minimax_h3.py:298-303`: `min(1.0, 2048/short)`).
         let image = reference_prepared_shape(&image_reference("anchor.png", 1)).unwrap();
         assert_eq!(image.version, REFERENCE_PREPROCESS_VERSION);
         assert_eq!(
             (image.normalized_width, image.normalized_height),
-            (Some(3648), Some(2048))
+            (Some(1920), Some(1088))
         );
-        assert_eq!(image.visual_rows, 114 * 64);
+        assert_eq!(image.visual_rows, 60 * 34);
         assert_eq!(image.audio_rows, 0);
 
         let video = reference_prepared_shape(&video_reference("clip.mp4", 2, 4_000)).unwrap();
@@ -3965,7 +3991,7 @@ mod tests {
     }
 
     #[test]
-    fn official_reference_geometry_upscales_small_images_and_videos() {
+    fn reference_geometry_never_upscales_small_images_and_videos() {
         let image = GenerationReference::Image {
             media: inline(&[1; 8]),
             provenance: crate::GenerationReferenceProvenance::default(),
@@ -3973,10 +3999,13 @@ mod tests {
             width: 80,
             height: 48,
         };
+        // ComfyUI's reference node never upscales an image
+        // (`nodes_minimax_h3.py:267`, `:298-303`): a tiny source keeps its
+        // native geometry, floored at the 32 grid.
         let image = reference_prepared_shape(&image).unwrap();
         assert_eq!(
             (image.normalized_width, image.normalized_height),
-            (Some(3424), Some(2048))
+            (Some(64), Some(64))
         );
 
         let video = GenerationReference::Video {
@@ -3994,10 +4023,12 @@ mod tests {
             audio_sample_rate: None,
             audio_channels: None,
         };
+        // A video smaller than its 768-short-edge canvas keeps its native
+        // geometry on the 32 grid (`nodes_minimax_h3.py:318-323`).
         let video = reference_prepared_shape(&video).unwrap();
         assert_eq!(
             (video.normalized_width, video.normalized_height),
-            (Some(1024), Some(768))
+            (Some(320), Some(256))
         );
     }
 

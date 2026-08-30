@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_rows_freeze_2048_images_768_videos_and_exact_audio_duration() {
+    fn prepared_rows_freeze_native_small_media_and_exact_audio_duration() {
         let references = vec![
             mold_core::GenerationReference::Image {
                 media: GenerationReferenceAuthority::Descriptor,
@@ -704,19 +704,21 @@ mod tests {
         ];
         let shapes =
             mold_core::minimax_h3::reference_prepared_shapes_for_target(&references, 124).unwrap();
+        // Never upscaled: a 64x64 source keeps its native canvas on the 32
+        // grid instead of blowing up to 2048x2048 (image) / 768x768 (video).
         assert_eq!(
             (shapes[0].normalized_width, shapes[0].normalized_height),
-            (Some(2_048), Some(2_048))
+            (Some(64), Some(64))
         );
-        assert_eq!(shapes[0].visual_rows, 4_096);
+        assert_eq!(shapes[0].visual_rows, 4);
         assert_eq!(
             (shapes[1].normalized_width, shapes[1].normalized_height),
-            (Some(768), Some(768))
+            (Some(64), Some(64))
         );
         assert_eq!(shapes[1].normalized_video_frames, Some(48));
         assert_eq!(shapes[1].video_frames, Some(39));
         assert_eq!(shapes[1].qwen_video_frames, Some(4));
-        assert_eq!(shapes[1].visual_rows, 6_912);
+        assert_eq!(shapes[1].visual_rows, 48);
         assert_eq!(shapes[2].audio_samples_per_channel, Some(32_000));
         assert_eq!(shapes[2].audio_rows, 80);
     }

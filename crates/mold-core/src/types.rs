@@ -11839,12 +11839,17 @@ mod reference_crop_tests {
     #[test]
     fn image_reference_pad_fixtures_match_the_browser_estimate() {
         let fixtures: [(u32, u32, u32, u32, u64); 6] = [
-            (1920, 1080, 3648, 2048, 7296),
-            (1080, 1080, 2048, 2048, 4096),
-            (1024, 768, 2720, 2048, 5440),
-            (1080, 1920, 2048, 3648, 7296),
-            (1344, 768, 3584, 2048, 7168),
-            (1120, 1080, 2112, 2048, 4224),
+            // Inside the 2048 short edge: native geometry on the 32 grid.
+            (1920, 1080, 1920, 1088, 2040),
+            (1080, 1080, 1088, 1088, 1156),
+            (1080, 1920, 1088, 1920, 2040),
+            // The 2026-08-29 held-print shape: a 582x1200 phone photo must stay
+            // ~native (684 pads), never blow up to 2048x4224 (8,448 pads).
+            (582, 1200, 576, 1216, 684),
+            // Past the short edge: scaled DOWN onto the 2048 canvas.
+            (4032, 3024, 2720, 2048, 5440),
+            // Exactly at the boundary: scale 1 keeps the native axes.
+            (2112, 2048, 2112, 2048, 4224),
         ];
         for (width, height, normalized_width, normalized_height, rows) in fixtures {
             let shape =
