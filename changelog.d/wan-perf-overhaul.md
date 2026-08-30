@@ -45,3 +45,11 @@
   then planned against that floor. Cancelling a slow sequence and re-queueing it
   is exactly how a render the card can hold came back as "not enough memory".
   Cancellations are now recorded as `invalidated` — an observation, not evidence.
+- **A chain stage blocked on GPU memory now gets an answer instead of hanging.**
+  An `InsufficientVram` from the plan resolver was silently discarded for owner
+  work, so a blocked stage contributed no candidates, reported no reason, never
+  asked mold's own idle model cache for the missing bytes, and was retried
+  forever — indistinguishable from a hang, with the earlier stages of the
+  sequence already rendered. Blocked owner work now records a typed memory
+  block, triggers the same idle-scheduler cache reclaim queued generations get,
+  and is bounded with the post-eviction numbers if the shortfall survives.
