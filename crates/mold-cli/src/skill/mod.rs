@@ -1,7 +1,7 @@
 //! Agent Skill generation and installation.
 //!
-//! The canonical Mold `SKILL.md` is embedded in the CLI and installed
-//! verbatim into supported agents' user-wide or project-local skill paths.
+//! The canonical Mold skill bundle is embedded in the CLI and installed into
+//! supported agents' user-wide or project-local skill paths.
 
 use anyhow::{Context, Result};
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
@@ -11,6 +11,8 @@ use std::path::{Component, Path, PathBuf};
 
 /// The canonical skill content installed by `mold skill install`.
 pub const SKILL_MD: &str = include_str!("SKILL.md");
+/// Model-family prompting recipes installed with the canonical skill.
+pub const MODEL_PROMPTING_MD: &str = include_str!("references/model-prompting.md");
 const SKILL_DIR_NAME: &str = "mold";
 
 #[derive(Parser, Debug)]
@@ -34,8 +36,8 @@ pub enum SkillCommand {
     /// Remove installed mold skills
     ///
     /// With no agent arguments, removes the skill from every known agent path
-    /// in the selected scope. Only `mold/SKILL.md` is deleted; a non-empty
-    /// `mold/` directory is preserved.
+    /// in the selected scope. Only Mold-managed skill files are deleted;
+    /// non-empty directories and unrelated files are preserved.
     Uninstall(SkillUninstallArgs),
 
     /// Print the generated SKILL.md to stdout
@@ -291,17 +293,28 @@ fn dedupe_targets(scope: &Scope, agents: &[Agent]) -> BTreeMap<PathBuf, Vec<&'st
     targets
 }
 
-fn write_skill_md(dir: &Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create skill directory {}", dir.display()))?;
-    let target = dir.join("SKILL.md");
-    let temp = tempfile::NamedTempFile::new_in(dir)
-        .with_context(|| format!("failed to create temporary file in {}", dir.display()))?;
+fn persist_embedded_file(dir: &Path, relative: &Path, contents: &str) -> Result<PathBuf> {
+    let target = dir.join(relative);
+    let parent = target.parent().expect("embedded skill file has a parent");
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create skill directory {}", parent.display()))?;
+    let temp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed to create temporary file in {}", parent.display()))?;
     temp.as_file()
-        .write_all(SKILL_MD.as_bytes())
-        .with_context(|| format!("failed to write skill content in {}", dir.display()))?;
+        .write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write skill content in {}", parent.display()))?;
     temp.persist(&target)
         .with_context(|| format!("failed to install skill at {}", target.display()))?;
+    Ok(target)
+}
+
+fn write_skill_bundle(dir: &Path) -> Result<PathBuf> {
+    let target = persist_embedded_file(dir, Path::new("SKILL.md"), SKILL_MD)?;
+    persist_embedded_file(
+        dir,
+        Path::new("references/model-prompting.md"),
+        MODEL_PROMPTING_MD,
+    )?;
     Ok(target)
 }
 
@@ -355,7 +368,7 @@ pub fn run(args: &SkillArgs) -> Result<()> {
 fn install(args: &SkillInstallArgs) -> Result<()> {
     let scope = resolve_scope(args.project, &args.dir)?;
     for (dir, names) in dedupe_targets(&scope, &selected_agents(args)?) {
-        let target = write_skill_md(&dir)?;
+        let target = write_skill_bundle(&dir)?;
         eprintln!(
             "Installed mold skill: {} ({})",
             display_path(&target),
@@ -375,14 +388,18 @@ fn uninstall(args: &SkillUninstallArgs) -> Result<()> {
 
     let mut removed = 0;
     for (dir, _) in dedupe_targets(&scope, &agents) {
-        let skill_md = dir.join("SKILL.md");
-        if !skill_md.exists() {
-            continue;
+        for relative in ["SKILL.md", "references/model-prompting.md"] {
+            let target = dir.join(relative);
+            if !target.exists() {
+                continue;
+            }
+            std::fs::remove_file(&target)
+                .with_context(|| format!("failed to remove {}", target.display()))?;
+            removed += 1;
+            eprintln!("Removed mold skill: {}", display_path(&target));
         }
-        std::fs::remove_file(&skill_md)
-            .with_context(|| format!("failed to remove {}", skill_md.display()))?;
-        removed += 1;
-        eprintln!("Removed mold skill: {}", display_path(&skill_md));
+        let references = dir.join("references");
+        let _ = std::fs::remove_dir(&references);
         if std::fs::remove_dir(&dir).is_err() && dir.exists() {
             eprintln!("Left non-empty directory in place: {}", display_path(&dir));
         }
@@ -483,15 +500,19 @@ mod tests {
     }
 
     #[test]
-    fn write_overwrites_only_skill_md_with_embedded_content() {
+    fn write_installs_embedded_skill_bundle_without_touching_user_files() {
         let root = tempfile::tempdir().unwrap();
         let skill_dir = root.path().join("mold");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("notes.md"), "keep").unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "stale").unwrap();
 
-        let target = write_skill_md(&skill_dir).unwrap();
+        let target = write_skill_bundle(&skill_dir).unwrap();
         assert_eq!(std::fs::read_to_string(target).unwrap(), SKILL_MD);
+        assert_eq!(
+            std::fs::read_to_string(skill_dir.join("references/model-prompting.md")).unwrap(),
+            MODEL_PROMPTING_MD
+        );
         assert_eq!(
             std::fs::read_to_string(skill_dir.join("notes.md")).unwrap(),
             "keep"
@@ -520,5 +541,43 @@ mod tests {
         assert!(keys.contains(&"description"));
         assert!(!keys.contains(&"argument-hint"));
         assert!(body.contains("mold skill install"));
+    }
+
+    #[test]
+    fn prompting_reference_covers_every_generation_family() {
+        let family_headings = [
+            ("flux", "## FLUX.1"),
+            ("flux2", "## FLUX.2"),
+            ("sd15", "## SD 1.5"),
+            ("sdxl", "## SDXL"),
+            ("sd3", "## SD 3.5"),
+            ("z-image", "## Z-Image"),
+            ("wuerstchen", "## Wuerstchen v2"),
+            ("qwen-image", "## Qwen-Image"),
+            ("qwen-image-edit", "### Qwen-Image Edit"),
+            ("ltx-video", "## LTX-Video 0.9.x"),
+            ("ltx2", "## LTX-2, LTX-2.3, and LTX-2.5"),
+            ("wan", "## Wan 2.1 and 2.2"),
+            ("minimax-h3", "## MiniMax H3"),
+            ("upscaler", "## Upscalers"),
+        ];
+
+        let manifest_families = mold_core::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| manifest.is_generation_model() || manifest.is_upscaler())
+            .map(|manifest| manifest.family.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let documented_families = family_headings
+            .iter()
+            .map(|(family, _)| *family)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(manifest_families, documented_families);
+        for (family, heading) in family_headings {
+            assert!(
+                MODEL_PROMPTING_MD.contains(heading),
+                "missing prompting section for {family}: {heading}"
+            );
+        }
     }
 }

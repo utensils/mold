@@ -13,6 +13,38 @@ mold run sdxl-base:fp16 "a candid photograph of a person on a beach at sunset" \
   --id-image ~/photos/portrait.jpg
 ```
 
+## Generated examples
+
+The two outputs below use the same synthetic reference portrait. PuLID keeps
+the face recognizable while the prompt changes the setting, wardrobe, pose,
+lighting, and photographic treatment.
+
+<div class="gallery-grid">
+<figure>
+
+![Synthetic reference portrait used for both PuLID examples](/gallery/pulid-reference.png)
+
+**Reference portrait**: a front-facing, evenly lit face with no obstruction.
+
+</figure>
+<figure>
+
+![The reference person as an orbital botanist in a glass greenhouse](/gallery/pulid-flux-orbital-botanist.png)
+
+**flux-dev:q4 + PuLID-FLUX v0.9.1**: 1024x1024, 25 steps,
+`--id-weight 0.85`, seed 83120.
+
+</figure>
+<figure>
+
+![The reference person as a glassblower in a glowing workshop](/gallery/pulid-jibmix-glassblower.png)
+
+**jibmix-flux:fp8 + PuLID-FLUX v0.9.1**: 1024x1024, 25 steps,
+`--id-weight 0.8`, seed 83122.
+
+</figure>
+</div>
+
 ::: warning License
 The face detector and recognizer are InsightFace **pretrained models**, which
 are licensed for **non-commercial research purposes only**. Mold does not bundle

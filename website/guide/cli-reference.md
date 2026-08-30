@@ -587,7 +587,10 @@ Supported targets match nxv: `claude`, `codex`, `pi`, `openclaw`, `copilot`,
 `cursor`, `gemini`, `amp`, `goose`, and generic `agents`. User-wide is the
 default. `--project` uses the current directory, while `--dir` selects another
 project root. Install requires explicit names, `--detected`, or `--all` and
-atomically replaces only `mold/SKILL.md`; uninstall preserves sibling files.
+atomically replaces the Mold-managed `mold/SKILL.md` and
+`mold/references/model-prompting.md` files. The reference gives agents
+family-specific prompt examples, audio/dialogue syntax, and model boundaries.
+Uninstall removes those managed files and preserves sibling files.
 
 ## `mold completions`
 

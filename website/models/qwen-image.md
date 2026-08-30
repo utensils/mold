@@ -3,6 +3,30 @@
 Qwen2.5-VL text encoder with a 3D causal VAE (2D temporal-slice) and
 flow-matching with classifier-free guidance.
 
+<div class="gallery-grid">
+<figure>
+
+![Teal artisan bakery, base Qwen-Image 2512](/gallery/qwen-image-bakery.png)
+
+_"Straight-on editorial architectural photograph of a tiny artisan bakery named
+MOLD & FLOUR on a quiet European corner, deep teal facade, arched windows,
+striped awning, vintage delivery bicycle, sunny spring morning"_;
+**qwen-image-2512:q8**, 50 steps, seed 251201
+
+</figure>
+<figure>
+
+![Snowy bakery edit, Qwen-Image-Edit](/gallery/qwen-image-edit-winter-bakery.png)
+
+_"Change the sunny spring morning into a cozy snowy winter blue hour. Add fresh
+snow to the exterior and turn on warm interior lights. Preserve the exact teal
+facade, readable MOLD & FLOUR sign, windows, door, bread displays, bicycle,
+crates, camera position, geometry, and composition"_;
+**qwen-image-edit-2511:q8**, 50 steps, seed 251111
+
+</figure>
+</div>
+
 ![Winter cabin, Qwen-Image 2512 Q4](/gallery/qwen-image-cabin.png)
 _"A snowy mountain cabin at twilight, warm orange light pouring from the windows, aurora borealis in the sky above"_; **qwen-image-2512:q4**, 50 steps, seed 888
 

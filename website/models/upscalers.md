@@ -2,6 +2,30 @@
 
 mold supports Real-ESRGAN super-resolution models for image upscaling. These models enhance image resolution by 2x or 4x using neural networks trained on image restoration tasks. Seven upscalers ship in the manifest: six RRDBNet builds and one SRVGGNetCompact build.
 
+## Before and After
+
+<div class="gallery-grid">
+<figure>
+
+![Original 512-pixel fantasy castle](/gallery/sd15-castle.png)
+
+**Input**: 512x512 DreamShaper v8 image
+
+</figure>
+<figure>
+
+![Fantasy castle upscaled to 2048 pixels with Real-ESRGAN](/gallery/upscalers/sd15-castle-real-esrgan-x4.png)
+
+**real-esrgan-x4plus:fp16**: 4x output at 2048x2048
+
+</figure>
+</div>
+
+```bash
+mold upscale sd15-castle.png --model real-esrgan-x4plus:fp16 \
+  --output sd15-castle-4x.png
+```
+
 ## Model List
 
 ### RRDBNet Architecture (High Quality)
