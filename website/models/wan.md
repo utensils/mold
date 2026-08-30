@@ -384,7 +384,11 @@ mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
   --frames 100 --clip-frames 49
 ```
 
-A Wan engine that has rendered a chain stage keeps its UMT5-XXL encoder resident between stages. An authored sequence gives every stage its own prompt, so the per-stage prompt-encoding cache misses and each stage would otherwise re-read the 11.37 GB FP16 encoder from disk. Retention lasts the sequence rather than the process, and `unload()` releases it when the model cache evicts the engine. Measured: a 3-stage 159-frame `wan22-t2v-a14b:q5` sequence at 832x480 renders in 257 s on an RTX 4090.
+A Wan engine caches the prompt encoding it produced — the ~4 MB `[1, 512, 4096]` tensor, not the 11.37 GB encoder — so a stage repeating a prompt skips the encoder load and the forward entirely. That covers an auto-chained long video, a re-roll, and a batch child; an authored sequence gives every stage its own prompt and still pays one encoder load per stage.
+
+Retaining the encoder itself across a sequence was built and measured, and then removed: the load is 15.3 s cold but only ~5 s once the file is in the page cache, against a ~90 s stage, and holding it costs 11.37 GB of host RAM for the length of the sequence. Five percent of a stage is not worth that much headroom on the axis where video renders are already tight. `MOLD_KEEP_TE_RAM=1` remains for anyone who wants the trade, and installing a quantized encoder is the better lever — the Q8 GGUF loads in 3.2 s on the GPU.
+
+Measured: a 3-stage 159-frame `wan22-t2v-a14b:q5` sequence at 832x480 renders in 257 s on an RTX 4090.
 
 Authored sequences work through the same `mold.chain.v1` script the LTX
 families use — per-stage prompts, frames, and transitions — with `mold chain

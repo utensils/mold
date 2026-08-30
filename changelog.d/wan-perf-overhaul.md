@@ -53,10 +53,3 @@
   sequence already rendered. Blocked owner work now records a typed memory
   block, triggers the same idle-scheduler cache reclaim queued generations get,
   and is bounded with the post-eviction numbers if the shortfall survives.
-- **A Wan sequence loads its text encoder once, not once per stage.** The
-  prompt-encoding cache only helps stages that share a prompt; an authored
-  sequence gives every stage its own, so each one re-read the 11.37 GB FP16
-  UMT5-XXL from disk. A Wan engine that has rendered a chain stage now retains
-  the encoder between stages — the behaviour `MOLD_KEEP_TE_RAM=1` already
-  provided, narrowed to the case that needs it, released by `unload()` on cache
-  eviction, and already accounted for by the warm-resident host estimate.

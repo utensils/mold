@@ -1201,25 +1201,6 @@ pub struct WanEngine {
     /// The last prompt encoding this engine produced, kept so a repeat of the
     /// same prompt never opens the encoder at all. See [`CachedPromptEncoding`].
     cached_encoding: Option<CachedPromptEncoding>,
-    /// Set once this engine renders a chain stage, cleared by `unload`.
-    ///
-    /// The prompt-encoding cache only helps stages that share a prompt — an
-    /// auto-chained long video, a re-roll, a batch child. An *authored*
-    /// sequence gives every stage its own prompt, so each one misses the cache
-    /// and re-reads the 11.37 GB FP16 UMT5 from disk; on this repo's own
-    /// production store that is the largest single cost in a sequence, paid
-    /// once per stage.
-    ///
-    /// `MOLD_KEEP_TE_RAM=1` already retains the encoder, and the reason it is
-    /// not a global default is a good one: an unbounded encoder cache is what
-    /// pinned FLUX's t5xxl_fp16 for the life of a process and made a 64 GB host
-    /// refuse H3. This narrows that to exactly the case that needs it. Stages
-    /// run back to back on one worker, so the retention lasts a sequence rather
-    /// than a process, `unload()` releases it on cache eviction, and the host
-    /// cost is already modelled — `predicted_warm_host_increment_bytes` exists
-    /// precisely because a CPU-parked encoder stays resident for the engine's
-    /// life.
-    rendering_chain: bool,
 }
 
 /// One prompt's UMT5 output, retained across renders.
@@ -1293,7 +1274,6 @@ impl WanEngine {
             pending_placement: None,
             retained_encoder: None,
             cached_encoding: None,
-            rendering_chain: false,
         }
     }
 
@@ -1910,9 +1890,7 @@ impl WanEngine {
             // read; the VRAM is released either way.
             // Metal is unified memory: "parking on CPU" copies within the same
             // physical RAM, so every other family skips it there and so does wan.
-            let keep = (crate::device::keep_te_in_ram() || self.rendering_chain)
-                && !text_device.is_metal();
-            if keep {
+            if crate::device::keep_te_in_ram() && !text_device.is_metal() {
                 encoder.park_to_cpu()?;
                 let parked = encoder.is_parked();
                 self.retained_encoder = Some(encoder);
@@ -2262,21 +2240,6 @@ fn video_frames_to_images(video: &Tensor, width: u32, height: u32) -> Result<Vec
 impl crate::engine::InferenceEngine for WanEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.base.progress.checkpoint()?;
-        // An ordinary render is the end of any sequence this engine was
-        // serving, so the chain-scoped encoder retention stops here.
-        //
-        // Without this the ~11.4 GB stays parked until the model cache
-        // happens to evict the engine, and with `MOLD_MAX_CACHED_MODELS`
-        // defaulting to 3 that is three encoders' worth of host RAM held for
-        // sequences that finished. `MOLD_KEEP_TE_RAM=1` is unaffected: that is
-        // an explicit request to keep it, and `keep_te_in_ram()` is re-read on
-        // the next render anyway.
-        if self.rendering_chain {
-            self.rendering_chain = false;
-            if !crate::device::keep_te_in_ram() {
-                self.retained_encoder = None;
-            }
-        }
         self.pending_placement = req.placement.clone();
         let result = if req.is_extend() {
             self.extend_inner(req)
@@ -2310,7 +2273,6 @@ impl crate::engine::InferenceEngine for WanEngine {
         // A few MB, but "give the resources back" means all of them, and a
         // reloaded engine must not answer from the previous one's prompt.
         self.cached_encoding = None;
-        self.rendering_chain = false;
         self.base.unload();
     }
 
@@ -2541,9 +2503,6 @@ impl crate::chain::ChainStageRenderer for WanEngine {
                  wan stages cannot honour it"
             );
         }
-        // From here the encoder is worth keeping between calls: the next
-        // stage of this sequence is the very next thing this engine does.
-        self.rendering_chain = true;
         let mut stage_req = stage_req.clone();
         self.seed_stage_from_carry(&mut stage_req, carry)?;
 
