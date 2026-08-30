@@ -1,1 +1,0 @@
-- **Keep machine details responsive with LTX-2.5 GGUF models installed.** GGUF checkpoints are now rejected immediately by safetensors-only capability probes instead of being read end to end, and iPhone/Android machine telemetry no longer waits for the host's model inventory.

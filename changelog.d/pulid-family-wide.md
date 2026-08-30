@@ -1,1 +1,0 @@
-- **Family-wide PuLID support.** Enable identity-photo generation for every FLUX and non-Turbo SDXL checkpoint, including live Hugging Face and Civitai catalog models, while continuing to reject SDXL Turbo.

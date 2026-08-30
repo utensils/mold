@@ -1,1 +1,0 @@
-- **Catalog outages recover without alarming errors.** Mold now respects catalog providers' retry timing and presents temporary Civitai or Hugging Face overloads as a calm, retryable notice while keeping available models visible.

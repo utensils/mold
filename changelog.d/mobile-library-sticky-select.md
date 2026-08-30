@@ -1,1 +1,0 @@
-- **Reachable mobile Library selection.** The Select and Done actions now stay visible while scrolling through long Libraries on iPhone and Android.

@@ -1,1 +1,0 @@
-- Fixed: a held queue row no longer renders as **Next up** / **#N in line** on iPhone, desktop, web, the TUI, or `mold queue list`. Held work is parked until an operator retries it, so `GET /api/queue` now numbers only rows that can run and every surface reads the shared `held` answer — a parked LTX continuation no longer looked like it was holding the whole queue.

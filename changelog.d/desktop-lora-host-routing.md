@@ -1,1 +1,0 @@
-- **Keep LoRAs on their generation machine.** Mold Studio now loads LoRAs from the selected machine and keeps generation pinned there, preventing remote jobs from receiving an unreadable path from another host.

@@ -11,6 +11,704 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-30
+
+- **LTX-2.5 sequences no longer reset to the opening image at every clip.** A
+  smooth continuation used to append the chain's opening image as a soft
+  "identity anchor" token at the first frame past the motion tail. LTX-2.5 was
+  trained with keyframe conditioning and reads exactly that token shape as a
+  keyframe it must reach, so every clip after the first cut back to the source
+  image. On keyframe-trained checkpoints the continuation now drops the
+  repeated image and lets the motion-tail carry own continuity; LTX-2 and
+  LTX-2.3 keep the anchor they were qualified with.
+- **MiniMax H3 references are never upscaled.** Ref2VA image references
+  smaller than a 2048 px short edge now keep their native geometry (32-aligned)
+  and video references keep theirs when they fit the reference canvas, matching
+  ComfyUI's `min(1.0, 2048/short)` policy. Two phone photographs (582x1200) were
+  being inflated to 2048x4224 each — about 67,000 vision-patch rows — and refused
+  with an impossible ~82.7 GB host-memory demand on a 64 GB host; the same print
+  now admits at roughly a quarter of the memory. The Create crop hint on web,
+  desktop, and iPhone mirrors the new arithmetic, and `REFERENCE_PREPROCESS_VERSION`
+  is bumped so a job held under the old shapes re-derives them on retry.
+- **Keep machine details responsive with LTX-2.5 GGUF models installed.** GGUF checkpoints are now rejected immediately by safetensors-only capability probes instead of being read end to end, and iPhone/Android machine telemetry no longer waits for the host's model inventory.
+- **LTX-2 attention on CUDA now runs the shared BF16 dispatcher.** Unmasked,
+  unperturbed self-attention (video and audio) routes through `crate::attention`
+  in the checkpoint's own dtype — upstream's arithmetic, measured 6-9x faster
+  than the old F32 tiles at stage-2 shapes — while masked cross-attention and
+  the STG blend keep the F32 path byte-for-byte. `MOLD_LTX2_ATTN_F32=1`
+  restores the F32 path everywhere, and every print records which route
+  rendered it as additive `attention_path` provenance
+  ([#735](https://github.com/utensils/mold/issues/735)). The sm89 `h3-cuda`
+  release artifact now compiles the global FlashAttention dispatch, so
+  `MOLD_ATTN=flash` works out of the box there — the default backend stays
+  `math` in every build (#736), and the MiniMax H3 visual VAE keeps its
+  byte-identical bounded-math decode on CUDA unless `MOLD_ATTN=flash` opts
+  in. LTX-2 renders also report typed Upscale, AudioDecode, and Mux phases
+  to the scheduler's learned-timing model.
+- **LTX-2.5 `int8-conv` runs real INT8 on CUDA instead of a host decode** ([#1398](https://github.com/utensils/mold/issues/1398)). The int8-convrot transformer previously decoded every packed weight in a CPU loop and uploaded it widened to BF16 — per block, per denoise step — so the 21.5 GB pack cost as much VRAM and far more time than the BF16 pack. Now the packed bytes upload once and stay packed: transformer linears execute ComfyUI's own W8A8 order (rotate the activation, dynamically quantize it per row, INT8×INT8→INT32 cuBLASLt GEMM, both scales in F32, bias after the GEMM) through the same kernel that runs the MiniMax H3 DiT, promoted family-neutral as `mold_candle::comfy_int8`. `MOLD_LTX2_INT8=dequant` keeps a W8A16 escape hatch that widens each linear per forward through the fused ConvRot device kernel (which now also serves CUDA loads of the Gemma 4 int8 encoder and the prompt connectors, replacing their host rayon decode). The active arm is logged once as `ltx2 int8 arm=…`, and the switch is fingerprint-registered so the two arms never share a scheduler estimate. Metal is unchanged.
+- **LTX-2.5 CUDA qualification harness.** `scripts/capture-ltx25-cuda-verification.sh`
+  runs the manifest-driven `scripts/fixtures/ltx25-cuda-matrix.json` (official
+  split packs, GGUF tiers, LTX-2/2.3 regressions) against a scratch CUDA
+  server and seals a `mold.ltx25.cuda.verification.v1` report whose rows are
+  exactly `passed|failed|blocked|not_run`, bound to retained media, Library
+  provenance, hashed server-log slices, and 1 Hz VRAM/host samples;
+  `scripts/capture-ltx25-comfy-cuda-reference.sh` is the matching ComfyUI CUDA
+  oracle for the INT8 ConvRot and GGUF Q4_K_M checkpoints. Both ship with CI
+  contract tests; the campaign itself lands separately
+  ([#1398](https://github.com/utensils/mold/issues/1398),
+  [#1414](https://github.com/utensils/mold/issues/1414)).
+- **LTX-2.5 INT8 ConvRot reaches adaptive residency on CUDA.** ConvRot checkpoints no longer force block streaming on CUDA: blocks stay resident in their packed W8A8 form and are priced that way by both admission and the adaptive planner, which now also reserve the per-forward dequant transient and the token-scaled W8A8 workspace. Metal and CPU keep the streaming behaviour they always had.
+- **Fix four bugs in the LTX-2.5 CUDA qualification harness.** The `.sha256-verified`
+  marker read now takes only the first line before stripping whitespace, so a
+  marker file with trailing content no longer corrupts the comparison. `--seal`
+  no longer passes the full per-row result array as a single `jq --argjson`
+  command-line argument — at real matrix sizes this exceeded Linux's
+  `MAX_ARG_STRLEN` (128 KiB per argument, independent of `ulimit -s`); it now
+  reads the payload via `--slurpfile` from a temp file. The audio sample-rate
+  check is now per-row (`expect.audio_sample_rate`, defaulting to 48000)
+  instead of hardcoding LTX-2.5's 48 kHz for every checkpoint — LTX-2 19B's
+  audio is genuinely 24 kHz. The text-to-audio (`t2a`) row's expectation no
+  longer assumes video-shaped provenance/metadata it never produces.
+- **LTX-2.5's plain `:bf16` diffusion-VAE decode works.** It no longer fails
+  with `cannot find tensor decoder.det_stages.0.0.mlp.w_up.bias`: the decoder's
+  SwiGLU MLPs now load the checkpoint's bias-free weights, and every rank-5
+  projection is flattened before candle's `Linear`, which only accepts rank ≤ 4
+  inputs.
+- **LTX-2.5 renders follow the prompt again.** The Gemma 4 prompt encoder read
+  its RMSNorm weights as Gemma 3-style offsets (`1 + w`) when the LTX-2.5
+  checkpoint stores them as absolute scales, so every normalization left the
+  channels the checkpoint suppresses at full gain. Conditioning collapsed onto
+  a per-seed attractor and video came out well-formed but unrelated to the
+  prompt; it now matches the reference encoder to BF16 rounding.
+- **Add pinned LTX-2.5 GGUF downloads.** Seven Abiray transformer tiers now
+  appear in model discovery with shared official companions, bounded header
+  qualification, and explicit download-only runtime and LoRA gates.
+- **Run the LTX-2.5 GGUF tiers natively.** The seven pinned Abiray transformer
+  tiers now execute end to end: quantized block linears stay compact at rest
+  and dequantize per forward on CUDA (`MOLD_LTX2_QMATMUL=1` opts into candle's
+  quantized fast path; Metal keeps `QMatMul`), adaptive residency prices the
+  files at their real sizes so Q4_K_M sits fully resident on a 24 GB card, and
+  LoRAs apply as a parallel low-rank branch with full-weight `.diff` deltas
+  refused by name. The download-only gate and its 501 refusal are gone.
+- **LTX-2 INT8 ConvRot prints record their execution arm.** Renders from INT8
+  ConvRot checkpoints carry an additive `int8_arm` on `VideoData` and saved
+  `OutputMetadata` (`native-w8a8`, `dequant-cuda`, `dequant-metal`,
+  `dequant-host`), mirroring `attention_path`, so provenance shows which
+  quantized arm produced the pixels.
+- **LTX-2.5 plain-bf16 diffusion-VAE decode now runs on CUDA.** The `neighborhood-attention-3d` custom op gained a CUDA kernel (a line-for-line port of the existing Metal kernel), so the diffusion video decoder no longer refuses with "no cuda implementation for neighborhood-attention-3d" on NVIDIA GPUs. A short clip whose frame count is smaller than the checkpoint's fixed attention window (e.g. a 9-frame smoke render against an [11, 11, 11] window) no longer refuses either — the window now degrades to full attention on whichever axis it exceeds, matching NATTEN boundary-window semantics, on every backend.
+- **Opt-in LTX-2 video-only rendering.** `video_only: true` /
+  `mold run --video-only` / the Advanced "Video only" toggle on web and
+  desktop skip the audio-video transformer's audio branch entirely, the way
+  upstream's video-only configurator omits it. Output-changing and never a
+  default; refused beside `enable_audio=true`, conditioning audio, the
+  text-to-audio pipeline, and `extend_video`. The debug-only
+  `MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH` environment variable is removed —
+  the request field is the one switch
+  ([#1037](https://github.com/utensils/mold/issues/1037)).
+- **One weight index for every LTX-2 transformer file.**
+  `mold_core::ltx2_weight_index::Ltx2TransformerWeightIndex` now answers what
+  a safetensors or GGUF transformer weighs — per-block and non-block bytes at
+  rest, widened, and packed, the block count, the storage format, and the
+  AdaLN width — and both the scheduler's LTX-2 admission model and the
+  engine's residency planner read it (pinned by a parity test). INT8 ConvRot
+  packs are priced at the BF16 size the loader actually materializes on the
+  device instead of their raw bytes (a 2× under-count that admitted plans
+  which OOMed at the first denoise step), and the AdaLN width is read from the
+  exact `adaln_single.linear.weight` key rather than whichever
+  `*adaln_single.linear.weight` a hash map yielded last (a 4.5× swing in the
+  conditioned activation term between runs). A `.sha256-verified` sidecar now
+  records the byte length it hashed and vouches only for that length, and a
+  sidecar from an older build is trusted only while the manifest's declared
+  size still holds — so a file rewritten underneath its marker shows up as a
+  repair instead of a "downloaded" model that fails qualification.
+  LTX-2.5 packs no longer advertise the LTX-2.3-only x1.5 spatial upsampler,
+  and the docs name the diffusion-VAE variants by their real `:bf16` tags
+  ([#1398](https://github.com/utensils/mold/issues/1398),
+  [#1414](https://github.com/utensils/mold/issues/1414)).
+- **Bare host addresses work on every surface.** iPhone, Android, desktop,
+  web, CLI, and TUI connections now consistently expand a hostname or IP such
+  as `100.123.198.98` to Mold's `http://` and `:7680` defaults while preserving
+  explicit protocols and ports.
+- **Mobile Library opens from a persistent thumbnail cache.** iPhone and Android now paint the last saved grid before refreshing connected hosts, retain unchanged thumbnails, and prewarm older prints within bounded storage so large Libraries return instantly without caching full originals.
+- **Show each machine once across every Mold client.** Desktop, web, iPhone,
+  and Android now treat the server UUID as the machine identity, collapse IP,
+  hostname, and MagicDNS aliases, keep the most recently verified address on
+  the surviving row, and retain intentionally disconnected machines for later
+  reconnection.
+- **Catalog outages recover without alarming errors.** Mold now respects catalog providers' retry timing and presents temporary Civitai or Hugging Face overloads as a calm, retryable notice while keeping available models visible.
+- **Keep LoRAs on their generation machine.** Mold Studio now loads LoRAs from the selected machine and keeps generation pinned there, preventing remote jobs from receiving an unreadable path from another host.
+- **Fixed Playground v2.5 generation.** Use the model's required EDM DPM++ 2M
+  schedule and latent normalization so renders produce coherent images instead
+  of noise.
+- **Post-generation upscales no longer stall on CPU while GPUs are available.**
+  Mold now keeps the follow-up Real-ESRGAN pass on a viable accelerator, while
+  retaining CPU fallback when every accelerator is unavailable or lacks VRAM.
+- **Discover SD3.5 models.** Show Stable Diffusion 3.5 in the Models family picker and return matching installable Hugging Face models across desktop, web, and mobile.
+- **Mobile navigation and remote-data refresh feel native.** Swipe down to dismiss
+  Library Info, pull to refresh Library, Models, Machines, or Machine Detail,
+  swipe between primary destinations, and swipe back from Machine Detail or
+  Settings without stealing gestures from the gallery viewer, image-tile
+  scrolling on Android tablets, or nested controls.
+- **Return to Create when restoring a queued print on mobile.** Tapping a
+  queued or recovered print now reloads its generation settings at the top of
+  the Create screen instead of leaving the view parked on the queue card.
+- **ZFS hosts stop refusing renders for memory ZFS will give back.** Host-RAM
+  admission now counts evictable ZFS ARC — OpenZFS's own reclaimable figure,
+  `min(Σ mru/mfu evictable, size − c_min)`, zero while ZFS is self-evicting or
+  its shrinker is rate-limited — beside `MemAvailable` on every path: the
+  scheduler ledger, MiniMax H3 admission, the between-eviction re-sample, and
+  `mold run --local`. Refusals, `/api/status` and `GET /api/queue` host
+  telemetry (`host_memory.reclaimable_zfs_arc_bytes`), `/api/resources`, the
+  Machines pages, and the TUI name the credit whenever it is above zero;
+  `MOLD_HOST_RAM_ZFS_ARC=0` disables it
+  ([#1439](https://github.com/utensils/mold/issues/1439)).
+- **Control host queues consistently from mobile.** Machines now exposes the
+  same Pause, Resume, and Cancel swipe actions as Create, adds a host-wide
+  pause control, and keeps paused status synchronized across mobile, desktop,
+  and web queue surfaces.
+- **Web thumbnail cache honesty and lifecycle.** Forgetting a machine now drops its persisted thumbnails with its API key; a retina display talking to an older host no longer stores that host's 256 px PNG under the 512 px key (the server's `x-mold-thumbnail-rendition` header, now CORS-exposed, confirms the rendition before it persists); and iPhone/Android tiles request the display's rendition like web and desktop.
+- **Web Library thumbnails persist across reloads.** On a secure origin the
+  web app keeps authenticated hosts' tiles in the browser's Cache API (keyed
+  by host, filename, content version, and rendition; bounded to 4 000 tiles),
+  so a reload paints the grid without one request per tile; keyless hosts
+  already rode the browser's HTTP cache. Every surface now asks a current
+  server for the display's rendition (`?size=512&fmt=jpeg` on retina), grid
+  tiles in the overscan band load at a lower priority than the ones on screen
+  and are promoted the moment they scroll into view, and a 2 000-print guard
+  pins the number of tiles the web grid mounts.
+- **Manage the Library from the terminal.** `mold library` can list and inspect
+  existing prints, preview stills and videos inline, edit titles and favorites,
+  add, remove, rename, or delete tags, manage collections and membership, and
+  move prints into recoverable trash. `mold library grid` opens the existing
+  protocol-aware TUI directly on its Library workspace.
+- **Faster gallery thumbnails on every surface.** `GET /api/gallery/thumbnail/:name`
+  now takes `?size=256|512` and `?fmt=png|jpeg` so retina displays get a sharp
+  512 px JPEG tile (about a quarter the bytes of the PNG; prints with
+  transparency stay PNG), while the default 256 px PNG keeps its exact path and
+  ETag for older clients. Video posters decode only the first frame instead of
+  the whole clip, startup warmup renders on a bounded thread pool newest-first
+  instead of one core serially, orphaned tiles of purged or re-rendered prints
+  are swept after warmup, and the Library listing walks a new
+  `(output_dir, recency)` index instead of sorting the directory in a temp
+  B-tree on every poll.
+- **Desktop Library thumbnails persist on disk.** The app keeps every tile it
+  has shown in a content-addressed cache under its app data folder
+  (`thumbnail-cache/v1`, bounded to 512 MB / 20 000 files, least-recently-used
+  eviction), keyed by host, filename, and the print's content version — never
+  by API key — so a cold launch paints the grid from local files without
+  asking any machine for a thumbnail it already holds, and scrolling finds the
+  tiles around the viewport pre-warmed. Tiles are served through a native
+  `mold-thumb://` protocol, so the webview decodes them off the main thread and
+  holds no blobs for them. With the built-in engine Off, this device's tiles
+  are now real thumbnails rendered in-app (video posters decode only the first
+  frame) instead of every full-resolution print. Print a deleted forever
+  leaves the cache; a trashed one keeps its tile.
+- **Pause queued work after restart.** Persisted generation and sequence jobs now return in a paused state after a server or desktop restart, so work resumes only after an explicit Resume action.
+- **MiniMax H3 runs its Qwen3-VL conditioner on the CUDA device when it
+  fits.** Every CUDA route had pinned the 32B conditioner to the host since
+  #919, so each FL2VA and Ref2VA render paid its prefill on the CPU — a single
+  2048-square Ref2VA image reference took ~40 minutes on an RTX 4090. The
+  vision tower's per-image attention is now query-chunked (exact; a 16,384-patch
+  reference no longer materializes a ~34 GB score matrix per layer), and
+  admission places the conditioner on the device whenever the Qwen phase —
+  fixed runtime, the 1.19 GB of dense-resident tensors, the request's
+  activation demand, and the output state — fits the available VRAM, keeping
+  the host route otherwise
+  ([#1423](https://github.com/utensils/mold/issues/1423)).
+- **MiniMax H3 first-frame (FL2VA) prints render again on the durable queue.**
+  Since the single durable admission path landed, every H3 job carrying a
+  `source_image` was admitted and then blocked forever as a phantom VRAM
+  shortage ("required < headroom"): the admission identity hashed the hydrated
+  request while the scheduler resolved the scrubbed row, and the row's missing
+  first frame read as a text-only render. The identity is now over the
+  persisted form (one scrub authority in `mold-core`), the resolver reads the
+  queue-media projection for the first frame, the worker revalidates its own
+  hydrated copy and reads the first frame off its media projection at every
+  fence rather than trusting the payload-free row, and a refused plan names the
+  conjunct that refused it in the log
+  ([#1427](https://github.com/utensils/mold/issues/1427)).
+- **MiniMax H3 Ref2VA Turbo 4-step renders instead of failing after the full
+  clip.** The Ref2VA phase backend hard-coded the `comfy-res-multistep`
+  integrator, so a Turbo tag rendered every phase with the wrong sampler and
+  was then refused by the provenance guard; it now takes the integrator and
+  video shift from the frozen quantization authority exactly as FL2VA does
+  ([#1432](https://github.com/utensils/mold/issues/1432)).
+- **Desktop Library stays smooth past 1 000 prints.** The gallery store now
+  indexes each print's organization and cross-host copies once per data change
+  instead of re-deriving them for every tile on every render (one filter change
+  used to run ~10 full passes over the library, and each visible tile scanned
+  every bucket), the grid renders one flat print-keyed tile layer so a
+  thumbnail-size drag or window resize moves tiles instead of remounting their
+  media, a 304 poll no longer invalidates the merged grid, gallery rows are
+  raw immutable snapshots rather than deep-reactive proxies, the thumbnail
+  scheduler dispatches in O(hosts) instead of re-sorting the whole queue, and
+  History ▸ Runs is capped like Sequences. Operation-count regression guards
+  (`gallery.perf.test.ts`, `LibraryView.perf.test.ts`, the scheduler drain
+  test) fail CI if any of these hot paths regress.
+- **Live sequence status.** Auto-chained video snapshots now restore an already-running clip or finalization phase instead of leaving desktop, web, and mobile activity rows stuck on Queued.
+- **Source images now default to Crop fill everywhere.** New uploads, gallery picks,
+  file drops, edit targets, and sequence opening images consistently preserve the
+  source proportions and crop overflow across web, desktop, iPhone, and Android.
+- **Keep prompt expansion retryable after short responses.** Exact-count failures now stay in the retry flow instead of incorrectly asking users to download an already installed expansion model.
+- **Keep active work in submission order.** Web, desktop, and mobile activity
+  timelines no longer move a newer developing print above older queued work.
+- **Library filters stay visible when hosts are offline.** Mobile keeps the unavailable-host
+  message, but now places it below the Favorites and tag controls so thumbnails cannot cover them.
+- **Ref2VA image references no longer hold or fail at execution.** Admission
+  counted a reference's Qwen vision rows as merged 32-px pads while the runtime
+  prepared 16-px ViT patches (four per pad), so every image reference was
+  admitted, dispatched, and then held as "prepared rows differ from frozen
+  admission" (16,384 vision rows against 4,096). Both sides now count patches
+  — the grid FL2VA's frozen value and the qualification record already used —
+  the conditioner text budget keeps the merged pads, and the memory grant
+  scales on the same composition the workspace was measured over. Past that
+  check, the conditioner's vision-row validation expected the bare pad count
+  and refused every visual reference ("returned 4098 vision rows for 4096
+  presentation pads"); it now expects the two flanking
+  `<|vision_start|>`/`<|vision_end|>` rows of every span, which upstream tags
+  as vision rows too. And the visual-VAE reference condition, whose official
+  seed-42 sample round-trips through FP16 on the host, is now moved onto the
+  frozen device before validation exactly as FL2VA's endpoint is, instead of
+  being refused for the encoder's own placement. Finally, the runtime-bound
+  observer attributes the condition-VAE workspace to whichever encoder phase
+  ran — Ref2VA's reference encode as well as FL2VA's endpoint encode — instead
+  of failing a fully muxed Ref2VA print at the last step for lacking FL2VA's
+  phase, and Ref2VA now reports its staged encoded-video and thumbnail
+  capacities to that observer as FL2VA does, whose zero-byte guard names the
+  offending field ([#1418](https://github.com/utensils/mold/issues/1418)).
+- **Source-shaped canvases preserve their aspect ratio.** When a checkpoint such as Wan only
+  advertises landscape and portrait presets, a square source now stays on a model-safe square
+  canvas instead of being mislabeled as Source while rendering at a widescreen resolution.
+- **Mobile Library tags stay visible with saved prints.** iPhone and Android now retain each
+  machine's tag filters while its cached Library is shown offline, without carrying tags across
+  server replacements.
+- **Mobile source and Library touch controls now stay consistent.** iPhone and Android use the same replaceable source-image wells everywhere, Library tags stay above thumbnails, natural full-width scrolling and pull-to-refresh work, and queued work exposes Pause or Resume beside Cancel ([#1420](https://github.com/utensils/mold/pull/1420)).
+- **Machine queue status now matches active video work.** Auto-chained one-shot
+  generations appear once in Create, and iPhone/Android machine details show
+  their active scheduler stages instead of incorrectly saying the queue is empty.
+- **Batch prints report their progress again.** `GET /api/queue/{id}/preview` now returns the whole folded progress snapshot — step, total, stage, weight load, download, queue position and the denoise preview — instead of a preview image alone, so the step counter works on a host started with `MOLD_STEP_PREVIEW=0`. Every surface reads it: web, desktop and iPhone move their counters without an image, and `mold run --batch N`, the TUI batch pane, MCP async jobs and `mold runpod run` recover the progress bars, denoise previews and model-pull lines they lost on the durable path. Batch children also carry `seed`, `generation_time_ms` and `gpu` on their result, so MCP reports the real values, the RunPod completion line names the seed and duration again, the TUI restores its preview, seed advance and prompt history, and `mold run --batch N` writes the local `mold.db` row. New `DELETE /api/generation-batches/{id}` cancels every non-terminal child of one print run; `generation_status` hydrates a single job's image again unless `include_result: false`; the TUI surfaces a sequence's request advisories, retries its own held prints with `^T`, and falls back to local inference for a batch when the host is unreachable, as it always did for a single print.
+- **One durable-print vocabulary on web, desktop, and iPhone.** A queued print's
+  stage, hold, cancellation, failure prose, and "outcome unknown" copy now come
+  from one shared policy, so the three surfaces no longer disagree ("Rendering"
+  and "Accepted" are gone; every surface says "Developing" and "Queued"). A
+  print the host reported complete without publishing a file is shown as a
+  failure instead of a blank result the web retried forever and the iPhone
+  silently skipped for Photos auto-save; a print whose server instance was
+  replaced or whose record the host no longer has settles as "Outcome unknown"
+  rather than lingering as interrupted work. Clients also stop re-reading the
+  queue on `gallery_added` and `job_ended` hints, since every settlement is
+  followed by the server's commit hint.
+- **Breaking.** The chain compatibility endpoints are gone. `POST /api/generate/chain` and `POST /api/generate/chain/stream` ran a sequence as a hidden ephemeral chain job and deleted its artifacts after answering, so it could not be resumed, retaken, or reattached after a dropped connection. A sequence is a durable chain job on every surface now: `POST /api/chain-jobs` plus `GET /api/chain-jobs/{id}/events`. `POST /api/generate/chain/validate` is unchanged. `mold run --script` and the TUI create a real job and follow its events, so a `--script` run that loses its connection leaves a job the host finishes and `mold chain list` can still find; the stitched print is downloaded from the host's gallery rather than returned inline, and its host-side thumbnail and GIF preview are no longer part of what the CLI writes locally.
+- **`mold queue` controls the generation queue from the terminal.** `list`, `show`, `cancel` (by id, `--all`, or `--batch`), `retry` (by id or `--held`), `move`, `pause`, `resume`, and `sweep` talk to `$MOLD_HOST` with no local fallback. The `STATE` column is the same vocabulary the web, desktop, and iPhone surfaces render — a running row counts its denoise steps, position 0 is `Next up`, everyone behind is `#N in line` — and held rows are listed with the server's own error sentence and whether a retry is allowed. `GET /api/queue` and `GET /api/queue/{id}` now carry each row's `batch_id`, `client_batch_id`, and one-based `batch_index`, so a bare job id is enough to compose a retry.
+- Two concurrent prints no longer take each other's response away. The durable feeder prefers claiming rows that have an attached client, and an exact claim that failed used to discard that client's observer along with the claim hint — but the usual reason an exact claim fails is that the feeder's own FIFO pass just claimed the row, which delivers the observer normally. Under concurrency the second `POST /api/generate` therefore received a `202` reconciliation body for a print that rendered perfectly well. Only a row that is genuinely gone discards its observer now.
+- **The desktop dev build no longer aborts on its second background
+  notification.** In `tauri dev` the first native notification correctly declined
+  and fell back to the notification plugin, but that fallback rewrites the
+  process's bundle identifier, so the next native notification believed it was
+  running from an app bundle and macOS terminated the app with
+  `bundleProxyForCurrentProcess is nil`. The app-bundle check now reads the
+  executable path, which nothing can rewrite.
+- `POST /api/generate` and `/api/generate/stream` answer a print that fails while the caller is attached with the caller's own error again — 404 `MODEL_NOT_FOUND` / `UNKNOWN_MODEL`, 503 `QUEUE_FULL`, otherwise 500 with the engine's sentence — naming the held durable job to resume, instead of a 202 reconciliation body; the CLI's missing-model auto-pull fires on it again. Both facades accept an optional `X-Mold-Client-Batch-Id` UUID as the durable `client_batch_id`, so a retried POST is answered with the batch it already admitted rather than a second render.
+- A `held` batch child now carries its typed refusal code in additive `error_code` beside its sentence (schema v30), so web, desktop, and iPhone offer pull-and-resume for a print parked on a missing model again; their classifier reads the code, never the prose. Own prints regained the live denoise preview and step count on every surface (polled from `GET /api/queue/{id}/preview` while the child runs), a typed pre-commit `503` refusal (`DURABLE_ADMISSION_UNAVAILABLE`, `DURABLE_MEDIA_UNAVAILABLE`, `QUEUE_FULL`, `SERVER_RESTARTING`) fails the print with the host's own message instead of waiting forever, Auto / Most capable skip a machine that refuses the durable contract, desktop auto-saves a remote print with the origin's own metadata, and a relaunch-recovered iPhone print restores its real settings from the host on selection.
+- Chain jobs accept every video `output_format`: the job's own artifact is stitched as MP4 and the gallery print is transcoded to the requested gif, webp, or apng at finalization, so an auto-chained non-mp4 request renders again on every surface and the CLI.
+- iPhone/Android queue rows swipe right-to-left to reveal Retry / Cancel (and Resume / Dismiss for a sequence); a full swipe from the revealed tray commits Cancel, a single gesture only reveals, and the ⋯ control opens the same tray for assistive access.
+- The chain-job `finalized` event and each manifest finalize record carry additive `gallery_filename` — the stitched print's gallery name in the requested format. `output` is the job-relative MP4 artifact amend and retake decode, never a name a client can fetch; the CLI, web, desktop, and iPhone hydrate the finished sequence from `gallery_filename` (and from the last finalize record when they attach after the job settled). A failed gif/webp/apng transcode publishes the MP4 with a warning instead of failing a finished render, an unsettled ephemeral job is never reclaimed by the clean-up sweep, and `/api/generation-batches` refuses new work while generation is unavailable exactly as `/api/generate` does while still answering an idempotent replay.
+- A plain Batch N is N ordinary siblings: the server no longer stamps `batch_id` / `batch_index` / `batch_count` on children whose caller supplied none, so only a prepared set carries the prepared-expansion provenance into the Library. The Rust CLI/TUI client gates on the machine's durable queue alone and never inspects the request; the server's typed refusal answers for anything it cannot take.
+- An auto-chained one-shot is no longer mistaken for a sequence the user authored. `mold run --frames 200` splits a long video into clips because the model cannot render it in one pass; that job is now created with the additive `ephemeral` flag on `POST /api/chain-jobs`, so it is absent from `GET /api/chain-jobs` and from History ▸ Sequences and "Now developing", its working directory is reclaimed by the clean-up sweep once it has settled (never while queued or running), it refuses resume, and — the visible half — its print records no `chain_job_id`, so **Reuse settings** restores a one-shot instead of opening the clip rail. An ephemeral job still publishes its stitched print with full per-clip provenance; it is the print, rendered in pieces.
+- `mold runpod generate` shows progress again, driven by the durable batch's own committed state transitions rather than by per-step frames the durable path does not carry.
+- **Gallery import publication is one record per attempt.** The server's atomic
+  gallery-import transaction now stages and publishes exactly one file; the
+  multi-child batch staging path (per-child leases, auxiliary thumbnail/preview
+  receipts, and the `child_record_updated` / `child_auxiliary_staged` /
+  `child_auxiliaries_cleared` / `child_unstaged` journal events) is retired.
+  Startup recovery fails closed on a crash-orphaned attempt that an earlier
+  multi-child release left behind — an attempt directory holding more than one
+  child, or a journal carrying one of those retired events — naming the
+  directory to move out of `.mold-batch-transactions` after inspection. The
+  committed archive is unaffected and still reads multi-child manifests.
+- New `GET /api/generation-batches/{id}/events`: an authenticated SSE stream of one durable batch's authoritative state. Every frame is a complete `GenerationBatchStatus` rather than a delta, so a client that connects late or reconnects is correct from the first event; the stream closes once every child has settled. Per-step progress and previews stay on `POST /api/generate/stream` and `GET /api/queue/{id}/preview`, which are the single-observer channels a job's own admission registers.
+- **A queued generation now says when it is preparing, and a memory shortfall
+  no longer holds it forever.** `GET /api/queue` reports a job whose own
+  dependency preparation is running as `preparing` — with how long it has been
+  running and, for MiniMax H3's artifact authentication pass, which component
+  and how far through — instead of the generic `dependency_wait` every other
+  not-ready job gets. MiniMax H3's admission additionally names and times each
+  of its phases — request contract, conditioner support load, conditioning
+  normalization, artifact authentication, adapter authentication, runtime
+  qualification, checkpoint opens, execution-plan freeze, plus reference
+  binding and any host-reclaim wait — logging both edges of every one at INFO
+  with its own elapsed time, and reporting the current phase and its own age on
+  the queue. An H3 admission refused for device or unified memory now carries
+  a typed shortfall like the host one already did, so the scheduler parks the
+  job while the machine could still free that memory and refuses it with both
+  numbers when it could not. Park or refuse now turns on the resource rather
+  than on which worker happened to be busy at the instant admission sampled,
+  and a park that outlives an idle scheduler is answered with its own
+  shortfall numbers rather than waiting indefinitely on an idle GPU.
+- **MiniMax H3 no longer charges one host peak for memory it uses at two
+  different moments.** The conditioner's load staging and its forward
+  activation cannot coexist — the staging buffers are freed before the first
+  forward allocates — so the phase peak now takes the larger rather than their
+  sum, and the staging term charges one largest tensor instead of two on top of
+  a parameter total that already contains it. FL2VA also pays for its own
+  conditioner sequence instead of the largest canvas the family admits, using
+  the same measured per-row cost and margin policy Ref2VA already used and
+  clamped so the reviewed shape is unchanged. At the reviewed 1344x768 shape
+  the host charge falls from 22.89 GB to 21.34 GB; smaller canvases fall
+  further.
+- **`GET /api/queue/:id` returns one queued job in full.** The queue listing is
+  payload-free by construction — it never reads a request body per row — so a
+  durably admitted job showed no settings at all until it was dispatched. The
+  new endpoint reads that one body and returns the same metadata shape a
+  replayed job describes itself with, plus the planner's work item for the job;
+  unknown ids return `404`.
+- **MiniMax H3 reference crop.** Ref2VA image references can be cropped before
+  they are sent: the reference row's new **Crop** action on web, desktop, and
+  iPhone opens a drag rectangle with Free / 1:1 / 4:3 / 3:2 / 16:9 presets, a
+  64 px minimum, and a live vision-pad cost hint. The crop is applied
+  client-side at the photograph's original resolution before digest and
+  upload, recorded as additive `references[].provenance.crop` provenance
+  (validated by the server, kept in the print's metadata), and restored by
+  Reuse settings when the same original is reattached. It never changes the
+  print's size or fits the reference to the canvas.
+- Fixed: a held queue row no longer renders as **Next up** / **#N in line** on iPhone, desktop, web, the TUI, or `mold queue list`. Held work is parked until an operator retries it, so `GET /api/queue` now numbers only rows that can run and every surface reads the shared `held` answer — a parked LTX continuation no longer looked like it was holding the whole queue.
+- **A print of the model already loaded no longer waits forever for host memory.** A device that already holds a plan's engine is charged only what a request allocates on top of it — a CPU-parked encoder stays resident for the engine's life and is already absent from `MemAvailable` — instead of the cold-load figure, which on a 64 GB host with `flux-dev:q8` warm (9.85 GB of headroom against a 10.5 GB cold demand) parked every queued print of that same model on "Waiting for memory" until the model was unloaded by hand. When a job is genuinely short of host memory while nothing is running, the scheduler now releases mold's own idle model cache first (#1289's rule, for every family), logs the block once with its numbers, and only then bounds the wait — as a retryable hold that names what was released and what is still short.
+- A queued print that no longer fits the GPU only because an idle model is still resident is no longer left waiting silently: on an idle host the scheduler releases idle models (the same reclaim it already runs for host RAM), re-samples the device, and re-plans; a shortfall that survives is held with the post-eviction numbers naming the device instead of waiting forever. Seen on an RTX 4090 with a PuLID `flux-dev:q8` print (22.2 GB) behind an idle `flux2-klein:q8`.
+- The server-owned raw batch-parent runtime is gone. Generation is admitted only as durable queue rows, so the batch parent reducer, its joint publication attempt, and their restart recovery have been deleted along with the parent-authority lock, the child lease/receipt protocol, and the `MAX_LIVE_SERVER_BATCH_OUTPUTS` cap. A batch parent left on disk by an older server is no longer resumed: its unpublished staged children are rolled back by the ordinary gallery transaction sweep at startup, exactly like any other interrupted publication.
+- Web, desktop, and iPhone now admit every print — Batch 1, Batch N, and each prepared variation — through the durable `POST /api/generation-batches` queue. The attached `/api/generate/stream` submission path, the mixed-version capability probes (`queue.heterogeneous_batch`, `queue.durable_batch_outcomes`, `queue.admission_protocol_version`), and the 404/405 placement-preview fallbacks are gone from the browser surfaces.
+- The browser no longer inspects a request before submitting it. Source media combined with a LoRA and identity photos are carried by the durable queue, and every request shape is submitted rather than fenced client-side; a machine that cannot take one — an HDR EXR output directory, or MiniMax H3's ordered references, which the durable queue does not yet carry — refuses it by name with its own message. The only client-side refusal left is a machine that does not advertise the durable contract at all.
+- A print is admitted before its model is resolved, so a machine that does not have the checkpoint now parks the print instead of refusing it. Create still offers the download on that machine and resumes the parked print itself once the weights land.
+- An auto-chained one-shot video is now created as a durable chain job (`POST /api/chain-jobs`, `ephemeral: true`) and followed on that job's own event stream, instead of the `/api/generate/chain/stream` shim. Its stitched print is fetched from the machine's gallery like any other print rather than sent back inline.
+- **Breaking.** Generation has ONE admission path. `POST /api/generate`, `POST /api/generate/stream`, and `POST /api/generation-batches` all admit through the durable queue; the attached, non-durable pipeline that used to run behind them is gone, along with the `X-Mold-Operation-Id` opt-in header that selected between them. A host that cannot admit durably — `MOLD_DB_DISABLE=1`, gallery output disabled, no queue journal, a missing admission service, or a non-authoritative dispatcher (`MOLD_DISPATCH_MODE=legacy|observe`) — now refuses generation on all three routes with one `503 DURABLE_ADMISSION_UNAVAILABLE` whose message names the unmet requirement, instead of silently rendering work it could not replay. `mold serve` on such a host still serves the gallery, models, catalog, and queue routes, and `/health` stays 200.
+- A LoRA combined with conditioning media — img2img, inpaint, control, identity, source video, keyframes, or audio — is an ordinary durable request. Durable media protocol v1 refused the pair because it could not carry the adapter's server-local path; the adapter record is now sealed in the encrypted media set beside the media, restored before the print is planned, and re-validated when the job is dispatched. A LoRA that was moved or deleted between admission and dispatch holds its row with a reason naming the file, the same shape a missing model takes, instead of rendering without the adapter.
+- Ordered MiniMax H3 references are admitted durably. Upload, inline, and server-path reference media is sealed into the encrypted queue-media store at admission — one-use upload handles are consumed before the request is journaled and never reach `mold.db` — and the queued print survives a restart and replays like any other. `capabilities.durable_media.h3_references` and `capabilities.reference_uploads.authless_inline` are removed; both were constants (`false` and `!available` respectively).
+- `hdr_exr_dir` supplied over HTTP keeps its own long-standing refusal — it names an output directory on the machine doing inference, so re-run the CLI with `--local` — and that refusal now happens before the job is accepted rather than after, so it is an actionable `422` instead of a job that holds.
+- **Breaking.** `GET /api/capabilities` drops `queue.heterogeneous_batch`, `queue.durable_batch_outcomes`, and `queue.admission_protocol_version`. `queue.heterogeneous_batch_max_outputs` is present exactly when the host admits generation at all, and is the single bit clients read.
+- A degraded encrypted queue-media store now refuses the media-carrying requests that need it (`503 DURABLE_MEDIA_UNAVAILABLE`) rather than rendering them without restart safety. A media-free request is unaffected.
+- `mold run` submits Batch N as one `/api/generation-batches` operation with no capability negotiation, and single prints keep live step progress and denoise previews on `/api/generate/stream`. The blocking `/api/generate` fallback the CLI, TUI, MCP server, RunPod driver, and Discord bot each carried is gone; a host that does not serve the streaming route is an error naming it.
+- Model activation is now asked before durable acceptance rather than during preparation, so a compliance-gated family still answers `451`, a download-only MiniMax H3 row still answers `501 MINIMAX_H3_RUNTIME_UNAVAILABLE`, and both arrive before the print is queued instead of after it holds. Model RESOLUTION stays where it was: a model that is unknown or not yet downloaded is accepted and held retryably so auto-pull can repair it, and the SSE error frame now carries the server's `MODEL_NOT_FOUND` / `UNKNOWN_MODEL` code so `mold run`'s missing-model auto-pull keeps working on the streaming route.
+- **A queued job now tells you what it is.** Selecting a queue row on desktop,
+  web, or iPhone opens the whole job: its prompt, the settings it was submitted
+  with, its live place in line, when it was submitted, whether it survives a
+  restart, how many times a worker has claimed it, the scheduler's lane and
+  estimate, a parked job's complete reason and error behind a Copy control, and
+  a running job's live denoise preview — with **Reuse settings**, **Cancel**,
+  and **Retry** routed to that exact machine. Web and iPhone had no queue detail
+  at all, and desktop's said the host was too old to share the job's settings.
+  It is not: the durable queue lists a row before the machine loads its request,
+  so the panel now says that in the machine's own terms, and desktop fills the
+  gap from its own copy of the request it submitted.
+- **iPhone and Android queue rows swipe.** Dragging a row right to left reveals
+  a 44pt **Cancel** and, where the machine supports reordering, a
+  non-destructive **To back**; a full swipe commits the cancel. Revealing the
+  tray is the first step and the tap or full swipe is the second, so nothing is
+  cancelled by one flick, and every action stays reachable from the row's
+  **Actions** button for VoiceOver and hardware keyboards. The horizontal pan is
+  scoped to the row, so the list scroll, the Library grid's column pinch, and
+  the gallery viewer's swipe are unaffected.
+- **Settled batch summaries are retained for `queue.held_retention_days`, not forever.**
+  A batch whose every print has completed, failed, or been cancelled is only a
+  receipt for a client reconnecting after a dropped stream, and nothing ever
+  purged one, so the `generation_batches` tables grew without bound. The hourly
+  queue sweeper now purges fully settled batches once their newest child
+  settlement is older than the existing `queue.held_retention_days` (`0` keeps
+  them forever), a purged batch answers `404 GENERATION_BATCH_NOT_FOUND` — which
+  clients already read as missing without reopening finished work — and
+  `POST /api/generation-batches/sweep` runs that pass on demand.
+- Every worker terminal path settles the durable row before it reports, through one settlement helper: a scheduler refusal that lost to a cancellation or a retention fence now ends the stream with `cancelled` / `retained` rather than always `failed`, and a dispatch claim fenced by shutdown sends the attached observer a terminal `failed` frame instead of closing quietly. An inference panic holds the row non-retryably on both the GPU and single-worker paths (the GPU path's quarantine fence still retains it for the restart).
+- Generation submission commits Batch N as durable singleton children through one `/api/generation-batches` operation across Studio, mobile, CLI, and TUI. Accepted work survives disconnects and restarts, and held failures remain visible and retryable.
+- Durable-admission readiness is one resolved value. `capabilities.queue.heterogeneous_batch_max_outputs`, `capabilities.durable_media`, `/api/status`, `/health`, `POST /api/generation-batches` and direct admission all read the same four conjuncts at one evaluation point, so a host can no longer advertise a protocol it refuses or report `durable_media` that `/api/status` denies.
+- A download-only MiniMax H3 identity now answers its documented `MINIMAX_H3_RUNTIME_UNAVAILABLE` instead of parking as a permanent hold, because durable replay asks the same identity question admission asked.
+- A single-image generation no longer carries prepared-batch provenance, so `batch_id`, `batch_index` and `batch_count` again mean "part of a prepared batch" to gallery and reuse consumers.
+- An inference panic on the single-worker path is no longer offered as user-retryable, and `POST /api/queue/{id}/retry` restores the dispatch budget without clearing the replay budget that bounds a boot crash loop.
+- `POST /api/generation-batches/status` is rate-limited as the read-only poll it is, and `POST /api/queue/{id}/retry` is rate-limited with generation because it re-queues GPU work.
+- Client reconciliation of an accepted batch is bounded: transient-failure retries stop and report instead of polling a vanished host forever, while the wait for queued work to run stays unbounded.
+- Durable batch children carry a monotonic `revision`, incremented by every authoritative state transition. Clients order snapshots by it instead of by `updated_at_ms`, so a retry that commits in the same millisecond as the hold it replaces is no longer dropped by the browser reducer, and an interrupted retry whose response was lost is reconciled by comparing revisions rather than by re-reading a state that cannot distinguish "retried and re-held" from "never retried" — the retry fence is now retained instead of released when the retry did not land.
+- Held durable queue rows have a retention sweep. `queue.held_retention_days` (default 30, `0` keeps forever, env `MOLD_QUEUE_HELD_RETENTION_DAYS`) purges abandoned holds hourly and on demand through `POST /api/queue/held/sweep`, releasing the encrypted request media each row pinned; the batch child survives as a terminal summary so a reconnecting client is never told the print was never admitted.
+- `GET /api/gallery` accepts `?filename=`, so reading one print's metadata no longer serializes and transfers the whole gallery index once per artifact.
+- **Fast idle server restarts.** Close connected SSE subscriptions during graceful shutdown so an idle `mold serve` no longer waits for the abort deadline ([#1415](https://github.com/utensils/mold/issues/1415)).
+- **MiniMax H3 Ref2VA Library references now queue correctly.** Mold binds each
+  selected image to its content hash before placement, so Library and local-file
+  references work across web, desktop, iPhone, and Android instead of being
+  refused with a missing SHA-256 error; auth-disabled hosts use Mold's validated
+  inline-reference path even when a stale key is saved, while unknown host
+  capabilities remain fail-closed instead of exposing reference bytes inline.
+- **Retry failed model downloads from notifications.** Web and desktop
+  notifications now retry the exact failed pull in place, and the web Downloads
+  panel keeps its close icon centered.
+- **Mobile batches respect the prompt expansion choice.** Developing multiple
+  prints now queues the requested copies from the authored prompt directly;
+  Mold prepares rewritten prompt variations only when Expand is selected.
+- **Reference-guided video setup works across every connected machine.**
+  MiniMax H3 Ref2VA no longer stops at its intentionally non-authoritative
+  placement preview, and desktop, web, iPhone, and Android can add ordered
+  image references from the shared multi-host Library or local files with
+  thumbnails and phone-safe responsive controls.
+- **Align LTX-2.5 controls and progress with upstream.** Installed LTX-2.5
+  checkpoints now advertise synchronized audio to every Studio surface, use
+  the current upstream refinement schedule and duration/frame authority, and
+  report bounded Gemma and transformer progress instead of appearing stuck
+  during long Metal work ([#1401](https://github.com/utensils/mold/issues/1401)).
+- **A queue-media permission problem now says how to fix it, and keeps saying
+  it.** The encrypted store under `$MOLD_HOME/queue-media` still refuses any
+  path that is not owned by the service user at `0700` — it holds the master
+  key — but the refusal now names the observed owner and mode beside the
+  expected ones and prints the exact shell-quoted `chown`/`chmod` repair,
+  instead of restating the requirement. Anything that walks the Mold data root (an ACL
+  pass, `chmod -R`, a restore that drops modes, `rsync` without `-p`) widens
+  that directory and switches restart-safe request media off, so the
+  degradation is no longer a single startup line: every reason is logged in
+  full at `WARN`, authenticated `GET /api/status` gains `durable_media`
+  (`available` plus the reasons, retained for the life of the process), and
+  auth-exempt `GET /health` gains a body naming the degraded subsystem —
+  `{"status":"degraded","degraded":["durable_media"]}`. `/health` still answers
+  `200` while degraded and never waits on a lock, because generation is
+  unaffected and a failing or blocking check would pull a working server out of
+  a load balancer; a host that never offers the feature at all reports nothing
+  rather than reading as broken
+  ([#1402](https://github.com/utensils/mold/issues/1402)).
+- **CUDA builds compile again.** `crates/mold-candle` took `candle-flash-attn`
+  from crates.io, whose copy depends on the upstream-named `candle-core`, so a
+  `--features flash-attn` build carried that crate alongside the fork's
+  `candle-core-mold` and every `flash_attn` call site failed to typecheck
+  against two nominally distinct `Tensor` types. It now comes from the same
+  fork revision as every other candle crate — the identical upstream 0.11.0
+  kernel payload, so the MiniMax H3 kernel itself is unchanged
+  ([#1399](https://github.com/utensils/mold/issues/1399)).
+- **H3 FlashAttention qualification records name the payload that was
+  compiled.** The release-candidate identity carried the crates.io archive
+  checksum of a file no build reads once the dependency moved to the fork; it
+  now carries the resolved git source, and the record schema is `v2` so a `v1`
+  record cannot validate against this build
+  ([#1399](https://github.com/utensils/mold/issues/1399)).
+- **A second Candle in the dependency graph now fails on the pull request.**
+  `scripts/tests/candle-single-identity.sh` joins the release-contract CI route
+  and rejects any manifest or lockfile — in any cargo root, including ones that
+  do not exist yet — that resolves a `candle-*` package from a registry, a
+  path, or a second git revision. The `--features flash-attn` compile gate runs
+  only on `main`, which is why this regression shipped four times before anyone
+  read a red check ([#1399](https://github.com/utensils/mold/issues/1399)).
+- **Complete LTX-2.5 Metal qualification.** Default LTX-2.5 requests to the
+  smaller distilled INT8 ConvRot pack, correct its official refinement
+  schedule, retain exact-source UAT evidence, and document every available or
+  deferred pack across Mold and the website
+  ([#1376](https://github.com/utensils/mold/issues/1376)).
+- **Responsive mobile wide layouts.** Android tablets and iPhones in landscape now use the full available width with notch-aware navigation, cleaner multi-column controls, and matching Android system-bar colors ([#1395](https://github.com/utensils/mold/pull/1395)).
+- **Native LTX-2.5 generation.** Added official compact INT8 ConvRot and full
+  BF16 Dev/Distilled split packs, Gemma 4 conditioning, Conv/Diffusion VAE,
+  synchronized audio, predicted duration, Metal/CUDA execution, and controls
+  across CLI, server, web, desktop, mobile, and TUI, while incomplete or
+  unvalidated runtime paths fail closed
+  ([#1373](https://github.com/utensils/mold/issues/1373),
+  [#1374](https://github.com/utensils/mold/issues/1374),
+  [#1375](https://github.com/utensils/mold/issues/1375)).
+- **Android now installs with Mold's real app icon.** The APK replaces Tauri's
+  generic robot with Mold's branded adaptive, round, and legacy launcher art
+  across every Android density, with a release check preventing regressions.
+- **Restrict Windows Nightly publication to main.** Prevent manual runs from signing or publishing non-main refs, and reject sources outside current main history before they update the rolling release.
+- **Windows nightlies finish even while `main` stays busy.** Windows CLI and
+  desktop artifacts now build in a dedicated non-cancellable workflow: the
+  active build completes while GitHub keeps only the newest pending commit.
+  Rolling publication preserves the shared checksums, tagged releases retain
+  their existing immutable build, and the final standalone desktop executable
+  is explicitly re-signed after Tauri finishes bundling it.
+- **Pinned MiniMax H3 prints no longer wait behind “Checking placement.”**
+  iPhone and Android submit ordinary H3 prints directly to the selected machine,
+  while automatic routing and authoritative identity/reference-media checks keep
+  their existing placement fence.
+- **Model documentation now matches the shipped runtime.** The website model
+  index, guides, feature matrix, API reference, and navigation now cover Wan,
+  MiniMax H3, Flux.2 Dev, and Qwen-Image 2512 consistently, with stale H3,
+  platform, installation, and Docker claims corrected and automated coverage
+  checks preventing model pages from becoming undiscoverable.
+- **MiniMax H3 requests no longer wait for checkpoint hashing before they queue.**
+  Placement preview now consumes only an existing trusted artifact attestation;
+  first-time verification runs during admitted queue ownership instead of
+  blocking the Create screen on `Checking placement`.
+- **MiniMax H3 no longer re-hashes unchanged checkpoints after every NixOS service restart.**
+  The NixOS module now keeps digest attestations in owner-private systemd state,
+  independent of the intentionally shared `MOLD_HOME`, and Mold warns when no
+  secure persistent attestation store is available.
+- **Truthful generation progress.** MiniMax and other multi-stage renders now keep
+  showing their real denoising step while transformer blocks stream, then name
+  video/audio decoding, encoding, muxing, and saving as finalization instead of
+  appearing stuck at a premature 100%.
+- **LTX 2.5 assets can be downloaded, verified, repaired, and removed safely.**
+  Mold now recognizes the official Dev and Distilled BF16 checkpoints with
+  convolutional-decoder variants, pins every artifact digest, preserves shared
+  storage across variants, checks managed-cache-aware disk capacity, and
+  qualifies the LTX 2.5 tensor contracts before marking a pull complete. The
+  checkpoints remain hidden from generation until the runtime phases land
+  ([#1372](https://github.com/utensils/mold/issues/1372)).
+- **Windows release artifacts publish again.** Authenticode verification no
+  longer imports the self-signed certificate into the user Root store to force
+  a `Valid` status. That import needs interactive trust confirmation, and CI
+  runs PowerShell without `-NonInteractive`, so it blocked on a dialog nobody
+  could see until the job's six-hour ceiling — stalling every Windows installer
+  and, because publication waits on the Windows build, the Linux, container,
+  and AUR assets with them. The check now pins the signing thumbprint against
+  each signature, so tampered, unsigned, and wrongly signed artifacts are still
+  refused
+  ([#1379](https://github.com/utensils/mold/pull/1379)).
+- **MiniMax H3's reviewed Ref2VA Turbo tier ships as a model tag.**
+  `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step` pulls the Ref2VA compact
+  stack plus one pinned 1.96 GB adapter and renders at 5 terminal-inclusive
+  sampler grid points, the same way the two FL2VA Turbo tags do. A Turbo tag
+  now collapses onto its own task's base checkpoint directory rather than
+  FL2VA's, and each adapter stays reviewed for exactly one task partition
+  ([#825](https://github.com/utensils/mold/issues/825)).
+- **Connect to protected machines discovered on the network.** Desktop, iPhone,
+  and Android now ask for a discovered machine's API key before connecting
+  instead of sending an unauthenticated request and stopping at an error.
+- **Fleet-wide mobile source gallery.** iPhone and Android source-image pickers now show stills from every reachable Mold host, while fetching each selection securely from its origin machine.
+- **MiniMax H3 Ref2VA renders on the shipping build.** The compact
+  `minimax-h3-ref2va:comfy-pruned-int8` checkpoint now generates video with
+  synchronized audio from an ordered set of image, video, and audio references,
+  wherever the H3 engine is built. It carries its own compiled runtime
+  qualification — a separate schema, decision string, envelope, and memory
+  bounds record derived per request from the reference set's real preprocessing
+  shapes — so a set the device cannot hold is refused with numbers instead of
+  being refused by name. `/api/models` reports `runtime_available: true` on the
+  row, and the earlier "Ref2VA execution is not available in any released
+  build" sentence is gone
+  ([#825](https://github.com/utensils/mold/issues/825)).
+- **Reusable gallery prompts.** Print prompts are now selectable and have a visible copy-to-clipboard action in the web, desktop, iPhone, and Android gallery viewers.
+- **MiniMax H3 placement recovers host memory and starts faster after restart.**
+  Private admission now unloads Mold's idle model cache before refusing a print,
+  while centralized artifact attestations avoid re-hashing unchanged model files
+  on every process start without weakening pinned-digest verification.
+- **Use Recent prints without leaving Create.** Right-clicking a Recent print
+  on the web Create page now offers Open, Reuse settings, Use as source, and
+  Delete, with media-aware source routing and keyboard-accessible navigation
+  ([#1365](https://github.com/utensils/mold/pull/1365)).
+- **Reliable remixes and Library thumbnails.** Remix now ignores model reasoning
+  and safely extracts the requested prompt set, while Library thumbnails render
+  immediately, recover after returning to the app, and find collection covers
+  from any available host.
+- **Family-wide PuLID support.** Enable identity-photo generation for every FLUX and non-Turbo SDXL checkpoint, including live Hugging Face and Civitai catalog models, while continuing to reject SDXL Turbo.
+- **A MiniMax H3 checkpoint mold cannot run now says so on an H3 build too.**
+  On a binary compiled with the H3 engine, submitting a generation for one of
+  the pinned identities that has no loader — the `official-bf16` qualification
+  references and the two `comfy-pruned-nvfp4` tags — was answered with the
+  private ingress boundary's "accepts only its supported compact task
+  partition" (HTTP 422) instead of the sentence its own `/api/models` row
+  publishes. The row and the refusal now agree again: those identities are
+  refused with `MINIMAX_H3_RUNTIME_UNAVAILABLE` over HTTP 501 and the reason
+  naming the missing weight-layout runtime, on every build, exactly as they
+  already were on builds without the engine. Downloading, verifying,
+  inventorying, repairing, and removing them is unchanged, and the reviewed
+  compact partition — Ref2VA included — keeps its existing answers
+  ([#1354](https://github.com/utensils/mold/issues/1354)).
+- **Queue generations behind running work during scheduler hand-offs.** A request that arrives while another generation still owns the GPU now waits for that work to finish instead of being refused because its VRAM is temporarily unavailable.
+- **Reliable Library thumbnails and navigation.** Collection covers no longer
+  break when the print grid refreshes, loading and failed previews use a clean
+  recoverable placeholder, and Library views return to the previous scroll
+  position during the current session on web, desktop, iPhone, and Android.
+- **iPhone generation reaches the remote queue when you switch apps.** Mold now
+  uses iOS's finite background-execution window while it prepares source media,
+  checks machine placement, uploads references, and submits one-shot or sequence
+  work, then reconnects to the remote host when the app returns.
+- **Fixed generation controls now explain themselves with the server's own
+  words.** Create's Detail and Prompt strength fields on web, desktop, and
+  iPhone render an additive per-control note from the generation profile, so a
+  MiniMax H3 Turbo tier finally says why Steps reads `9` ("Fixed by the 8-step
+  Turbo tier: 9 terminal-inclusive sampler grid points (8 denoise intervals).")
+  and why Guidance is locked ("MiniMax H3 does not use classifier-free
+  guidance; guidance is fixed at 0."). Every surface previously hard-coded a
+  distilled-FLUX sentence that was simply false for H3 — it claimed CFG was
+  fixed at 1.0 and offered a Dev checkpoint that does not exist. Distilled
+  FLUX/LTX recipes keep their existing wording, now generated from the value
+  the recipe actually pinned, and a control an older server fixed without a
+  note renders nothing rather than invented copy.
+- **H3 size pills no longer read "Reviewed".** The private-runtime bridge
+  overrode every H3 resolution preset's tier, putting a mark on every pill that
+  named a qualification rather than anything about the size; the presets now
+  keep the shared `recommended` tier every other model uses, and the `Default`
+  mark still points at the model's own default canvas.
+- **Durable batch queues stay responsive at any depth.** Heterogeneous batch
+  admission now commits directly to SQLite and a capacity-bounded feeder
+  hydrates work only as scheduler room becomes available, preserving FIFO,
+  cancellation, restart recovery, and idempotent retries without one waiting
+  task per child.
+- **Fixed the private MiniMax H3 UAT server build.** `cargo check -p mold-ai-server
+--features h3-private-uat` compiles again — the presentation route still built the
+  scheduler's `compute_capability` as a bare pair after it became optional — and CI now
+  typechecks that edge, with its tests, so it cannot silently rot again
+  ([#1350](https://github.com/utensils/mold/issues/1350)).
+- **MiniMax H3's compact envelope is a rule, not a pinned shape.** The compact
+  FL2VA tags now render any canvas whose axes are multiples of 32, at least
+  256 px each, totalling at most `1344x768`'s pixel count, with aspect between
+  1:4 and 4:1 — plus 107 to 345 frames on the `17n+5` grid at 24 fps and 2 to
+  50 sampler steps. The exact 124 frames, two-canvas set, and 21-step pin were
+  the qualifying campaign's own shape read as a contract. The runtime envelope
+  and its memory bounds are minted per request and scaled from those
+  measurements, so a shape that does not fit is refused with real numbers
+  instead of by a fixed list, and a source image renders its own aspect at the
+  largest admitted size rather than being letterboxed. Reviewed Turbo tags keep
+  their distilled adapter's exact step count.
+- **Instant large libraries.** Desktop, web, iPhone, iPad, and terminal galleries now virtualize large collections, prioritize visible previews, cancel abandoned thumbnail work, and reuse bounded version-aware caches so scrolling stays responsive without stale or blank tiles ([#1344](https://github.com/utensils/mold/pull/1344)).
+- **Safelight Dark defaults across Mold Studio.** Fresh desktop, web, iPhone,
+  and Android installs now open in Safelight Dark while preserving every valid
+  theme choice a user has already saved.
+- **Overlapping MiniMax H3 prints now wait in the queue for host memory.**
+  Placement preview reports memory held by an active GPU render as a
+  non-authoritative transient condition, allowing compatible clients to use
+  their existing direct-queue fallback. Admission remains pending while that
+  owner runs, then retries from a fresh sample after it settles. Idle cached
+  models are still reclaimed immediately before the request waits.
+- **Desktop engine restarts no longer multiply notifications.** Rapid clicks or
+  command-palette key repeat now share one stop/start cycle, so Mold restarts
+  the engine once and reports one completion instead of flooding the
+  notification shelf.
+- **MiniMax H3 renders a square canvas.** `768x768` is now a qualified compact
+  FL2VA canvas beside `1344x768`, measured on an RTX 4090 at 124 frames / 24 fps
+  (937 s and 7.4 GB peak VRAM against the default canvas's 1216 s and 10.8 GB;
+  664 s on `-turbo-8step`).
+  Create offers it as the 1:1 shape chip on every surface, and a square or
+  portrait first-frame image now fits to it instead of being letterboxed into
+  the 7:4 default ([#1033](https://github.com/utensils/mold/issues/1033)).
+- **Library trash works when Mold is opened over plain LAN HTTP.** Trash all,
+  selected-print trash, desktop bulk organization, and retained offline edits
+  no longer depend on the secure-context-only `crypto.randomUUID` browser API.
+- **Reachable mobile Library selection.** The Select and Done actions now stay visible while scrolling through long Libraries on iPhone and Android.
+- **MiniMax H3 model selection is explicit and consistent.** Create now keeps installed Official BF16 and NVFP4 acquisition-only variants visible as disabled rows with the reporting machine's runtime reason instead of silently dropping them, and every registered H3 manifest uses the same human-readable model and family labels across Studio surfaces.
+- **Expose MiniMax H3 reference inputs.** Ref2VA image, video, and audio
+  references now appear beside the required-media warning in Create on web,
+  desktop, and mobile, and every registered H3 model identity is classified
+  consistently.
+- **MiniMax H3 says which models this build can actually run, before you
+  download them.** `/api/models` now derives `runtime_available` from the same
+  authority generation consults — the build's own engine, the task partition,
+  and the checkpoint's weight layout — and carries a new
+  `runtime_unavailable_reason` naming the obstacle. So an RTX 3090/A40, B200,
+  RTX 50-series, or Windows build no longer advertises H3 as runnable, Ref2VA
+  is honest that it executes on no released binary, and web, desktop, and iPhone
+  show a "Download only" badge and the server's own sentence on Discover rows
+  and detail panes rather than after a 21-42 GB pull. Generation refuses with
+  the same sentence over HTTP 501 (`MINIMAX_H3_RUNTIME_UNAVAILABLE`, never the
+  compliance 451), `mold pull` prints the reason instead of a `mold run` hint
+  it would refuse, and `mold run --local` stops before loading any weights.
+  Downloading, verifying, inventorying, repairing, and removing every H3 model
+  is unchanged ([#1276](https://github.com/utensils/mold/issues/1276)).
+- **MiniMax H3 no longer needs a manual unload after another model.** A
+  generation refused for want of host memory now releases mold's own idle model
+  cache least-recently-used first, re-samples, and retries admission once before
+  answering. If the gap still cannot be closed, the refusal names what was given
+  back — "released 9.8 GB by unloading 2 idle models; still 2.9 GB short" — so
+  the number a user reads already includes every byte mold could return
+  ([#1289](https://github.com/utensils/mold/issues/1289)).
+- **MiniMax H3 docs now describe the shipped Metal route.** The README, H3 model
+  guide, qualification record, and agent skill said admission refused every
+  backend but CUDA and that macOS builds omitted the `h3` feature entirely.
+  Both stopped being true when the Apple Silicon route shipped: admission
+  accepts a Metal device, the public runtime profile is
+  `supported-compact-fl2va-cuda-sm89-or-metal`, and the released macOS builds
+  carry `h3`. Metal remains correctness-only and unqualified — no H3 checkpoint
+  has completed a render on it yet
+  ([#1164](https://github.com/utensils/mold/issues/1164)). The qualification
+  record also now carries the NVFP4 transformer no-go and its reopen criterion
+  ([#1318](https://github.com/utensils/mold/issues/1318)).
+
 ## [0.25.0] - 2026-08-23
 
 - **Release version bumps no longer rebuild Android.** Repository-owned release-plz PRs now use the same guarded metadata-only fast path as desktop and iOS, while untrusted lookalike branches still run the full Android validation route.
@@ -2792,7 +3490,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/utensils/mold/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/utensils/mold/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/utensils/mold/compare/v0.23.3...v0.24.0
 [0.23.3]: https://github.com/utensils/mold/compare/v0.23.2...v0.23.3
