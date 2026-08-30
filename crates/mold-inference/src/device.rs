@@ -2240,6 +2240,59 @@ pub fn usable_free_vram_bytes(ordinal: usize) -> Option<u64> {
     free_vram_bytes(ordinal).map(|free| usable_free_vram_from_raw(free, reserve))
 }
 
+/// Return unused CUDA memory-pool reservations to the driver.
+///
+/// The device twin of `mold_server::gpu_worker::trim_malloc_arenas`, and it
+/// exists for the same reason. candle allocates through cudarc's
+/// `cuMemAllocAsync`, which serves from a stream-ordered memory POOL: freeing a
+/// tensor returns its bytes to that pool, not to the driver. `cuMemGetInfo` —
+/// which is what `usable_free_vram_bytes_result` and every admission decision
+/// read — reports pool reservations as USED.
+///
+/// So after a render drops its weights the card still reads ~2.9 GB occupied
+/// on this host, and the next request at the same shape is refused for memory
+/// the process is holding but not using. Measured on an RTX 4090:
+/// `wan22-t2v-a14b:q5` at 81 frames renders on a fresh server (110.4 s, 22,475
+/// MiB peak) and the immediate repeat is refused at "requires 23.20 GB, 22.19
+/// GB available" — a shape the card had just proved it holds.
+///
+/// `cuMemPoolTrimTo(pool, 0)` releases every unused block. It does not touch
+/// live allocations, so it is safe to call at any point; what it costs is that
+/// the next allocation re-reserves from the driver, which is why this is called
+/// once when a render finishes rather than inside the denoise loop.
+///
+/// Returns whether the trim actually ran. Every failure is non-fatal: an
+/// un-trimmed pool is the behaviour that shipped before this existed.
+#[cfg(feature = "cuda")]
+pub fn trim_device_memory_pool(ordinal: usize) -> bool {
+    use candle_core::cuda_backend::cudarc::driver::sys as cuda_sys;
+
+    // SAFETY: driver calls on an ordinal the caller has already used for this
+    // render. `cuDeviceGet` and `cuDeviceGetMemPool` only read handles, and
+    // `cuMemPoolTrimTo` frees pool blocks that no live allocation references.
+    unsafe {
+        let mut device: cuda_sys::CUdevice = 0;
+        if cuda_sys::cuDeviceGet(&mut device, ordinal as core::ffi::c_int)
+            != cuda_sys::CUresult::CUDA_SUCCESS
+        {
+            return false;
+        }
+        let mut pool: cuda_sys::CUmemoryPool = std::ptr::null_mut();
+        if cuda_sys::cuDeviceGetMemPool(&mut pool, device) != cuda_sys::CUresult::CUDA_SUCCESS
+            || pool.is_null()
+        {
+            return false;
+        }
+        cuda_sys::cuMemPoolTrimTo(pool, 0) == cuda_sys::CUresult::CUDA_SUCCESS
+    }
+}
+
+/// No pool to trim off CUDA.
+#[cfg(not(feature = "cuda"))]
+pub fn trim_device_memory_pool(_ordinal: usize) -> bool {
+    false
+}
+
 /// Authoritative reserve-adjusted current-free reading used by CUDA admission.
 /// Unlike the compatibility `Option` API, failure is typed so callers cannot
 /// silently substitute host RAM or nominal device capacity.
