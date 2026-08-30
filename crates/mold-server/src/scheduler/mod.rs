@@ -3681,7 +3681,7 @@ impl Coordinator {
                 // `next_memory_reclaim` ask mold's own idle cache for the
                 // bytes, and what lets `settle_unschedulable_owner_work` bound
                 // the wait with numbers instead of leaving a sequence hanging.
-                self.record_owner_vram_block(
+                changed |= self.record_owner_vram_block(
                     &id,
                     &VramShortfall {
                         required_peak_bytes: *required_peak_bytes,
@@ -3689,7 +3689,6 @@ impl Coordinator {
                     },
                     &device_facts,
                 );
-                changed = true;
                 continue;
             }
             if let crate::execution_plan::ExecutionPlanError::PlanInvalidated(_) = &error {
@@ -3919,21 +3918,23 @@ impl Coordinator {
     /// because the two maps hold different job types and the warn line names a
     /// different thing; a shared generic would have to take a closure for the
     /// model name and gain nothing.
+    /// Returns whether anything actually changed, so a block that is simply
+    /// still true does not bump `state_version` on every scheduler tick.
     fn record_owner_vram_block(
         &mut self,
         work_id: &str,
         shortfall: &VramShortfall,
         device_facts: &[crate::execution_plan::DeviceFact],
-    ) {
+    ) -> bool {
         let Some(device) = device_facts
             .iter()
             .filter(|fact| shortfall.eligible_device_ids.contains(&fact.id))
             .max_by_key(|fact| fact.available_vram_bytes)
         else {
-            return;
+            return false;
         };
         let Some(pending) = self.pending_owner_work.get_mut(work_id) else {
-            return;
+            return false;
         };
         let kind = MemoryBlockKind::Device {
             device_id: device.id.clone(),
@@ -3942,8 +3943,11 @@ impl Coordinator {
         };
         match pending.memory_block.as_mut() {
             Some(block) if block.kind == kind => {
+                let moved = block.required_bytes != shortfall.required_peak_bytes
+                    || block.headroom_bytes != device.available_vram_bytes;
                 block.required_bytes = shortfall.required_peak_bytes;
                 block.headroom_bytes = device.available_vram_bytes;
+                moved
             }
             _ => {
                 tracing::warn!(
@@ -3961,6 +3965,7 @@ impl Coordinator {
                     reclaimable_zfs_arc_bytes: None,
                     reclaim: ReclaimAttempt::NotStarted,
                 });
+                true
             }
         }
     }
