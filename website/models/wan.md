@@ -279,6 +279,10 @@ The decode is also _not_ where this family runs out of memory. Its transient is
 bounded to one latent frame at a time by construction, so `1280x704 x 121`
 decodes on a 24 GB card; the denoise is the memory wall.
 
+### When the VAE decode does not fit
+
+The full decode is attempted first. Only an out-of-memory failure falls back to a spatially tiled decode — 256x256 pixel tiles with a quarter-tile overlap and a linearly ramped blend, the same geometry ComfyUI's own `decode_tiled_3d` uses. Wan's decoder already streams the temporal axis one latent frame at a time, so tiling bounds the one thing that was left unbounded: the spatial working set at full output resolution. A render that fits keeps the untiled path, which is faster and free of any seam approximation.
+
 ### FlashAttention on Wan
 
 A `--features cuda,flash-attn` build routes the Wan DiT's self- and cross-attention through candle-flash-attn v2, and **that is now the default for video families** — an unset `MOLD_ATTN` reaches the Wan DiT as `flash` wherever the kernel is compiled in. `MOLD_ATTN=math` restores the previous arithmetic. Image families keep `math` as their default, so the bytes an archived still renders are unchanged (see [#736](https://github.com/utensils/mold/issues/736) for why that split exists). Measured on an RTX 4090 with the same binary, only the backend varying (`wan22-t2v-a14b:q5`, 53 frames at 832x480):
