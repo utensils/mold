@@ -2151,7 +2151,16 @@ watch(
 watch(
   [
     () => route.query.print,
-    () => gallery.merged.length,
+    () => {
+      const print = route.query.print;
+      return typeof print === "string"
+        ? gallery.merged.some((entry) => entry.item.filename === print)
+        : false;
+    },
+    () =>
+      gallery.sources
+        .map((source) => `${source.key}:${gallery.organizeCapable(source.key)}`)
+        .join("|"),
     () =>
       Object.entries(gallery.collectionsByHost)
         .map(([key, bucket]) => `${key}:${bucket.loading}:${bucket.loaded}:${bucket.error ?? ""}`)
@@ -2165,7 +2174,11 @@ watch(
     const unsettledCollectionCopy = (
       entry.copies ?? [{ sourceKey: entry.sourceKey, item: entry.item }]
     ).some((copy) => {
-      if (!copy.item.collections?.length || !gallery.organizeCapable(copy.sourceKey)) return false;
+      // A non-empty collection id is itself evidence that this host supports
+      // organization. Its capability snapshot may still be in flight after
+      // the host becomes ready, so do not consume the one-shot route until
+      // the listing resolves those ids to slugs and hidden state.
+      if (!copy.item.collections?.length) return false;
       const bucket = gallery.collectionsByHost[copy.sourceKey];
       return !bucket || bucket.loading || (!bucket.loaded && bucket.error === null);
     });

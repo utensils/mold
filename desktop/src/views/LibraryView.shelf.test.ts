@@ -172,6 +172,7 @@ async function mountView(
     trash?: boolean;
     trashItems?: GalleryImage[];
     hiddenCollection?: boolean;
+    deferCapabilities?: boolean;
   } = {},
 ) {
   const {
@@ -179,6 +180,7 @@ async function mountView(
     trash = true,
     trashItems = [trashed],
     hiddenCollection = false,
+    deferCapabilities = false,
   } = options;
   const router = createRouter({
     history: createMemoryHistory(),
@@ -208,13 +210,15 @@ async function mountView(
     error: null,
     instanceId: null,
   });
-  hosts.capabilities["plato-7680"] = {
-    gallery: {
-      can_delete: true,
-      organize,
-      trash: trash ? { enabled: true, retention_days: 30 } : null,
-    },
-  };
+  if (!deferCapabilities) {
+    hosts.capabilities["plato-7680"] = {
+      gallery: {
+        can_delete: true,
+        organize,
+        trash: trash ? { enabled: true, retention_days: 30 } : null,
+      },
+    };
+  }
 
   const gallery = useGalleryStore();
   gallery.buckets["plato-7680"] = {
@@ -1023,6 +1027,43 @@ describe("Lightbox wiring", () => {
     await vi.waitFor(() =>
       expect(router.currentRoute.value.query).toEqual({ scope: "collections", c: "smurfs" }),
     );
+    wrapper.unmount();
+  });
+
+  it("retains a hidden-video notification until late capabilities and collections settle", async () => {
+    const { wrapper, gallery, router, hosts } = await mountView(
+      `/library?print=${encodeURIComponent(smurf04.filename)}`,
+      { hiddenCollection: true, deferCapabilities: true },
+    );
+
+    expect(router.currentRoute.value.query.print).toBe(smurf04.filename);
+    expect(wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(false);
+
+    hosts.capabilities["plato-7680"] = {
+      gallery: { can_delete: true, organize: true, trash: null },
+    };
+    await vi.waitFor(() => expect(gallery.collectionsByHost["plato-7680"]?.loaded).toBe(true));
+    await vi.waitFor(() => expect(gallery.collectionSlug).toBe("smurfs"));
+    expect(wrapper.getComponent({ name: "Lightbox" }).props("item").filename).toBe(
+      smurf04.filename,
+    );
+    wrapper.unmount();
+  });
+
+  it("opens a delayed notification target when a same-count refresh adds it", async () => {
+    const late = { ...plain, filename: "late-h3-video.mp4", timestamp: 50 };
+    const { wrapper, gallery, router } = await mountView(
+      `/library?print=${encodeURIComponent(late.filename)}`,
+    );
+
+    expect(router.currentRoute.value.query.print).toBe(late.filename);
+    expect(wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(false);
+    gallery.buckets["plato-7680"]!.items.splice(0, 1, late);
+
+    await vi.waitFor(() =>
+      expect(wrapper.getComponent({ name: "Lightbox" }).props("item").filename).toBe(late.filename),
+    );
+    expect(gallery.buckets["plato-7680"]!.items).toHaveLength(live.length);
     wrapper.unmount();
   });
 });
