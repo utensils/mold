@@ -1454,6 +1454,116 @@ impl WanVideoVae {
         unpatchify(&out, self.config.patch_size)?.clamp(-1.0, 1.0)
     }
 
+    /// Spatially tiled decode, for a canvas whose single-pass decode does not
+    /// fit.
+    ///
+    /// Wan's decoder already streams the TEMPORAL axis — `decode` walks one
+    /// latent frame per chunk — so what is left to bound is the spatial
+    /// working set, which is the whole `[b, c, t, H, W]` activation at full
+    /// output resolution. This tiles `h` and `w`, decodes each tile through
+    /// the ordinary path, and blends the overlaps.
+    ///
+    /// Ported from ComfyUI's `tiled_scale_multidim`
+    /// (`comfy/utils.py:1145-1258`), which is also what its own
+    /// `decode_tiled_3d` uses: tile starts step by `tile - overlap`, each tile
+    /// is clamped so the last one ends flush with the edge, and the
+    /// accumulator is a weighted mean under a mask that ramps linearly over
+    /// `overlap` pixels at every tiled edge. Upstream Wan has no tiling of its
+    /// own (`Wan2.2/wan/modules/vae2_1.py` decodes whole frames), so ComfyUI is
+    /// the reference here.
+    ///
+    /// The blend is a true weighted mean — accumulate `tile * mask`, and
+    /// `mask` separately, then divide — so it does not matter that the ramps
+    /// do not sum to one at the canvas edges, where only one tile contributes.
+    /// `tile` and `overlap` are LATENT units.
+    pub fn decode_tiled(&self, latents: &Tensor, tile: usize, overlap: usize) -> Result<Tensor> {
+        let (_, _, _, lat_h, lat_w) = latents.dims5()?;
+        let tile = tile.max(1);
+        // An overlap at or above the tile size would make the stride zero and
+        // never terminate.
+        let overlap = overlap.min(tile.saturating_sub(1));
+        if lat_h <= tile && lat_w <= tile {
+            return self.decode(latents);
+        }
+
+        let scale = self.config.spatial_compression();
+        let starts = |len: usize| -> Vec<usize> {
+            if len <= tile {
+                return vec![0];
+            }
+            let stride = tile - overlap;
+            let mut out = Vec::new();
+            let mut pos = 0usize;
+            while pos < len.saturating_sub(overlap) {
+                out.push(pos.min(len.saturating_sub(overlap)));
+                pos += stride;
+            }
+            out
+        };
+
+        let device = latents.device().clone();
+        let mut acc: Option<Tensor> = None;
+        let mut weight: Option<Tensor> = None;
+
+        for h0 in starts(lat_h) {
+            for w0 in starts(lat_w) {
+                let th = tile.min(lat_h - h0);
+                let tw = tile.min(lat_w - w0);
+                let piece = latents.narrow(3, h0, th)?.narrow(4, w0, tw)?.contiguous()?;
+                let decoded = self.decode(&piece)?.to_dtype(DType::F32)?;
+                let (_, _, frames, out_h, out_w) = decoded.dims5()?;
+
+                let mask = tile_blend_mask(out_h, out_w, overlap * scale, &device)?;
+                let contribution = decoded.broadcast_mul(&mask)?;
+
+                // Allocated on the first tile, where the decoded frame count
+                // is finally known: the temporal expansion is the decoder's,
+                // not something the latent shape states.
+                if acc.is_none() {
+                    acc = Some(Tensor::zeros(
+                        (1, 3, frames, lat_h * scale, lat_w * scale),
+                        DType::F32,
+                        &device,
+                    )?);
+                    weight = Some(Tensor::zeros(
+                        (1, 1, frames, lat_h * scale, lat_w * scale),
+                        DType::F32,
+                        &device,
+                    )?);
+                }
+
+                let (oh, ow) = (h0 * scale, w0 * scale);
+                let acc_ref = acc.as_mut().expect("allocated above");
+                *acc_ref = acc_ref.slice_assign(
+                    &[0..1, 0..3, 0..frames, oh..oh + out_h, ow..ow + out_w],
+                    &acc_ref
+                        .narrow(3, oh, out_h)?
+                        .narrow(4, ow, out_w)?
+                        .add(&contribution)?,
+                )?;
+                let weight_ref = weight.as_mut().expect("allocated above");
+                *weight_ref = weight_ref.slice_assign(
+                    &[0..1, 0..1, 0..frames, oh..oh + out_h, ow..ow + out_w],
+                    &weight_ref
+                        .narrow(3, oh, out_h)?
+                        .narrow(4, ow, out_w)?
+                        .broadcast_add(&mask)?,
+                )?;
+            }
+        }
+
+        let acc = acc.ok_or_else(|| {
+            candle_core::Error::Msg("Wan VAE: tiled decode produced no tiles".into())
+        })?;
+        let weight = weight.expect("allocated beside acc");
+        // Every output pixel is covered by at least one tile, so the divisor
+        // is never zero; the clamp is belt and braces against a degenerate
+        // mask rather than a real case.
+        acc.broadcast_div(&weight.clamp(1e-6, f64::INFINITY)?)?
+            .to_dtype(self.dtype)?
+            .clamp(-1.0, 1.0)
+    }
+
     /// Walk the encoder over an explicit chunk plan. Causal padding makes the
     /// result independent of how the clip is split (after the mandatory leading
     /// single frame), which is what the equivalence tests assert.
@@ -1503,6 +1613,32 @@ fn encode_chunk_plan(frames: usize) -> Vec<usize> {
 }
 
 /// `patchify` (`vae2_2.py:280-296`): `b c f (h q) (w r) -> b (c r q) f h w`.
+/// ComfyUI's tile feather, as a separable `[1, 1, 1, h, w]` mask.
+///
+/// `comfy/utils.py:1229-1236` walks `t in 0..feather` and MULTIPLIES both the
+/// `t`-th and the `(len-1-t)`-th row by `(t+1)/feather`. When `2*feather`
+/// exceeds the axis the two ramps overlap and their factors multiply, which is
+/// reproduced here rather than clamped — a tile narrower than twice the
+/// feather is exactly the edge case where matching upstream matters.
+fn tile_blend_mask(height: usize, width: usize, feather: usize, device: &Device) -> Result<Tensor> {
+    let ramp = |len: usize| -> Vec<f32> {
+        let mut values = vec![1.0f32; len];
+        if feather == 0 || feather >= len {
+            return values;
+        }
+        for t in 0..feather {
+            let a = (t + 1) as f32 / feather as f32;
+            values[t] *= a;
+            values[len - 1 - t] *= a;
+        }
+        values
+    };
+
+    let rows = Tensor::from_vec(ramp(height), (1, 1, 1, height, 1), device)?;
+    let cols = Tensor::from_vec(ramp(width), (1, 1, 1, 1, width), device)?;
+    rows.broadcast_mul(&cols)
+}
+
 fn patchify(x: &Tensor, patch_size: usize) -> Result<Tensor> {
     if patch_size == 1 {
         return x.contiguous();
@@ -1718,6 +1854,85 @@ mod tests {
                 "encode plan {plan:?} diverged"
             );
         }
+    }
+
+    /// The structural contract of the tiler, which is what a unit test can
+    /// actually hold it to.
+    ///
+    /// Deliberately NOT a numerical-closeness assertion against the untiled
+    /// decode. A tile's convolutions see zero padding where the full canvas
+    /// had neighbouring pixels — the approximation every tiler upstream makes
+    /// — and against these *untrained* fixture weights the receptive field
+    /// spans a whole 4-px latent tile, so the difference is large and spread
+    /// evenly across the tile rather than banded at the seams. Measured on
+    /// this fixture it is ~1.6 with the error map uniform, which says the
+    /// oracle is bad, not the blend. Quality is judged on a real checkpoint in
+    /// UAT; what belongs here is that the plan, the shapes, and the
+    /// short-circuit are right.
+    #[test]
+    fn wan21_tiled_decode_covers_the_canvas_and_short_circuits() {
+        let (vae, _map) = build(WanVaeConfig::tiny_v2_1());
+        let latents = randn(&[1, 4, 2, 8, 8]);
+
+        let reference = vae.decode(&latents).unwrap();
+        assert_eq!(reference.dims(), &[1, 3, 5, 64, 64]);
+
+        // A tile at or above both axes must be the plain decode itself, not an
+        // approximation of it — otherwise every render that does not need
+        // tiling would still pay for the blend.
+        let untiled = vae.decode_tiled(&latents, 8, 2).unwrap();
+        assert_eq!(
+            max_abs_diff(&reference, &untiled),
+            0.0,
+            "a single-tile plan must be the plain decode"
+        );
+
+        // Genuinely subdivided: same shape, every pixel written, all finite,
+        // and inside the decoder's own output range.
+        let tiled = vae.decode_tiled(&latents, 4, 1).unwrap();
+        assert_eq!(tiled.dims(), reference.dims());
+        let values = tiled.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert!(
+            values.iter().all(|v| v.is_finite()),
+            "a gap in the tile plan or a zero divisor shows up as NaN"
+        );
+        assert!(
+            values.iter().all(|v| (-1.0..=1.0).contains(v)),
+            "tiled decode left the clamped output range"
+        );
+
+        // An overlap at or above the tile would make the stride zero; it is
+        // clamped rather than hanging.
+        let clamped = vae.decode_tiled(&latents, 4, 9).unwrap();
+        assert_eq!(clamped.dims(), reference.dims());
+    }
+
+    /// The blend mask is ComfyUI's, and the property that matters is that it
+    /// ramps from near zero at a feathered edge to one in the interior.
+    #[test]
+    fn the_tile_blend_mask_ramps_at_the_edges_and_is_flat_inside() {
+        let device = Device::Cpu;
+        let mask = tile_blend_mask(8, 8, 2, &device).unwrap();
+        assert_eq!(mask.dims(), &[1, 1, 1, 8, 8]);
+        let values = mask.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let at = |r: usize, c: usize| values[r * 8 + c];
+
+        // Interior is untouched.
+        assert!((at(4, 4) - 1.0).abs() < 1e-6);
+        // Corners get both ramps, so they are the product of the two.
+        assert!((at(0, 0) - 0.25).abs() < 1e-6, "corner was {}", at(0, 0));
+        // Edges ramp on one axis only.
+        assert!((at(0, 4) - 0.5).abs() < 1e-6, "top edge was {}", at(0, 4));
+        assert!((at(4, 0) - 0.5).abs() < 1e-6, "left edge was {}", at(4, 0));
+        // The ramp is symmetric.
+        assert!((at(0, 4) - at(7, 4)).abs() < 1e-6);
+        assert!((at(4, 0) - at(4, 7)).abs() < 1e-6);
+
+        // A feather at or above the axis leaves the mask flat rather than
+        // collapsing it to zero.
+        let flat = tile_blend_mask(4, 4, 4, &device).unwrap();
+        let flat = flat.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert!(flat.iter().all(|v| (*v - 1.0).abs() < 1e-6));
     }
 
     #[test]

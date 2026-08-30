@@ -870,6 +870,49 @@ enum WanImageConditioning {
     },
 }
 
+/// Decode the clip, falling back to a spatially tiled decode on an OOM.
+///
+/// Wan was the only family in mold with no decode fallback at all: every other
+/// engine goes through `crate::vae_tiling`, and an exhausted decode here
+/// failed the whole render after the denoise had already been paid for. That
+/// is the most expensive possible moment to give up.
+///
+/// Full decode first, exactly as ComfyUI does (`comfy/sd.py:1240-1261` catches
+/// the OOM and only then sets its tiling flag) — a render that fits must keep
+/// the untiled path, which is both faster and free of any seam approximation.
+///
+/// The tile size is ComfyUI's own: `256 / spatial_compression` latent pixels
+/// with a quarter of that as overlap (`comfy/sd.py:1275-1276`), i.e. a
+/// 256x256 pixel tile whichever VAE generation is loaded.
+fn decode_with_tiled_fallback(
+    vae: &WanVideoVae,
+    latents: &Tensor,
+    progress: &crate::progress::ProgressReporter,
+) -> Result<Tensor> {
+    match vae.decode(latents) {
+        Ok(video) => Ok(video),
+        Err(error) if crate::vae_tiling::is_out_of_memory_error(&error) => {
+            let scale = vae.config().spatial_compression().max(1);
+            let tile = (256 / scale).max(1);
+            let overlap = (tile / 4).max(1);
+            progress.info(&format!(
+                "VAE decode ran out of memory; retrying tiled at {}x{} pixels",
+                tile * scale,
+                tile * scale
+            ));
+            tracing::warn!(
+                tile_latent = tile,
+                overlap_latent = overlap,
+                spatial_compression = scale,
+                "wan VAE decode OOM; retrying with a tiled decode"
+            );
+            vae.decode_tiled(latents, tile, overlap)
+                .map_err(anyhow::Error::from)
+        }
+        Err(error) => Err(anyhow::Error::from(error)),
+    }
+}
+
 /// Whether a request needs the unconditional pass.
 ///
 /// At guidance <= 1 the CFG combination reduces to the conditional prediction,
@@ -2034,7 +2077,7 @@ impl WanEngine {
 
         progress.stage_start("Decoding video frames");
         let decode_start = Instant::now();
-        let video = vae.decode(&latents)?;
+        let video = decode_with_tiled_fallback(&vae, &latents, progress)?;
         progress.checkpoint()?;
         drop(vae);
         device.synchronize()?;

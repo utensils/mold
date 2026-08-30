@@ -54,3 +54,10 @@
   sequence already rendered. Blocked owner work now records a typed memory
   block, triggers the same idle-scheduler cache reclaim queued generations get,
   and is bounded with the post-eviction numbers if the shortfall survives.
+- **A Wan VAE decode that runs out of memory now tiles instead of failing.**
+  Wan was the only family with no decode fallback at all — every other engine
+  goes through `vae_tiling`, while an exhausted Wan decode failed the render
+  after the whole denoise had already been paid for. The full decode is still
+  attempted first, and only an OOM falls back to a spatially tiled decode with
+  ComfyUI's own geometry: 256x256 pixel tiles, a quarter-tile overlap, and a
+  linearly ramped blend mask.
