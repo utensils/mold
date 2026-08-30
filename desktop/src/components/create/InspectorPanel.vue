@@ -10,7 +10,6 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import {
@@ -269,15 +268,27 @@ const advancedCount = computed(() =>
       ) + Number(Boolean(draft.clips.some((clip) => clip.cameraControl)))
     : advancedActiveCount(props.form),
 );
-const showGenerateAudio = computed(() =>
-  isSequence.value
-    ? props.chainLimits?.supports_audio === true
-    : caps.value.supportsAudio && !isMinimaxH3Identity(props.form.family, props.form.model),
-);
+const showGenerateAudio = computed(() => caps.value.offersAudioControl);
 const generateAudio = computed(() =>
   isSequence.value ? draft.enableAudio : props.form.enableAudio,
 );
-const audioOutputSupported = computed(() => selectedModel.value?.supports_audio !== false);
+const audioOutputSupported = computed(() =>
+  isSequence.value
+    ? props.chainLimits?.supports_audio === true
+    : caps.value.supportsAudio && selectedModel.value?.supports_audio !== false,
+);
+const audioOutputUnavailableReason = computed(() => {
+  if (!showGenerateAudio.value || audioOutputSupported.value) return null;
+  if (isSequence.value) {
+    return props.chainLimits?.supports_audio === false
+      ? "Generated audio is unavailable for this sequence on the selected host."
+      : null;
+  }
+  if (selectedModel.value?.supports_audio === false) {
+    return "Audio assets are not included with this checkpoint. Video generation remains available.";
+  }
+  return caps.value.outputDeliveryReason ?? "Generated audio is unavailable for this recipe.";
+});
 function setGenerateAudio(value: boolean) {
   if (isSequence.value) draft.enableAudio = value;
   else props.form.enableAudio = value;
@@ -885,16 +896,13 @@ function resetSettings() {
         <span class="ms-field__label ms-field__label--inline">Generate audio</span>
         <SwitchToggle
           :model-value="generateAudio"
-          :disabled="!isSequence && !audioOutputSupported"
+          :disabled="!audioOutputSupported"
           label="Generate audio"
           @update:model-value="setGenerateAudio"
         />
       </div>
-      <p
-        v-if="showGenerateAudio && !isSequence && !audioOutputSupported"
-        class="ms-field__hint -mt-2"
-      >
-        Audio assets are not included with this checkpoint. Video generation remains available.
+      <p v-if="audioOutputUnavailableReason" class="ms-field__hint -mt-2">
+        {{ audioOutputUnavailableReason }}
       </p>
 
       <!-- Seed -->

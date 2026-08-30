@@ -208,6 +208,44 @@ describe("InspectorPanel — layout", () => {
     expect(form.frames).toBe(241);
   });
 
+  it("keeps the audio control visible for a video-only LTX-2.5 checkpoint", () => {
+    const model = noteModel(
+      "ltx-2.5-22b-distilled:q4",
+      "ltx2",
+      { default: 8, min: 8, max: 8, step: 1, mode: "fixed" },
+      { default: 1, min: 1, max: 1, step: 0.1, mode: "fixed" },
+    );
+    model.supports_audio = false;
+    useModelStore().all = [model];
+    const form = formFor("ltx2");
+    form.model = model.name;
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(true);
+    expect(wrapper.getComponent(SwitchToggle).props("disabled")).toBe(true);
+    expect(wrapper.text()).toContain("Audio assets are not included with this checkpoint");
+  });
+
+  it("keeps LTX-2.5 audio visible when the host recipe cannot deliver it", () => {
+    const model = noteModel(
+      "ltx-2.5-22b-distilled:q4",
+      "ltx2",
+      { default: 8, min: 8, max: 8, step: 1, mode: "fixed" },
+      { default: 1, min: 1, max: 1, step: 0.1, mode: "fixed" },
+    );
+    model.supports_audio = true;
+    useModelStore().all = [model];
+    const form = formFor("ltx2");
+    form.model = model.name;
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    expect(wrapper.find('[data-test="generate-audio-control"]').exists()).toBe(true);
+    expect(wrapper.getComponent(SwitchToggle).props("disabled")).toBe(true);
+    expect(wrapper.text()).toContain("Generated audio is unavailable for this recipe");
+  });
+
   it("does not expose the audio toggle for an H3 model restored without a family", () => {
     const form = formFor("");
     form.model = "minimax-h3-fl2va:official-bf16";

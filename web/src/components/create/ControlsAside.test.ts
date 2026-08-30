@@ -22,6 +22,7 @@ import {
 import { __testing__ as routingTesting } from "../../composables/useHostRouting";
 import { CAPABLE_TARGET_ID } from "../../lib/hostRouting";
 import type { GenerateFormState } from "../../types";
+import type { ChainLimits } from "../../api";
 
 const pushMock = vi.hoisted(() => vi.fn());
 vi.mock("vue-router", () => ({
@@ -51,6 +52,21 @@ function factory(overrides: Partial<GenerateFormState> = {}, family = "flux") {
   return mount(ControlsAside, {
     props: { modelValue: baseForm(overrides), family, advCount: 0 },
   });
+}
+
+function chainLimits(supportsAudio: boolean): ChainLimits {
+  return {
+    model: "ltx-2-19b-distilled:fp8",
+    frames_per_clip_cap: 121,
+    frames_per_clip_recommended: 97,
+    max_stages: 16,
+    max_total_frames: 1936,
+    fade_frames_max: 24,
+    transition_modes: ["smooth", "cut", "fade"],
+    quantization_family: "fp8",
+    supports_audio: supportsAudio,
+    supports_sequence: true,
+  };
 }
 
 describe("ControlsAside", () => {
@@ -268,6 +284,56 @@ describe("ControlsAside", () => {
     expect(next.enableAudio).toBe(false);
   });
 
+  it("shows why generated audio is unavailable for a video-only LTX checkpoint", () => {
+    const model = noteModel(
+      "ltx-2.5-22b-distilled:q4",
+      "ltx2",
+      { default: 8, min: 8, max: 8, step: 1, mode: "fixed" },
+      { default: 1, min: 1, max: 1, step: 0.1, mode: "fixed" },
+    );
+    model.supports_audio = false;
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({ model: model.name, modelFamily: "ltx2" }),
+        family: "ltx2",
+        model,
+      },
+    });
+
+    expect(wrapper.find("[data-test='generate-audio-control']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.getComponent(SwitchToggle).props("disabled")).toBe(true);
+    expect(wrapper.text()).toContain(
+      "Audio assets are not included with this checkpoint",
+    );
+  });
+
+  it("keeps LTX audio visible when the host recipe cannot deliver it", () => {
+    const model = noteModel(
+      "ltx-2.5-22b-distilled:q4",
+      "ltx2",
+      { default: 8, min: 8, max: 8, step: 1, mode: "fixed" },
+      { default: 1, min: 1, max: 1, step: 0.1, mode: "fixed" },
+    );
+    model.supports_audio = true;
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({ model: model.name, modelFamily: "ltx2" }),
+        family: "ltx2",
+        model,
+      },
+    });
+
+    expect(wrapper.find("[data-test='generate-audio-control']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.getComponent(SwitchToggle).props("disabled")).toBe(true);
+    expect(wrapper.text()).toContain(
+      "Generated audio is unavailable for this recipe",
+    );
+  });
+
   it("keeps sequence generated audio in the primary settings", async () => {
     const draft = useSequenceDraftStore();
     const model = {
@@ -281,10 +347,33 @@ describe("ControlsAside", () => {
         family: "ltx2",
         model,
         output: "sequence",
+        chainLimits: chainLimits(true),
       },
     });
     wrapper.getComponent(SwitchToggle).vm.$emit("update:modelValue", true);
     expect(draft.enableAudio).toBe(true);
+  });
+
+  it("keeps sequence audio disabled when the routed host rejects it", () => {
+    const model = {
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+      supports_audio: true,
+    } as ModelInfoExtended;
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({ model: model.name, modelFamily: "ltx2" }),
+        family: "ltx2",
+        model,
+        output: "sequence",
+        chainLimits: chainLimits(false),
+      },
+    });
+
+    expect(wrapper.getComponent(SwitchToggle).props("disabled")).toBe(true);
+    expect(wrapper.text()).toContain(
+      "Generated audio is unavailable for this sequence on the selected host",
+    );
   });
 
   it("does not expose the audio toggle for an H3 model restored without a family", () => {

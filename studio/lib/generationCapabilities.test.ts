@@ -65,9 +65,71 @@ describe("baseGenerationCapabilities", () => {
       expect(baseGenerationCapabilities(family)).toMatchObject({
         supportsVideo: true,
         supportsAudio: true,
+        offersAudioControl: true,
       });
       expect(isAdvancedVideoFamily(family)).toBe(true);
     }
+  });
+
+  it("keeps the LTX audio control visible when a checkpoint lacks audio assets", () => {
+    const videoOnlyRecipe = {
+      capabilities: {
+        guidance: { adjustable: false, supports_negative_prompt: false },
+        negative_prompt: { mode: "hidden", required: false },
+        supports_audio: false,
+        source_video: { mode: "adjustable", required: false },
+        mask: { mode: "hidden", required: false },
+        keyframes: { mode: "adjustable", required: false },
+        audio: { mode: "hidden", required: false },
+        lora: { mode: "adjustable", max_count: 4 },
+        controlnet: { mode: "hidden", max_count: 0 },
+        output: {
+          default_format: "mp4",
+          formats: ["mp4"],
+          audio_requires_mp4: false,
+        },
+        wan_recipe: {
+          mode: "hidden",
+          supports_distill_strength: false,
+          supports_first_last_frame: false,
+        },
+        schedulers: [],
+      },
+    } as unknown as GenerationRecipeProfile;
+
+    for (const family of ["ltx2", "ltx-2"]) {
+      expect(
+        baseGenerationCapabilities(
+          family,
+          "ltx-video-only",
+          null,
+          null,
+          null,
+          videoOnlyRecipe,
+        ),
+      ).toMatchObject({
+        supportsAudio: false,
+        offersAudioControl: true,
+      });
+    }
+
+    expect(baseGenerationCapabilities("ltx-video")).toMatchObject({
+      supportsAudio: false,
+      offersAudioControl: false,
+    });
+    expect(baseGenerationCapabilities("wan")).toMatchObject({
+      supportsAudio: false,
+      offersAudioControl: false,
+    });
+    expect(
+      baseGenerationCapabilities(
+        "minimax-h3",
+        "minimax-h3-fl2va:official-bf16",
+      ),
+    ).toMatchObject({
+      supportsAudio: true,
+      offersAudioControl: false,
+    });
   });
 
   it("treats wan as video without audio or a bespoke advanced panel", () => {

@@ -149,9 +149,11 @@ pushed screen opened from the header.
   to the selected model's defaults while preserving the prompt, model choice,
   and any prepared batch size; the Advanced sheet keeps its narrower
   advanced-only Reset.
-  For LTX-2 checkpoints, the sheet honors additive `supports_audio` model
-  metadata: video-only community checkpoints disable generated audio with an
-  explanation while source-image video remains available. It also exposes the
+  For LTX-2 checkpoints, the primary Create settings honor additive
+  `supports_audio` model metadata and the resolved recipe: audio-capable host
+  recipes expose generated audio, while video-only checkpoints or hosts that
+  cannot deliver audio keep that control visible but disabled with the exact
+  available explanation. The Advanced sheet also exposes the
   additive `guidance_overrides` contract (STG scale/blocks, CFG rescale,
   modality scale, and skip stride), validates before queueing, counts the group
   in its badge, and keeps empty fields absent so pipeline defaults remain exact.

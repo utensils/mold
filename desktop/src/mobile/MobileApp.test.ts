@@ -7674,6 +7674,28 @@ describe("MobileApp create settings reset", () => {
     expect(liveForm.enableAudio).toBe(true);
   });
 
+  it("keeps LTX-2.5 audio visible and disabled for a video-only checkpoint", async () => {
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/models") {
+        return Promise.resolve([
+          {
+            ...model,
+            name: "ltx-2.5-22b-distilled:q4",
+            supports_audio: false,
+          },
+        ]);
+      }
+      return base(callTarget, path, init);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const control = wrapper.get("[data-test='mobile-generate-audio-control']");
+    expect(control.get("input").attributes()).toHaveProperty("disabled");
+    expect(wrapper.text()).toContain("Audio assets are not included with this checkpoint");
+  });
+
   it("keeps the visible source across an H3 round trip via the shared bridge", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
