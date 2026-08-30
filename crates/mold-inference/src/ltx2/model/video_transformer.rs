@@ -2069,7 +2069,8 @@ impl LtxAttention {
                         // @400fd31). The shared dispatcher takes head-major
                         // `[B, H, N, D]` in the input dtype and applies the
                         // `MOLD_ATTN` / `MOLD_ATTN_CHUNK` policy.
-                        crate::attention::attention(
+                        crate::attention::attention_for(
+                            crate::attention::AttentionPolicy::Video,
                             &q.transpose(1, 2)?,
                             &k.transpose(1, 2)?,
                             &v.transpose(1, 2)?,

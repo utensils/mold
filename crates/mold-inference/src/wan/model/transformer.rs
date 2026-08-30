@@ -854,12 +854,22 @@ impl WanAttention {
         };
 
         let attn = step_profile::time(phase.1, &device, || {
-            // `crate::attention::attention` wants [batch, heads, seq, head_dim].
+            // `crate::attention::attention_for` wants [batch, heads, seq, head_dim].
             let q = q.transpose(1, 2)?.contiguous()?;
             let k = k.transpose(1, 2)?.contiguous()?;
             let v = v.transpose(1, 2)?.contiguous()?;
             let scale = 1.0 / (self.head_dim as f32).sqrt();
-            crate::attention::attention(&q, &k, &v, scale)
+            // `Video` policy: an unset `MOLD_ATTN` reaches the Wan DiT as
+            // flash where the kernel is compiled in. Measured 2.1x
+            // (158.4 s -> 75.3 s, `wan22-t2v-a14b:q5` 53f at 832x480 on an
+            // RTX 4090); `MOLD_ATTN=math` restores the old arithmetic.
+            crate::attention::attention_for(
+                crate::attention::AttentionPolicy::Video,
+                &q,
+                &k,
+                &v,
+                scale,
+            )
         })?;
 
         let merged = attn.transpose(1, 2)?.contiguous()?.reshape((

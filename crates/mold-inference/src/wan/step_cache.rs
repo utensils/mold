@@ -141,10 +141,28 @@ pub(crate) fn parse_threshold(raw: &str) -> Result<Option<f64>> {
 }
 
 /// Resolve the policy from the process environment.
+///
+/// **Unset means `auto`, not `off`.** The two guards in
+/// [`WanStepCachePolicy::resolve`] are what make that safe: the configurations
+/// where reuse cannot help — a distilled adapter, or a schedule under
+/// [`MIN_CACHEABLE_STEPS`] — refuse themselves and say so, so the default only
+/// ever engages on the long non-distilled schedules it was measured on
+/// (`wan22-t2v-a14b:q8`, 33f at 832x480, 20 steps: 605.6 s -> 327.4 s, a
+/// **1.85x** speedup with no visible artifacting).
+///
+/// Defaulting to `off` made the feature effectively unreachable: it shipped,
+/// was measured, and then every production render paid full price because
+/// nothing set the variable. `MOLD_WAN_STEP_CACHE=off` is the escape hatch.
 pub(crate) fn requested_threshold() -> Result<Option<f64>> {
-    match crate::runtime_env::value("MOLD_WAN_STEP_CACHE") {
-        Some(raw) => parse_threshold(&raw),
-        None => Ok(None),
+    threshold_for_env(crate::runtime_env::value("MOLD_WAN_STEP_CACHE").as_deref())
+}
+
+/// Pure half of [`requested_threshold`], so the default is testable without
+/// touching the process environment.
+pub(crate) fn threshold_for_env(raw: Option<&str>) -> Result<Option<f64>> {
+    match raw {
+        Some(raw) => parse_threshold(raw),
+        None => Ok(Some(AUTO_THRESHOLD)),
     }
 }
 
@@ -240,6 +258,64 @@ impl WanStepCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unset `MOLD_WAN_STEP_CACHE` resolves to `auto`, not `off`.
+    ///
+    /// This is the whole change: the cache shipped measured at 1.85x and then
+    /// never ran, because nothing set the variable. It is only safe as a
+    /// default because `WanStepCachePolicy::resolve` refuses the two
+    /// configurations where reuse cannot help.
+    #[test]
+    fn an_unset_env_defaults_to_auto() {
+        assert_eq!(
+            threshold_for_env(None).expect("unset is valid"),
+            Some(AUTO_THRESHOLD)
+        );
+    }
+
+    /// `off` is still the escape hatch, and still means off.
+    #[test]
+    fn off_still_disables() {
+        for raw in ["off", "OFF", "0", "", "  "] {
+            assert_eq!(
+                threshold_for_env(Some(raw)).expect("valid"),
+                None,
+                "{raw:?} must disable the cache"
+            );
+        }
+    }
+
+    /// An explicit threshold still wins over the new default.
+    #[test]
+    fn an_explicit_threshold_outranks_the_default() {
+        assert_eq!(threshold_for_env(Some("0.25")).expect("valid"), Some(0.25));
+        assert_eq!(
+            threshold_for_env(Some("auto")).expect("valid"),
+            Some(AUTO_THRESHOLD)
+        );
+    }
+
+    /// The default must never engage where the measurement says it cannot
+    /// help: a distilled adapter, or a schedule under `MIN_CACHEABLE_STEPS`.
+    /// That refusal is what makes defaulting to `auto` safe at all.
+    #[test]
+    fn the_default_refuses_itself_on_distilled_and_short_schedules() {
+        let requested = threshold_for_env(None).expect("unset is valid");
+
+        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 20, true);
+        assert_eq!(policy, WanStepCachePolicy::Off);
+        assert_eq!(refusal, Some(WanStepCacheRefusal::Distilled));
+
+        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 4, false);
+        assert_eq!(policy, WanStepCachePolicy::Off);
+        assert_eq!(refusal, Some(WanStepCacheRefusal::TooFewSteps));
+
+        // ...and does engage on the shape it was measured on.
+        let (policy, refusal) = WanStepCachePolicy::resolve(requested, 20, false);
+        assert_eq!(policy, WanStepCachePolicy::Threshold(AUTO_THRESHOLD));
+        assert_eq!(refusal, None);
+    }
+
     use candle_core::{DType, Device};
 
     #[test]

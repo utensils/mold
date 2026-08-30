@@ -281,14 +281,14 @@ decodes on a 24 GB card; the denoise is the memory wall.
 
 ### FlashAttention on Wan
 
-A `--features cuda,flash-attn` build can route the Wan DiT's self- and cross-attention through candle-flash-attn v2; set `MOLD_ATTN=flash` to opt in (the default is `math` in every build, see [#736](https://github.com/utensils/mold/issues/736)). Measured on an RTX 4090 with the same binary, only the backend varying (`wan22-t2v-a14b:q5`, 53 frames at 832x480):
+A `--features cuda,flash-attn` build routes the Wan DiT's self- and cross-attention through candle-flash-attn v2, and **that is now the default for video families** — an unset `MOLD_ATTN` reaches the Wan DiT as `flash` wherever the kernel is compiled in. `MOLD_ATTN=math` restores the previous arithmetic. Image families keep `math` as their default, so the bytes an archived still renders are unchanged (see [#736](https://github.com/utensils/mold/issues/736) for why that split exists). Measured on an RTX 4090 with the same binary, only the backend varying (`wan22-t2v-a14b:q5`, 53 frames at 832x480):
 
 | Backend | Peak VRAM  | Wall clock |
 | ------- | ---------- | ---------- |
 | `flash` | 21,354 MiB | 75.3 s     |
 | `math`  | 22,250 MiB | 158.4 s    |
 
-So flash is worth **2.1x on speed** and only ~900 MiB on peak. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that among release artifacts only the sm89 (`h3-cuda`) binary compiles `flash-attn` — `MOLD_ATTN=flash` opts in there; on every other artifact this remains a source-build configuration.
+So flash is worth **2.1x on speed** and only ~900 MiB on peak. The speed is why it is the default; the small memory delta is why it is not, on its own, what unlocks longer clips. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that among release artifacts only the sm89 (`h3-cuda`) binary compiles `flash-attn` — `MOLD_ATTN=flash` opts in there; on every other artifact this remains a source-build configuration.
 
 At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
 the default there), the image embeds the same `mold:parameters` provenance as
