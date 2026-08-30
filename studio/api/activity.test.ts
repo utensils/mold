@@ -249,7 +249,7 @@ describe("active work reconciliation", () => {
     ]);
   });
 
-  it("keeps fleet work chronological instead of promoting running phases", () => {
+  it("keeps fleet work newest-first instead of promoting running phases", () => {
     const snapshot = reconcileActivityHost(route, undefined, {
       instance_id: "instance-a",
       observed_at_unix_ms: 10,
@@ -274,8 +274,8 @@ describe("active work reconciliation", () => {
     });
 
     expect(mergeFleetActivity([snapshot]).map((row) => row.id)).toEqual([
-      "older-queued",
       "newer-running",
+      "older-queued",
     ]);
   });
 });

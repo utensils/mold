@@ -121,7 +121,7 @@ describe("NavRail developing jobs", () => {
     };
   }
 
-  it("keeps recovered and local work in chronological order across phase changes", async () => {
+  it("keeps recovered and local work newest-first across phase changes", async () => {
     const wrapper = await mountAt("/create");
     useGenerationStore().jobs = [
       {
@@ -160,7 +160,7 @@ describe("NavRail developing jobs", () => {
     await flushPromises();
 
     const text = wrapper.get("[data-test='developing-jobs']").text();
-    expect(text.indexOf("flux-dev")).toBeLessThan(text.indexOf("flux-schnell"));
+    expect(text.indexOf("flux-schnell")).toBeLessThan(text.indexOf("flux-dev"));
   });
 
   it("shows cancellation progress, then offers to remove the cancelled row", async () => {

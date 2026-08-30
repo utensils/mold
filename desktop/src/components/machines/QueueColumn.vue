@@ -84,9 +84,11 @@ async function cancel(row: QueueSurfaceRow) {
  *  PATCH uses. `entry.position` counts running jobs too, so nudging against it
  *  is off-by-N (or a no-op) the moment anything on the host is running. */
 function queuedIndexOf(row: QueueSurfaceRow): number {
-  return rows.value
-    .filter((r) => r.hostId === row.hostId && r.entry.state === "queued")
-    .findIndex((r) => r.entry.id === row.entry.id);
+  return (
+    jobs.queues[row.hostId]?.entries
+      .filter((entry) => entry.state === "queued")
+      .findIndex((entry) => entry.id === row.entry.id) ?? -1
+  );
 }
 
 /** Nudge a queued job earlier/later; the server clamps out-of-range indices. */

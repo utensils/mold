@@ -15,6 +15,10 @@ import {
   type ActivityJobVM,
   type PrintActivityVM,
 } from "./activity";
+import {
+  compareNewestQueueEntry,
+  compareNewestSubmitted,
+} from "./activityOrder";
 import { buildQueueStatusIndex } from "./queuePosition";
 import type { ChainJobSummary } from "./api/chainTypes";
 
@@ -51,6 +55,38 @@ function summary(extra: Partial<ChainJobSummary> = {}): ChainJobSummary {
     ...extra,
   };
 }
+
+describe("compareNewestSubmitted", () => {
+  it("sorts newest-first and preserves sending order for equal timestamps", () => {
+    const rows = [
+      { id: "equal-first", createdAtMs: 20 },
+      { id: "oldest", createdAtMs: 10 },
+      { id: "equal-second", createdAtMs: 20 },
+      { id: "newest", createdAtMs: 30 },
+    ];
+    expect(rows.sort(compareNewestSubmitted).map(({ id }) => id)).toEqual([
+      "newest",
+      "equal-first",
+      "equal-second",
+      "oldest",
+    ]);
+  });
+
+  it("sorts queue entries newest-first without using scheduler position", () => {
+    const entries = [
+      { id: "sent-first", started_at_unix_ms: 20, position: 9 },
+      { id: "oldest", started_at_unix_ms: 10, position: 0 },
+      { id: "sent-second", started_at_unix_ms: 20, position: 1 },
+      { id: "newest", started_at_unix_ms: 30, position: 7 },
+    ];
+    expect(entries.sort(compareNewestQueueEntry).map(({ id }) => id)).toEqual([
+      "newest",
+      "sent-first",
+      "sent-second",
+      "oldest",
+    ]);
+  });
+});
 
 describe("sequenceActions", () => {
   it("gives running jobs cancel + watch, settled jobs edit paths", () => {
@@ -115,7 +151,7 @@ describe("sequenceToVM", () => {
 });
 
 describe("mergeActivity", () => {
-  it("keeps active work chronological regardless of phase, then settled by recency", () => {
+  it("keeps active work newest-first regardless of phase, then settled by recency", () => {
     const settledPrint = print({
       key: "print:1",
       phase: "done",
@@ -140,8 +176,8 @@ describe("mergeActivity", () => {
       [queuedSeq, settledSeq],
     );
     expect(merged.map((vm) => vm.key)).toEqual([
-      "print:2", // older running work stays where it was submitted
-      "seq:plato:c1", // newer queued work follows it
+      "seq:plato:c1", // newer queued work stays above older running work
+      "print:2",
       "seq:plato:c2", // then settled, newest first
       "print:1",
     ]);

@@ -19,6 +19,7 @@ import {
   type QueueStatusIndex,
 } from "./queuePosition";
 import { friendlySequenceError } from "./sequence";
+import { compareNewestSubmitted } from "./activityOrder";
 
 export type ActivityAction =
   "cancel" | "watch" | "retake" | "edit" | "resume" | "delete";
@@ -241,9 +242,9 @@ export function needsAttention(vm: ActivityJobVM): boolean {
         vm.state === "paused";
 }
 
-/** Merge prints and sequences into one list. Active work stays in chronological
- * submission order, regardless of whether a row is queued or running; settled
- * work follows by recency and is partitioned into attention/history below. */
+/** Merge prints and sequences into one list. Active work stays newest-first,
+ * regardless of whether a row is queued or running; settled work follows by
+ * recency and is partitioned into attention/history below. */
 export function mergeActivity(
   prints: readonly ActivityJobVM[],
   sequences: readonly ActivityJobVM[],
@@ -251,7 +252,7 @@ export function mergeActivity(
   return [...prints, ...sequences].sort((a, b) => {
     const activeDelta = Number(isActive(b)) - Number(isActive(a));
     if (activeDelta !== 0) return activeDelta;
-    if (isActive(a)) return a.createdAtMs - b.createdAtMs;
+    if (isActive(a)) return compareNewestSubmitted(a, b);
     return b.createdAtMs - a.createdAtMs;
   });
 }

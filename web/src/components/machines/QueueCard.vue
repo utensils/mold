@@ -18,6 +18,7 @@ import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
 import type { QueuePlan } from "@studio/api/queuePlan";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
 import { queueWaitLabel, resolveQueueWait } from "@studio/lib/queuePosition";
+import { compareNewestQueueEntry } from "@studio/lib/activityOrder";
 
 const props = withDefaults(
   defineProps<{
@@ -59,6 +60,9 @@ const emit = defineEmits<{
 
 const queuedIds = computed(() =>
   props.entries.filter((e) => e.state === "queued").map((e) => e.id),
+);
+const displayEntries = computed(() =>
+  [...props.entries].sort(compareNewestQueueEntry),
 );
 const cancellableIds = computed(() =>
   props.entries
@@ -170,9 +174,9 @@ function queuedIndexOf(id: string): number {
         Nothing queued.
       </p>
 
-      <ul v-if="entries.length" class="qc__list">
+      <ul v-if="displayEntries.length" class="qc__list">
         <li
-          v-for="entry in entries"
+          v-for="entry in displayEntries"
           :key="entry.id"
           class="qc__row"
           data-test="queue-row"
@@ -228,7 +232,8 @@ function queuedIndexOf(id: string): number {
               class="qc__icon"
               data-test="queue-up"
               :disabled="dimmed || isFirstQueued(entry.id)"
-              aria-label="Move up"
+              aria-label="Run earlier"
+              title="Run earlier in the dispatch queue"
               @click="emit('move', entry.id, queuedIndexOf(entry.id) - 1)"
             >
               <Icon name="chevron-up" :size="14" />
@@ -238,7 +243,8 @@ function queuedIndexOf(id: string): number {
               class="qc__icon"
               data-test="queue-down"
               :disabled="dimmed || isLastQueued(entry.id)"
-              aria-label="Move down"
+              aria-label="Run later"
+              title="Run later in the dispatch queue"
               @click="emit('move', entry.id, queuedIndexOf(entry.id) + 1)"
             >
               <Icon name="chevron-down" :size="14" />

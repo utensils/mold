@@ -1,4 +1,5 @@
 import { apiJsonTo, type ApiTarget } from "./client";
+import { compareNewestSubmitted } from "../lib/activityOrder";
 
 export interface ActiveWorkItem {
   id: string;
@@ -176,8 +177,11 @@ export function mergeFleetActivity(
   // still be queued on one machine while a newer job is already running on
   // another, so grouping by phase makes "developing" work jump to the top.
   // Submission time is the only ordering shared by every work kind and host.
-  return rows.sort(
-    (a, b) =>
-      a.created_at_unix_ms - b.created_at_unix_ms || a.key.localeCompare(b.key),
+  // Equal timestamps retain the server's sending order.
+  return rows.sort((a, b) =>
+    compareNewestSubmitted(
+      { createdAtMs: a.created_at_unix_ms },
+      { createdAtMs: b.created_at_unix_ms },
+    ),
   );
 }

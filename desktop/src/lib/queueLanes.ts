@@ -4,6 +4,8 @@
  * Pure functions so lane grouping and the drag/drop policy are unit-testable.
  */
 
+import { compareNewestQueueEntry } from "@studio/lib/activityOrder";
+
 export type LaneKey = number | "queue";
 
 /** The subset of a queue row the lane computation needs. */
@@ -13,6 +15,7 @@ export interface LaneEntryLike {
    * replay or dispatch budget. It occupies no lane and waits for no turn. */
   state: "queued" | "running" | "paused" | "held";
   position: number;
+  started_at_unix_ms: number;
   /** GPU ordinal currently running this row (running rows only). */
   gpu?: number;
   /** Requested GPU ordinal for queued rows; absent = Auto. */
@@ -31,12 +34,8 @@ export function laneForEntry(entry: LaneEntryLike): number | null {
   return entry.target_gpu ?? null;
 }
 
-/** Every state this comparator can see. A missing key yields `undefined`, and
- *  `undefined - n` is NaN, which silently stops the sort rather than failing. */
-const STATE_RANK = { running: 0, queued: 1, paused: 2, held: 3 } as const;
-
 function laneOrder<T extends LaneEntryLike>(a: T, b: T): number {
-  return STATE_RANK[a.state] - STATE_RANK[b.state] || a.position - b.position;
+  return compareNewestQueueEntry(a, b);
 }
 
 /**

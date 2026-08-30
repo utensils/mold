@@ -29,6 +29,7 @@ import {
 } from "@studio/lib/queuePosition";
 import type { Job } from "../../composables/useGenerateStream";
 import { ORIGIN_HOST_ID } from "../../lib/hostRegistry";
+import { compareNewestSubmitted } from "@studio/lib/activityOrder";
 
 const props = withDefaults(
   defineProps<{
@@ -211,19 +212,22 @@ const running = computed(() =>
 const queued = computed(() =>
   props.jobs.filter((j) => j.state === "running" && !j.workStarted),
 );
-/** Render exactly the oldest submitted queued print, then summarize the rest.
- * Cancellation reveals the following row, so every job remains reachable
- * without producing one interactive DOM subtree per backlog item. */
-const nextQueued = computed(() => {
+/** Render exactly the newest submitted queued print, then summarize the rest.
+ * Cancellation reveals the preceding submission without producing one
+ * interactive DOM subtree per backlog item. */
+const newestQueued = computed(() => {
   const actionable = queued.value.filter((job) => !job.cancelling);
   return (
-    [...(actionable.length > 0 ? actionable : queued.value)].sort(
-      (a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id),
+    [...(actionable.length > 0 ? actionable : queued.value)].sort((a, b) =>
+      compareNewestSubmitted(
+        { createdAtMs: a.startedAt },
+        { createdAtMs: b.startedAt },
+      ),
     )[0] ?? null
   );
 });
 const summarizedQueuedCount = computed(() =>
-  Math.max(0, queued.value.length - (nextQueued.value ? 1 : 0)),
+  Math.max(0, queued.value.length - (newestQueued.value ? 1 : 0)),
 );
 
 type WebActivityRow =
@@ -241,8 +245,8 @@ type WebActivityRow =
       sequence: ActivityJobVM & { kind: "sequence" };
     };
 
-/** One visual queue across local prints, sequences, and recovered fleet work.
- * A phase transition changes only the row contents, never its position. */
+/** One newest-first visual queue across local prints, sequences, and recovered
+ * fleet work. A phase transition changes only the row contents. */
 const activeRows = computed<WebActivityRow[]>(() =>
   [
     ...props.shared.map((shared): WebActivityRow => ({
@@ -257,13 +261,13 @@ const activeRows = computed<WebActivityRow[]>(() =>
       kind: "print",
       print,
     })),
-    ...(nextQueued.value
+    ...(newestQueued.value
       ? [
           {
-            key: `print:${nextQueued.value.id}`,
-            createdAtMs: nextQueued.value.startedAt,
+            key: `print:${newestQueued.value.id}`,
+            createdAtMs: newestQueued.value.startedAt,
             kind: "print" as const,
-            print: nextQueued.value,
+            print: newestQueued.value,
           },
         ]
       : []),
@@ -273,7 +277,7 @@ const activeRows = computed<WebActivityRow[]>(() =>
       kind: "sequence",
       sequence,
     })),
-  ].sort((a, b) => a.createdAtMs - b.createdAtMs || a.key.localeCompare(b.key)),
+  ].sort(compareNewestSubmitted),
 );
 const active = computed(
   () =>

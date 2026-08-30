@@ -150,6 +150,7 @@ import {
   type ActivityJobVM,
   type PrintActivityVM,
 } from "@studio/lib/activity";
+import { compareNewestSubmitted } from "@studio/lib/activityOrder";
 import {
   buildQueueStatusIndex,
   queueStatusFor,
@@ -2575,8 +2576,8 @@ type MobileActivityDisplayRow =
   | { key: string; createdAtMs: number; kind: "local"; local: ActivityRow }
   | { key: string; createdAtMs: number; kind: "shared"; shared: FleetActiveWork };
 
-/** One chronological queue across this session and server-owned/recovered
- * work. Ownership and phase change row contents, never visual position. */
+/** One newest-first queue across this session and server-owned/recovered work.
+ * Ownership and phase change row contents without changing submission order. */
 const mobileActivityRows = computed<MobileActivityDisplayRow[]>(() =>
   [
     ...activityRows.value.map((local): MobileActivityDisplayRow => ({
@@ -2591,7 +2592,7 @@ const mobileActivityRows = computed<MobileActivityDisplayRow[]>(() =>
       kind: "shared",
       shared,
     })),
-  ].sort((a, b) => a.createdAtMs - b.createdAtMs || a.key.localeCompare(b.key)),
+  ].sort(compareNewestSubmitted),
 );
 const expandedQueueFailures = ref(new Set<string>());
 

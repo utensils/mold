@@ -10,21 +10,21 @@ function listing(): QueueEntry[] {
   return [
     {
       id: "run",
-      model: "m",
+      model: "old-running",
       state: "running",
       started_at_unix_ms: 1,
       position: 0,
     },
     {
       id: "A",
-      model: "m",
+      model: "middle-queued",
       state: "queued",
       started_at_unix_ms: 2,
       position: 1,
     },
     {
       id: "B",
-      model: "m",
+      model: "new-queued",
       state: "queued",
       started_at_unix_ms: 3,
       position: 2,
@@ -57,10 +57,13 @@ describe("QueueCard reorder index", () => {
     expect(wrapper.emitted("cancelAll")).toHaveLength(1);
     expect(
       wrapper.findAll("[data-test='queue-lane']")[0]!.attributes("disabled"),
+    ).toBeUndefined();
+    expect(
+      wrapper.findAll("[data-test='queue-lane']")[2]!.attributes("disabled"),
     ).toBeDefined();
     expect(
-      wrapper.findAll("[data-test='queue-lane']")[1]!.attributes("disabled"),
-    ).toBeUndefined();
+      wrapper.findAll("[data-test='queue-inspect']").map((row) => row.text()),
+    ).toEqual(["new-queued", "middle-queued", "old-running"]);
   });
 
   it("offers running cancellation only when the host advertises cooperative support", () => {
@@ -100,10 +103,11 @@ describe("QueueCard reorder index", () => {
 
   it("moves the last queued job up to queued index 0, not its listing position", async () => {
     const wrapper = mountCard();
-    // Only the two queued rows expose reorder buttons: index 0 = A, 1 = B.
+    // Display is B, A, running; queued mutation indices remain A=0, B=1.
     const upButtons = wrapper.findAll("[data-test='queue-up']");
     expect(upButtons).toHaveLength(2);
-    await upButtons[1]!.trigger("click"); // move B up
+    expect(upButtons[0]!.attributes("aria-label")).toBe("Run earlier");
+    await upButtons[0]!.trigger("click"); // move B up
 
     expect(wrapper.emitted("move")).toEqual([["B", 0]]);
   });
@@ -112,7 +116,8 @@ describe("QueueCard reorder index", () => {
     const wrapper = mountCard();
     const downButtons = wrapper.findAll("[data-test='queue-down']");
     expect(downButtons).toHaveLength(2);
-    await downButtons[0]!.trigger("click"); // move A down
+    expect(downButtons[1]!.attributes("aria-label")).toBe("Run later");
+    await downButtons[1]!.trigger("click"); // move A down
 
     expect(wrapper.emitted("move")).toEqual([["A", 1]]);
   });
@@ -165,8 +170,8 @@ describe("host-wide pause presentation", () => {
     });
 
     const rows = wrapper.findAll("[data-test='queue-row']");
-    expect(rows[0]!.text()).toContain("Queue paused");
-    expect(rows[1]!.text()).toContain("Held");
+    expect(rows[0]!.text()).toContain("Held");
+    expect(rows[1]!.text()).toContain("Queue paused");
   });
 });
 
@@ -233,9 +238,9 @@ describe("restart-paused rows", () => {
     });
 
     const rows = wrapper.findAll("[data-test='queue-row']");
-    expect(rows[0]!.text()).toContain("Paused");
-    expect(rows[1]!.text()).toContain("#1 in line");
-    expect(rows[1]!.text()).not.toContain("Queue paused");
+    expect(rows[0]!.text()).toContain("#1 in line");
+    expect(rows[0]!.text()).not.toContain("Queue paused");
+    expect(rows[1]!.text()).toContain("Paused");
     expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Resume");
   });
 });
