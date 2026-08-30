@@ -150,7 +150,9 @@ jobs:
           key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-2.11.4
       - name: Install Tauri CLI
         if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
-        run: cargo install tauri-cli --version 2.11.4 --locked
+        # rust-cache can restore cargo-tauri even when the dedicated binary
+        # cache misses. Keep this fallback idempotent across both cache layers.
+        run: cargo install tauri-cli --version 2.11.4 --locked --force
       - name: Verify Tauri CLI
         run: cargo tauri --version | grep -F '2.11.4'
       - name: Install frontend dependencies
