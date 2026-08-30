@@ -1,8 +1,10 @@
 # Plan: Fix "No selected machine has the model and required components" + missing-component auto-recovery
 
-**Status:** phases 0–1 implemented, including cold opaque-catalog recovery; phase 3
-messaging implemented; repair/resume blocked on download authority · **Owner:** Codex
-· **Date:** 2026-07-29
+**Status (2026-08-30):** phases 0–1 implemented, including cold opaque-catalog
+recovery; phase 3 messaging implemented; phase 2 pull-and-resume shipped on web and
+desktop in #1168 for the missing-model / primary-checkpoint case. What remains is
+repair of a _companion_ component whose `repair_model` is a different model.
+· **Owner:** Codex · **Date:** 2026-07-29
 
 ## Implementation status
 
@@ -32,22 +34,37 @@ Implemented in this change:
   metadata where the existing component-status authority can prove them. Stale device
   pins remain hard-infeasible.
 
-Not implemented in this change:
+Implemented since this note was written (#1168):
 
-- Automatic component repair and held-request resume. The web download singleton and
-  API helpers are origin-only, but repair must POST, list, stream, and cancel on one
-  immutable remote target. A catalog repair can also enqueue a primary job plus
+- Missing-model pull-and-resume on web and desktop.
+  `classifyMissingModel` (`studio/api/generationPlacement.ts`) separates an
+  authoritative `infeasible` caused by the model's own absence — the server's "no
+  concrete local artifacts" reason, or a missing component whose `repair_model` IS
+  the requested model — from a capacity refusal, a policy block, or a missing
+  companion. Only the first is answered with a download. Create offers the pull,
+  picks the machine through `planModelInstall`, and arms an exact-host resume
+  through `web/src/composables/usePullResume.ts` and `desktop/src/stores/pullResume.ts`,
+  which share the which-job rule in `studio/lib/pullResume.ts`. A resume is
+  promised only for a concrete host and a request that is already final; anything
+  still to be fitted or stamped after routing gets the download and an explicit
+  "press Generate again".
+
+On iPhone the same offer is raised from the durable HELD child rather than from a
+placement preview: `desktop/src/mobile/missingModelHold.ts` (`planHeldMissingModelPull`)
+reads the machine's typed hold code through `classifyMissingModelHold`, so the
+native placement-preview-driven recovery this note asked for was superseded, not
+built.
+
+Still not implemented:
+
+- Automatic repair of a _companion_ component whose `repair_model` names a different
+  model — deliberately excluded by `classifyMissingModel`. The web download singleton
+  and API helpers are origin-only, but such a repair must POST, list, stream, and
+  cancel on one immutable remote target, and it can enqueue a primary job plus
   companion jobs, so one returned job id is not sufficient ownership for a visible,
-  cancellable recovery.
-- Native automatic repair/resume. Existing missing-model pull recovery starts after a
-  failed submission; placement recovery instead needs a finalized held-request
-  authority spanning source preprocessing, form/prepared staleness, route identity,
-  unmount, and a grouped pull lease.
-
-Phase 2 therefore requires a shared target-aware, all-host download authority with a
-server-issued repair group id (or equivalent complete job-id set) and group-level
-list/stream/cancel semantics. Only after that exists should any surface auto-start a
-repair and promise generation will resume.
+  cancellable recovery. That case still requires a shared target-aware, all-host
+  download authority with a server-issued repair group id (or equivalent complete
+  job-id set) and group-level list/stream/cancel semantics.
 
 ## Symptom
 

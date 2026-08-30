@@ -8,13 +8,16 @@ on the device.
 
 ## Download and install
 
+- **[Latest release APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)**:
+  the `Mold-android.apk` asset on the newest tagged `v*` release, with its
+  checksum in that release's `SHA256SUMS`.
 - **[Download the nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)**: the newest Android build from `main`.
 
-The link downloads the signed universal `Mold-android.apk` file directly, not a
-compressed archive. Open the downloaded APK on an Android 7.0 or newer
+Either link downloads the signed universal `Mold-android.apk` file directly, not
+a compressed archive. Open the downloaded APK on an Android 7.0 or newer
 device and approve installation from your browser or file manager when Android
-asks. Later nightly APKs use the same signing identity, so they can upgrade the
-installed app in place.
+asks. Both channels share one signing identity and a monotonic version-code
+scheme, so a later APK from either upgrades the installed app in place.
 
 Mold is not yet published through Google Play. Android may therefore ask you to
 allow **Install unknown apps** for the app that opened the download. Keep that

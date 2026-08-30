@@ -139,6 +139,7 @@ export default defineConfig({
             { text: 'Wuerstchen', link: '/models/wuerstchen' },
             { text: 'Qwen-Image', link: '/models/qwen-image' },
             { text: 'LTX Video', link: '/models/ltx2' },
+            { text: 'LTX Video 0.9.x', link: '/models/ltx-video' },
             { text: 'MiniMax H3', link: '/models/minimax-h3' },
             { text: 'Wan Video', link: '/models/wan' },
             { text: 'Upscalers', link: '/models/upscalers' },

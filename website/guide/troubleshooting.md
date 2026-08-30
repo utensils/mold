@@ -180,6 +180,6 @@ useful for diagnosis, not for real image generation performance.
 ## Advanced Performance Knobs
 
 The main opt-in knobs are documented in
-[Configuration → Performance knobs](/guide/configuration#performance-knobs).
+[Configuration → Generation](/guide/configuration#generation).
 Start there for `MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`,
 `MOLD_ATTN`, and `MOLD_ATTN_CHUNK` instead of guessing from log messages.

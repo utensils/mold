@@ -1,5 +1,11 @@
 # Activity is present tense — job visibility + sequence reuse from the Library
 
+**Status (2026-08-30):** shipped. `studio/lib/activity.ts` and
+`studio/lib/sequenceReuse.ts` are the landed modules, and CLAUDE.md's
+"Activity-is-present-tense invariant" and "Sequence-reuse invariant" are the
+maintained statements of the rules. This note is kept as the design record;
+symbols that moved after landing are repointed inline below.
+
 Design note, 2026-07-28. Follow-up to #565 (shared sequence kit), #566 (chain
 lifecycle events), #568 (desktop unified Create), the in-flight web unified-Create
 landing, and the in-flight iOS landing. **Plan only** — no product code, spec, or
@@ -163,8 +169,9 @@ What changes:
   unified-Create landing left open. It should render live sequence entries from
   the same shared merge, with the clip counter (`clip 3/5 · developing…`) as its
   status line.
-- **It does not gain settled sequences.** The existing `.slice(-3)` window of
-  recently finished prints stays prints-only. The rail's own comment calls it "a
+- **It does not gain settled sequences.** The existing last-finished window of
+  recently finished prints (`.slice(-GENERATION_HISTORY_LIMIT)`, 50) stays
+  prints-only. The rail's own comment calls it "a
   working queue, not a full history"; adding settled sequences there would
   rebuild the pile in a second place, one route away from the one we just
   cleaned up. Settled sequences have two homes already (the print in Library, the
@@ -278,7 +285,7 @@ the honest counterweight to removing 40 completed rows.
 | `SETTLED_VISIBLE_MS` | `5 * 60_000` | how long a settled-but-wrong job keeps a strip row |
 | `MAX_ATTENTION_ROWS` | `2` | strip rows for wrong-but-settled work; overflow → digest |
 | `HISTORY_JOBS_RENDER_CAP` | `200` | rows rendered in History ▸ Sequences |
-| `RAIL_SETTLED_KEEP` | `3` | existing sidebar last-finished window (unchanged) |
+| `GENERATION_HISTORY_LIMIT` | `50` | existing sidebar last-finished window (`desktop/src/stores/generation.ts`, unchanged) |
 | `PRINT_PRUNE_KEEP` | `12` | existing `generation.prune` cap (unchanged) |
 
 ## A.8 Mobile (iPhone) — brief
@@ -433,9 +440,10 @@ Rules:
 - `chain_job_id` and `chain` are written together by `stitched_output_metadata`,
   so "job id without stages" is not a real state; if it is ever seen, treat it as
   legacy (Reuse only, no Edit) rather than trusting half a record.
-- Ephemeral chain outputs (`routes_chain.rs` passes `chain_job_id: None`) carry
-  `chain` but no job id → **Reuse only**. Correct: there is no durable job to
-  edit.
+- Ephemeral chain outputs (an auto-chained one-shot, marked by
+  `ChainRequest.ephemeral` in `crates/mold-core/src/chain.rs`, publishes its
+  print with `chain_job_id: None`) carry `chain` but no job id → **Reuse
+  only**. Correct: there is no durable job to edit.
 
 ## B.5 Where the code goes
 
@@ -623,9 +631,9 @@ change, not a contradiction of it.
 ### Rust / server
 
 No changes required. `chain_job_id` and `chain` already reach `GET /api/gallery`;
-`GET /api/chain-jobs/:id` already 404s for a missing job. (Unrelated: the
-`POST /api/chain-jobs/:id/amend` route registration is tracked by the in-flight
-server work, not this note.)
+`GET /api/chain-jobs/:id` already 404s for a missing job. (The unrelated
+`POST /api/chain-jobs/:id/amend` route has since been registered —
+`crates/mold-server/src/routes.rs`.)
 
 ### Docs to update on landing
 

@@ -36,7 +36,7 @@ browses for them:
 ```bash
 mold server discover
 # NAME          URL                       VERSION  AUTH  GPU
-# hal9000-7680  http://192.168.1.10:7680  0.14.0   -     1xNVIDIA GeForce RTX 4090
+# hal9000-7680  http://192.168.1.10:7680  0.26.0   -     1xNVIDIA GeForce RTX 4090
 #
 # Connect: export MOLD_HOST=http://192.168.1.10:7680
 ```

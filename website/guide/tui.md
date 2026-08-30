@@ -50,7 +50,9 @@ terminal.
 
 Log files follow the naming pattern `mold-server.YYYY-MM-DD.log` and are
 automatically cleaned up after 7 days (configurable via `logging.max_days` in
-`~/.mold/config.toml`).
+`~/.mold/config.toml`). The TUI writes its own file-only log beside it as
+`mold-tui.YYYY-MM-DD.log`, because it owns the terminal and cannot log to
+stderr.
 
 To view live logs while the TUI is running, open a second terminal:
 
@@ -93,8 +95,9 @@ Create; it is a Create sub-mode, not a tab.
 TUI's version of the GUI surfaces' ⌘K launcher. Type to filter, **Up**/
 **Down** to select, **Enter** to run, **Esc** to close. It covers
 navigation (all five workspaces, the chain composer), actions (toggle
-Advanced, randomize seed, expand prompt, prompt history, help, quit),
-and switching between all eleven theme presets.
+Advanced, connect a machine, randomize seed, expand prompt, retry held
+prints, prompt history, help, quit), and switching between all eleven theme
+presets.
 
 ## Create View
 
@@ -104,7 +107,9 @@ The main workspace with four panels:
   keybindings). Required, except for an LTX-2 / LTX-Video model that already has
   a source image attached, where an empty prompt is accepted and prompt
   expansion is skipped for that run
-- **Parameters**: six essentials rows plus the Advanced accordion
+- **Parameters**: six essentials rows for an image model — plus **Duration**
+  (and **Predict duration** where the model advertises duration prediction)
+  for a video model — followed by the Advanced accordion
 - **Preview** (idle hint; while generating, the latest live latent preview
   frame (for families that stream denoise previews) FLUX.1, Flux.2, Z-Image,
   and Wan 2.1/2.2) with the denoise progress line beneath it; then the
@@ -122,19 +127,24 @@ memory telemetry live in the Machines workspace and the chrome host chip.
 
 ### Essentials
 
-| Row             | Shows                                   | ◀▶ / +/-             | Enter                |
-| --------------- | --------------------------------------- | -------------------- | -------------------- |
-| Model           | human-readable model name + description | --                   | fuzzy model selector |
-| Size            | `1024 × 1024`                           | cycle aspect presets | type an exact `WxH`  |
-| Detail          | `●●●●○○○○ 28` step dots                 | adjust steps         | --                   |
-| Prompt strength | guidance                                | adjust               | --                   |
-| Seed            | `random` / `fixed · 42`                 | cycle seed mode      | type an exact seed   |
-| Batch           | image count                             | adjust               | --                   |
+| Row              | Shows                                     | ◀▶ / +/-                 | Enter                |
+| ---------------- | ----------------------------------------- | ------------------------ | -------------------- |
+| Model            | human-readable model name + description   | --                       | fuzzy model selector |
+| Size             | `1024 × 1024`                             | cycle aspect presets     | type an exact `WxH`  |
+| Detail           | `●●●●○○○○ 28` step dots                   | adjust steps             | --                   |
+| Prompt strength  | guidance                                  | adjust                   | --                   |
+| Predict duration | `on` / `off` (video models that offer it) | toggle                   | --                   |
+| Duration         | `5.0s · 121f` (video models)              | adjust on the frame grid | --                   |
+| Seed             | `random` / `fixed · 42`                   | cycle seed mode          | type an exact seed   |
+| Batch            | image count                               | adjust                   | --                   |
 
-Size's `◀▶` cycles 1:1, 3:2, 2:3, 16:9, and 9:16 presets fitted to the
-model's default pixel area (64-aligned). Seed modes are `random` (new seed
-every run), `fixed` (reproducible), and `increment` (+1 per run); **Ctrl+R**
-still cycles them from anywhere.
+Size's `◀▶` cycles the sizes the selected model's generation profile
+advertises; when the host advertises no profile it falls back to computed
+1:1, 3:2, 2:3, 16:9, and 9:16 presets fitted to the model's default pixel
+area (64-aligned). With **Predict duration** on, the Duration row reads
+`automatic · 1–20s` and the server picks the clip length. Seed modes are
+`random` (new seed every run), `fixed` (reproducible), and `increment` (+1
+per run); **Ctrl+R** still cycles them from anywhere.
 
 ### Advanced accordion
 
@@ -150,7 +160,7 @@ open state and expanded section persist across sessions
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                                                                                                                                      |
 | Negative prompt        | inline editor (CFG models; **Alt+N** jumps here). Wan models prefill their tuned default; leave it for the default, edit to replace it, clear it to send an explicit empty negative |
-| Source image           | Source, Strength, Mask, ControlNet (per model)                                                                                                                                      |
+| Source image           | References, Source, Strength, Mask, ControlNet (per model)                                                                                                                          |
 | Identity photo         | Photo, Strength, Start step (only for a checkpoint the server advertises as identity-capable)                                                                                       |
 | LoRA                   | LoRA path + scale                                                                                                                                                                   |
 | Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                                                                                                                |
@@ -282,7 +292,10 @@ Press **Enter** on the Model field or **Ctrl+M** from anywhere:
 
 ### Prompt History
 
-Previous prompts persist across sessions in `~/.mold/prompt-history.jsonl`:
+Previous prompts persist across sessions in the metadata DB
+(`$MOLD_HOME/mold.db`, `prompt_history` table). A pre-existing
+`~/.mold/prompt-history.jsonl` from an older release is imported exactly once
+at startup and then renamed `prompt-history.jsonl.migrated`.
 
 - **Up/Down** arrows at top/bottom of prompt recall history
 - **Ctrl+P**/**Ctrl+N** also navigate history
@@ -295,12 +308,14 @@ The prompt editor supports standard emacs/shell keybindings:
 | Key    | Action            |
 | ------ | ----------------- |
 | Ctrl+A | Beginning of line |
-| Ctrl+E | End of line       |
 | Ctrl+U | Kill to start     |
 | Ctrl+W | Delete word back  |
 | Ctrl+D | Delete forward    |
 | Ctrl+F | Forward char      |
 | Ctrl+B | Backward char     |
+
+**Ctrl+E** is not an end-of-line binding here: it bypasses the editor to
+**Expand prompt** (and **Ctrl+Shift+E** to Remix).
 
 ## Library View
 
@@ -394,13 +409,15 @@ used by `mold run --script`.
 
 See all installed and available models with family, size, defaults, and status.
 
-| Key   | Action                        |
-| ----- | ----------------------------- |
-| j/k   | Navigate the model list       |
-| Enter | Set as default model          |
-| p     | Pull (download) a model       |
-| u     | Unload the active model (GPU) |
-| Esc   | Back to Create                |
+| Key   | Action                                         |
+| ----- | ---------------------------------------------- |
+| j/k   | Navigate the model list                        |
+| Enter | Use this model in Create (jumps to the prompt) |
+| p     | Pull (download) a model                        |
+| r     | Remove a model from the host (confirms)        |
+| u     | Unload the active model (GPU)                  |
+| /     | Filter the model list                          |
+| Esc   | Back to Create                                 |
 
 ## Machines View
 
@@ -423,13 +440,14 @@ loaded model, active work, and lifecycle state.
 | Enter | Set as the generation target (again reverts to Auto)     |
 | Tab   | Switch focus between the host list and the detail lanes  |
 | c     | Connect a machine (also in the ⌘K palette from anywhere) |
-| d     | Forget the selected host (confirms; deletes its API key) |
-| g     | Select the next GPU on the current machine               |
-| e     | Enable or disable the selected GPU                       |
+| d     | Disconnect or reconnect the selected host                |
+| f     | Forget the selected host (confirms; deletes its API key) |
 | r     | Refresh telemetry and queue now                          |
+| g     | Select the next GPU on the current machine               |
 | [ / ] | Select the previous or next GPU/MIG device               |
 | e     | Enable or disable the selected device (when advertised)  |
 | x     | Cancel the selected queued job (detail focus, confirms)  |
+| l     | Load more queue rows (detail focus)                      |
 | Esc   | Back to Create                                           |
 
 Disabling a busy GPU removes it from future scheduling immediately but lets
@@ -504,8 +522,8 @@ toggle persists to `mold.db` the moment it flips.
 | Row           | Key                       | Default | Effect                                                                                                                                  |
 | ------------- | ------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | Format        | `tui.default_format`      | `png`   | Seeds a fresh session's Format parameter (a saved session or per-model preference still wins)                                           |
-| Reduce Motion | `tui.reduce_motion`       | `off`   | Disables TUI motion effects (consumed by upcoming releases)                                                                             |
-| Show Timeline | `tui.show_timeline`       | `on`    | Shows the Timeline on the Create view (consumed by upcoming releases)                                                                   |
+| Reduce Motion | `tui.reduce_motion`       | `off`   | Disables the workspace fade and the completion sweep                                                                                    |
+| Show Timeline | `tui.show_timeline`       | `on`    | Shows the Timeline on the Create view                                                                                                   |
 | Confirmations | `tui.confirm_destructive` | `on`    | When off, destructive actions (deleting a print, removing a model, deleting a chain stage) run immediately without a confirmation popup |
 
 A **Library** section follows: **Trash (days)** edits the shared
@@ -566,17 +584,17 @@ views.
 
 ### Global Shortcuts
 
-| Key           | Action                                |
-| ------------- | ------------------------------------- |
-| Esc           | Unfocus / navigation mode             |
-| 1 – 5         | Switch workspace (in navigation mode) |
-| Left / Right  | Cycle workspaces (in navigation mode) |
-| Alt+1 – Alt+5 | Switch workspace (from anywhere)      |
-| Tab           | Cycle focus to next panel             |
-| Shift+Tab     | Cycle focus to previous panel         |
-| Ctrl+C        | Quit                                  |
-| q             | Quit (when not in a text field)       |
-| ?             | Show help overlay                     |
+| Key                  | Action                                |
+| -------------------- | ------------------------------------- |
+| Esc                  | Unfocus / navigation mode             |
+| 1 – 5                | Switch workspace (in navigation mode) |
+| Alt+Left / Alt+Right | Cycle workspaces (from anywhere)      |
+| Alt+1 – Alt+5        | Switch workspace (from anywhere)      |
+| Tab                  | Cycle focus to next panel             |
+| Shift+Tab            | Cycle focus to previous panel         |
+| Ctrl+C               | Quit                                  |
+| q                    | Quit (when not in a text field)       |
+| ?                    | Show help overlay                     |
 
 ### Create Shortcuts
 
@@ -605,8 +623,10 @@ views.
 
 ## Session Persistence
 
-All settings are saved to `~/.mold/tui-session.json` after each generation and
-restored on next launch:
+All settings are saved to the metadata DB (`$MOLD_HOME/mold.db`, the `settings`
+and `model_prefs` tables) after each generation and restored on next launch. A
+legacy `~/.mold/tui-session.json` is imported exactly once at startup and then
+renamed `tui-session.json.migrated`. Persisted state covers:
 
 - Prompt and negative prompt text
 - Model selection
@@ -657,8 +677,8 @@ cargo build --release -p mold-ai --features metal,tui
 cargo build --release -p mold-ai --features cuda,tui
 ```
 
-```bash [All features]
-cargo build --release -p mold-ai --features metal,preview,discord,expand,tui
+```bash [Release feature set]
+cargo build --release -p mold-ai --features metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 ```
 
 :::

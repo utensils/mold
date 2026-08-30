@@ -88,6 +88,17 @@ Android companions.
 **[Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
 · [Explore the desktop app](https://utensils.io/mold/guide/desktop)
 
+**[Download Mold for Windows (x86_64)](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe)**
+— a self-signed NSIS installer. The published build is CPU / remote-hosts
+only; see the [desktop guide](https://utensils.io/mold/guide/desktop) for the
+CUDA recipe. Verify and explicitly trust the release's
+`mold-windows-self-signing.cert.cer` before installing; the certificate is not
+publicly trusted and does not suppress SmartScreen on its own.
+
+Linux desktop builds are source/CI distributions for now — `nix build
+.#mold-desktop` or the devshell's `desktop-build` CUDA AppImage. See the
+[desktop guide](https://utensils.io/mold/guide/desktop).
+
 Android uses the same remote-only Mold Studio mobile interface. Download the
 signed universal nightly APK directly; there is no zip to unpack:
 

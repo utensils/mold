@@ -41,14 +41,18 @@ What this does:
 
 1. If a warm pod exists (created by a prior `run`), reuses it.
 2. Otherwise creates a new pod with smart defaults:
-   - picks the cheapest GPU with High or Medium stock (4090 → 5090 → L40S → A100),
+   - picks the cheapest GPU with High or Medium stock that clears the
+     model's estimated VRAM need (see
+     [Smart defaults](#smart-defaults-explained)),
    - selects the matching `ghcr.io/utensils/mold` image tag,
    - retries across datacenters if scheduling stalls.
 3. Waits for the mold server inside the pod to be reachable, streaming a
    readiness progress bar.
 4. Durably admits the request through `/api/generation-batches`, polls its
-   exact client id to completion, and downloads the gallery result. There is
-   no attached-SSE alternative, so this step shows no per-step progress.
+   exact client id to completion, and downloads the gallery result. Rather
+   than holding an SSE connection open through the proxy, the durable
+   observer polls each running child's progress snapshot, so per-step
+   denoise and model-pull lines are still shown.
 5. Saves the output to `./mold-outputs/runpod-<pod-id>-<timestamp>.png`
    (directory auto-created, `.gitignore`'d by default).
 6. Prints the proxy URL so you can open the pod's
@@ -59,9 +63,10 @@ What this does:
 
 ## Web gallery
 
-Every `ghcr.io/utensils/mold` image ships the Vue 3 gallery SPA at
+Every `ghcr.io/utensils/mold` image ships the Vue 3 Mold Studio SPA at
 `/opt/mold/web`, and the server exposes it as the root route. Opening the
-pod's proxy URL in a browser gives you:
+pod's proxy URL in a browser lands on the Create workspace; the gallery is
+the Library workspace at `/library`, which gives you:
 
 - Feed / grid toggle over the server's `output` directory.
 - Real thumbnails for PNG, JPEG, GIF, APNG, WebP, and **MP4** (first frame).
@@ -72,7 +77,7 @@ pod's proxy URL in a browser gives you:
 # Print the browsable URL for an existing pod
 mold runpod connect <pod-id>
 # → export MOLD_HOST=https://<pod-id>-7680.proxy.runpod.net
-# → gallery: https://<pod-id>-7680.proxy.runpod.net
+# → gallery: https://<pod-id>-7680.proxy.runpod.net/library
 ```
 
 The delete button is always available. Pair `MOLD_API_KEY` with the pod
@@ -85,7 +90,7 @@ mold runpod run "a cat" --model flux-dev:q4        # preload a specific model
 mold runpod run "a cat" --gpu 5090                 # force a GPU family
 mold runpod run "a cat" --dc US-IL-1               # pin a datacenter
 mold runpod run "a cat" --network-volume <id>       # persistent /workspace
-mold runpod run "a cat" --keep                     # don't park pod for reuse
+mold runpod run "a cat" --keep                     # keep the pod running (skips auto-teardown / idle reap)
 mold runpod run "a cat" --steps 28 --seed 42       # forward standard gen flags
 mold runpod run "a cat" --output-dir ./renders     # custom save path
 ```
@@ -139,8 +144,14 @@ When `mold runpod create` (or `run`) is invoked without `--gpu`/`--dc`:
 1. `RunPodClient::gpu_types()` aggregates the highest stock signal per GPU
    across all datacenters (via GraphQL; the REST API doesn't expose
    this).
-2. The cheapest family with **High** or **Medium** stock wins, from the
-   preference list `4090 > 5090 > L40S > A100`.
+2. Each candidate must also clear the VRAM the requested model is estimated
+   to need (`estimated_vram_need_gb`, 18 GB when no model is named). The
+   first family with **High** or **Medium** stock that clears it wins,
+   walking a ten-entry ladder in ascending-VRAM order so small models do not
+   overshoot: RTX 4090, RTX 3090, RTX 5090, L40, L40S, RTX A6000,
+   A100 PCIe, A100 SXM, H100 NVL, H100 SXM. If none matches, any
+   High-stock "interesting" GPU with enough VRAM is taken as a fallback;
+   otherwise the command fails and asks for an explicit `--gpu`.
 3. The displayed image target comes from the shared GPU table:
    - A30/A100 and generic Ampere → `:<version>-sm80`
    - A2/A10/A16/A40, RTX A4000–A6000, RTX 3050–3090 → `:<version>-sm86`

@@ -41,7 +41,7 @@ flow-matching transformer.
 | `ultrareal-v4:q4`   | 25    | 6.7 GB  | Photorealistic, lighter |
 | `ultrareal-v3:q8`   | 25    | 12.7 GB | Photorealistic          |
 | `ultrareal-v3:q6`   | 25    | 9.8 GB  | Photorealistic          |
-| `ultrareal-v3:q4`   | 25    | 7.5 GB  | Photorealistic, lighter |
+| `ultrareal-v3:q4`   | 25    | 6.8 GB  | Photorealistic, lighter |
 | `ultrareal-v2:bf16` | 25    | 23.8 GB | Full precision          |
 | `iniverse-mix:fp8`  | 25    | 11.9 GB | Realistic SFW/NSFW mix  |
 

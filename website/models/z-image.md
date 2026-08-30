@@ -3,10 +3,13 @@
 Qwen3 text encoder with a flow-matching transformer using 3D RoPE positional
 encoding. Excellent quality at just 9 steps.
 
-- **Developer**: [Z-Potentials](https://huggingface.co/Z-Potentials)
+- **Developer**: [Tongyi-MAI](https://huggingface.co/Tongyi-MAI) (Alibaba)
 - **License**: Apache 2.0
 - **HuggingFace**:
-  [Z-Potentials/Z-Image-v1-Turbo](https://huggingface.co/Z-Potentials/Z-Image-v1-Turbo)
+  [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)
+  (BF16 transformer shards, Qwen3 text encoder, VAE, tokenizer);
+  [leejet/Z-Image-Turbo-GGUF](https://huggingface.co/leejet/Z-Image-Turbo-GGUF)
+  (quantized tiers)
 
 ## Variants
 
@@ -15,7 +18,7 @@ encoding. Excellent quality at just 9 steps.
 | `z-image-turbo:q8`   | 9     | 6.6 GB  | Fast, great       |
 | `z-image-turbo:q6`   | 9     | 5.3 GB  | Best quality/size |
 | `z-image-turbo:q4`   | 9     | 3.8 GB  | Lighter           |
-| `z-image-turbo:bf16` | 9     | 12.2 GB | Full precision    |
+| `z-image-turbo:bf16` | 9     | 24.6 GB | Full precision    |
 
 ## Defaults
 
@@ -28,8 +31,16 @@ encoding. Excellent quality at just 9 steps.
 | Width | Height | Aspect Ratio |
 | ----- | ------ | ------------ |
 | 1024  | 1024   | 1:1 (native) |
-| 1024  | 768    | 4:3          |
-| 768   | 1024   | 3:4          |
+| 1152  | 896    | 9:7          |
+| 896   | 1152   | 7:9          |
+| 1152  | 864    | 4:3          |
+| 864   | 1152   | 3:4          |
+| 1248  | 832    | 3:2          |
+| 832   | 1248   | 2:3          |
+| 1280  | 720    | 16:9         |
+| 720   | 1280   | 9:16         |
+| 1344  | 576    | 7:3          |
+| 576   | 1344   | 3:7          |
 
 Using non-recommended dimensions will trigger a warning. All values must be
 multiples of 16.

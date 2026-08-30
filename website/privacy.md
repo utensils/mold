@@ -3,24 +3,29 @@
 **Effective July 21, 2026**
 
 This policy describes how the open-source Mold project handles information in
-the Mold Remote app for iPhone and iPad. Mold Remote is a client for Mold
+the Mold apps that link to it: the mobile app for iPhone, iPad, and Android,
+and the desktop app for macOS, Linux, and Windows. Each is a client for Mold
 servers that you choose and control. The Mold project does not operate a
 central account service, hosted generation service, advertising network, or
-analytics service for the app.
+analytics service for these apps.
 
-## Information the app stores on your device
+## Information the apps store on your device
 
-Mold Remote stores the information needed to provide its features locally on
-your device, including:
+Mold stores the information needed to provide its features locally on your
+device, including:
 
 - saved Mold server names, addresses, and connection preferences;
-- server API keys in the iOS Keychain;
+- server API keys — in the iOS Keychain on iPhone and iPad, encrypted with a
+  non-exportable Android Keystore key (AES-GCM, alias
+  `com.utensils.mold.remote-api-key.v1`) inside private app storage on
+  Android, and in an owner-only application-data file on desktop;
 - appearance preferences, prompt templates, and other app settings; and
 - temporary media and response data needed to display your server's library.
 
-The app uses Apple's Local Network permission to discover Mold servers that
-advertise themselves on your current network. Mold does not use this permission
-to track your location.
+The mobile apps use the platform's local network permission (Apple's Local
+Network permission on iOS, network service discovery on Android) to find Mold
+servers that advertise themselves on your current network. Mold does not use
+this permission to track your location.
 
 ## Information sent to your Mold servers
 
@@ -59,12 +64,13 @@ action you request.
 
 - Forgetting a server in the app removes its saved connection and API key from
   the device.
-- Deleting the app removes its local app data according to iOS behavior.
+- Deleting the app removes its local app data according to the platform's
+  own behavior.
 - Gallery media, prompt history, logs, and models stored on a Mold server must
   be deleted from that server or by its operator. Available gallery deletion
   controls act directly on the selected server.
-- You can deny Local Network access in iOS Settings and add a server address
-  manually instead.
+- You can deny local network access in your device's system settings and add
+  a server address manually instead.
 
 Because the Mold project does not maintain user accounts or receive app data,
 it ordinarily has no centrally stored personal information to retrieve or
@@ -72,8 +78,8 @@ delete.
 
 ## Children
 
-Mold Remote is not directed to children under 13, and the Mold project does not
-knowingly collect personal information from children through the app.
+Mold is not directed to children under 13, and the Mold project does not
+knowingly collect personal information from children through its apps.
 
 ## Changes to this policy
 

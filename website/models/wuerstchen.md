@@ -20,7 +20,12 @@ authors went on to create Stable Cascade (also discontinued).
 
 | Model                | Steps | Size   | Notes                 |
 | -------------------- | ----- | ------ | --------------------- |
-| `wuerstchen-v2:fp16` | 30    | 5.6 GB | Full cascade pipeline |
+| `wuerstchen-v2:fp16` | 30    | 3.7 GB | Full cascade pipeline |
+
+The Size column is the prior transformer as `mold list` prints it (GiB). The
+whole cascade downloads about 12.5 GB (decimal; `mold info` reports it as
+`11.6GB`): prior transformer 4.0 GB, decoder 4.2 GB, prior CLIP-G 2.8 GB, decoder CLIP 1.4 GB,
+VQ-GAN 74 MB, plus two tokenizers.
 
 No quantized (GGUF) variants are available for this model.
 

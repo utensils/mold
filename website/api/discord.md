@@ -27,7 +27,7 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 
 | Command              | Description                                                                                                                                                                                                                     |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes                                                                                                                        |
+| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes and ordered MiniMax H3 references                                                                                      |
 | `/identity`          | Generate an image conditioned on a face reference photo (PuLID), with `identity_strength` and `identity_start_step`                                                                                                             |
 | `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable video sequence (LTX-2, LTX-Video (which joins independently rendered clips) or Wan, per the model's advertised sequence support), with per-clip progress and final MP4 delivery |
 | `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                                                                          |
@@ -99,6 +99,12 @@ audio-to-video, `source_video` plus both retake times regenerates that time
 range, and two or three `keyframe_*` images are spaced across the requested
 frame count for interpolation. These modes are mutually exclusive in one
 command and do not need the `pipeline` option.
+
+MiniMax H3's ordered references are their own pair of attachments,
+`reference_1` and `reference_2`, each an image, an H.264 MP4, or a WAV.
+Ordering is explicit, so `reference_1` must be present before `reference_2`.
+They cannot be combined with `source_image`, `source_video`, `audio_file`,
+the `keyframe_*` images, either retake time, or the `pipeline` option.
 
 Negative prompts: leaving `negative_prompt` unset applies the model's
 advertised default negative (Wan ships a tuned one). To explicitly disable the

@@ -2,7 +2,17 @@
 
 **Date:** 2026-07-25
 
-**Status:** Architecture reviewed; ready to split into implementation phases
+**Status (2026-08-30):** Historical handoff. Phases A–G shipped — the
+authoritative device registry, `/api/devices` with `PATCH /api/devices/:id`,
+per-device workers and leases, learned phase estimates, and `planned_lane_kind`
+are all live. Sections 12.2–12.5's server-owned batch parent/child substrate was
+**replaced rather than implemented**: batch children are ordered durable
+singleton rows in `mold_db::generation_batches`, admitted through
+`POST /api/generation-batches`. Read CLAUDE.md's durable-queue and
+batch-capability invariants as the current authority; this document records the
+reasoning, not the shipped shape.
+
+**Original status:** Architecture reviewed; ready to split into implementation phases
 
 **Baseline:** `origin/main` at `7cdb6aeefc5b`
 
@@ -1392,6 +1402,16 @@ concurrent resume without cross-chain state corruption.
 
 ## 12. Batch behavior
 
+> **Superseded from §12.2 onward.** The `batch_runtime` / `batch_parent` /
+> `WorkKind::BatchChild` substrate this section designs was deleted before it
+> shipped. There is no raw batch parent, no `GalleryPublicationGate`, and no
+> `.mold-batch-transactions` staging tree: a batch is 1–64 ordered singleton
+> children admitted atomically through `POST /api/generation-batches`, each an
+> ordinary durable `generation_queue` row whose replay idempotence key is
+> `OutputMetadata.job_id`, with the summary in `generation_batch_children`
+> (`crates/mold-db/src/generation_batches.rs`). §12.1 and §12.4 still describe
+> live behavior.
+
 ### 12.1 Phases A–E: preserve client siblings
 
 Desktop, web, iPhone, CLI, and TUI keep Batch N as N independent requests.
@@ -1562,10 +1582,10 @@ The F1 planning foundation implements this boundary without routing a parent:
   `O(N × D × min(S,64) × S)` time and `O(N + D × S)` retained memory.
   Production singleton declarations retain `O(D)` memory; objective scoring
   and lazy random access use logarithmic completion-threshold searches.
-- The output carries exact contiguous child coverage and the existing
-  `PlannedBatchPartition` projection needed by future `BatchChild` work.
-  Canonical generation-batch admission consumes singleton requests; the
-  projection remains useful for scheduler planning and legacy recovery.
+- The output carries exact contiguous child coverage. The `PlannedBatchPartition`
+  projection this bullet anticipated was never built — canonical
+  generation-batch admission consumes singleton requests, and the shipped child
+  record is `generation_batch_children`.
 
 ### 12.4 Determinism
 
@@ -1586,7 +1606,10 @@ Every output records device ID and execution fingerprint for provenance.
 ### 12.5 Logical atomic publication
 
 Strict filesystem+SQLite multi-file atomicity is impossible without a journal.
-Implement logical API atomicity with one `GalleryPublicationGate`:
+The plan was to implement logical API atomicity with one
+`GalleryPublicationGate`. It was not built: the durable queue journal is the
+journal this section wanted, and each child publishes independently under its
+own `job_id`. Retained for the reasoning:
 
 1. write each child only under
    `<resolved_output_dir>/.mold-batch-transactions/<parent_id>/attempts/<attempt_generation>/staging/`;

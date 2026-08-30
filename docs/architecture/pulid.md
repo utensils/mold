@@ -34,10 +34,10 @@ lands the four shared extraction artifacts at identical paths by
 construction, never as a special case keyed on which bundle asked for them. A
 machine that already has one bundle installed therefore downloads only the
 other's adapter file to complete the second.
-`mold_core::pulid_assets::pulid_paths` returns `Some` for a given family only
-when **every** one of its five files is complete, so holding a `PulidPaths`
-means holding a runnable bundle for that family; `missing_pulid_files` is the
-repair signal.
+`mold_core::pulid_assets::pulid_paths_for(config, family)` returns `Some` only
+when **every** one of that family's five files is complete, so holding a
+`PulidPaths` means holding a runnable bundle for that family;
+`missing_pulid_files_for(config, family)` is the repair signal.
 
 The two ONNX files are InsightFace *pretrained models*, which are
 non-commercial-research-only even though the InsightFace code is MIT. Mold
@@ -393,34 +393,38 @@ denoise step must reuse that one value.
 
 ### Where it runs, and why there
 
-`mold_inference::identity::extraction::extract_identity_embedding` composes the
+`mold_inference::identity::extraction::extract_identity_embeddings` composes the
 whole stack — SCRFD, ArcFace, `ensure_eva_clip_vision_safetensors`, the tower,
-the IDFormer — into one `[1, 32, 2048]` answer. It is called from exactly one
-place: `variant_dependencies::prepare_inputs_for_devices`, **after** the
-per-device loop and **before** anything fans out.
+the IDFormer — into one `[1, 32, 2048]` answer per photograph, averaged into
+one. (`extract_identity_embedding` is the one-photograph convenience wrapper
+over it, not a second path.) The production call site is
+`mold_server::identity_extraction::resolve_identity_for_lease`.
 
-That position is chosen, not incidental.
+#1223 ran it at admission, on the host, in
+`variant_dependencies::prepare_inputs_for_devices`. #1227 phase 2 moved it, and
+where it runs now is chosen, not incidental.
 
-- **After the device loop**, because asset *paths* are per-device (a
-  mixed-capacity host can select different encoder variants per GPU) but an
-  identity is not. It is a function of the request's own bytes and is identical
-  on every device, so resolving it inside the loop would compute the same value
-  N times.
-- **Before fan-out**, because `PreparedExecutionInputs` is precisely what
-  `batch_runtime::submit_child` clones into every `BatchChildExecution`. Storing
-  the embedding there makes "one extraction, every sibling" structural rather
-  than a convention somebody has to keep.
-- **On the CPU**, because at admission the scheduler has not leased a device
-  yet, so there is no GPU to run it on. (Until #1227 there was a second reason:
-  `candle-onnx` materializes every initializer on `Device::Cpu` and refuses
-  anything else. The two face networks are now resident `candle` modules that
-  take a device — `identity::scrfd_net`, `identity::arcface_net` — so only the
-  admission-ordering reason remains, and `docs/architecture/pulid-perf.md` §3
-  designs the phase that would lift it.) That constraint turns into the
-  guarantee the issue asked for: extraction's ~1.4 GB peak is allocated and
-  released before the job is dispatched, so it *cannot* overlap the T5/CLIP
-  encode peak. No scheduled slot and no new typed learned-scheduling phase was
-  needed, because the two peaks cannot coexist.
+- **Inside the lease, on the render's own device.** The two reasons for the
+  host position both expired: `candle-onnx` could not place a tensor off the
+  CPU (phase 1 replaced it with the resident `identity::scrfd_net` /
+  `identity::arcface_net` ports, which honour a caller-supplied device), and a
+  pre-lease phase cannot overlap the T5/CLIP encode peak by construction —
+  which phase 2 traded for its cost, since `docs/architecture/pulid-perf.md` §4
+  measured one host extraction at 2,840 ms of which the EVA02-CLIP tower alone
+  was 79%.
+- **Before the model load**, not merely before prompt encode. That ordering is
+  the drop-before-adapter rule: detector, recognizer, parser, tower, and
+  IDFormer are each built, forwarded, and fully released in turn, so on a cold
+  load none coexists with the transformer, let alone with the resident adapter.
+- **As a typed learned-scheduling phase**, `ProgressPhase::IdentityExtract`,
+  whose runtime the scheduler learns in schema v22's
+  `scheduler_estimates.ewma_identity_extract_ms`. `ExtractionSlot`'s bespoke
+  semaphore-plus-`ram_snapshot()` was retired with the call site: a lease is
+  already exclusive on its device, and two admission-time memory gates that can
+  disagree is worse than one.
+- **Once per parent**, still. A warm engine does hold the transformer while the
+  extraction runs, which is why the device term below is charged *additively*
+  beside the adapter term rather than as a maximum.
 
 ### The frozen value
 
@@ -428,7 +432,7 @@ That position is chosen, not incidental.
 little-endian `f32` bytes, not a `candle` tensor. That makes it `Clone`, `Eq`,
 `Hash`, and device-independent, which is what lets one extraction serve a batch
 that fans out across several GPUs. It carries the reference photograph's
-SHA-256, the four asset digests, and a fingerprint over all three — the
+SHA-256, the five asset digests, and a fingerprint over all three — the
 fingerprint being what a test can compare across siblings to prove nothing
 re-extracted. Its `Debug` redacts the values: they are a biometric derivative
 and must never reach a log line, an error body, or a probe payload.
@@ -447,9 +451,9 @@ nothing worth optimizing.
    extraction entirely, and `compose_prepared_generation` carries it across as a
    backstop for a preparer that ignored the context.
 2. **Placement preview** runs the same preparation path read-only. It must never
-   spend seconds and 1.4 GB on a probe, and it does not need to: identity
-   changes the *memory demand*, which `memory_preflight` charges from the
-   request, not from the extracted value. `DependencyMaterializationPolicy::
+   spend seconds and `EXTRACTION_HOST_PEAK_BYTES` on a probe, and it does not
+   need to: identity changes the *memory demand*, which `memory_preflight`
+   charges from the request, not from the extracted value. `DependencyMaterializationPolicy::
    ExistingOnly` therefore extracts nothing.
 3. **The engine is cached across requests and the identity is not.** The GPU
    worker calls `InferenceEngine::install_identity_embedding` before EVERY
@@ -485,17 +489,24 @@ Measured, replacing #1220's declared 2.3 GB placeholder:
 | --- | --- | --- |
 | Device | 839,270,400 | 20 cross-attention modules at FLUX.1's geometry, f16/bf16 |
 | Device | ~410,000,000 | cross-attention activation headroom at 1024x1024 |
-| **Device total** | **1,250,000,000** | `IDENTITY_VRAM_OVERHEAD_BYTES` |
+| **Device, adapter subtotal** | **1,250,000,000** | `IDENTITY_VRAM_OVERHEAD_BYTES` |
+| Device | 700,000,000 | `EXTRACTION_DEVICE_PEAK_BYTES`, charged as `IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES` — additive to the row above, once through the unified gate on Metal |
+| Device | 150,000,000 | `TRUE_CFG_VRAM_OVERHEAD_BYTES`, charged only when the negative branch actually runs |
 | Host | 16,923,827 | `scrfd_10g_bnkps.onnx` |
 | Host | 260,665,334 | `glintr100.onnx` |
 | Host | 856,461,210 | the EVA02-CLIP `.pt` (609 MB derived, plus f32 activations) |
+| **Host peak** | **2,400,000,000** | `EXTRACTION_HOST_PEAK_BYTES` — above the artifact bytes, because it also covers the private authenticated copies and the tower's f32 widening |
 
-The old placeholder charged the tower and the IDFormer to VRAM on the assumption
-that the extractor would run on the generation device. It does not, and
-over-charging VRAM by ~1 GB parks renders a card could actually run.
-`ComponentRole::IdentityVisionEncoder` is consequently `is_host_only`, alongside
-the two ONNX graphs; `IdentityAdapter` deliberately is not, because it is the
-one identity artifact that IS device-resident for the whole denoise.
+The old placeholder charged the tower and the IDFormer to VRAM as ordinary
+per-component weights. They are not: `ComponentRole::IdentityVisionEncoder`,
+`FaceDetector`, `FaceRecognizer`, and `FaceParser` are all `is_host_only`, so
+their own bytes are charged as host demand — the private authenticated copy the
+`VarBuilder` reads from — even though phase 2 now runs them on the leased
+device. The device cost of running them there is the separate flat
+`EXTRACTION_DEVICE_PEAK_BYTES` term above, measured on plato (L40S) at a
+637.5–643.8 MB device peak against the 700,000,000 bytes charged. `IdentityAdapter` is deliberately not
+host-only, because it is the one identity artifact that IS device-resident for
+the whole denoise.
 
 SDXL's adapter is charged separately, `IDENTITY_SDXL_VRAM_OVERHEAD_BYTES` (850
 MB), because its 70 smaller `attn2` modules and their activation headroom are
@@ -550,7 +561,7 @@ other way round.
 IDFormer is built once afterwards and run per photograph. So N photographs cost
 N times the latency and one host peak — the only term that scales with N is the
 retained hidden states, `EXTRACTION_RETAINED_BYTES_PER_IMAGE` (~12 MB each
-against a 1.4 GB peak), which is why `ID_IMAGES_MAX` is a *latency* budget
+against a 2.4 GB host peak), which is why `ID_IMAGES_MAX` is a *latency* budget
 rather than a memory one.
 
 Ordering: the mean is order-independent, so nothing sorts or canonicalizes. The

@@ -16,7 +16,7 @@ and pixel-perfect screenshots with no conversion artifacts.
 - A debug build of mold with TUI support:
 
 ```bash
-cargo build -p mold-cli --features tui
+cargo build -p mold-ai --features tui
 ```
 
 Or use the devshell helper: `build`
@@ -154,17 +154,17 @@ scripts/tui-uat.sh quit
 
 **Global:** Ctrl+C = quit, Alt+1-5 = switch workspace
 
-**Create (prompt focused):** Enter = generate, Tab = next focus, Escape = nav mode, Ctrl+G = generate, Ctrl+M = model selector, Ctrl+R = cycle seed mode, Alt+N = open Advanced → Negative → focus inline editor
+**Create (prompt focused):** Enter = generate, Tab = next focus, Escape = nav mode, Ctrl+G = generate, Ctrl+M = model selector, Ctrl+R = randomize seed, Ctrl+E = expand prompt, Ctrl+Shift+E = remix prompt, Ctrl+S = save image, Ctrl+T = retry held prints, Ctrl+P / Ctrl+N = previous / next prompt in history, Alt+N = open Advanced → Negative → focus inline editor (every Ctrl binding works from any Create focus)
 
 **Create (nav mode):** 1-5 = switch workspace, c = chain composer, A = toggle Advanced, q = quit, Enter = focus prompt
 
-**Create (Parameters focus):** j/k = flat row traversal (essentials → `▸ Advanced` header → section rows → `↺ Reset`), +/- or ←/→ = adjust a field / expand-collapse a section, Enter = activate (Model picker, Size `WxH` popup, Seed value popup, section expand, Negative inline editor focus), A = toggle the accordion. Essentials order: Model (first row — `model <name>` relies on this), Size, Detail, Prompt strength, Seed, Batch. Accordion landmarks: `▸ Advanced` collapsed / `▾ Advanced` open with section rows (`Scheduler & sampling`, `Negative prompt`, `Source image`, `LoRA`, `Upscale after generate`, `Output format`, `Video` on video models). Persisted keys for `db-get`: `tui.advanced_open` (`true`/`false`), `tui.advanced_section` (section slug or empty).
+**Create (Parameters focus):** j/k = flat row traversal (essentials → `▸ Advanced` header → section rows → `↺ Reset`), +/- or ←/→ = adjust a field / expand-collapse a section, Enter = activate (Model picker, Size `WxH` popup, Seed value popup, section expand, Negative inline editor focus), A = toggle the accordion. Essentials order: Model (first row — `model <name>` relies on this), Size, Detail, Prompt strength, Seed, Batch; a video model inserts `Predict duration` (only when the checkpoint advertises `supports_duration_prediction`) and `Duration` between Prompt strength and Seed, so it has 7–8 essentials. Accordion landmarks: `▸ Advanced` collapsed / `▾ Advanced` open with section rows (`Scheduler & sampling`, `Negative prompt`, `Source image`, `Identity photo` on identity-capable checkpoints, `LoRA`, `Upscale after generate`, `Output format`, `Video` on video models, `File under`). Persisted keys for `db-get`: `tui.advanced_open` (`true`/`false`), `tui.advanced_section` (section slug or empty).
 
 **Library (grid):** hjkl/arrows = navigate, Enter = detail, e/r = recall into Create, d = delete (multi-host prints delete on every owning host; confirm names the count), u = upscale (routes to the owning host), o = open, / = filter by prompt/model/filename (typed chars edit, Enter applies, Esc clears; Esc with a filter applied clears it before leaving the view)
 
 **Models:** j/k = navigate, Enter = select, p = pull, r = remove, u = unload, / = filter
 
-**Machines:** j/k = select row, Enter = set generation target (again = back to Auto), Tab = host list ↔ detail lanes, c = connect a machine (stepped URL → API key → test popup), d = forget host (confirm; deletes its saved API key), r = refresh, x = cancel selected queued job (detail focus, confirm). Persisted keys for `db-get`: `tui.hosts.v1` (JSON registry), `tui.generate_target` (`auto`|`local`|`host:<id>`), `tui.host_key.<id>`.
+**Machines:** j/k = select row, Enter = set generation target (again = back to Auto), Tab = host list ↔ detail lanes, c = connect a machine (stepped URL → API key → test popup), d = disconnect/reconnect the selected remembered host, f = forget host (confirm; deletes its saved API key), r = refresh, x = cancel the selected queued or running job when the host supports it (detail focus, confirm), l = load the next durable queue page, g = next visible GPU, `[` / `]` = device selection back/forward, e = enable or drain/disable the selected GPU. Persisted keys for `db-get`: `tui.hosts.v1` (JSON registry), `tui.generate_target` (`auto`|`local`|`host:<id>`), `tui.host_key.<id>`.
 
 **Settings:** j/k = navigate, +/- = adjust values, Tab = flip Appearance ↔ Configuration focus. On the Appearance theme-card grid, Up/Down move by card rows (Down past the bottom row enters Configuration) and Left/Right/+/- cycle presets linearly with live apply — `theme-set` relies on the linear `+` cycle and the `theme · <slug>` header hint. The Configuration list starts with a DB-backed Preferences section (`tui.default_format`, `tui.reduce_motion`, `tui.show_timeline`, `tui.confirm_destructive`); with `tui.confirm_destructive` off, destructive actions skip the Confirm popup.
 
@@ -249,10 +249,12 @@ scripts/tui-uat.sh quit
 ## Example: Per-Model Preferences UAT (#264) — full param coverage
 
 The cleanest strategy is DB-seed-then-verify-UI, plus a `model` switch
-that exercises `update_model`'s snapshot/restore path. Every field in
+that exercises `update_model`'s snapshot/restore path. Every generation-parameter field in
 `model_prefs` gets checked: width, height, steps, guidance, scheduler,
 seed_mode, batch, format, lora_path, lora_scale, expand, offload,
-strength, control_scale.
+strength, control_scale, frames, fps. (The table also carries the
+`profile` primary-key component and the `last_prompt` / `last_negative`
+columns; prompts stay out of this check by design.)
 
 ```bash
 ISO=$(mktemp -d /tmp/mold-uat.XXXXXX)
@@ -299,7 +301,7 @@ scripts/tui-uat.sh assert "Steps     7"
 # Direct DB assertions for the fields that don't always render in the UI
 # (scheduler, lora, strength, control_scale are conditionally visible).
 for col in width height steps guidance scheduler seed_mode batch format \
-           lora_scale expand offload strength control_scale; do
+           lora_scale expand offload strength control_scale frames fps; do
     scripts/tui-uat.sh db-model-assert flux2-klein:q8 "$col" \
       "$(sqlite3 "$ISO/mold.db" "SELECT $col FROM model_prefs WHERE model='flux2-klein:q8';")"
     scripts/tui-uat.sh db-model-assert flux-dev:q4 "$col" \

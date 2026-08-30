@@ -124,9 +124,12 @@ their contract is explicit". This ledger's disposition column should drive a
 pre-download header gate.
 
 **R3 — the `source_video` refusal is a family-wide blanket.** Wan refuses
-`source_video`, `extend_video`, and `mask_image` for every checkpoint with
-one message. Phase 0 below makes that wrong for `Plain` checkpoints; it must
-become a per-shape decision.
+`source_video` and `mask_image` for every checkpoint with one message
+(`reject_unsupported_conditioning`). `extend_video` already left that blanket
+in #783 — it routes to `extend_inner` before the guard and is decided per
+checkpoint from the `source_image` contract — so the remaining blanket is those
+two. Phase 0 below makes it wrong for `Plain` checkpoints; it must become a
+per-shape decision for `source_video` too.
 
 ## Phase 0 — plain video-to-video restyle (SDEdit)
 
