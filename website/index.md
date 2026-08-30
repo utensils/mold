@@ -241,6 +241,24 @@ warm lantern light, steam rising from ceramic cups, watercolor style"_
 </figure>
 <figure>
 
+![Orbital botanist preserving a reference identity with PuLID](/gallery/pulid-flux-orbital-botanist.png)
+
+**flux-dev:q4 + PuLID-FLUX v0.9.1**: 25 steps, seed 83120. The same synthetic
+reference face is preserved in a new orbital-greenhouse scene with
+`--id-weight 0.85`. [See the reference and comparison](/guide/identity#generated-examples).
+
+</figure>
+<figure>
+
+![Glassblower preserving a reference identity with PuLID](/gallery/pulid-jibmix-glassblower.png)
+
+**jibmix-flux:fp8 + PuLID-FLUX v0.9.1**: 25 steps, seed 83122. The same
+reference identity is restaged as a Venetian glassblower with
+`--id-weight 0.8`.
+
+</figure>
+<figure>
+
 ![Astronaut, Z-Image Turbo](/gallery/zimage-astronaut.png)
 
 **z-image-turbo:q8**: 9 steps, seed 777 _"An astronaut floating through a

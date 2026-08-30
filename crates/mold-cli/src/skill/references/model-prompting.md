@@ -63,6 +63,36 @@ mold run sdxl-turbo:fp16 \
   --negative-prompt "empty street, blur, text, watermark" --steps 4 --seed 88
 ```
 
+## PuLID identity conditioning
+
+PuLID adds a face identity to a FLUX.1 or qualified SDXL prompt; it does not
+replace that family's prompting style. Start with a sharp, front-facing adult
+portrait with even light, an unobstructed face, and a neutral background. In
+the prompt, describe the new role, clothing, setting, pose, composition, and
+lighting without re-describing facial features that should come from the
+reference. Use `--id-weight 0.7` to `0.9` as a practical likeness-versus-scene
+starting range. Raise it only when the face drifts; very high values can look
+waxy. Do not combine identity conditioning with img2img or a LoRA.
+
+```bash
+# FLUX.1: natural prose; delay identity slightly for a scene with strong geometry
+mold run flux-dev:q4 \
+  "Cinematic medium close-up of an orbital botanist inside a glass greenhouse above Earth, cream flight jacket, tending luminous blue orchids, sunrise through curved windows, natural skin texture, 50mm documentary photograph" \
+  --id-image portrait.png --id-weight 0.85 --id-start-step 2 --seed 83120
+
+# SDXL: compact scene treatment plus a real negative prompt
+mold run juggernaut-xl:fp16 \
+  "film-noir detective in a rain-soaked 1940s train station, charcoal overcoat, single platform lamp, steam, wet pavement reflections, black-and-white 35mm photograph" \
+  --id-image portrait.png --id-weight 0.8 \
+  --negative-prompt "cartoon, waxy skin, distorted face, text, watermark" --seed 83121
+```
+
+For multiple photos, repeat `--id-image` with two or three views of the same
+person. FLUX true CFG is an advanced negative-prompt path: pair
+`--true-cfg 2.0` with `--guidance 1.0`; SDXL uses its ordinary CFG and must not
+receive `--true-cfg`. Check `supports_identity` on the exact server model row
+before promising that a catalog checkpoint can run it.
+
 ## SD 3.5
 
 SD 3.5 follows complete natural-language composition better than legacy Stable
