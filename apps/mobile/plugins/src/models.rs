@@ -86,3 +86,8 @@ pub struct IdentityPhotoResponse {
     pub size_bytes: Option<u64>,
     pub data_b64: Option<String>,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PairingScanResponse {
+    pub content: String,
+}

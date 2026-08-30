@@ -9996,7 +9996,12 @@ describe("MobileApp host and catalog coordination", () => {
 
   it("claims Android pairing codes with an Android client identity", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);
-    scanPairingQr.mockResolvedValue({ content: pairingPayload() });
+    invoke.mockImplementation((command: string) => {
+      if (command === "scan_android_pairing_code") {
+        return Promise.resolve({ content: pairingPayload() });
+      }
+      return Promise.resolve(null);
+    });
     claimPairingSession.mockResolvedValue({
       api_key: "paired-key",
       instance_id: "wrong-host",
@@ -10009,6 +10014,59 @@ describe("MobileApp host and catalog coordination", () => {
       name: "Mold on Android",
       kind: "android",
     });
+    expect(scanPairingQr).not.toHaveBeenCalled();
+  });
+
+  it("cancels Android pairing through the native session and settles the pending scan", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    const pendingScan = deferred<{ content: string }>();
+    invoke.mockImplementation((command: string) => {
+      if (command === "scan_android_pairing_code") return pendingScan.promise;
+      if (command === "cancel_android_pairing_scan") {
+        pendingScan.reject("cancelled");
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-pair-scanner-cancel']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("cancel_android_pairing_scan");
+    expect(cancelBarcodeScanner).not.toHaveBeenCalled();
+    expect(wrapper.find("[data-test='mobile-pair-scanner']").exists()).toBe(false);
+    expect(wrapper.find(".error-text").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-scan-pairing']").attributes("disabled")).toBeUndefined();
+  });
+
+  it("cancels the native Android pairing session when the app unmounts", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    const pendingScan = deferred<{ content: string }>();
+    invoke.mockImplementation((command: string) => {
+      if (command === "scan_android_pairing_code") return pendingScan.promise;
+      if (command === "cancel_android_pairing_scan") {
+        pendingScan.reject("cancelled");
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
+    await flushPromises();
+
+    wrapper.unmount();
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("cancel_android_pairing_scan");
+    expect(cancelBarcodeScanner).not.toHaveBeenCalled();
   });
 
   it("settles first-run camera permission before opening the pairing scanner", async () => {
@@ -10134,6 +10192,45 @@ describe("MobileApp host and catalog coordination", () => {
         name: "pair-host",
         baseUrl: "http://pair.local:7680",
       }),
+    );
+  });
+
+  it("stores and connects a QR-paired Android host after the native camera closes", async () => {
+    isNativeAndroidRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "scan_android_pairing_code") {
+        return Promise.resolve({ content: pairingPayload() });
+      }
+      return Promise.resolve(null);
+    });
+    claimPairingSession.mockResolvedValue({
+      api_key: "paired-key",
+      instance_id: "pair-id",
+      hostname: "pair-host",
+    });
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
+      const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
+      if (path === "/api/status" && baseUrl === "http://pair.local:7680") {
+        return Promise.resolve({ ...status, instance_id: "pair-id", hostname: "pair-host" });
+      }
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      return durableApiFallback(path, init, requestTarget);
+    });
+
+    await scanFromMachines();
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("keychain_set_api_key", {
+        hostId: "pair-local-7680",
+        apiKey: "paired-key",
+      }),
+    );
+
+    expect(wrapper?.find("[data-test='mobile-pair-scanner']").exists()).toBe(false);
+    expect(wrapper?.find(".error-text").exists()).toBe(false);
+    expect(wrapper?.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+      "page",
     );
   });
 

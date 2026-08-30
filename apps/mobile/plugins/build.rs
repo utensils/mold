@@ -9,6 +9,8 @@ const COMMANDS: &[&str] = &[
     "share_exported_animation",
     "pick_identity_photo",
     "set_mobile_appearance",
+    "scan_pairing_code",
+    "cancel_pairing_scan",
 ];
 
 fn main() {

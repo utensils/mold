@@ -14,6 +14,32 @@ Default permissions for the plugin
 <tr>
 <td>
 
+`mold-mobile-native:allow-cancel-pairing-scan`
+
+</td>
+<td>
+
+Enables the cancel_pairing_scan command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-cancel-pairing-scan`
+
+</td>
+<td>
+
+Denies the cancel_pairing_scan command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `mold-mobile-native:allow-copy-image-to-clipboard`
 
 </td>
@@ -189,6 +215,32 @@ Enables the save_video_to_photos command without any pre-configured scope.
 <td>
 
 Denies the save_video_to_photos command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:allow-scan-pairing-code`
+
+</td>
+<td>
+
+Enables the scan_pairing_code command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-scan-pairing-code`
+
+</td>
+<td>
+
+Denies the scan_pairing_code command without any pre-configured scope.
 
 </td>
 </tr>

@@ -295,6 +295,18 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the cancel_pairing_scan command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cancel-pairing-scan",
+          "markdownDescription": "Enables the cancel_pairing_scan command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel_pairing_scan command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cancel-pairing-scan",
+          "markdownDescription": "Denies the cancel_pairing_scan command without any pre-configured scope."
+        },
+        {
           "description": "Enables the copy_image_to_clipboard command without any pre-configured scope.",
           "type": "string",
           "const": "allow-copy-image-to-clipboard",
@@ -377,6 +389,18 @@
           "type": "string",
           "const": "deny-save-video-to-photos",
           "markdownDescription": "Denies the save_video_to_photos command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the scan_pairing_code command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-scan-pairing-code",
+          "markdownDescription": "Enables the scan_pairing_code command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the scan_pairing_code command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-scan-pairing-code",
+          "markdownDescription": "Denies the scan_pairing_code command without any pre-configured scope."
         },
         {
           "description": "Enables the set_api_key command without any pre-configured scope.",
