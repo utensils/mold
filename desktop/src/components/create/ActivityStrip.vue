@@ -32,6 +32,7 @@ import { useComposerStore } from "../../stores/composer";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useLiveActivityStore } from "../../stores/liveActivity";
 import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
+import { compareNewestSubmitted } from "@studio/lib/activityOrder";
 
 /**
  * Create activity strip (Mold Studio) — present tense only.
@@ -113,7 +114,16 @@ watch(() => queued.value.length > 0, retainQueuePoll, { immediate: true });
 onBeforeUnmount(() => retainQueuePoll(false));
 
 const MAX_QUEUED_PILLS = 4;
-const visibleQueued = computed(() => queued.value.slice(0, MAX_QUEUED_PILLS));
+const visibleQueued = computed(() =>
+  [...queued.value]
+    .sort((a, b) =>
+      compareNewestSubmitted(
+        { createdAtMs: a.submittedAtUnixMs },
+        { createdAtMs: b.submittedAtUnixMs },
+      ),
+    )
+    .slice(0, MAX_QUEUED_PILLS),
+);
 const hiddenQueuedCount = computed(() =>
   Math.max(0, queued.value.length - visibleQueued.value.length),
 );
@@ -273,8 +283,8 @@ type DesktopActivityRow =
       sequence: ActivityJobVM & { kind: "sequence" };
     };
 
-/** One visual queue across local prints, sequences, and recovered fleet work.
- * A phase transition changes only the row contents, never its position. */
+/** One newest-first visual queue across local prints, sequences, and recovered
+ * fleet work. A phase transition changes only the row contents. */
 const activeRows = computed<DesktopActivityRow[]>(() =>
   [
     ...sharedRows.value.map((shared): DesktopActivityRow => ({
@@ -305,7 +315,7 @@ const activeRows = computed<DesktopActivityRow[]>(() =>
       kind: "sequence",
       sequence,
     })),
-  ].sort((a, b) => a.createdAtMs - b.createdAtMs || a.key.localeCompare(b.key)),
+  ].sort(compareNewestSubmitted),
 );
 const attentionSequences = computed(() =>
   partition.value.attention.filter(

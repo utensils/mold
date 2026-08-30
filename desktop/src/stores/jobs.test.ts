@@ -122,7 +122,7 @@ beforeEach(() => {
 });
 
 describe("held rows", () => {
-  it("keeps a held row in the listing and sorts it after live work", async () => {
+  it("keeps a held row in the newest-first listing", async () => {
     // A held job exceeded its replay or dispatch cap: it exists only in the
     // journal and will never start on its own. Dropping it here is the one
     // outcome the held-row visibility contract forbids — nothing reports it,
@@ -164,10 +164,8 @@ describe("held rows", () => {
 
     const states = (jobs.queues[host.id]?.entries ?? []).map((entry) => entry.state);
     expect(states).toContain("held");
-    // The shared surface both Machines and Create render puts running work
-    // first and parked work last — held is not competing for a lane.
-    const surface = jobs.queueSurface.map((row) => row.entry.state);
-    expect(surface.indexOf("running")).toBeLessThan(surface.indexOf("held"));
+    const surface = jobs.queueSurface.map((row) => row.entry.id);
+    expect(surface).toEqual(["srv-run", "srv-held"]);
     const held = jobs.queues[host.id]?.entries.find((entry) => entry.state === "held");
     expect(held?.held_reason).toBe("dispatch attempts exhausted");
   });

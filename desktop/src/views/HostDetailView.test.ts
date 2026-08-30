@@ -665,12 +665,12 @@ describe("HostDetailView storage and queue", () => {
     const wrapper = await mountView();
     const rows = wrapper.findAll("[data-test='host-queue-row']");
     expect(rows).toHaveLength(2);
-    expect(rows[0]!.text()).toContain("RUNNING · GPU 0");
-    expect(rows[0]!.text()).toContain("flux-dev:q8");
+    expect(rows[0]!.text()).toContain("QUEUED #1");
+    expect(rows[0]!.text()).toContain("z-image:q8");
+    expect(rows[1]!.text()).toContain("RUNNING · GPU 0");
+    expect(rows[1]!.text()).toContain("flux-dev:q8");
     // Elapsed wall-clock for the running row (~90s → "1m 30s").
-    expect(rows[0]!.text()).toMatch(/1m \d+s/);
-    expect(rows[1]!.text()).toContain("QUEUED #1");
-    expect(rows[1]!.text()).toContain("z-image:q8");
+    expect(rows[1]!.text()).toMatch(/1m \d+s/);
     // Neither entry belongs to this app's generation store.
     expect(rows[0]!.text()).toContain("OTHER CLIENT");
     expect(wrapper.find("[data-test='queue-empty']").exists()).toBe(false);

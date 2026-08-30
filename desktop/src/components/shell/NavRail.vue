@@ -41,6 +41,7 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
 import { thumbnailPath } from "../../lib/gallery/media";
 import type { FleetActiveWork } from "@studio/api/activity";
+import { compareNewestSubmitted } from "@studio/lib/activityOrder";
 
 const route = useRoute();
 const router = useRouter();
@@ -117,9 +118,9 @@ function isActive(path: string): boolean {
   return route.path === path;
 }
 
-/** Queue order: every live job first (submission order), then enough recent
- * finished prints to use the rail's available height. The flex child scrolls,
- * so a tall window becomes useful history without displacing status/settings. */
+/** Queue inputs: every live job newest-first, then enough recent finished
+ * prints to use the rail's available height. The merged rail re-applies the
+ * same newest-first policy across recovered work and sequences. */
 const railJobs = computed<Job[]>(() => {
   const live = railOrder(
     generation.jobs.filter((j) => j.status !== "complete" && j.status !== "error"),
@@ -175,9 +176,8 @@ type RailRow =
     }
   | { key: string; createdAtMs: number; kind: "print"; print: Job };
 
-/** One visual timeline across recovered work, sequences, prints, and retained
- * print history. Status transitions update rows in place instead of promoting
- * developing work above older queued work. */
+/** One newest-first timeline across recovered work, sequences, prints, and
+ * retained print history. Status transitions update rows in place. */
 const railRows = computed<RailRow[]>(() =>
   [
     ...sharedRows.value.map((shared): RailRow => ({
@@ -198,7 +198,7 @@ const railRows = computed<RailRow[]>(() =>
       kind: "print",
       print,
     })),
-  ].sort((a, b) => a.createdAtMs - b.createdAtMs || a.key.localeCompare(b.key)),
+  ].sort(compareNewestSubmitted),
 );
 
 const developingCount = computed(

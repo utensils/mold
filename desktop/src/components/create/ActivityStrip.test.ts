@@ -35,7 +35,7 @@ function baseJob(): Job {
 }
 
 describe("ActivityStrip", () => {
-  it("keeps queued and recovered running work in chronological order", () => {
+  it("keeps queued and recovered running work newest-first", () => {
     useGenerationStore().jobs = [
       {
         ...baseJob(),
@@ -69,7 +69,7 @@ describe("ActivityStrip", () => {
     };
 
     const text = mount(ActivityStrip).get("[data-test='activity-list-scroll']").text();
-    expect(text.indexOf("older queued print")).toBeLessThan(text.indexOf("newer developing print"));
+    expect(text.indexOf("newer developing print")).toBeLessThan(text.indexOf("older queued print"));
   });
 
   it("keeps recovered shared work visible and actionable", async () => {
@@ -265,7 +265,7 @@ describe("ActivityStrip — unknown outcomes", () => {
 });
 
 describe("ActivityStrip — sequences", () => {
-  it("renders in-flight sequence rows from every host, running work first", () => {
+  it("renders in-flight sequence rows from every host, newest first", () => {
     const chains = useChainJobsStore();
     chains.byHost.local = { jobs: [seqJob({ state: "queued", current_stage: 0 })], error: null };
     chains.byHost["hal9000-7680"] = {
@@ -282,11 +282,10 @@ describe("ActivityStrip — sequences", () => {
     const wrapper = mount(ActivityStrip);
     const rows = wrapper.findAll("[data-test='activity-sequence']");
     expect(rows).toHaveLength(2);
-    // The shared merge puts active work first even when it is older.
-    expect(rows[0]!.text()).toContain("running");
-    expect(rows[0]!.text()).toContain("2/3");
+    expect(rows[0]!.text()).toContain("queued");
+    expect(rows[1]!.text()).toContain("running");
+    expect(rows[1]!.text()).toContain("2/3");
     expect(rows[0]!.text()).toContain("3 clips");
-    expect(rows[1]!.text()).toContain("queued");
   });
 
   it("routes row actions to the owning host", async () => {

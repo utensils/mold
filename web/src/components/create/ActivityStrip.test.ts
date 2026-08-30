@@ -66,7 +66,7 @@ function makeSequenceVM(
 }
 
 describe("ActivityStrip", () => {
-  it("keeps an older queued print above newer running fleet work", () => {
+  it("keeps newer fleet work above an older queued print", () => {
     const olderQueued = makeJob({
       id: "older-queued",
       startedAt: 1_000,
@@ -100,8 +100,8 @@ describe("ActivityStrip", () => {
     const text = mount(ActivityStrip, {
       props: { jobs: [olderQueued], shared: [newerShared] },
     }).text();
-    expect(text.indexOf("a cat")).toBeLessThan(
-      text.indexOf("newer developing print"),
+    expect(text.indexOf("newer developing print")).toBeLessThan(
+      text.indexOf("a cat"),
     );
   });
 
@@ -263,7 +263,7 @@ describe("ActivityStrip", () => {
     ).toContain("9999 other queued prints");
   });
 
-  it("does not promote a newer held print above an older queued print", () => {
+  it("shows a newer held print above an older queued print", () => {
     const wrapper = mount(ActivityStrip, {
       props: {
         jobs: [
@@ -279,10 +279,10 @@ describe("ActivityStrip", () => {
     });
 
     expect(
-      wrapper.find("[data-test='activity-queued-older-queued']").exists(),
+      wrapper.find("[data-test='activity-queued-newer-held']").exists(),
     ).toBe(true);
     expect(
-      wrapper.find("[data-test='activity-queued-newer-held']").exists(),
+      wrapper.find("[data-test='activity-queued-older-queued']").exists(),
     ).toBe(false);
     expect(wrapper.text()).toContain("1 other queued print");
   });

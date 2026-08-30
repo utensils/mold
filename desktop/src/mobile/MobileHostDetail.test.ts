@@ -447,8 +447,8 @@ describe("MobileHostDetail remote host data", () => {
 
     const queueRows = view.get("[data-test='host-detail-queue']").findAll("li");
     expect(queueRows).toHaveLength(2);
-    expect(queueRows[0]!.text()).toContain("flux-dev:q8RUNNING · GPU 0");
-    expect(queueRows[1]!.text()).toContain("z-image:q8QUEUED #2");
+    expect(queueRows[0]!.text()).toContain("z-image:q8QUEUED #2");
+    expect(queueRows[1]!.text()).toContain("flux-dev:q8RUNNING · GPU 0");
 
     const modelRows = view.get("[data-test='host-detail-models']").findAll("li");
     expect(modelRows).toHaveLength(2);
@@ -556,6 +556,13 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.text()).toContain("Verifying file [1/19]");
     expect(view.text()).not.toContain("0/0 files");
     expect(view.emitted("status")).toEqual([[{ id: studio.id, status: serverStatus() }]]);
+  });
+
+  it("renders the machine queue newest-first", async () => {
+    const view = await mountDetail();
+    expect(
+      view.findAll("[data-test^='host-detail-queue-row-']").map((row) => row.find("strong").text()),
+    ).toEqual(["z-image:q8", "flux-dev:q8"]);
   });
 
   it("confirms and cancels only a queued job on the exact authenticated host", async () => {

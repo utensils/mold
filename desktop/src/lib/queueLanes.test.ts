@@ -7,7 +7,7 @@ import {
 } from "./queueLanes";
 
 function entry(over: Partial<LaneEntryLike> & { id: string }): LaneEntryLike {
-  return { state: "queued", position: 0, ...over };
+  return { state: "queued", position: 0, started_at_unix_ms: 0, ...over };
 }
 
 describe("laneForEntry", () => {
@@ -23,19 +23,16 @@ describe("laneForEntry", () => {
 });
 
 describe("held rows", () => {
-  it("orders held last instead of comparing an unknown state", () => {
-    // `STATE_RANK` is indexed by the row's state: an unrecognised one yields
-    // `undefined`, and `undefined - n` is NaN, so the comparator silently
-    // stops ordering rather than failing loudly.
+  it("keeps held work visible in newest-first display order", () => {
     const rows = [
-      entry({ id: "held", state: "held", position: 0 }),
-      entry({ id: "run", state: "running", position: 1 }),
-      entry({ id: "queued", state: "queued", position: 2 }),
+      entry({ id: "queued", state: "queued", position: 2, started_at_unix_ms: 1 }),
+      entry({ id: "run", state: "running", position: 1, started_at_unix_ms: 2 }),
+      entry({ id: "held", state: "held", position: 0, started_at_unix_ms: 3 }),
     ];
 
     const lanes = computeQueueLanes(rows, []);
 
-    expect(lanes[0]!.entries.map((row) => row.id)).toEqual(["run", "queued", "held"]);
+    expect(lanes[0]!.entries.map((row) => row.id)).toEqual(["held", "run", "queued"]);
   });
 
   it("puts a held row in the Auto lane rather than claiming a GPU", () => {
@@ -85,14 +82,14 @@ describe("computeQueueLanes", () => {
     expect(lanes[1]!.entries.map((e) => e.id)).toEqual(["q1"]);
   });
 
-  it("orders each lane running-first, then by queue position", () => {
+  it("orders each lane newest-first without changing queue positions", () => {
     const rows = [
-      entry({ id: "q-late", target_gpu: 0, position: 5 }),
-      entry({ id: "run", state: "running", gpu: 0, position: 9 }),
-      entry({ id: "q-early", target_gpu: 0, position: 1 }),
+      entry({ id: "q-late", target_gpu: 0, position: 5, started_at_unix_ms: 3 }),
+      entry({ id: "run", state: "running", gpu: 0, position: 9, started_at_unix_ms: 1 }),
+      entry({ id: "q-early", target_gpu: 0, position: 1, started_at_unix_ms: 2 }),
     ];
     const lanes = computeQueueLanes(rows, [0, 1]);
-    expect(lanes[0]!.entries.map((e) => e.id)).toEqual(["run", "q-early", "q-late"]);
+    expect(lanes[0]!.entries.map((e) => e.id)).toEqual(["q-late", "q-early", "run"]);
   });
 });
 

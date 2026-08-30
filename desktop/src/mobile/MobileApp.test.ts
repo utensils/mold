@@ -1118,7 +1118,7 @@ describe("MobileApp sequence generation", () => {
     expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(target.apiKey);
   });
 
-  it("interleaves local and recovered work by submission time", async () => {
+  it("interleaves local and recovered work newest-first", async () => {
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
@@ -1160,7 +1160,7 @@ describe("MobileApp sequence generation", () => {
     await flushPromises();
 
     const text = wrapper.get(".mobile-generation-queue-list").text();
-    expect(text.indexOf("older queued print")).toBeLessThan(text.indexOf("newer developing print"));
+    expect(text.indexOf("newer developing print")).toBeLessThan(text.indexOf("older queued print"));
   });
 
   it("swipes a queued item from another client to exact-host pause and resume", async () => {

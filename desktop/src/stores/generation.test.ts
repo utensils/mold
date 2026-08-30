@@ -240,7 +240,7 @@ describe("railOrder", () => {
     submittedAtUnixMs,
   });
 
-  it("keeps submission order when a newer job starts developing", async () => {
+  it("keeps newest submissions first when a newer job starts developing", async () => {
     const { railOrder } = await import("./generation");
     const jobs = [
       job(1, "queued", 3),
@@ -248,13 +248,13 @@ describe("railOrder", () => {
       job(3, "queued", 1),
       job(4, "denoising", null),
     ];
-    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([1, 2, 3, 4]);
+    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([4, 3, 2, 1]);
   });
 
-  it("uses client identity only to break equal submission timestamps", async () => {
+  it("preserves sending order for equal submission timestamps", async () => {
     const { railOrder } = await import("./generation");
     const jobs = [job(7, "loading", null, 10), job(5, "queued", null, 10), job(6, "queued", 1, 10)];
-    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([5, 6, 7]);
+    expect(railOrder(jobs).map((j) => j.clientId)).toEqual([7, 5, 6]);
   });
 });
 

@@ -1,0 +1,1 @@
+- **Newest queue work first.** Desktop, web, and mobile now show the latest submitted activity at the top while preserving sending order for simultaneous submissions.

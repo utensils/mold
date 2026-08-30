@@ -172,9 +172,9 @@ describe("QueueColumn", () => {
     jobs.queues.local = {
       hostId: "local",
       entries: [
-        { id: "run", model: "m", state: "running", started_at_unix_ms: 1, position: 0 },
-        { id: "A", model: "m", state: "queued", started_at_unix_ms: 2, position: 1 },
-        { id: "B", model: "m", state: "queued", started_at_unix_ms: 3, position: 2 },
+        { id: "run", model: "old-running", state: "running", started_at_unix_ms: 1, position: 0 },
+        { id: "A", model: "middle-queued", state: "queued", started_at_unix_ms: 2, position: 1 },
+        { id: "B", model: "new-queued", state: "queued", started_at_unix_ms: 3, position: 2 },
       ],
       paused: null,
       caps: { canPause: true, canCancelAll: true, canReorder: true },
@@ -185,15 +185,21 @@ describe("QueueColumn", () => {
     const wrapper = mount(QueueColumn);
     await flushPromises();
 
-    // Only the two queued rows expose reorder buttons: index 0 = A, 1 = B.
+    expect(
+      wrapper
+        .findAll("[data-test='queue-surface-row']")
+        .map((row) => row.find(".text-body").text()),
+    ).toEqual(["new-queued", "middle-queued", "old-running"]);
+    // Display is newest-first: B, A, running. Reorder still uses the server's
+    // queued subset: A index 0, B index 1.
     const ups = wrapper.findAll("[data-test='queue-reorder-up']");
     const downs = wrapper.findAll("[data-test='queue-reorder-down']");
     expect(ups).toHaveLength(2);
 
-    await ups[1]!.trigger("click"); // move B up
+    await ups[0]!.trigger("click"); // move B up
     expect(reorder).toHaveBeenLastCalledWith("local", "B", 0);
 
-    await downs[0]!.trigger("click"); // move A down
+    await downs[1]!.trigger("click"); // move A down
     expect(reorder).toHaveBeenLastCalledWith("local", "A", 1);
   });
 

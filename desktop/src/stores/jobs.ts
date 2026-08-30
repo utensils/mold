@@ -14,6 +14,7 @@ import { useGenerationStore } from "./generation";
 import { useHostsStore, type HostView } from "./hosts";
 import { useToastStore } from "./toasts";
 import type { Job } from "./generation";
+import { compareNewestQueueEntry } from "@studio/lib/activityOrder";
 
 const POLL_INTERVAL_MS = 5_000;
 
@@ -94,14 +95,6 @@ export interface QueueSurfaceRow {
   canCancelRunning: boolean;
 }
 
-/** Running first, then queued, then held — held work is parked, not in line,
- *  so it must never sort among rows that are actually waiting for a lane. */
-function queueSurfaceRank(entry: EnrichedQueueEntry): number {
-  if (entry.state === "running") return 0;
-  if (entry.state === "queued") return 1;
-  return entry.state === "paused" ? 2 : 3;
-}
-
 function visibleQueueEntries(entries: readonly import("@studio/api/queuePlan").QueueEntry[]) {
   return entries
     .filter(
@@ -166,7 +159,8 @@ export const useJobsStore = defineStore("jobs", {
   getters: {
     /**
      * Unified running+queued rows across every connected host, joined with
-     * this app's own jobs. Running rows first, then by queue position. The
+     * this app's own jobs. Newest submissions render first while scheduler
+     * position remains untouched for queue actions. The
      * single source both the Machines queue column and the Create activity
      * strip render, so the two surfaces show identical state (G2).
      */
@@ -190,11 +184,7 @@ export const useJobsStore = defineStore("jobs", {
           });
         }
       }
-      return rows.sort(
-        (a, b) =>
-          queueSurfaceRank(a.entry) - queueSurfaceRank(b.entry) ||
-          a.entry.position - b.entry.position,
-      );
+      return rows.sort((a, b) => compareNewestQueueEntry(a.entry, b.entry));
     },
   },
   actions: {

@@ -23,6 +23,7 @@ import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { queuePlanOnlyWork } from "@studio/lib/queuePlanPresentation";
+import { compareNewestQueueEntry } from "@studio/lib/activityOrder";
 import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
@@ -147,6 +148,7 @@ const runtimeWindow = computed(() => {
     : null;
 });
 const queueEntryIds = computed(() => queue.value.map((entry) => entry.id));
+const displayQueue = computed(() => [...queue.value].sort(compareNewestQueueEntry));
 const planOnlyWork = computed(() => queuePlanOnlyWork(queuePlan.value, queueEntryIds.value));
 const queueSummary = computed(() => {
   const visibleWork = queue.value.length + planOnlyWork.value.length;
@@ -1269,8 +1271,8 @@ onBeforeUnmount(() => {
             {{ deviceError }}
           </p>
         </div>
-        <ul v-if="queue.length" class="mobile-data-list" data-test="host-detail-queue">
-          <li v-for="entry in queue" :key="entry.id" class="mobile-queue-item">
+        <ul v-if="displayQueue.length" class="mobile-data-list" data-test="host-detail-queue">
+          <li v-for="entry in displayQueue" :key="entry.id" class="mobile-queue-item">
             <SwipeActionRow
               :actions="queueRowActions(entry)"
               :label="`${modelLabel(entry.model)} job`"

@@ -1,5 +1,6 @@
 import { reactive } from "vue";
 import { defineStore } from "pinia";
+import { compareNewestSubmitted } from "@studio/lib/activityOrder";
 import { apiFetchTo, currentTarget, type ApiTarget, apiJsonTo } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import {
@@ -243,13 +244,15 @@ export function planBatchRequests(
 }
 
 /**
- * Stable chronological display order for the jobs rail. A transition from
- * queued to loading/developing must update a row in place, never move it to
- * the top of the visual queue.
+ * Stable newest-first display order for the jobs rail. Equal timestamps retain
+ * sending order, and phase transitions never affect placement.
  */
 export function railOrder(jobs: Job[]): Job[] {
-  return [...jobs].sort(
-    (a, b) => a.submittedAtUnixMs - b.submittedAtUnixMs || a.clientId - b.clientId,
+  return [...jobs].sort((a, b) =>
+    compareNewestSubmitted(
+      { createdAtMs: a.submittedAtUnixMs },
+      { createdAtMs: b.submittedAtUnixMs },
+    ),
   );
 }
 
