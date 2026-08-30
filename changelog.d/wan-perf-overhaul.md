@@ -20,12 +20,13 @@
   parking all 40 transformer blocks against a shortfall it did not have. The
   math and flash calibrations are fitted separately, because the residual the
   slope stands in for does not shrink when attention stops writing its tile.
-- **A Wan chain stage no longer re-encodes its prompt.** The engine keeps the
-  ~4 MB prompt encoding it produced and reuses it when the prompt, negative,
-  CFG arm, encoder weights, device, and dtype all match, so an authored
-  sequence loads the 11.4 GB UMT5-XXL encoder once instead of once per stage.
-  The encoder itself is still dropped after use; this caches its output, not
-  the encoder.
+- **A Wan render that repeats a prompt no longer re-encodes it.** The engine
+  keeps the ~4 MB prompt encoding it produced and reuses it when the prompt,
+  negative, CFG arm, encoder weights, device, and dtype all match, skipping both
+  the 11.37 GB UMT5-XXL load and the forward. That covers an auto-chained long
+  video, a re-roll, and a batch child; an authored sequence gives every stage
+  its own prompt and still pays one encoder load per stage. This caches the
+  encoder's output, not the encoder, which is still dropped after use.
 - **A chain stage that runs out of GPU memory now says so.** Chain stages
   bypassed every piece of CUDA error handling ordinary generations have, and
   surfaced a bare `DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")` with
