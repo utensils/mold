@@ -758,9 +758,22 @@ impl WanRmsNorm {
         // ~671 MB apiece, per norm, per block, per step. The fused kernel
         // reads the input once and writes the output once.
         //
-        // The weight is stored in the compute dtype and `rms_norm` requires a
-        // rank-1 alpha matching the last axis, which is how it is loaded.
-        candle_nn::ops::rms_norm(x, &self.weight, self.eps as f32)
+        // `rms_norm` requires alpha to match the activation dtype, and the
+        // two genuinely differ: the GGUF arm dequantizes non-linear tensors
+        // into F32 while `CastBoundary` keeps activations BF16 between the
+        // quantized linears. The cast is a `[dim]`-sized copy — 20 KB at
+        // A14B, against the 671 MB buffers this fused call stops allocating —
+        // and is skipped outright when the dtypes already agree.
+        //
+        // Found on the real q5 checkpoint, not by the fixture tests, which
+        // happen to load their weights at the activation dtype: a
+        // `dtype mismatch in binary op` at the first block.
+        let alpha = if self.weight.dtype() == x.dtype() {
+            self.weight.clone()
+        } else {
+            self.weight.to_dtype(x.dtype())?
+        };
+        candle_nn::ops::rms_norm(x, &alpha, self.eps as f32)
     }
 }
 
@@ -1916,6 +1929,57 @@ mod tests {
     use super::*;
     use candle_nn::VarMap;
     use std::collections::HashMap;
+
+    /// `rms_norm` refuses an alpha whose dtype differs from the activation's,
+    /// and on the real quantized checkpoint they DO differ: the GGUF arm
+    /// dequantizes non-linear tensors into F32 while `CastBoundary` keeps
+    /// activations BF16 between the quantized linears.
+    ///
+    /// This is a regression test for a failure the fixture tests could not
+    /// see. They build their weights at the activation dtype, so the fused
+    /// call matched by accident and every unit test passed; the real
+    /// `wan22-t2v-a14b:q5` render then died at the first block with
+    /// `dtype mismatch in binary op`.
+    #[test]
+    fn the_rms_norm_accepts_a_weight_whose_dtype_differs_from_the_activation() {
+        let device = Device::Cpu;
+        let x = Tensor::randn(0f32, 1.0, (1, 4, 8), &device).unwrap();
+
+        let matched = WanRmsNorm {
+            weight: Tensor::ones(8, DType::F32, &device).unwrap(),
+            eps: 1e-6,
+        };
+        let mismatched = WanRmsNorm {
+            weight: Tensor::ones(8, DType::F16, &device).unwrap(),
+            eps: 1e-6,
+        };
+
+        let want = matched.forward(&x).expect("matched dtypes must norm");
+        let got = mismatched
+            .forward(&x)
+            .expect("a differing weight dtype must be cast, not refused");
+
+        assert_eq!(
+            got.dtype(),
+            x.dtype(),
+            "the output keeps the activation dtype"
+        );
+        assert_eq!(got.dims(), want.dims());
+        let diff = (&want - &got)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(
+            diff < 1e-3,
+            "an all-ones weight must give the same norm whichever dtype it was stored in (diff {diff})"
+        );
+    }
 
     /// The #775 profiler must be inert when its env is unset: `time` is a
     /// straight pass-through (values and errors) and `report` never prints or
