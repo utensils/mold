@@ -91,6 +91,14 @@ function progress(row: FleetActiveWork): number | null {
     Math.min(100, Math.round((row.current / row.total) * 100)),
   );
 }
+
+function phase(row: FleetActiveWork): string {
+  if (row.phase === "preparing" && row.preparation_progress?.component) {
+    return `Preparing · ${row.preparation_progress.component}`;
+  }
+  if (row.stage) return row.stage;
+  return row.phase.replaceAll("_", " ");
+}
 </script>
 
 <template>
@@ -135,10 +143,8 @@ function progress(row: FleetActiveWork): number | null {
         <span class="live-activity-copy">
           <strong>{{ title(row) }}</strong>
           <span>
-            {{ row.hostLabel }} · {{ row.phase.replaceAll("_", " ") }}
-            <template v-if="progress(row) !== null">
-              · {{ progress(row) }}%</template
-            >
+            {{ row.hostLabel }} · {{ phase(row) }}
+            <template v-if="progress(row) !== null"> · {{ progress(row) }}%</template>
             <template v-if="row.stale">
               · Last seen active ·
               {{ row.hostError ?? "Waiting to reconnect" }}</template

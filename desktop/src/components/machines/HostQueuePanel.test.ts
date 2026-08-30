@@ -125,6 +125,68 @@ describe("HostQueuePanel", () => {
     expect(wrapper.get("[data-test='queue-row']").text()).toContain("PAUSED");
   });
 
+  it("shows dependency preparation component and progress on a queued row", async () => {
+    const entry = queued("preparing", 0, 0);
+    const { wrapper } = await mountPanel([], [entry], {
+      plan_version: 1,
+      state_version: 1,
+      optimizer_state: "settled",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [
+        {
+          work_id: entry.id,
+          parent_id: entry.id,
+          work_kind: "generation",
+          priority_class: "user",
+          queue_rank: 0,
+          bypass_count: 0,
+          estimate_confidence: "low",
+          blocked_reason: "preparing",
+          preparation_progress: {
+            component: "Verifying model files",
+            bytes_done: 27,
+            bytes_total: 100,
+          },
+        },
+      ],
+    });
+
+    expect(wrapper.get("[data-test='queue-row']").text()).toContain(
+      "PREPARING · VERIFYING MODEL FILES 27%",
+    );
+  });
+
+  it("shows the host's model-loading stage for a running row", async () => {
+    const entry = { ...queued("loading", 0, 0), state: "running" as const };
+    const { wrapper } = await mountPanel([], [entry], {
+      plan_version: 1,
+      state_version: 1,
+      optimizer_state: "settled",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [
+        {
+          work_id: entry.id,
+          parent_id: entry.id,
+          work_kind: "generation",
+          priority_class: "user",
+          queue_rank: 0,
+          bypass_count: 0,
+          estimate_confidence: "low",
+          activity_phase: "active",
+          runtime_phase: "loading",
+          runtime_stage: "Loading Flux.2 transformer",
+        },
+      ],
+    });
+
+    expect(wrapper.get("[data-test='queue-row']").text()).toContain(
+      "LOADING FLUX.2 TRANSFORMER",
+    );
+    expect(wrapper.get("[data-test='queue-row']").text()).not.toContain("NEXT UP");
+  });
+
   it("offers Resume for restart-paused work while the global gate is open", async () => {
     const entry = { ...queued("srv-paused", 0, 0), state: "paused" as const };
     const { wrapper, jobs } = await mountPanel([], [entry]);

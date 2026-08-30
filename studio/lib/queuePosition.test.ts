@@ -43,6 +43,55 @@ function plan(blocked: Record<string, string>): QueuePlan {
 }
 
 describe("buildQueueStatusIndex", () => {
+  it("prefers an exact batch child over an earlier parent aggregate", () => {
+    const exactPlan: QueuePlan = {
+      plan_version: 1,
+      state_version: 1,
+      optimizer_state: "settled",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [
+        {
+          work_id: "job-1:sibling",
+          parent_id: "job-1",
+          work_kind: "prepared_sibling",
+          priority_class: "normal",
+          queue_rank: 0,
+          bypass_count: 0,
+          estimate_confidence: "medium",
+          blocked_reason: "model_not_installed",
+        },
+        {
+          work_id: "job-1",
+          parent_id: "batch-parent",
+          work_kind: "prepared_sibling",
+          priority_class: "normal",
+          queue_rank: 1,
+          bypass_count: 0,
+          estimate_confidence: "medium",
+          blocked_reason: "preparing",
+          preparation_progress: {
+            component: "Exact child files",
+            bytes_done: 41,
+            bytes_total: 100,
+          },
+        },
+      ],
+    };
+    const index = buildQueueStatusIndex([
+      {
+        hostId: "alpha",
+        entries: [entry("job-1", 2)],
+        plan: exactPlan,
+      },
+    ]);
+
+    expect(queueStatusFor(index, "alpha", "job-1")).toMatchObject({
+      blockedReason: "preparing",
+      preparation: { component: "Exact child files", fraction: 0.41 },
+    });
+  });
+
   it("projects a host-wide pause onto queued rows without hiding held work", () => {
     const index = buildQueueStatusIndex([
       {

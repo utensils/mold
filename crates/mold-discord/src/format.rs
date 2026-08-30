@@ -508,10 +508,20 @@ pub fn format_server_status_pages(
                         .map(mold_core::QueueBlockedReason::as_str)
                         .or(work.assignment_reason.as_deref())
                         .unwrap_or("none");
+                    let preparation = work
+                        .preparation_label()
+                        .map(|label| format!(" · {label}"))
+                        .unwrap_or_default();
+                    let runtime = work
+                        .runtime_label()
+                        .map(|label| format!(" · {label}"))
+                        .unwrap_or_default();
                     truncate_chars(
                         &format!(
-                            "`{}` · {} · lane {lane} · finish {finish} · {} confidence · {reason}",
-                            work.work_id, work.activity_phase, work.estimate_confidence
+                            "`{}` · {}{preparation}{runtime} · lane {lane} · finish {finish} · {} confidence · {reason}",
+                            work.work_id,
+                            work.presentation_phase(),
+                            work.estimate_confidence
                         ),
                         360,
                     )

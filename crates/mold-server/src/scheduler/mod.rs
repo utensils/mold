@@ -895,6 +895,9 @@ enum PreparationState {
 }
 
 enum PreparationEvent {
+    Progress {
+        work_id: String,
+    },
     Ready {
         work_id: String,
         prepared: Box<PreparedGeneration>,
@@ -1560,6 +1563,9 @@ fn queue_plan_semantically_equal(
             // Another live clock reading. The progress BYTES stay, because a
             // preparation that has moved is a real change worth publishing.
             work.preparation_elapsed_ms = None;
+            if let Some(progress) = &mut work.preparation_progress {
+                progress.phase_elapsed_ms = None;
+            }
             let duration = work
                 .estimated_start_unix_ms
                 .zip(work.estimated_finish_unix_ms)
@@ -2048,17 +2054,14 @@ impl Coordinator {
                         // The sink holds a phase clock the wire does not; the
                         // wire gets the phase's own age, which is what a queue
                         // row can act on.
-                        progress: pending
-                            .preparation_progress
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .as_ref()
-                            .map(|state| mold_core::QueuePreparationProgress {
+                        progress: pending.preparation_progress.snapshot().map(|state| {
+                            mold_core::QueuePreparationProgress {
                                 component: state.component.clone(),
                                 bytes_done: state.bytes_done,
                                 bytes_total: state.bytes_total,
                                 phase_elapsed_ms: Some(now_ms.saturating_sub(state.started_ms)),
-                            }),
+                            }
+                        }),
                     },
                 )
             })
@@ -2078,11 +2081,15 @@ impl Coordinator {
             };
             pending.preparation = PreparationState::Preparing;
             pending.preparation_started_ms = Some(monotonic_ms());
-            *pending
-                .preparation_progress
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            pending.preparation_progress.clear();
             let preparation_progress = pending.preparation_progress.clone();
+            let progress_tx = self.preparation_tx.clone();
+            let progress_id = id.clone();
+            preparation_progress.set_notifier(Arc::new(move || {
+                let _ = progress_tx.send(PreparationEvent::Progress {
+                    work_id: progress_id.clone(),
+                });
+            }));
             tracing::info!(
                 job_id = %id,
                 model = %pending.job.request.model,
@@ -2210,6 +2217,19 @@ impl Coordinator {
 
     fn handle_preparation_event(&mut self, event: PreparationEvent, immediate: &mut bool) {
         match event {
+            PreparationEvent::Progress { work_id } => {
+                if self
+                    .pending
+                    .get(&work_id)
+                    .is_some_and(|pending| pending.preparation == PreparationState::Preparing)
+                {
+                    // Preparation is observable scheduler state. Advancing the
+                    // state authority makes GET /api/queue and the emitted
+                    // queue-plan event agree without fabricating a worker
+                    // lease or bypassing the normal planner projection.
+                    self.mutate(immediate);
+                }
+            }
             PreparationEvent::Ready { work_id, prepared } => {
                 let Some(pending) = self.pending.get_mut(&work_id) else {
                     return;
@@ -7022,6 +7042,10 @@ fn queue_plan_projection_at_unix(
                 warm_wait_deadline_unix_ms: None,
                 preparation_elapsed_ms: None,
                 preparation_progress: None,
+                runtime_phase: None,
+                runtime_stage: None,
+                runtime_current: None,
+                runtime_total: None,
                 activity_phase: if lease.accepted && host_utility {
                     mold_core::QueueActivityPhase::Cpu
                 } else if lease.accepted {
@@ -7155,6 +7179,10 @@ fn queue_plan_projection_at_unix(
                     warm_wait_deadline_unix_ms: warm_wait.map(|wait| to_unix(wait.deadline_ms)),
                     preparation_elapsed_ms: preparing.map(|view| view.elapsed_ms),
                     preparation_progress: preparing.and_then(|view| view.progress.clone()),
+                    runtime_phase: None,
+                    runtime_stage: None,
+                    runtime_current: None,
+                    runtime_total: None,
                     activity_phase: if warm_wait.is_some() {
                         mold_core::QueueActivityPhase::WarmWait
                     } else if blocked.is_some() {
@@ -10857,6 +10885,13 @@ mod tests {
             lane_order: Some(0),
             estimated_start_unix_ms: Some(10_000),
             estimated_finish_unix_ms: Some(15_000),
+            blocked_reason: Some(mold_core::QueueBlockedReason::Preparing),
+            preparation_progress: Some(mold_core::QueuePreparationProgress {
+                component: "Verifying model files".into(),
+                bytes_done: 27,
+                bytes_total: 100,
+                phase_elapsed_ms: Some(4_200),
+            }),
             ..Default::default()
         };
         let first = mold_core::QueuePlan {
@@ -10876,11 +10911,25 @@ mod tests {
             work_items: vec![mold_core::QueueWorkItem {
                 estimated_start_unix_ms: Some(11_000),
                 estimated_finish_unix_ms: Some(16_000),
+                preparation_progress: Some(mold_core::QueuePreparationProgress {
+                    component: "Verifying model files".into(),
+                    bytes_done: 27,
+                    bytes_total: 100,
+                    phase_elapsed_ms: Some(9_900),
+                }),
                 ..work
             }],
             ..first.clone()
         };
         assert!(queue_plan_semantically_equal(&first, &shifted));
+
+        let mut progressed = shifted.clone();
+        progressed.work_items[0]
+            .preparation_progress
+            .as_mut()
+            .unwrap()
+            .bytes_done = 28;
+        assert!(!queue_plan_semantically_equal(&first, &progressed));
 
         let mut slower = shifted;
         slower.work_items[0].estimated_finish_unix_ms = Some(17_000);
@@ -15709,6 +15758,45 @@ mod tests {
             wire["preparation_progress"]["bytes_total"],
             37_000_000_000_u64
         );
+    }
+
+    #[tokio::test]
+    async fn preparation_progress_invalidates_the_published_plan_authority() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+        state.job_registry.register("progressing", "flux-dev:q4");
+        let (job, _result) = fake_generation("progressing");
+        queue.submit(job, 1).await.unwrap();
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("progressing")
+            .unwrap()
+            .preparation = PreparationState::Preparing;
+
+        let before = coordinator.state_version;
+        immediate = false;
+        coordinator.handle_preparation_event(
+            PreparationEvent::Progress {
+                work_id: "progressing".into(),
+            },
+            &mut immediate,
+        );
+
+        assert!(immediate, "a progress update must wake publication now");
+        assert!(coordinator.state_version > before);
+        assert!(coordinator.dirty.dirty_since.is_some());
     }
 
     struct SelectiveBlockingPreparer {

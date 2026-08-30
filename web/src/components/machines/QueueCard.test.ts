@@ -39,6 +39,82 @@ function mountCard() {
 }
 
 describe("QueueCard reorder index", () => {
+  it("shows dependency preparation component and progress on a queued row", () => {
+    const entry = listing()[1]!;
+    const wrapper = mount(QueueCard, {
+      props: {
+        entries: [entry],
+        gpuOrdinals: [0],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "settled",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: entry.id,
+              parent_id: entry.id,
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              estimate_confidence: "low",
+              blocked_reason: "preparing",
+              preparation_progress: {
+                component: "Verifying model files",
+                bytes_done: 27,
+                bytes_total: 100,
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-test='queue-row']").text()).toContain(
+      "Preparing · Verifying model files 27%",
+    );
+  });
+
+  it("shows runtime stage and step for a running row", () => {
+    const entry = listing()[0]!;
+    const wrapper = mount(QueueCard, {
+      props: {
+        entries: [entry],
+        gpuOrdinals: [0],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "settled",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: entry.id,
+              parent_id: entry.id,
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              estimate_confidence: "low",
+              activity_phase: "active",
+              runtime_phase: "running",
+              runtime_stage: "Denoising",
+              runtime_current: 2,
+              runtime_total: 4,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-test='queue-row']").text()).toContain(
+      "Denoising · 2/4",
+    );
+    expect(wrapper.get("[data-test='queue-row']").text()).not.toContain("Next up");
+  });
+
   it("exposes advertised queue controls and disables lane changes for running jobs", async () => {
     const wrapper = mount(QueueCard, {
       props: {

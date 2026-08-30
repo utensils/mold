@@ -106,6 +106,45 @@ describe("ActivityStrip", () => {
     expect(routerPush).toHaveBeenCalledWith("/models");
   });
 
+  it("names server-side preparation instead of presenting it as queued", () => {
+    useLiveActivityStore().hosts = {
+      render: {
+        hostId: "render",
+        hostLabel: "HAL 9000",
+        target: { baseUrl: "http://render", apiKey: null },
+        routeUrl: "http://render",
+        instanceId: "render-instance",
+        observedAtUnixMs: 2,
+        stale: false,
+        error: null,
+        items: [
+          {
+            id: "print-1",
+            kind: "generation",
+            phase: "preparing",
+            model: "flux2-klein-9b:bf16",
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            current: 27,
+            total: 100,
+            preparation_progress: {
+              component: "Verifying model files",
+              bytes_done: 27,
+              bytes_total: 100,
+            },
+            can_cancel: true,
+          },
+        ],
+        unavailableKinds: [],
+      },
+    };
+
+    const text = mount(ActivityStrip).get("[data-test='shared-live-activity']").text();
+    expect(text).toMatch(
+      /HAL 9000 · Preparing · Verifying model files\s+· 27%/,
+    );
+  });
+
   it("is hidden when nothing is in flight", () => {
     const wrapper = mount(ActivityStrip);
     expect(wrapper.find("[data-test='activity-strip']").exists()).toBe(false);

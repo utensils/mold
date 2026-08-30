@@ -5927,6 +5927,42 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
 
 // ── /api/queue ───────────────────────────────────────────────────────────────
 
+fn enrich_queue_plan_runtime(
+    plan: &mut Option<mold_core::QueuePlan>,
+    registry: &crate::job_registry::JobRegistry,
+) {
+    let Some(plan) = plan else { return };
+    for work in &mut plan.work_items {
+        if work.activity_phase != mold_core::QueueActivityPhase::Active {
+            continue;
+        }
+        let Some(progress) = registry.progress_snapshot(&work.work_id) else {
+            continue;
+        };
+        let progress = progress.unwrap_or_default();
+        let running = progress.step.is_some();
+        work.runtime_phase = Some(if running { "running" } else { "loading" }.to_string());
+        work.runtime_stage = progress.stage.clone().or_else(|| {
+            progress
+                .weight_load
+                .as_ref()
+                .map(|load| format!("Loading {}", load.component))
+        });
+        let (current, total) = if running {
+            (
+                progress.step.map(|value| value as u64),
+                progress.total.map(|value| value as u64),
+            )
+        } else {
+            progress.weight_load.as_ref().map_or((None, None), |load| {
+                (Some(load.bytes_loaded), Some(load.bytes_total))
+            })
+        };
+        work.runtime_current = current;
+        work.runtime_total = total;
+    }
+}
+
 /// Bounded snapshot of jobs currently queued or running on the server. Clients
 /// (notably the web SPA) poll this to reconcile their local card list — any
 /// "running" card whose server id isn't here is a zombie left over from a
@@ -5952,6 +5988,7 @@ async fn list_queue(
 ) -> Result<Json<QueueListingResponse>, ApiError> {
     let mut listing = state.job_registry.snapshot();
     listing.plan = state.scheduled_work.latest_plan();
+    enrich_queue_plan_runtime(&mut listing.plan, &state.job_registry);
     let requested_page = QueuePageRequest::parse(query, state.queue_capacity)?;
     let explicit_page = requested_page.explicit;
 
@@ -6096,7 +6133,9 @@ async fn get_queue_job(
     // plan entries are its children — the first child that names it as parent.
     // Matching only `work_id` would answer `null` for exactly the batch parent
     // whose phase a client is asking about.
-    let work_item = state.scheduled_work.latest_plan().and_then(|plan| {
+    let mut plan = state.scheduled_work.latest_plan();
+    enrich_queue_plan_runtime(&mut plan, &state.job_registry);
+    let work_item = plan.and_then(|plan| {
         let items = plan.work_items;
         items
             .iter()

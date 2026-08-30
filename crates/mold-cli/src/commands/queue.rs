@@ -601,7 +601,13 @@ pub(crate) fn render_detail(
         );
     }
     if let Some(item) = work_item {
-        line("Planned phase", item.activity_phase.to_string());
+        line("Planned phase", item.presentation_phase().to_string());
+        if let Some(label) = item.preparation_label() {
+            line("Preparing", label);
+        }
+        if let Some(label) = item.runtime_label() {
+            line("Current stage", label.to_string());
+        }
         if let Some(device) = item.planned_device_id.as_deref() {
             line("Planned device", device.to_string());
         }

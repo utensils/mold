@@ -545,6 +545,7 @@ type ActivityRow =
       /** Effective lifecycle after applying the host-wide queue pause. */
       queueState: string | null;
       blockedReason: string | null;
+      preparation: Extract<ActivityJobVM, { kind: "print" }>["preparation"];
       sequence: null;
     }
   | { key: string; print: null; sequence: Extract<ActivityJobVM, { kind: "sequence" }> };
@@ -2291,6 +2292,7 @@ function syncDurableGenerationJobs(): void {
               if (url) job.previewUrl = url;
               if (progress.step !== null) job.step = progress.step;
               if (progress.total !== null) job.total = progress.total;
+              if (progress.stage) job.stage = progress.stage;
             },
           );
         }
@@ -2417,6 +2419,7 @@ const activityRows = computed<ActivityRow[]>(() =>
             queuePosition: vm.queuePosition ?? null,
             queueState: vm.queueState ?? null,
             blockedReason: vm.blockedReason ?? null,
+            preparation: vm.preparation ?? null,
           },
         ]
       : [];
@@ -2555,6 +2558,7 @@ function activityRowStatus(row: ActivityRow): string {
       state: row.queueState,
       position: row.queuePosition ?? row.print.queuePosition,
       blockedReason: row.blockedReason,
+      preparation: row.preparation,
     }),
   );
 }
@@ -3105,6 +3109,7 @@ const generationStatus = computed(() => {
           state: live?.state,
           position: live?.position ?? active.queuePosition,
           blockedReason: live?.blockedReason,
+          preparation: live?.preparation,
         }),
       );
     }

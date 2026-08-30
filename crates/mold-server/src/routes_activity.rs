@@ -18,14 +18,29 @@ fn nonnegative_ms(value: i64) -> u64 {
     value.try_into().unwrap_or_default()
 }
 
-fn scheduler_phase(phase: &QueueActivityPhase) -> &'static str {
-    match phase {
-        QueueActivityPhase::Active | QueueActivityPhase::Cpu => "running",
+fn scheduler_phase(
+    work: &mold_core::QueueWorkItem,
+    progress: Option<&mold_core::queue_progress::QueueJobProgress>,
+) -> &'static str {
+    match work.activity_phase {
+        QueueActivityPhase::Cpu => "running",
+        QueueActivityPhase::Active if progress.and_then(|value| value.step).is_some() => "running",
+        // Only registry-backed generations have a model-loading progress
+        // record. Scheduler-owned GPU work (chain stages, upscales, utilities)
+        // is already executing once its lease is Active and must not inherit
+        // the generation fallback label indefinitely.
+        QueueActivityPhase::Active if progress.is_some() => "loading",
+        QueueActivityPhase::Active => "running",
         QueueActivityPhase::Dispatching => "loading",
+        QueueActivityPhase::Blocked
+            if work.blocked_reason == Some(mold_core::QueueBlockedReason::Preparing) =>
+        {
+            "preparing"
+        }
         QueueActivityPhase::Blocked
         | QueueActivityPhase::WarmWait
         | QueueActivityPhase::Queued
-        | QueueActivityPhase::Unknown(_) => "preparing",
+        | QueueActivityPhase::Unknown(_) => "queued",
     }
 }
 
@@ -45,15 +60,47 @@ struct SchedulerActivity {
     phase: &'static str,
     current: Option<u64>,
     total: Option<u64>,
+    stage: Option<String>,
+    preparation_progress: Option<mold_core::QueuePreparationProgress>,
 }
 
-fn scheduler_activity(state: &AppState) -> HashMap<String, SchedulerActivity> {
-    let mut by_parent: HashMap<String, SchedulerActivity> = HashMap::new();
+#[derive(Default)]
+struct SchedulerActivityIndex {
+    by_work: HashMap<String, SchedulerActivity>,
+    by_parent: HashMap<String, SchedulerActivity>,
+}
+
+fn merge_scheduler_activity(current: &mut SchedulerActivity, candidate: &SchedulerActivity) {
+    let candidate_rank = phase_rank(candidate.phase);
+    let current_rank = phase_rank(current.phase);
+    if candidate_rank > current_rank {
+        *current = candidate.clone();
+    } else if candidate_rank == current_rank {
+        if candidate.stage.is_some() {
+            current.stage = candidate.stage.clone();
+        }
+        if candidate.preparation_progress.is_some() {
+            current.preparation_progress = candidate.preparation_progress.clone();
+            current.current = candidate.current;
+            current.total = candidate.total;
+        } else {
+            current.current = current.current.max(candidate.current);
+            current.total = current.total.max(candidate.total);
+        }
+    }
+}
+
+fn scheduler_activity(state: &AppState) -> SchedulerActivityIndex {
+    let mut index = SchedulerActivityIndex::default();
     let Some(plan) = state.scheduled_work.latest_plan() else {
-        return by_parent;
+        return index;
     };
     for work in plan.work_items {
-        let phase = scheduler_phase(&work.activity_phase);
+        let runtime_progress = state
+            .job_registry
+            .progress_snapshot(&work.work_id)
+            .flatten();
+        let phase = scheduler_phase(&work, runtime_progress.as_ref());
         let kind = match work.work_kind.as_str() {
             "chain_stage" => "sequence",
             "generation" | "prepared_sibling" => "generation",
@@ -64,26 +111,56 @@ fn scheduler_activity(state: &AppState) -> HashMap<String, SchedulerActivity> {
         // monotonic submission counter, not a place in line; the registry
         // ordering below is the one authority for that, and it is what
         // `GET /api/queue` reports.
+        let preparation_progress = work.preparation_progress.clone();
+        let stage = runtime_progress.as_ref().and_then(|progress| {
+            progress.stage.clone().or_else(|| {
+                progress
+                    .weight_load
+                    .as_ref()
+                    .map(|load| format!("Loading {}", load.component))
+            })
+        });
+        let runtime_current = runtime_progress.as_ref().and_then(|progress| {
+            progress
+                .step
+                .map(|value| value.try_into().unwrap_or(u64::MAX))
+                .or_else(|| progress.weight_load.as_ref().map(|load| load.bytes_loaded))
+        });
+        let runtime_total = runtime_progress.as_ref().and_then(|progress| {
+            progress
+                .total
+                .map(|value| value.try_into().unwrap_or(u64::MAX))
+                .or_else(|| progress.weight_load.as_ref().map(|load| load.bytes_total))
+        });
         let candidate = SchedulerActivity {
             kind,
             phase,
-            current: work.chain_stage.map(u64::from),
-            total: work
-                .batch_partition
-                .map(|partition| u64::from(partition.count)),
+            current: preparation_progress
+                .as_ref()
+                .map(|progress| progress.bytes_done)
+                .or(runtime_current)
+                .or_else(|| work.chain_stage.map(u64::from)),
+            total: preparation_progress
+                .as_ref()
+                .map(|progress| progress.bytes_total)
+                .or(runtime_total)
+                .or_else(|| {
+                    work.batch_partition
+                        .map(|partition| u64::from(partition.count))
+                }),
+            stage: stage.or_else(|| (phase == "loading").then(|| "Loading model".to_string())),
+            preparation_progress,
         };
-        by_parent
+        index
+            .by_work
+            .insert(work.work_id.clone(), candidate.clone());
+        index
+            .by_parent
             .entry(work.parent_id)
-            .and_modify(|current| {
-                if phase_rank(candidate.phase) > phase_rank(current.phase) {
-                    current.phase = candidate.phase;
-                }
-                current.current = current.current.max(candidate.current);
-                current.total = current.total.max(candidate.total);
-            })
+            .and_modify(|current| merge_scheduler_activity(current, &candidate))
             .or_insert(candidate);
     }
-    by_parent
+    index
 }
 
 /// Return the host-owned, nonterminal work snapshot used to reconcile Now
@@ -104,7 +181,10 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
 
     for entry in queue.entries {
         represented.insert(entry.id.clone());
-        let scheduled = scheduler.get(&entry.id);
+        let scheduled = scheduler
+            .by_work
+            .get(&entry.id)
+            .or_else(|| scheduler.by_parent.get(&entry.id));
         let phase = scheduled.map_or_else(
             || match entry.state {
                 crate::job_registry::JobLifecycle::Queued => "queued",
@@ -126,8 +206,11 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             created_at_unix_ms: entry.started_at_unix_ms,
             updated_at_unix_ms: observed_at_unix_ms,
             position: Some(entry.position),
-            current: None,
-            total: None,
+            current: scheduled.and_then(|activity| activity.current),
+            total: scheduled.and_then(|activity| activity.total),
+            stage: scheduled.and_then(|activity| activity.stage.clone()),
+            preparation_progress: scheduled
+                .and_then(|activity| activity.preparation_progress.clone()),
             can_cancel: !cancelling
                 && matches!(
                     entry.state,
@@ -161,6 +244,8 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                             position: None,
                             current: None,
                             total: None,
+                            stage: None,
+                            preparation_progress: None,
                             can_cancel: true,
                         });
                     }
@@ -193,9 +278,10 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                     .chain_jobs
                     .as_ref()
                     .is_some_and(|runner| runner.is_cancelling(&row.id));
+            let scheduled = scheduler.by_parent.get(&row.id);
             let phase = if cancelling {
                 "cancelling"
-            } else if let Some(activity) = scheduler.get(&row.id) {
+            } else if let Some(activity) = scheduled {
                 activity.phase
             } else if row.state == mold_core::chain_job::ChainJobState::Queued {
                 "queued"
@@ -214,6 +300,9 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 position: None,
                 current: Some(u64::from(row.current_stage)),
                 total: Some(u64::from(row.stage_count)),
+                stage: scheduled.and_then(|activity| activity.stage.clone()),
+                preparation_progress: scheduled
+                    .and_then(|activity| activity.preparation_progress.clone()),
                 can_cancel: true,
             });
         }
@@ -227,7 +316,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
     // Scheduler-only work includes preparation/utility phases that never
     // enter either durable registry. Collapse partitions/stages to one parent
     // row so a batch or chain never double-renders.
-    for (parent_id, activity) in &scheduler {
+    for (parent_id, activity) in &scheduler.by_parent {
         // Generation and sequence registries own their terminal boundary. A
         // separately published scheduler plan may lag completion briefly and
         // is enrichment only for those work kinds, never resurrection.
@@ -249,6 +338,8 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             position: None,
             current: activity.current,
             total: activity.total,
+            stage: activity.stage.clone(),
+            preparation_progress: activity.preparation_progress.clone(),
             can_cancel: false,
         });
     }
@@ -274,6 +365,8 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             position: Some(position),
             current: Some(job.bytes_done),
             total: Some(job.bytes_total),
+            stage: None,
+            preparation_progress: None,
             can_cancel: true,
         });
     }

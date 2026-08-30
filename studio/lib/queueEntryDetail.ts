@@ -22,6 +22,8 @@
 import type { QueueEntry, QueuePlan, QueueWorkItem } from "../api/queuePlan";
 import {
   normalizeBlockedReason,
+  preparationForWorkItem,
+  queueWorkItemFor,
   queueWaitCode,
   queueWaitLabel,
   resolveQueueWait,
@@ -218,16 +220,6 @@ function loraFields(
   ];
 }
 
-function workItemFor(
-  plan: QueuePlan | null | undefined,
-  jobId: string,
-): QueueWorkItem | null {
-  for (const item of plan?.work_items ?? []) {
-    if (item.parent_id === jobId || item.work_id === jobId) return item;
-  }
-  return null;
-}
-
 function laneLabel(item: QueueWorkItem): string | null {
   if (item.gpu != null) return `GPU ${item.gpu}`;
   if (item.planned_lane_kind === "host_utility") return "CPU";
@@ -368,10 +360,11 @@ export function queueEntryDetailModel(
   const { entry, hostLabel, modelLabel, nowMs } = input;
   const running = entry.state === "running";
   const held = entry.state === "held";
-  const item = workItemFor(input.plan, entry.id);
+  const item = queueWorkItemFor(input.plan, entry.id);
   const wait = resolveQueueWait({
     position: entry.position,
     blockedReason: item?.blocked_reason ?? item?.reason,
+    preparation: item ? preparationForWorkItem(item) : null,
   });
 
   const hostMetadata =

@@ -98,6 +98,36 @@ describe("queueEntryDetailModel", () => {
     expect(model({ plan }).waitLabel).toBe("#3 in line");
   });
 
+  it("shows dependency preparation instead of leaving the row queued", () => {
+    const plan: QueuePlan = {
+      plan_version: 1,
+      state_version: 1,
+      optimizer_state: "clean",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [
+        {
+          work_id: "job-1",
+          parent_id: "batch-parent",
+          work_kind: "prepared_sibling",
+          priority_class: "normal",
+          queue_rank: 0,
+          bypass_count: 0,
+          estimate_confidence: "high",
+          blocked_reason: "preparing",
+          preparation_progress: {
+            component: "Verifying model files",
+            bytes_done: 27,
+            bytes_total: 100,
+          },
+        },
+      ],
+    };
+    const detail = model({ plan });
+    expect(detail.stateCode).toBe("PREPARING · VERIFYING MODEL FILES 27%");
+    expect(detail.waitLabel).toBe("Preparing · Verifying model files 27%");
+  });
+
   it("groups host-supplied settings the way the Create inspector does", () => {
     const detail = model({ metadata });
     expect(detail.metadataSource).toBe("host");

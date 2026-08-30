@@ -11,6 +11,13 @@ export interface ActiveWorkItem {
   position?: number | null;
   current?: number | null;
   total?: number | null;
+  stage?: string | null;
+  preparation_progress?: {
+    component: string;
+    bytes_done: number;
+    bytes_total: number;
+    phase_elapsed_ms?: number | null;
+  } | null;
   can_cancel: boolean;
 }
 

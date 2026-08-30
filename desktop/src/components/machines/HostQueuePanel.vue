@@ -14,7 +14,13 @@ import QueueEntryDrawer from "../jobs/QueueEntryDrawer.vue";
 import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../../stores/generation";
 import { type HostView } from "../../stores/hosts";
-import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
+import {
+  buildQueueStatusIndex,
+  queueRuntimeCode,
+  queueStatusFor,
+  queueWaitCode,
+  resolveQueueWait,
+} from "@studio/lib/queuePosition";
 import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
 import { watchSelectedQueuePreview, type QueueJobProgress } from "@studio/api/generationSelection";
 import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../../stores/jobs";
@@ -76,6 +82,17 @@ const restartPaused = computed(
 const dispatchPaused = computed(() => snapshot.value?.paused === true);
 const resumeNeeded = computed(() => dispatchPaused.value || restartPaused.value);
 const caps = computed(() => snapshot.value?.caps ?? null);
+const queueStatus = computed(() => {
+  const current = snapshot.value;
+  return buildQueueStatusIndex([
+    {
+      hostId: props.host.id,
+      entries: current?.entries ?? [],
+      plan: current?.plan ?? null,
+      paused: current?.paused,
+    },
+  ]);
+});
 
 const lanes = computed(() => {
   const snap = snapshot.value;
@@ -111,12 +128,21 @@ function entryCode(entry: EnrichedQueueEntry): string {
   if (entry.state === "running") {
     const job = ownJob(entry);
     if (job && job.total > 0 && job.status === "denoising") return `${job.step}/${job.total}`;
+    const runtime = queueRuntimeCode(snapshot.value?.plan, entry.id);
+    if (runtime) return runtime;
     return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
   }
   if (dispatchPaused.value && entry.state === "queued") return "PAUSED";
   // Same waiting vocabulary as Create and iPhone, resolved once in studio —
   // including "held", which is parked rather than in line.
-  return queueWaitCode(resolveQueueWait({ state: entry.state, position: entry.position }));
+  return queueWaitCode(
+    resolveQueueWait(
+      queueStatusFor(queueStatus.value, props.host.id, entry.id) ?? {
+        state: entry.state,
+        position: entry.position,
+      },
+    ),
+  );
 }
 
 /** The host's own words for why a job is parked, shown beside the row so the

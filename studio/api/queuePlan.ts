@@ -85,6 +85,10 @@ export interface QueueWorkItem {
     /** Age of the current phase alone, reset when the phase changes. */
     phase_elapsed_ms?: number | null;
   } | null;
+  runtime_phase?: "loading" | "running" | (string & {}) | null;
+  runtime_stage?: string | null;
+  runtime_current?: number | null;
+  runtime_total?: number | null;
   warm_wait_deadline_unix_ms?: number | null;
   activity_phase?:
     | "queued"

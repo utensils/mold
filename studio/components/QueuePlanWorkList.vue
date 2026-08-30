@@ -2,6 +2,10 @@
 import { computed } from "vue";
 import type { QueuePlan, QueueWorkItem } from "../api/queuePlan";
 import { queuePlanOnlyWork } from "../lib/queuePlanPresentation";
+import {
+  preparationForWorkItem,
+  preparationLabel,
+} from "../lib/queuePosition";
 
 const props = withDefaults(
   defineProps<{
@@ -33,6 +37,8 @@ function kindLabel(item: QueueWorkItem): string {
 }
 
 function phaseLabel(item: QueueWorkItem): string {
+  const preparation = preparationForWorkItem(item);
+  if (preparation) return preparationLabel(preparation);
   return words(item.activity_phase ?? "scheduled");
 }
 

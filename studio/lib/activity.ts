@@ -16,6 +16,7 @@ import {
   queueStatusFor,
   queueWaitLabel,
   resolveQueueWait,
+  type QueuePreparation,
   type QueueStatusIndex,
 } from "./queuePosition";
 import { friendlySequenceError } from "./sequence";
@@ -54,6 +55,8 @@ export type ActivityJobVM =
       queueState?: string | null;
       /** Raw scheduler `blocked_reason` for this job, when the plan named one. */
       blockedReason?: string | null;
+      /** Live dependency preparation detail from the scheduler plan. */
+      preparation?: QueuePreparation | null;
     }
   | {
       kind: "sequence";
@@ -175,6 +178,7 @@ export function withLiveQueueStatus(
   if (status.state !== null) next.queueState = status.state;
   if (status.position !== null) next.queuePosition = status.position;
   if (status.blockedReason !== null) next.blockedReason = status.blockedReason;
+  if (status.preparation !== null) next.preparation = status.preparation;
   return next;
 }
 
@@ -192,6 +196,7 @@ export function queueStatusLabel(vm: ActivityJobVM): string | null {
       state: vm.queueState,
       position: vm.queuePosition,
       blockedReason: vm.blockedReason,
+      preparation: vm.preparation,
     }),
   );
 }

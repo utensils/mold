@@ -31,31 +31,73 @@ export interface QueuePreparation {
 }
 
 /** The plan's preparation report for a job's work item, if it carries one. */
+export function preparationForWorkItem(
+  item: QueueWorkItem,
+): QueuePreparation | null {
+  if (item.blocked_reason !== "preparing") return null;
+  const progress = item.preparation_progress ?? null;
+  const total = progress?.bytes_total ?? 0;
+  return {
+    component: progress?.component || null,
+    fraction:
+      progress && total > 0
+        ? Math.min(1, Math.max(0, progress.bytes_done / total))
+        : null,
+    elapsedMs:
+      typeof item.preparation_elapsed_ms === "number" &&
+      Number.isFinite(item.preparation_elapsed_ms)
+        ? item.preparation_elapsed_ms
+        : null,
+  };
+}
+
+/** Exact queue work for a job, falling back to a parent aggregate only after
+ * checking batch-child identity. */
+export function queueWorkItemFor(
+  plan: QueuePlan | null | undefined,
+  jobId: string,
+): QueueWorkItem | null {
+  const items = plan?.work_items ?? [];
+  return (
+    items.find((item) => item.work_id === jobId) ??
+    items.find((item) => item.parent_id === jobId) ??
+    null
+  );
+}
+
+/** Live worker copy added to queue-plan rows by current hosts. */
+export function queueRuntimeLabel(
+  plan: QueuePlan | null | undefined,
+  jobId: string,
+): string | null {
+  const item = queueWorkItemFor(plan, jobId);
+  if (!item?.runtime_phase) return null;
+  const stage =
+    item.runtime_stage?.trim() ||
+    (item.runtime_phase === "loading" ? "Loading model" : "Running");
+  if (
+    item.runtime_current != null &&
+    item.runtime_total != null &&
+    item.runtime_total > 0
+  ) {
+    return `${stage} · ${item.runtime_current}/${item.runtime_total}`;
+  }
+  return stage;
+}
+
+export function queueRuntimeCode(
+  plan: QueuePlan | null | undefined,
+  jobId: string,
+): string | null {
+  return queueRuntimeLabel(plan, jobId)?.toLocaleUpperCase() ?? null;
+}
+
 function planPreparation(
   plan: QueuePlan | null | undefined,
   jobId: string,
 ): QueuePreparation | null {
-  if (!plan) return null;
-  const items: readonly QueueWorkItem[] = plan.work_items ?? [];
-  for (const item of items) {
-    if (item.parent_id !== jobId && item.work_id !== jobId) continue;
-    if (item.blocked_reason !== "preparing") continue;
-    const progress = item.preparation_progress ?? null;
-    const total = progress?.bytes_total ?? 0;
-    return {
-      component: progress?.component || null,
-      fraction:
-        progress && total > 0
-          ? Math.min(1, Math.max(0, progress.bytes_done / total))
-          : null,
-      elapsedMs:
-        typeof item.preparation_elapsed_ms === "number" &&
-        Number.isFinite(item.preparation_elapsed_ms)
-          ? item.preparation_elapsed_ms
-          : null,
-    };
-  }
-  return null;
+  const item = queueWorkItemFor(plan, jobId);
+  return item ? preparationForWorkItem(item) : null;
 }
 
 /** "Preparing", or "Preparing · Verifying MiniMax H3 artifacts 41%". */
@@ -225,14 +267,9 @@ function planBlockedReason(
   plan: QueuePlan | null | undefined,
   jobId: string,
 ): string | null {
-  if (!plan) return null;
-  const items: readonly QueueWorkItem[] = plan.work_items ?? [];
-  for (const item of items) {
-    if (item.parent_id !== jobId && item.work_id !== jobId) continue;
-    const label = normalizeBlockedReason(item.blocked_reason ?? item.reason);
-    if (label !== null) return item.blocked_reason ?? item.reason ?? null;
-  }
-  return null;
+  const item = queueWorkItemFor(plan, jobId);
+  const reason = item?.blocked_reason ?? item?.reason;
+  return normalizeBlockedReason(reason) === null ? null : (reason ?? null);
 }
 
 /**

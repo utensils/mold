@@ -3944,6 +3944,18 @@ pub struct QueueWorkItem {
     /// What that preparation is working through, when it reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preparation_progress: Option<QueuePreparationProgress>,
+    /// Live execution phase joined from the queue progress registry when a
+    /// client reads the queue (`loading` or `running`). The scheduler's plan
+    /// remains payload-free and older servers omit this enrichment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_phase: Option<String>,
+    /// Latest model-load or inference stage for this live work item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_current: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_total: Option<u64>,
     #[serde(default)]
     #[schema(value_type = String)]
     pub activity_phase: QueueActivityPhase,
@@ -3956,6 +3968,43 @@ pub struct QueueWorkItem {
 }
 
 impl QueueWorkItem {
+    /// User-facing phase for clients that render the scheduler plan directly.
+    ///
+    /// Preparation remains encoded as a typed blocked reason on the wire for
+    /// compatibility, but presenting it as "blocked" contradicts the work the
+    /// server is actively performing.
+    pub fn presentation_phase(&self) -> &str {
+        if self.blocked_reason == Some(QueueBlockedReason::Preparing) {
+            "preparing"
+        } else if let Some(phase) = self.runtime_phase.as_deref() {
+            phase
+        } else {
+            self.activity_phase.as_str()
+        }
+    }
+
+    /// Current dependency-preparation component, including a bounded percent
+    /// when the preparer reports a byte total.
+    pub fn preparation_label(&self) -> Option<String> {
+        let progress = self.preparation_progress.as_ref()?;
+        if progress.bytes_total == 0 {
+            return Some(progress.component.clone());
+        }
+        let percent = progress
+            .bytes_done
+            .saturating_mul(100)
+            .checked_div(progress.bytes_total)
+            .unwrap_or(0)
+            .min(100);
+        Some(format!("{} {percent}%", progress.component))
+    }
+
+    pub fn runtime_label(&self) -> Option<&str> {
+        self.runtime_stage.as_deref().or_else(|| {
+            (self.runtime_phase.as_deref() == Some("loading")).then_some("Loading model")
+        })
+    }
+
     /// Whether this work belongs to the host utility lane.
     ///
     /// Current servers provide the typed lane class. The exact legacy
@@ -4092,6 +4141,13 @@ pub struct ActiveWorkItem {
     pub current: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    /// Latest human-facing model-load or inference stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    /// Scheduler-owned dependency preparation detail. Additive so older hosts
+    /// and non-generation work retain the existing activity wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_progress: Option<QueuePreparationProgress>,
     /// Server-confirmed cancellation support for this exact item. Clients may
     /// narrow this further when the item is not part of their local session.
     #[serde(default)]
