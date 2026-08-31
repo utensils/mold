@@ -326,9 +326,22 @@ pub(crate) fn settle_publication_blocking(
     registry: &crate::job_registry::SharedJobRegistry,
     saved: &crate::queue::SavedOutputNames,
     response: &mold_core::GenerateResponse,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> Result<(), SettlementOutcome> {
     let settlement = match publication_result(job_id, output_dir, saved, response) {
-        Some(result_json) => settle_completion_blocking(&mut channels.journal, &result_json),
+        Some(result_json) => {
+            match handoff_gallery_media_blocking(&channels.journal, output_dir, gallery_gate) {
+                Ok(()) => settle_completion_blocking(&mut channels.journal, &result_json),
+                Err(error) => {
+                    tracing::error!(job = %job_id, %error, "retaining completed generation after source-media handoff failure");
+                    settle_blocking(
+                        &mut channels.journal,
+                        DurableDisposition::Hold { retryable: true },
+                        SOURCE_MEDIA_HANDOFF_REASON,
+                    )
+                }
+            }
+        }
         None => settle_blocking(
             &mut channels.journal,
             DurableDisposition::Hold { retryable: true },
@@ -345,9 +358,28 @@ pub(crate) async fn settle_publication_async(
     registry: &crate::job_registry::SharedJobRegistry,
     saved: &crate::queue::SavedOutputNames,
     response: &mold_core::GenerateResponse,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> Result<(), SettlementOutcome> {
     let settlement = match publication_result(job_id, output_dir, saved, response) {
-        Some(result_json) => settle_completion_async(&mut channels.journal, &result_json).await,
+        Some(result_json) => {
+            // This is the same short, file-first authority transition used by
+            // blocking GPU owners. It must finish before the ticket moves to
+            // the blocking SQLite settlement task below.
+            let handoff =
+                handoff_gallery_media_blocking(&channels.journal, output_dir, gallery_gate);
+            match handoff {
+                Ok(()) => settle_completion_async(&mut channels.journal, &result_json).await,
+                Err(error) => {
+                    tracing::error!(job = %job_id, %error, "retaining completed generation after source-media handoff failure");
+                    settle_async(
+                        &mut channels.journal,
+                        DurableDisposition::Hold { retryable: true },
+                        SOURCE_MEDIA_HANDOFF_REASON,
+                    )
+                    .await
+                }
+            }
+        }
         None => {
             settle_async(
                 &mut channels.journal,
@@ -361,6 +393,19 @@ pub(crate) async fn settle_publication_async(
 }
 
 const UNPUBLISHED_OUTPUT_REASON: &str = "the generated output could not be saved to the gallery";
+const SOURCE_MEDIA_HANDOFF_REASON: &str =
+    "the generated output was saved but its retained source media could not be committed";
+
+fn handoff_gallery_media_blocking(
+    ticket: &Option<QueueTicket>,
+    output_dir: Option<&std::path::Path>,
+    gate: &crate::batch_transaction::GalleryPublicationGate,
+) -> anyhow::Result<()> {
+    match (ticket.as_ref(), output_dir) {
+        (Some(ticket), Some(output_dir)) => ticket.handoff_media_to_gallery(output_dir, gate),
+        _ => Ok(()),
+    }
+}
 
 fn publication_result(
     job_id: &str,
@@ -755,6 +800,7 @@ mod tests {
             &registry,
             &crate::queue::SavedOutputNames::default(),
             &response,
+            &crate::batch_transaction::GalleryPublicationGate::default(),
         )
         .expect("the caller still delivers the render it holds in memory");
         let row = harness.row("unsaved").expect("the row is kept for review");
@@ -792,6 +838,7 @@ mod tests {
             &registry,
             &crate::queue::SavedOutputNames::default(),
             &response,
+            &crate::batch_transaction::GalleryPublicationGate::default(),
         )
         .expect_err("a retained render never reports completion");
         assert_eq!(outcome, SettlementOutcome::Retained);

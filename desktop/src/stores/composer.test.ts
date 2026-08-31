@@ -44,4 +44,98 @@ describe("composer store", () => {
     expect(taken && "metadata" in taken ? taken.metadata : null).toEqual(metadata);
     expect(composer.take()).toBeNull();
   });
+
+  it("carries only opaque retained-source inventory beside the exact output", () => {
+    const composer = useComposerStore();
+    composer.setRetainedSource({
+      filename: "print.png",
+      origin: { baseUrl: "http://render-box:7680", apiKey: "secret" },
+      inventory: {
+        availability: "available",
+        members: [
+          { member_id: "opaque", role: "source_image", display_name: "source.png", size_bytes: 3 },
+        ],
+      },
+    });
+    expect(composer.retainedSource).toMatchObject({
+      filename: "print.png",
+      inventory: { availability: "available" },
+    });
+    expect(JSON.stringify(composer.retainedSource)).not.toContain("queue-media");
+  });
+
+  it("fences a late retained inventory after a superseding handoff", () => {
+    const composer = useComposerStore();
+    const version = composer.beginRetainedSourceReuse({
+      prompt: "old",
+      model: "flux-dev:q8",
+      seed: null,
+      width: 1024,
+      height: 1024,
+      steps: 4,
+      guidance: 3.5,
+    });
+    composer.set({
+      prompt: "new",
+      model: "flux-dev:q8",
+      seed: null,
+      width: 1024,
+      height: 1024,
+      steps: 4,
+      guidance: 3.5,
+    });
+    expect(
+      composer.setRetainedSourceIfCurrent(version, {
+        filename: "old.png",
+        origin: { baseUrl: "http://old:7680", apiKey: "secret" },
+        inventory: { availability: "available", members: [] },
+      }),
+    ).toBe(false);
+    expect(composer.retainedSource).toBeNull();
+  });
+
+  it("invalidates retained authority on reset or source clear", () => {
+    const composer = useComposerStore();
+    const version = composer.beginRetainedSourceReuse({
+      prompt: "old",
+      model: "flux-dev:q8",
+      seed: null,
+      width: 1024,
+      height: 1024,
+      steps: 4,
+      guidance: 3.5,
+    });
+    composer.invalidateRetainedSource();
+    expect(composer.takePendingRetainedSourceApplyVersion()).toBeNull();
+    expect(
+      composer.setRetainedSourceIfCurrent(version, {
+        filename: "old.png",
+        origin: { baseUrl: "http://old:7680", apiKey: "secret" },
+        inventory: { availability: "available", members: [] },
+      }),
+    ).toBe(false);
+  });
+
+  it("carries a pending authoritative apply marker before slow inventory arrives", () => {
+    const composer = useComposerStore();
+    const version = composer.beginRetainedSourceReuse({
+      prompt: "old",
+      model: "flux-dev:q8",
+      seed: null,
+      width: 1024,
+      height: 1024,
+      steps: 4,
+      guidance: 3.5,
+    });
+
+    expect(composer.takePendingRetainedSourceApplyVersion()).toBe(version);
+    expect(composer.takePendingRetainedSourceApplyVersion()).toBeNull();
+    expect(
+      composer.setRetainedSourceIfCurrent(version, {
+        filename: "old.png",
+        origin: { baseUrl: "http://old:7680", apiKey: "secret" },
+        inventory: { availability: "available", members: [] },
+      }),
+    ).toBe(true);
+  });
 });

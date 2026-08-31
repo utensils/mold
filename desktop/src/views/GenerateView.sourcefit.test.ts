@@ -190,6 +190,110 @@ describe("GenerateView source-fit submit path", () => {
     expect(form.height).toBe(1344);
   });
 
+  it("keeps the new retained authority when Reuse replaces a media-bearing draft", async () => {
+    const form = primeForm();
+    form.identityImage = { filename: "old-face.png", base64: "OLD_FACE" };
+    form.maskImage = "OLD_MASK";
+    form.controlImage = "OLD_CONTROL";
+    form.audioFile = { filename: "old.wav", base64: "OLD_AUDIO" };
+    sourceStashGet.mockResolvedValue("RESTORED");
+    const composer = useComposerStore();
+    const version = composer.beginRetainedSourceReuse({
+      metadata: {
+        prompt: "a camera",
+        model: model.name,
+        seed: 42,
+        steps: 20,
+        guidance: 7,
+        width: 512,
+        height: 512,
+        version: "test",
+        source_image_sha256: "a".repeat(64),
+        source_image_name: "camera.png",
+      } as OutputMetadata,
+    });
+    expect(
+      composer.setRetainedSourceIfCurrent(version, {
+        filename: "print.png",
+        origin: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+        inventory: {
+          availability: "available",
+          members: [
+            {
+              member_id: "source",
+              role: "source_image",
+              display_name: "camera.png",
+              size_bytes: 8,
+            },
+          ],
+        },
+      }),
+    ).toBe(true);
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+
+    expect(form.sourceImage).toBe("RESTORED");
+    expect(composer.retainedSource?.filename).toBe("print.png");
+    expect(composer.isRetainedSourceCurrent(version)).toBe(true);
+  });
+
+  it("keeps slow inventory authoritative after metadata replaces staged media", async () => {
+    const form = primeForm();
+    form.identityImage = { filename: "old-face.png", base64: "OLD_FACE" };
+    form.maskImage = "OLD_MASK";
+    form.controlImage = "OLD_CONTROL";
+    let resolveRestore!: (value: string) => void;
+    sourceStashGet.mockReturnValue(
+      new Promise<string>((resolve) => {
+        resolveRestore = resolve;
+      }),
+    );
+    const composer = useComposerStore();
+    const version = composer.beginRetainedSourceReuse({
+      metadata: {
+        prompt: "a slow camera",
+        model: model.name,
+        seed: 42,
+        steps: 20,
+        guidance: 7,
+        width: 512,
+        height: 512,
+        version: "test",
+        source_image_sha256: "b".repeat(64),
+        source_image_name: "slow.png",
+      } as OutputMetadata,
+    });
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    expect(composer.retainedSource).toBeNull();
+    expect(composer.isRetainedSourceCurrent(version)).toBe(true);
+
+    expect(
+      composer.setRetainedSourceIfCurrent(version, {
+        filename: "slow-print.png",
+        origin: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+        inventory: {
+          availability: "available",
+          members: [
+            {
+              member_id: "source",
+              role: "source_image",
+              display_name: "slow.png",
+              size_bytes: 8,
+            },
+          ],
+        },
+      }),
+    ).toBe(true);
+    resolveRestore("SLOW_RESTORED");
+    await flushPromises();
+
+    expect(composer.retainedSource?.filename).toBe("slow-print.png");
+    expect(form.sourceImage).toBe("SLOW_RESTORED");
+  });
+
   it("preserves a reused Qwen edit's manual canvas while portrait target bytes restore", async () => {
     const qwenEdit = {
       ...model,

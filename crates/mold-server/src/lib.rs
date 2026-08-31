@@ -5,11 +5,13 @@ pub mod catalog_credentials;
 pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
+mod chain_source_media;
 pub(crate) mod dir_sync;
 mod durable_admission_authority;
 mod durable_disposition;
 mod durable_generation_settlement;
 mod gallery_authority;
+mod gallery_source_media;
 #[allow(dead_code)]
 mod h3_admission;
 mod h3_attempt;
@@ -791,6 +793,17 @@ pub async fn run_server(
                 healed_committed_rows = report.healed_committed_rows,
                 "gallery transaction startup recovery complete"
             );
+            if let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() {
+                let pins = lifecycle
+                    .reconcile_gallery_pins(&output_dir, &state.gallery_publication_gate)?;
+                tracing::info!(
+                    retained = pins.retained,
+                    released = pins.released,
+                    release_failures = pins.release_failures,
+                    untouched = pins.untouched,
+                    "gallery retained-media pin reconciliation complete"
+                );
+            }
         }
     }
 

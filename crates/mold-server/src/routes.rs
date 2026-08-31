@@ -271,6 +271,7 @@ use crate::queue::clean_error_message;
         crate::reference_uploads::create_reference_upload_session,
         crate::reference_uploads::upload_reference,
         crate::reference_uploads::cancel_reference_upload_session,
+        crate::gallery_source_media::create_reuse_session,
         expand_prompt,
         remix_prompt,
         list_models,
@@ -305,6 +306,8 @@ use crate::queue::clean_error_message;
         crate::gallery_trash::delete_gallery_files_forever,
         crate::gallery_trash::empty_gallery_trash,
         crate::gallery_trash::sweep_gallery_trash,
+        crate::gallery_source_media::inventory,
+        crate::gallery_source_media::download,
         crate::queue_retention::sweep_held_queue,
         crate::queue_retention::sweep_settled_batches,
         server_status,
@@ -494,6 +497,9 @@ use crate::queue::clean_error_message;
         mold_core::TrashFilenamesRequest,
         mold_core::TrashSweepResult,
         mold_core::EmptyTrashResult,
+        mold_core::RetainedSourceMediaAvailability,
+        mold_core::RetainedSourceMediaMember,
+        mold_core::RetainedSourceMediaInventory,
     )),
     tags(
         (name = "generation", description = "Image generation"),
@@ -623,6 +629,18 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
+        .route(
+            "/api/gallery/source-media/:filename",
+            get(crate::gallery_source_media::inventory),
+        )
+        .route(
+            "/api/gallery/source-media/:filename/:member_id",
+            get(crate::gallery_source_media::download),
+        )
+        .route(
+            "/api/gallery/source-media/:filename/reuse-sessions",
+            post(crate::gallery_source_media::create_reuse_session),
+        )
         .route("/api/gallery/media-token", post(create_gallery_media_token))
         .route("/api/gallery/export-options", get(gallery_export_options))
         .route("/api/gallery/export/:filename", post(export_gallery_video))
@@ -2580,6 +2598,11 @@ pub(crate) fn generation_batch_status(
     path = "/api/generation-batches",
     tag = "generation",
     request_body = mold_core::GenerationBatchAdmissionRequest,
+    params((
+        "X-Mold-Retained-Media-Session" = Option<String>,
+        Header,
+        description = "One-time same-host retained-media authority; valid only for a singleton batch whose child exactly matches the session-bound request"
+    )),
     responses(
         (status = 202, description = "Every child durably admitted", body = mold_core::GenerationBatchStatus),
         (status = 200, description = "Idempotent replay of an admitted batch", body = mold_core::GenerationBatchStatus),
@@ -2592,6 +2615,7 @@ async fn admit_generation_batch(
     State(state): State<AppState>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
+    headers: HeaderMap,
     Json(mut body): Json<mold_core::GenerationBatchAdmissionRequest>,
 ) -> Result<(StatusCode, Json<mold_core::GenerationBatchStatus>), ApiError> {
     // Every conjunct at one evaluation point. This used to be two statements
@@ -2608,18 +2632,6 @@ async fn admit_generation_batch(
         return Err(ApiError::validation(format!(
             "requests must contain 1..={MAX_HETEROGENEOUS_BATCH_OUTPUTS} children"
         )));
-    }
-    if state.queue_journal.durable_media_capabilities().is_none()
-        && body
-            .requests
-            .iter()
-            .any(crate::queue_media_admission::request_requires_encrypted_durable_media)
-    {
-        return Err(ApiError::with_code(
-            "encrypted durable request media is unavailable",
-            "DURABLE_MEDIA_UNAVAILABLE",
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
     }
     // A host can never refuse one route for a reason it accepts on another:
     // maintenance mode (every device disabled) refuses `/api/generate`, so it
@@ -2643,6 +2655,41 @@ async fn admit_generation_batch(
             )),
             None => Err(unavailable),
         };
+    }
+    let retained_reuse = crate::gallery_source_media::validate_reuse_batch_cardinality(
+        &headers,
+        body.requests.len(),
+    )?;
+    if retained_reuse && state.queue_journal.durable_media_capabilities().is_none() {
+        return Err(ApiError::with_code(
+            "encrypted durable request media is unavailable",
+            "DURABLE_MEDIA_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+    if retained_reuse {
+        let request = body.requests.first_mut().expect("length checked above");
+        mold_core::minimax_h3::canonicalize_request_model(request);
+        crate::gallery_source_media::hydrate_reuse_session(
+            &state,
+            authenticated.as_ref(),
+            auth_state.as_ref(),
+            &headers,
+            request,
+        )
+        .await?;
+    }
+    if state.queue_journal.durable_media_capabilities().is_none()
+        && body
+            .requests
+            .iter()
+            .any(crate::queue_media_admission::request_requires_encrypted_durable_media)
+    {
+        return Err(ApiError::with_code(
+            "encrypted durable request media is unavailable",
+            "DURABLE_MEDIA_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
     }
     let admission = state
         .queue_journal
@@ -2983,6 +3030,10 @@ fn canonical_generation_batch_status_ids(
         "X-Mold-Client-Batch-Id" = Option<String>,
         Header,
         description = "Optional caller-chosen UUID used as the durable client_batch_id; a replay answers with the admitted batch status"
+    ), (
+        "X-Mold-Retained-Media-Session" = Option<String>,
+        Header,
+        description = "One-time same-host authority for hydrating selected retained source media into this exact request"
     )),
     responses(
         (status = 200, description = "Generated media bytes with the matching image/video/audio Content-Type. A replayed X-Mold-Client-Batch-Id answers 200 application/json with the admitted GenerationBatchStatus instead; read the Content-Type."),
@@ -3003,6 +3054,14 @@ async fn generate(
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
+    crate::gallery_source_media::hydrate_reuse_session(
+        &state,
+        authenticated.as_ref(),
+        auth_state.as_ref(),
+        &headers,
+        &mut req,
+    )
+    .await?;
     let client_batch_id = direct_client_batch_id(&headers)?;
     validate_direct_generation_request(&req)?;
     let admission = direct_durable_admission(&state, &mut req).await?;
@@ -4076,6 +4135,10 @@ pub(crate) fn requested_sse_completion_payload(
         "X-Mold-Client-Batch-Id" = Option<String>,
         Header,
         description = "Optional caller-chosen UUID used as the durable client_batch_id; a replay answers with the admitted batch status as JSON"
+    ), (
+        "X-Mold-Retained-Media-Session" = Option<String>,
+        Header,
+        description = "One-time same-host authority for hydrating selected retained source media into this exact request"
     )),
     responses(
         (status = 200, description = "SSE event stream with progress and result. A replayed X-Mold-Client-Batch-Id answers 200 application/json with the admitted GenerationBatchStatus instead; read the Content-Type."),
@@ -4093,6 +4156,14 @@ async fn generate_stream(
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
+    crate::gallery_source_media::hydrate_reuse_session(
+        &state,
+        authenticated.as_ref(),
+        auth_state.as_ref(),
+        &headers,
+        &mut req,
+    )
+    .await?;
     let completion_payload = requested_sse_completion_payload(&headers)?;
     let client_batch_id = direct_client_batch_id(&headers)?;
     validate_direct_generation_request(&req)?;
@@ -7784,7 +7855,7 @@ fn gallery_import_too_large(message: impl Into<String>) -> ApiError {
     )
 }
 
-fn validate_gallery_filename(filename: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_gallery_filename(filename: &str) -> Result<(), ApiError> {
     let path = std::path::Path::new(filename);
     if filename.is_empty()
         || filename == "."
@@ -8160,6 +8231,7 @@ async fn import_gallery_file(
     {
         let db_for_trash = db.clone();
         let gate_for_trash = state.gallery_publication_gate.clone();
+        let media_lifecycle = state.queue_journal.queue_media_lifecycle();
         let dir_for_trash = output_dir.clone();
         let name_for_trash = filename.clone();
         let purged = tokio::task::spawn_blocking(move || -> Result<bool, ApiError> {
@@ -8182,6 +8254,7 @@ async fn import_gallery_file(
                 &name_for_trash,
                 db,
                 &gate_for_trash,
+                media_lifecycle.as_deref(),
             )?;
             Ok(true)
         })

@@ -516,6 +516,9 @@ export interface GenerateRequest {
    * Deliberately NOT a composition input: it is never fitted, cropped, or
    * resized against the canvas and carries no `source_fit` provenance. */
   id_image?: string;
+  /** Ordered multi-photo identity form, mutually exclusive with id_image. */
+  id_images?: string[];
+  id_image_names?: string[];
   /** Provenance label for `id_image` — recorded into OutputMetadata (with the
    * digest, never the bytes) so Reuse settings can look the photo back up. */
   id_image_name?: string;

@@ -106,6 +106,23 @@ Gotcha: the tauri dev watcher does not rebuild on `crates/` changes — relaunch
 
 ## Config
 
+## Durable gallery source media
+
+Durable queue uploads do not die with their queue row. Publication first pins
+the encrypted media set under queue-media storage, commits that exact pin into
+the gallery archive authority, projects it into `gallery_media_*`, and only
+then settles the queue row. Restart replay performs the same handoff before it
+recognizes an already-published job as complete. Trash preserves pins;
+permanent deletion removes gallery authority first and releases only that
+print's pins afterward, so sibling outputs remain independent.
+
+`GET /api/gallery/source-media/:filename` and its opaque-member download route
+require API-key authentication. They never expose paths or store identities and
+report explicit `unavailable_auth`, `unavailable_legacy`, and
+`unavailable_missing_or_corrupt` states. A same-host reuse session is one-time,
+short-lived, and bound to the exact target request; cross-host reuse remains a
+client download-and-upload relay.
+
 Two stores, one logical `Config` view:
 
 | Surface                                                              | Owns                                                                                     |

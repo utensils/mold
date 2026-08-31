@@ -812,6 +812,7 @@ mod tests {
                 },
                 record,
                 facts: Some(ArchiveFileFacts::from_path(&media_path).unwrap()),
+                retained_media: Vec::new(),
             },
         );
         let snapshot = AuthoritySnapshot {

@@ -246,6 +246,62 @@ impl GalleryPublicationGate {
         Ok(index)
     }
 
+    pub(crate) fn retained_media_for_item(
+        &self,
+        output_dir: &Path,
+        filename: &str,
+    ) -> anyhow::Result<Option<(ArchivedChildIdentity, Vec<GalleryMediaPin>)>> {
+        let index = self.committed_archive_index(output_dir)?;
+        Ok(index
+            .entries
+            .get(filename)
+            .or_else(|| index.retired_entries.get(filename))
+            .map(|entry| (entry.identity.clone(), entry.retained_media.clone())))
+    }
+
+    /// Resolve retained media only while the exact archived bytes still own
+    /// this filename. Live entries are checked at the live path; retired
+    /// entries are checked in trash. Quarantined names and same-name
+    /// replacements are never allowed to inherit the archived inputs.
+    pub(crate) fn validated_retained_media_for_item(
+        &self,
+        output_dir: &Path,
+        filename: &str,
+    ) -> anyhow::Result<ValidatedRetainedMedia> {
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+        let canonical = bookkeeping.canonical_root();
+        let index = self.committed_archive_index_while_locked(canonical, &bookkeeping)?;
+        if index.quarantined_names.contains(filename) {
+            return Ok(ValidatedRetainedMedia::Invalid);
+        }
+        if let Some(entry) = index.entries.get(filename) {
+            return Ok(
+                if crate::gallery_authority::current_file_matches(canonical, entry)? {
+                    ValidatedRetainedMedia::Present {
+                        identity: entry.identity.clone(),
+                        pins: entry.retained_media.clone(),
+                    }
+                } else {
+                    ValidatedRetainedMedia::Invalid
+                },
+            );
+        }
+        if let Some(entry) = index.retired_entries.get(filename) {
+            let trash_path = gallery_trash_dir(canonical).join(filename);
+            return Ok(
+                if crate::gallery_authority::file_matches_entry_at(&trash_path, entry)? {
+                    ValidatedRetainedMedia::Present {
+                        identity: entry.identity.clone(),
+                        pins: entry.retained_media.clone(),
+                    }
+                } else {
+                    ValidatedRetainedMedia::Invalid
+                },
+            );
+        }
+        Ok(ValidatedRetainedMedia::Missing)
+    }
+
     pub(crate) fn committed_archive_index_while_locked(
         &self,
         output_dir: &Path,
@@ -366,6 +422,7 @@ impl GalleryPublicationGate {
                     facts: Some(ArchiveFileFacts::from_path(
                         &output_dir.join(&child.final_name),
                     )?),
+                    retained_media: Vec::new(),
                 },
             );
         }
@@ -463,6 +520,138 @@ impl GalleryPublicationGate {
         )?;
         self.install_committed_archive_index(canonical_output_dir, generation, index);
         Ok(())
+    }
+
+    /// Advance the retirement checkpoint once more so projection-complete
+    /// entries are removed by `commit_snapshot`, returning exactly the pins
+    /// whose authority disappeared. Callers release these encrypted links
+    /// only after this method succeeds.
+    pub(crate) fn finalize_retained_media_release(
+        &self,
+        output_dir: &Path,
+        filenames: impl IntoIterator<Item = String>,
+    ) -> anyhow::Result<Vec<GalleryMediaPin>> {
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+        let canonical_output_dir = bookkeeping.canonical_root();
+        let mut index =
+            self.committed_archive_index_while_locked(canonical_output_dir, &bookkeeping)?;
+        let names = filenames.into_iter().collect::<BTreeSet<_>>();
+        let exact_names = names
+            .iter()
+            .filter(|name| index.retired_entries.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let pins = names
+            .iter()
+            .filter_map(|name| index.retired_entries.get(name))
+            .flat_map(|entry| entry.retained_media.iter().cloned())
+            .collect::<Vec<_>>();
+        if exact_names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let generation =
+            crate::gallery_authority::read_generation(canonical_output_dir, &bookkeeping)?
+                .context("gallery authority generation is missing")?;
+        let generation = crate::gallery_authority::commit_snapshot(
+            canonical_output_dir,
+            &bookkeeping,
+            generation,
+            &mut index,
+            "release_retained_source_media",
+            exact_names,
+        )?;
+        self.install_committed_archive_index(canonical_output_dir, generation, index);
+        Ok(pins)
+    }
+
+    /// Pin one queue-media bundle to every exact committed output belonging
+    /// to `job_id`, then durably record those bindings in the existing gallery
+    /// authority. The callback creates encrypted store-local links while the
+    /// gallery bookkeeping lock freezes the archive identities. A failed
+    /// authority commit may leave only orphan pins, which startup can safely
+    /// sweep; the reverse (authority without a pin) is never committed here.
+    pub(crate) fn bind_retained_media_for_job(
+        &self,
+        output_dir: &Path,
+        job_id: &str,
+        media_set: &crate::queue_media_store::MediaSetRef,
+        mut pin: impl FnMut(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Vec<(String, GalleryMediaPin)>> {
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+        let canonical_output_dir = bookkeeping.canonical_root();
+        let mut index =
+            self.committed_archive_index_while_locked(canonical_output_dir, &bookkeeping)?;
+        let mut targets = index
+            .entries
+            .iter()
+            .filter(|(filename, entry)| {
+                !index.quarantined_names.contains(*filename)
+                    && entry.record.metadata.job_id.as_deref() == Some(job_id)
+            })
+            .map(|(filename, entry)| (filename.clone(), entry.identity.clone()))
+            .collect::<Vec<_>>();
+        targets.sort_by(|left, right| left.0.cmp(&right.0));
+        ensure!(
+            !targets.is_empty(),
+            "no committed gallery outputs belong to queue job {job_id}"
+        );
+        let mut bindings = Vec::with_capacity(targets.len());
+        for (filename, identity) in &targets {
+            let entry = index
+                .entries
+                .get(filename)
+                .context("committed gallery identity disappeared during source-media handoff")?;
+            ensure!(
+                entry.identity == *identity
+                    && crate::gallery_authority::current_file_matches(canonical_output_dir, entry)?,
+                "gallery output changed during source-media handoff: {filename}"
+            );
+            let pin_id = gallery_media_pin_id(canonical_output_dir, identity)?;
+            pin(&pin_id)?;
+            bindings.push((
+                filename.clone(),
+                GalleryMediaPin {
+                    media_set: media_set.clone(),
+                    pin_id,
+                },
+            ));
+        }
+        let mut changed_names = Vec::new();
+        for ((filename, identity), (_, binding)) in targets.into_iter().zip(bindings.iter()) {
+            let entry = index
+                .entries
+                .get_mut(&filename)
+                .context("committed gallery identity disappeared before binding commit")?;
+            ensure!(
+                entry.identity == identity,
+                "gallery identity changed before binding commit"
+            );
+            if !entry.retained_media.contains(binding) {
+                entry.retained_media.push(binding.clone());
+                entry.retained_media.sort_by(|left, right| {
+                    left.pin_id
+                        .cmp(&right.pin_id)
+                        .then_with(|| left.media_set.set_id.cmp(&right.media_set.set_id))
+                });
+                changed_names.push(filename);
+            }
+        }
+        if changed_names.is_empty() {
+            return Ok(bindings);
+        }
+        let generation =
+            crate::gallery_authority::read_generation(canonical_output_dir, &bookkeeping)?
+                .context("gallery authority generation is missing")?;
+        let generation = crate::gallery_authority::commit_snapshot(
+            canonical_output_dir,
+            &bookkeeping,
+            generation,
+            &mut index,
+            "bind_retained_source_media",
+            changed_names,
+        )?;
+        self.install_committed_archive_index(canonical_output_dir, generation, index);
+        Ok(bindings)
     }
 }
 
@@ -613,6 +802,28 @@ pub(crate) struct CommittedArchiveEntry {
     pub(crate) record: GenerationRecord,
     #[serde(default)]
     pub(crate) facts: Option<ArchiveFileFacts>,
+    /// Opaque encrypted source-media pins retained for this exact published
+    /// archive identity. The committed gallery checkpoint is authority;
+    /// SQLite and the private pin namespace are repairable projections.
+    #[serde(default)]
+    pub(crate) retained_media: Vec<GalleryMediaPin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GalleryMediaPin {
+    pub(crate) media_set: crate::queue_media_store::MediaSetRef,
+    /// Domain-separated digest of the exact archive identity. Gallery
+    /// filenames never enter private queue-media paths.
+    pub(crate) pin_id: String,
+}
+
+pub(crate) enum ValidatedRetainedMedia {
+    Missing,
+    Invalid,
+    Present {
+        identity: ArchivedChildIdentity,
+        pins: Vec<GalleryMediaPin>,
+    },
 }
 
 impl CommittedArchiveEntry {
@@ -2607,6 +2818,30 @@ pub async fn recover_transactions(
     let loaded = crate::gallery_authority::load_or_initialize(output_dir, &bookkeeping, || {
         Ok(archive_index)
     })?;
+    if let Some(db) = db.as_ref() {
+        let canonical = bookkeeping.canonical_root().to_string_lossy().into_owned();
+        let bindings = loaded
+            .index
+            .entries
+            .iter()
+            .chain(loaded.index.retired_entries.iter())
+            .flat_map(|(filename, entry)| {
+                let canonical = canonical.clone();
+                entry.retained_media.iter().map(move |pin| {
+                    mold_db::gallery_media::GalleryMediaBinding {
+                        output_dir: canonical.clone(),
+                        filename: filename.clone(),
+                        pin_id: pin.pin_id.clone(),
+                        media_set_id: pin.media_set.set_id.clone(),
+                        owner_uuid: pin.media_set.owner_id.clone(),
+                        job_id: pin.media_set.job_id.clone(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        mold_db::gallery_media::replace_directory(db, &canonical, &bindings)
+            .context("projecting gallery-retained source media from committed authority")?;
+    }
     gate.install_committed_archive_index(output_dir, loaded.generation, loaded.index);
     drop(bookkeeping);
     gate.acknowledge_retirement_projections(output_dir, retired_names)?;
@@ -4297,6 +4532,47 @@ fn archived_child_identity(
     })
 }
 
+/// Stable cryptographic ownership scope for pins belonging to one canonical
+/// gallery root. The prefix lets startup reconcile only the current root's
+/// pins without treating a previously configured output directory as orphaned.
+pub(crate) fn gallery_media_pin_scope(output_dir: &Path) -> anyhow::Result<String> {
+    let canonical = fs::canonicalize(output_dir).with_context(|| {
+        format!(
+            "failed to canonicalize gallery root {} for retained-media pin",
+            output_dir.display()
+        )
+    })?;
+    let canonical = canonical.to_string_lossy();
+    let mut digest = Sha256::new();
+    digest.update(b"mold.gallery-media-pin-root.v1\0");
+    digest.update((canonical.len() as u64).to_le_bytes());
+    digest.update(canonical.as_bytes());
+    Ok(format!("{:x}", digest.finalize())[..32].to_string())
+}
+
+fn gallery_media_pin_id(
+    output_dir: &Path,
+    identity: &ArchivedChildIdentity,
+) -> anyhow::Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(b"mold.gallery-media-pin.v1\0");
+    digest.update((identity.parent_id.len() as u64).to_le_bytes());
+    digest.update(identity.parent_id.as_bytes());
+    digest.update(identity.attempt_generation.to_le_bytes());
+    digest.update((identity.child_index as u64).to_le_bytes());
+    digest.update((identity.final_name.len() as u64).to_le_bytes());
+    digest.update(identity.final_name.as_bytes());
+    digest.update((identity.checksum_sha256.len() as u64).to_le_bytes());
+    digest.update(identity.checksum_sha256.as_bytes());
+    digest.update(identity.size_bytes.to_le_bytes());
+    let identity_digest = format!("{:x}", digest.finalize());
+    Ok(format!(
+        "{}{}",
+        gallery_media_pin_scope(output_dir)?,
+        &identity_digest[..32]
+    ))
+}
+
 fn deleted_archive_child_digest(identity: &ArchivedChildIdentity) -> String {
     let mut digest = Sha256::new();
     digest.update(b"mold.deleted-archive-child.v1\0");
@@ -4644,6 +4920,7 @@ fn read_committed_archive_catalog(
                                 identity,
                                 record: child.record.clone(),
                                 facts: None,
+                                retained_media: Vec::new(),
                             });
                         continue;
                     }
@@ -4673,6 +4950,7 @@ fn read_committed_archive_catalog(
                         facts: (metadata.is_file() && !metadata.file_type().is_symlink())
                             .then(|| ArchiveFileFacts::from_metadata(&metadata))
                             .transpose()?,
+                        retained_media: Vec::new(),
                     },
                 );
                 if prior.is_some() {
@@ -5022,6 +5300,7 @@ pub(crate) fn restore_trashed_archive_filename(
             identity: entry.identity,
             record: entry.record,
             facts: Some(ArchiveFileFacts::from_path(trash_path)?),
+            retained_media: entry.retained_media,
         },
     );
     let next_generation = crate::gallery_authority::commit_snapshot(
@@ -8301,6 +8580,117 @@ mod tests {
         assert!(changed.index.get("second.png").is_some());
     }
 
+    #[tokio::test]
+    async fn retained_media_binding_is_exact_per_archive_identity_and_restart_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = GalleryPublicationGate::default();
+        for (index, name) in ["first.png", "second.png"].into_iter().enumerate() {
+            let mut saved = record(name, index as u64);
+            saved.metadata.job_id = Some("durable-job".into());
+            let parent_id = format!("parent-{index}");
+            let mut transaction = GalleryImportTransaction::begin(
+                dir.path(),
+                &parent_id,
+                0,
+                serde_json::json!({"kind": "retained-media-test"}),
+                saved,
+            )
+            .unwrap();
+            transaction.stage_bytes(name.as_bytes()).unwrap();
+            transaction.mark_prepared().unwrap();
+            transaction.commit(&gate, Arc::new(None)).await.unwrap();
+        }
+        let media_set = crate::queue_media_store::MediaSetRef {
+            owner_id: "owner".into(),
+            job_id: "durable-job".into(),
+            set_id: "source-set".into(),
+        };
+        let mut pinned = Vec::new();
+        let bindings = gate
+            .bind_retained_media_for_job(dir.path(), "durable-job", &media_set, |pin| {
+                pinned.push(pin.to_owned());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(pinned.len(), 2);
+        assert_ne!(bindings[0].1.pin_id, bindings[1].1.pin_id);
+        let pin_scope = gallery_media_pin_scope(dir.path()).unwrap();
+        assert!(bindings
+            .iter()
+            .all(|(_, binding)| binding.pin_id.starts_with(&pin_scope)));
+
+        let restarted = GalleryPublicationGate::default();
+        for (filename, binding) in bindings {
+            assert_eq!(
+                restarted
+                    .retained_media_for_item(dir.path(), &filename)
+                    .unwrap()
+                    .unwrap()
+                    .1,
+                vec![binding]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn finalizing_a_legacy_retirement_advances_authority_without_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        publish_import(dir.path(), "legacy-parent", "legacy.png", 0, b"legacy").await;
+        let gate = GalleryPublicationGate::default();
+        assert_eq!(
+            tombstone_committed_archive_filename(dir.path(), "legacy.png", &gate).unwrap(),
+            ArchiveDeleteDisposition::SafeToUnlink
+        );
+        gate.acknowledge_retirement_projections(dir.path(), ["legacy.png".to_owned()])
+            .unwrap();
+        assert!(gate
+            .finalize_retained_media_release(dir.path(), ["legacy.png".to_owned()])
+            .unwrap()
+            .is_empty());
+        let index = GalleryPublicationGate::default()
+            .committed_archive_index(dir.path())
+            .unwrap();
+        assert!(!index.retired_entries.contains_key("legacy.png"));
+        assert!(!index.retired_names.contains("legacy.png"));
+    }
+
+    #[tokio::test]
+    async fn retained_media_lookup_requires_the_exact_live_or_trashed_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        publish_import(dir.path(), "lookup-parent", "lookup.png", 0, b"original").await;
+        let gate = GalleryPublicationGate::default();
+        assert!(matches!(
+            gate.validated_retained_media_for_item(dir.path(), "lookup.png")
+                .unwrap(),
+            ValidatedRetainedMedia::Present { .. }
+        ));
+
+        fs::write(dir.path().join("lookup.png"), b"replacement").unwrap();
+        assert!(matches!(
+            gate.validated_retained_media_for_item(dir.path(), "lookup.png")
+                .unwrap(),
+            ValidatedRetainedMedia::Invalid
+        ));
+
+        fs::write(dir.path().join("lookup.png"), b"original").unwrap();
+        assert_eq!(
+            trash_committed_archive_filename(dir.path(), "lookup.png", &gate).unwrap(),
+            TrashArchiveDisposition::Moved
+        );
+        assert!(matches!(
+            gate.validated_retained_media_for_item(dir.path(), "lookup.png")
+                .unwrap(),
+            ValidatedRetainedMedia::Present { .. }
+        ));
+        fs::write(gallery_trash_dir(dir.path()).join("lookup.png"), b"damaged").unwrap();
+        assert!(matches!(
+            gate.validated_retained_media_for_item(dir.path(), "lookup.png")
+                .unwrap(),
+            ValidatedRetainedMedia::Invalid
+        ));
+    }
+
     #[test]
     fn deleting_one_of_ten_thousand_authority_entries_hashes_no_unrelated_media() {
         let dir = tempfile::tempdir().unwrap();
@@ -8335,6 +8725,7 @@ mod tests {
                     },
                     record: saved,
                     facts: Some(ArchiveFileFacts::from_path(&path).unwrap()),
+                    retained_media: Vec::new(),
                 },
             );
         }

@@ -388,6 +388,9 @@ export interface GenerateRequestWire {
    * identity-qualified checkpoint, and never beside a LoRA or `source_image`;
    * every rule lives in `@studio/lib/identityConditioning`. */
   id_image?: string | null;
+  /** Ordered multi-photo identity form, mutually exclusive with id_image. */
+  id_images?: string[] | null;
+  id_image_names?: string[] | null;
   /** Upload label recorded as provenance only when `id_image` exists. */
   id_image_name?: string | null;
   /** `0.0..=3.0`; omit to let the server's own default (1.0) apply. */

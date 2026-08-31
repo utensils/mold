@@ -95,6 +95,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   "append-word": [word: string];
   "canvas-intent": [intent: CanvasIntent];
+  "reset-settings": [];
   /** The picker's "Not installed" row: offer the pull for this exact id. */
   "pull-missing-model": [model: string];
 }>();
@@ -648,6 +649,7 @@ function setFileUnder(next: FileUnderState) {
 // model, and retained prepared work survive; changing Batch makes that work
 // explicitly stale instead of silently discarding it.
 function resetSettings() {
+  emit("reset-settings");
   resetFormToModelDefaults(props.form, selectedModel.value);
   // The canvas is part of what Reset restores, so its authority resets with
   // it — otherwise the next model change would re-snap the reset canvas back
