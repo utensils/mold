@@ -1790,7 +1790,7 @@ impl QueueMediaStore {
             .join(format!("{}.partial", random_hex(16)?));
         ensure_private_dir(&partial)?;
         let mut staging = PlaintextStagingGuard::new(partial);
-        let decoded = self.decode_v2_from_path(media_set, &path, Some(staging.path()), true)?;
+        let decoded = self.decode_v2_from_path(media_set, path, Some(staging.path()), true)?;
         crate::dir_sync::sync_directory(staging.path())?;
         let partial = staging.path().to_path_buf();
         let ready = partial.with_extension("ready");
