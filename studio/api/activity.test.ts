@@ -21,6 +21,23 @@ describe("activeWorkPhaseLabel", () => {
     ).toBe("Encoding video");
   });
 
+  it("keeps the host's current and total progress in the shared activity label", () => {
+    expect(
+      activeWorkPhaseLabel({
+        id: "generation-1",
+        kind: "generation",
+        phase: "running",
+        model: "minimax-h3-fl2va:comfy-pruned-int8",
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        current: 17,
+        total: 20,
+        stage: "Streaming MiniMax H3 transformer blocks",
+        can_cancel: true,
+      }),
+    ).toBe("Streaming MiniMax H3 transformer blocks · 17/20");
+  });
+
   it("names the component while preparation is still active", () => {
     expect(
       activeWorkPhaseLabel({

@@ -287,8 +287,11 @@ pushed screen opened from the header.
   pending scan before another scan can begin. Host detail shows telemetry, models-disk usage, queue,
   downloads, loaded models, and installed models (all using catalog display
   names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
-  unload, open-in-Models, and forget actions. Queue rows are swipe-to-act
-  (`studio/components/SwipeActionRow.vue`, gesture math in
+  unload, open-in-Models, and forget actions. Queue rows render through the
+  same `MobileGenerationQueueCard` used by Create, so
+  prompt/model/host hierarchy, long-stage wrapping, and live `current/total`
+  progress stay visually and semantically identical on both tabs. They are
+  swipe-to-act (`studio/components/SwipeActionRow.vue`, gesture math in
   `studio/lib/swipeAction.ts`): a right-to-left swipe reveals a 44pt tray, and
   from that revealed tray a tap or a second full swipe past 60% of the row
   commits **Cancel**, which reaches queued rows always and running singletons
