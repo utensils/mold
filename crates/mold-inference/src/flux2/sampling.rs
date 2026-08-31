@@ -41,9 +41,7 @@ impl Flux2State {
         let dev = img.device();
         let (img, img_ids) = pack_image_tokens(img, 0)?;
 
-        // Text tokens
-        let txt = txt_emb.repeat(bs)?;
-        let txt_ids = Tensor::zeros((bs, txt.dim(1)?, 4), candle_core::DType::F32, dev)?;
+        let (txt, txt_ids) = text_conditioning(txt_emb, bs, dev)?;
 
         // FLUX.2 has no pooled text vector — use a zero vector.
         // The transformer's vector_in is None so this won't be used,
@@ -58,6 +56,28 @@ impl Flux2State {
             vec,
         })
     }
+}
+
+/// Batch one encoder output into transformer text tokens and their (all-zero)
+/// four-axis position ids.
+///
+/// A classifier-free-guided render needs exactly this pair for its negative
+/// prompt and nothing else — no second latent, no second id grid, since both
+/// branches denoise the SAME image tokens. Building it through `Flux2State`
+/// instead would demand the rank-4 latent the positive state was already
+/// built from, which by then has been packed to rank 3.
+pub fn text_conditioning(
+    txt_emb: &Tensor,
+    batch_size: usize,
+    device: &candle_core::Device,
+) -> Result<(Tensor, Tensor)> {
+    let txt = txt_emb.repeat(batch_size)?;
+    let txt_ids = Tensor::zeros(
+        (batch_size, txt.dim(1)?, 4),
+        candle_core::DType::F32,
+        device,
+    )?;
+    Ok((txt, txt_ids))
 }
 
 /// Patchify one FLUX.2 VAE latent and create its four-axis position IDs.
@@ -168,7 +188,7 @@ pub fn unpack(xs: &Tensor, height: usize, width: usize) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device};
+    use candle_core::{DType, Device, IndexOp};
 
     #[test]
     fn schedule_endpoints() {
@@ -231,6 +251,29 @@ mod tests {
         assert_eq!(state.img_ids.dims(), &[1, 64 * 64, 4]); // 4D IDs
         assert_eq!(state.txt.dims(), &[1, 50, 7680]);
         assert_eq!(state.txt_ids.dims(), &[1, 50, 4]);
+    }
+
+    /// The unconditional branch is built AFTER the positive state, when the
+    /// only latent in scope is the packed rank-3 one. Building it through
+    /// `Flux2State::new` would demand the rank-4 latent that no longer exists
+    /// there and fail every CFG render with "unexpected rank, expected: 4".
+    #[test]
+    fn negative_conditioning_matches_the_positive_state_without_a_latent() {
+        let dev = Device::Cpu;
+        let txt = Tensor::randn(0f32, 1., (1, 50, 7680), &dev).unwrap();
+        let img = Tensor::randn(0f32, 1., (1, 32, 128, 128), &dev).unwrap();
+        let state = Flux2State::new(&txt, &img).unwrap();
+
+        let negative = Tensor::randn(0f32, 1., (1, 50, 7680), &dev).unwrap();
+        let (neg_txt, neg_txt_ids) =
+            text_conditioning(&negative, state.img.dim(0).unwrap(), state.img.device()).unwrap();
+
+        assert_eq!(neg_txt.dims(), state.txt.dims());
+        assert_eq!(neg_txt_ids.dims(), state.txt_ids.dims());
+        // And it is the NEGATIVE embedding, not a second copy of the positive.
+        let neg_first = neg_txt.i((0, 0, 0)).unwrap().to_scalar::<f32>().unwrap();
+        let expected = negative.i((0, 0, 0)).unwrap().to_scalar::<f32>().unwrap();
+        assert_eq!(neg_first, expected);
     }
 
     #[test]

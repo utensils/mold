@@ -412,6 +412,9 @@ pub(crate) struct QuantizedFlux2Transformer {
     img_in: Linear,
     txt_in: Linear,
     time_in: MlpEmbedder,
+    /// Present only for guidance-distilled checkpoints (`cfg.guidance_embed`),
+    /// i.e. FLUX.2 [dev]. Klein GGUFs ship no `guidance_in.*` tensors at all.
+    guidance_in: Option<MlpEmbedder>,
     pe_embedder: EmbedNd,
     double_mod_img: Modulation2,
     double_mod_txt: Modulation2,
@@ -429,6 +432,14 @@ impl QuantizedFlux2Transformer {
         let img_in = quantized_nn::linear_no_bias(cfg.in_channels, h_sz, vb.pp("img_in"))?;
         let txt_in = quantized_nn::linear_no_bias(cfg.context_in_dim, h_sz, vb.pp("txt_in"))?;
         let time_in = MlpEmbedder::new(256, h_sz, &vb, "time_in")?;
+        // `comfy/ldm/flux/model.py:93` builds `guidance_in` only when
+        // `params.guidance_embed`; a distilled Klein GGUF has no such tensors,
+        // so the load must stay optional rather than fail looking for them.
+        let guidance_in = if cfg.guidance_embed {
+            Some(MlpEmbedder::new(256, h_sz, &vb, "guidance_in")?)
+        } else {
+            None
+        };
 
         let double_mod_img = Modulation2::new(h_sz, &vb, "double_stream_modulation_img")?;
         let double_mod_txt = Modulation2::new(h_sz, &vb, "double_stream_modulation_txt")?;
@@ -461,6 +472,7 @@ impl QuantizedFlux2Transformer {
             img_in,
             txt_in,
             time_in,
+            guidance_in,
             pe_embedder,
             double_mod_img,
             double_mod_txt,
@@ -480,7 +492,7 @@ impl QuantizedFlux2Transformer {
         txt_ids: &Tensor,
         timesteps: &Tensor,
         _y: &Tensor,
-        _guidance: Option<&Tensor>,
+        guidance: Option<&Tensor>,
     ) -> Result<Tensor> {
         if txt.rank() != 3 || img.rank() != 3 {
             anyhow::bail!("expected rank 3, got txt={} img={}", txt.rank(), img.rank())
@@ -500,9 +512,17 @@ impl QuantizedFlux2Transformer {
         };
         let mut txt = linear_nan_safe(&self.txt_in, txt)?;
         let mut img = linear_nan_safe(&self.img_in, img)?;
-        let vec_ = self
+        let mut vec_ = self
             .time_in
             .forward(&timestep_embedding(timesteps, 256, DType::F32)?)?;
+        // `comfy/ldm/flux/model.py:171-173`:
+        //   vec = vec + guidance_in(timestep_embedding(guidance, 256))
+        // FLUX.2 [dev] is guidance-distilled, so dropping this term leaves the
+        // conditioning vector at its unguided value and the render collapses.
+        if let (Some(g_in), Some(guidance)) = (self.guidance_in.as_ref(), guidance) {
+            let guidance = guidance.to_device(img.device())?.to_dtype(DType::F32)?;
+            vec_ = (vec_ + g_in.forward(&timestep_embedding(&guidance, 256, DType::F32)?)?)?;
+        }
 
         let (img_mod1, img_mod2) = self.double_mod_img.forward(&vec_)?;
         let (txt_mod1, txt_mod2) = self.double_mod_txt.forward(&vec_)?;
@@ -525,10 +545,275 @@ impl QuantizedFlux2Transformer {
     }
 }
 
+/// Tiny synthetic Flux.2 transformers for unit tests. Shared with
+/// `super::transformer`'s tests, which exercise the denoise loop (and its
+/// classifier-free-guidance branch) over one of these.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+    use candle_core::Device;
+
+    /// A Flux.2 config small enough to instantiate on CPU in a unit test while
+    /// keeping every shape relationship the loader depends on (head_dim ==
+    /// sum(axes_dim), mlp_ratio, fused QKV widths).
+    pub(crate) fn tiny_cfg(guidance_embed: bool) -> Flux2Config {
+        Flux2Config {
+            in_channels: 4,
+            vec_in_dim: 0,
+            context_in_dim: 6,
+            hidden_size: 8,
+            mlp_ratio: 3.0,
+            num_heads: 1,
+            depth: 1,
+            depth_single_blocks: 1,
+            axes_dim: vec![2, 2, 2, 2],
+            theta: 2000,
+            guidance_embed,
+        }
+    }
+
+    /// Deterministic non-degenerate weights: a constant tensor would make every
+    /// output row identical and hide a dropped conditioning term.
+    pub(crate) fn spread(shape: (usize, usize), salt: f32) -> Tensor {
+        let (rows, cols) = shape;
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i as f32 * 0.37 + salt).sin()) * 0.1)
+            .collect();
+        Tensor::from_vec(data, (rows, cols), &Device::Cpu).expect("weight")
+    }
+
+    /// Every tensor `QuantizedFlux2Transformer::new` looks up for `cfg`, in the
+    /// BFL-native GGUF naming unsloth/city96 publish.
+    pub(crate) fn tiny_gguf_tensors(cfg: &Flux2Config) -> Vec<(String, Tensor)> {
+        let h = cfg.hidden_size;
+        let mlp = (h as f64 * cfg.mlp_ratio) as usize;
+        let head_dim = h / cfg.num_heads;
+        let mut t: Vec<(String, Tensor)> = vec![
+            ("img_in.weight".into(), spread((h, cfg.in_channels), 0.1)),
+            ("txt_in.weight".into(), spread((h, cfg.context_in_dim), 0.2)),
+            ("time_in.in_layer.weight".into(), spread((h, 256), 0.3)),
+            ("time_in.out_layer.weight".into(), spread((h, h), 0.4)),
+            (
+                "double_stream_modulation_img.lin.weight".into(),
+                spread((6 * h, h), 0.5),
+            ),
+            (
+                "double_stream_modulation_txt.lin.weight".into(),
+                spread((6 * h, h), 0.6),
+            ),
+            (
+                "single_stream_modulation.lin.weight".into(),
+                spread((3 * h, h), 0.7),
+            ),
+            (
+                "final_layer.linear.weight".into(),
+                spread((cfg.in_channels, h), 0.8),
+            ),
+            (
+                "final_layer.adaLN_modulation.1.weight".into(),
+                spread((2 * h, h), 0.9),
+            ),
+        ];
+        if cfg.guidance_embed {
+            t.push(("guidance_in.in_layer.weight".into(), spread((h, 256), 1.1)));
+            t.push(("guidance_in.out_layer.weight".into(), spread((h, h), 1.2)));
+        }
+        for i in 0..cfg.depth {
+            for side in ["img", "txt"] {
+                t.push((
+                    format!("double_blocks.{i}.{side}_attn.qkv.weight"),
+                    spread((3 * h, h), 1.3),
+                ));
+                t.push((
+                    format!("double_blocks.{i}.{side}_attn.proj.weight"),
+                    spread((h, h), 1.4),
+                ));
+                t.push((
+                    format!("double_blocks.{i}.{side}_attn.norm.query_norm.scale"),
+                    spread((1, head_dim), 1.5).flatten_all().unwrap(),
+                ));
+                t.push((
+                    format!("double_blocks.{i}.{side}_attn.norm.key_norm.scale"),
+                    spread((1, head_dim), 1.6).flatten_all().unwrap(),
+                ));
+                t.push((
+                    format!("double_blocks.{i}.{side}_mlp.0.weight"),
+                    spread((2 * mlp, h), 1.7),
+                ));
+                t.push((
+                    format!("double_blocks.{i}.{side}_mlp.2.weight"),
+                    spread((h, mlp), 1.8),
+                ));
+            }
+        }
+        for i in 0..cfg.depth_single_blocks {
+            t.push((
+                format!("single_blocks.{i}.linear1.weight"),
+                spread((3 * h + 2 * mlp, h), 2.1),
+            ));
+            t.push((
+                format!("single_blocks.{i}.linear2.weight"),
+                spread((h, h + mlp), 2.2),
+            ));
+            t.push((
+                format!("single_blocks.{i}.norm.query_norm.scale"),
+                spread((1, head_dim), 2.3).flatten_all().unwrap(),
+            ));
+            t.push((
+                format!("single_blocks.{i}.norm.key_norm.scale"),
+                spread((1, head_dim), 2.4).flatten_all().unwrap(),
+            ));
+        }
+        t
+    }
+
+    pub(crate) fn tiny_transformer(cfg: &Flux2Config) -> QuantizedFlux2Transformer {
+        tiny_transformer_with(cfg, |_, tensor| tensor)
+    }
+
+    /// As `tiny_transformer`, with each tensor passed through `edit` first —
+    /// used to zero one sub-module and hold the rest fixed.
+    pub(crate) fn tiny_transformer_with(
+        cfg: &Flux2Config,
+        edit: impl Fn(&str, Tensor) -> Tensor,
+    ) -> QuantizedFlux2Transformer {
+        let tensors: Vec<(String, Tensor)> = tiny_gguf_tensors(cfg)
+            .into_iter()
+            .map(|(name, tensor)| {
+                let edited = edit(&name, tensor);
+                (name, edited)
+            })
+            .collect();
+        let quantized: Vec<(String, QTensor)> = tensors
+            .into_iter()
+            .map(|(name, tensor)| {
+                (
+                    name,
+                    QTensor::quantize(&tensor, GgmlDType::F32).expect("quantize"),
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, &QTensor)> = quantized
+            .iter()
+            .map(|(name, q)| (name.as_str(), q))
+            .collect();
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        gguf_file::write(&mut buffer, &[], &refs).expect("write gguf");
+        let vb = VarBuilder::from_gguf_buffer(&buffer.into_inner(), &Device::Cpu)
+            .expect("load test gguf");
+        QuantizedFlux2Transformer::new(cfg, vb, &Device::Cpu).expect("build transformer")
+    }
+
+    /// Run one forward with the tiny model at the given guidance value.
+    pub(crate) fn tiny_forward(
+        model: &QuantizedFlux2Transformer,
+        guidance: Option<f32>,
+    ) -> Vec<f32> {
+        let device = Device::Cpu;
+        let img = spread((3, 4), 3.1).reshape((1, 3, 4)).unwrap();
+        let txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
+        let img_ids = Tensor::zeros((1, 3, 4), DType::F32, &device).unwrap();
+        let txt_ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        let timesteps = Tensor::full(0.5f32, 1, &device).unwrap();
+        let y = Tensor::zeros((1, 1), DType::F32, &device).unwrap();
+        let guidance = guidance.map(|g| Tensor::full(g, 1, &device).unwrap());
+        model
+            .forward(
+                &img,
+                &img_ids,
+                &txt,
+                &txt_ids,
+                &timesteps,
+                &y,
+                guidance.as_ref(),
+            )
+            .expect("forward")
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
-    use candle_core::Device;
+    use candle_core::{DType, Device, Tensor};
+
+    /// FLUX.2 [dev] is guidance-distilled: `comfy/ldm/flux/model.py:171-173`
+    /// adds `guidance_in(timestep_embedding(guidance))` into the conditioning
+    /// vector. A GGUF dev checkpoint that ignored the term would denoise as if
+    /// every request asked for the same guidance.
+    #[test]
+    fn guidance_distilled_gguf_conditions_on_the_requested_guidance() {
+        let cfg = tiny_cfg(true);
+        let model = tiny_transformer(&cfg);
+
+        let low = tiny_forward(&model, Some(1.0));
+        let high = tiny_forward(&model, Some(7.0));
+
+        assert_eq!(low.len(), high.len());
+        assert!(
+            low.iter().all(|v| v.is_finite()) && high.iter().all(|v| v.is_finite()),
+            "guided forward must stay finite"
+        );
+        assert!(
+            low.iter().zip(&high).any(|(a, b)| (a - b).abs() > 1e-6),
+            "guidance 1.0 and 7.0 produced identical predictions — guidance_in is not wired in"
+        );
+    }
+
+    /// The guidance term is ADDED to the conditioning vector
+    /// (`comfy/ldm/flux/model.py:173`: `vec = vec + guidance_in(...)`), so an
+    /// all-zero `guidance_in` must leave the render exactly where the
+    /// unguided one is. A composition that replaced `vec` instead of adding
+    /// to it, or that fed the raw scale in place of its timestep embedding,
+    /// would move the output here while still "responding to guidance".
+    #[test]
+    fn a_zero_guidance_embedder_leaves_the_conditioning_vector_untouched() {
+        let cfg = tiny_cfg(true);
+        let zeroed = tiny_transformer_with(&cfg, |name, tensor| {
+            if name.starts_with("guidance_in.") {
+                Tensor::zeros(tensor.shape(), DType::F32, &Device::Cpu).expect("zeros")
+            } else {
+                tensor
+            }
+        });
+        let distilled = tiny_transformer(&tiny_cfg(false));
+
+        let guided = tiny_forward(&zeroed, Some(7.0));
+        let unguided = tiny_forward(&zeroed, None);
+        assert_eq!(
+            guided, unguided,
+            "a zero guidance embedder must contribute nothing"
+        );
+        // And it lands where the checkpoint with no guidance embedder at all
+        // does — the term is the only difference between the two.
+        let baseline = tiny_forward(&distilled, None);
+        assert_eq!(guided.len(), baseline.len());
+        for (a, b) in guided.iter().zip(&baseline) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+    }
+
+    /// A distilled Klein GGUF ships no `guidance_in.*` tensors at all, so the
+    /// loader must not look for them and the request's guidance value must not
+    /// reach the conditioning vector.
+    #[test]
+    fn distilled_gguf_loads_without_guidance_tensors_and_ignores_guidance() {
+        let cfg = tiny_cfg(false);
+        let model = tiny_transformer(&cfg);
+
+        let none = tiny_forward(&model, None);
+        let seven = tiny_forward(&model, Some(7.0));
+
+        assert_eq!(
+            none, seven,
+            "distilled Klein must ignore the guidance value"
+        );
+    }
 
     /// Verify that QLastLayer::forward uses BFL ordering (shift, scale) not diffusers (scale, shift).
     ///

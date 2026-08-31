@@ -2838,6 +2838,28 @@ pub fn is_flux2_dev_model(model: &str) -> bool {
     model.contains("flux2-dev") || model.contains("flux.2-dev")
 }
 
+/// Whether a stable name or catalog ID denotes an UNDISTILLED FLUX.2 [klein]
+/// base checkpoint.
+///
+/// The base checkpoints are architecturally identical to the distilled Klein
+/// tiers — `transformer/config.json` is byte-for-byte the same, down to
+/// `guidance_embeds: false` — so nothing in the weights or the header tells
+/// them apart. What differs is how they are sampled: BFL trained them without
+/// step or guidance distillation, so they take ~50 steps and REAL
+/// classifier-free guidance, exactly as `diffusers`'
+/// `pipeline_flux2_klein.py:593` decides
+/// (`guidance_scale > 1 and not self.config.is_distilled`).
+///
+/// This name test is therefore the only authority for "sample this with an
+/// unconditional branch", and every layer that advertises or executes CFG for
+/// Flux.2 reads it. A base fine-tune published under an opaque catalog ID is
+/// sampled as distilled — the conservative direction: one forward per step
+/// and a guidance value the checkpoint ignores.
+pub fn is_flux2_base_model(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("klein-base") || model.contains("klein_base")
+}
+
 /// Validate an upscale request. Returns `Ok(())` if valid, or an error message.
 pub fn validate_upscale_request(req: &UpscaleRequest) -> Result<(), String> {
     if req.model.trim().is_empty() {

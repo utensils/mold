@@ -212,11 +212,11 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ## `flux2`
 
-### `flux2-dev:bf16`
+### Profile `flux2.flux2-dev`
 
 Schema 1 · hash `1a1cbe1158572d5c70fb6b1987da74d2712fd45ad05324910085eeb799430ad9` · default recipe `default`
 
-Models: `flux2-dev:bf16`.
+Models: `flux2-dev:bf16`, `flux2-dev:fp8`, `flux2-dev:q4`, `flux2-dev:q6`, `flux2-dev:q8`.
 
 #### Default (`default`)
 
@@ -256,11 +256,99 @@ Models: `flux2-klein-9b:bf16`, `flux2-klein-9b:q4`, `flux2-klein-9b:q6`, `flux2-
 
 Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
+### `flux2-klein-9b:fp8`
+
+Schema 1 · hash `5fbf4c29c6d745731fcb652dc2769676979db230c264607db076e6c64d8e94da` · default recipe `default`
+
+Models: `flux2-klein-9b:fp8`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `1024x1024`, 4 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `1:1` | `768x768` (recommended), `1024x1024` (recommended) |
+| `4:3` | `1024x768` (recommended) |
+| `3:4` | `768x1024` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### Profile `flux2.flux2-klein-base-9b`
+
+Schema 1 · hash `447408ad73bad3b4d002731ed959a2af8e44c4f859bdd738fa6f50340dcca92c` · default recipe `default`
+
+Models: `flux2-klein-base-9b:bf16`, `flux2-klein-base-9b:q4`, `flux2-klein-base-9b:q6`, `flux2-klein-base-9b:q8`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `1024x1024`, 50 steps, guidance 4.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `1:1` | `768x768` (recommended), `1024x1024` (recommended) |
+| `4:3` | `1024x768` (recommended) |
+| `3:4` | `768x1024` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### Profile `flux2.flux2-klein-base`
+
+Schema 1 · hash `bdfcd214d482133bbdd79d407cfcd9398c591fabcc0639cdacc2aba306145703` · default recipe `default`
+
+Models: `flux2-klein-base:bf16`, `flux2-klein-base:q4`, `flux2-klein-base:q6`, `flux2-klein-base:q8`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `1024x1024`, 50 steps, guidance 4.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `1:1` | `768x768` (recommended), `1024x1024` (recommended) |
+| `4:3` | `1024x768` (recommended) |
+| `3:4` | `768x1024` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ### Profile `flux2.flux2-klein`
 
 Schema 1 · hash `788239ff1efaa4e554592d55b54c7f498c1aee8e1b7828470c9daabf42992447` · default recipe `default`
 
 Models: `flux2-klein:bf16`, `flux2-klein:q4`, `flux2-klein:q6`, `flux2-klein:q8`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `1024x1024`, 4 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `1:1` | `768x768` (recommended), `1024x1024` (recommended) |
+| `4:3` | `1024x768` (recommended) |
+| `3:4` | `768x1024` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### `flux2-klein:fp8`
+
+Schema 1 · hash `4a250e165459c6937ae23c773f4d9e4f3d29d9f4c0ecab50b22f61d693e2bc2a` · default recipe `default`
+
+Models: `flux2-klein:fp8`.
 
 #### Default (`default`)
 

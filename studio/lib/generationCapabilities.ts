@@ -237,6 +237,7 @@ const WAN_DISTILL_TIER = /a14b[:-]q[45]$/;
  * re-round it to three mantissa bits. The bf16 and GGUF tiers keep adapters.
  */
 const WAN_FP8_TIER = /a14b[:-]fp8$/;
+const FLUX2_FP8_TIER = /[:-]fp8$/;
 
 export const MAX_LORA_STACK = 4;
 
@@ -341,7 +342,9 @@ export function baseGenerationCapabilities(
       (profileCaps
         ? profileControlVisible(profileCaps.negative_prompt.mode)
         : advertisedDefault?.supports_negative_prompt) ??
-      (!NO_NEGATIVE_PROMPT_FAMILIES.has(normalized) && !fixedGuidance),
+      ((!NO_NEGATIVE_PROMPT_FAMILIES.has(normalized) ||
+        isFlux2BaseModel(model)) &&
+        !fixedGuidance),
     guidanceAdjustable: !fixedGuidance,
     fixedGuidance: fixedGuidance
       ? h3
@@ -371,6 +374,12 @@ export function baseGenerationCapabilities(
         // so offering the control would advertise a load that always fails.
         // Mirrors `WanTransformer::from_safetensors_with_loras`.
         !(wan && WAN_FP8_TIER.test(normalizedModel)) &&
+        // Flux.2's FP8 tiers refuse adapters for the same reason: the merge
+        // widens the patched weight and drops its `weight_scale`.
+        // Mirrors `Flux2Engine::load_transformer`.
+        !(
+          normalized.startsWith("flux2") && FLUX2_FP8_TIER.test(normalizedModel)
+        ) &&
         (LORA_CAPABLE_FAMILIES as readonly string[]).includes(normalized),
     maxLoraStack: profileCaps?.lora.max_count ?? MAX_LORA_STACK,
     supportsControlNet: profileCaps
@@ -438,6 +447,20 @@ export function isWanFamily(family: string): boolean {
 
 export function isQwenImageEditFamily(family: string): boolean {
   return family === "qwen-image-edit";
+}
+
+/**
+ * Whether a model is an UNDISTILLED FLUX.2 [klein] base checkpoint.
+ *
+ * These are the one Flux.2 tier trained without guidance distillation, so
+ * they sample with a real unconditional branch and can therefore use a
+ * negative prompt. Mirrors `mold_core::validation::is_flux2_base_model`; the
+ * host advertises the same answer through the generation profile, and this is
+ * the fallback for a host that advertises nothing.
+ */
+export function isFlux2BaseModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  return normalized.includes("klein-base") || normalized.includes("klein_base");
 }
 
 export function isFlux2DevModel(model: string): boolean {

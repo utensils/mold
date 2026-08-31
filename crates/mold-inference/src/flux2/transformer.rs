@@ -172,7 +172,16 @@ impl Flux2Linear {
 
         let weight = vb.get((out_dim, in_dim), "weight")?;
         if weight.dtype() == DType::F8E4M3 {
-            let scale = vb.get_unchecked("scale_weight").ok();
+            // Every producer writes the scale as F32 (BFL's `weight_scale`,
+            // ComfyUI's `scale_weight` — the single-file backend normalizes
+            // the spelling), so asking for F32 is the identity cast on every
+            // shipped checkpoint and keeps the stored value intact through
+            // load. `forward` still multiplies in the working dtype, like
+            // every other weight in the block.
+            let scale = vb
+                .get_unchecked_dtype("scale_weight", DType::F32)
+                .or_else(|_| vb.get_unchecked("scale_weight"))
+                .ok();
             let bias = if has_bias {
                 vb.get_unchecked("bias").ok()
             } else {
@@ -248,7 +257,12 @@ fn flux2_linear_bytes(linear: &Flux2Linear) -> usize {
             scale,
             bias,
         } => {
-            tensor_bytes(weight)
+            // The FP8 slab is 1 byte per parameter at rest, but `forward`
+            // materializes a full working-dtype copy of it on every call, and
+            // this figure drives the block-offload residency plan. Charging
+            // the at-rest bytes would let the planner keep twice as many
+            // blocks resident as the forward actually fits.
+            tensor_bytes(weight) * (DType::BF16.size_in_bytes() / DType::F8E4M3.size_in_bytes())
                 + scale.as_ref().map(tensor_bytes).unwrap_or(0)
                 + bias.as_ref().map(tensor_bytes).unwrap_or(0)
         }
@@ -285,10 +299,16 @@ impl Module for Flux2Linear {
                 bias,
             } => {
                 let dtype = x.dtype();
+                // A per-tensor scale is linear in the matmul, so it rides on
+                // the OUTPUT — which is orders of magnitude smaller than the
+                // weight — instead of costing a second full-size pass over the
+                // dequantized slab. Mirrors the Qwen-Image FP8 rule. Anything
+                // with per-row structure still scales the weight.
+                let scalar_scale = scale.as_ref().filter(|s| s.rank() == 0);
                 let w = weight.to_dtype(dtype)?;
                 let w = match scale {
-                    Some(s) => w.broadcast_mul(&s.to_dtype(dtype)?)?,
-                    None => w,
+                    Some(s) if scalar_scale.is_none() => w.broadcast_mul(&s.to_dtype(dtype)?)?,
+                    _ => w,
                 };
                 let w = w.t()?;
                 let out = match *x.dims() {
@@ -303,6 +323,10 @@ impl Module for Flux2Linear {
                             .reshape((bsize, m, ()))?
                     }
                     _ => x.matmul(&w)?,
+                };
+                let out = match scalar_scale {
+                    Some(s) => out.broadcast_mul(&s.to_dtype(dtype)?)?,
+                    None => out,
                 };
                 match bias {
                     Some(b) => out.broadcast_add(&b.to_dtype(dtype)?),
@@ -1487,6 +1511,22 @@ pub(crate) enum Flux2TransformerWrapper {
     Quantized(super::quantized_transformer::QuantizedFlux2Transformer),
 }
 
+/// The unconditional branch of a classifier-free-guided FLUX.2 render.
+///
+/// Only the undistilled [klein] base checkpoints use one: they carry no
+/// guidance embedding, so `guidance` can only reach the render as a real CFG
+/// scale over a second forward. `diffusers`'
+/// `pipeline_flux2_klein.py:747-753,862-875` is the contract — the negative
+/// prompt defaults to `""`, both branches see the identical latent and ids,
+/// and the combination is `neg + scale * (pos - neg)`.
+pub(crate) struct Flux2CfgBranch<'a> {
+    /// `guidance_scale`; the branch is constructed only when it exceeds 1.
+    pub scale: f64,
+    /// The negative prompt's encoder hidden states.
+    pub txt: &'a Tensor,
+    pub txt_ids: &'a Tensor,
+}
+
 impl Flux2TransformerWrapper {
     #[allow(clippy::too_many_arguments)]
     pub fn denoise(
@@ -1502,6 +1542,7 @@ impl Flux2TransformerWrapper {
         progress: &crate::progress::ProgressReporter,
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
         preview: Option<&crate::latent_preview::LatentPreviewer>,
+        cfg: Option<&Flux2CfgBranch<'_>>,
     ) -> anyhow::Result<Tensor> {
         use crate::progress::ProgressEvent;
         use std::time::Instant;
@@ -1530,34 +1571,35 @@ impl Flux2TransformerWrapper {
             } else {
                 (img.clone(), img_ids.clone())
             };
-            let pred = match self {
-                Self::BF16(m) => m.forward(
-                    &model_img,
-                    &model_img_ids,
-                    txt,
-                    txt_ids,
-                    &t_vec,
-                    vec_,
-                    Some(&guidance_tensor),
-                )?,
-                Self::Offloaded(m) => m.forward(
-                    &model_img,
-                    &model_img_ids,
-                    txt,
-                    txt_ids,
-                    &t_vec,
-                    vec_,
-                    Some(&guidance_tensor),
-                )?,
-                Self::Quantized(m) => m.forward(
-                    &model_img,
-                    &model_img_ids,
-                    txt,
-                    txt_ids,
-                    &t_vec,
-                    vec_,
-                    Some(&guidance_tensor),
-                )?,
+            let pred = self.forward_once(
+                &model_img,
+                &model_img_ids,
+                txt,
+                txt_ids,
+                &t_vec,
+                vec_,
+                &guidance_tensor,
+            )?;
+            // The unconditional branch. `None` leaves `pred` exactly what the
+            // single-forward path produced — the same conditioning, the same
+            // call — so a distilled render is byte-identical to one made
+            // before this branch existed.
+            let pred = match cfg {
+                Some(branch) => {
+                    let neg = self.forward_once(
+                        &model_img,
+                        &model_img_ids,
+                        branch.txt,
+                        branch.txt_ids,
+                        &t_vec,
+                        vec_,
+                        &guidance_tensor,
+                    )?;
+                    // `pipeline_flux2_klein.py:875`:
+                    // `noise_pred = neg + guidance_scale * (noise_pred - neg)`
+                    (&neg + ((&pred - &neg)? * branch.scale)?)?
+                }
+                None => pred,
             };
             let pred = pred.narrow(1, 0, img.dim(1)?)?;
             img = (img + &pred * (t_prev - t_curr))?;
@@ -1589,11 +1631,171 @@ impl Flux2TransformerWrapper {
         progress.checkpoint()?;
         Ok(img)
     }
+
+    /// One transformer forward, routed to whichever of the three arms this is.
+    ///
+    /// Extracted so the conditional pass and the CFG unconditional pass are
+    /// the SAME call rather than two hand-kept copies of a three-arm match:
+    /// the two must differ only in their text conditioning.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_once(
+        &self,
+        img: &Tensor,
+        img_ids: &Tensor,
+        txt: &Tensor,
+        txt_ids: &Tensor,
+        t_vec: &Tensor,
+        vec_: &Tensor,
+        guidance: &Tensor,
+    ) -> anyhow::Result<Tensor> {
+        let pred = match self {
+            Self::BF16(m) => m.forward(img, img_ids, txt, txt_ids, t_vec, vec_, Some(guidance))?,
+            Self::Offloaded(m) => {
+                m.forward(img, img_ids, txt, txt_ids, t_vec, vec_, Some(guidance))?
+            }
+            Self::Quantized(m) => {
+                m.forward(img, img_ids, txt, txt_ids, t_vec, vec_, Some(guidance))?
+            }
+        };
+        Ok(pred)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Denoise the tiny synthetic transformer for one step, optionally with an
+    /// unconditional branch. Returns the resulting latent as f32.
+    fn denoise_once(
+        wrapper: &Flux2TransformerWrapper,
+        guidance: f64,
+        cfg: Option<(&Tensor, &Tensor, f64)>,
+    ) -> Vec<f32> {
+        use crate::flux2::quantized_transformer::test_support::spread;
+        let device = candle_core::Device::Cpu;
+        let txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
+        let txt_ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        denoise_once_with_text(wrapper, guidance, &txt, &txt_ids, cfg)
+    }
+
+    /// As `denoise_once`, with the positive conditioning supplied.
+    fn denoise_once_with_text(
+        wrapper: &Flux2TransformerWrapper,
+        guidance: f64,
+        txt: &Tensor,
+        txt_ids: &Tensor,
+        cfg: Option<(&Tensor, &Tensor, f64)>,
+    ) -> Vec<f32> {
+        use crate::flux2::quantized_transformer::test_support::spread;
+        let device = candle_core::Device::Cpu;
+        let img = spread((3, 4), 3.1).reshape((1, 3, 4)).unwrap();
+        let img_ids = Tensor::zeros((1, 3, 4), DType::F32, &device).unwrap();
+        let vec_ = Tensor::zeros((1, 1), DType::F32, &device).unwrap();
+        let branch = cfg.map(|(txt, txt_ids, scale)| Flux2CfgBranch {
+            scale,
+            txt,
+            txt_ids,
+        });
+        let progress = crate::progress::ProgressReporter::default();
+        wrapper
+            .denoise(
+                &img,
+                &img_ids,
+                None,
+                txt,
+                txt_ids,
+                &vec_,
+                &[1.0, 0.0],
+                guidance,
+                &progress,
+                None,
+                None,
+                branch.as_ref(),
+            )
+            .expect("denoise")
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+    }
+
+    /// A render that asks for no unconditional branch must take exactly the
+    /// path it took before the branch existed — same conditioning, same single
+    /// forward. Pinned by construction: `forward_once` is the only caller.
+    #[test]
+    fn a_render_without_a_cfg_branch_is_unchanged_by_a_scale_of_one() {
+        use crate::flux2::quantized_transformer::test_support::{
+            spread, tiny_cfg, tiny_transformer,
+        };
+        let cfg = tiny_cfg(false);
+        let wrapper = Flux2TransformerWrapper::Quantized(tiny_transformer(&cfg));
+        let device = candle_core::Device::Cpu;
+
+        let plain = denoise_once(&wrapper, 1.0, None);
+        // The SAME conditioning on both branches at scale 1.0:
+        // neg + 1.0 * (pos - neg) == pos.
+        let txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
+        let txt_ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        let inert = denoise_once(&wrapper, 1.0, Some((&txt, &txt_ids, 1.0)));
+
+        assert_eq!(plain.len(), inert.len());
+        for (a, b) in plain.iter().zip(&inert) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+    }
+
+    /// The combination is `neg + scale * (pos - neg)`
+    /// (`pipeline_flux2_klein.py:875`), and this pins it exactly rather than
+    /// settling for "the render changed". Over one step the update is
+    /// `img - pred`, so a conditional-only run, an unconditional-only run and
+    /// a guided run are related by that same lerp — with the sign inverted,
+    /// or the branches swapped, the identity fails.
+    #[test]
+    fn the_cfg_combination_is_the_upstream_lerp_between_the_two_branches() {
+        use crate::flux2::quantized_transformer::test_support::{
+            spread, tiny_cfg, tiny_transformer,
+        };
+        let cfg = tiny_cfg(false);
+        let wrapper = Flux2TransformerWrapper::Quantized(tiny_transformer(&cfg));
+        let device = candle_core::Device::Cpu;
+        // The positive conditioning `denoise_once` uses, and a different
+        // negative one.
+        let pos_txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
+        let neg_txt = spread((2, 6), 4.9).reshape((1, 2, 6)).unwrap();
+        let ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+
+        let scale = 3.0_f32;
+        // Conditional only, unconditional only, and the guided render.
+        let conditional = denoise_once(&wrapper, 1.0, None);
+        let unconditional = denoise_once_with_text(&wrapper, 1.0, &neg_txt, &ids, None);
+        let guided = denoise_once(&wrapper, 1.0, Some((&neg_txt, &ids, scale as f64)));
+
+        assert!(
+            conditional
+                .iter()
+                .zip(&unconditional)
+                .any(|(a, b)| (a - b).abs() > 1e-5),
+            "the two conditionings must actually differ, or the identity is vacuous"
+        );
+        for ((got, uncond), cond) in guided.iter().zip(&unconditional).zip(&conditional) {
+            let want = uncond + scale * (cond - uncond);
+            assert!(
+                (got - want).abs() < 1e-3,
+                "guided {got} != neg + {scale} * (pos - neg) = {want}",
+            );
+        }
+        // And the positive conditioning is the one that was guided toward,
+        // not the negative: this is what an accidental swap breaks.
+        assert!(pos_txt
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .zip(neg_txt.flatten_all().unwrap().to_vec1::<f32>().unwrap())
+            .any(|(a, b)| (a - b).abs() > 1e-6),);
+    }
 
     #[test]
     fn klein_config_dimensions() {
@@ -1754,6 +1956,82 @@ mod tests {
         let v: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
         for x in &v {
             assert!((x - 8.0).abs() < 1e-3, "got {x}, want 8.0");
+        }
+    }
+
+    /// BFL's own FP8 conversions store `weight / weight_scale` and ship the
+    /// scale beside it. Ignoring it does not blur the render, it destroys it:
+    /// a scale of 0.002 makes every weight ~500x too large.
+    #[test]
+    fn flux2_linear_fp8_applies_a_scalar_dequantization_scale() {
+        let dev = candle_core::Device::Cpu;
+        let weight = Tensor::from_vec(vec![2.0f32; 8], (2, 4), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let scale = Tensor::new(0.25f32, &dev).unwrap();
+        assert_eq!(scale.rank(), 0, "per-tensor scale is a scalar");
+        let lin = Flux2Linear::Fp8 {
+            weight,
+            scale: Some(scale),
+            bias: None,
+        };
+        let x = Tensor::from_vec(vec![1.0f32; 4], (1, 4), &dev).unwrap();
+        let v: Vec<f32> = lin
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        // 4 inputs x (2.0 * 0.25) = 2.0 per output row.
+        for got in &v {
+            assert!((got - 2.0).abs() < 1e-3, "got {got}, want 2.0");
+        }
+    }
+
+    /// The scalar scale rides on the output for cost, so it must still agree
+    /// with the weight-side arithmetic a per-row scale takes.
+    #[test]
+    fn flux2_linear_fp8_scalar_and_per_row_scales_agree() {
+        let dev = candle_core::Device::Cpu;
+        let raw: Vec<f32> = (0..8).map(|i| (i as f32 + 1.0) * 0.5).collect();
+        let weight = Tensor::from_vec(raw, (2, 4), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 4), &dev).unwrap();
+
+        let scalar = Flux2Linear::Fp8 {
+            weight: weight.clone(),
+            scale: Some(Tensor::new(0.5f32, &dev).unwrap()),
+            bias: None,
+        };
+        // The same 0.5, expressed per output row — this takes the weight-side
+        // branch instead.
+        let per_row = Flux2Linear::Fp8 {
+            weight,
+            scale: Some(Tensor::from_vec(vec![0.5f32; 2], (2, 1), &dev).unwrap()),
+            bias: None,
+        };
+
+        let a: Vec<f32> = scalar
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let b: Vec<f32> = per_row
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(a.len(), b.len());
+        for (got, want) in a.iter().zip(&b) {
+            assert!((got - want).abs() < 1e-3, "got {got}, want {want}");
         }
     }
 

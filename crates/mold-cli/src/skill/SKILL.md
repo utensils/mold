@@ -734,7 +734,9 @@ Pick the right model for the task:
 | `flux-dev:q4`                       | Slow (25 steps)   | Excellent | Final quality, detailed                                 |
 | `flux2-klein:q8`                    | Fast (4 steps)    | Good      | Low VRAM, lightweight FLUX                              |
 | `flux2-klein-9b:q8`                 | Fast (4 steps)    | Excellent | Higher quality 9B, non-commercial                       |
+| `flux2-dev:q4`                      | Slow (50 steps)   | Excellent | Full FLUX.2 Dev on a 24 GB GPU; ungated                 |
 | `flux2-dev:bf16`                    | Slow (50 steps)   | Excellent | Full FLUX.2 Dev; gated, non-commercial, high host RAM   |
+| `flux2-klein-base:q8`               | Slow (50 steps)   | Excellent | Undistilled 4B; true CFG + negative prompt, Apache 2.0  |
 | `sdxl-turbo:fp16`                   | Fast (4 steps)    | Good      | Quick SDXL generation                                   |
 | `sd15:fp16`                         | Medium (25 steps) | Good      | ControlNet, 512x512                                     |
 | `z-image-turbo:q8`                  | Fast (9 steps)    | Excellent | High quality, Qwen3 encoder                             |
@@ -789,11 +791,13 @@ Default model if none specified: `flux2-klein:q8`
 
 **Z-Image**: `z-image-turbo:bf16`, `z-image-turbo:q8`, `z-image-turbo:q6`, `z-image-turbo:q4`
 
-**Flux.2 Klein**: `flux2-klein:bf16`, `flux2-klein:q8`, `flux2-klein:q6`, `flux2-klein:q4`
+**Flux.2 Klein**: `flux2-klein:bf16`, `flux2-klein:fp8`, `flux2-klein:q8`, `flux2-klein:q6`, `flux2-klein:q4`
 
-**Flux.2 Klein-9B**: `flux2-klein-9b:bf16`, `flux2-klein-9b:q8`, `flux2-klein-9b:q6`, `flux2-klein-9b:q4`
+**Flux.2 Klein-9B**: `flux2-klein-9b:bf16`, `flux2-klein-9b:fp8`, `flux2-klein-9b:q8`, `flux2-klein-9b:q6`, `flux2-klein-9b:q4`
 
-**Flux.2 Dev**: `flux2-dev:bf16` (gated, non-commercial; 50 steps, guidance 4.0; automatically block-offloads on constrained CUDA GPUs)
+**Flux.2 Klein Base** (undistilled): `flux2-klein-base:{bf16,q8,q6,q4}`, `flux2-klein-base-9b:{bf16,q8,q6,q4}` — 50 steps at guidance 4.0, and the ONLY Flux.2 tier that uses a negative prompt: guidance above 1.0 runs a real unconditional branch, so a render costs two forwards per step. `--guidance 1` skips the branch. They reuse the distilled tiers' encoder and VAE bytes.
+
+**Flux.2 Dev**: `flux2-dev:bf16` (gated, non-commercial) plus the ungated quantized tiers `flux2-dev:q8`, `flux2-dev:q6`, `flux2-dev:q4`, `flux2-dev:fp8` — same 50 steps at guidance 4.0, same streamed Mistral3 encoder, and no license acceptance because their transformers and runtime assets come from ungated mirrors. The bare name `flux2-dev` still means `:bf16`; name a tag for the others. Only the safetensors tiers (`bf16`, `fp8`) block-offload on constrained CUDA GPUs — a GGUF tier stays fully resident, so budget its transformer size in VRAM (35/27/20 GB for q8/q6/q4). Every dev tier also pulls ~36 GB of shared encoder and VAE, once.
 
 **Wuerstchen**: `wuerstchen-v2:fp16`
 

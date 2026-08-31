@@ -315,6 +315,56 @@ impl Flux2Engine {
             .is_ok_and(|config| config.hidden_size == 6144)
     }
 
+    /// The negative prompt this render's unconditional branch encodes, or
+    /// `None` when the render runs one forward per step.
+    ///
+    /// `diffusers`' `pipeline_flux2_klein.py:593` is the condition —
+    /// `guidance_scale > 1 and not self.config.is_distilled` — and `:748` is
+    /// the default: an undistilled base render with no negative prompt uses
+    /// `""`, not "no branch". Distilled Klein and guidance-embedded Dev never
+    /// reach here, so their loop is unchanged.
+    fn cfg_branch_prompt(&self, req: &GenerateRequest) -> Option<String> {
+        if !mold_core::validation::is_flux2_base_model(&self.base.model_name) {
+            return None;
+        }
+        if req.guidance <= 1.0 {
+            return None;
+        }
+        Some(req.negative_prompt.clone().unwrap_or_default())
+    }
+
+    /// The prompts this render must encode: the positive one, plus the
+    /// unconditional branch's when there is one.
+    fn prompts_to_encode<'a>(
+        &self,
+        req: &'a GenerateRequest,
+        cfg_prompt: Option<&'a str>,
+    ) -> Vec<&'a str> {
+        match cfg_prompt {
+            Some(negative) => vec![req.prompt.as_str(), negative],
+            None => vec![req.prompt.as_str()],
+        }
+    }
+
+    /// Every prompt's conditioning, or `None` if any of them still needs the
+    /// encoder. Checked as a set so a two-prompt CFG render loads the encoder
+    /// once for whichever half missed.
+    fn restore_cached_prompts(
+        prompt_cache: &Mutex<LruCache<String, CachedTensor>>,
+        prompts: &[&str],
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Option<Vec<Tensor>>> {
+        let mut hits = Vec::with_capacity(prompts.len());
+        for prompt in prompts {
+            match restore_cached_tensor(prompt_cache, &prompt_text_key(prompt), device, dtype)? {
+                Some(tensor) => hits.push(tensor),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(hits))
+    }
+
     fn block_offload_enabled(&self) -> bool {
         self.offload
     }
@@ -549,6 +599,21 @@ impl Flux2Engine {
                     &self.base.paths.transformer,
                     cfg,
                 )?;
+            // An FP8-scaled checkpoint stores `weight / weight_scale` and the
+            // scale beside it, and only `Flux2Linear`'s FP8 arm applies it.
+            // A LoRA merge widens the weight it patches to the working dtype,
+            // so a patched layer would reach that constructor as BF16, take
+            // the arm with no scale, and come out ~500x hot while every
+            // untouched layer stayed correct. Refuse, exactly as Wan's
+            // fp8-scaled tier does, rather than render the mixture.
+            if backend.is_fp8_scaled() && has_lora {
+                anyhow::bail!(
+                    "{} is fp8-scaled, and mold merges LoRAs into bf16 and GGUF checkpoints \
+                     only — an fp8 merge would drop the per-tensor dequantization scale on \
+                     every layer the adapter touches. Use a bf16 or GGUF tier for adapters.",
+                    self.base.paths.transformer.display()
+                );
+            }
             let backend: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(backend);
             if self.block_offload_enabled() && !has_lora && !is_nvfp4 {
                 let flux_vb = candle_nn::VarBuilder::from_backend(backend, gpu_dtype, Device::Cpu);
@@ -851,6 +916,13 @@ impl Flux2Engine {
         Ok(stacked)
     }
 
+    /// Encode one prompt through the cache.
+    ///
+    /// `phase` is `true` only for the render's PRIMARY prompt. A true-CFG
+    /// render encodes two, and `ProgressPhase::PromptEncode` names a phase of
+    /// the render rather than a call — `phase_done` is a plain emit, so
+    /// reporting it per prompt would publish the phase twice on one stream.
+    /// The unconditional branch still reports its own stage line.
     fn encode_prompt_cached(
         progress: &ProgressReporter,
         prompt_cache: &Mutex<LruCache<String, CachedTensor>>,
@@ -858,7 +930,13 @@ impl Flux2Engine {
         prompt: &str,
         target_device: &Device,
         target_dtype: DType,
+        phase: bool,
     ) -> Result<Tensor> {
+        let label = if phase {
+            "Encoding prompt (Qwen3)"
+        } else {
+            "Encoding negative prompt (Qwen3)"
+        };
         let cache_key = prompt_text_key(prompt);
         let (txt_emb, cache_hit) = get_or_insert_cached_tensor(
             prompt_cache,
@@ -866,14 +944,18 @@ impl Flux2Engine {
             target_device,
             target_dtype,
             || {
-                progress.stage_start("Encoding prompt (Qwen3)");
+                progress.stage_start(label);
                 let encode_start = Instant::now();
                 let txt_emb = Self::encode_and_stack(encoder, prompt, target_device, target_dtype)?;
-                progress.phase_done(
-                    crate::ProgressPhase::PromptEncode,
-                    "Encoding prompt (Qwen3)",
-                    encode_start.elapsed(),
-                );
+                if phase {
+                    progress.phase_done(
+                        crate::ProgressPhase::PromptEncode,
+                        label,
+                        encode_start.elapsed(),
+                    );
+                } else {
+                    progress.stage_done(label, encode_start.elapsed());
+                }
                 Ok(txt_emb)
             },
         )?;
@@ -1093,12 +1175,15 @@ impl Flux2Engine {
         // --- Phase 1: text encoding ---
         // Check prompt cache first — skip encoder load entirely on cache hit.
         // This saves ~1-5s per batch image (encoder load + VRAM allocation).
-        let cache_key = prompt_text_key(&req.prompt);
-        let txt_emb = if let Some(tensor) =
-            restore_cached_tensor(&self.prompt_cache, &cache_key, &device, gpu_dtype)?
+        // A true-CFG render encodes two prompts, so both are asked for as a
+        // set: one encoder load serves whichever half missed.
+        let cfg_prompt = self.cfg_branch_prompt(req);
+        let prompts = self.prompts_to_encode(req, cfg_prompt.as_deref());
+        let embeddings = if let Some(hits) =
+            Self::restore_cached_prompts(&self.prompt_cache, &prompts, &device, gpu_dtype)?
         {
             self.base.progress.cache_hit("prompt conditioning");
-            tensor
+            hits
         } else {
             if self.is_dev() {
                 if self
@@ -1149,18 +1234,27 @@ impl Flux2Engine {
                     .progress
                     .stage_start("Encoding prompt (streamed Mistral3)");
                 let encode_start = Instant::now();
-                let (txt_emb, _) = encoder.encode(&req.prompt, &device, gpu_dtype)?;
+                // Dev is guidance-distilled, so `prompts` is always the single
+                // positive prompt here — the loop is over one element.
+                let mut encoded = Vec::with_capacity(prompts.len());
+                for prompt in &prompts {
+                    let (txt_emb, _) = encoder.encode(prompt, &device, gpu_dtype)?;
+                    let cached = CachedTensor::from_tensor(&txt_emb)?;
+                    self.prompt_cache
+                        .lock()
+                        .unwrap()
+                        .insert(prompt_text_key(prompt), cached);
+                    encoded.push(txt_emb);
+                }
                 self.base.progress.phase_done(
                     crate::ProgressPhase::PromptEncode,
                     "Encoding prompt (streamed Mistral3)",
                     encode_start.elapsed(),
                 );
-                let cached = CachedTensor::from_tensor(&txt_emb)?;
-                self.prompt_cache.lock().unwrap().insert(cache_key, cached);
                 drop(encoder);
                 encoder_device.synchronize()?;
                 self.base.progress.info("Freed streamed Mistral3 encoder");
-                txt_emb
+                encoded
             } else {
                 // Reserve-adjusted reading drives the Qwen3 variant selection.
                 let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
@@ -1243,23 +1337,32 @@ impl Flux2Engine {
                     .progress
                     .stage_done(&enc_stage_label, enc_stage.elapsed());
 
-                let txt_emb = Self::encode_prompt_cached(
-                    &self.base.progress,
-                    &self.prompt_cache,
-                    &mut text_encoder,
-                    &req.prompt,
-                    &device,
-                    gpu_dtype,
-                )?;
+                let mut encoded = Vec::with_capacity(prompts.len());
+                for (index, prompt) in prompts.iter().enumerate() {
+                    encoded.push(Self::encode_prompt_cached(
+                        &self.base.progress,
+                        &self.prompt_cache,
+                        &mut text_encoder,
+                        prompt,
+                        &device,
+                        gpu_dtype,
+                        index == 0,
+                    )?);
+                }
 
                 // Drop text encoder to free memory
                 drop(text_encoder);
                 self.base.progress.info("Freed Qwen3 encoder");
                 tracing::info!("Qwen3 encoder dropped (sequential mode)");
 
-                txt_emb
+                encoded
             }
         };
+        let mut embeddings = embeddings.into_iter();
+        let txt_emb = embeddings
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("prompt conditioning missing"))?;
+        let neg_emb = embeddings.next();
 
         let latent_h = height.div_ceil(8);
         let latent_w = width.div_ceil(8);
@@ -1443,6 +1546,27 @@ impl Flux2Engine {
         let denoise_start = Instant::now();
 
         let previewer = crate::latent_preview::LatentPreviewer::flux2(height, width);
+        // Both branches denoise the SAME image tokens, so the unconditional
+        // branch needs only its own text conditioning — batched to match the
+        // positive one, which `state.img` has already been packed into.
+        let neg_conditioning = neg_emb
+            .as_ref()
+            .map(|emb| sampling::text_conditioning(emb, state.img.dim(0)?, state.img.device()))
+            .transpose()?;
+        let cfg_branch =
+            neg_conditioning
+                .as_ref()
+                .map(|(txt, txt_ids)| super::transformer::Flux2CfgBranch {
+                    scale: req.guidance,
+                    txt,
+                    txt_ids,
+                });
+        if cfg_branch.is_some() {
+            self.base.progress.info(&format!(
+                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} (two forwards per step)",
+                req.guidance
+            ));
+        }
         let img = transformer.denoise(
             &state.img,
             &state.img_ids,
@@ -1455,6 +1579,7 @@ impl Flux2Engine {
             &self.base.progress,
             inpaint_ctx.as_ref(),
             Some(&previewer),
+            cfg_branch.as_ref(),
         )?;
 
         let img = sampling::unpack(&img, height, width)?;
@@ -1612,20 +1737,24 @@ impl Flux2Engine {
             "starting Flux.2 generation"
         );
 
-        // 1. Encode prompt with Qwen3 (check cache first to avoid unnecessary reload)
-        let txt_emb = {
+        // 1. Encode prompt with Qwen3 (check cache first to avoid unnecessary
+        //    reload). An undistilled base render also encodes its
+        //    unconditional branch here, while the encoder is up.
+        let cfg_prompt = self.cfg_branch_prompt(req);
+        let prompts = self.prompts_to_encode(req, cfg_prompt.as_deref());
+        let embeddings = {
+            let prompt_cache = &self.prompt_cache;
             let progress = &self.base.progress;
             let loaded = self
                 .base
                 .loaded
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("model not loaded — call load() first"))?;
-            let cache_key = prompt_text_key(&req.prompt);
-            if let Some(tensor) =
-                restore_cached_tensor(&self.prompt_cache, &cache_key, &loaded.device, loaded.dtype)?
+            if let Some(hits) =
+                Self::restore_cached_prompts(prompt_cache, &prompts, &loaded.device, loaded.dtype)?
             {
                 progress.cache_hit("prompt conditioning");
-                tensor
+                hits
             } else {
                 // Cache miss — restore encoder if it was dropped or parked after
                 // a previous generation.
@@ -1645,14 +1774,18 @@ impl Flux2Engine {
                     progress.stage_done(label, reload_start.elapsed());
                 }
 
-                let txt_emb = Self::encode_prompt_cached(
-                    progress,
-                    &self.prompt_cache,
-                    &mut loaded.text_encoder,
-                    &req.prompt,
-                    &loaded.device,
-                    loaded.dtype,
-                )?;
+                let mut encoded = Vec::with_capacity(prompts.len());
+                for (index, prompt) in prompts.iter().enumerate() {
+                    encoded.push(Self::encode_prompt_cached(
+                        progress,
+                        prompt_cache,
+                        &mut loaded.text_encoder,
+                        prompt,
+                        &loaded.device,
+                        loaded.dtype,
+                        index == 0,
+                    )?);
+                }
                 tracing::info!("Qwen3 encoding complete");
 
                 // Free GPU VRAM for denoising. With `MOLD_KEEP_TE_RAM=1` and the
@@ -1678,9 +1811,14 @@ impl Flux2Engine {
                     }
                 }
 
-                txt_emb
+                encoded
             }
         };
+        let mut embeddings = embeddings.into_iter();
+        let txt_emb = embeddings
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("prompt conditioning missing"))?;
+        let neg_emb = embeddings.next();
 
         self.reload_transformer_if_needed()?;
 
@@ -1777,6 +1915,27 @@ impl Flux2Engine {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("transformer not loaded"))?;
         let previewer = crate::latent_preview::LatentPreviewer::flux2(height, width);
+        // Both branches denoise the SAME image tokens, so the unconditional
+        // branch needs only its own text conditioning — batched to match the
+        // positive one, which `state.img` has already been packed into.
+        let neg_conditioning = neg_emb
+            .as_ref()
+            .map(|emb| sampling::text_conditioning(emb, state.img.dim(0)?, state.img.device()))
+            .transpose()?;
+        let cfg_branch =
+            neg_conditioning
+                .as_ref()
+                .map(|(txt, txt_ids)| super::transformer::Flux2CfgBranch {
+                    scale: req.guidance,
+                    txt,
+                    txt_ids,
+                });
+        if cfg_branch.is_some() {
+            progress.info(&format!(
+                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} (two forwards per step)",
+                req.guidance
+            ));
+        }
         let img = transformer.denoise(
             &state.img,
             &state.img_ids,
@@ -1789,6 +1948,7 @@ impl Flux2Engine {
             progress,
             inpaint_ctx.as_ref(),
             Some(&previewer),
+            cfg_branch.as_ref(),
         )?;
 
         // 6. Unpack latent to spatial

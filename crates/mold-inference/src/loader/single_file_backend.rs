@@ -190,6 +190,13 @@ pub struct SingleFileBackend {
     st: MmapedSafetensors,
     /// `diffusers_key → projection rule into the mmap'd source tensors`.
     entries: BTreeMap<String, BackendEntry>,
+    /// Hand `F8_E4M3` weights back at their on-disk dtype instead of casting
+    /// them to the VarBuilder's dtype. Set only for FP8-scaled Flux.2
+    /// checkpoints, whose `Flux2Linear::new` selects its FP8 arm by inspecting
+    /// `weight.dtype()` — a cast here would silently take the BF16 arm, which
+    /// applies no `scale_weight` and renders noise. Every other consumer keeps
+    /// the historical casting behaviour.
+    preserve_fp8: bool,
 }
 
 impl SingleFileBackend {
@@ -204,7 +211,37 @@ impl SingleFileBackend {
         })?;
         let st = unsafe { MmapedSafetensors::new(checkpoint) }
             .with_context(|| format!("mmap single-file checkpoint at {}", checkpoint.display()))?;
-        Ok(Self { st, entries })
+        Ok(Self {
+            st,
+            entries,
+            preserve_fp8: false,
+        })
+    }
+
+    /// Whether this checkpoint carries FP8 weights with per-tensor
+    /// dequantization scales, which the consumer must apply itself.
+    ///
+    /// A LoRA merge cannot: `Flux2LoraBackend` widens whatever it is handed to
+    /// F32, adds the delta, and returns the working dtype, so a patched layer
+    /// would reach `Flux2Linear::new` as BF16, take the arm that never looks
+    /// for a scale, and lose it — while the layers no adapter touched keep
+    /// theirs. Callers ask this and refuse the combination.
+    pub fn is_fp8_scaled(&self) -> bool {
+        self.preserve_fp8
+    }
+
+    /// Cast a looked-up tensor to the VarBuilder's dtype, except for the FP8
+    /// weights of an FP8-scaled checkpoint, which are handed back at their
+    /// on-disk dtype so `Flux2Linear::new` can recognize and dequantize them
+    /// with their `scale_weight`.
+    fn cast(&self, t: Tensor, dtype: DType) -> candle_core::Result<Tensor> {
+        if t.dtype() == dtype {
+            return Ok(t);
+        }
+        if self.preserve_fp8 && matches!(t.dtype(), DType::F8E4M3) {
+            return Ok(t);
+        }
+        t.to_dtype(dtype)
     }
 
     /// Direct-only entries from a `BTreeMap<diffusers, a1111>` slice — used by
@@ -427,8 +464,26 @@ impl SingleFileBackend {
             )
         })?;
 
-        let entries = build_flux2_entries(cfg, prefix, quant, &nvfp4_bases, rms_suffix);
-        Self::from_entries(checkpoint, entries)
+        // FP8-scaled layers are orthogonal to NVFP4 and just as mixed: BFL's
+        // klein FP8 quantizes every attention and MLP slab, Comfy-Org's dev
+        // `fp8mixed` quantizes only the MLPs. Collect them per tensor so the
+        // BF16 half of a mixed file keeps its ordinary Direct route.
+        let fp8_scaled = if quant == Quant::Nvfp4 {
+            BTreeMap::new()
+        } else {
+            collect_fp8_scaled_bases(checkpoint).with_context(|| {
+                format!(
+                    "enumerate FP8-scaled bases in {} (header peek)",
+                    checkpoint.display(),
+                )
+            })?
+        };
+
+        let entries =
+            build_flux2_entries(cfg, prefix, quant, &nvfp4_bases, rms_suffix, &fp8_scaled);
+        let mut backend = Self::from_entries(checkpoint, entries)?;
+        backend.preserve_fp8 = !fp8_scaled.is_empty();
+        Ok(backend)
     }
 
     /// Resolve `diffusers_key` to a tensor on `dev` per the projection rule.
@@ -590,6 +645,64 @@ fn collect_nvfp4_bases(path: &Path) -> Result<std::collections::BTreeSet<String>
     Ok(has_scale.intersection(&has_scale_2).cloned().collect())
 }
 
+/// Two spellings exist in the wild for one FP8 layer's dequantization scale.
+/// BFL's own FP8
+/// conversions (`FLUX.2-klein-{4b,9b}-fp8`) and Comfy-Org's `fp8mixed` write
+/// `<base>.weight_scale` (plus an `<base>.input_scale` that only matters to a
+/// tensor-core FP8 matmul, which mold does not run — dequantizing the weight
+/// makes it irrelevant); ComfyUI's own re-exports write `<base>.scale_weight`.
+/// Dropping the scale is not a rounding difference: `quantize` divides by it
+/// (`comfy/quant_ops.py:138`), so ignoring a scale of ~2e-3 inflates every
+/// weight by ~500x and the render is noise.
+///
+/// Header-peek `path` and collect every base whose `.weight` is stored as
+/// `F8_E4M3` AND carries a per-tensor scale sidecar. Mixed files are the norm
+/// (Comfy-Org's dev `fp8mixed` leaves all attention projections in BF16), so
+/// this is a per-tensor decision, exactly like `collect_nvfp4_bases`.
+fn collect_fp8_scaled_bases(path: &Path) -> Result<BTreeMap<String, String>> {
+    use std::fs::File;
+    use std::io::Read;
+
+    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut len_buf = [0u8; 8];
+    file.read_exact(&mut len_buf)?;
+    let header_len = u64::from_le_bytes(len_buf) as usize;
+    let mut header_buf = vec![0u8; header_len];
+    file.read_exact(&mut header_buf)?;
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_buf).with_context(|| "parse safetensors header JSON")?;
+    let obj = header
+        .as_object()
+        .ok_or_else(|| anyhow!("safetensors header is not a JSON object"))?;
+
+    let is_fp8 = |key: &str| {
+        obj.get(key)
+            .and_then(|info| info.get("dtype"))
+            .and_then(|dtype| dtype.as_str())
+            .is_some_and(|dtype| dtype == "F8_E4M3" || dtype == "F8_E5M2")
+    };
+
+    let mut scaled: BTreeMap<String, String> = BTreeMap::new();
+    for key in obj.keys() {
+        if key == "__metadata__" {
+            continue;
+        }
+        let Some(base) = key
+            .strip_suffix(".weight_scale")
+            .or_else(|| key.strip_suffix(".scale_weight"))
+        else {
+            continue;
+        };
+        // `weight_scale` is also NVFP4's block-scale key; there it is F8E4M3
+        // with a shape, and `collect_nvfp4_bases` claims it. Only a base whose
+        // own `.weight` is FP8 is an FP8-scaled linear.
+        if is_fp8(&format!("{base}.weight")) {
+            scaled.insert(base.to_string(), key.clone());
+        }
+    }
+    Ok(scaled)
+}
+
 /// Header-peek the safetensors at `path` and decide which suffix the BFL
 /// `*.norm.{query,key}_norm.*` RMSNorm tensors use.
 ///
@@ -660,12 +773,37 @@ fn nvfp4_subkeys(diffusers_key: &str, source_base: &str) -> Vec<(String, Backend
     ]
 }
 
+/// The subkey `Flux2Linear::new` probes for an FP8 layer's per-tensor scale.
+/// Both on-disk spellings are normalized to this one name so the transformer
+/// stays unaware of which exporter wrote the checkpoint.
+const FP8_SCALE_SUBKEY: &str = "scale_weight";
+
+/// Register the FP8 scale sidecar for `diffusers`, when its source base has
+/// one. A `.weight` target becomes `<layer>.scale_weight`; the scale is
+/// per-tensor, so the three QKV slices of one fused slab all point at the
+/// same scalar.
+fn fp8_scale_entry(
+    diffusers: &str,
+    source_base: &str,
+    fp8_scaled: &BTreeMap<String, String>,
+) -> Option<(String, BackendEntry)> {
+    let scale_key = fp8_scaled.get(source_base)?;
+    let layer = diffusers.strip_suffix(".weight")?;
+    Some((
+        format!("{layer}.{FP8_SCALE_SUBKEY}"),
+        BackendEntry::Direct {
+            source_key: scale_key.clone(),
+        },
+    ))
+}
+
 fn direct(
     diffusers: &str,
     bfl_suffix: &str,
     prefix: &str,
     quant: Quant,
     nvfp4_bases: &std::collections::BTreeSet<String>,
+    fp8_scaled: &BTreeMap<String, String>,
 ) -> Vec<(String, BackendEntry)> {
     let source_key = format!("{prefix}{bfl_suffix}");
     let source_base = weight_base(&source_key).to_string();
@@ -678,7 +816,9 @@ fn direct(
         && bfl_suffix.ends_with(".weight")
         && nvfp4_bases.contains(&source_base);
     if !route_nvfp4 {
-        return vec![(diffusers.to_string(), BackendEntry::Direct { source_key })];
+        let mut entries = vec![(diffusers.to_string(), BackendEntry::Direct { source_key })];
+        entries.extend(fp8_scale_entry(diffusers, &source_base, fp8_scaled));
+        return entries;
     }
     nvfp4_subkeys(diffusers, &source_base)
 }
@@ -690,12 +830,13 @@ fn slice_qkv(
     prefix: &str,
     quant: Quant,
     nvfp4_bases: &std::collections::BTreeSet<String>,
+    fp8_scaled: &BTreeMap<String, String>,
 ) -> Vec<(String, BackendEntry)> {
     let source_key = format!("{prefix}{bfl_suffix}");
     let source_base = weight_base(&source_key).to_string();
     let route_nvfp4 = quant == Quant::Nvfp4 && nvfp4_bases.contains(&source_base);
     if !route_nvfp4 {
-        return vec![(
+        let mut entries = vec![(
             diffusers.to_string(),
             BackendEntry::Slice {
                 source_key,
@@ -704,6 +845,8 @@ fn slice_qkv(
                 num_components: 3,
             },
         )];
+        entries.extend(fp8_scale_entry(diffusers, &source_base, fp8_scaled));
+        return entries;
     }
     // NVFP4 sliced QKV — three sub-keys + a slice-meta sub-key. All four
     // share the same `source_base`; the streaming `Flux2Linear` reads the
@@ -739,6 +882,7 @@ fn build_flux2_entries(
     quant: Quant,
     nvfp4_bases: &std::collections::BTreeSet<String>,
     rms_suffix: &str,
+    fp8_scaled: &BTreeMap<String, String>,
 ) -> BTreeMap<String, BackendEntry> {
     let mut e: BTreeMap<String, BackendEntry> = BTreeMap::new();
 
@@ -769,7 +913,7 @@ fn build_flux2_entries(
         ),
     ];
     for (d, b) in top_level {
-        for (k, v) in direct(d, b, prefix, quant, nvfp4_bases) {
+        for (k, v) in direct(d, b, prefix, quant, nvfp4_bases, fp8_scaled) {
             e.insert(k, v);
         }
     }
@@ -785,10 +929,19 @@ fn build_flux2_entries(
     e.insert(
         "norm_out.linear.weight".to_string(),
         BackendEntry::SwapHalves {
-            source_key: ada_ln_bfl_key,
+            source_key: ada_ln_bfl_key.clone(),
             axis: 0,
         },
     );
+    // Every shipped FP8 conversion leaves this one BF16, but a producer that
+    // quantized it would otherwise reach `Flux2Linear`'s FP8 arm with no
+    // scale — one silently ~500x-hot layer and no error. The scale is
+    // per-tensor, so the row swap above does not disturb it.
+    e.extend(fp8_scale_entry(
+        "norm_out.linear.weight",
+        weight_base(&ada_ln_bfl_key),
+        fp8_scaled,
+    ));
 
     // --- Conditional: pooled-vector embedder (disabled in Klein). ---
     if cfg.vec_in_dim > 0 {
@@ -796,7 +949,7 @@ fn build_flux2_entries(
             ("vector_in.linear_1.weight", "vector_in.in_layer.weight"),
             ("vector_in.linear_2.weight", "vector_in.out_layer.weight"),
         ] {
-            for (k, v) in direct(d, b, prefix, quant, nvfp4_bases) {
+            for (k, v) in direct(d, b, prefix, quant, nvfp4_bases, fp8_scaled) {
                 e.insert(k, v);
             }
         }
@@ -814,7 +967,7 @@ fn build_flux2_entries(
                 "guidance_in.out_layer.weight",
             ),
         ] {
-            for (k, v) in direct(d, b, prefix, quant, nvfp4_bases) {
+            for (k, v) in direct(d, b, prefix, quant, nvfp4_bases, fp8_scaled) {
                 e.insert(k, v);
             }
         }
@@ -831,6 +984,7 @@ fn build_flux2_entries(
                 prefix,
                 quant,
                 nvfp4_bases,
+                fp8_scaled,
             ) {
                 e.insert(k, v);
             }
@@ -858,6 +1012,7 @@ fn build_flux2_entries(
                 prefix,
                 quant,
                 nvfp4_bases,
+                fp8_scaled,
             ) {
                 e.insert(k, v);
             }
@@ -873,6 +1028,7 @@ fn build_flux2_entries(
                 prefix,
                 quant,
                 nvfp4_bases,
+                fp8_scaled,
             ) {
                 e.insert(k, v);
             }
@@ -904,6 +1060,7 @@ fn build_flux2_entries(
                 prefix,
                 quant,
                 nvfp4_bases,
+                fp8_scaled,
             ) {
                 e.insert(k, v);
             }
@@ -928,6 +1085,7 @@ fn build_flux2_entries(
                 prefix,
                 quant,
                 nvfp4_bases,
+                fp8_scaled,
             ) {
                 e.insert(k, v);
             }
@@ -969,20 +1127,12 @@ impl SimpleBackend for SingleFileBackend {
             }
             .bt());
         }
-        if t.dtype() != dtype {
-            t.to_dtype(dtype)
-        } else {
-            Ok(t)
-        }
+        self.cast(t, dtype)
     }
 
     fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
         let t = self.lookup(name, dev)?;
-        if t.dtype() != dtype {
-            t.to_dtype(dtype)
-        } else {
-            Ok(t)
-        }
+        self.cast(t, dtype)
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
@@ -1623,6 +1773,170 @@ mod tests {
             .map(|(k, s, d)| (k.as_str(), s.clone(), d.clone()))
             .collect();
         write_synthetic("flux2-bfl", &refs)
+    }
+
+    /// Write a BFL-native root-layout fixture where `img_mlp.0` is FP8 with a
+    /// per-tensor scale under `scale_key`, mirroring the mixed FP8 files BFL
+    /// and Comfy-Org publish (attention BF16, MLP slabs FP8).
+    fn write_flux2_fp8_fixture(scale_key: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mold-sf-backend-flux2-fp8-{}-{}.safetensors",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+
+        // Two FP8 bytes: 0x40 == 2.0, 0x38 == 1.0 in e4m3.
+        let fp8 = vec![0x40u8, 0x40];
+        let scale = 0.25f32.to_le_bytes().to_vec();
+        let ones = 1.0f32.to_le_bytes().to_vec();
+        let two_rows: Vec<u8> = [1.0f32, 2.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let mut views: HashMap<String, TensorView<'_>> = HashMap::new();
+        let insert_f32 = |views: &mut HashMap<String, TensorView<'_>>,
+                          key: &str,
+                          shape: Vec<usize>,
+                          buf: &'static [u8]| {
+            views.insert(
+                key.to_string(),
+                TensorView::new(SafeDtype::F32, shape, buf).unwrap(),
+            );
+        };
+        let ones_leaked: &'static [u8] = Box::leak(ones.into_boxed_slice());
+        let two_leaked: &'static [u8] = Box::leak(two_rows.into_boxed_slice());
+        let fp8_leaked: &'static [u8] = Box::leak(fp8.into_boxed_slice());
+        let scale_leaked: &'static [u8] = Box::leak(scale.into_boxed_slice());
+
+        for key in [
+            "img_in.weight",
+            "txt_in.weight",
+            "time_in.in_layer.weight",
+            "time_in.out_layer.weight",
+            "final_layer.linear.weight",
+            "double_stream_modulation_img.lin.weight",
+            "double_stream_modulation_txt.lin.weight",
+            "single_stream_modulation.lin.weight",
+            "double_blocks.0.img_attn.proj.weight",
+            "double_blocks.0.img_attn.norm.query_norm.scale",
+            "double_blocks.0.img_attn.norm.key_norm.scale",
+            "double_blocks.0.img_mlp.2.weight",
+            "double_blocks.0.txt_attn.proj.weight",
+            "double_blocks.0.txt_attn.norm.query_norm.scale",
+            "double_blocks.0.txt_attn.norm.key_norm.scale",
+            "double_blocks.0.txt_mlp.0.weight",
+            "double_blocks.0.txt_mlp.2.weight",
+            "single_blocks.0.linear1.weight",
+            "single_blocks.0.linear2.weight",
+            "single_blocks.0.norm.query_norm.scale",
+            "single_blocks.0.norm.key_norm.scale",
+        ] {
+            insert_f32(&mut views, key, vec![1, 1], ones_leaked);
+        }
+        insert_f32(
+            &mut views,
+            "final_layer.adaLN_modulation.1.weight",
+            vec![2, 1],
+            two_leaked,
+        );
+        for key in [
+            "double_blocks.0.img_attn.qkv.weight",
+            "double_blocks.0.txt_attn.qkv.weight",
+        ] {
+            views.insert(
+                key.to_string(),
+                TensorView::new(SafeDtype::F32, vec![3, 1], {
+                    static QKV: [u8; 12] = [0; 12];
+                    &QKV
+                })
+                .unwrap(),
+            );
+        }
+        // The one FP8 layer plus its scale sidecar.
+        views.insert(
+            "double_blocks.0.img_mlp.0.weight".to_string(),
+            TensorView::new(SafeDtype::F8_E4M3, vec![2, 1], fp8_leaked).unwrap(),
+        );
+        views.insert(
+            format!("double_blocks.0.img_mlp.0.{scale_key}"),
+            TensorView::new(SafeDtype::F32, vec![], scale_leaked).unwrap(),
+        );
+        serialize_to_file(&views, &None, &path).unwrap();
+        path
+    }
+
+    /// Both spellings of the per-tensor FP8 scale must reach the transformer
+    /// under the one subkey `Flux2Linear::new` probes for. Without this the
+    /// scale is simply absent and the layer's weights are ~500x too large.
+    #[test]
+    fn flux2_fp8_scale_sidecars_resolve_under_one_subkey() {
+        for scale_key in ["weight_scale", "scale_weight"] {
+            let cfg = flux2_test_config();
+            let path = write_flux2_fp8_fixture(scale_key);
+            let backend =
+                SingleFileBackend::from_flux2_singlefile(&path, &cfg).expect("fp8 backend");
+            let diffusers_scale = "transformer_blocks.0.ff.linear_in.scale_weight";
+            assert!(
+                backend.contains_tensor(diffusers_scale),
+                "{scale_key}: no rule for {diffusers_scale}",
+            );
+            let scale = backend
+                .get_unchecked(diffusers_scale, DType::F32, &Device::Cpu)
+                .expect("scale lookup");
+            assert_eq!(scale.rank(), 0);
+            assert_eq!(scale.to_vec0::<f32>().unwrap(), 0.25);
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    /// The FP8 weight itself must survive the VarBuilder's dtype: casting it
+    /// to BF16 at load makes `Flux2Linear::new` take its unscaled BF16 arm,
+    /// which silently drops the scale the sidecar exists to supply. BF16
+    /// tensors in the same mixed file still cast.
+    #[test]
+    fn flux2_fp8_weights_keep_their_dtype_while_the_rest_casts() {
+        let cfg = flux2_test_config();
+        let path = write_flux2_fp8_fixture("weight_scale");
+        let backend = SingleFileBackend::from_flux2_singlefile(&path, &cfg).expect("fp8 backend");
+
+        let fp8 = backend
+            .get_unchecked(
+                "transformer_blocks.0.ff.linear_in.weight",
+                DType::BF16,
+                &Device::Cpu,
+            )
+            .expect("fp8 weight");
+        assert_eq!(fp8.dtype(), DType::F8E4M3);
+
+        let bf16 = backend
+            .get_unchecked(
+                "transformer_blocks.0.ff.linear_out.weight",
+                DType::BF16,
+                &Device::Cpu,
+            )
+            .expect("bf16 weight");
+        assert_eq!(bf16.dtype(), DType::BF16);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A checkpoint with no FP8 tensors must behave exactly as before: no
+    /// scale entries, and every weight cast to the VarBuilder's dtype.
+    #[test]
+    fn flux2_bf16_checkpoints_gain_no_fp8_entries() {
+        let cfg = flux2_test_config();
+        let path = write_flux2_bfl_fixture(&cfg, None);
+        let backend = SingleFileBackend::from_flux2_singlefile(&path, &cfg).expect("backend");
+        assert!(!backend.preserve_fp8);
+        assert!(!backend
+            .entries
+            .keys()
+            .any(|key| key.ends_with(".scale_weight")));
+        let w = backend
+            .get_unchecked("x_embedder.weight", DType::BF16, &Device::Cpu)
+            .expect("weight");
+        assert_eq!(w.dtype(), DType::BF16);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
