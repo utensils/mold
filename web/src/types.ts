@@ -29,15 +29,7 @@ export type {
 
 // Matches `mold_core::OutputFormat` on the wire (lowercase strings).
 export type OutputFormat =
-  | "png"
-  | "jpeg"
-  | "gif"
-  | "apng"
-  | "webp"
-  | "mp4"
-  | "wav"
-  | "glb"
-  | "obj";
+  "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav" | "glb" | "obj";
 
 export type SeedMode = "random" | "static" | "increment";
 

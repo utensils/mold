@@ -16,11 +16,11 @@ than answered from an empty prompt.
 
 ## Variants
 
-| Model                        | Steps | Size    | VRAM   | Notes                                    |
-| ---------------------------- | ----- | ------- | ------ | ---------------------------------------- |
-| `hunyuan3d-mini-turbo:fp16`  | 5     | 3.6 GiB | ~5 GB  | 0.6B, step-distilled. **The default.**   |
-| `hunyuan3d-turbo:fp16`       | 5     | 4.6 GiB | ~6 GB  | 1.1B, step-distilled                     |
-| `hunyuan3d:fp16`             | 30    | 4.6 GiB | ~6 GB  | 1.1B, undistilled — best shape fidelity  |
+| Model                       | Steps | Size    | VRAM  | Notes                                   |
+| --------------------------- | ----- | ------- | ----- | --------------------------------------- |
+| `hunyuan3d-mini-turbo:fp16` | 5     | 3.6 GiB | ~5 GB | 0.6B, step-distilled. **The default.**  |
+| `hunyuan3d-turbo:fp16`      | 5     | 4.6 GiB | ~6 GB | 1.1B, step-distilled                    |
+| `hunyuan3d:fp16`            | 30    | 4.6 GiB | ~6 GB | 1.1B, undistilled — best shape fidelity |
 
 Each is ONE self-contained file carrying the shape transformer, the shape VAE
 and a DINOv2-giant image encoder, which is why a "0.6B" model is still 3.6 GiB
@@ -62,11 +62,11 @@ mold run hunyuan3d-mini-turbo --image chair.png --output - | some-gltf-viewer
 
 ## Controls
 
-| Flag                | Default | What it does                                                   |
-| ------------------- | ------- | -------------------------------------------------------------- |
-| `--octree`          | 256     | Query-grid resolution. The detail knob; **cost is cubic**.      |
-| `--mesh-threshold`  | 0.6     | Iso-level. Lower recovers thin features and adds noise.         |
-| `--target-faces`    | none    | Decimate to approximately this triangle count.                  |
+| Flag               | Default | What it does                                               |
+| ------------------ | ------- | ---------------------------------------------------------- |
+| `--octree`         | 256     | Query-grid resolution. The detail knob; **cost is cubic**. |
+| `--mesh-threshold` | 0.6     | Iso-level. Lower recovers thin features and adds noise.    |
+| `--target-faces`   | none    | Decimate to approximately this triangle count.             |
 
 `--octree` accepts 128, 192, 256, 320 or 384. It is an allowlist rather than a
 range because the shape VAE evaluates its occupancy field on `(n + 1)³` points
@@ -96,8 +96,8 @@ before you build on them:
 and a separate written licence from Tencent is required once your products
 exceed **1 million monthly active users**.
 
-Outputs are unencumbered — *"Tencent claims no rights in Outputs You
-generate"* — so the meshes themselves are yours.
+Outputs are unencumbered — _"Tencent claims no rights in Outputs You
+generate"_ — so the meshes themselves are yours.
 
 Because of this, mold refuses to download the weights until you have recorded
 an acceptance:

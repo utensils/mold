@@ -154,6 +154,7 @@ for more options.
 | [LTX Video](/models/ltx2)             | 768x512 / 1216x704            | T5/Gemma, video transformers, causal VAEs      |
 | [MiniMax H3](/models/minimax-h3)      | 1344x768                      | Qwen3-VL, joint audio-video DiT, dual VAEs     |
 | [Wan Video](/models/wan)              | 832x480 / 1280x704            | UMT5-XXL, flow DiT, causal 3D VAE, A14B MoE    |
+| [Hunyuan3D](/models/hunyuan3d)        | n/a — output is a mesh        | DINOv2-giant, flow DiT, vecset shape VAE       |
 | [Upscalers](/models/upscalers)        | 2x / 4x source size           | Real-ESRGAN super-resolution                   |
 
 Each family page lists its actual shape contract. Bucketed families may warn

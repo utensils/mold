@@ -127,20 +127,20 @@ the full multiscale refinement path.
 
 ## Backend Support
 
-| Family          | CUDA           | Metal                         | CPU              |
-| --------------- | -------------- | ----------------------------- | ---------------- |
-| FLUX.1 / FLUX.2 | Yes            | Yes                           | Yes (slow)       |
-| SDXL / SD 1.5   | Yes            | Yes                           | Yes              |
-| SD 3.5          | Yes            | Yes                           | Yes              |
-| Z-Image         | Yes            | Yes                           | Yes              |
-| Wuerstchen v2   | Yes            | Yes                           | Yes              |
-| Qwen-Image      | Yes            | Yes                           | Yes              |
-| Qwen-Image-Edit | Yes            | Yes                           | Yes              |
-| LTX Video       | Yes            | Yes                           | Yes              |
-| **LTX-2**       | Yes            | Yes                           | Correctness-only |
-| Wan Video       | Yes            | Correctness-only              | Correctness-only |
-| MiniMax H3      | SM89 H3 builds | Correctness-only, unqualified | No               |
-| Hunyuan3D       | Correctness-only | Correctness-only            | Correctness-only |
+| Family          | CUDA             | Metal                         | CPU              |
+| --------------- | ---------------- | ----------------------------- | ---------------- |
+| FLUX.1 / FLUX.2 | Yes              | Yes                           | Yes (slow)       |
+| SDXL / SD 1.5   | Yes              | Yes                           | Yes              |
+| SD 3.5          | Yes              | Yes                           | Yes              |
+| Z-Image         | Yes              | Yes                           | Yes              |
+| Wuerstchen v2   | Yes              | Yes                           | Yes              |
+| Qwen-Image      | Yes              | Yes                           | Yes              |
+| Qwen-Image-Edit | Yes              | Yes                           | Yes              |
+| LTX Video       | Yes              | Yes                           | Yes              |
+| **LTX-2**       | Yes              | Yes                           | Correctness-only |
+| Wan Video       | Yes              | Correctness-only              | Correctness-only |
+| MiniMax H3      | SM89 H3 builds   | Correctness-only, unqualified | No               |
+| Hunyuan3D       | Correctness-only | Correctness-only              | Correctness-only |
 
 ::: warning Hunyuan3D is not performance-qualified
 The shape path is dense matmuls and attention with no custom kernel, so it is

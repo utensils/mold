@@ -42,8 +42,8 @@ mold run hunyuan3d --image chair.png \
   -o chair.glb
 ```
 
-| Flag               | Default | What it does                                              |
-| ------------------ | ------- | --------------------------------------------------------- |
+| Flag               | Default | What it does                                               |
+| ------------------ | ------- | ---------------------------------------------------------- |
 | `--octree`         | 256     | Query-grid resolution. The detail knob; **cost is cubic**. |
 | `--mesh-threshold` | 0.6     | Iso-level. Lower recovers thin features and adds noise.    |
 | `--target-faces`   | none    | Decimate to approximately this triangle count.             |
