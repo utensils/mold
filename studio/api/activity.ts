@@ -30,8 +30,11 @@ export function activeWorkPhaseLabel(row: ActiveWorkItem): string {
   if (row.phase === "preparing" && row.preparation_progress?.component) {
     return `Preparing · ${row.preparation_progress.component}`;
   }
-  if (row.stage?.trim()) return row.stage.trim();
-  return row.phase.replaceAll("_", " ");
+  const stage = row.stage?.trim() || row.phase.replaceAll("_", " ");
+  if (row.current != null && row.total != null && row.total > 0) {
+    return `${stage} · ${row.current}/${row.total}`;
+  }
+  return stage;
 }
 
 export interface ActiveWorkSnapshot {

@@ -323,6 +323,8 @@ describe("MobileHostDetail remote host data", () => {
                 activity_phase: "active",
                 runtime_phase: "loading",
                 runtime_stage: "Loading Flux.2 transformer",
+                runtime_current: 17,
+                runtime_total: 20,
               },
             ],
           },
@@ -333,7 +335,7 @@ describe("MobileHostDetail remote host data", () => {
 
     const view = await mountDetail();
     const row = view.get("[data-test='host-detail-queue-row-job-queued']");
-    expect(row.text()).toContain("LOADING FLUX.2 TRANSFORMER");
+    expect(row.text()).toContain("LOADING FLUX.2 TRANSFORMER · 17/20");
     expect(row.text()).not.toContain("NEXT UP");
   });
 
@@ -528,8 +530,8 @@ describe("MobileHostDetail remote host data", () => {
 
     const queueRows = view.get("[data-test='host-detail-queue']").findAll("li");
     expect(queueRows).toHaveLength(2);
-    expect(queueRows[0]!.text()).toContain("z-image:q8QUEUED #2");
-    expect(queueRows[1]!.text()).toContain("flux-dev:q8RUNNING · GPU 0");
+    expect(queueRows[0]!.text()).toContain("z-image:q8StudioQUEUED #2");
+    expect(queueRows[1]!.text()).toContain("flux-dev:q8StudioRUNNING · GPU 0");
 
     const modelRows = view.get("[data-test='host-detail-models']").findAll("li");
     expect(modelRows).toHaveLength(2);
@@ -642,7 +644,9 @@ describe("MobileHostDetail remote host data", () => {
   it("renders the machine queue newest-first", async () => {
     const view = await mountDetail();
     expect(
-      view.findAll("[data-test^='host-detail-queue-row-']").map((row) => row.find("strong").text()),
+      view
+        .findAll("[data-test^='host-detail-queue-row-']")
+        .map((row) => row.get(".mobile-generation-job-copy p").text()),
     ).toEqual(["z-image:q8", "flux-dev:q8"]);
   });
 

@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 const css = readFileSync("src/mobile/mobile.css", "utf8");
 const mobileHtml = readFileSync("index.mobile.html", "utf8");
 const mobileAppComponent = readFileSync("src/mobile/MobileApp.vue", "utf8");
+const mobileHostDetailComponent = readFileSync("src/mobile/MobileHostDetail.vue", "utf8");
+const mobileGenerationQueueCard = readFileSync("src/mobile/MobileGenerationQueueCard.vue", "utf8");
 const preparedComponent = readFileSync("src/mobile/MobilePreparedExpansionBatch.vue", "utf8");
 const pullComponent = readFileSync("src/mobile/MobileExpansionPullStatus.vue", "utf8");
 const composerComponent = readFileSync("src/mobile/MobileSequenceComposer.vue", "utf8");
@@ -156,6 +158,12 @@ describe("mobile scrolling", () => {
 });
 
 describe("mobile generation status containment", () => {
+  it("renders Create and Machines queue jobs through one shared card", () => {
+    expect(mobileAppComponent).toContain("<MobileGenerationQueueCard");
+    expect(mobileHostDetailComponent).toContain("<MobileGenerationQueueCard");
+    expect(mobileGenerationQueueCard).toContain('data-test="mobile-generation-status"');
+  });
+
   it("bounds local queue rows and wraps detailed backend status", () => {
     const row = css.match(/\.mobile-generation-job\s*\{([^}]*)\}/s);
     const detailed = css.match(/\.mobile-generation-job--detailed-status\s*\{([^}]*)\}/s);

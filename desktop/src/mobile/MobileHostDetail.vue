@@ -17,6 +17,7 @@ import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import SwipeActionRow from "@studio/components/SwipeActionRow.vue";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
+import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
 import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
 import type { SwipeRowAction } from "@studio/lib/swipeAction";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
@@ -1306,16 +1307,19 @@ onBeforeUnmount(() => {
               :data-test="`host-detail-queue-row-${entry.id}`"
               @act="onQueueRowAction(entry, $event)"
             >
-              <button
-                type="button"
-                class="mobile-queue-open"
-                :data-test="`host-detail-queue-open-${entry.id}`"
+              <MobileGenerationQueueCard
+                :title="entry.metadata?.prompt?.trim() || modelLabel(entry.model)"
+                :subtitle="
+                  entry.metadata?.prompt?.trim()
+                    ? `${modelLabel(entry.model)} · ${host.name}`
+                    : host.name
+                "
+                :status="queueRowBusy(entry) ? 'WORKING…' : queueCode(entry)"
+                :detail="entry.state === 'held' ? entry.error || entry.held_reason || null : null"
                 :aria-label="`Job details for ${modelLabel(entry.model)}`"
-                @click="inspectedQueueId = entry.id"
-              >
-                <strong>{{ modelLabel(entry.model) }}</strong>
-                <span>{{ queueRowBusy(entry) ? "WORKING…" : queueCode(entry) }}</span>
-              </button>
+                :data-test="`host-detail-queue-open-${entry.id}`"
+                @activate="inspectedQueueId = entry.id"
+              />
             </SwipeActionRow>
           </li>
         </ul>

@@ -19,6 +19,7 @@ import {
 } from "@tauri-apps/plugin-barcode-scanner";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
+import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
@@ -2613,9 +2614,6 @@ function activityRowStatus(row: ActivityRow): string {
   );
 }
 
-function activityRowHasDetailedStatus(row: ActivityRow): boolean {
-  return row.print !== null && activityRowStatus(row).length > 18;
-}
 const sharedMobileActivity = computed(() => {
   const local = new Set(
     allGenerationJobs.value.flatMap((job) =>
@@ -11907,96 +11905,65 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     :data-test="entry.local.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
                     @act="onMobileQueueRowAction(entry.local, $event)"
                   >
+                    <MobileGenerationQueueCard
+                      v-if="entry.local.print"
+                      :title="entry.local.print.prompt"
+                      :subtitle="`${modelLabel(entry.local.print.model)} · ${entry.local.print.hostLabel}`"
+                      :status="activityRowStatus(entry.local)"
+                      :detail="durableHold(entry.local.print)?.error ?? null"
+                      :cancelling="entry.local.print.cancelling === true"
+                      :aria-label="entry.local.print.prompt"
+                      @activate="selectMobilePrint(entry.local.print)"
+                    />
                     <div
+                      v-if="entry.local.sequence"
                       class="mobile-generation-job"
-                      :class="{
-                        'mobile-generation-job--detailed-status': activityRowHasDetailedStatus(
-                          entry.local,
-                        ),
-                      }"
                       role="button"
                       tabindex="0"
-                      @click="
-                        entry.local.print
-                          ? selectMobilePrint(entry.local.print)
-                          : selectCurrentMobileSequence()
-                      "
-                      @keydown.enter.prevent="
-                        entry.local.print
-                          ? selectMobilePrint(entry.local.print)
-                          : selectCurrentMobileSequence()
-                      "
+                      @click="selectCurrentMobileSequence()"
+                      @keydown.enter.prevent="selectCurrentMobileSequence()"
                     >
-                      <template v-if="entry.local.print">
-                        <div class="mobile-generation-job-copy">
-                          <p>{{ entry.local.print.prompt }}</p>
-                          <span>
-                            {{ modelLabel(entry.local.print.model) }} ·
-                            {{ entry.local.print.hostLabel }}
+                      <div class="mobile-generation-job-copy">
+                        <p>
+                          {{ modelLabel(entry.local.sequence.model) || "Sequence" }} ·
+                          {{ entry.local.sequence.stageCount }} clips
+                        </p>
+                        <span>
+                          {{ entry.local.sequence.phase ?? entry.local.sequence.state }} · clip
+                          {{
+                            Math.min(
+                              entry.local.sequence.currentStage + 1,
+                              entry.local.sequence.stageCount,
+                            )
+                          }}/{{ entry.local.sequence.stageCount }}
+                          <template v-if="sequenceRowProgress !== null">
+                            · {{ sequenceRowProgress }}%
+                          </template>
+                        </span>
+                        <button
+                          v-if="entry.local.sequence.error"
+                          type="button"
+                          class="mobile-sequence-row-error"
+                          :class="{
+                            'mobile-sequence-row-error--expanded': expandedQueueFailures.has(
+                              entry.local.key,
+                            ),
+                          }"
+                          data-test="mobile-sequence-error-disclosure"
+                          :aria-expanded="expandedQueueFailures.has(entry.local.key)"
+                          @click.stop="toggleQueueFailure(entry.local.key)"
+                        >
+                          <span>{{ entry.local.sequence.error }}</span>
+                          <span aria-hidden="true">
+                            {{ expandedQueueFailures.has(entry.local.key) ? "Less" : "Details" }}
                           </span>
-                          <p
-                            v-if="durableHold(entry.local.print)?.error"
-                            class="mobile-generation-held-error"
-                            data-test="mobile-generation-held-error"
-                          >
-                            {{ durableHold(entry.local.print)?.error }}
-                          </p>
-                        </div>
-                        <div class="mobile-generation-job-action">
-                          <span data-test="mobile-generation-status">{{
-                            activityRowStatus(entry.local)
-                          }}</span>
-                          <span
-                            v-if="entry.local.print.cancelling"
-                            data-test="mobile-generation-cancelling"
-                          >
-                            Cancelling…
-                          </span>
-                        </div>
-                      </template>
-                      <template v-else-if="entry.local.sequence">
-                        <div class="mobile-generation-job-copy">
-                          <p>
-                            {{ modelLabel(entry.local.sequence.model) || "Sequence" }} ·
-                            {{ entry.local.sequence.stageCount }} clips
-                          </p>
-                          <span>
-                            {{ entry.local.sequence.phase ?? entry.local.sequence.state }} · clip
-                            {{
-                              Math.min(
-                                entry.local.sequence.currentStage + 1,
-                                entry.local.sequence.stageCount,
-                              )
-                            }}/{{ entry.local.sequence.stageCount }}
-                            <template v-if="sequenceRowProgress !== null">
-                              · {{ sequenceRowProgress }}%
-                            </template>
-                          </span>
-                          <button
-                            v-if="entry.local.sequence.error"
-                            type="button"
-                            class="mobile-sequence-row-error"
-                            :class="{
-                              'mobile-sequence-row-error--expanded': expandedQueueFailures.has(
-                                entry.local.key,
-                              ),
-                            }"
-                            data-test="mobile-sequence-error-disclosure"
-                            :aria-expanded="expandedQueueFailures.has(entry.local.key)"
-                            @click.stop="toggleQueueFailure(entry.local.key)"
-                          >
-                            <span>{{ entry.local.sequence.error }}</span>
-                            <span aria-hidden="true">
-                              {{ expandedQueueFailures.has(entry.local.key) ? "Less" : "Details" }}
-                            </span>
-                          </button>
-                        </div>
-                        <div class="mobile-generation-job-action">
-                          <span data-test="mobile-sequence-status">
-                            {{ entry.local.sequence.hostLabel }}
-                          </span>
-                        </div>
-                      </template>
+                        </button>
+                      </div>
+                      <div class="mobile-generation-job-action">
+                        <span data-test="mobile-sequence-status">
+                          {{ entry.local.sequence.hostLabel }}
+                        </span>
+                      </div>
                     </div>
                   </SwipeActionRow>
                 </div>

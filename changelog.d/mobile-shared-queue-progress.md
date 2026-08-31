@@ -1,0 +1,1 @@
+- **Consistent mobile generation progress.** Create now keeps each running job's live step count visible, and Create and Machines share the same clean queue-card presentation.

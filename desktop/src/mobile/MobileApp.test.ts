@@ -2340,6 +2340,8 @@ describe("MobileApp generation queue", () => {
         phase: "running",
         model: model.name,
         stage: "Encoding video",
+        current: 15,
+        total: 20,
         created_at_unix_ms: 10,
         updated_at_unix_ms: 12,
         can_cancel: true,
@@ -2348,11 +2350,15 @@ describe("MobileApp generation queue", () => {
     window.dispatchEvent(new Event("pageshow"));
     await flushPromises();
 
-    expect(wrapper.get("[data-test='mobile-generation-status']").text()).toBe("ENCODING VIDEO");
-    expect(wrapper.get(".mobile-generation-job").classes()).not.toContain(
+    expect(wrapper.get("[data-test='mobile-generation-status']").text()).toBe(
+      "ENCODING VIDEO · 15/20",
+    );
+    expect(wrapper.get(".mobile-generation-job").classes()).toContain(
       "mobile-generation-job--detailed-status",
     );
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Encoding video");
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
+      "Encoding video · 15/20",
+    );
     expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("1 active");
   });
 

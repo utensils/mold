@@ -4541,6 +4541,10 @@ button:disabled {
   border-top: 1px solid var(--edge);
 }
 
+.mobile-data-list li.mobile-queue-item {
+  padding: 0;
+}
+
 .mobile-data-list li > div {
   min-width: 0;
   flex: 1;
