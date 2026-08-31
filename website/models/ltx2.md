@@ -40,7 +40,7 @@ separate audio and video VAEs, duration prediction, and latent upscalers. Mold
 defaults bare LTX-2.5 names to the compact distilled INT8 ConvRot +
 convolutional-VAE pack on every host. That exact-weight route is Metal-qualified;
 the approximately 71 GB BF16 pack remains downloadable but operator-deferred,
-and CUDA qualification is intentionally tracked on a separate host.
+and CUDA has a separate completed qualification campaign on NVIDIA hosts.
 :::
 
 ::: info Implementation provenance
@@ -106,6 +106,16 @@ path; Metal keeps `QMatMul`), so the smaller tiers sit fully resident where
 the BF16 packs stream — Q4_K_M fits a 24 GB card. `:q3` and `:q4` mean K_M;
 K_S uses explicit tags. LoRAs apply as a parallel low-rank branch; full-weight
 `.diff` deltas are refused on GGUF tiers.
+
+On Apple Metal, the transformer residency planner preserves a live macOS
+unified-memory safety floor. It keeps only the blocks that fit and streams the
+remainder one tensor at a time from the GGUF file with bounded command-buffer
+fences. If the minimum streaming working set would cross that floor, Mold
+refuses before transformer allocation. Q3_K_M, Q4_K_M, and Q6_K are
+hardware-qualified on a 48 GiB Apple M4 Max at 512x512, 9 frames, and 8 steps;
+matched fixed-seed visual inspection confirmed prompt fidelity. Q3_K_M also
+completed a 97-frame MP4. The K_S, Q5_K_M, and Q8_0 tiers are not claimed by
+that Metal qualification campaign.
 
 ## LTX-2.5 Metal quick start
 
@@ -177,8 +187,8 @@ should compare generated contact sheets or clips from that fixed seed.
 - LTX-2.5 BF16 execution is operator-deferred on Metal. The assets remain
   downloadable and checksum-qualified; mold fails closed instead of claiming
   a completed BF16 runtime qualification.
-- LTX-2.5 CUDA qualification is outside the Apple Metal campaign and is being
-  completed on a separate CUDA host.
+- LTX-2.5 CUDA qualification is maintained separately from the Apple Metal
+  campaign and has completed on dedicated NVIDIA hosts.
 - LTX-2.5 IC-LoRA, retake, lip dub, and HDR/EXR are deferred until their 2.5
   adapter contracts are validated. Mold will not silently apply LTX-2.3
   control weights to a 2.5 request.

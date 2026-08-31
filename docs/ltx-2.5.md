@@ -2,9 +2,9 @@
 
 Mold runs the official LTX-2.5 split checkpoints natively through Candle. The
 same request and capability contract serves the CLI, HTTP API, web, desktop,
-TUI, and the shared iPhone/Android surface. This qualification covers the
-compact distilled INT8 ConvRot pack on Apple Metal. CUDA qualification runs
-separately on a dedicated NVIDIA host and is still pending.
+TUI, and the shared iPhone/Android surface. Apple Metal qualification covers
+the compact distilled INT8 ConvRot pack plus the Q3_K_M, Q4_K_M, and Q6 GGUF
+tiers. CUDA has a separate completed qualification campaign on NVIDIA hosts.
 
 ## Pick a model
 
@@ -50,6 +50,14 @@ Q4_K_M's ~15.7 GB transformer sits fully resident on a 24 GB card. LoRAs
 apply as a parallel low-rank branch, never merged into the quantized weight;
 full-weight `.diff` deltas are refused with a pointer at the safetensors
 packs.
+
+On Metal, adaptive residency reserves `max(15% of installed RAM, 8 GiB)` for
+macOS and other applications, retains only the packed blocks inside the live
+remainder, and streams overflow tensors from disk through bounded release
+fences. If the fixed transformer weights, request activations, runtime
+headroom, and one streamed block exceed that live remainder, Mold refuses
+before transformer allocation. A failed Metal release fence after an
+allocation OOM also stops the retry ladder. Neither rule changes CUDA.
 
 Official companion weights are gated and downloaded from
 [`Lightricks/LTX-2.5`](https://huggingface.co/Lightricks/LTX-2.5). The public
@@ -106,16 +114,34 @@ and explicit seams are wanted.
 
 ## Implemented and qualified paths
 
-Executed on Apple Metal with retained media and machine-readable reports:
+Executed on Apple Metal with retained evidence:
 
 - the distilled ComfyUI-compatible INT8 ConvRot transformer with the
   conventional video VAE;
 - Gemma 4 conditioning with explicit frames, including synchronized-audio MP4
-  and silent T2V APNG outputs.
+  and silent T2V APNG outputs;
+- Q3_K_M (`:q3`), Q4_K_M (`:q4`), and Q6_K (`:q6`) GGUF transformers at
+  512x512, 9 frames, and 8 steps. Fixed-seed visual inspection confirmed the
+  requested yellow tram, blue neon reflections, and red umbrellas in all three
+  tiers after the Gemma 4 RMSNorm fix;
+- Q3_K_M at the full 97-frame single-clip envelope, exported as MP4.
+
+On the 48 GiB Apple M4 Max qualification host, process RSS peaked at 13.14 GiB
+for Q3_K_M, 13.53 GiB for Q4_K_M, and 13.95 GiB for Q6_K during the matched
+512x512 runs. The compact INT8 ConvRot comparison peaked at 19.43 GiB. These
+are whole-process unified-memory measurements, not Metal-only VRAM figures.
+The memory guard did not fire, and every output was retained in the Mold
+Library.
+
+The sealed machine-readable Metal report covers the current-head INT8 audio
+and silent rows. GGUF qualification retains its clips, logs, TSV measurements,
+and inspected contact sheets beside that report; it is not represented as a
+GGUF row inside the INT8 report.
 
 Implemented and covered by focused planning, parsing, or unit contracts, but
 not claimed as executed Metal qualification by this report:
 
+- the `:q3-k-s`, `:q4-k-s`, `:q5`, and `:q8` GGUF tiers;
 - predicted duration, source/keyframe conditioning, guidance overrides, LoRAs,
   and offload;
 - native spatial/temporal two-stage upscaling and ordinary Mold Sequence jobs;
@@ -128,7 +154,6 @@ Deferred and fail-closed:
   downloadable and checksum-qualified;
 - the diffusion-video-VAE packs, which are BF16 and therefore part of the
   deferred Metal runtime row;
-- CUDA runtime qualification, which belongs to the dedicated NVIDIA campaign;
 - NVFP4 execution (the official file is known but not exposed as runnable);
 - HDR/EXR, IC-LoRA, Retake, and LipDub adapters until LTX-2.5-specific weights
   and parity are qualified;
@@ -149,8 +174,12 @@ The implementation and parity fixtures are pinned to:
   `95c0d467cc2a4770b71fa25a117320377e6eb08f`.
 
 Retained parity artifacts, logs, prompts, seeds, and run manifests live under
-`/Volumes/ExternalStorage/mold2/output/verification/ltx-2.5/`. Downloaded model
-files remain under `/Volumes/ExternalStorage/mold2` and are not cleanup data.
+`/Volumes/ExternalStorage/mold2/output/verification/ltx-2.5/`. The current-head
+Metal report is
+`ltx25-metal-int8-verification-20260831T152436Z.json`; it seals source commit
+`8ac394ecdab96953a209bbe8f51e90d9e5ceaaf6`, the three focused Rust gates, and
+the retained INT8 audio and silent media. Downloaded model files remain under
+`/Volumes/ExternalStorage/mold2` and are not cleanup data.
 
 Run `scripts/capture-ltx25-metal-verification.sh` on Apple Silicon to capture a
 machine-readable INT8 Metal report. The capture validates the pinned upstream
@@ -163,9 +192,9 @@ is recorded as operator-deferred with the blocking operator and sampler
 progress instead of being reported as passing. Neither capture deletes models
 or renders.
 
-The CUDA campaign has the same two halves on its dedicated NVIDIA host, and is
-still pending: `scripts/capture-ltx25-cuda-verification.sh` runs (`--run`) and
-then seals (`--seal`, the default) every
+The completed CUDA campaign has the same two halves on its dedicated NVIDIA
+hosts: `scripts/capture-ltx25-cuda-verification.sh` runs (`--run`) and then
+seals (`--seal`, the default) every
 `scripts/fixtures/ltx25-cuda-matrix.json` row into a
 `mold.ltx25.cuda.verification.v1` report, checked by
 `scripts/validate-ltx25-cuda-report.py` against
