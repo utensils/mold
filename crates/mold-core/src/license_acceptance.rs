@@ -98,8 +98,49 @@ pub const INSIGHTFACE_ANTELOPEV2: ThirdPartyLicense = ThirdPartyLicense {
     summary: "InsightFace pretrained models (antelopev2: scrfd_10g_bnkps, glintr100) are licensed for non-commercial research purposes only.",
 };
 
+/// The Tencent Hunyuan 3D 2.0 Community License.
+///
+/// Two clauses make this a gate rather than a footnote. The agreement opens
+/// with "THIS LICENSE AGREEMENT DOES NOT APPLY IN THE EUROPEAN UNION, UNITED
+/// KINGDOM AND SOUTH KOREA", so a user in those territories has no licence at
+/// all for these weights; and it requires a separate written grant from
+/// Tencent once the licensee's products exceed 1 million monthly active
+/// users. Outputs are unencumbered — "Tencent claims no rights in Outputs You
+/// generate" — so nothing a user renders is affected, only the act of
+/// acquiring the weights.
+///
+/// Pinned to upstream commit `f8db63096c8282cb27354314d896feba5ba6ff8a`,
+/// fetched and verified on 2026-08-31.
+pub const TENCENT_HUNYUAN3D_2_0: ThirdPartyLicense = ThirdPartyLicense {
+    id: "tencent-hunyuan3d-2.0",
+    name: "Tencent Hunyuan 3D 2.0 Community License",
+    url: "https://raw.githubusercontent.com/Tencent-Hunyuan/Hunyuan3D-2/f8db63096c8282cb27354314d896feba5ba6ff8a/LICENSE",
+    sha256: "94259df223918a5733677965c1bfe1774a2dba25042d9c3b47a3418ea6c1f324",
+    canonical: "https://github.com/Tencent-Hunyuan/Hunyuan3D-2/blob/main/LICENSE",
+    summary: "Tencent Hunyuan 3D 2.0 weights: the licence does NOT apply in the European Union, the United Kingdom or South Korea, and a separate Tencent licence is required above 1 million monthly active users. Tencent claims no rights in the meshes you generate.",
+};
+
+/// The Tencent Hunyuan 3D 2.1 Community License. Same territorial exclusion
+/// and same 1M-MAU threshold as [`TENCENT_HUNYUAN3D_2_0`], but a distinct
+/// document covering the 2.1 release — including the PBR paint weights.
+///
+/// Pinned to upstream commit `82920d643c0dc2f7bfd7255f45f62d386edfe60c`,
+/// fetched and verified on 2026-08-31.
+pub const TENCENT_HUNYUAN3D_2_1: ThirdPartyLicense = ThirdPartyLicense {
+    id: "tencent-hunyuan3d-2.1",
+    name: "Tencent Hunyuan 3D 2.1 Community License",
+    url: "https://raw.githubusercontent.com/Tencent-Hunyuan/Hunyuan3D-2.1/82920d643c0dc2f7bfd7255f45f62d386edfe60c/LICENSE",
+    sha256: "b79ac5e11ce063b6c6570dbe9686a45a03ba08bd248aa6aa82fb342a23a81c0c",
+    canonical: "https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1/blob/main/LICENSE",
+    summary: "Tencent Hunyuan 3D 2.1 weights: the licence does NOT apply in the European Union, the United Kingdom or South Korea, and a separate Tencent licence is required above 1 million monthly active users. Tencent claims no rights in the meshes you generate.",
+};
+
 /// Every license mold knows how to gate on.
-pub const THIRD_PARTY_LICENSES: &[&ThirdPartyLicense] = &[&INSIGHTFACE_ANTELOPEV2];
+pub const THIRD_PARTY_LICENSES: &[&ThirdPartyLicense] = &[
+    &INSIGHTFACE_ANTELOPEV2,
+    &TENCENT_HUNYUAN3D_2_0,
+    &TENCENT_HUNYUAN3D_2_1,
+];
 
 /// Resolve a license by its stable id.
 pub fn license_by_id(id: &str) -> Option<&'static ThirdPartyLicense> {
@@ -127,9 +168,26 @@ fn license_covers_manifest_file(
         manifest_name,
         crate::manifest::PULID_FLUX_MANIFEST | crate::manifest::PULID_SDXL_MANIFEST
     );
-    license.id == INSIGHTFACE_ANTELOPEV2.id
-        && is_pulid_bundle
-        && matches!(hf_filename, "scrfd_10g_bnkps.onnx" | "glintr100.onnx")
+    if license.id == INSIGHTFACE_ANTELOPEV2.id {
+        return is_pulid_bundle
+            && matches!(hf_filename, "scrfd_10g_bnkps.onnx" | "glintr100.onnx");
+    }
+
+    // Hunyuan3D gates on the REPOSITORY the file comes from, expressed through
+    // the manifest name, because each release carries its own licence
+    // document: the 2.0 shape checkpoints are covered by the 2.0 agreement and
+    // the 2.1 paint bundle by the 2.1 one. Both must be accepted separately if
+    // a user installs both, which is the honest answer — they are two
+    // documents with two release dates.
+    if license.id == TENCENT_HUNYUAN3D_2_0.id {
+        return manifest_name.starts_with("hunyuan3d")
+            && !manifest_name.starts_with("hunyuan3d-paint");
+    }
+    if license.id == TENCENT_HUNYUAN3D_2_1.id {
+        return manifest_name.starts_with("hunyuan3d-paint");
+    }
+
+    false
 }
 
 /// Every license covering one manifest file.

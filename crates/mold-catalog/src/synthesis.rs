@@ -289,6 +289,11 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         | Family::Wan
         | Family::MinimaxH3 => false,
         Family::QwenImage | Family::Wuerstchen => false,
+        // Hunyuan3D bundles the shape VAE inside the single checkpoint under
+        // the `vae.` prefix, unconditionally and across every published tier
+        // (2.0, 2.0-turbo, 2.0-mini, 2mv, 2.1). There is nothing to probe for
+        // and no VAE companion exists to route to.
+        Family::Hunyuan3d => true,
     }
 }
 

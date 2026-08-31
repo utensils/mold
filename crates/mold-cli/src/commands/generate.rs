@@ -2252,6 +2252,8 @@ fn container_label(format: OutputFormat) -> &'static str {
         OutputFormat::Webp => "WebP",
         OutputFormat::Mp4 => "MP4",
         OutputFormat::Wav => "WAV",
+        OutputFormat::Glb => "GLB",
+        OutputFormat::Obj => "OBJ",
     }
 }
 

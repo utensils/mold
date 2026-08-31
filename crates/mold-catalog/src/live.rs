@@ -832,11 +832,7 @@ fn companion_to_entry(companion: &Companion, family: Family, tokenizer: bool) ->
         family,
         family_role: FamilyRole::Foundation,
         sub_family: None,
-        modality: if family.is_video() {
-            Modality::Video
-        } else {
-            Modality::Image
-        },
+        modality: Modality::for_family(family),
         kind,
         file_format: FileFormat::Safetensors,
         bundling: Bundling::Separated,
@@ -1191,6 +1187,7 @@ fn hf_family_search_term(family: Family) -> &'static str {
         Family::MinimaxH3 => "minimax-h3",
         Family::QwenImage => "qwen-image",
         Family::Wuerstchen => "wuerstchen",
+        Family::Hunyuan3d => "hunyuan3d",
     }
 }
 
@@ -1321,11 +1318,7 @@ fn hf_summary_to_entry(hit: HfSearchHit, family: Family, family_role: FamilyRole
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let modality = if family.is_video() {
-        Modality::Video
-    } else {
-        Modality::Image
-    };
+    let modality = Modality::for_family(family);
     // Heuristic kind: "lora" tag wins, otherwise checkpoint.
     let kind = if hit
         .tags
@@ -1930,6 +1923,7 @@ mod tests {
             (Family::MinimaxH3, "minimax-h3"),
             (Family::QwenImage, "qwen-image"),
             (Family::Wuerstchen, "wuerstchen"),
+            (Family::Hunyuan3d, "hunyuan3d"),
         ];
         assert_eq!(cases.len(), crate::families::ALL_FAMILIES.len());
         for (family, expected) in cases {

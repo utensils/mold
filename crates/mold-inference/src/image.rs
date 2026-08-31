@@ -66,7 +66,9 @@ pub(crate) fn encode_rgb_image(
         | OutputFormat::Apng
         | OutputFormat::Webp
         | OutputFormat::Mp4
-        | OutputFormat::Wav => {
+        | OutputFormat::Wav
+        | OutputFormat::Glb
+        | OutputFormat::Obj => {
             anyhow::bail!("{format} encoding is not supported for single images")
         }
     }

@@ -5629,6 +5629,11 @@ impl App {
                         // no control for. Cycling exits back to the raster start
                         // rather than offering a format that would 422.
                         OutputFormat::Wav => OutputFormat::Png,
+                        // Nor are the mesh containers. A 3-D family emits GLB
+                        // and nothing else, so the control is not a choice
+                        // there; and offering GLB on a raster model would 422
+                        // for the same reason `wav` would.
+                        OutputFormat::Glb | OutputFormat::Obj => OutputFormat::Png,
                     };
                     if p.enable_audio == Some(true) && p.format != OutputFormat::Mp4 {
                         p.enable_audio = None;

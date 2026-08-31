@@ -24,6 +24,11 @@ pub fn format_from_path(path: &Path) -> Option<OutputFormat> {
         Some("webp") => Some(OutputFormat::Webp),
         Some("mp4") => Some(OutputFormat::Mp4),
         Some("wav") => Some(OutputFormat::Wav),
+        // Binary glTF is the STORED form of a 3-D print. `.obj` is
+        // deliberately absent: mold only ever writes OBJ as a gallery
+        // export transcode, so a stray `.obj` in the output directory is
+        // not a mold artifact and must not be adopted into the library.
+        Some("glb") => Some(OutputFormat::Glb),
         _ => None,
     }
 }
@@ -36,7 +41,15 @@ pub fn read_embedded(path: &Path, format: OutputFormat) -> Option<OutputMetadata
         OutputFormat::Png | OutputFormat::Apng => read_png_metadata(path),
         OutputFormat::Jpeg => read_jpeg_metadata(path),
         OutputFormat::Gif => read_gif_metadata(path),
-        OutputFormat::Webp | OutputFormat::Mp4 | OutputFormat::Wav => None,
+        // No embedded-parameter channel: WebP/MP4/WAV have none that mold
+        // writes, and a GLB deliberately does not carry one either — the
+        // `generations` row is the authority for a mesh print, exactly as
+        // it is for a clip, so nothing has to keep two copies in step.
+        OutputFormat::Webp
+        | OutputFormat::Mp4
+        | OutputFormat::Wav
+        | OutputFormat::Glb
+        | OutputFormat::Obj => None,
     }
 }
 
@@ -191,6 +204,10 @@ pub fn min_valid_size(format: OutputFormat) -> u64 {
         // 44-byte canonical RIFF/WAVE header plus a token amount of PCM. A
         // header-only file decodes as a zero-length track everywhere.
         OutputFormat::Wav => 1024,
+        // 12-byte GLB header + 8-byte JSON chunk header + a minimal glTF
+        // document. Anything smaller cannot describe a mesh, so it is a
+        // truncated write.
+        OutputFormat::Glb | OutputFormat::Obj => 512,
     }
 }
 
@@ -234,6 +251,36 @@ pub fn has_riff_wave_header(path: &Path) -> bool {
     &buf[0..4] == b"RIFF" && &buf[8..12] == b"WAVE"
 }
 
+/// `glTF` magic + version + a self-consistent total length — the mesh
+/// counterpart of [`has_ftyp_box`], so a truncated or mislabelled `.glb`
+/// never reaches the gallery.
+///
+/// The 12-byte GLB header is `magic("glTF") | version(u32) | length(u32)`,
+/// where `length` covers the entire file. Checking it against the real file
+/// size is what catches a write that died halfway: the magic alone survives
+/// truncation.
+pub fn has_gltf_header(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let declared_len = match f.metadata() {
+        Ok(meta) => meta.len(),
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 12];
+    if f.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    if &buf[0..4] != b"glTF" {
+        return false;
+    }
+    if u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) != 2 {
+        return false;
+    }
+    u64::from(u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]])) == declared_len
+}
+
 /// Heuristic "this is a solid black image" detector — the same NaN/aborted
 /// generation guard the server already uses. Only inspects raster files
 /// below a per-format suspect-size ceiling so we never decode real outputs.
@@ -245,7 +292,12 @@ pub fn is_probably_solid_black(path: &Path, format: OutputFormat, size_bytes: u6
         OutputFormat::Png | OutputFormat::Apng => 8 * 1024,
         OutputFormat::Jpeg => 4 * 1024,
         OutputFormat::Gif | OutputFormat::Webp => 4 * 1024,
-        OutputFormat::Mp4 | OutputFormat::Wav => return false,
+        // The solid-black guard is a RASTER heuristic: it decodes the file as
+        // an image and looks at pixel values. Nothing outside the raster
+        // formats has pixels to look at.
+        OutputFormat::Mp4 | OutputFormat::Wav | OutputFormat::Glb | OutputFormat::Obj => {
+            return false;
+        }
     };
     if size_bytes > suspect_threshold {
         return false;
@@ -278,13 +330,20 @@ pub fn is_valid_gallery_file(path: &Path, format: OutputFormat, size_bytes: u64)
     let header_ok = match format {
         OutputFormat::Mp4 => has_ftyp_box(path),
         OutputFormat::Wav => has_riff_wave_header(path),
+        OutputFormat::Glb => has_gltf_header(path),
+        // OBJ is never a stored artifact (see `format_from_path`), so this
+        // arm is unreachable through the scanner. Refuse rather than fall
+        // into the raster probe, which would try to decode text as an image.
+        OutputFormat::Obj => false,
         _ => image_header_dims(path).is_some(),
     };
     if !header_ok {
         return false;
     }
-    if !matches!(format, OutputFormat::Mp4 | OutputFormat::Wav)
-        && is_probably_solid_black(path, format, size_bytes)
+    if !matches!(
+        format,
+        OutputFormat::Mp4 | OutputFormat::Wav | OutputFormat::Glb | OutputFormat::Obj
+    ) && is_probably_solid_black(path, format, size_bytes)
     {
         return false;
     }

@@ -1057,6 +1057,12 @@ fn recipe(
     let h3_compact_turbo_steps = h3_compact_turbo.map(|tier| tier.steps);
     let h3_compact_steps = h3_compact_turbo_steps.unwrap_or(crate::minimax_h3::COMFY_DEFAULT_STEPS);
     let audio_only = pipeline == Some(Ltx2PipelineMode::T2a);
+    // A mesh recipe is canvasless for the same reason an audio-only one is:
+    // the artifact has no pixel dimensions. The source image is letterboxed to
+    // the checkpoint's own conditioning size, which is not a canvas the user
+    // picks, so advertising a resolution control here would offer a knob the
+    // engine ignores.
+    let mesh_only = family == crate::manifest::HUNYUAN3D_FAMILY;
     let source_driven = family == "qwen-image-edit"
         || matches!(
             pipeline,
@@ -1102,7 +1108,7 @@ fn recipe(
             )
             .is_ok()
     });
-    let resolution = if audio_only {
+    let resolution = if audio_only || mesh_only {
         ResolutionProfile {
             domain: ResolutionDomain::None,
             alignment: 1,
@@ -1243,7 +1249,20 @@ fn recipe(
     // which would advertise a control the worker cannot honour.
     let identity_supported = crate::identity::identity_runtime_available()
         && crate::identity::identity_qualified_model_with_family(input.model, Some(family));
-    let output = if audio_only {
+    let output = if mesh_only {
+        OutputCapabilitiesProfile {
+            // GLB is the only STORED form. OBJ is offered as an export
+            // transcode from the gallery, not as a generation target, because
+            // an `.obj` alone carries neither materials nor textures.
+            default_format: OutputFormat::Glb,
+            formats: vec![OutputFormat::Glb],
+            audio_requires_mp4: false,
+            delivery_reason: Some(
+                "3-D delivery uses binary glTF; OBJ is available as a gallery export."
+                    .to_string(),
+            ),
+        }
+    } else if audio_only {
         OutputCapabilitiesProfile {
             default_format: OutputFormat::Wav,
             formats: vec![OutputFormat::Wav],
@@ -1294,8 +1313,8 @@ fn recipe(
         input.default_steps
     };
     let defaults = GenerationDefaultsProfile {
-        width: if audio_only { 0 } else { default_width },
-        height: if audio_only { 0 } else { default_height },
+        width: if audio_only || mesh_only { 0 } else { default_width },
+        height: if audio_only || mesh_only { 0 } else { default_height },
         steps: default_steps,
         guidance: effective_guidance,
         frames: temporal.as_ref().map(|profile| profile.frames.default),

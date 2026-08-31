@@ -219,11 +219,7 @@ pub fn from_hf(
         return Err(NormalizeError::EmptyTree);
     }
     files.sort_by(|a, b| a.url.cmp(&b.url));
-    let modality = if family.is_video() {
-        Modality::Video
-    } else {
-        Modality::Image
-    };
+    let modality = Modality::for_family(family);
 
     let kind = classify_hf_kind(&detail, &files);
     if kind == Kind::Lora {
@@ -531,11 +527,7 @@ fn from_civitai_version(
     };
     let companions = companions_for(family, sub_family.as_deref(), bundling, kind);
     let mut supported = supported_for(family, bundling, kind);
-    let modality = if family.is_video() {
-        Modality::Video
-    } else {
-        Modality::Image
-    };
+    let modality = Modality::for_family(family);
 
     let mut recipe_files = vec![civitai_recipe_file(version.id, file, None)];
     if family == Family::ZImage {

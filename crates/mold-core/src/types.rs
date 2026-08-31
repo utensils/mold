@@ -2784,6 +2784,15 @@ pub enum OutputFormat {
     Webp,
     Mp4,
     Wav,
+    /// Binary glTF. The stored form of every 3-D artifact: one self-contained
+    /// file carrying geometry, UVs, normals and any PBR textures as embedded
+    /// buffer views, so a mesh remains one gallery row exactly like a print.
+    Glb,
+    /// Wavefront OBJ. **Export-only** — a `.obj` is never the stored artifact
+    /// because it cannot carry its own material or textures, so mold serves it
+    /// as a transcode alongside the `.mtl` and texture files rather than
+    /// publishing a file that is incomplete on its own.
+    Obj,
 }
 
 impl OutputFormat {
@@ -2797,6 +2806,8 @@ impl OutputFormat {
             OutputFormat::Webp => "webp",
             OutputFormat::Mp4 => "mp4",
             OutputFormat::Wav => "wav",
+            OutputFormat::Glb => "glb",
+            OutputFormat::Obj => "obj",
         }
     }
 
@@ -2810,6 +2821,8 @@ impl OutputFormat {
             OutputFormat::Webp => "image/webp",
             OutputFormat::Mp4 => "video/mp4",
             OutputFormat::Wav => "audio/wav",
+            OutputFormat::Glb => "model/gltf-binary",
+            OutputFormat::Obj => "model/obj",
         }
     }
 
@@ -2828,6 +2841,17 @@ impl OutputFormat {
     /// branch must stay `false` so nothing tries to seek frames out of them.
     pub fn is_audio(&self) -> bool {
         matches!(self, OutputFormat::Wav)
+    }
+
+    /// Whether this format carries 3-D geometry and no raster frames.
+    ///
+    /// The third disjoint media class, added the way [`Self::is_audio`] was:
+    /// every `is_video` and `is_audio` branch must stay `false` for a mesh, or
+    /// a viewer tries to seek frames out of a glTF buffer. Gallery grids show
+    /// the sidecar poster PNG a mesh save writes; only the lightbox loads the
+    /// geometry.
+    pub fn is_mesh(&self) -> bool {
+        matches!(self, OutputFormat::Glb | OutputFormat::Obj)
     }
 }
 
@@ -2849,6 +2873,8 @@ impl std::str::FromStr for OutputFormat {
             "webp" => Ok(OutputFormat::Webp),
             "mp4" => Ok(OutputFormat::Mp4),
             "wav" => Ok(OutputFormat::Wav),
+            "glb" => Ok(OutputFormat::Glb),
+            "obj" => Ok(OutputFormat::Obj),
             other => Err(format!("unknown format: {other}")),
         }
     }

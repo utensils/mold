@@ -46,6 +46,30 @@ pub enum FamilyRole {
 pub enum Modality {
     Image,
     Video,
+    /// A 3-D mesh asset. Disjoint from both raster kinds: no frames, no fps,
+    /// no canvas, and a viewer must not try to decode it as a picture.
+    Mesh,
+}
+
+impl Modality {
+    /// The one place a family's modality is decided.
+    ///
+    /// It used to be decided at four — HF repo normalization, Civitai version
+    /// normalization, the companion row builder, and the HF search-hit path —
+    /// each an `if family.is_video() { Video } else { Image }`. That shape is
+    /// why the doc on [`Family::is_video`] warns about a new family compiling
+    /// cleanly while being misclassified at whichever site the author missed;
+    /// adding a third modality made the duplication untenable, so the four
+    /// call sites now delegate here and a new family is classified once.
+    pub fn for_family(family: Family) -> Self {
+        if family.is_mesh() {
+            Modality::Mesh
+        } else if family.is_video() {
+            Modality::Video
+        } else {
+            Modality::Image
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
