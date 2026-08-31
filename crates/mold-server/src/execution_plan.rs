@@ -7749,6 +7749,9 @@ mod tests {
                 h3_factory_authority_sha256: None,
                 attention_backend: SemanticAttentionBackend::Math,
                 attention_chunk: SemanticAttentionChunk::Auto,
+                // flux is an image family: it never takes cuDNN, so its
+                // fingerprint carries no convolution backend at all.
+                conv_backend: None,
                 vae_tiling: SemanticVaeTiling::Auto,
                 vae_dtype: SemanticVaeDType::Auto,
                 runtime: vec![RuntimeSemanticSetting {
