@@ -172,7 +172,14 @@ impl Flux2Linear {
 
         let weight = vb.get((out_dim, in_dim), "weight")?;
         if weight.dtype() == DType::F8E4M3 {
-            let scale = vb.get_unchecked("scale_weight").ok();
+            // Every producer writes the scale as F32 (BFL's `weight_scale`,
+            // ComfyUI's `scale_weight` — the single-file backend normalizes
+            // the spelling). Ask for it at that dtype so it is not rounded
+            // through the working dtype before it multiplies anything.
+            let scale = vb
+                .get_unchecked_dtype("scale_weight", DType::F32)
+                .or_else(|_| vb.get_unchecked("scale_weight"))
+                .ok();
             let bias = if has_bias {
                 vb.get_unchecked("bias").ok()
             } else {
@@ -285,10 +292,16 @@ impl Module for Flux2Linear {
                 bias,
             } => {
                 let dtype = x.dtype();
+                // A per-tensor scale is linear in the matmul, so it rides on
+                // the OUTPUT — which is orders of magnitude smaller than the
+                // weight — instead of costing a second full-size pass over the
+                // dequantized slab. Mirrors the Qwen-Image FP8 rule. Anything
+                // with per-row structure still scales the weight.
+                let scalar_scale = scale.as_ref().filter(|s| s.rank() == 0);
                 let w = weight.to_dtype(dtype)?;
                 let w = match scale {
-                    Some(s) => w.broadcast_mul(&s.to_dtype(dtype)?)?,
-                    None => w,
+                    Some(s) if scalar_scale.is_none() => w.broadcast_mul(&s.to_dtype(dtype)?)?,
+                    _ => w,
                 };
                 let w = w.t()?;
                 let out = match *x.dims() {
@@ -303,6 +316,10 @@ impl Module for Flux2Linear {
                             .reshape((bsize, m, ()))?
                     }
                     _ => x.matmul(&w)?,
+                };
+                let out = match scalar_scale {
+                    Some(s) => out.broadcast_mul(&s.to_dtype(dtype)?)?,
+                    None => out,
                 };
                 match bias {
                     Some(b) => out.broadcast_add(&b.to_dtype(dtype)?),
@@ -1754,6 +1771,82 @@ mod tests {
         let v: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
         for x in &v {
             assert!((x - 8.0).abs() < 1e-3, "got {x}, want 8.0");
+        }
+    }
+
+    /// BFL's own FP8 conversions store `weight / weight_scale` and ship the
+    /// scale beside it. Ignoring it does not blur the render, it destroys it:
+    /// a scale of 0.002 makes every weight ~500x too large.
+    #[test]
+    fn flux2_linear_fp8_applies_a_scalar_dequantization_scale() {
+        let dev = candle_core::Device::Cpu;
+        let weight = Tensor::from_vec(vec![2.0f32; 8], (2, 4), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let scale = Tensor::new(0.25f32, &dev).unwrap();
+        assert_eq!(scale.rank(), 0, "per-tensor scale is a scalar");
+        let lin = Flux2Linear::Fp8 {
+            weight,
+            scale: Some(scale),
+            bias: None,
+        };
+        let x = Tensor::from_vec(vec![1.0f32; 4], (1, 4), &dev).unwrap();
+        let v: Vec<f32> = lin
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        // 4 inputs x (2.0 * 0.25) = 2.0 per output row.
+        for got in &v {
+            assert!((got - 2.0).abs() < 1e-3, "got {got}, want 2.0");
+        }
+    }
+
+    /// The scalar scale rides on the output for cost, so it must still agree
+    /// with the weight-side arithmetic a per-row scale takes.
+    #[test]
+    fn flux2_linear_fp8_scalar_and_per_row_scales_agree() {
+        let dev = candle_core::Device::Cpu;
+        let raw: Vec<f32> = (0..8).map(|i| (i as f32 + 1.0) * 0.5).collect();
+        let weight = Tensor::from_vec(raw, (2, 4), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 4), &dev).unwrap();
+
+        let scalar = Flux2Linear::Fp8 {
+            weight: weight.clone(),
+            scale: Some(Tensor::new(0.5f32, &dev).unwrap()),
+            bias: None,
+        };
+        // The same 0.5, expressed per output row — this takes the weight-side
+        // branch instead.
+        let per_row = Flux2Linear::Fp8 {
+            weight,
+            scale: Some(Tensor::from_vec(vec![0.5f32; 2], (2, 1), &dev).unwrap()),
+            bias: None,
+        };
+
+        let a: Vec<f32> = scalar
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let b: Vec<f32> = per_row
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(a.len(), b.len());
+        for (got, want) in a.iter().zip(&b) {
+            assert!((got - want).abs() < 1e-3, "got {got}, want {want}");
         }
     }
 
