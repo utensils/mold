@@ -17,8 +17,9 @@ use crate::queue_media_startup::{
     UntouchedEntry,
 };
 use crate::queue_media_store::{
-    MediaSetRef, QueueMediaAdmissionAuthority, QueueMediaError, QueueMediaOperationFingerprint,
-    QueueMediaOperationReceipt, QueueMediaProjection, QueueMediaStore, SealMedia,
+    GalleryMediaPinRef, MediaSetRef, QueueMediaAdmissionAuthority, QueueMediaError,
+    QueueMediaOperationFingerprint, QueueMediaOperationReceipt, QueueMediaProjection,
+    QueueMediaStore, SealMedia,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,14 @@ pub(crate) enum CleanupOutcome {
     AlreadyClean,
     /// The authenticated set was unlinked and its GC obligation cleared.
     Deleted,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct GalleryPinReconcileReport {
+    pub(crate) retained: usize,
+    pub(crate) released: usize,
+    pub(crate) release_failures: usize,
+    pub(crate) untouched: usize,
 }
 
 /// Singular concrete bridge between owner-fenced SQLite obligations and the
@@ -205,6 +214,154 @@ impl QueueMediaLifecycle {
         )
         .map_err(db_error)?;
         Ok(joined.map(|joined| candidate_from_joined(&joined)))
+    }
+
+    /// Create encrypted per-output pins, commit their exact archive bindings,
+    /// then refresh SQLite's repairable projection. This must complete before
+    /// the queue row is terminally deleted.
+    pub(crate) fn handoff_to_gallery(
+        &self,
+        job_id: &str,
+        output_dir: &std::path::Path,
+        gate: &crate::batch_transaction::GalleryPublicationGate,
+    ) -> anyhow::Result<()> {
+        let Some(candidate) = self
+            .candidate_for_job(job_id)
+            .map_err(|error| anyhow::anyhow!(error))?
+        else {
+            return Ok(());
+        };
+        let store = self.runtime_store()?;
+        let media_set = candidate.media_set.clone();
+        let bindings =
+            gate.bind_retained_media_for_job(output_dir, job_id, &media_set, |pin_id| {
+                store
+                    .pin_for_gallery_item(&media_set, pin_id)
+                    .map(|_| ())
+                    .map_err(Into::into)
+            })?;
+        let canonical = std::fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.into());
+        for (filename, _) in bindings {
+            let retained = gate
+                .retained_media_for_item(&canonical, &filename)?
+                .map(|(_, pins)| pins)
+                .unwrap_or_default();
+            let projection = retained
+                .into_iter()
+                .map(|binding| mold_db::gallery_media::GalleryMediaBinding {
+                    output_dir: canonical.to_string_lossy().into_owned(),
+                    filename: filename.clone(),
+                    pin_id: binding.pin_id,
+                    media_set_id: binding.media_set.set_id,
+                    owner_uuid: binding.media_set.owner_id,
+                    job_id: binding.media_set.job_id,
+                })
+                .collect::<Vec<_>>();
+            mold_db::gallery_media::replace_for_item(
+                self.db().map_err(|error| anyhow::anyhow!(error))?,
+                &canonical.to_string_lossy(),
+                &filename,
+                &projection,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release_gallery_pin(
+        &self,
+        media_set: MediaSetRef,
+        pin_id: String,
+    ) -> Result<(), QueueMediaError> {
+        self.runtime_store()?
+            .release_gallery_pin(&GalleryMediaPinRef::new(media_set, pin_id)?)
+    }
+
+    /// Sweep encrypted gallery pins that no committed live/retired archive
+    /// entry authorizes. This runs after gallery authority startup recovery
+    /// and before serving, so a pin created before a failed authority commit
+    /// cannot race a new publication.
+    pub(crate) fn reconcile_gallery_pins(
+        &self,
+        output_dir: &std::path::Path,
+        gate: &crate::batch_transaction::GalleryPublicationGate,
+    ) -> anyhow::Result<GalleryPinReconcileReport> {
+        let index = gate.committed_archive_index(output_dir)?;
+        let pin_scope = crate::batch_transaction::gallery_media_pin_scope(output_dir)?;
+        let authoritative = index
+            .entries
+            .values()
+            .chain(index.retired_entries.values())
+            .flat_map(|entry| entry.retained_media.iter())
+            .map(|pin| GalleryMediaPinRef::new(pin.media_set.clone(), pin.pin_id.clone()))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let store = self.runtime_store()?;
+        let inspection = store.inspect_gallery_pins();
+        let mut report = GalleryPinReconcileReport {
+            untouched: inspection.untouched.len(),
+            ..GalleryPinReconcileReport::default()
+        };
+        for pin in inspection.pins {
+            if !pin.pin_id.starts_with(&pin_scope) {
+                // The encrypted pin store is shared across configured gallery
+                // roots. A different scope is owned by another (possibly
+                // previously configured) root and cannot be judged from this
+                // root's authority index.
+                report.untouched += 1;
+                continue;
+            }
+            if authoritative.contains(&pin) {
+                report.retained += 1;
+                continue;
+            }
+            match store.release_gallery_pin(&pin) {
+                Ok(()) => report.released += 1,
+                Err(error) => {
+                    report.release_failures += 1;
+                    tracing::warn!(%error, pin_id = %pin.pin_id, "orphan gallery-media pin release will retry on startup");
+                }
+            }
+        }
+        for description in inspection.untouched {
+            tracing::warn!(%description, "unsafe gallery-media pin entry was left untouched");
+        }
+        Ok(report)
+    }
+
+    pub(crate) fn gallery_manifest(
+        &self,
+        media_set: MediaSetRef,
+        pin_id: String,
+    ) -> Result<crate::queue_media_store::MediaSetManifest, QueueMediaError> {
+        self.runtime_store()?
+            .load_from_gallery_pin(&GalleryMediaPinRef::new(media_set, pin_id)?)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn gallery_member_bytes(
+        &self,
+        media_set: MediaSetRef,
+        pin_id: String,
+        member_index: usize,
+    ) -> Result<Vec<u8>, QueueMediaError> {
+        use crate::queue_media_store::DecryptedQueueMediaPayload;
+        use std::io::Read as _;
+
+        let pin = GalleryMediaPinRef::new(media_set, pin_id)?;
+        let mut decrypted = self.runtime_store()?.decrypt_mixed_from_gallery_pin(&pin)?;
+        let member = decrypted
+            .media
+            .get_mut(member_index)
+            .ok_or(QueueMediaError::NotFound)?;
+        match &mut member.payload {
+            DecryptedQueueMediaPayload::Bytes(bytes) => Ok(std::mem::take(bytes)),
+            DecryptedQueueMediaPayload::PrivatePath(path) => {
+                let mut file = mold_core::secure_file::open_regular_file_no_follow(path)
+                    .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                Ok(bytes)
+            }
+        }
     }
 
     pub(crate) fn active_candidates(&self) -> Result<Vec<QueueMediaGcCandidate>, AdapterError> {
@@ -573,6 +730,117 @@ mod tests {
                 .durable_media_ready
         );
         lifecycle
+    }
+
+    #[tokio::test]
+    async fn startup_gallery_pin_reconcile_releases_authorityless_pins() {
+        let home = tempfile::tempdir().unwrap();
+        let gallery = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "instance-a",
+        ));
+        let owner = journal.owner_uuid().unwrap().to_string();
+        let store = QueueMediaStore::open(home.path()).unwrap().store;
+        let media_set = store
+            .seal(
+                &owner,
+                "orphan-job",
+                vec![SealMedia::bytes("source", "source.png", vec![1, 2, 3])],
+            )
+            .unwrap();
+        let pin_id = format!(
+            "{}{}",
+            crate::batch_transaction::gallery_media_pin_scope(gallery.path()).unwrap(),
+            "a".repeat(32)
+        );
+        store.pin_for_gallery_item(&media_set, &pin_id).unwrap();
+        drop(store);
+
+        let lifecycle = install_and_reconcile(home.path(), db, &journal);
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        crate::batch_transaction::recover_transactions(gallery.path(), &gate, Arc::new(None))
+            .await
+            .unwrap();
+        let report = lifecycle
+            .reconcile_gallery_pins(gallery.path(), &gate)
+            .unwrap();
+        assert_eq!(report.released, 1);
+        assert_eq!(report.retained, 0);
+        assert!(QueueMediaStore::open_existing(home.path())
+            .unwrap()
+            .inspect_gallery_pins()
+            .pins
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconciling_current_output_root_does_not_sweep_another_roots_pins() {
+        let home = tempfile::tempdir().unwrap();
+        let old_gallery = tempfile::tempdir().unwrap();
+        let current_gallery = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "instance-a",
+        ));
+        let owner = journal.owner_uuid().unwrap().to_string();
+        let store = QueueMediaStore::open(home.path()).unwrap().store;
+        let old_set = store
+            .seal(
+                &owner,
+                "old-root-job",
+                vec![SealMedia::bytes("source", "old.png", vec![1])],
+            )
+            .unwrap();
+        let current_set = store
+            .seal(
+                &owner,
+                "current-root-orphan",
+                vec![SealMedia::bytes("source", "current.png", vec![2])],
+            )
+            .unwrap();
+        let old_pin_id = format!(
+            "{}{}",
+            crate::batch_transaction::gallery_media_pin_scope(old_gallery.path()).unwrap(),
+            "a".repeat(32)
+        );
+        let current_pin_id = format!(
+            "{}{}",
+            crate::batch_transaction::gallery_media_pin_scope(current_gallery.path()).unwrap(),
+            "b".repeat(32)
+        );
+        store.pin_for_gallery_item(&old_set, &old_pin_id).unwrap();
+        store
+            .pin_for_gallery_item(&current_set, &current_pin_id)
+            .unwrap();
+        drop(store);
+
+        let lifecycle = install_and_reconcile(home.path(), db, &journal);
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        crate::batch_transaction::recover_transactions(
+            current_gallery.path(),
+            &gate,
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+        let report = lifecycle
+            .reconcile_gallery_pins(current_gallery.path(), &gate)
+            .unwrap();
+
+        assert_eq!(report.released, 1);
+        assert_eq!(report.untouched, 1);
+        let remaining = QueueMediaStore::open_existing(home.path())
+            .unwrap()
+            .inspect_gallery_pins()
+            .pins;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].pin_id, old_pin_id);
+        assert_eq!(remaining[0].media_set, old_set);
     }
 
     #[cfg(unix)]

@@ -135,6 +135,17 @@ import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { restoreGenerationSourceMedia } from "@studio/lib/generationSourceMedia";
 import {
+  retainedSourceMediaBlob,
+  retainedSourceMediaDisclosure,
+  retainedSourceMediaInventory,
+  type RetainedSourceMediaAvailability,
+} from "@studio/api/gallerySourceMedia";
+import {
+  beginRetainedSourceReuseIntent,
+  retainedSourceReuseIsCurrent,
+  setRetainedSourceReuseIntentIfCurrent,
+} from "../lib/retainedSourceReuse";
+import {
   appendMinimaxH3GalleryImageReference,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
@@ -1641,6 +1652,7 @@ let reuseEpoch = 0;
 async function restoreLibrarySource(
   item: GalleryImage,
   epoch: number,
+  retainedVersion: number,
   expected: {
     model: string;
     width: number;
@@ -1650,6 +1662,7 @@ async function restoreLibrarySource(
 ): Promise<void> {
   const stillOwnsEmptySource = () =>
     epoch === reuseEpoch &&
+    retainedSourceReuseIsCurrent(retainedVersion) &&
     form.state.value.model === expected.model &&
     form.state.value.width === expected.width &&
     form.state.value.height === expected.height &&
@@ -1659,6 +1672,7 @@ async function restoreLibrarySource(
     await nextTick();
     if (
       epoch !== reuseEpoch ||
+      !retainedSourceReuseIsCurrent(retainedVersion) ||
       form.state.value.model !== expected.model ||
       form.state.value.imageAttachments[0]?.base64 !== base64
     )
@@ -1667,6 +1681,27 @@ async function restoreLibrarySource(
       item.metadata.generation_width ?? item.metadata.width;
     form.state.value.height =
       item.metadata.generation_height ?? item.metadata.height;
+  };
+  const owner = hostForEntry(item);
+  const retainedTarget = owner
+    ? { baseUrl: owner.url, apiKey: owner.apiKey ?? null }
+    : null;
+  let retainedUnavailable: RetainedSourceMediaAvailability | null = null;
+  const retainedRead = retainedTarget
+    ? retainedSourceMediaInventory(item.filename, retainedTarget).catch(
+        () => null,
+      )
+    : Promise.resolve(null);
+  const acceptRetainedInventory = (
+    inventory: Awaited<ReturnType<typeof retainedSourceMediaInventory>> | null,
+  ) => {
+    if (!inventory || !retainedTarget || epoch !== reuseEpoch) return;
+    retainedUnavailable = inventory.availability;
+    setRetainedSourceReuseIntentIfCurrent(retainedVersion, {
+      filename: item.filename,
+      origin: retainedTarget,
+      inventory,
+    });
   };
   const sha256 = item.metadata.source_image_sha256;
   const stored = await restoreGenerationSourceMedia(sha256).catch(() => null);
@@ -1682,12 +1717,59 @@ async function restoreLibrarySource(
       },
     ];
     await restoreCanvas(stored.base64);
+    void retainedRead.then((inventory) => {
+      acceptRetainedInventory(inventory);
+      const disclosure = inventory
+        ? retainedSourceMediaDisclosure(inventory.availability)
+        : null;
+      if (disclosure) toast("error", disclosure);
+    });
     return;
   }
 
+  const resolvedRetainedInventory = await retainedRead;
+  acceptRetainedInventory(resolvedRetainedInventory);
+
+  if (retainedTarget && resolvedRetainedInventory) {
+    try {
+      const retained = resolvedRetainedInventory.members.find(
+        (member) => member.role === "source_image",
+      );
+      if (resolvedRetainedInventory.availability === "available" && retained) {
+        const blob = await retainedSourceMediaBlob(
+          item.filename,
+          retained.member_id,
+          retainedTarget,
+        );
+        const base64 = await blobToBase64(blob);
+        if (!stillOwnsEmptySource()) return;
+        const dimensions = imageDimensionsFromBase64(base64);
+        form.state.value.imageAttachments = [
+          {
+            kind: "gallery",
+            filename: retained.display_name,
+            base64,
+            width: dimensions?.width,
+            height: dimensions?.height,
+            mime: blob.type || undefined,
+          },
+        ];
+        await restoreCanvas(base64);
+        return;
+      }
+    } catch {
+      // Preserve the established same-name gallery fallback below.
+    }
+  }
+
   const filename = item.metadata.source_image_name;
-  if (!filename) return;
-  const owner = hostForEntry(item);
+  if (!filename) {
+    const disclosure = retainedUnavailable
+      ? retainedSourceMediaDisclosure(retainedUnavailable)
+      : null;
+    if (disclosure) toast("error", disclosure);
+    return;
+  }
   const candidates = [owner, ...listHosts()].filter(
     (host, index, hosts) =>
       host && hosts.findIndex((other) => other?.id === host.id) === index,
@@ -1717,12 +1799,15 @@ async function restoreLibrarySource(
   }
   toast(
     "error",
-    "The original source image is unavailable. Reattach it before generating.",
+    (retainedUnavailable &&
+      retainedSourceMediaDisclosure(retainedUnavailable)) ||
+      "The original source image is unavailable. Reattach it before generating.",
   );
 }
 
 async function onReuse(item: GalleryImage) {
   const epoch = ++reuseEpoch;
+  const retainedVersion = beginRetainedSourceReuseIntent();
   if (isSequencePrint(item)) {
     reuseSequence(item);
     return;
@@ -1755,7 +1840,7 @@ async function onReuse(item: GalleryImage) {
   closeLightbox();
   await router.push({ name: "create" });
   if (epoch !== reuseEpoch) return;
-  await restoreLibrarySource(item, epoch, expected);
+  await restoreLibrarySource(item, epoch, retainedVersion, expected);
 }
 
 /**

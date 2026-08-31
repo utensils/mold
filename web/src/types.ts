@@ -29,7 +29,13 @@ export type {
 
 // Matches `mold_core::OutputFormat` on the wire (lowercase strings).
 export type OutputFormat =
-  "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav";
+  | "png"
+  | "jpeg"
+  | "gif"
+  | "apng"
+  | "webp"
+  | "mp4"
+  | "wav";
 
 export type SeedMode = "random" | "static" | "increment";
 
@@ -330,7 +336,9 @@ export interface LoraWeight {
 
 // ── Device placement (Agent C: model-ui-overhaul §3) ──────────────────────
 export type DeviceRef =
-  { kind: "auto" } | { kind: "cpu" } | { kind: "gpu"; ordinal: number };
+  | { kind: "auto" }
+  | { kind: "cpu" }
+  | { kind: "gpu"; ordinal: number };
 
 export interface AdvancedPlacement {
   transformer: DeviceRef;
@@ -388,6 +396,9 @@ export interface GenerateRequestWire {
    * identity-qualified checkpoint, and never beside a LoRA or `source_image`;
    * every rule lives in `@studio/lib/identityConditioning`. */
   id_image?: string | null;
+  /** Ordered multi-photo identity form, mutually exclusive with id_image. */
+  id_images?: string[] | null;
+  id_image_names?: string[] | null;
   /** Upload label recorded as provenance only when `id_image` exists. */
   id_image_name?: string | null;
   /** `0.0..=3.0`; omit to let the server's own default (1.0) apply. */
@@ -1215,7 +1226,11 @@ export interface Ltx2CameraControlInfo {
 // server's serde output.
 
 export type JobStatusWire =
-  "queued" | "active" | "completed" | "failed" | "cancelled";
+  | "queued"
+  | "active"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface DownloadJobWire {
   id: string;

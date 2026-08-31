@@ -62,6 +62,10 @@ import {
 } from "@studio/lib/libraryOrganization";
 import { ApiError, type ApiTarget } from "../lib/api/client";
 import {
+  retainedSourceMediaDisclosure,
+  retainedSourceMediaInventory,
+} from "@studio/api/gallerySourceMedia";
+import {
   useGalleryStore,
   type FanoutResult,
   type GalleryKindFilter,
@@ -433,7 +437,29 @@ function reuseSettings(entry: MergedPrint) {
   }
   // Full metadata → full-fidelity restore (negative prompt, LoRAs,
   // scheduler, video params, …) via `applyPrefillToForm`.
-  composer.set({ metadata: entry.item.metadata });
+  const retainedVersion = composer.beginRetainedSourceReuse({ metadata: entry.item.metadata });
+  const target = gallery.targetOf(entry.sourceKey);
+  if (target) {
+    void retainedSourceMediaInventory(entry.item.filename, target)
+      .then((inventory) => {
+        if (
+          !composer.setRetainedSourceIfCurrent(retainedVersion, {
+            filename: entry.item.filename,
+            origin: target,
+            inventory,
+          })
+        ) {
+          return;
+        }
+        const disclosure = retainedSourceMediaDisclosure(inventory.availability);
+        if (disclosure) toasts.push(disclosure, "error");
+      })
+      .catch(() => {
+        // The established local stash/gallery-name restore stays live. A
+        // transport failure inspecting the additive endpoint must not turn a
+        // previously working Reuse settings action into a dead end.
+      });
+  }
   lightboxOpen.value = false;
   void router.push("/create");
 }

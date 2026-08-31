@@ -139,6 +139,15 @@ import {
 } from "../api";
 import { apiJsonTo } from "@studio/api/client";
 import {
+  relayRetainedSourceMedia,
+  retainedSourceMediaMembersForRequest,
+} from "@studio/api/gallerySourceMedia";
+import {
+  clearRetainedSourceReuseIntent,
+  retainedSourceReuseIsCurrent,
+  retainedSourceReuseSnapshot,
+} from "../lib/retainedSourceReuse";
+import {
   settingsRestoreMetadata,
   watchSelectedQueuePreview,
   type QueueJobProgress,
@@ -2457,6 +2466,7 @@ function applySequenceReuse(metadata: OutputMetadata) {
 function applySequenceHandoff() {
   const handoff = takeSequenceHandoff();
   if (!handoff) return;
+  clearRetainedSourceReuseIntent();
   if (handoff.kind === "reuse") {
     applySequenceReuse(handoff.metadata);
     return;
@@ -2682,6 +2692,7 @@ function inspectSelectedQueueRender(
 function applyGenerationHandoff() {
   const handoff = takeGenerationHandoff();
   if (!handoff) return;
+  clearRetainedSourceReuseIntent();
   setOutput("single");
   draft.stopEditing();
   editBaselineShared.value = null;
@@ -2723,6 +2734,7 @@ function onAppendPromptPhrase(phrase: string) {
 // source media, and any in-flight expansion/variation review, but KEEP the
 // selected model, then focus the prompt. Never nukes the persisted model.
 function onNewPrint() {
+  clearRetainedSourceReuseIntent();
   const model = currentModel.value;
   if (model) form.applyModelDefaults(model);
   // A new print files itself from scratch — the ghost chip and the title
@@ -2752,6 +2764,7 @@ function onNewPrint() {
 // nothing leaves the browser, so an undo toast is enough and a blocking confirm
 // would be heavier than the action deserves.
 function onResetSettings() {
+  clearRetainedSourceReuseIntent();
   // resetSettings swaps in a freshly built state object, so the previous one is
   // never mutated and can be handed straight back on undo.
   const previous = form.state.value;
@@ -3987,7 +4000,7 @@ async function onSubmitInner(
   );
   if (!isCurrent()) return;
   if (preparedSource === false) return;
-  const req = form.toRequest(currentModel.value);
+  let req = form.toRequest(currentModel.value);
   const finalizedCopies = requestCopyCount(req);
   if (quick) req.original_prompt = quick.originalPrompt;
   if (quick?.promptTransform) req.prompt_transform = quick.promptTransform;
@@ -4063,6 +4076,36 @@ async function onSubmitInner(
       mime: staged?.mime ?? null,
     });
   }
+  const retainedSnapshot = retainedSourceReuseSnapshot();
+  const retainedIntent = retainedSnapshot?.intent;
+  if (retainedIntent?.inventory.availability === "available") {
+    const retainedMembers = retainedSourceMediaMembersForRequest(
+      retainedIntent.inventory.members,
+      req,
+    );
+    if (retainedMembers.length > 0) {
+      try {
+        req = await relayRetainedSourceMedia(
+          retainedIntent.filename,
+          retainedMembers,
+          req,
+          retainedIntent.origin,
+          signal,
+        );
+      } catch (error) {
+        toast(
+          "error",
+          `Couldn’t restore retained source media: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return;
+      }
+      if (
+        !isCurrent() ||
+        !retainedSourceReuseIsCurrent(retainedSnapshot!.version)
+      )
+        return;
+    }
+  }
   const finalizedResult = route
     ? decision.kind === "chain"
       ? await routing.revalidateFeasibleChain(
@@ -4107,6 +4150,7 @@ async function onSubmitInner(
   });
   if (!accepted || !isCurrent()) return;
   if (!submitRequestCopies(req, decision, route)) return;
+  clearRetainedSourceReuseIntent();
   quickPrepared.value = null;
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);
@@ -4503,13 +4547,36 @@ async function queueVariations() {
           : `${feasibilityMessage(revalidated, "this complete batch")} Nothing was queued; your reviewed variations are preserved.`;
       return;
     }
+    let retainedPreparedBase = prepared.baseRequest;
+    const retainedSnapshot = retainedSourceReuseSnapshot();
+    const retainedIntent = retainedSnapshot?.intent;
+    if (retainedIntent?.inventory.availability === "available") {
+      const retainedMembers = retainedSourceMediaMembersForRequest(
+        retainedIntent.inventory.members,
+        retainedPreparedBase,
+      );
+      if (retainedMembers.length > 0) {
+        try {
+          retainedPreparedBase = await relayRetainedSourceMedia(
+            retainedIntent.filename,
+            retainedMembers,
+            retainedPreparedBase,
+            retainedIntent.origin,
+          );
+        } catch (error) {
+          composerError.value = `Couldn’t restore retained source media: ${error instanceof Error ? error.message : String(error)}`;
+          return;
+        }
+        if (!retainedSourceReuseIsCurrent(retainedSnapshot!.version)) return;
+      }
+    }
     const requests = list.map((prompt, index) => {
       // Each variation already carries the style extras, so it is the final
       // prompt — override the base request's prompt rather than re-appending.
       // Each is one print; the batch size drove the variation count, not the
       // per-job image count.
       const request: GenerateRequestWire = {
-        ...prepared.baseRequest,
+        ...retainedPreparedBase,
         // Prepared siblings share one filing decision, read at queue time —
         // the reviewed prompts are what was frozen, not where they file.
         ...fileUnder.requestFields(),
@@ -4549,6 +4616,7 @@ async function queueVariations() {
     }
     variations.value = [];
     preparedBatch.value = null;
+    clearRetainedSourceReuseIntent();
   } finally {
     queueingVariations.value = false;
   }
@@ -4558,6 +4626,7 @@ async function queueVariations() {
 async function onClearSource() {
   if (form.state.value.maskImage && !(await resolveMaskSourceConflict()))
     return;
+  clearRetainedSourceReuseIntent();
   form.state.value.imageAttachments = [];
 }
 

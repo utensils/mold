@@ -875,6 +875,31 @@ async fn feed_available(
                 continue;
             }
         } else if let Some(output) = completed_output {
+            // Publication can commit immediately before a process exits, while
+            // the queue row and its encrypted upload are still retained.  A
+            // replay that merely observes the committed output and deletes the
+            // row would therefore drop the last source-media copy.  Complete
+            // the same pin -> authority -> projection handoff used by live
+            // settlement before advancing the row to its terminal state.
+            if let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() {
+                let lifecycle = lifecycle.clone();
+                let gallery_gate = state.gallery_publication_gate.clone();
+                let output_dir = row.output_dir.clone();
+                let completion_id = row.id.clone();
+                let handed_off = await_preparation!(tokio::task::spawn_blocking(move || {
+                    lifecycle.handoff_to_gallery(&completion_id, &output_dir, &gallery_gate)
+                }));
+                if let Err(error) = handed_off
+                    .map_err(anyhow::Error::from)
+                    .and_then(|result| result)
+                {
+                    drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
+                    tracing::error!(job = %row.id, %error, "durable replay source-media handoff failed; retaining for retry");
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
+            }
             // The committed archive records the filenames only, so the
             // terminal facts stay absent rather than reported as zero.
             let result_json = serde_json::to_string(&mold_core::GenerationBatchResult {

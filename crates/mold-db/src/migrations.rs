@@ -648,6 +648,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 32,
         kind: MigrationKind::Sql(V32_GENERATION_QUEUE_EXPLICIT_PAUSE),
     },
+    Migration {
+        version: 33,
+        kind: MigrationKind::Sql(V33_GALLERY_RETAINED_MEDIA),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -667,6 +671,33 @@ CREATE INDEX IF NOT EXISTS idx_gen_dir_recency
 const V32_GENERATION_QUEUE_EXPLICIT_PAUSE: &str = r#"
 ALTER TABLE generation_queue
     ADD COLUMN explicitly_paused INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// Repairable SQLite projection of encrypted gallery-owned source-media
+/// pins. The committed gallery checkpoint remains lifecycle authority.
+const V33_GALLERY_RETAINED_MEDIA: &str = r#"
+CREATE TABLE gallery_media_sets (
+    media_set_id TEXT NOT NULL CHECK (length(media_set_id) > 0),
+    owner_uuid   TEXT NOT NULL CHECK (length(owner_uuid) > 0),
+    job_id       TEXT NOT NULL CHECK (length(job_id) > 0),
+    PRIMARY KEY (media_set_id, owner_uuid, job_id)
+);
+
+CREATE TABLE gallery_media_bindings (
+    output_dir   TEXT NOT NULL,
+    filename     TEXT NOT NULL CHECK (length(filename) > 0),
+    pin_id       TEXT NOT NULL CHECK (length(pin_id) = 64),
+    media_set_id TEXT NOT NULL,
+    owner_uuid   TEXT NOT NULL,
+    job_id       TEXT NOT NULL,
+    FOREIGN KEY (media_set_id, owner_uuid, job_id)
+        REFERENCES gallery_media_sets(media_set_id, owner_uuid, job_id)
+        ON DELETE CASCADE,
+    PRIMARY KEY (output_dir, filename, pin_id, media_set_id, owner_uuid, job_id)
+);
+
+CREATE INDEX gallery_media_bindings_set
+ON gallery_media_bindings(media_set_id, owner_uuid, job_id, output_dir, filename);
 "#;
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -744,7 +775,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 32;
+pub const SCHEMA_VERSION: i64 = 33;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///

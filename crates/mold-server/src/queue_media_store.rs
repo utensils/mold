@@ -25,6 +25,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const STORE_DIR: &str = "queue-media";
 const STORE_VERSION_DIR: &str = "v1";
+const GALLERY_PINS_DIR: &str = "gallery-pins";
 const KEY_FILE: &str = "master.key";
 const GENERATION_ADMISSION_KEY_FILE: &str = "generation-admission.key";
 const MAGIC: &[u8; 8] = b"MOLDQMS1";
@@ -195,6 +196,12 @@ pub struct OpenedQueueMediaStore {
     pub key_disposition: KeyDisposition,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct GalleryPinInspection {
+    pub(crate) pins: Vec<GalleryMediaPinRef>,
+    pub(crate) untouched: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct QueueMediaStore {
     root: PathBuf,
@@ -246,6 +253,25 @@ pub struct MediaSetRef {
     pub owner_id: String,
     pub job_id: String,
     pub set_id: String,
+}
+
+/// An opaque gallery-owned durable link to one encrypted queue-media set.
+///
+/// `pin_id` is the lowercase SHA-256 archive-identity digest supplied by the
+/// gallery. It deliberately carries no source filename or server path.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GalleryMediaPinRef {
+    pub media_set: MediaSetRef,
+    pub pin_id: String,
+}
+
+impl GalleryMediaPinRef {
+    pub fn new(media_set: MediaSetRef, pin_id: impl Into<String>) -> Result<Self, QueueMediaError> {
+        validate_media_set_ref(&media_set)?;
+        let pin_id = pin_id.into();
+        validate_gallery_pin_id(&pin_id)?;
+        Ok(Self { media_set, pin_id })
+    }
 }
 
 pub struct SealMediaBytes {
@@ -1092,6 +1118,7 @@ impl QueueMediaStore {
             version_root.join("staging"),
             version_root.join("locks"),
             version_root.join("ephemeral"),
+            version_root.join(GALLERY_PINS_DIR),
         ] {
             ensure_private_dir(&path)?;
         }
@@ -1464,6 +1491,190 @@ impl QueueMediaStore {
             .map(|decoded| decoded.manifest)
     }
 
+    /// Retain the exact encrypted queue bundle for one committed gallery item.
+    ///
+    /// Publication prefers a hard link. Filesystems which cannot link use an
+    /// owner-only encrypted-byte copy; plaintext is never materialized. The
+    /// operation is idempotent only when an existing pin authenticates as this
+    /// exact media set.
+    pub fn pin_for_gallery_item(
+        &self,
+        media_set: &MediaSetRef,
+        pin_id: &str,
+    ) -> Result<GalleryMediaPinRef, QueueMediaError> {
+        let pin = GalleryMediaPinRef::new(media_set.clone(), pin_id)?;
+        let _lock = self.lock_job(&media_set.owner_id, &media_set.job_id)?;
+        let destination = self.gallery_pin_path(&pin);
+        ensure_private_dir(destination.parent().expect("gallery pin has parent"))?;
+
+        if let Some(metadata) = symlink_metadata_optional(&destination)? {
+            verify_private_bundle_metadata(&destination, &metadata)?;
+            self.decode_bundle_from_path(media_set, &destination, None)?;
+            return Ok(pin);
+        }
+
+        let source = self
+            .locate_bundle(media_set)?
+            .ok_or(QueueMediaError::NotFound)?;
+        let source_metadata = fs::symlink_metadata(&source)?;
+        verify_private_bundle_metadata(&source, &source_metadata)?;
+        // Authenticate before adding gallery durability. This also prevents a
+        // syntactically plausible but tampered queue file from being pinned.
+        self.decode_bundle_from_path(media_set, &source, None)?;
+        self.publish_gallery_pin(&source, &destination)?;
+        if let Err(error) = self.decode_bundle_from_path(media_set, &destination, None) {
+            cleanup_owned_publication_path(&destination);
+            return Err(error);
+        }
+        Ok(pin)
+    }
+
+    /// Load an exact gallery pin. Queue active/retired paths are intentionally
+    /// not consulted, so callers cannot silently restore from the wrong owner.
+    pub fn load_from_gallery_pin(
+        &self,
+        pin: &GalleryMediaPinRef,
+    ) -> Result<MediaSetManifest, QueueMediaError> {
+        validate_gallery_pin_ref(pin)?;
+        let path = self.gallery_pin_path(pin);
+        let metadata = symlink_metadata_optional(&path)?.ok_or(QueueMediaError::NotFound)?;
+        verify_private_bundle_metadata(&path, &metadata)?;
+        self.decode_bundle_from_path(&pin.media_set, &path, None)
+            .map(|decoded| decoded.manifest)
+    }
+
+    /// Idempotently release one gallery binding. Other hard-linked sibling
+    /// bindings and encrypted-copy pins remain independently durable.
+    pub fn release_gallery_pin(&self, pin: &GalleryMediaPinRef) -> Result<(), QueueMediaError> {
+        validate_gallery_pin_ref(pin)?;
+        let _lock = self.lock_job(&pin.media_set.owner_id, &pin.media_set.job_id)?;
+        let path = self.gallery_pin_path(pin);
+        let Some(metadata) = symlink_metadata_optional(&path)? else {
+            return Ok(());
+        };
+        verify_private_bundle_metadata(&path, &metadata)?;
+        fs::remove_file(&path)?;
+        let parent = path.parent().expect("gallery pin has parent");
+        crate::dir_sync::sync_directory(parent)?;
+        self.cleanup_gallery_pin_directories(parent)?;
+        Ok(())
+    }
+
+    /// Enumerate only structurally valid, owner-private gallery pins. Unsafe
+    /// or malformed entries are reported and left untouched.
+    pub(crate) fn inspect_gallery_pins(&self) -> GalleryPinInspection {
+        let mut report = GalleryPinInspection::default();
+        let root = self.root.join(GALLERY_PINS_DIR);
+        let pin_dirs = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+            Err(error) => {
+                report
+                    .untouched
+                    .push(format!("{}: {error}", root.display()));
+                return report;
+            }
+        };
+        for pin_dir in pin_dirs.flatten() {
+            let pin_path = pin_dir.path();
+            let Some(pin_id) = pin_dir.file_name().to_str().map(str::to_owned) else {
+                report.untouched.push(pin_path.display().to_string());
+                continue;
+            };
+            if validate_gallery_pin_id(&pin_id).is_err()
+                || fs::symlink_metadata(&pin_path)
+                    .ok()
+                    .and_then(|metadata| {
+                        verify_private_directory_metadata(&pin_path, &metadata).ok()
+                    })
+                    .is_none()
+            {
+                report.untouched.push(pin_path.display().to_string());
+                continue;
+            }
+            let Ok(owner_dirs) = fs::read_dir(&pin_path) else {
+                report.untouched.push(pin_path.display().to_string());
+                continue;
+            };
+            for owner_dir in owner_dirs.flatten() {
+                let owner_path = owner_dir.path();
+                let owner = owner_dir
+                    .file_name()
+                    .to_str()
+                    .and_then(decode_component)
+                    .filter(|value| validate_identity("owner", value).is_ok());
+                if owner.is_none()
+                    || fs::symlink_metadata(&owner_path)
+                        .ok()
+                        .and_then(|metadata| {
+                            verify_private_directory_metadata(&owner_path, &metadata).ok()
+                        })
+                        .is_none()
+                {
+                    report.untouched.push(owner_path.display().to_string());
+                    continue;
+                }
+                let owner = owner.unwrap();
+                let Ok(job_dirs) = fs::read_dir(&owner_path) else {
+                    report.untouched.push(owner_path.display().to_string());
+                    continue;
+                };
+                for job_dir in job_dirs.flatten() {
+                    let job_path = job_dir.path();
+                    let job = job_dir
+                        .file_name()
+                        .to_str()
+                        .and_then(decode_component)
+                        .filter(|value| validate_identity("job", value).is_ok());
+                    if job.is_none()
+                        || fs::symlink_metadata(&job_path)
+                            .ok()
+                            .and_then(|metadata| {
+                                verify_private_directory_metadata(&job_path, &metadata).ok()
+                            })
+                            .is_none()
+                    {
+                        report.untouched.push(job_path.display().to_string());
+                        continue;
+                    }
+                    let job = job.unwrap();
+                    let Ok(files) = fs::read_dir(&job_path) else {
+                        report.untouched.push(job_path.display().to_string());
+                        continue;
+                    };
+                    for file in files.flatten() {
+                        let path = file.path();
+                        let Some(set_id) = set_id_hint(&file.file_name()) else {
+                            report.untouched.push(path.display().to_string());
+                            continue;
+                        };
+                        if fs::symlink_metadata(&path)
+                            .ok()
+                            .and_then(|metadata| {
+                                verify_private_bundle_metadata(&path, &metadata).ok()
+                            })
+                            .is_none()
+                        {
+                            report.untouched.push(path.display().to_string());
+                            continue;
+                        }
+                        report.pins.push(GalleryMediaPinRef {
+                            media_set: MediaSetRef {
+                                owner_id: owner.clone(),
+                                job_id: job.clone(),
+                                set_id,
+                            },
+                            pin_id: pin_id.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        report.pins.sort();
+        report.untouched.sort();
+        report
+    }
+
     /// Authenticate only the fixed-width first V2 record. No media frame or
     /// trailing manifest byte is read by this operation.
     pub fn open_projection(
@@ -1552,6 +1763,27 @@ impl QueueMediaStore {
         let path = self
             .locate_bundle(media_set)?
             .ok_or(QueueMediaError::NotFound)?;
+        self.decrypt_mixed_from_path(media_set, &path)
+    }
+
+    #[cfg(unix)]
+    pub fn decrypt_mixed_from_gallery_pin(
+        &self,
+        pin: &GalleryMediaPinRef,
+    ) -> Result<DecryptedQueueMediaSet, QueueMediaError> {
+        validate_gallery_pin_ref(pin)?;
+        let path = self.gallery_pin_path(pin);
+        let metadata = symlink_metadata_optional(&path)?.ok_or(QueueMediaError::NotFound)?;
+        verify_private_bundle_metadata(&path, &metadata)?;
+        self.decrypt_mixed_from_path(&pin.media_set, &path)
+    }
+
+    #[cfg(unix)]
+    fn decrypt_mixed_from_path(
+        &self,
+        media_set: &MediaSetRef,
+        path: &Path,
+    ) -> Result<DecryptedQueueMediaSet, QueueMediaError> {
         let partial = self
             .runtime_staging
             .root
@@ -1607,6 +1839,16 @@ impl QueueMediaStore {
         ))
     }
 
+    #[cfg(not(unix))]
+    pub fn decrypt_mixed_from_gallery_pin(
+        &self,
+        _pin: &GalleryMediaPinRef,
+    ) -> Result<DecryptedQueueMediaSet, QueueMediaError> {
+        Err(QueueMediaError::SecurityUnavailable(
+            "mixed queue-media hydration requires verified private staging support".into(),
+        ))
+    }
+
     /// Authenticates the complete bundle before publishing a private plaintext
     /// staging directory to the caller.
     #[cfg(unix)]
@@ -1614,13 +1856,38 @@ impl QueueMediaStore {
         &self,
         media_set: &MediaSetRef,
     ) -> Result<DecryptedMediaSet, QueueMediaError> {
+        validate_media_set_ref(media_set)?;
+        let path = self
+            .locate_bundle(media_set)?
+            .ok_or(QueueMediaError::NotFound)?;
+        self.decrypt_to_private_staging_from_path(media_set, &path)
+    }
+
+    #[cfg(unix)]
+    pub fn decrypt_to_private_staging_from_gallery_pin(
+        &self,
+        pin: &GalleryMediaPinRef,
+    ) -> Result<DecryptedMediaSet, QueueMediaError> {
+        validate_gallery_pin_ref(pin)?;
+        let path = self.gallery_pin_path(pin);
+        let metadata = symlink_metadata_optional(&path)?.ok_or(QueueMediaError::NotFound)?;
+        verify_private_bundle_metadata(&path, &metadata)?;
+        self.decrypt_to_private_staging_from_path(&pin.media_set, &path)
+    }
+
+    #[cfg(unix)]
+    fn decrypt_to_private_staging_from_path(
+        &self,
+        media_set: &MediaSetRef,
+        path: &Path,
+    ) -> Result<DecryptedMediaSet, QueueMediaError> {
         let partial = self
             .runtime_staging
             .root
             .join(format!("{}.partial", random_hex(16)?));
         ensure_private_dir(&partial)?;
         let mut staging = PlaintextStagingGuard::new(partial);
-        let decoded = self.decode_bundle(media_set, Some(staging.path()))?;
+        let decoded = self.decode_bundle_from_path(media_set, path, Some(staging.path()))?;
         crate::dir_sync::sync_directory(staging.path())?;
         let partial = staging.path().to_path_buf();
         let ready = partial.with_extension("ready");
@@ -1660,10 +1927,30 @@ impl QueueMediaStore {
         ))
     }
 
+    #[cfg(windows)]
+    pub fn decrypt_to_private_staging_from_gallery_pin(
+        &self,
+        _pin: &GalleryMediaPinRef,
+    ) -> Result<DecryptedMediaSet, QueueMediaError> {
+        Err(QueueMediaError::SecurityUnavailable(
+            "private plaintext staging requires a verified current-user-only Windows DACL".into(),
+        ))
+    }
+
     #[cfg(not(any(unix, windows)))]
     pub fn decrypt_to_private_staging(
         &self,
         _media_set: &MediaSetRef,
+    ) -> Result<DecryptedMediaSet, QueueMediaError> {
+        Err(QueueMediaError::SecurityUnavailable(
+            "private plaintext staging is unavailable on this platform".into(),
+        ))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn decrypt_to_private_staging_from_gallery_pin(
+        &self,
+        _pin: &GalleryMediaPinRef,
     ) -> Result<DecryptedMediaSet, QueueMediaError> {
         Err(QueueMediaError::SecurityUnavailable(
             "private plaintext staging is unavailable on this platform".into(),
@@ -2606,6 +2893,75 @@ impl QueueMediaStore {
             .join(format!("{}{BUNDLE_SUFFIX}", media_set.set_id))
     }
 
+    fn gallery_pin_path(&self, pin: &GalleryMediaPinRef) -> PathBuf {
+        self.root
+            .join(GALLERY_PINS_DIR)
+            .join(&pin.pin_id)
+            .join(encode_component(&pin.media_set.owner_id))
+            .join(encode_component(&pin.media_set.job_id))
+            .join(format!("{}{BUNDLE_SUFFIX}", pin.media_set.set_id))
+    }
+
+    fn publish_gallery_pin(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), QueueMediaError> {
+        match fs::hard_link(source, destination) {
+            Ok(()) => {
+                crate::dir_sync::sync_directory(
+                    destination.parent().expect("gallery pin has parent"),
+                )?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(QueueMediaError::Corrupt(
+                    "gallery pin destination appeared during publication".into(),
+                ));
+            }
+            // Cross-device, network, FAT-style, and platform hard-link
+            // limitations all take the same safe encrypted-copy path.
+            Err(_) => {}
+        }
+
+        let parent = destination.parent().expect("gallery pin has parent");
+        let temporary = parent.join(format!(".pin-{}.tmp", random_hex(16)?));
+        let copy_result = (|| {
+            let mut source_file = mold_core::secure_file::open_regular_file_no_follow(source)
+                .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
+            verify_private_bundle_file(source, &source_file)?;
+            let mut temporary_file = create_private_file(&temporary)?;
+            std::io::copy(&mut source_file, &mut temporary_file)?;
+            temporary_file.sync_all()?;
+            drop(temporary_file);
+            if symlink_metadata_optional(destination)?.is_some() {
+                return Err(QueueMediaError::Corrupt(
+                    "gallery pin destination appeared during publication".into(),
+                ));
+            }
+            fs::rename(&temporary, destination)?;
+            crate::dir_sync::sync_directory(parent)?;
+            Ok(())
+        })();
+        if copy_result.is_err() {
+            cleanup_owned_publication_path(&temporary);
+        }
+        copy_result
+    }
+
+    fn cleanup_gallery_pin_directories(&self, job_directory: &Path) -> Result<(), QueueMediaError> {
+        let owner_directory = job_directory.parent().expect("gallery pin owner directory");
+        let pin_directory = owner_directory.parent().expect("gallery pin id directory");
+        if !remove_empty_private_directory(job_directory)? {
+            return Ok(());
+        }
+        if !remove_empty_private_directory(owner_directory)? {
+            return Ok(());
+        }
+        remove_empty_private_directory(pin_directory)?;
+        Ok(())
+    }
+
     fn job_has_bundle(
         &self,
         state: StoredState,
@@ -3463,6 +3819,25 @@ fn validate_media_set_ref(media_set: &MediaSetRef) -> Result<(), QueueMediaError
     Ok(())
 }
 
+fn validate_gallery_pin_ref(pin: &GalleryMediaPinRef) -> Result<(), QueueMediaError> {
+    validate_media_set_ref(&pin.media_set)?;
+    validate_gallery_pin_id(&pin.pin_id)
+}
+
+fn validate_gallery_pin_id(pin_id: &str) -> Result<(), QueueMediaError> {
+    if pin_id.len() != 64
+        || !pin_id
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err(QueueMediaError::InvalidIdentity(
+            "gallery pin id is not a 64-character lowercase SHA-256 digest".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn sort_inspection(report: &mut StoreInspection) {
     report.active.sort();
     report.retired.sort();
@@ -3831,6 +4206,34 @@ fn verify_private_directory_metadata(
     Ok(())
 }
 
+fn verify_private_bundle_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), QueueMediaError> {
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(QueueMediaError::InsecurePath(path.display().to_string()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(insecure_private_path(
+                path,
+                metadata,
+                0o600,
+                "a current-user-owned 0600 encrypted bundle",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_private_bundle_file(path: &Path, file: &File) -> Result<(), QueueMediaError> {
+    verify_private_bundle_metadata(path, &file.metadata()?)
+}
+
 fn store_contains_payload(version_root: &Path) -> Result<bool, QueueMediaError> {
     let Some(metadata) = symlink_metadata_optional(version_root)? else {
         return Ok(false);
@@ -3848,7 +4251,7 @@ fn store_contains_payload(version_root: &Path) -> Result<bool, QueueMediaError> 
             return Ok(true);
         };
         match name {
-            "active" | "retired" | "staging" => {
+            "active" | "retired" | "staging" | GALLERY_PINS_DIR => {
                 if tree_contains_non_directory_entry(&entry.path())? {
                     return Ok(true);
                 }
@@ -4228,6 +4631,193 @@ mod tests {
 
     fn bundle_bytes(store: &QueueMediaStore, reference: &MediaSetRef) -> Vec<u8> {
         fs::read(store.bundle_path(StoredState::Active, reference)).unwrap()
+    }
+
+    fn gallery_pin_id(label: &[u8]) -> String {
+        hex_encode(&Sha256::digest(label))
+    }
+
+    fn gallery_test_media() -> Vec<SealMedia> {
+        vec![
+            SealMedia::bytes("source", "secret-source.png", b"hello".to_vec()),
+            SealMedia::bytes("mask", "secret-mask.png", b"mask".to_vec()),
+        ]
+    }
+
+    #[test]
+    fn gallery_pins_are_idempotent_and_survive_queue_link_deletion() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let reference = store.seal("owner", "job", gallery_test_media()).unwrap();
+        let pin_id = gallery_pin_id(b"gallery item");
+
+        let first = store.pin_for_gallery_item(&reference, &pin_id).unwrap();
+        let second = store.pin_for_gallery_item(&reference, &pin_id).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            store.load_from_gallery_pin(&first).unwrap().entries.len(),
+            2
+        );
+
+        store.delete(&reference).unwrap();
+        assert!(matches!(
+            store.load(&reference),
+            Err(QueueMediaError::NotFound)
+        ));
+        assert_eq!(
+            store.load_from_gallery_pin(&first).unwrap().entries.len(),
+            2
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read(
+                &store
+                    .decrypt_to_private_staging_from_gallery_pin(&first)
+                    .unwrap()
+                    .files[0]
+                    .path
+            )
+            .unwrap(),
+            b"hello"
+        );
+
+        store.release_gallery_pin(&first).unwrap();
+        store.release_gallery_pin(&first).unwrap();
+        assert!(matches!(
+            store.load_from_gallery_pin(&first),
+            Err(QueueMediaError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn gallery_pin_inventory_returns_only_structurally_safe_exact_refs() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let reference = store.seal("owner", "job", gallery_test_media()).unwrap();
+        let pin = store
+            .pin_for_gallery_item(&reference, &gallery_pin_id(b"inventory"))
+            .unwrap();
+        let unsafe_entry = store.root.join(GALLERY_PINS_DIR).join("not-a-pin");
+        fs::create_dir_all(&unsafe_entry).unwrap();
+
+        let inspection = store.inspect_gallery_pins();
+        assert_eq!(inspection.pins, vec![pin]);
+        assert_eq!(inspection.untouched.len(), 1);
+        assert!(unsafe_entry.exists(), "malformed entries are never swept");
+    }
+
+    #[test]
+    fn gallery_pins_do_not_deduplicate_across_jobs() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let first_set = store.seal("owner", "job-a", gallery_test_media()).unwrap();
+        let second_set = store.seal("owner", "job-b", gallery_test_media()).unwrap();
+        let first_pin = store
+            .pin_for_gallery_item(&first_set, &gallery_pin_id(b"item-a"))
+            .unwrap();
+        let second_pin = store
+            .pin_for_gallery_item(&second_set, &gallery_pin_id(b"item-b"))
+            .unwrap();
+
+        let first_path = store.gallery_pin_path(&first_pin);
+        let second_path = store.gallery_pin_path(&second_pin);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                fs::metadata(&first_path).unwrap().ino(),
+                fs::metadata(&second_path).unwrap().ino()
+            );
+        }
+        assert_ne!(
+            fs::read(first_path).unwrap(),
+            fs::read(second_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn sibling_gallery_pins_share_one_bundle_and_release_independently() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let media_set = store.seal("owner", "job", gallery_test_media()).unwrap();
+        let first = store
+            .pin_for_gallery_item(&media_set, &gallery_pin_id(b"sibling-a"))
+            .unwrap();
+        let second = store
+            .pin_for_gallery_item(&media_set, &gallery_pin_id(b"sibling-b"))
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(store.gallery_pin_path(&first)).unwrap().ino(),
+                fs::metadata(store.gallery_pin_path(&second)).unwrap().ino()
+            );
+        }
+
+        store.delete(&media_set).unwrap();
+        store.release_gallery_pin(&first).unwrap();
+        assert_eq!(
+            store.load_from_gallery_pin(&second).unwrap().entries.len(),
+            2
+        );
+        store.release_gallery_pin(&second).unwrap();
+        assert!(matches!(
+            store.load_from_gallery_pin(&second),
+            Err(QueueMediaError::NotFound)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gallery_pin_collision_tamper_and_symlink_are_never_accepted() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let reference = store.seal("owner", "job", gallery_test_media()).unwrap();
+        let pin = GalleryMediaPinRef::new(reference.clone(), gallery_pin_id(b"item")).unwrap();
+        let path = store.gallery_pin_path(&pin);
+        ensure_private_dir(path.parent().unwrap()).unwrap();
+        let mut collision = create_private_file(&path).unwrap();
+        collision
+            .write_all(b"not an encrypted queue bundle")
+            .unwrap();
+        collision.sync_all().unwrap();
+        drop(collision);
+        let before = fs::read(&path).unwrap();
+        assert!(store.pin_for_gallery_item(&reference, &pin.pin_id).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        fs::remove_file(&path).unwrap();
+        symlink(store.bundle_path(StoredState::Active, &reference), &path).unwrap();
+        assert!(matches!(
+            store.pin_for_gallery_item(&reference, &pin.pin_id),
+            Err(QueueMediaError::InsecurePath(_))
+        ));
+        assert!(matches!(
+            store.release_gallery_pin(&pin),
+            Err(QueueMediaError::InsecurePath(_))
+        ));
+    }
+
+    #[test]
+    fn gallery_pin_ids_are_fixed_lowercase_sha256_digests() {
+        let reference = MediaSetRef {
+            owner_id: "owner".into(),
+            job_id: "job".into(),
+            set_id: "0".repeat(32),
+        };
+        for invalid in [
+            "".to_string(),
+            "a".to_string(),
+            "A".repeat(64),
+            "g".repeat(64),
+            "0".repeat(63),
+        ] {
+            assert!(GalleryMediaPinRef::new(reference.clone(), invalid).is_err());
+        }
+        assert!(GalleryMediaPinRef::new(reference, gallery_pin_id(b"archive identity")).is_ok());
     }
 
     fn frame_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {

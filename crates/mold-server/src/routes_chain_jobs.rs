@@ -787,6 +787,7 @@ pub async fn delete_chain_job(
 ) -> Result<StatusCode, ApiError> {
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
+    let root = jobs_root()?;
     {
         let _guard = handle.lock_job(&id).await;
         let row = chain_jobs::get_job(db, &id)
@@ -795,6 +796,9 @@ pub async fn delete_chain_job(
         if row.state == ChainJobState::Running {
             return Err(conflict(CHAIN_JOB_RUNNING, "chain job is running"));
         }
+        crate::chain_source_media::release_all(&root, &row.job_dir).map_err(|e| {
+            ApiError::internal(format!("failed to release chain source media: {e:#}"))
+        })?;
         if row.job_dir.exists() {
             std::fs::remove_dir_all(&row.job_dir)
                 .map_err(|e| ApiError::internal(format!("failed to remove chain job dir: {e}")))?;

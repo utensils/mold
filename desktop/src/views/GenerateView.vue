@@ -226,6 +226,7 @@ import {
   persistGenerationSourceMedia,
   restoreGenerationSourceMedia,
 } from "@studio/lib/generationSourceMedia";
+import { relayRetainedSourceMedia } from "@studio/api/gallerySourceMedia";
 import { persistIdentityPhoto, restoreIdentityPhoto } from "@studio/lib/identityConditioning";
 import { isMissingModelError } from "../lib/generateErrors";
 import { copyableError, describeTransportError } from "../lib/api/errors";
@@ -3626,9 +3627,71 @@ async function generate() {
         return;
       }
     }
-    const request = buildRequest(draft);
+    let request = buildRequest(draft);
     if (quickExpansionSnapshot.value?.promptTransform) {
       request.prompt_transform = quickExpansionSnapshot.value.promptTransform;
+    }
+    let retainedSourceOption: BatchRequestOptions["retainedSource"];
+    const retained = composer.retainedSource;
+    const retainedVersion = retained ? composer.retainedSourceVersion : null;
+    if (retained?.inventory.availability === "available" && retained.inventory.members.length > 0) {
+      const fieldForRole: Record<string, keyof GenerateRequest> = {
+        source_image: "source_image",
+        identity_image: "id_image",
+        identity_images: "id_images",
+        edit_images: "edit_images",
+        mask_image: "mask_image",
+        control_image: "control_image",
+        audio_file: "audio_file",
+        audio_file_path: "audio_file",
+        source_video: "source_video",
+        source_video_path: "source_video",
+        extend_video: "extend_video",
+        extend_video_path: "extend_video",
+        keyframes: "keyframes",
+        references: "references",
+      };
+      const wanted = retained.inventory.members.filter((member) => {
+        const field = fieldForRole[member.role];
+        if (!field) return false;
+        // Descriptor-only H3 references are topology, not byte authority; the
+        // server session hydrates those descriptors in place.
+        if (field === "references") {
+          return (
+            request.references?.every((reference) => reference.media.authority === "descriptor") ===
+            true
+          );
+        }
+        return request[field] == null;
+      });
+      if (wanted.length > 0) {
+        const sameHost =
+          route?.target.baseUrl === retained.origin.baseUrl &&
+          route.target.apiKey === retained.origin.apiKey;
+        if (sameHost && batch === 1) {
+          retainedSourceOption = {
+            filename: retained.filename,
+            memberIds: wanted.map((member) => member.member_id),
+          };
+        } else {
+          try {
+            request = await relayRetainedSourceMedia(
+              retained.filename,
+              wanted,
+              request,
+              retained.origin,
+            );
+          } catch (error) {
+            toasts.push(
+              `Couldn’t restore retained source media: ${error instanceof Error ? error.message : String(error)}`,
+              "error",
+            );
+            return;
+          }
+          if (retainedVersion !== null && !composer.isRetainedSourceCurrent(retainedVersion))
+            return;
+        }
+      }
     }
     if (request.source_image && originalSource) {
       void persistGenerationSourceMedia(request.source_image, originalSource);
@@ -3675,6 +3738,7 @@ async function generate() {
             : {}),
         }
       : {};
+    if (retainedSourceOption) requestOptions.retainedSource = retainedSourceOption;
     if (route && !routeResolvedAgainstFinalRequest) {
       const finalized = await hosts.resolveFeasible(route.hostId, finalizedPlanningRequest, batch, {
         signal: submitSignal,
@@ -3719,6 +3783,7 @@ async function generate() {
       requirements: licenseRequirements(placementPreview?.pending_downloads),
     });
     if (!accepted || !submissionGuard.isCurrent(submitToken)) return;
+    if (retainedVersion !== null && !composer.isRetainedSourceCurrent(retainedVersion)) return;
     // Stash exact img2img/Qwen-edit bytes by the hashes the server records so
     // Reuse settings can restore local files and fitted sources later.
     // Fire-and-forget — never blocks the submit.
@@ -3742,6 +3807,7 @@ async function generate() {
       preparedSubmitting.value = false;
       return;
     }
+    composer.invalidateRetainedSource();
     const acceptedSubmissionId = ++latestAcceptedSubmissionId;
     missingModel.value = null;
     if (preparedSubmission) {
@@ -3885,10 +3951,26 @@ watch(
  *  the form — a superseded restore (newer prefill, ⌘N, user edits) is
  *  dropped silently. Bumped by every prefill and by ⌘N. */
 let restoreEpoch = 0;
+let authoritativeReuseApply = false;
+function invalidateRetainedRestore(): void {
+  restoreEpoch += 1;
+  composer.invalidateRetainedSource();
+}
 
 function applyPrefill() {
   const prefill = composer.take();
   if (!prefill) return;
+  const pendingRetainedVersion = composer.takePendingRetainedSourceApplyVersion();
+  if (
+    pendingRetainedVersion !== null &&
+    composer.isRetainedSourceCurrent(pendingRetainedVersion) &&
+    "metadata" in prefill
+  ) {
+    authoritativeReuseApply = true;
+    void nextTick(() => {
+      authoritativeReuseApply = false;
+    });
+  }
   restoreEpoch += 1;
   // A gallery/history metadata prefill represents one rendered print. Sequence
   // prints use the separate sequence handoff above; every other print must
@@ -4196,7 +4278,7 @@ watch(isSequence, (on) => {
 watch(
   () => ui.newGenerationTick,
   () => {
-    restoreEpoch += 1; // an in-flight source restore must not repopulate ⌘N
+    invalidateRetainedRestore();
     preparationGuard.invalidate();
     preparedBatch.value = null;
     expansionRunning.value = false;
@@ -4209,6 +4291,25 @@ watch(
     submissionGuard.invalidate();
     formStore.clearComposer();
     void nextTick(() => composerRef.value?.focus?.());
+  },
+);
+
+// A clear control may live several components below this view. Fence retained
+// gallery authority whenever the user removes any staged private-media slot;
+// additions and replacements keep the current reuse draft intact.
+watch(
+  () =>
+    Number(Boolean(form.sourceImage)) +
+    form.imageAttachments.length +
+    Number(Boolean(form.identityImage)) +
+    Number(Boolean(form.maskImage)) +
+    Number(Boolean(form.controlImage)) +
+    Number(Boolean(form.audioFile)) +
+    Number(Boolean(form.sourceVideo)) +
+    Number(Boolean(form.extendVideo)) +
+    form.keyframes.length,
+  (count, previous) => {
+    if (count < previous && !authoritativeReuseApply) invalidateRetainedRestore();
   },
 );
 
@@ -4826,6 +4927,7 @@ onBeforeUnmount(() => {
       :canvas-intent="canvasIntent"
       @append-word="appendPromptWord"
       @canvas-intent="setCanvasIntent"
+      @reset-settings="invalidateRetainedRestore"
       @pull-missing-model="offerPullForSelectedModel"
     />
 

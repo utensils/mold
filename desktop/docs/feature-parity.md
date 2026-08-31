@@ -346,7 +346,7 @@ maps the final value to UIKit plus a status-bar refresh. Host metadata and the
 selected host use separate local-storage keys; API keys remain in Keychain and
 mobile templates use `mold.mobile.generation.templates.v1`.
 
-**Metadata DB**: `MOLD_HOME/mold.db` (`MOLD_DB_PATH` override, `MOLD_DB_DISABLE=1`). `SCHEMA_VERSION` 31 with forward-only migrations. Twenty-one tables: `generations`, `generation_tags`, `tags`, `collections`, `collection_items` (Library organization), `settings`, `settings_v`, `model_prefs`, `model_prefs_v`, `prompt_history`, `catalog`, `chain_jobs`, `chain_job_stages`, `generation_queue`, `generation_queue_media`, `generation_batches`, `generation_batch_children` (the durable queue), `gallery_mutation_receipts`, `device_preferences`, `paired_clients`, and `scheduler_estimates`.
+**Metadata DB**: `MOLD_HOME/mold.db` (`MOLD_DB_PATH` override, `MOLD_DB_DISABLE=1`). `SCHEMA_VERSION` 33 with forward-only migrations. Twenty-three tables: `generations`, `generation_tags`, `tags`, `collections`, `collection_items` (Library organization), `settings`, `settings_v`, `model_prefs`, `model_prefs_v`, `prompt_history`, `catalog`, `chain_jobs`, `chain_job_stages`, `generation_queue`, `generation_queue_media`, `generation_batches`, `generation_batch_children` (the durable queue), `gallery_media_sets`, `gallery_media_bindings` (repairable retained source-media projection), `gallery_mutation_receipts`, `device_preferences`, `paired_clients`, and `scheduler_estimates`.
 
 ---
 

@@ -2323,6 +2323,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             drop(request);
             let job_id = job.id.clone();
             let output_dir = job.output_dir.clone();
+            let gallery_gate = state.gallery_publication_gate.clone();
             let completion_payload = job.completion_payload;
             let mut channels =
                 durable_generation_settlement::IntoSettlementChannels::into_settlement_channels(
@@ -2335,6 +2336,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 &state.job_registry,
                 &saved_names,
                 &response,
+                &gallery_gate,
             )
             .await
             .is_err()

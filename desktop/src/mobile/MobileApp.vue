@@ -185,6 +185,16 @@ import {
   reconcileGenerationBatches,
 } from "@studio/api/generationAdmission";
 import {
+  relayRetainedSourceMedia,
+  retainedSourceMediaBlob,
+  retainedSourceMediaDisclosure,
+  retainedSourceMediaInventory,
+  retainedSourceMediaMembersForRequest,
+  type RetainedSourceMediaInventory,
+  type RetainedSourceMediaAvailability,
+} from "@studio/api/gallerySourceMedia";
+import { RetainedSourceReuseAuthority } from "./retainedSourceReuseAuthority";
+import {
   selectedQueueGeneration,
   watchSelectedQueuePreview,
   type QueueJobProgress,
@@ -961,6 +971,7 @@ function keepingPrintIdentity(reset: () => void): void {
 }
 
 function resetCreateSettings(): void {
+  invalidateRetainedSourceReuse();
   keepingPrintIdentity(() => resetFormToModelDefaults(form, selectedGenerationModel.value));
   // The canvas is part of what Reset restores, so its authority resets with
   // it — otherwise the next model change would re-snap the reset canvas back
@@ -1165,6 +1176,33 @@ let modelLoadEpoch = 0;
 let routingModelsEpoch = 0;
 let reusePrintEpoch = 0;
 let reusePrintController: AbortController | null = null;
+type MobileRetainedSourceReuse = {
+  filename: string;
+  origin: ApiTarget;
+  inventory: RetainedSourceMediaInventory;
+};
+const retainedSourceAuthority = new RetainedSourceReuseAuthority<MobileRetainedSourceReuse>();
+let authoritativeReuseApply = false;
+function invalidateRetainedSourceReuse(): void {
+  retainedSourceAuthority.invalidate();
+  reusePrintEpoch += 1;
+  reusePrintController?.abort();
+}
+watch(
+  () =>
+    Number(Boolean(form.sourceImage)) +
+    form.imageAttachments.length +
+    Number(Boolean(form.identityImage)) +
+    Number(Boolean(form.maskImage)) +
+    Number(Boolean(form.controlImage)) +
+    Number(Boolean(form.audioFile)) +
+    Number(Boolean(form.sourceVideo)) +
+    Number(Boolean(form.extendVideo)) +
+    form.keyframes.length,
+  (count, previous) => {
+    if (count < previous && !authoritativeReuseApply) invalidateRetainedSourceReuse();
+  },
+);
 let sourceUseEpoch = 0;
 let sourceUseController: AbortController | null = null;
 let resultMediaRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -6805,6 +6843,41 @@ async function generate(): Promise<void> {
     }
   }
 
+  const retainedSnapshot = retainedSourceAuthority.snapshot();
+  const retainedSourceReuse = retainedSnapshot?.value;
+  if (retainedSourceReuse?.inventory.availability === "available") {
+    const retainedMembers = retainedSourceMediaMembersForRequest(
+      retainedSourceReuse.inventory.members,
+      request,
+    );
+    if (retainedMembers.length > 0) {
+      try {
+        request = await relayRetainedSourceMedia(
+          retainedSourceReuse.filename,
+          retainedMembers,
+          request,
+          retainedSourceReuse.origin,
+          submitSignal,
+        );
+      } catch (error) {
+        if (!submissionAttempt.isCurrent()) {
+          releasePreparedSubmission();
+          return;
+        }
+        setGenerationStatus(
+          `Couldn’t restore retained source media: ${error instanceof Error ? error.message : String(error)}`,
+          true,
+        );
+        releasePreparedSubmission();
+        return;
+      }
+      if (!retainedSourceAuthority.isCurrent(retainedSnapshot!.version)) {
+        releasePreparedSubmission();
+        return;
+      }
+    }
+  }
+
   const chainRouting = decideGenerateRequestRouting(request, draft.family, routingModel);
   if (chainRouting.kind === "reject") {
     setGenerationStatus(chainRouting.reason);
@@ -6980,6 +7053,7 @@ async function generate(): Promise<void> {
       return;
     }
     const admission = submitMobileDurableGeneration({ route, requests: durablePlans });
+    retainedSourceAuthority.invalidate();
     const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
     void admission.finally(() => admissionBackgroundTask.release());
     releasePreparedSubmission();
@@ -7017,6 +7091,7 @@ async function generate(): Promise<void> {
       chainRouting,
       requestOptions,
     );
+    retainedSourceAuthority.invalidate();
   } catch (error) {
     setGenerationStatus(describeTransportError(error, route.label), true);
     releasePreparedSubmission();
@@ -7880,6 +7955,7 @@ async function loadMoreGalleryPage(): Promise<void> {
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
   if (reusingPrint.value || print.metadata_synthetic) return;
+  const retainedVersion = retainedSourceAuthority.begin();
   clearSelectedQueueRender();
   const epoch = ++reusePrintEpoch;
   reusePrintController?.abort();
@@ -7934,7 +8010,10 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       reusePrintError.value = `${print.hostName} has no downloaded models available.`;
       return;
     }
+    authoritativeReuseApply = true;
     const reuse = applyMobileGalleryMetadata(form, print.metadata, reuseModels);
+    await nextTick();
+    authoritativeReuseApply = false;
     if (reuse.sequenceUnsupportedReason) {
       reusePrintError.value = reuse.sequenceUnsupportedReason;
       return;
@@ -7956,6 +8035,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
           print,
           controller.signal,
           () => !cancelledReuse(epoch, controller),
+          retainedVersion,
         )
       : null;
     if (cancelledReuse(epoch, controller)) return;
@@ -7965,6 +8045,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     const identityRestoreNotice = await restoreReusedIdentityPhoto(
       print.metadata,
       () => !cancelledReuse(epoch, controller),
+      retainedVersion,
     );
     if (cancelledReuse(epoch, controller)) return;
     if (reuse.sequence) {
@@ -8052,7 +8133,8 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
           : `Couldn’t load models from ${print.hostName}. ${describeTransportError(error, print.hostName)}`;
     }
   } finally {
-    if (epoch === reusePrintEpoch) {
+    authoritativeReuseApply = false;
+    if (reusePrintController === controller) {
       reusingPrint.value = false;
       reusePrintController = null;
     }
@@ -8143,11 +8225,13 @@ async function readReusePresentation(
 async function restoreReusedIdentityPhoto(
   metadata: OutputMetadata,
   isCurrent: () => boolean,
+  retainedVersion: number,
 ): Promise<string | null> {
+  const stillCurrent = () => isCurrent() && retainedSourceAuthority.isCurrent(retainedVersion);
   const wanted = form.identityImage;
   if (!mobileIdentityNeedsReattach(wanted)) return null;
   const stored = await restoreIdentityPhoto(metadata.id_image_sha256).catch(() => null);
-  if (!isCurrent()) return null;
+  if (!stillCurrent()) return null;
   const slot = form.identityImage;
   // Cleared, reattached, or replaced while the lookup ran — the user wins.
   if (!slot || slot.base64 || slot.filename !== wanted?.filename) return null;
@@ -8163,13 +8247,35 @@ async function restoreOrdinaryReusedSource(
   print: GalleryPrint,
   signal: AbortSignal,
   isCurrent: () => boolean,
+  retainedVersion: number,
 ): Promise<string | null> {
-  if (caps.value.sourceImageMode !== "single") return null;
+  const stillCurrent = () => isCurrent() && retainedSourceAuthority.isCurrent(retainedVersion);
   const restoredSourceFit = parseSourceFitPolicy(print.metadata.source_fit);
+  let retainedUnavailable: RetainedSourceMediaAvailability | null = null;
+  let retainedInventory: RetainedSourceMediaInventory | null = null;
+  if (!print.target.apiKey) {
+    retainedUnavailable = "unavailable_auth";
+  } else {
+    try {
+      retainedInventory = await readRetainedSourceInventory(print.target, print.filename, signal);
+      if (!stillCurrent()) return null;
+      retainedUnavailable = retainedInventory.availability;
+      retainedSourceAuthority.setIfCurrent(retainedVersion, {
+        filename: print.filename,
+        origin: print.target,
+        inventory: retainedInventory,
+      });
+    } catch {
+      // Preserve the pre-feature local and same-name gallery fallbacks.
+    }
+  }
+  if (caps.value.sourceImageMode !== "single") {
+    return retainedUnavailable ? retainedSourceMediaDisclosure(retainedUnavailable) : null;
+  }
   const stored = await restoreGenerationSourceMedia(print.metadata.source_image_sha256).catch(
     () => null,
   );
-  if (!isCurrent()) return null;
+  if (!stillCurrent()) return null;
   if (stored) {
     preserveRestoredSourceCanvas(stored.base64);
     form.sourceImage = stored.base64;
@@ -8178,17 +8284,49 @@ async function restoreOrdinaryReusedSource(
     // image. Let that watcher settle, then reassert provenance attributes:
     // Library reuse is restoration, not a new pick.
     await nextTick();
-    if (!isCurrent()) return null;
+    if (!stillCurrent()) return null;
     form.sourceImageWidth = stored.width ?? null;
     form.sourceImageHeight = stored.height ?? null;
     form.width = print.metadata.generation_width ?? print.metadata.width;
     form.height = print.metadata.generation_height ?? print.metadata.height;
     if (restoredSourceFit) form.sourceFit = restoredSourceFit;
-    return null;
+    return retainedUnavailable ? retainedSourceMediaDisclosure(retainedUnavailable) : null;
+  }
+
+  if (retainedInventory?.availability === "available") {
+    try {
+      const retained = retainedInventory.members.find((member) => member.role === "source_image");
+      if (retained) {
+        const blob = await readRetainedSourceBlob(
+          print.target,
+          print.filename,
+          retained.member_id,
+          signal,
+        );
+        if (!stillCurrent()) return null;
+        const base64 = await blobToBase64(blob);
+        preserveRestoredSourceCanvas(base64);
+        form.sourceImage = base64;
+        form.sourceImageName = retained.display_name;
+        await nextTick();
+        if (!stillCurrent()) return null;
+        const dimensions = imageDimensionsFromBase64(base64);
+        form.sourceImageWidth = dimensions?.width ?? null;
+        form.sourceImageHeight = dimensions?.height ?? null;
+        form.width = print.metadata.generation_width ?? print.metadata.width;
+        form.height = print.metadata.generation_height ?? print.metadata.height;
+        if (restoredSourceFit) form.sourceFit = restoredSourceFit;
+        return null;
+      }
+    } catch {
+      // Preserve the pre-feature same-name gallery fallback below.
+    }
   }
 
   const filename = print.metadata.source_image_name;
-  if (!filename) return null;
+  if (!filename) {
+    return retainedUnavailable ? retainedSourceMediaDisclosure(retainedUnavailable) : null;
+  }
   const candidates = new Map<string, ApiTarget>([[print.hostId, print.target]]);
   for (const entry of gallery.value) {
     if (entry.filename === filename && !candidates.has(entry.hostId)) {
@@ -8198,13 +8336,13 @@ async function restoreOrdinaryReusedSource(
   for (const target of candidates.values()) {
     try {
       const source = await readReusedSourceCandidate(target, filename, signal);
-      if (!isCurrent()) return null;
+      if (!stillCurrent()) return null;
       if (!source) continue;
       preserveRestoredSourceCanvas(source.base64);
       form.sourceImage = source.base64;
       form.sourceImageName = filename;
       await nextTick();
-      if (!isCurrent()) return null;
+      if (!stillCurrent()) return null;
       form.sourceImageWidth = source.dimensions?.width ?? null;
       form.sourceImageHeight = source.dimensions?.height ?? null;
       form.width = print.metadata.generation_width ?? print.metadata.width;
@@ -8215,8 +8353,57 @@ async function restoreOrdinaryReusedSource(
       // Continue through every host that advertises the named source.
     }
   }
-  if (!isCurrent()) return null;
-  return "The original source image is unavailable. Reattach it before developing.";
+  if (!stillCurrent()) return null;
+  return (
+    (retainedUnavailable && retainedSourceMediaDisclosure(retainedUnavailable)) ||
+    "The original source image is unavailable. Reattach it before developing."
+  );
+}
+
+async function withReuseSourceDeadline<T>(
+  signal: AbortSignal,
+  read: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let rejectDeadline: ((reason: Error) => void) | null = null;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    rejectDeadline = reject;
+  });
+  const abort = () => {
+    controller.abort();
+    rejectDeadline?.(new DOMException("Reuse source restoration was cancelled", "AbortError"));
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  timeout = setTimeout(() => {
+    controller.abort();
+    rejectDeadline?.(new Error("Source restoration timed out"));
+  }, REUSE_PRESENTATION_TIMEOUT_MS);
+  try {
+    return await Promise.race([read(controller.signal), deadline]);
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+    signal.removeEventListener("abort", abort);
+    rejectDeadline = null;
+  }
+}
+
+function readRetainedSourceInventory(target: ApiTarget, filename: string, signal: AbortSignal) {
+  return withReuseSourceDeadline(signal, (bounded) =>
+    retainedSourceMediaInventory(filename, target, bounded),
+  );
+}
+
+function readRetainedSourceBlob(
+  target: ApiTarget,
+  filename: string,
+  memberId: string,
+  signal: AbortSignal,
+) {
+  return withReuseSourceDeadline(signal, (bounded) =>
+    retainedSourceMediaBlob(filename, memberId, target, bounded),
+  );
 }
 
 async function readReusedSourceCandidate(
@@ -8320,6 +8507,7 @@ async function restoreReusedH3BoundaryMedia(print: {
 async function useSelectedPrintAsSource(): Promise<void> {
   const print = selectedPrint.value;
   if (!print || !canUseSelectedPrintAsSource.value || usingPrintAsSource.value) return;
+  invalidateRetainedSourceReuse();
   const epoch = ++sourceUseEpoch;
   sourceUseController?.abort();
   const controller = new AbortController();

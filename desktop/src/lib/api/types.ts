@@ -437,7 +437,13 @@ export interface ExpandResponse {
 
 export type RemixSourceKind = "original" | "current" | "direct";
 export type RemixDimension =
-  "composition" | "camera" | "lighting" | "setting" | "mood" | "movement" | "style";
+  | "composition"
+  | "camera"
+  | "lighting"
+  | "setting"
+  | "mood"
+  | "movement"
+  | "style";
 
 export interface RemixRequest {
   source_prompt: string;
@@ -516,6 +522,9 @@ export interface GenerateRequest {
    * Deliberately NOT a composition input: it is never fitted, cropped, or
    * resized against the canvas and carries no `source_fit` provenance. */
   id_image?: string;
+  /** Ordered multi-photo identity form, mutually exclusive with id_image. */
+  id_images?: string[];
+  id_image_names?: string[];
   /** Provenance label for `id_image` — recorded into OutputMetadata (with the
    * digest, never the bytes) so Reuse settings can look the photo back up. */
   id_image_name?: string;
@@ -1266,7 +1275,13 @@ export interface ChainLimits {
 }
 
 export type ChainJobState =
-  "queued" | "running" | "paused" | "interrupted" | "failed" | "completed" | "cancelled";
+  | "queued"
+  | "running"
+  | "paused"
+  | "interrupted"
+  | "failed"
+  | "completed"
+  | "cancelled";
 
 export type StageState = "pending" | "running" | "completed" | "failed";
 

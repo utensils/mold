@@ -8744,6 +8744,31 @@ pub struct GalleryImage {
     pub purge_at: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RetainedSourceMediaAvailability {
+    Available,
+    UnavailableLegacy,
+    UnavailableMissingOrCorrupt,
+    UnavailableAuth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RetainedSourceMediaMember {
+    /// Opaque item-scoped member id; never a server path or media-set id.
+    pub member_id: String,
+    pub role: String,
+    pub display_name: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RetainedSourceMediaInventory {
+    pub availability: RetainedSourceMediaAvailability,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<RetainedSourceMediaMember>,
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }

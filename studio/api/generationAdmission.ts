@@ -355,11 +355,12 @@ export async function admitGenerationBatch<TRequest>(
   target: ApiTarget,
   request: GenerationBatchAdmissionRequest<TRequest>,
   signal?: AbortSignal,
+  extraHeaders?: HeadersInit,
 ): Promise<GenerationBatchStatus> {
   return parseGenerationBatchStatus(
     await apiJsonTo<unknown>(target, "/api/generation-batches", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...Object.fromEntries(new Headers(extraHeaders)) },
       body: JSON.stringify(request),
       ...(signal ? { signal } : {}),
     }),

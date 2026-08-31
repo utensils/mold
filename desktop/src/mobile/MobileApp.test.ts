@@ -8452,6 +8452,54 @@ describe("MobileApp gallery", () => {
     expect(wrapper.get("[data-test='mobile-host-health']").text()).toBe("reconnecting…");
   });
 
+  it("finishes Reuse from a media-bearing draft without self-cancelling", async () => {
+    const conditioned = {
+      ...print,
+      metadata: {
+        ...print.metadata,
+        source_image_name: "restored.png",
+        source_image_sha256: "a".repeat(64),
+      },
+    };
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([conditioned]);
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return durableApiFallback(path, init, callTarget);
+    });
+    restoreGenerationSourceMedia.mockResolvedValue({
+      kind: "upload",
+      filename: "restored.png",
+      base64: "RESTORED_SOURCE",
+      width: 512,
+      height: 512,
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = "OLD_SOURCE";
+    liveForm.identityImage = { filename: "old-face.png", base64: "OLD_FACE" };
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer']").exists()).toBe(false),
+    );
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "Prompt settings restored",
+    );
+    expect(liveForm.prompt).toBe(print.metadata.prompt);
+    expect(liveForm.sourceImage).toBe("RESTORED_SOURCE");
+    expect(liveForm.sourceImageName).toBe("restored.png");
+  });
+
   it("times out a reuse even when the transport ignores AbortSignal", async () => {
     Object.defineProperty(globalThis, "indexedDB", {
       configurable: true,

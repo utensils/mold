@@ -583,8 +583,16 @@ pub(crate) fn create_job_with_params(
     let layout = JobDirLayout::new(job_dir.clone());
     layout.ensure_root()?;
 
+    let request = crate::chain_source_media::persist_scrubbed(
+        jobs_root,
+        &job_dir,
+        &params.id,
+        params.request,
+    )?;
+    let source_media_rollback = crate::chain_source_media::CreateRollback::new(jobs_root, &job_dir);
+
     let now = now_ms_i64();
-    let mut manifest = ChainJobManifest::new(params.id.clone(), now.max(0) as u64, &params.request)
+    let mut manifest = ChainJobManifest::new(params.id.clone(), now.max(0) as u64, &request)
         .map_err(|e| anyhow!("{e:#}"))?;
     manifest.ephemeral = params.ephemeral;
     manifest.frozen_model = params.frozen_model;
@@ -592,14 +600,14 @@ pub(crate) fn create_job_with_params(
         .write_atomic(&job_dir)
         .map_err(|e| anyhow!("{e:#}"))?;
     ChainExecutionAuthority::dormant(params.id.clone()).persist_atomic(&job_dir)?;
-    let request_json = serde_json::to_string(&params.request)?;
+    let request_json = serde_json::to_string(&request)?;
     let row = ChainJobRow {
         id: params.id.clone(),
         state: ChainJobState::Queued,
-        model: params.request.model.clone(),
+        model: request.model.clone(),
         request_json,
         job_dir,
-        stage_count: params.request.stages.len() as u32,
+        stage_count: request.stages.len() as u32,
         current_stage: 0,
         error: None,
         created_at_ms: now,
@@ -623,6 +631,7 @@ pub(crate) fn create_job_with_params(
             },
         )?;
     }
+    source_media_rollback.commit();
     Ok(row)
 }
 
@@ -634,6 +643,17 @@ pub(crate) fn create_job_with_params(
 /// before any later startup/resume path joins them to the job directory. Keep
 /// that rejection-before-join ordering; it is the traversal boundary.
 pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(usize, usize)> {
+    match crate::chain_source_media::reconcile_orphans(jobs_root) {
+        Ok(deleted) if deleted > 0 => tracing::info!(
+            deleted,
+            "reconciled orphaned encrypted chain source-media bundles"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            error = %format!("{error:#}"),
+            "chain source-media cleanup remains pending for the next startup"
+        ),
+    }
     let now = now_ms_i64();
     let paused = chain_jobs::pause_active_for_restart(db, now)?;
 
@@ -788,6 +808,11 @@ pub(crate) fn run_gc_pass(
                 if !settled(current.state) || deps.claims.is_claimed(&row.id) || within_grace {
                     false
                 } else {
+                    let jobs_root = current
+                        .job_dir
+                        .parent()
+                        .context("ephemeral chain job directory has no jobs root")?;
+                    crate::chain_source_media::release_all(jobs_root, &current.job_dir)?;
                     if current.job_dir.exists() {
                         std::fs::remove_dir_all(&current.job_dir).with_context(|| {
                             format!(
@@ -848,6 +873,7 @@ pub(crate) fn startup_gc_sweep(db: &MetadataDb, jobs_root: &Path) -> anyhow::Res
         // Only a SETTLED ephemeral job is debris. A queued one is a print
         // the runner resumes; an interrupted one is reported, not deleted.
         if manifest.ephemeral && settled(row.state) {
+            crate::chain_source_media::release_all(jobs_root, &job_dir)?;
             if job_dir.exists() {
                 std::fs::remove_dir_all(&job_dir).with_context(|| {
                     format!(
@@ -1307,7 +1333,7 @@ fn execute_job_inner(
         let layout = JobDirLayout::new(job.job_dir.clone());
         let mut effective = {
             let _guard = deps.job_locks.blocking_lock(&job.id);
-            match effective_request(&manifest) {
+            match effective_request_with_media(&manifest, &job.job_dir) {
                 Ok(effective) => effective,
                 Err(err) => {
                     fail_job(db, deps, &job.id, None, format!("{err:#}"))?;
@@ -2288,6 +2314,21 @@ fn finalize_job(
             deps.executor.after_gallery_publication(&job.id)?;
         }
     }
+    if let Some(output_dir) = deps.output_dir.as_ref() {
+        let jobs_root = job
+            .job_dir
+            .parent()
+            .context("chain job directory has no jobs root")?;
+        crate::chain_source_media::handoff_current_to_gallery(
+            db,
+            jobs_root,
+            &job.job_dir,
+            &job.id,
+            output_dir,
+            &effective,
+            &deps.gallery_publication_gate,
+        )?;
+    }
 
     let now = now_ms_u64();
     let output = format!("final/output-{take}.mp4");
@@ -2419,7 +2460,7 @@ pub fn apply_retake(
         jobs_root.join(&job.job_dir)
     };
     let mut manifest = ChainJobManifest::read_from_dir(&job_dir)?;
-    let effective = effective_request(&manifest)?;
+    let effective = effective_request_with_media(&manifest, &job_dir)?;
     let stage_idx = req.stage_idx as usize;
     if stage_idx >= manifest.stage_status.len() {
         bail!("stage_idx {} out of bounds", req.stage_idx);
@@ -2715,7 +2756,7 @@ pub fn apply_amend(
         ChainJobState::Cancelled,
         ChainJobState::Completed,
     ];
-    let old_effective = effective_request(&manifest)?;
+    let old_effective = effective_request_with_media(&manifest, &job_dir)?;
     let candidate = amend_candidate_request(&old_effective, req)
         .normalise()
         .map_err(|e| anyhow!("{CHAIN_JOB_AMEND_INVALID}: {e}"))?;
@@ -2725,7 +2766,6 @@ pub fn apply_amend(
             candidate.output_format
         );
     }
-
     // Invalidation: longest identity prefix, clamped to the leading run of
     // completed stages, then shrunk past any legacy stage whose baked-in
     // artifacts can't serve the new boundary plan.
@@ -2755,6 +2795,11 @@ pub fn apply_amend(
         }
     }
 
+    // Compare hydrated render identity above. Only after the preservation
+    // boundary is fixed do we seal the candidate and scrub its durable JSON.
+    let candidate =
+        crate::chain_source_media::persist_scrubbed(jobs_root, &job_dir, job_id, candidate)?;
+
     let now = now_ms_u64();
     let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
     if !chain_jobs::try_transition(
@@ -2780,7 +2825,9 @@ pub fn apply_amend(
     // rows.
     manifest.amends.push(AmendRecord {
         at_unix_ms: now,
-        previous_request_json: serde_json::to_string(&old_effective)?,
+        previous_request_json: serde_json::to_string(&crate::chain_source_media::scrub(
+            old_effective,
+        ))?,
         preserved_stages: preserved,
     });
     manifest.needs_finalize = Some(true);
@@ -3489,6 +3536,16 @@ pub(crate) fn effective_request(manifest: &ChainJobManifest) -> anyhow::Result<C
         }
     }
     Ok(request)
+}
+
+fn effective_request_with_media(
+    manifest: &ChainJobManifest,
+    job_dir: &Path,
+) -> anyhow::Result<ChainRequest> {
+    let jobs_root = job_dir
+        .parent()
+        .context("chain job directory has no jobs root")?;
+    crate::chain_source_media::hydrate(jobs_root, job_dir, effective_request(manifest)?)
 }
 
 /// Exposed to `routes_chain` so the advisory VRAM estimate prices exactly
@@ -6367,6 +6424,55 @@ mod tests {
         assert_eq!(manifest.stage_status[2].state, StageState::Completed);
         assert_eq!(manifest.finalizes.len(), 2);
         assert!(job_dir.join("final/output-2.mp4").exists());
+    }
+
+    #[test]
+    fn amend_later_stage_preserves_completed_source_bearing_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let mut req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        req.stages[0].source_image = Some(vec![1, 2, 3]);
+        let row = create_job_with_params(
+            &db,
+            dir.path(),
+            CreateJobParams {
+                id: "01JBR55SOURCEPREFIX".into(),
+                ephemeral: false,
+                request: req,
+                frozen_model: None,
+            },
+        )
+        .unwrap();
+        let job_dir = row.job_dir.clone();
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("output"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        execute_job(&deps, &row, 0).unwrap();
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let mut stages = effective_request_with_media(&manifest, &job_dir)
+            .unwrap()
+            .stages;
+        stages[1].prompt = "edited later stage".into();
+
+        let (_, preserved) =
+            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+
+        assert_eq!(preserved, 1);
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .stage_status[0]
+                .state,
+            StageState::Completed
+        );
     }
 
     #[test]

@@ -300,6 +300,7 @@ pub(crate) fn purge_trashed_print_blocking(
     name: &str,
     db: &MetadataDb,
     gate: &GalleryPublicationGate,
+    media_lifecycle: Option<&crate::queue_media_lifecycle::QueueMediaLifecycle>,
 ) -> Result<(), ApiError> {
     let trash_dir = batch_transaction::gallery_trash_dir(dir);
     let trash_path = trash_dir.join(name);
@@ -318,7 +319,13 @@ pub(crate) fn purge_trashed_print_blocking(
     }
     remove_cached_sidecars(name);
     let projection_complete = match db.delete(dir, name) {
-        Ok(_) => true,
+        Ok(_) => match remove_gallery_media_projection(db, dir, name) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(file = %name, %error, "retained-media DB projection removal failed after purge");
+                false
+            }
+        },
         Err(error) => {
             tracing::warn!(file = %name, %error, "metadata DB delete failed after purge");
             false
@@ -332,6 +339,7 @@ pub(crate) fn purge_trashed_print_blocking(
                     format!("{e:#}"),
                 )
             })?;
+        release_retired_media_pins(dir, name, gate, media_lifecycle)?;
     }
     Ok(())
 }
@@ -345,6 +353,7 @@ pub(crate) fn hard_delete_live_print_blocking(
     name: &str,
     db: Option<&MetadataDb>,
     gate: &GalleryPublicationGate,
+    media_lifecycle: Option<&crate::queue_media_lifecycle::QueueMediaLifecycle>,
 ) -> Result<(), ApiError> {
     let path = dir.join(name);
     let archive_disposition = batch_transaction::tombstone_committed_archive_filename(
@@ -381,10 +390,22 @@ pub(crate) fn hard_delete_live_print_blocking(
     // source of truth and reconciliation will re-sync on the next restart.
     let projection_complete = if let Some(db) = db {
         match db.delete(dir, name) {
-            Ok(true) => true,
+            Ok(true) => match remove_gallery_media_projection(db, dir, name) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(file = %name, %error, "retained-media DB projection removal failed after delete");
+                    false
+                }
+            },
             Ok(false) => {
                 tracing::debug!("delete: no metadata row for {}", dir.join(name).display());
-                true
+                match remove_gallery_media_projection(db, dir, name) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::warn!(file = %name, %error, "retained-media DB projection removal failed after delete");
+                        false
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -404,6 +425,39 @@ pub(crate) fn hard_delete_live_print_blocking(
                     "failed to checkpoint gallery deletion projection: {error:#}"
                 ))
             })?;
+        release_retired_media_pins(dir, name, gate, media_lifecycle)?;
+    }
+    Ok(())
+}
+
+fn remove_gallery_media_projection(db: &MetadataDb, dir: &Path, name: &str) -> anyhow::Result<()> {
+    let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    mold_db::gallery_media::replace_for_item(db, &canonical.to_string_lossy(), name, &[])
+}
+
+fn release_retired_media_pins(
+    dir: &Path,
+    name: &str,
+    gate: &GalleryPublicationGate,
+    lifecycle: Option<&crate::queue_media_lifecycle::QueueMediaLifecycle>,
+) -> Result<(), ApiError> {
+    let pins = gate
+        .finalize_retained_media_release(dir, [name.to_owned()])
+        .map_err(|error| {
+            internal(
+                "failed to commit retained source-media release",
+                format!("{error:#}"),
+            )
+        })?;
+    let Some(lifecycle) = lifecycle else {
+        // Authority already excludes these pins. A future complete startup
+        // scan may collect the encrypted orphans; never guess without one.
+        return Ok(());
+    };
+    for pin in pins {
+        if let Err(error) = lifecycle.release_gallery_pin(pin.media_set, pin.pin_id) {
+            tracing::warn!(file = %name, %error, "retained source-media pin release will be reconciled on startup");
+        }
     }
     Ok(())
 }
@@ -442,10 +496,17 @@ pub(crate) async fn delete_gallery_image(
     let permanent = query.permanent.unwrap_or(false);
     let db = state.metadata_db.clone();
     let gate = state.gallery_publication_gate.clone();
+    let media_lifecycle = state.queue_journal.queue_media_lifecycle();
     let task_name = name.clone();
     let event = tokio::task::spawn_blocking(move || -> Result<Option<ServerEvent>, ApiError> {
         let Some(db) = db.as_ref().as_ref() else {
-            hard_delete_live_print_blocking(&dir, &task_name, None, &gate)?;
+            hard_delete_live_print_blocking(
+                &dir,
+                &task_name,
+                None,
+                &gate,
+                media_lifecycle.as_deref(),
+            )?;
             return Ok(Some(ServerEvent::GalleryRemoved {
                 filename: task_name,
             }));
@@ -456,9 +517,21 @@ pub(crate) async fn delete_gallery_image(
                 .map_err(|e| internal("metadata DB read failed", format!("{e:#}")))?
                 .is_some_and(|row| row.trashed_at_ms.is_some());
             if trashed {
-                purge_trashed_print_blocking(&dir, &task_name, db, &gate)?;
+                purge_trashed_print_blocking(
+                    &dir,
+                    &task_name,
+                    db,
+                    &gate,
+                    media_lifecycle.as_deref(),
+                )?;
             } else {
-                hard_delete_live_print_blocking(&dir, &task_name, Some(db), &gate)?;
+                hard_delete_live_print_blocking(
+                    &dir,
+                    &task_name,
+                    Some(db),
+                    &gate,
+                    media_lifecycle.as_deref(),
+                )?;
             }
             return Ok(Some(ServerEvent::GalleryRemoved {
                 filename: task_name,
@@ -642,6 +715,7 @@ pub(crate) async fn delete_gallery_files_forever(
     let names = clean_filenames(&request)?;
     let db = state.metadata_db.clone();
     let gate = state.gallery_publication_gate.clone();
+    let media_lifecycle = state.queue_journal.queue_media_lifecycle();
     let (removed, failure) = tokio::task::spawn_blocking(
         move || -> Result<(Vec<String>, Option<ApiError>), ApiError> {
             let mut removed = Vec::new();
@@ -652,12 +726,30 @@ pub(crate) async fn delete_gallery_files_forever(
                         .map_err(|error| internal("metadata DB read failed", format!("{error:#}")))?
                         .is_some_and(|row| row.trashed_at_ms.is_some());
                     if trashed {
-                        purge_trashed_print_blocking(&dir, &name, db, &gate)
+                        purge_trashed_print_blocking(
+                            &dir,
+                            &name,
+                            db,
+                            &gate,
+                            media_lifecycle.as_deref(),
+                        )
                     } else {
-                        hard_delete_live_print_blocking(&dir, &name, Some(db), &gate)
+                        hard_delete_live_print_blocking(
+                            &dir,
+                            &name,
+                            Some(db),
+                            &gate,
+                            media_lifecycle.as_deref(),
+                        )
                     }
                 } else {
-                    hard_delete_live_print_blocking(&dir, &name, None, &gate)
+                    hard_delete_live_print_blocking(
+                        &dir,
+                        &name,
+                        None,
+                        &gate,
+                        media_lifecycle.as_deref(),
+                    )
                 };
                 match outcome {
                     Ok(()) => removed.push(name),
@@ -701,6 +793,7 @@ pub(crate) async fn empty_gallery_trash(
     let db = state.metadata_db.clone();
     require_metadata_db(&db)?;
     let gate = state.gallery_publication_gate.clone();
+    let media_lifecycle = state.queue_journal.queue_media_lifecycle();
     let purged = tokio::task::spawn_blocking(move || -> Result<Vec<String>, ApiError> {
         let db = require_metadata_db(&db)?;
         let rows = db
@@ -708,7 +801,13 @@ pub(crate) async fn empty_gallery_trash(
             .map_err(|e| internal("metadata DB read failed", format!("{e:#}")))?;
         let mut purged = Vec::new();
         for row in rows {
-            purge_trashed_print_blocking(&dir, &row.filename, db, &gate)?;
+            purge_trashed_print_blocking(
+                &dir,
+                &row.filename,
+                db,
+                &gate,
+                media_lifecycle.as_deref(),
+            )?;
             purged.push(row.filename);
         }
         Ok(purged)
@@ -768,6 +867,7 @@ pub(crate) async fn sweep_trash_once(state: &AppState) -> anyhow::Result<TrashSw
         return Ok(TrashSweepResult::default());
     }
     let gate = state.gallery_publication_gate.clone();
+    let media_lifecycle = state.queue_journal.queue_media_lifecycle();
     let _gallery_writer = state.gallery_publication_gate.write().await;
     let (purged, remaining) =
         tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<String>, u64)> {
@@ -778,7 +878,13 @@ pub(crate) async fn sweep_trash_once(state: &AppState) -> anyhow::Result<TrashSw
             let expired = db.expired_trashed(&dir, retention, now_ms)?;
             let mut purged = Vec::with_capacity(expired.len());
             for row in expired {
-                match purge_trashed_print_blocking(&dir, &row.filename, db, &gate) {
+                match purge_trashed_print_blocking(
+                    &dir,
+                    &row.filename,
+                    db,
+                    &gate,
+                    media_lifecycle.as_deref(),
+                ) {
                     Ok(()) => purged.push(row.filename),
                     Err(error) => tracing::warn!(
                         file = %row.filename,
@@ -845,6 +951,36 @@ pub(crate) fn spawn_trash_sweeper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permanent_delete_projection_removes_retained_media_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        mold_db::gallery_media::replace_for_item(
+            &db,
+            &canonical.to_string_lossy(),
+            "print.png",
+            &[mold_db::gallery_media::GalleryMediaBinding {
+                output_dir: canonical.to_string_lossy().into_owned(),
+                filename: "print.png".into(),
+                pin_id: "a".repeat(64),
+                media_set_id: "0".repeat(32),
+                owner_uuid: "owner".into(),
+                job_id: "job".into(),
+            }],
+        )
+        .unwrap();
+
+        remove_gallery_media_projection(&db, dir.path(), "print.png").unwrap();
+        assert!(mold_db::gallery_media::list_for_item(
+            &db,
+            &canonical.to_string_lossy(),
+            "print.png"
+        )
+        .unwrap()
+        .is_empty());
+    }
 
     #[test]
     fn media_source_prefers_live_then_trash() {

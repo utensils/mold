@@ -4814,6 +4814,7 @@ fn finish_generation_success(
     // cannot retain a completed job and replay it into a duplicate print.
     let job_id = job.id.clone();
     let output_dir = job.output_dir.clone();
+    let gallery_gate = job.gallery_publication_gate.clone();
     let registry = job.registry.clone();
     let completion_payload = job.completion_payload;
     let mut channels =
@@ -4825,6 +4826,7 @@ fn finish_generation_success(
         &registry,
         &saved_names,
         &response,
+        &gallery_gate,
     )
     .is_err()
     {

@@ -2061,6 +2061,20 @@ impl QueueTicket {
         self.journal.is_retaining()
     }
 
+    /// Transfer this job's encrypted authored media into exact committed
+    /// gallery ownership. Success settlement may proceed only after this
+    /// authority-first handoff completes.
+    pub(crate) fn handoff_media_to_gallery(
+        &self,
+        output_dir: &Path,
+        gate: &crate::batch_transaction::GalleryPublicationGate,
+    ) -> anyhow::Result<()> {
+        let Some(lifecycle) = self.journal.queue_media_lifecycle() else {
+            return Ok(());
+        };
+        lifecycle.handoff_to_gallery(&self.id, output_dir, gate)
+    }
+
     /// The job produced its output. Delete the row unconditionally — a
     /// completed job must never be replayed, fence or no fence.
     pub fn complete(self) {

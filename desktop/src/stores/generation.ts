@@ -62,6 +62,7 @@ import {
   type DurableMediaCapabilities,
   type GenerationBatchStatus,
 } from "@studio/api/generationAdmission";
+import { createRetainedSourceMediaReuseSession } from "@studio/api/gallerySourceMedia";
 import {
   buildGenerationBatchStatusRequest,
   chunkGenerationBatchTrackers,
@@ -194,6 +195,9 @@ export interface BatchRequestOptions {
   /** Durable identity shared by prepared siblings and retained in gallery metadata. */
   batchId?: string;
   promptTransform?: PromptTransformProvenance;
+  /** One-time, request-bound retained-media authority. The server requires a
+   * singleton batch and consumes this handle exactly once. */
+  retainedSource?: { filename: string; memberIds: readonly string[] };
 }
 
 /**
@@ -1181,6 +1185,7 @@ export const useGenerationStore = defineStore("generation", {
       record: DurableGenerationRecoveryRecord,
       requests: GenerateRequest[],
       route: Pick<JobRoute, "referenceUploads"> | null = null,
+      retainedSource?: { filename: string; memberIds: readonly string[] },
     ): Promise<void> {
       const hosts = useHostsStore();
       const host = hosts.all.find(
@@ -1228,6 +1233,26 @@ export const useGenerationStore = defineStore("generation", {
         }
       }
       const body = { client_batch_id: record.tracker.clientBatchId, requests: transport };
+      let retainedMediaSessionHandle: string | undefined;
+      if (retainedSource) {
+        if (transport.length !== 1) {
+          this.rejectDurableRecord(record, "Retained source-media reuse requires one print.");
+          return;
+        }
+        try {
+          retainedMediaSessionHandle = (
+            await createRetainedSourceMediaReuseSession(
+              retainedSource.filename,
+              retainedSource.memberIds,
+              transport[0]!,
+              target,
+            )
+          ).session_handle;
+        } catch (error) {
+          this.rejectDurableRecord(record, error);
+          return;
+        }
+      }
       const attach = (batch: GenerationBatchStatus) => {
         record.tracker = reduceGenerationLifecycle(record.tracker, {
           type: "batch_snapshot",
@@ -1238,7 +1263,16 @@ export const useGenerationStore = defineStore("generation", {
         this.ensureDurableHostStream(record.tracker.hostId);
       };
       try {
-        attach(await admitGenerationBatch(target, body));
+        attach(
+          await admitGenerationBatch(
+            target,
+            body,
+            undefined,
+            retainedMediaSessionHandle
+              ? { "X-Mold-Retained-Media-Session": retainedMediaSessionHandle }
+              : undefined,
+          ),
+        );
         return;
       } catch (error) {
         if (isDefiniteGenerationAdmissionRejection(error)) {
@@ -1260,6 +1294,13 @@ export const useGenerationStore = defineStore("generation", {
         const lookup = await lookupGenerationBatchByClientId(target, record.tracker.clientBatchId);
         if (lookup.kind === "found") {
           attach(lookup.batch);
+          return;
+        }
+        if (retainedMediaSessionHandle) {
+          this.rejectDurableRecord(
+            record,
+            "The one-time retained source session was consumed before admission could be confirmed. Reuse settings again before retrying.",
+          );
           return;
         }
         attach(await admitGenerationBatch(target, body));
@@ -1300,6 +1341,9 @@ export const useGenerationStore = defineStore("generation", {
       const size = Math.max(1, Math.floor(batchSize));
       const baseSeed = resolveBaseSeed(req.seed);
       const plans = planBatchRequests(req, size, baseSeed, requestOptions);
+      if (requestOptions.retainedSource && plans.length !== 1) {
+        throw new Error("Retained source-media reuse requires a single print per submission.");
+      }
       // An unrouted submit means This device; resolve its own route so the
       // durable contract is read from the machine that will run the print.
       route = effectiveJobRoute(route, req.model || null);
@@ -1419,12 +1463,19 @@ export const useGenerationStore = defineStore("generation", {
         const admitChunks = uploadWork
           ? chunks.reduce(
               (previous, { record, requestChunk }) =>
-                previous.then(() => this.admitDurableRecord(record, requestChunk, host)),
+                previous.then(() =>
+                  this.admitDurableRecord(
+                    record,
+                    requestChunk,
+                    host,
+                    requestOptions.retainedSource,
+                  ),
+                ),
               Promise.resolve(),
             )
           : Promise.all(
               chunks.map(({ record, requestChunk }) =>
-                this.admitDurableRecord(record, requestChunk, host),
+                this.admitDurableRecord(record, requestChunk, host, requestOptions.retainedSource),
               ),
             ).then(() => undefined);
         const admitted = admitChunks.then(() => jobs);
