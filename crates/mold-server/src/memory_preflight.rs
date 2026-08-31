@@ -1817,6 +1817,14 @@ fn request_sensitive_activation_memory_with_wan_geometry(
             crate::wan_admission::WanShapeHint::from_request_with_projection(req, projection),
             wan_geometry.unwrap_or_else(mold_inference::device::WanActivationGeometry::a14b),
         )
+    } else if hint.is_some_and(|h| h.family == ActivationFamily::Hunyuan3dShape) {
+        // A mesh has no canvas, so the pixel-area estimate would price every
+        // 3-D render identically no matter what was asked for. The peak is
+        // whichever of the image conditioner, the shape DiT and one decode
+        // chunk is largest — see `crate::hunyuan3d_admission`.
+        crate::hunyuan3d_admission::activation_peak_bytes(
+            crate::hunyuan3d_admission::Hunyuan3dShape::from_request(req),
+        )
     } else if hint.is_some_and(|h| h.family.streaming_transformer()) {
         // Cold-cache fallback: no checkpoint header has been read here, so the
         // AdaLN width is unknown and falls back to the six-component default.
