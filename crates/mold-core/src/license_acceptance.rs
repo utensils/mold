@@ -169,8 +169,7 @@ fn license_covers_manifest_file(
         crate::manifest::PULID_FLUX_MANIFEST | crate::manifest::PULID_SDXL_MANIFEST
     );
     if license.id == INSIGHTFACE_ANTELOPEV2.id {
-        return is_pulid_bundle
-            && matches!(hf_filename, "scrfd_10g_bnkps.onnx" | "glintr100.onnx");
+        return is_pulid_bundle && matches!(hf_filename, "scrfd_10g_bnkps.onnx" | "glintr100.onnx");
     }
 
     // Hunyuan3D gates on the REPOSITORY the file comes from, expressed through

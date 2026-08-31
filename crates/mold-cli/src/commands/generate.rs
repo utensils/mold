@@ -3181,6 +3181,7 @@ impl BatchOutputs {
     /// carry the last item's artifact; every image is retained.
     fn finish(self) -> GenerateResponse {
         GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: self.audio,
             images: self.images,
@@ -5043,6 +5044,7 @@ mod tests {
         let prompts = vec!["first clip".to_string(), "second clip".to_string()];
         let batch_requests = local_batch_requests(&request, 2, 91, Some(&prompts));
         let response = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),
@@ -6262,6 +6264,7 @@ mod audio_batch_passthrough_tests {
 
     fn audio_response(seed: u64, bytes: &[u8]) -> GenerateResponse {
         GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: Some(mold_core::AudioData {
                 data: bytes.to_vec(),

@@ -6734,6 +6734,7 @@ mod tests {
         });
         crate::h3_private_bridge::H3ClaimedRunOutput {
             response: GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 images: Vec::new(),
                 video,
@@ -7750,6 +7751,7 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             std::fs::remove_file(&self.weights)?;
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![self.generated.clone()],
@@ -7789,6 +7791,7 @@ mod tests {
                 .recv()
                 .unwrap();
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![ImageData {
@@ -8417,6 +8420,7 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             self.record("generate");
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![ImageData {
@@ -9709,6 +9713,7 @@ mod tests {
             .unwrap();
             let original = fake_upscale_image();
             let response = GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![original.clone()],
@@ -11419,6 +11424,7 @@ mod tests {
 
     fn fake_response() -> GenerateResponse {
         GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
@@ -12132,6 +12138,7 @@ mod tests {
         let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
         let job = fake_upscale_job(Config::default(), "real-esrgan-x4plus:fp16");
         let mut response = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],

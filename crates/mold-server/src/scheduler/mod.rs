@@ -15016,6 +15016,7 @@ mod tests {
                 id: child_id.clone(),
                 generation: Box::new(gpu_job),
                 response: mold_core::GenerateResponse {
+                    mesh: None,
                     request_warnings: Vec::new(),
                     audio: None,
                     images: Vec::new(),
@@ -15203,6 +15204,7 @@ mod tests {
             id: fence.work_id.clone(),
             generation: Box::new(gpu_job),
             response: mold_core::GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: Vec::new(),
@@ -15364,6 +15366,7 @@ mod tests {
             id: child_id.clone(),
             generation: Box::new(gpu_job),
             response: mold_core::GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: Vec::new(),

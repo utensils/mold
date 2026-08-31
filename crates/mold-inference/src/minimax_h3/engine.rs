@@ -325,6 +325,7 @@ impl H3Fl2VaEngine {
             &output,
         )?;
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             images: Vec::new(),
             video: Some(VideoData {

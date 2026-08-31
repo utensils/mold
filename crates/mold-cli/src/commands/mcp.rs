@@ -85,6 +85,7 @@ async fn generate_canonically(
         .and_then(|(_, extension)| extension.parse::<OutputFormat>().ok())
         .unwrap_or_else(|| artifact.request.resolved_output_format());
     Ok(GenerateResponse {
+        mesh: None,
         images: vec![mold_core::ImageData {
             data: artifact.bytes,
             format,
@@ -124,6 +125,7 @@ async fn hydrate_canonical_outcome(
             )
         })?;
     Ok(GenerateResponse {
+        mesh: None,
         images: vec![mold_core::ImageData {
             data: artifact.bytes,
             format,
@@ -4542,6 +4544,7 @@ mod tests {
         jobs.finish(
             &id,
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![mold_core::ImageData {

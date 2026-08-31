@@ -2125,6 +2125,13 @@ pub struct GenerateResponse {
     /// frameless artifact would mis-render it everywhere at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioData>,
+    /// 3-D mesh output (additive). Present only for mesh families — currently
+    /// Hunyuan3D image-to-3D. A fourth slot for the same reason `audio` is a
+    /// third: a populated `video` means "this response is a video" to every
+    /// existing consumer, and a populated `images` means "these are pictures".
+    /// A mesh is neither, and must not be reachable by either read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshData>,
     #[schema(example = 1234)]
     pub generation_time_ms: u64,
     #[schema(example = "flux-schnell:q8")]
@@ -2257,6 +2264,48 @@ pub struct AudioData {
     pub thumbnail_width: u32,
     #[schema(example = 360)]
     pub thumbnail_height: u32,
+}
+
+/// 3-D mesh output from a mesh model family.
+///
+/// The bytes are ONE self-contained file. For [`OutputFormat::Glb`] that
+/// means geometry, UVs, normals and any PBR textures all live in the same
+/// binary glTF as embedded buffer views, which is what lets a mesh be one
+/// gallery row with no schema change — the same shape a still or a clip has.
+/// Loose textures would need a second table and a rework of every gallery
+/// projection; see #1496.
+///
+/// `poster` is the mesh counterpart of [`AudioData::thumbnail`]: a rendered
+/// still that grids and the TUI cell can lay out without a 3-D renderer.
+/// Only the lightbox loads the geometry itself.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshData {
+    /// Encoded mesh bytes. Always an [`OutputFormat::is_mesh`] variant.
+    pub data: Vec<u8>,
+    /// Output format. Always [`OutputFormat::Glb`] today: OBJ exists as a
+    /// gallery export transcode, never as a stored artifact.
+    pub format: OutputFormat,
+    #[schema(example = 24576)]
+    pub vertex_count: u32,
+    #[schema(example = 49152)]
+    pub face_count: u32,
+    /// Axis-aligned bounds in the mesh's own coordinate space, `[x, y, z]`.
+    /// Recorded so a client can frame a camera without parsing the geometry.
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    /// Whether the mesh carries generated PBR textures, as opposed to bare
+    /// geometry. Distinct from "has a material": an untextured mesh still
+    /// gets a default material so viewers shade it.
+    pub textured: bool,
+    /// Rendered poster PNG for gallery grids and the TUI cell.
+    pub poster: Vec<u8>,
+    /// Raster size of `poster`. A mesh has no dimensions of its own, so this
+    /// is what gallery rows record and what grids lay the tile out with —
+    /// exactly as `thumbnail_width`/`_height` do for audio.
+    #[schema(example = 512)]
+    pub poster_width: u32,
+    #[schema(example = 512)]
+    pub poster_height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -4678,6 +4727,25 @@ pub struct SseCompleteEvent {
     /// Base64-encoded waveform PNG for the gallery tile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_thumbnail: Option<String>,
+
+    // ── Mesh-only fields (additive; absent for every raster response) ───
+    /// Vertex count. Presence of this field signals a mesh response, where
+    /// `image` carries the encoded glTF bytes and `format` is an
+    /// [`OutputFormat::is_mesh`] variant. Probed BEFORE `audio_sample_rate`
+    /// and `video_frames` for the same reason audio is probed before video:
+    /// a mesh has neither, so a wider probe would classify it as an image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_vertices: Option<u32>,
+    /// Triangle count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_faces: Option<u32>,
+    /// Whether the mesh carries generated PBR textures.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mesh_textured: bool,
+    /// Base64-encoded poster PNG for the gallery tile. `width`/`height`
+    /// describe this poster, not the mesh — a mesh has no raster size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_poster: Option<String>,
 
     /// GPU ordinal that handled this request (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7179,6 +7247,10 @@ mod tests {
     #[test]
     fn sse_complete_event_roundtrip() {
         let event = SseCompleteEvent {
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -8327,6 +8399,10 @@ mod tests {
     #[test]
     fn sse_complete_event_video_roundtrip() {
         let event = SseCompleteEvent {
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -8380,6 +8456,10 @@ mod tests {
     #[test]
     fn sse_complete_event_video_no_audio_omits_audio_fields() {
         let event = SseCompleteEvent {
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -8459,6 +8539,10 @@ mod tests {
     fn sse_complete_event_image_no_video_fields_in_json() {
         // An image-only event should not include any video_* keys in JSON
         let event = SseCompleteEvent {
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,

@@ -1118,6 +1118,7 @@ impl SD3Engine {
         );
 
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
@@ -1490,6 +1491,7 @@ impl SD3Engine {
             tracing::info!(generation_time_ms, seed, "SD3 generation complete");
 
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![ImageData {

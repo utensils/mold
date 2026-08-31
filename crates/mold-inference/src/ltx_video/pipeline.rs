@@ -1705,6 +1705,7 @@ impl LtxVideoEngine {
         ));
 
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],

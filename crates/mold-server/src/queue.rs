@@ -1202,6 +1202,7 @@ async fn upscale_generated_image_on_single_worker(
     let mut response = mold_core::GenerateResponse {
         request_warnings: Vec::new(),
         audio: None,
+        mesh: None,
         images: vec![],
         video: None,
         generation_time_ms: 0,
@@ -1279,11 +1280,55 @@ pub(crate) fn build_sse_complete_event(
     // as-built, image metadata gets the payload's actual dimensions.
     let event_metadata = metadata.map(|meta| {
         let mut meta = meta.clone();
-        if response.video.is_none() {
+        // Only a raster print's metadata records the payload's own
+        // dimensions. A clip already carries them, and neither audio nor a
+        // mesh has any — `img` there is the sidecar tile, not the artifact.
+        if response.video.is_none() && response.audio.is_none() && response.mesh.is_none() {
             apply_output_dimensions_to_metadata(&mut meta, img);
         }
         Box::new(meta)
     });
+    if let Some(ref mesh) = response.mesh {
+        return SseCompleteEvent {
+            request_warnings: response.request_warnings.clone(),
+            image: if include_media {
+                b64.encode(&mesh.data)
+            } else {
+                String::new()
+            },
+            format: mesh.format,
+            // As with audio, the raster dimensions a client lays the tile out
+            // with are the POSTER's. A mesh has none of its own.
+            width: mesh.poster_width,
+            height: mesh.poster_height,
+            original_image: None,
+            original_width: None,
+            original_height: None,
+            seed_used: response.seed_used,
+            generation_time_ms: response.generation_time_ms,
+            model: response.model.clone(),
+            video_frames: None,
+            video_fps: None,
+            video_thumbnail: None,
+            video_gif_preview: None,
+            video_has_audio: false,
+            video_duration_ms: None,
+            video_audio_sample_rate: None,
+            video_audio_channels: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+            audio_duration_ms: None,
+            audio_thumbnail: None,
+            mesh_vertices: Some(mesh.vertex_count),
+            mesh_faces: Some(mesh.face_count),
+            mesh_textured: mesh.textured,
+            mesh_poster: include_media.then(|| b64.encode(&mesh.poster)),
+            gpu: response.gpu,
+            filename: saved.output.clone(),
+            original_filename: None,
+            metadata: event_metadata,
+        };
+    }
     if let Some(ref audio) = response.audio {
         return SseCompleteEvent {
             request_warnings: response.request_warnings.clone(),
@@ -1315,6 +1360,10 @@ pub(crate) fn build_sse_complete_event(
             audio_channels: Some(audio.channels),
             audio_duration_ms: Some(audio.duration_ms),
             audio_thumbnail: include_media.then(|| b64.encode(&audio.thumbnail)),
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
             gpu: response.gpu,
             filename: saved.output.clone(),
             original_filename: None,
@@ -1354,6 +1403,10 @@ pub(crate) fn build_sse_complete_event(
             video_duration_ms: video.duration_ms,
             video_audio_sample_rate: video.audio_sample_rate,
             video_audio_channels: video.audio_channels,
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
             gpu: response.gpu,
             filename: saved.output.clone(),
             original_filename: None,
@@ -1390,6 +1443,10 @@ pub(crate) fn build_sse_complete_event(
             video_duration_ms: None,
             video_audio_sample_rate: None,
             video_audio_channels: None,
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
             gpu: response.gpu,
             filename: saved.output.clone(),
             original_filename: saved.original.clone(),
@@ -3936,6 +3993,7 @@ mod tests {
     #[test]
     fn durable_terminal_result_carries_saved_gallery_names_and_terminal_facts() {
         let response = mold_core::GenerateResponse {
+            mesh: None,
             images: Vec::new(),
             video: None,
             audio: None,
@@ -5071,6 +5129,7 @@ mod tests {
             journal: None,
         };
         let response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),
@@ -5999,6 +6058,7 @@ mod tests {
             audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
         };
         let response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             images: Vec::new(),
             video: Some(video.clone()),
@@ -6157,6 +6217,7 @@ mod tests {
             audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
         };
         let response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             images: Vec::new(),
             video: Some(video.clone()),
@@ -6427,6 +6488,7 @@ mod tests {
             index: 0,
         };
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: vec![identity.to_string()],
             audio: None,
             images: vec![image.clone()],
@@ -6484,6 +6546,7 @@ mod tests {
     fn build_sse_complete_event_audio_carries_wav_payload_and_no_video_fields() {
         let audio = fake_audio(48_000);
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: Some(audio.clone()),
             images: vec![],
@@ -6530,6 +6593,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_audio_omits_media_for_metadata_only_payloads() {
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: Some(fake_audio(24_000)),
             images: vec![],
@@ -6613,6 +6677,7 @@ mod tests {
             audio_channels: Some(2),
         };
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
@@ -6722,6 +6787,7 @@ mod tests {
             audio_channels: None,
         };
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
@@ -6746,6 +6812,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_image_clears_all_video_fields() {
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
@@ -6779,6 +6846,7 @@ mod tests {
         req.batch_index = Some(2);
         req.batch_count = Some(3);
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
@@ -6837,6 +6905,7 @@ mod tests {
     #[test]
     fn metadata_only_completion_fails_when_the_output_was_not_saved() {
         let response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
@@ -6865,6 +6934,7 @@ mod tests {
         let mut req = fake_request("flux-dev:q4");
         req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
         let mut response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
@@ -6959,6 +7029,7 @@ mod tests {
             audio_channels: None,
         };
         let mut response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
