@@ -348,8 +348,10 @@ not convolution and cuDNN pays a per-call setup candle does not cache. Frames
 match the im2col arm at ~40 dB PSNR -- the same shot, not the same bytes, which
 is the trade this family opts into.
 
-A cuDNN failure falls back to im2col rather than failing the render, and only
-Linux CUDA release artifacts compile the feature.
+A cuDNN failure falls back to im2col rather than failing the render. Every
+Linux CUDA artifact compiles the feature -- the Nix packages, the four
+`release.yml` binaries, the Docker image, both AUR packages and the desktop
+AppImage. macOS and Windows do not: cuDNN is CUDA-only.
 
 ### When the VAE decode does not fit
 

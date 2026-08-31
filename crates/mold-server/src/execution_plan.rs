@@ -401,9 +401,30 @@ pub struct ExecutionSemanticConfig {
     pub h3_factory_authority_sha256: Option<String>,
     pub attention_backend: SemanticAttentionBackend,
     pub attention_chunk: SemanticAttentionChunk,
+    /// The convolution backend this render will actually execute on.
+    ///
+    /// Without it, the same source revision built with and without the
+    /// `cudnn` feature produces one fingerprint for two different sets of
+    /// numerics and timings, so swapping those binaries against one `mold.db`
+    /// reuses the other's scheduler estimates. Resolved rather than read from
+    /// `MOLD_CONV`, because the default is per family and the feature may not
+    /// be compiled at all.
+    ///
+    /// `None` for families whose convolutions never take cuDNN, so their
+    /// fingerprints stay exactly as they were — the same reason `umt5_variant`
+    /// is skipped when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conv_backend: Option<SemanticConvBackend>,
     pub vae_tiling: SemanticVaeTiling,
     pub vae_dtype: SemanticVaeDType,
     pub runtime: Vec<RuntimeSemanticSetting>,
+}
+
+/// The convolution backend an execution actually runs on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticConvBackend {
+    Im2Col,
+    Cudnn,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -623,6 +644,24 @@ impl ExecutionSemanticConfig {
                 mold_inference::attention::AttentionChunkPolicy::Size(size) => {
                     SemanticAttentionChunk::Size(*size as u64)
                 }
+            },
+            // Only video families can take cuDNN, so only they carry the
+            // field; an image family's fingerprint is byte-identical to what
+            // it was before this existed.
+            conv_backend: match mold_inference::conv_policy::policy_for_family(family) {
+                mold_inference::conv_policy::ConvPolicy::Image => None,
+                mold_inference::conv_policy::ConvPolicy::Video => Some(
+                    match mold_inference::conv_policy::resolve_for(
+                        mold_inference::conv_policy::ConvPolicy::Video,
+                    ) {
+                        mold_inference::conv_policy::ConvBackend::Im2Col => {
+                            SemanticConvBackend::Im2Col
+                        }
+                        mold_inference::conv_policy::ConvBackend::Cudnn => {
+                            SemanticConvBackend::Cudnn
+                        }
+                    },
+                ),
             },
             vae_tiling: match vae_tiling {
                 mold_inference::vae_tiling::TiledMode::Auto => SemanticVaeTiling::Auto,

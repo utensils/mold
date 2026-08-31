@@ -59,6 +59,8 @@ RUN set -eux; \
             pkg-config \
             libssl-dev \
             libwebp-dev \
+            libcudnn9-dev-cuda-12 \
+            libcudnn9-cuda-12 \
             nasm \
             git \
             ca-certificates \
@@ -124,7 +126,7 @@ RUN mkdir -p crates/mold-core/src \
     && echo "// stub" > crates/mold-tui/src/lib.rs
 
 # Build dependencies only (this layer is cached until Cargo.toml/lock changes)
-RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4,metrics
+RUN cargo build --release -p mold-ai --features cuda,cudnn,expand,discord,tui,webp,mp4,metrics
 
 # Now copy the real source code
 COPY crates/ crates/
@@ -145,9 +147,12 @@ ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
 # longer implies CUDA or the SM89 attention kernel, so `cuda,h3` would build a
 # CUDA H3 binary without its kernel. `h3-cuda` implies `cuda`, which is why it
 # replaces the device feature rather than appending to it.
+# `cudnn` is orthogonal to the device feature and appends to it: it implies
+# `cuda` but is never implied by it, because cudarc links libcudnn and needs
+# its headers. Video families take the cuDNN convolution path (#1483).
 RUN gpu_feature="cuda"; \
     if [ "${CUDA_COMPUTE_CAP}" = "89" ]; then gpu_feature="h3-cuda"; fi; \
-    cargo build --release -p mold-ai --features "${gpu_feature},expand,discord,tui,webp,mp4,metrics"
+    cargo build --release -p mold-ai --features "${gpu_feature},cudnn,expand,discord,tui,webp,mp4,metrics"
 RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \
     "${CUDA_COMPUTE_CAP}" /build/target/release/build
 RUN scripts/probe-cuda-embedded-ptx.py /build/target/release/mold \
@@ -163,7 +168,10 @@ FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# cuBLAS and cuRAND are already in the runtime image.
+# cuBLAS and cuRAND are already in the runtime image. cuDNN is NOT, and the
+# binary links libcudnn.so.9 dynamically since #1483 — without it the
+# container fails at exec, which the builder's own ldd check cannot catch
+# because the builder stage has the dev package installed.
 # libcuda.so.1 (the NVIDIA driver) is injected at runtime by the NVIDIA
 # Container Toolkit on GPU hosts like RunPod — it is never in the image.
 # Same apt retry wrapper as the builder stage — the tini fetch in particular
@@ -172,6 +180,7 @@ RUN set -eux; \
     for attempt in 1 2 3 4 5; do \
         apt-get update && apt-get install -y --no-install-recommends \
             ca-certificates \
+            libcudnn9-cuda-12 \
             libwebp7 \
             tini \
         && break \

@@ -10,7 +10,7 @@ arch=('x86_64')
 url="https://github.com/utensils/mold"
 license=('MIT')
 
-depends=('cuda' 'gcc-libs' 'glibc')
+depends=('cuda' 'cudnn' 'gcc-libs' 'glibc')
 
 optdepends=(
   'nvidia-utils: NVIDIA GPU driver (required for any local GPU generation)'
@@ -27,6 +27,7 @@ makedepends=(
   'rust>=1.93'
   'cargo'
   'cuda'
+  'cudnn'
   'clang'
   'lld'
   'nasm'
@@ -84,7 +85,7 @@ build() {
   [[ "${CUDA_COMPUTE_CAP}" == "89" ]] && gpu_feature="h3-cuda"
   cargo build --release --frozen --offline \
     -p mold-ai \
-    --features "${gpu_feature},preview,expand,tui,webp,mp4,metrics,mdns,pulid"
+    --features "${gpu_feature},cudnn,preview,expand,tui,webp,mp4,metrics,mdns,pulid"
 }
 
 check() {

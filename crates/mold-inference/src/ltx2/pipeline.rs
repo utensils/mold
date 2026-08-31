@@ -1714,6 +1714,9 @@ impl ChainStageRenderer for Ltx2Engine {
         // in. If the orchestrator later needs denoise-step events routed
         // through its own channel, we can plumb `stage_progress` into a
         // temporary ProgressCallback wrapper here.
+        // See the note on the Wan stage renderer: a chain stage bypasses
+        // `generate`, so the convolution policy has to be applied here too.
+        let _conv = crate::conv_policy::ConvScope::for_family("ltx2");
         self.render_chain_stage(stage_req, carry, motion_tail_pixel_frames, hdr_sidecar)
     }
 }

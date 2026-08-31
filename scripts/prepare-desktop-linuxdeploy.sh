@@ -41,6 +41,8 @@ printf '%s  %s\n' "$linuxdeploy_sha256" "$real_tool" | sha256sum --check --statu
 
 wrapper=$(mktemp "$cache_dir/.linuxdeploy-wrapper.XXXXXX")
 "${CC:-cc}" -O2 -x c -o "$wrapper" - <<'EOF'
+#define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -59,7 +61,11 @@ int main(int argc, char **argv) {
   if (prefix_length + sizeof(real_name) > sizeof(real_tool)) return 126;
   memcpy(name, real_name, sizeof(real_name));
 
-  char **forwarded = calloc((size_t)argc + 3, sizeof(char *));
+  /* Room for: real_tool, the extract flag, argv[1..], --exclude-library,
+     every forced --library, and the NULL terminator. */
+  size_t forced_capacity = 64;
+  char **forwarded =
+      calloc((size_t)argc + forced_capacity + 4, sizeof(char *));
   if (forwarded == NULL) return 126;
   forwarded[0] = real_tool;
   int next = 1;
@@ -69,7 +75,34 @@ int main(int argc, char **argv) {
   }
   if (!extracts) forwarded[next++] = "--appimage-extract-and-run";
   for (int i = 1; i < argc; i++) forwarded[next++] = argv[i];
-  forwarded[next] = "--exclude-library=libcuda.so*";
+  forwarded[next++] = "--exclude-library=libcuda.so*";
+
+  /* linuxdeploy only follows DT_NEEDED, but cuDNN's dispatcher (libcudnn.so,
+     128 KB) dlopen's its engine libraries at runtime. Without forcing them in,
+     the AppImage ships the dispatcher, cuDNN fails to initialise on the user's
+     machine, and the convolutions silently fall back to im2col — working, but
+     without the speedup the build was for. Any library in this directory is
+     forced into the bundle. */
+  const char *extra_dir = getenv("MOLD_LINUXDEPLOY_FORCE_LIBRARY_DIR");
+  if (extra_dir != NULL && *extra_dir != '\0') {
+    DIR *dir = opendir(extra_dir);
+    if (dir != NULL) {
+      struct dirent *entry;
+      size_t forced = 0;
+      while ((entry = readdir(dir)) != NULL && forced < forced_capacity) {
+        if (entry->d_name[0] == '.') continue;
+        char *arg = NULL;
+        if (asprintf(&arg, "--library=%s/%s", extra_dir, entry->d_name) < 0) {
+          closedir(dir);
+          return 126;
+        }
+        forwarded[next++] = arg;
+        forced++;
+      }
+      closedir(dir);
+    }
+  }
+  forwarded[next] = NULL;
 
   execv(real_tool, forwarded);
   fprintf(stderr, "failed to run %s: %s\n", real_tool, strerror(errno));

@@ -2555,6 +2555,12 @@ impl crate::chain::ChainStageRenderer for WanEngine {
         hdr_sidecar: Option<&crate::chain::StageSidecar>,
         _stage_progress: Option<&mut dyn FnMut(crate::chain::StageProgressEvent)>,
     ) -> Result<crate::chain::StageOutcome> {
+        // A chain stage is a second entry point into this engine: it reaches
+        // `generate_inner` without passing through `generate`, so it needs its
+        // own scope or every sequence — including the automatic chain a long
+        // `--frames` render becomes — would silently stay on im2col and ignore
+        // MOLD_CONV entirely.
+        let _conv = crate::conv_policy::ConvScope::for_family("wan");
         if hdr_sidecar.is_some() {
             bail!(
                 "WanEngine.render_stage: the HDR EXR sidecar is an LTX-2 feature; \

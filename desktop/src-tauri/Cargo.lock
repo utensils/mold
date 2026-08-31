@@ -725,7 +725,7 @@ dependencies = [
 [[package]]
 name = "candle-core-mold"
 version = "0.11.1"
-source = "git+https://github.com/utensils/candle.git?rev=e74f25ff6f9120a42cf31dcce552d86cbbd56d2d#e74f25ff6f9120a42cf31dcce552d86cbbd56d2d"
+source = "git+https://github.com/utensils/candle.git?rev=2a15732384b6086e6969cd3847b5c051e456ec22#2a15732384b6086e6969cd3847b5c051e456ec22"
 dependencies = [
  "byteorder",
  "candle-kernels",
@@ -756,7 +756,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.11.0"
-source = "git+https://github.com/utensils/candle.git?rev=e74f25ff6f9120a42cf31dcce552d86cbbd56d2d#e74f25ff6f9120a42cf31dcce552d86cbbd56d2d"
+source = "git+https://github.com/utensils/candle.git?rev=2a15732384b6086e6969cd3847b5c051e456ec22#2a15732384b6086e6969cd3847b5c051e456ec22"
 dependencies = [
  "anyhow",
  "candle-core-mold",
@@ -767,7 +767,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/utensils/candle.git?rev=e74f25ff6f9120a42cf31dcce552d86cbbd56d2d#e74f25ff6f9120a42cf31dcce552d86cbbd56d2d"
+source = "git+https://github.com/utensils/candle.git?rev=2a15732384b6086e6969cd3847b5c051e456ec22#2a15732384b6086e6969cd3847b5c051e456ec22"
 dependencies = [
  "cudaforge",
 ]
@@ -775,7 +775,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels-mold"
 version = "0.11.0"
-source = "git+https://github.com/utensils/candle.git?rev=e74f25ff6f9120a42cf31dcce552d86cbbd56d2d#e74f25ff6f9120a42cf31dcce552d86cbbd56d2d"
+source = "git+https://github.com/utensils/candle.git?rev=2a15732384b6086e6969cd3847b5c051e456ec22#2a15732384b6086e6969cd3847b5c051e456ec22"
 dependencies = [
  "block2",
  "half",
@@ -790,7 +790,7 @@ dependencies = [
 [[package]]
 name = "candle-nn-mold"
 version = "0.11.1"
-source = "git+https://github.com/utensils/candle.git?rev=e74f25ff6f9120a42cf31dcce552d86cbbd56d2d#e74f25ff6f9120a42cf31dcce552d86cbbd56d2d"
+source = "git+https://github.com/utensils/candle.git?rev=2a15732384b6086e6969cd3847b5c051e456ec22#2a15732384b6086e6969cd3847b5c051e456ec22"
 dependencies = [
  "candle-core-mold",
  "candle-metal-kernels-mold",
@@ -807,7 +807,7 @@ dependencies = [
 [[package]]
 name = "candle-onnx"
 version = "0.11.0"
-source = "git+https://github.com/utensils/candle.git?rev=e74f25ff6f9120a42cf31dcce552d86cbbd56d2d#e74f25ff6f9120a42cf31dcce552d86cbbd56d2d"
+source = "git+https://github.com/utensils/candle.git?rev=2a15732384b6086e6969cd3847b5c051e456ec22#2a15732384b6086e6969cd3847b5c051e456ec22"
 dependencies = [
  "candle-core-mold",
  "candle-nn-mold",
@@ -818,7 +818,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers-mold"
 version = "0.11.1"
-source = "git+https://github.com/utensils/candle.git?rev=e74f25ff6f9120a42cf31dcce552d86cbbd56d2d#e74f25ff6f9120a42cf31dcce552d86cbbd56d2d"
+source = "git+https://github.com/utensils/candle.git?rev=2a15732384b6086e6969cd3847b5c051e456ec22#2a15732384b6086e6969cd3847b5c051e456ec22"
 dependencies = [
  "byteorder",
  "candle-core-mold",
@@ -836,7 +836,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.11.1"
-source = "git+https://github.com/utensils/candle.git?rev=e74f25ff6f9120a42cf31dcce552d86cbbd56d2d#e74f25ff6f9120a42cf31dcce552d86cbbd56d2d"
+source = "git+https://github.com/utensils/candle.git?rev=2a15732384b6086e6969cd3847b5c051e456ec22#2a15732384b6086e6969cd3847b5c051e456ec22"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -1894,7 +1894,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5266,7 +5266,7 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools",
  "log",
  "multimap",
@@ -5445,7 +5445,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5974,7 +5974,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6032,7 +6032,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7443,7 +7443,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8764,7 +8764,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
