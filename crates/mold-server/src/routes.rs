@@ -7437,6 +7437,13 @@ async fn server_capabilities(
                     .read()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .is_none(),
+            gallery_image: db_available
+                && !state.is_output_disabled(&config)
+                && state
+                    .generation_unavailable_reason
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_none(),
             contract_version: mold_core::VIDEO_UPSCALE_CONTRACT_VERSION,
             source_library: true,
             source_upload: false,

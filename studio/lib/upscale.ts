@@ -49,3 +49,7 @@ export function framewiseStatus(job: VideoUpscaleJob): string {
       return "Cancelled";
   }
 }
+
+export function shouldPollFramewiseJob(job: VideoUpscaleJob | null): boolean {
+  return !!job && ["queued", "running", "finalizing"].includes(job.state);
+}

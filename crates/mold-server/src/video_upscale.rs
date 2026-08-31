@@ -73,12 +73,8 @@ pub fn recover_at_startup(state: &AppState) {
             let Some(database) = state.metadata_db.as_ref().as_ref() else {
                 break;
             };
-            let queued = match jobs::list(database) {
-                Ok(rows) => rows
-                    .into_iter()
-                    .filter(|job| job.state == VideoUpscaleJobState::Queued)
-                    .map(|job| job.id)
-                    .collect::<Vec<_>>(),
+            let queued = match jobs::list_queued_ids(database) {
+                Ok(ids) => ids,
                 Err(error) => {
                     tracing::warn!(%error, "could not scan queued framewise upscale jobs");
                     continue;
@@ -100,20 +96,14 @@ fn scale_for(model: &str) -> u32 {
     }
 }
 
-fn copy_and_hash_source(source: &FsPath, destination: &FsPath) -> anyhow::Result<(u64, String)> {
+fn hash_pinned_source(source: &FsPath) -> anyhow::Result<(u64, String)> {
     let metadata = fs::metadata(source)?;
     anyhow::ensure!(metadata.is_file(), "source is not a regular file");
     anyhow::ensure!(
         metadata.len() > 0 && metadata.len() <= MAX_SOURCE_BYTES,
         "source exceeds the 2 GiB durable-job limit"
     );
-    let partial = destination.with_extension("partial");
-    let _ = fs::remove_file(&partial);
     let mut input = fs::File::open(source)?;
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&partial)?;
     let mut digest = Sha256::new();
     let mut copied = 0_u64;
     let mut buffer = vec![0_u8; 1024 * 1024];
@@ -130,10 +120,7 @@ fn copy_and_hash_source(source: &FsPath, destination: &FsPath) -> anyhow::Result
             "source changed beyond the 2 GiB limit"
         );
         digest.update(&buffer[..read]);
-        output.write_all(&buffer[..read])?;
     }
-    output.sync_all()?;
-    fs::rename(&partial, destination)?;
     Ok((copied, format!("{:x}", digest.finalize())))
 }
 
@@ -149,6 +136,19 @@ fn source_sha256(path: &FsPath) -> anyhow::Result<String> {
         digest.update(&buffer[..read]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn validate_image_upscale_dimensions(width: u32, height: u32, scale: u32) -> Result<(), ApiError> {
+    let output_pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(u64::from(scale).pow(2)))
+        .ok_or_else(|| ApiError::validation("upscaled image dimensions overflow"))?;
+    if output_pixels > MAX_OUTPUT_PIXELS {
+        return Err(ApiError::validation(format!(
+            "upscaled image would contain {output_pixels} pixels; the limit is {MAX_OUTPUT_PIXELS}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_resource_bounds(
@@ -211,20 +211,23 @@ fn write_synced(path: &FsPath, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 fn prepare_pinned_source(
-    source: &FsPath,
     pinned_source: &FsPath,
     work_dir: &FsPath,
     scale: u32,
-    metadata: &mold_core::OutputMetadata,
 ) -> anyhow::Result<VideoUpscaleMediaFacts> {
-    let (source_bytes, digest) = copy_and_hash_source(source, pinned_source)?;
+    let (source_bytes, digest) = hash_pinned_source(pinned_source)?;
     let facts = probe(pinned_source)?;
     validate_resource_bounds(&facts, scale, source_bytes, fs2::available_space(work_dir)?)?;
-    write_synced(&work_dir.join(SOURCE_DIGEST_FILE), digest.as_bytes())?;
-    write_synced(
-        &work_dir.join(SOURCE_METADATA_FILE),
-        &serde_json::to_vec(metadata)?,
-    )?;
+    let digest_path = work_dir.join(SOURCE_DIGEST_FILE);
+    if digest_path.exists() {
+        anyhow::ensure!(
+            fs::read_to_string(&digest_path)?.trim() == digest,
+            "durable Framewise upscale source identity changed during preparation"
+        );
+    } else {
+        write_synced(&digest_path, digest.as_bytes())?;
+    }
+    crate::dir_sync::sync_directory(work_dir)?;
     Ok(facts)
 }
 
@@ -337,22 +340,24 @@ pub(crate) fn enqueue_gallery_video_job(
         .and_then(|extension| extension.to_str())
         .unwrap_or("mp4");
     let pinned_source = work_dir.join(format!("source.{extension}"));
-    let prepared = prepare_pinned_source(
-        &source_path,
-        &pinned_source,
-        &work_dir,
-        scale_for(&model),
-        &source_metadata,
-    );
-    let facts = match prepared {
-        Ok(facts) => facts,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&work_dir);
-            return Err(ApiError::validation(format!(
-                "framewise upscale source could not be admitted: {error:#}"
-            )));
+    let admission = (|| -> anyhow::Result<()> {
+        fs::hard_link(&source_path, &pinned_source)?;
+        write_synced(
+            &work_dir.join(SOURCE_METADATA_FILE),
+            &serde_json::to_vec(&source_metadata)?,
+        )?;
+        crate::dir_sync::sync_directory(&work_dir)?;
+        if let Some(parent) = work_dir.parent() {
+            crate::dir_sync::sync_directory(parent)?;
         }
-    };
+        Ok(())
+    })();
+    if let Err(error) = admission {
+        let _ = fs::remove_dir_all(&work_dir);
+        return Err(ApiError::internal(format!(
+            "failed to pin Gallery source into durable Framewise job: {error}"
+        )));
+    }
     let now = now_ms();
     let stored = StoredVideoUpscaleJob {
         job: VideoUpscaleJob {
@@ -366,8 +371,8 @@ pub(crate) fn enqueue_gallery_video_job(
             model,
             tile_size,
             completed_frames: 0,
-            total_frames: facts.frame_count,
-            source_facts: Some(facts),
+            total_frames: 0,
+            source_facts: None,
             output_facts: None,
             output_filename: None,
             error: None,
@@ -375,6 +380,9 @@ pub(crate) fn enqueue_gallery_video_job(
             updated_at_ms: now,
             disclosure: VIDEO_UPSCALE_DISCLOSURE.into(),
         },
+        // A same-filesystem hard link pins the admitted Gallery bytes with a
+        // cheap metadata operation before durable acknowledgement. Hashing,
+        // probing, and bounds checks remain on the blocking preparation pool.
         source_path: pinned_source,
         work_dir,
     };
@@ -493,17 +501,18 @@ pub async fn upscale_gallery_image(
             "Library image exceeds the 64 MiB upscale limit",
         ));
     }
+    let scale = scale_for(&model);
+    let (source_width, source_height) =
+        image::ImageReader::new(std::io::Cursor::new(&source_bytes))
+            .with_guessed_format()
+            .map_err(|error| ApiError::validation(format!("invalid source image: {error}")))?
+            .into_dimensions()
+            .map_err(|error| ApiError::validation(format!("invalid source image: {error}")))?;
+    validate_image_upscale_dimensions(source_width, source_height, scale)?;
+    // Full decoding happens only after the header dimensions prove that the
+    // expanded image fits the same per-frame policy as video upscaling.
     let source = image::load_from_memory(&source_bytes)
         .map_err(|error| ApiError::validation(format!("invalid source image: {error}")))?;
-    let scale = scale_for(&model);
-    let output_pixels = u64::from(source.width())
-        .saturating_mul(u64::from(source.height()))
-        .saturating_mul(u64::from(scale).pow(2));
-    if output_pixels > MAX_OUTPUT_PIXELS {
-        return Err(ApiError::validation(format!(
-            "upscaled image would contain {output_pixels} pixels; the limit is {MAX_OUTPUT_PIXELS}"
-        )));
-    }
     if crate::model_manager::upscaler_model_needs_pull(&*state.config.read().await, &model) {
         crate::model_manager::pull_model(&state, &model, None).await?;
     }
@@ -1046,13 +1055,33 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut stored = jobs::get(database, id)?.ok_or_else(|| anyhow::anyhow!("job disappeared"))?;
-    verify_pinned_source(&stored)?;
     let facts = match stored.job.source_facts.clone() {
-        Some(facts) => facts,
-        None => {
-            let facts = probe(&stored.source_path)?;
-            jobs::update_probe(database, id, &facts, now_ms())?;
+        Some(facts) => {
+            verify_pinned_source(&stored)?;
             facts
+        }
+        None => {
+            let pinned_source = stored.source_path.clone();
+            let work_dir = stored.work_dir.clone();
+            let scale = stored.job.scale_factor;
+            let prepared = tokio::task::spawn_blocking(move || {
+                prepare_pinned_source(&pinned_source, &work_dir, scale)
+                    .map(|facts| (pinned_source, facts))
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("Framewise preparation task failed: {error}"))??;
+            if !jobs::finish_preparation(database, id, &prepared.0, &prepared.1, now_ms())? {
+                if jobs::get(database, id)?
+                    .is_some_and(|stored| stored.job.state == VideoUpscaleJobState::Cancelled)
+                {
+                    let _ = fs::remove_dir_all(&stored.work_dir);
+                }
+                return Ok(());
+            }
+            stored = jobs::get(database, id)?
+                .ok_or_else(|| anyhow::anyhow!("prepared job disappeared"))?;
+            verify_pinned_source(&stored)?;
+            prepared.1
         }
     };
     let model = stored.job.model.clone();
@@ -1331,6 +1360,53 @@ mod tests {
         assert!(!crate::model_manager::upscaler_model_needs_pull(
             &config, model
         ));
+    }
+
+    #[test]
+    fn enqueue_persists_intent_without_copying_or_probing_source_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path();
+        let source = gallery.join("source.mp4");
+        fs::write(&source, b"large-source-placeholder").unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let metadata = mold_db::metadata_io::synthesize_from_filename("source.mp4", 1);
+        let record = mold_db::GenerationRecord::from_save(
+            gallery,
+            "source.mp4",
+            OutputFormat::Mp4,
+            metadata,
+            mold_db::RecordSource::Server,
+            1,
+        );
+        db.upsert(&record).unwrap();
+
+        let job = enqueue_gallery_video_job(
+            gallery,
+            &db,
+            "source.mp4",
+            "real-esrgan-x4plus:fp16".into(),
+            None,
+        )
+        .unwrap();
+        let stored = jobs::get(&db, &job.id).unwrap().unwrap();
+        assert_eq!(stored.job.state, VideoUpscaleJobState::Queued);
+        assert_eq!(stored.job.total_frames, 0);
+        assert!(stored.job.source_facts.is_none());
+        assert!(stored.source_path.starts_with(&stored.work_dir));
+        assert_ne!(stored.source_path, source.canonicalize().unwrap());
+        assert_eq!(
+            fs::read(&stored.source_path).unwrap(),
+            fs::read(source).unwrap()
+        );
+        assert!(!stored.work_dir.join(SOURCE_DIGEST_FILE).exists());
+        assert!(stored.work_dir.join(SOURCE_METADATA_FILE).is_file());
+    }
+
+    #[test]
+    fn image_dimensions_are_rejected_before_full_decode() {
+        assert!(validate_image_upscale_dimensions(1024, 1024, 4).is_ok());
+        let error = validate_image_upscale_dimensions(32_000, 32_000, 4).unwrap_err();
+        assert!(error.error.contains("pixels"));
     }
 
     #[test]

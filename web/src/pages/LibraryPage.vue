@@ -117,9 +117,13 @@ import {
   listHosts,
   originHost,
 } from "../lib/hostRegistry";
-import { hostDeleteGalleryImage } from "../components/machines/hostClient";
+import {
+  hostCapabilities,
+  hostDeleteGalleryImage,
+} from "../components/machines/hostClient";
 import {
   createFramewiseUpscale,
+  findRecoverableFramewiseUpscale,
   getFramewiseUpscale,
   transitionFramewiseUpscale,
   upscaleLibraryImage,
@@ -130,6 +134,7 @@ import {
   framewiseProgress,
   framewiseStatus,
   libraryUpscaleLabel,
+  shouldPollFramewiseJob,
 } from "@studio/lib/upscale";
 import { selectUpscalers } from "../components/create/advanced/upscalers";
 import type { GalleryImage, ModelInfoExtended } from "../types";
@@ -191,6 +196,7 @@ const entries = ref<HostGalleryImage[]>([]);
 const rawEntries = ref<HostGalleryImage[]>([]);
 /** Per-host organization: capabilities, collections, tags, trash listing. */
 const snapshots = ref<HostOrganizationSnapshot[]>([]);
+const galleryImageUpscaleByHost = ref<Record<string, boolean>>({});
 /** Copies moved to the trash locally (undo window elapsed) until a
  * SUCCESSFUL server listing confirms them (or they age out). */
 const pendingTrashed = ref<HostGalleryImage[]>([]);
@@ -1496,10 +1502,20 @@ async function performRefresh() {
   errorMessage.value = null;
   try {
     const hosts = listHosts();
-    const [merged, organization] = await Promise.all([
+    const [merged, organization, upscaleCapabilities] = await Promise.all([
       fetchMergedGallery(hosts),
       fetchOrganization(hosts).catch(() => null),
+      Promise.all(
+        hosts.map(
+          async (host) =>
+            [
+              host.id,
+              (await hostCapabilities(host)).video_upscale?.gallery_image === true,
+            ] as const,
+        ),
+      ),
     ]);
+    galleryImageUpscaleByHost.value = Object.fromEntries(upscaleCapabilities);
     if (organization) {
       snapshots.value = organization;
       // Drop a shadow copy only once its host's trash listing SUCCEEDED and
@@ -1951,6 +1967,7 @@ const upscaleModel = ref("");
 const upscaleBusy = ref(false);
 const upscaleJob = ref<VideoUpscaleJob | null>(null);
 let upscalePoll: ReturnType<typeof setTimeout> | null = null;
+let upscaleEpoch = 0;
 const upscalers = computed(() => selectUpscalers(models.value));
 const upscaleKind = computed(() =>
   upscaleItem.value && mediaKind(upscaleItem.value.format, upscaleItem.value.filename) === "video"
@@ -1963,16 +1980,32 @@ function stopUpscalePoll() {
   upscalePoll = null;
 }
 function closeUpscaleDialog() {
+  upscaleEpoch += 1;
   stopUpscalePoll();
   upscaleItem.value = null;
   upscaleJob.value = null;
 }
-function onUpscale(item: GalleryImage) {
+async function onUpscale(item: GalleryImage) {
   if (mediaKind(item.format, item.filename) === "audio") return;
   stopUpscalePoll();
+  const epoch = ++upscaleEpoch;
   upscaleItem.value = item;
   upscaleJob.value = null;
   upscaleModel.value = defaultUpscaler(upscalers.value);
+  if (mediaKind(item.format, item.filename) === "video") {
+    try {
+      const recovered = await findRecoverableFramewiseUpscale(
+        upscaleTarget(item),
+        item.filename,
+      );
+      if (epoch !== upscaleEpoch || upscaleItem.value !== item) return;
+      upscaleJob.value = recovered;
+      if (recovered) upscaleModel.value = recovered.model;
+      if (shouldPollFramewiseJob(upscaleJob.value)) void pollUpscaleJob();
+    } catch {
+      // Older hosts do not expose durable Framewise history.
+    }
+  }
 }
 function upscaleTarget(item: GalleryImage) {
   const host = hostForEntry(item);
@@ -1982,44 +2015,72 @@ function upscaleTarget(item: GalleryImage) {
 async function pollUpscaleJob() {
   const item = upscaleItem.value;
   const job = upscaleJob.value;
-  if (!item || !job || ["completed", "failed", "cancelled"].includes(job.state)) return;
+  if (
+    !item ||
+    !job ||
+    !shouldPollFramewiseJob(job)
+  )
+    return;
+  const epoch = upscaleEpoch;
   try {
-    upscaleJob.value = await getFramewiseUpscale(upscaleTarget(item), job.id);
-    if (upscaleJob.value.state === "completed") {
-      toast("success", `Framewise upscale complete — ${upscaleJob.value.output_filename}`);
+    const next = await getFramewiseUpscale(upscaleTarget(item), job.id);
+    if (
+      epoch !== upscaleEpoch ||
+      upscaleItem.value !== item ||
+      upscaleJob.value?.id !== job.id
+    )
+      return;
+    upscaleJob.value = next;
+    if (next.state === "completed") {
+      toast("success", `Framewise upscale complete — ${next.output_filename}`);
       await refresh();
       return;
     }
   } catch (error) {
+    if (epoch !== upscaleEpoch || upscaleItem.value !== item) return;
     toast("error", error instanceof Error ? error.message : String(error));
     return;
   }
-  upscalePoll = setTimeout(() => void pollUpscaleJob(), 750);
+  if (shouldPollFramewiseJob(upscaleJob.value))
+    upscalePoll = setTimeout(() => void pollUpscaleJob(), 750);
 }
 async function startUpscale() {
   const item = upscaleItem.value;
   if (!item || upscaleBusy.value) return;
+  const epoch = ++upscaleEpoch;
+  stopUpscalePoll();
   upscaleBusy.value = true;
   try {
     if (upscaleKind.value === "video") {
-      upscaleJob.value = await createFramewiseUpscale(
+      const created = await createFramewiseUpscale(
         upscaleTarget(item),
         item.filename,
         upscaleModel.value,
       );
-      toast("info", `Framewise upscale queued (${upscaleJob.value.id}).`);
+      if (epoch !== upscaleEpoch || upscaleItem.value !== item) return;
+      upscaleJob.value = created;
+      toast("info", `Framewise upscale queued (${created.id}).`);
       void pollUpscaleJob();
     } else {
-      const result = await upscaleLibraryImage(
-        upscaleTarget(item),
-        item.filename,
-        upscaleModel.value,
-      );
-      toast("success", `Upscaled — ${result.filename}`);
-      await refresh();
-      closeUpscaleDialog();
+      const host = hostForEntry(item);
+      if (host && galleryImageUpscaleByHost.value[host.id] === true) {
+        const result = await upscaleLibraryImage(
+          upscaleTarget(item),
+          item.filename,
+          upscaleModel.value,
+        );
+        toast("success", `Upscaled — ${result.filename}`);
+        await refresh();
+        closeUpscaleDialog();
+      } else if (await setAsSource(item)) {
+        closeUpscaleDialog();
+        closeLightbox();
+        toast("info", "Added as source — pick an upscaler in Controls.");
+        void router.push({ name: "create" });
+      }
     }
   } catch (error) {
+    if (epoch !== upscaleEpoch || upscaleItem.value !== item) return;
     toast("error", error instanceof Error ? error.message : String(error));
   } finally {
     upscaleBusy.value = false;
@@ -2027,15 +2088,21 @@ async function startUpscale() {
 }
 async function transitionUpscale(action: "pause" | "resume" | "cancel") {
   const item = upscaleItem.value;
-  if (!item || !upscaleJob.value) return;
+  const job = upscaleJob.value;
+  if (!item || !job) return;
+  stopUpscalePoll();
+  const epoch = ++upscaleEpoch;
   try {
-    upscaleJob.value = await transitionFramewiseUpscale(
+    const transitioned = await transitionFramewiseUpscale(
       upscaleTarget(item),
-      upscaleJob.value.id,
+      job.id,
       action,
     );
+    if (epoch !== upscaleEpoch || upscaleItem.value !== item) return;
+    upscaleJob.value = transitioned;
     if (action === "resume") void pollUpscaleJob();
   } catch (error) {
+    if (epoch !== upscaleEpoch || upscaleItem.value !== item) return;
     toast("error", error instanceof Error ? error.message : String(error));
   }
 }

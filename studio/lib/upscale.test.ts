@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { defaultUpscaler, framewiseProgress, framewiseStatus, libraryUpscaleLabel } from "./upscale";
+import {
+  defaultUpscaler,
+  framewiseProgress,
+  framewiseStatus,
+  libraryUpscaleLabel,
+  shouldPollFramewiseJob,
+} from "./upscale";
 
 describe("Library upscale presentation", () => {
   it("names image and video actions without conflating temporal processing", () => {
@@ -28,5 +34,7 @@ describe("Library upscale presentation", () => {
     };
     expect(framewiseProgress(job)).toBe(0.4);
     expect(framewiseStatus(job)).toBe("Upscaling frame 5 of 10");
+    expect(shouldPollFramewiseJob(job)).toBe(true);
+    expect(shouldPollFramewiseJob({ ...job, state: "paused" })).toBe(false);
   });
 });

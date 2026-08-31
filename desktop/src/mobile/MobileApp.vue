@@ -364,6 +364,7 @@ import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import UpscaleDialog from "@ui/components/UpscaleDialog.vue";
 import {
   createFramewiseUpscale,
+  findRecoverableFramewiseUpscale,
   getFramewiseUpscale,
   transitionFramewiseUpscale,
   upscaleLibraryImage,
@@ -373,6 +374,7 @@ import {
   defaultUpscaler,
   framewiseProgress,
   framewiseStatus,
+  shouldPollFramewiseJob,
 } from "@studio/lib/upscale";
 import {
   mobileHostHealthLabel,
@@ -10102,6 +10104,7 @@ const viewerUpscaleModel = ref("");
 const viewerUpscaleBusy = ref(false);
 const viewerUpscaleJob = ref<VideoUpscaleJob | null>(null);
 let viewerUpscalePoll: ReturnType<typeof setTimeout> | null = null;
+let viewerUpscaleEpoch = 0;
 const viewerUpscaleKind = computed(() =>
   viewerUpscaleItem.value && isVideoItem(viewerUpscaleItem.value) ? "video" : "image",
 );
@@ -10111,49 +10114,85 @@ function stopViewerUpscalePoll(): void {
   viewerUpscalePoll = null;
 }
 function closeViewerUpscale(): void {
+  viewerUpscaleEpoch += 1;
   stopViewerUpscalePoll();
   viewerUpscaleItem.value = null;
   viewerUpscaleJob.value = null;
 }
-function openViewerUpscale(): void {
+async function openViewerUpscale(): Promise<void> {
   const print = selectedPrint.value;
   if (!print || isAudioItem(print)) return;
   stopViewerUpscalePoll();
+  const epoch = ++viewerUpscaleEpoch;
   viewerUpscaleItem.value = print;
   viewerUpscaleJob.value = null;
   viewerUpscaleModel.value = defaultUpscaler(upscalers.value);
+  if (isVideoItem(print)) {
+    try {
+      const recovered = await findRecoverableFramewiseUpscale(
+        print.target,
+        print.filename,
+      );
+      if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
+      viewerUpscaleJob.value = recovered;
+      if (recovered) viewerUpscaleModel.value = recovered.model;
+      if (shouldPollFramewiseJob(viewerUpscaleJob.value))
+        void pollViewerUpscale();
+    } catch {
+      // Older hosts do not expose durable Framewise history.
+    }
+  }
 }
 async function pollViewerUpscale(): Promise<void> {
   const print = viewerUpscaleItem.value;
   const job = viewerUpscaleJob.value;
-  if (!print || !job || ["completed", "failed", "cancelled"].includes(job.state)) return;
+  if (
+    !print ||
+    !job ||
+    !shouldPollFramewiseJob(job)
+  )
+    return;
+  const epoch = viewerUpscaleEpoch;
   try {
-    viewerUpscaleJob.value = await getFramewiseUpscale(print.target, job.id);
-    if (viewerUpscaleJob.value.state === "completed") {
-      generationAnnouncement.value = `Framewise upscale complete: ${viewerUpscaleJob.value.output_filename}`;
+    const next = await getFramewiseUpscale(print.target, job.id);
+    if (
+      epoch !== viewerUpscaleEpoch ||
+      viewerUpscaleItem.value !== print ||
+      viewerUpscaleJob.value?.id !== job.id
+    )
+      return;
+    viewerUpscaleJob.value = next;
+    if (next.state === "completed") {
+      generationAnnouncement.value = `Framewise upscale complete: ${next.output_filename}`;
       await refreshGallery();
       return;
     }
   } catch (error) {
+    if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
     generationAnnouncement.value = describeTransportError(error, print.hostName);
     return;
   }
-  viewerUpscalePoll = setTimeout(() => void pollViewerUpscale(), 750);
+  if (shouldPollFramewiseJob(viewerUpscaleJob.value))
+    viewerUpscalePoll = setTimeout(() => void pollViewerUpscale(), 750);
 }
 async function startViewerUpscale(): Promise<void> {
   const print = viewerUpscaleItem.value;
   if (!print || viewerUpscaleBusy.value) return;
+  const epoch = ++viewerUpscaleEpoch;
+  stopViewerUpscalePoll();
   viewerUpscaleBusy.value = true;
   try {
     if (isVideoItem(print)) {
-      viewerUpscaleJob.value = await createFramewiseUpscale(
+      const created = await createFramewiseUpscale(
         print.target,
         print.filename,
         viewerUpscaleModel.value,
       );
-      generationAnnouncement.value = `Framewise upscale queued: ${viewerUpscaleJob.value.id}`;
+      if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
+      viewerUpscaleJob.value = created;
+      generationAnnouncement.value = `Framewise upscale queued: ${created.id}`;
       void pollViewerUpscale();
-    } else {
+    } else if (serverCapabilities[print.hostId]?.video_upscale?.gallery_image === true) {
       const result = await upscaleLibraryImage(
         print.target,
         print.filename,
@@ -10162,8 +10201,13 @@ async function startViewerUpscale(): Promise<void> {
       generationAnnouncement.value = `Upscaled image created: ${result.filename}`;
       await refreshGallery();
       closeViewerUpscale();
+    } else {
+      closeViewerUpscale();
+      await useSelectedPrintAsSource();
+      generationAnnouncement.value = "Added as source — pick an upscaler in generation controls.";
     }
   } catch (error) {
+    if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
     generationAnnouncement.value = describeTransportError(error, print.hostName);
   } finally {
     viewerUpscaleBusy.value = false;
@@ -10171,15 +10215,21 @@ async function startViewerUpscale(): Promise<void> {
 }
 async function transitionViewerUpscale(action: "pause" | "resume" | "cancel"): Promise<void> {
   const print = viewerUpscaleItem.value;
-  if (!print || !viewerUpscaleJob.value) return;
+  const job = viewerUpscaleJob.value;
+  if (!print || !job) return;
+  stopViewerUpscalePoll();
+  const epoch = ++viewerUpscaleEpoch;
   try {
-    viewerUpscaleJob.value = await transitionFramewiseUpscale(
+    const transitioned = await transitionFramewiseUpscale(
       print.target,
-      viewerUpscaleJob.value.id,
+      job.id,
       action,
     );
+    if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
+    viewerUpscaleJob.value = transitioned;
     if (action === "resume") void pollViewerUpscale();
   } catch (error) {
+    if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
     generationAnnouncement.value = describeTransportError(error, print.hostName);
   }
 }

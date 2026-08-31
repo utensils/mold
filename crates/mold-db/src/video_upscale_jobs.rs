@@ -127,6 +127,32 @@ pub fn list(db: &MetadataDb) -> Result<Vec<VideoUpscaleJob>> {
     })
 }
 
+pub fn list_queued_ids(db: &MetadataDb) -> Result<Vec<String>> {
+    db.with_conn(|conn| {
+        let mut statement = conn.prepare(
+            "SELECT id FROM video_upscale_jobs WHERE state='queued' ORDER BY created_at_ms ASC",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        let ids = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    })
+}
+
+pub fn finish_preparation(
+    db: &MetadataDb,
+    id: &str,
+    source_path: &std::path::Path,
+    facts: &VideoUpscaleMediaFacts,
+    now_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE video_upscale_jobs SET source_path=?2,source_facts_json=?3,total_frames=?4,updated_at_ms=?5 WHERE id=?1 AND state='running'",
+            params![id, source_path.to_string_lossy(), serde_json::to_string(facts)?, facts.frame_count, now_ms],
+        )? == 1)
+    })
+}
+
 pub fn transition(
     db: &MetadataDb,
     id: &str,
@@ -314,5 +340,49 @@ mod tests {
             paused.job.error.as_deref(),
             Some("late bookkeeping failure")
         );
+    }
+
+    #[test]
+    fn queued_query_and_preparation_update_only_active_authority() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut row = stored();
+        row.job.state = VideoUpscaleJobState::Queued;
+        row.job.source_facts = None;
+        row.job.total_frames = 0;
+        insert(&db, &row).unwrap();
+        assert_eq!(list_queued_ids(&db).unwrap(), vec!["vup-1"]);
+        assert!(transition(
+            &db,
+            "vup-1",
+            &[VideoUpscaleJobState::Queued],
+            VideoUpscaleJobState::Running,
+            2,
+        )
+        .unwrap());
+        assert!(list_queued_ids(&db).unwrap().is_empty());
+        let facts = VideoUpscaleMediaFacts {
+            container: "mov,mp4,m4a,3gp,3g2,mj2".into(),
+            video_codec: "h264".into(),
+            width: 32,
+            height: 24,
+            frame_count: 4,
+            fps: "4/1".into(),
+            duration_ms: 1_000,
+            primary_audio_codec: None,
+            primary_audio_sample_rate: None,
+            primary_audio_channels: None,
+        };
+        assert!(finish_preparation(
+            &db,
+            "vup-1",
+            std::path::Path::new("/work/source.mp4"),
+            &facts,
+            3
+        )
+        .unwrap());
+        let prepared = get(&db, "vup-1").unwrap().unwrap();
+        assert_eq!(prepared.source_path, PathBuf::from("/work/source.mp4"));
+        assert_eq!(prepared.job.total_frames, 4);
+        assert_eq!(prepared.job.source_facts, Some(facts));
     }
 }

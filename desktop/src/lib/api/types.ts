@@ -138,6 +138,7 @@ export interface ServerCapabilities {
   durable_media?: DurableMediaCapabilities | null;
   video_upscale?: {
     available: boolean;
+    gallery_image?: boolean;
     contract_version: number;
     source_library: boolean;
     source_upload: boolean;

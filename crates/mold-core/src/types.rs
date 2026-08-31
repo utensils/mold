@@ -10111,6 +10111,10 @@ pub struct MeshCapabilities {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoUpscaleCapabilities {
     pub available: bool,
+    /// Server-side Gallery image publication endpoint. Absent/false on older
+    /// hosts, whose clients must retain the legacy upscale-stream fallback.
+    #[serde(default)]
+    pub gallery_image: bool,
     pub contract_version: u32,
     pub source_library: bool,
     pub source_upload: bool,

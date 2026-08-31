@@ -100,16 +100,19 @@ import {
 } from "@studio/lib/minimaxH3Authoring";
 import {
   createFramewiseUpscale,
+  findRecoverableFramewiseUpscale,
   getFramewiseUpscale,
   transitionFramewiseUpscale,
   upscaleLibraryImage,
   type VideoUpscaleJob,
 } from "@studio/api/videoUpscale";
+import { useHostsStore } from "../stores/hosts";
 import {
   defaultUpscaler,
   framewiseProgress,
   framewiseStatus,
   libraryUpscaleLabel,
+  shouldPollFramewiseJob,
 } from "@studio/lib/upscale";
 
 const GAP = 8;
@@ -126,6 +129,7 @@ const DESKTOP_LIBRARY_SCROLL_KEY = "desktop:library";
 const router = useRouter();
 const route = useRoute();
 const gallery = useGalleryStore();
+const hosts = useHostsStore();
 const models = useModelStore();
 const chains = useChainJobsStore();
 const composer = useComposerStore();
@@ -336,6 +340,7 @@ const upscaleEntry = ref<MergedPrint | null>(null);
 const upscaleModel = ref(defaultUpscaler(models.upscalers));
 const upscaleJob = ref<VideoUpscaleJob | null>(null);
 let upscalePoll: ReturnType<typeof setTimeout> | null = null;
+let upscaleEpoch = 0;
 const upscaleKind = computed(() =>
   upscaleEntry.value && isVideo(upscaleEntry.value.item) ? "video" : "image",
 );
@@ -346,64 +351,148 @@ function stopUpscalePoll() {
 }
 
 function closeUpscaleDialog() {
+  upscaleEpoch += 1;
   stopUpscalePoll();
   upscaleEntry.value = null;
   upscaleJob.value = null;
 }
 
-function openUpscaleDialog(entry: MergedPrint) {
+async function openUpscaleDialog(entry: MergedPrint) {
   if (isAudio(entry.item) || !targetFor(entry)) return;
   stopUpscalePoll();
+  const epoch = ++upscaleEpoch;
   upscaleEntry.value = entry;
   upscaleJob.value = null;
   upscaleModel.value = defaultUpscaler(models.upscalers);
+  if (isVideo(entry.item)) {
+    try {
+      const recovered = await findRecoverableFramewiseUpscale(
+        targetFor(entry)!,
+        entry.item.filename,
+      );
+      if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
+      upscaleJob.value = recovered;
+      if (recovered) upscaleModel.value = recovered.model;
+      if (shouldPollFramewiseJob(upscaleJob.value)) void pollUpscaleJob();
+    } catch {
+      // Old hosts do not expose durable video-upscale history.
+    }
+  }
 }
 
 async function pollUpscaleJob() {
   const entry = upscaleEntry.value;
   const job = upscaleJob.value;
   const target = entry && targetFor(entry);
-  if (!entry || !job || !target || job.state === "completed" || job.state === "failed" || job.state === "cancelled") {
+  if (
+    !entry ||
+    !job ||
+    !target ||
+    !shouldPollFramewiseJob(job)
+  ) {
     return;
   }
+  const epoch = upscaleEpoch;
   try {
-    upscaleJob.value = await getFramewiseUpscale(target, job.id);
-    if (upscaleJob.value.state === "completed") {
-      toasts.push(`Framewise upscale complete — ${upscaleJob.value.output_filename}`);
+    const next = await getFramewiseUpscale(target, job.id);
+    if (
+      epoch !== upscaleEpoch ||
+      upscaleEntry.value !== entry ||
+      upscaleJob.value?.id !== job.id
+    )
+      return;
+    upscaleJob.value = next;
+    if (next.state === "completed") {
+      toasts.push(`Framewise upscale complete — ${next.output_filename}`);
       void gallery.refreshHost(entry.sourceKey);
     }
   } catch (error) {
+    if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
     toasts.push(error instanceof Error ? error.message : String(error), "error");
     return;
   }
-  upscalePoll = setTimeout(() => void pollUpscaleJob(), 750);
+  if (shouldPollFramewiseJob(upscaleJob.value))
+    upscalePoll = setTimeout(() => void pollUpscaleJob(), 750);
+}
+
+async function legacyStreamUpscale(entry: MergedPrint): Promise<string> {
+  const { sseStream } = await import("../lib/api/sse");
+  const target = targetFor(entry);
+  if (!target) throw new Error("The print's source host is unavailable.");
+  const image = await fetchItemBase64(entry);
+  return new Promise<string>((resolve, reject) => {
+    const abort = new AbortController();
+    let settled = false;
+    void sseStream("/api/upscale/stream", {
+      method: "POST",
+      target,
+      body: {
+        model: upscaleModel.value,
+        image,
+        output_format: "png",
+      },
+      signal: abort.signal,
+      retry: false,
+      onEvent: (event, data) => {
+        try {
+          if (event === "complete") {
+            settled = true;
+            resolve((JSON.parse(data) as { image: string }).image);
+          } else if (event === "error") {
+            settled = true;
+            const parsed = JSON.parse(data) as { message?: string; error?: string };
+            reject(new Error(parsed.message ?? parsed.error ?? data));
+          }
+        } catch (error) {
+          settled = true;
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      },
+      onClose: (error) => {
+        if (!settled) reject(error ?? new Error("The upscale stream ended without a result."));
+      },
+    });
+  });
 }
 
 async function startUpscale() {
   const entry = upscaleEntry.value;
   const target = entry && targetFor(entry);
   if (!entry || !target || upscalingFilename.value) return;
+  const epoch = ++upscaleEpoch;
+  stopUpscalePoll();
   upscalingFilename.value = entry.item.filename;
   try {
     if (isVideo(entry.item)) {
-      upscaleJob.value = await createFramewiseUpscale(
+      const created = await createFramewiseUpscale(
         target,
         entry.item.filename,
         upscaleModel.value,
       );
-      toasts.push(`Framewise upscale queued (${upscaleJob.value.id}).`);
+      if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
+      upscaleJob.value = created;
+      toasts.push(`Framewise upscale queued (${created.id}).`);
       void pollUpscaleJob();
     } else {
-      const result = await upscaleLibraryImage(
-        target,
-        entry.item.filename,
-        upscaleModel.value,
-      );
-      toasts.push(`Upscaled — ${result.filename}`);
-      void gallery.refreshHost(entry.sourceKey);
+      if (hosts.capabilities[entry.sourceKey]?.video_upscale?.gallery_image === true) {
+        const result = await upscaleLibraryImage(
+          target,
+          entry.item.filename,
+          upscaleModel.value,
+        );
+        toasts.push(`Upscaled — ${result.filename}`);
+        void gallery.refreshHost(entry.sourceKey);
+      } else {
+        const upscaled = await legacyStreamUpscale(entry);
+        const stem = entry.item.filename.replace(/\.[^.]+$/, "");
+        const saved = await ipc.saveOutputBytes(`${stem}-upscaled.png`, upscaled);
+        toasts.push(`Upscaled — saved locally as ${saved}`);
+        void gallery.refreshHost("local");
+      }
       closeUpscaleDialog();
     }
   } catch (error) {
+    if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
     toasts.push(error instanceof Error ? error.message : String(error), "error");
   } finally {
     upscalingFilename.value = null;
@@ -413,11 +502,17 @@ async function startUpscale() {
 async function transitionUpscale(action: "pause" | "resume" | "cancel") {
   const entry = upscaleEntry.value;
   const target = entry && targetFor(entry);
-  if (!entry || !target || !upscaleJob.value) return;
+  const job = upscaleJob.value;
+  if (!entry || !target || !job) return;
+  stopUpscalePoll();
+  const epoch = ++upscaleEpoch;
   try {
-    upscaleJob.value = await transitionFramewiseUpscale(target, upscaleJob.value.id, action);
+    const transitioned = await transitionFramewiseUpscale(target, job.id, action);
+    if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
+    upscaleJob.value = transitioned;
     if (action === "resume") void pollUpscaleJob();
   } catch (error) {
+    if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
     toasts.push(error instanceof Error ? error.message : String(error), "error");
   }
 }

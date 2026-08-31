@@ -1,58 +1,46 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  createFramewiseUpscale,
-  transitionFramewiseUpscale,
+  recoverableFramewiseUpscale,
+  type VideoUpscaleJob,
 } from "./videoUpscale";
 
-const target = { baseUrl: "http://plato:7680", apiKey: "secret" };
-afterEach(() => vi.unstubAllGlobals());
+function job(
+  id: string,
+  filename: string,
+  state: VideoUpscaleJob["state"],
+): VideoUpscaleJob {
+  return {
+    contract_version: 1,
+    id,
+    state,
+    source: { kind: "library", filename },
+    model: "real-esrgan-x4plus:fp16",
+    completed_frames: 0,
+    total_frames: 4,
+    disclosure: "Framewise",
+  };
+}
 
-describe("Framewise upscale API", () => {
-  it("sends gallery authority rather than video bytes or a server path", async () => {
-    let request: RequestInit | undefined;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url, init) => {
-        request = init;
-        return Response.json({
-          id: "vup-1",
-          state: "queued",
-          disclosure: "Framewise upscale",
-        });
-      }),
-    );
-    await createFramewiseUpscale(
-      target,
-      "clip.mp4",
-      "real-esrgan-x4plus:fp16",
-      256,
-    );
-    expect(JSON.parse(String(request?.body))).toEqual({
-      source: { kind: "library", filename: "clip.mp4" },
-      model: "real-esrgan-x4plus:fp16",
-      tile_size: 256,
-    });
-    expect(new Headers(request?.headers).get("x-api-key")).toBe("secret");
+describe("recoverableFramewiseUpscale", () => {
+  it("restores the newest active or restart-paused job for a Library video", () => {
+    expect(
+      recoverableFramewiseUpscale(
+        [job("paused", "clip.mp4", "paused"), job("other", "other.mp4", "running")],
+        "clip.mp4",
+      )?.id,
+    ).toBe("paused");
   });
 
-  it("uses explicit lifecycle endpoints", async () => {
-    const calls: Array<[string, string]> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url, init) => {
-        calls.push([String(url), init?.method ?? "GET"]);
-        return Response.json({
-          id: "vup/1",
-          state: "paused",
-          disclosure: "Framewise upscale",
-        });
-      }),
-    );
-    await transitionFramewiseUpscale(target, "vup/1", "pause");
-    await transitionFramewiseUpscale(target, "vup/1", "cancel");
-    expect(calls).toEqual([
-      ["http://plato:7680/api/video-upscale-jobs/vup%2F1/pause", "POST"],
-      ["http://plato:7680/api/video-upscale-jobs/vup%2F1", "DELETE"],
-    ]);
+  it("does not restore completed, failed, or cancelled history", () => {
+    expect(
+      recoverableFramewiseUpscale(
+        [
+          job("done", "clip.mp4", "completed"),
+          job("failed", "clip.mp4", "failed"),
+          job("cancelled", "clip.mp4", "cancelled"),
+        ],
+        "clip.mp4",
+      ),
+    ).toBeNull();
   });
 });

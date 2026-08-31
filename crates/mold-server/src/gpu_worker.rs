@@ -4871,13 +4871,34 @@ fn finish_generation_success(
         }
     }
 
+    // Persist the requested video follow-up before reporting generation
+    // success. Enqueue is deliberately metadata-only; the dispatcher performs
+    // the large source copy and probe away from this dedicated GPU owner.
+    if let (Some(model), Some(filename), Some(output_dir), Some(database)) = (
+        video_upscale_model,
+        saved_names.output.as_deref(),
+        job.output_dir.as_deref(),
+        job.metadata_db.as_ref().as_ref(),
+    ) {
+        if let Err(error) = crate::video_upscale::enqueue_gallery_video_job(
+            output_dir, database, filename, model, None,
+        ) {
+            let message = format!(
+                "video was published, but its requested Framewise upscale could not be queued: {}",
+                error.error
+            );
+            tracing::error!(job_id = %job.id, %message);
+            durable_generation_settlement::fail_blocking(job, DurableDisposition::Retain, message);
+            return;
+        }
+    }
+
     // Settle the durable row on what actually reached the gallery, not on the
     // fact that inference returned. Settled here rather than on the ticket's
     // ordinary drop so a shutdown racing the last microseconds of delivery
     // cannot retain a completed job and replay it into a duplicate print.
     let job_id = job.id.clone();
     let output_dir = job.output_dir.clone();
-    let video_upscale_database = job.metadata_db.clone();
     let gallery_gate = job.gallery_publication_gate.clone();
     let registry = job.registry.clone();
     let completion_payload = job.completion_payload;
@@ -4895,22 +4916,6 @@ fn finish_generation_success(
     .is_err()
     {
         return;
-    }
-    if let (Some(model), Some(filename), Some(output_dir), Some(database)) = (
-        video_upscale_model,
-        saved_names.output.as_deref(),
-        output_dir.as_deref(),
-        video_upscale_database.as_ref().as_ref(),
-    ) {
-        if let Err(error) = crate::video_upscale::enqueue_gallery_video_job(
-            output_dir, database, filename, model, None,
-        ) {
-            tracing::warn!(
-                job_id = %job_id,
-                error = %error.error,
-                "could not queue generated video for Framewise upscale"
-            );
-        }
     }
     let completion = channels.progress_tx.is_some().then(|| {
         build_sse_completion_message(

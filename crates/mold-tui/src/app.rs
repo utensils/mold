@@ -2207,6 +2207,31 @@ fn wait_for_server_health(url: &str, timeout_secs: u64) -> bool {
     false
 }
 
+fn recoverable_framewise_upscale(
+    jobs: &[mold_core::VideoUpscaleJob],
+    filename: &str,
+    model: &str,
+) -> Option<mold_core::VideoUpscaleJob> {
+    jobs.iter()
+        .filter(|job| {
+            job.model == model
+                && matches!(
+                    job.state,
+                    mold_core::VideoUpscaleJobState::Queued
+                        | mold_core::VideoUpscaleJobState::Running
+                        | mold_core::VideoUpscaleJobState::Finalizing
+                        | mold_core::VideoUpscaleJobState::Paused
+                )
+                && matches!(
+                    &job.source,
+                    mold_core::VideoUpscaleSource::Library { filename: source }
+                        if source == filename
+                )
+        })
+        .max_by_key(|job| job.updated_at_ms)
+        .cloned()
+}
+
 impl App {
     pub fn new(host: Option<String>, local: bool, picker: Picker) -> Result<Self> {
         Self::new_with_launch_policy(
@@ -3031,16 +3056,37 @@ impl App {
                     .and_then(crate::hosts::api_key_for);
                 let client = crate::hosts::client_for(&url, api_key.as_deref());
                 let request = mold_core::CreateVideoUpscaleJobRequest {
-                    source: mold_core::VideoUpscaleSource::Library { filename },
+                    source: mold_core::VideoUpscaleSource::Library {
+                        filename: filename.clone(),
+                    },
                     model: model_name,
                     tile_size: None,
                 };
-                let mut job = match client.create_video_upscale_job(&request).await {
-                    Ok(job) => job,
+                let recoverable = match client.list_video_upscale_jobs().await {
+                    Ok(jobs) => recoverable_framewise_upscale(&jobs, &filename, &request.model),
                     Err(error) => {
                         let _ = tx.send(BackgroundEvent::UpscaleFailed(error.to_string()));
                         return;
                     }
+                };
+                let mut job = match recoverable {
+                    Some(job) if job.state == mold_core::VideoUpscaleJobState::Paused => {
+                        match client.transition_video_upscale_job(&job.id, "resume").await {
+                            Ok(job) => job,
+                            Err(error) => {
+                                let _ = tx.send(BackgroundEvent::UpscaleFailed(error.to_string()));
+                                return;
+                            }
+                        }
+                    }
+                    Some(job) => job,
+                    None => match client.create_video_upscale_job(&request).await {
+                        Ok(job) => job,
+                        Err(error) => {
+                            let _ = tx.send(BackgroundEvent::UpscaleFailed(error.to_string()));
+                            return;
+                        }
+                    },
                 };
                 let id = job.id.clone();
                 let _ = tx.send(BackgroundEvent::FramewiseUpscaleStatus(job.clone()));
@@ -15445,6 +15491,56 @@ mod tests {
         // There should be 7 upscaler models in the manifest
         assert_eq!(models.len(), 7);
         assert!(models.iter().all(|n| !n.is_empty()));
+    }
+
+    #[test]
+    fn framewise_picker_recovers_latest_paused_job_for_the_selected_video() {
+        let job = |id: &str, filename: &str, state, updated_at_ms| mold_core::VideoUpscaleJob {
+            contract_version: mold_core::VIDEO_UPSCALE_CONTRACT_VERSION,
+            id: id.into(),
+            state,
+            source: mold_core::VideoUpscaleSource::Library {
+                filename: filename.into(),
+            },
+            model: "real-esrgan-x4plus:fp16".into(),
+            scale_factor: 4,
+            tile_size: None,
+            completed_frames: 0,
+            total_frames: 0,
+            source_facts: None,
+            output_facts: None,
+            output_filename: None,
+            error: None,
+            created_at_ms: 1,
+            updated_at_ms,
+            disclosure: mold_core::VIDEO_UPSCALE_DISCLOSURE.into(),
+        };
+        let jobs = vec![
+            job(
+                "older",
+                "clip.mp4",
+                mold_core::VideoUpscaleJobState::Running,
+                2,
+            ),
+            job(
+                "recovered",
+                "clip.mp4",
+                mold_core::VideoUpscaleJobState::Paused,
+                3,
+            ),
+            job(
+                "other",
+                "other.mp4",
+                mold_core::VideoUpscaleJobState::Paused,
+                4,
+            ),
+        ];
+        assert_eq!(
+            recoverable_framewise_upscale(&jobs, "clip.mp4", "real-esrgan-x4plus:fp16")
+                .unwrap()
+                .id,
+            "recovered"
+        );
     }
 
     #[test]
