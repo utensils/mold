@@ -1207,9 +1207,18 @@ fn recipe(
             .contains("dev");
     let wan = family == "wan";
     let normalized_model = crate::manifest::resolve_model_name(input.model).to_ascii_lowercase();
-    let lora_supported = validation::family_supports_lora(family)
-        && !flux2_dev
-        && !(wan && normalized_model.ends_with("a14b:fp8"));
+    // BFL's own FP8 Flux.2 conversions store `weight / weight_scale`, and a
+    // LoRA merge widens the weight it patches — dropping the scale on exactly
+    // the layers the adapter touches. `Flux2Engine::load_transformer` refuses
+    // the pair, so the control must not be offered. Same shape of refusal as
+    // wan's fp8-scaled expert tier below.
+    let flux2_fp8 = family == "flux2" && normalized_model.ends_with(":fp8");
+    // Checkpoints whose own loader refuses an adapter stack, whatever the
+    // family supports: FLUX.2 [dev]'s reference protocol, the FP8 Flux.2
+    // conversions, and wan's fp8-scaled expert pair.
+    let checkpoint_refuses_lora =
+        flux2_dev || flux2_fp8 || (wan && normalized_model.ends_with("a14b:fp8"));
+    let lora_supported = validation::family_supports_lora(family) && !checkpoint_refuses_lora;
     let source_video_required = matches!(
         pipeline,
         Some(Ltx2PipelineMode::IcLora | Ltx2PipelineMode::Retake | Ltx2PipelineMode::LipDub)
@@ -1649,6 +1658,25 @@ mod tests {
             supports_sequence: false,
             supports_extend: false,
             supports_audio: false,
+        }
+    }
+
+    /// `Flux2Engine::load_transformer` refuses an adapter over an FP8-scaled
+    /// checkpoint, because the merge widens the patched weight and drops its
+    /// `weight_scale`. A profile that still advertised the control would
+    /// offer a load that always fails.
+    #[test]
+    fn flux2_fp8_tiers_do_not_advertise_lora() {
+        for model in ["flux2-klein:fp8", "flux2-klein-9b:fp8"] {
+            let profile = resolve_generation_profile(input(model, "flux2"));
+            let lora = profile.default_recipe().unwrap().capabilities.lora.mode;
+            assert_eq!(lora, ControlMode::Hidden, "{model} must not offer LoRA");
+        }
+        // Every other Flux.2 tier still does.
+        for model in ["flux2-klein:q8", "flux2-klein-base:q8", "flux2-klein:bf16"] {
+            let profile = resolve_generation_profile(input(model, "flux2"));
+            let lora = profile.default_recipe().unwrap().capabilities.lora.mode;
+            assert_ne!(lora, ControlMode::Hidden, "{model} must still offer LoRA");
         }
     }
 

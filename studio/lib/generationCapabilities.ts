@@ -237,6 +237,7 @@ const WAN_DISTILL_TIER = /a14b[:-]q[45]$/;
  * re-round it to three mantissa bits. The bf16 and GGUF tiers keep adapters.
  */
 const WAN_FP8_TIER = /a14b[:-]fp8$/;
+const FLUX2_FP8_TIER = /[:-]fp8$/;
 
 export const MAX_LORA_STACK = 4;
 
@@ -373,6 +374,12 @@ export function baseGenerationCapabilities(
         // so offering the control would advertise a load that always fails.
         // Mirrors `WanTransformer::from_safetensors_with_loras`.
         !(wan && WAN_FP8_TIER.test(normalizedModel)) &&
+        // Flux.2's FP8 tiers refuse adapters for the same reason: the merge
+        // widens the patched weight and drops its `weight_scale`.
+        // Mirrors `Flux2Engine::load_transformer`.
+        !(
+          normalized.startsWith("flux2") && FLUX2_FP8_TIER.test(normalizedModel)
+        ) &&
         (LORA_CAPABLE_FAMILIES as readonly string[]).includes(normalized),
     maxLoraStack: profileCaps?.lora.max_count ?? MAX_LORA_STACK,
     supportsControlNet: profileCaps

@@ -27,6 +27,11 @@ storage requirements even when GPU residency is bounded.
 Sizes are the transformer alone. Every tier also pulls the Mistral3 encoder,
 VAE, and tokenizer (~36 GB), shared across tiers.
 
+The bare name `flux2-dev` means `flux2-dev:bf16`; name a tag for the others.
+Only the safetensors tiers (`bf16`, `fp8`) block-offload when a CUDA GPU
+cannot hold the transformer — a GGUF tier stays fully resident, so its size
+above is the VRAM it needs.
+
 Only `flux2-dev:bf16` is gated: it comes from Black Forest Labs'
 [FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) repo, which
 holds the transformer and the encoder together. The quantized tiers pull

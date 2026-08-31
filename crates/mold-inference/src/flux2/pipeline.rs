@@ -599,6 +599,21 @@ impl Flux2Engine {
                     &self.base.paths.transformer,
                     cfg,
                 )?;
+            // An FP8-scaled checkpoint stores `weight / weight_scale` and the
+            // scale beside it, and only `Flux2Linear`'s FP8 arm applies it.
+            // A LoRA merge widens the weight it patches to the working dtype,
+            // so a patched layer would reach that constructor as BF16, take
+            // the arm with no scale, and come out ~500x hot while every
+            // untouched layer stayed correct. Refuse, exactly as Wan's
+            // fp8-scaled tier does, rather than render the mixture.
+            if backend.is_fp8_scaled() && has_lora {
+                anyhow::bail!(
+                    "{} is fp8-scaled, and mold merges LoRAs into bf16 and GGUF checkpoints \
+                     only — an fp8 merge would drop the per-tensor dequantization scale on \
+                     every layer the adapter touches. Use a bf16 or GGUF tier for adapters.",
+                    self.base.paths.transformer.display()
+                );
+            }
             let backend: Box<dyn candle_nn::var_builder::SimpleBackend> = Box::new(backend);
             if self.block_offload_enabled() && !has_lora && !is_nvfp4 {
                 let flux_vb = candle_nn::VarBuilder::from_backend(backend, gpu_dtype, Device::Cpu);
@@ -901,6 +916,13 @@ impl Flux2Engine {
         Ok(stacked)
     }
 
+    /// Encode one prompt through the cache.
+    ///
+    /// `phase` is `true` only for the render's PRIMARY prompt. A true-CFG
+    /// render encodes two, and `ProgressPhase::PromptEncode` names a phase of
+    /// the render rather than a call — `phase_done` is a plain emit, so
+    /// reporting it per prompt would publish the phase twice on one stream.
+    /// The unconditional branch still reports its own stage line.
     fn encode_prompt_cached(
         progress: &ProgressReporter,
         prompt_cache: &Mutex<LruCache<String, CachedTensor>>,
@@ -908,7 +930,13 @@ impl Flux2Engine {
         prompt: &str,
         target_device: &Device,
         target_dtype: DType,
+        phase: bool,
     ) -> Result<Tensor> {
+        let label = if phase {
+            "Encoding prompt (Qwen3)"
+        } else {
+            "Encoding negative prompt (Qwen3)"
+        };
         let cache_key = prompt_text_key(prompt);
         let (txt_emb, cache_hit) = get_or_insert_cached_tensor(
             prompt_cache,
@@ -916,14 +944,18 @@ impl Flux2Engine {
             target_device,
             target_dtype,
             || {
-                progress.stage_start("Encoding prompt (Qwen3)");
+                progress.stage_start(label);
                 let encode_start = Instant::now();
                 let txt_emb = Self::encode_and_stack(encoder, prompt, target_device, target_dtype)?;
-                progress.phase_done(
-                    crate::ProgressPhase::PromptEncode,
-                    "Encoding prompt (Qwen3)",
-                    encode_start.elapsed(),
-                );
+                if phase {
+                    progress.phase_done(
+                        crate::ProgressPhase::PromptEncode,
+                        label,
+                        encode_start.elapsed(),
+                    );
+                } else {
+                    progress.stage_done(label, encode_start.elapsed());
+                }
                 Ok(txt_emb)
             },
         )?;
@@ -1306,7 +1338,7 @@ impl Flux2Engine {
                     .stage_done(&enc_stage_label, enc_stage.elapsed());
 
                 let mut encoded = Vec::with_capacity(prompts.len());
-                for prompt in &prompts {
+                for (index, prompt) in prompts.iter().enumerate() {
                     encoded.push(Self::encode_prompt_cached(
                         &self.base.progress,
                         &self.prompt_cache,
@@ -1314,6 +1346,7 @@ impl Flux2Engine {
                         prompt,
                         &device,
                         gpu_dtype,
+                        index == 0,
                     )?);
                 }
 
@@ -1742,7 +1775,7 @@ impl Flux2Engine {
                 }
 
                 let mut encoded = Vec::with_capacity(prompts.len());
-                for prompt in &prompts {
+                for (index, prompt) in prompts.iter().enumerate() {
                     encoded.push(Self::encode_prompt_cached(
                         progress,
                         prompt_cache,
@@ -1750,6 +1783,7 @@ impl Flux2Engine {
                         prompt,
                         &loaded.device,
                         loaded.dtype,
+                        index == 0,
                     )?);
                 }
                 tracing::info!("Qwen3 encoding complete");

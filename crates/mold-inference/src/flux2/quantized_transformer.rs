@@ -669,7 +669,22 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn tiny_transformer(cfg: &Flux2Config) -> QuantizedFlux2Transformer {
-        let tensors = tiny_gguf_tensors(cfg);
+        tiny_transformer_with(cfg, |_, tensor| tensor)
+    }
+
+    /// As `tiny_transformer`, with each tensor passed through `edit` first —
+    /// used to zero one sub-module and hold the rest fixed.
+    pub(crate) fn tiny_transformer_with(
+        cfg: &Flux2Config,
+        edit: impl Fn(&str, Tensor) -> Tensor,
+    ) -> QuantizedFlux2Transformer {
+        let tensors: Vec<(String, Tensor)> = tiny_gguf_tensors(cfg)
+            .into_iter()
+            .map(|(name, tensor)| {
+                let edited = edit(&name, tensor);
+                (name, edited)
+            })
+            .collect();
         let quantized: Vec<(String, QTensor)> = tensors
             .into_iter()
             .map(|(name, tensor)| {
@@ -748,6 +763,39 @@ mod tests {
             low.iter().zip(&high).any(|(a, b)| (a - b).abs() > 1e-6),
             "guidance 1.0 and 7.0 produced identical predictions — guidance_in is not wired in"
         );
+    }
+
+    /// The guidance term is ADDED to the conditioning vector
+    /// (`comfy/ldm/flux/model.py:173`: `vec = vec + guidance_in(...)`), so an
+    /// all-zero `guidance_in` must leave the render exactly where the
+    /// unguided one is. A composition that replaced `vec` instead of adding
+    /// to it, or that fed the raw scale in place of its timestep embedding,
+    /// would move the output here while still "responding to guidance".
+    #[test]
+    fn a_zero_guidance_embedder_leaves_the_conditioning_vector_untouched() {
+        let cfg = tiny_cfg(true);
+        let zeroed = tiny_transformer_with(&cfg, |name, tensor| {
+            if name.starts_with("guidance_in.") {
+                Tensor::zeros(tensor.shape(), DType::F32, &Device::Cpu).expect("zeros")
+            } else {
+                tensor
+            }
+        });
+        let distilled = tiny_transformer(&tiny_cfg(false));
+
+        let guided = tiny_forward(&zeroed, Some(7.0));
+        let unguided = tiny_forward(&zeroed, None);
+        assert_eq!(
+            guided, unguided,
+            "a zero guidance embedder must contribute nothing"
+        );
+        // And it lands where the checkpoint with no guidance embedder at all
+        // does — the term is the only difference between the two.
+        let baseline = tiny_forward(&distilled, None);
+        assert_eq!(guided.len(), baseline.len());
+        for (a, b) in guided.iter().zip(&baseline) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
     }
 
     /// A distilled Klein GGUF ships no `guidance_in.*` tensors at all, so the

@@ -2898,10 +2898,12 @@ fn flux2_klein_base_defaults() -> ManifestDefaults {
 /// including the ungated community quantizations — behind an access request.
 /// Comfy-Org republishes the same VAE (its sha256 is byte-identical to the
 /// gated file pinned in `shared_flux2_dev_files`) and a Mistral3 encoder
-/// already pruned to layers 0-29 plus `model.norm`, which is exactly the
-/// prefix `encoders::mistral3` streams (it captures hidden states after
-/// layers 10/20/30 and never touches the vision tower or LM head). Keys are
-/// HF-native (`model.layers.N.*`), so the streamed loader reads it unchanged.
+/// whose language model is already pruned to layers 0-29 plus `model.norm` —
+/// exactly the prefix `encoders::mistral3` streams, since it captures hidden
+/// states after layers 10/20/30. It also carries the vision tower and
+/// projector, which the streamed loader never requests and an mmap therefore
+/// never pages in. Keys are HF-native (`model.layers.N.*`) rather than BFL's
+/// `language_model.model.*`, which the loader resolves from the header.
 /// The tekken tokenizer comes from unsloth's ungated Mistral-Small mirror.
 fn shared_flux2_dev_open_files() -> Vec<ModelFile> {
     vec![
@@ -4212,6 +4214,15 @@ pub fn resolve_model_name(input: &str) -> String {
     // GGUF tag added by #794 would silently become the family default.
     if input == "wan22-ti2v-5b" {
         return format!("{input}:fp16");
+    }
+    // `flux2-dev` stays on the full BF16 checkpoint it has always meant. The
+    // tag loop tries `:q8` first, so adding the quantized tiers would have
+    // silently re-pointed the bare name at a different 35 GB download —
+    // starting a fresh pull on a host that already has the 103 GB install,
+    // and switching to a tier the engine cannot block-offload. The
+    // quantized tiers are chosen by naming their tag.
+    if input == "flux2-dev" {
+        return format!("{input}:bf16");
     }
     // Legacy format: flux-dev-q4 -> flux-dev:q4 and
     // ltx-2.3-22b-dev-fp8 -> ltx-2.3-22b-dev:fp8.
@@ -8132,9 +8143,11 @@ mod tests {
     }
 
     /// `resolve_model_name` walks `:q8 → :fp16 → :bf16 → :fp8`, so a bare base
-    /// name must not silently resolve to a distilled Klein tier.
+    /// name must not silently resolve to a distilled Klein tier — and adding
+    /// `flux2-dev:q8` must not re-point the bare `flux2-dev`, which has always
+    /// meant the full BF16 checkpoint.
     #[test]
-    fn flux2_klein_base_bare_names_resolve_within_their_own_family() {
+    fn flux2_bare_names_resolve_within_their_own_family_and_dev_stays_bf16() {
         assert_eq!(
             resolve_model_name("flux2-klein-base"),
             "flux2-klein-base:q8"
@@ -8144,6 +8157,10 @@ mod tests {
             "flux2-klein-base-9b:q8"
         );
         assert_eq!(resolve_model_name("flux2-klein"), "flux2-klein:q8");
+        assert_eq!(resolve_model_name("flux2-dev"), "flux2-dev:bf16");
+        // The quantized dev tiers stay reachable by tag, in both spellings.
+        assert_eq!(resolve_model_name("flux2-dev:q4"), "flux2-dev:q4");
+        assert_eq!(resolve_model_name("flux2-dev-q4"), "flux2-dev:q4");
     }
 
     /// FP8 tiers are single-file transformers; the engine header-peeks them,

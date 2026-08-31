@@ -218,6 +218,18 @@ impl SingleFileBackend {
         })
     }
 
+    /// Whether this checkpoint carries FP8 weights with per-tensor
+    /// dequantization scales, which the consumer must apply itself.
+    ///
+    /// A LoRA merge cannot: `Flux2LoraBackend` widens whatever it is handed to
+    /// F32, adds the delta, and returns the working dtype, so a patched layer
+    /// would reach `Flux2Linear::new` as BF16, take the arm that never looks
+    /// for a scale, and lose it — while the layers no adapter touched keep
+    /// theirs. Callers ask this and refuse the combination.
+    pub fn is_fp8_scaled(&self) -> bool {
+        self.preserve_fp8
+    }
+
     /// Cast a looked-up tensor to the VarBuilder's dtype, except for the FP8
     /// weights of an FP8-scaled checkpoint, which are handed back at their
     /// on-disk dtype so `Flux2Linear::new` can recognize and dequantize them
@@ -917,10 +929,19 @@ fn build_flux2_entries(
     e.insert(
         "norm_out.linear.weight".to_string(),
         BackendEntry::SwapHalves {
-            source_key: ada_ln_bfl_key,
+            source_key: ada_ln_bfl_key.clone(),
             axis: 0,
         },
     );
+    // Every shipped FP8 conversion leaves this one BF16, but a producer that
+    // quantized it would otherwise reach `Flux2Linear`'s FP8 arm with no
+    // scale — one silently ~500x-hot layer and no error. The scale is
+    // per-tensor, so the row swap above does not disturb it.
+    e.extend(fp8_scale_entry(
+        "norm_out.linear.weight",
+        weight_base(&ada_ln_bfl_key),
+        fp8_scaled,
+    ));
 
     // --- Conditional: pooled-vector embedder (disabled in Klein). ---
     if cfg.vec_in_dim > 0 {

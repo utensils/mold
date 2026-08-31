@@ -174,8 +174,10 @@ impl Flux2Linear {
         if weight.dtype() == DType::F8E4M3 {
             // Every producer writes the scale as F32 (BFL's `weight_scale`,
             // ComfyUI's `scale_weight` — the single-file backend normalizes
-            // the spelling). Ask for it at that dtype so it is not rounded
-            // through the working dtype before it multiplies anything.
+            // the spelling), so asking for F32 is the identity cast on every
+            // shipped checkpoint and keeps the stored value intact through
+            // load. `forward` still multiplies in the working dtype, like
+            // every other weight in the block.
             let scale = vb
                 .get_unchecked_dtype("scale_weight", DType::F32)
                 .or_else(|_| vb.get_unchecked("scale_weight"))
@@ -255,7 +257,12 @@ fn flux2_linear_bytes(linear: &Flux2Linear) -> usize {
             scale,
             bias,
         } => {
-            tensor_bytes(weight)
+            // The FP8 slab is 1 byte per parameter at rest, but `forward`
+            // materializes a full working-dtype copy of it on every call, and
+            // this figure drives the block-offload residency plan. Charging
+            // the at-rest bytes would let the planner keep twice as many
+            // blocks resident as the forward actually fits.
+            tensor_bytes(weight) * (DType::BF16.size_in_bytes() / DType::F8E4M3.size_in_bytes())
                 + scale.as_ref().map(tensor_bytes).unwrap_or(0)
                 + bias.as_ref().map(tensor_bytes).unwrap_or(0)
         }
@@ -1667,10 +1674,23 @@ mod tests {
     ) -> Vec<f32> {
         use crate::flux2::quantized_transformer::test_support::spread;
         let device = candle_core::Device::Cpu;
-        let img = spread((3, 4), 3.1).reshape((1, 3, 4)).unwrap();
         let txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
-        let img_ids = Tensor::zeros((1, 3, 4), DType::F32, &device).unwrap();
         let txt_ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        denoise_once_with_text(wrapper, guidance, &txt, &txt_ids, cfg)
+    }
+
+    /// As `denoise_once`, with the positive conditioning supplied.
+    fn denoise_once_with_text(
+        wrapper: &Flux2TransformerWrapper,
+        guidance: f64,
+        txt: &Tensor,
+        txt_ids: &Tensor,
+        cfg: Option<(&Tensor, &Tensor, f64)>,
+    ) -> Vec<f32> {
+        use crate::flux2::quantized_transformer::test_support::spread;
+        let device = candle_core::Device::Cpu;
+        let img = spread((3, 4), 3.1).reshape((1, 3, 4)).unwrap();
+        let img_ids = Tensor::zeros((1, 3, 4), DType::F32, &device).unwrap();
         let vec_ = Tensor::zeros((1, 1), DType::F32, &device).unwrap();
         let branch = cfg.map(|(txt, txt_ids, scale)| Flux2CfgBranch {
             scale,
@@ -1683,8 +1703,8 @@ mod tests {
                 &img,
                 &img_ids,
                 None,
-                &txt,
-                &txt_ids,
+                txt,
+                txt_ids,
                 &vec_,
                 &[1.0, 0.0],
                 guidance,
@@ -1725,37 +1745,56 @@ mod tests {
         }
     }
 
-    /// The unconditional branch has to change the render — and in the
-    /// direction `pipeline_flux2_klein.py:875` specifies. A larger scale
-    /// pushes further from the unconditional prediction, so the distance from
-    /// the negative-only render must grow with it.
+    /// The combination is `neg + scale * (pos - neg)`
+    /// (`pipeline_flux2_klein.py:875`), and this pins it exactly rather than
+    /// settling for "the render changed". Over one step the update is
+    /// `img - pred`, so a conditional-only run, an unconditional-only run and
+    /// a guided run are related by that same lerp — with the sign inverted,
+    /// or the branches swapped, the identity fails.
     #[test]
-    fn cfg_scale_moves_the_render_away_from_the_unconditional_branch() {
+    fn the_cfg_combination_is_the_upstream_lerp_between_the_two_branches() {
         use crate::flux2::quantized_transformer::test_support::{
             spread, tiny_cfg, tiny_transformer,
         };
         let cfg = tiny_cfg(false);
         let wrapper = Flux2TransformerWrapper::Quantized(tiny_transformer(&cfg));
         let device = candle_core::Device::Cpu;
-        // A different negative conditioning than the positive prompt's.
-        let neg_txt = spread((2, 6), 9.9).reshape((1, 2, 6)).unwrap();
-        let neg_ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        // The positive conditioning `denoise_once` uses, and a different
+        // negative one.
+        let pos_txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
+        let neg_txt = spread((2, 6), 4.9).reshape((1, 2, 6)).unwrap();
+        let ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
 
-        let unguided = denoise_once(&wrapper, 1.0, None);
-        let low = denoise_once(&wrapper, 2.0, Some((&neg_txt, &neg_ids, 2.0)));
-        let high = denoise_once(&wrapper, 6.0, Some((&neg_txt, &neg_ids, 6.0)));
+        let scale = 3.0_f32;
+        // Conditional only, unconditional only, and the guided render.
+        let conditional = denoise_once(&wrapper, 1.0, None);
+        let unconditional = denoise_once_with_text(&wrapper, 1.0, &neg_txt, &ids, None);
+        let guided = denoise_once(&wrapper, 1.0, Some((&neg_txt, &ids, scale as f64)));
 
-        let spread_of = |a: &[f32], b: &[f32]| -> f32 {
-            a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f32>()
-        };
         assert!(
-            spread_of(&unguided, &low) > 1e-6,
-            "a CFG branch must change the render"
+            conditional
+                .iter()
+                .zip(&unconditional)
+                .any(|(a, b)| (a - b).abs() > 1e-5),
+            "the two conditionings must actually differ, or the identity is vacuous"
         );
-        assert!(
-            spread_of(&unguided, &high) > spread_of(&unguided, &low),
-            "a larger CFG scale must push further from the unguided prediction"
-        );
+        for ((got, uncond), cond) in guided.iter().zip(&unconditional).zip(&conditional) {
+            let want = uncond + scale * (cond - uncond);
+            assert!(
+                (got - want).abs() < 1e-3,
+                "guided {got} != neg + {scale} * (pos - neg) = {want}",
+            );
+        }
+        // And the positive conditioning is the one that was guided toward,
+        // not the negative: this is what an accidental swap breaks.
+        assert!(pos_txt
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .zip(neg_txt.flatten_all().unwrap().to_vec1::<f32>().unwrap())
+            .any(|(a, b)| (a - b).abs() > 1e-6),);
     }
 
     #[test]
