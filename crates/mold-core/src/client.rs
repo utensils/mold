@@ -1680,6 +1680,32 @@ impl MoldClient {
             .paused)
     }
 
+    /// Pause only one waiting generation row, leaving host dispatch and every
+    /// sibling runnable.
+    pub async fn pause_queue_job(&self, id: &str) -> Result<()> {
+        self.set_queue_job_paused(id, "pause").await
+    }
+
+    /// Return only one paused generation row to the runnable queue.
+    pub async fn resume_queue_job(&self, id: &str) -> Result<()> {
+        self.set_queue_job_paused(id, "resume").await
+    }
+
+    async fn set_queue_job_paused(&self, id: &str, action: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/queue/{}/{}",
+                self.base_url,
+                encode_path_segment(id),
+                action
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
     /// Run the held-row retention sweep now (`POST /api/queue/held/sweep`).
     pub async fn sweep_held_queue(&self) -> Result<crate::HeldSweepResult> {
         let resp = self
@@ -3313,7 +3339,6 @@ mod tests {
             )
             .mount(&server)
             .await;
-
         let error = MoldClient::new(&server.uri())
             .set_device_enabled("cuda:device-1", true)
             .await
@@ -3745,6 +3770,13 @@ mod tests {
             })))
             .mount(&server)
             .await;
+        for action in ["pause", "resume"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/api/queue/job-1/{action}")))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+        }
         Mock::given(method("DELETE"))
             .and(path("/api/generation-batches/batch-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -3761,6 +3793,8 @@ mod tests {
         assert_eq!(client.cancel_all_queue_jobs().await.unwrap(), 4);
         assert!(client.pause_queue().await.unwrap());
         assert!(!client.resume_queue().await.unwrap());
+        client.pause_queue_job("job-1").await.unwrap();
+        client.resume_queue_job("job-1").await.unwrap();
         let held = client.sweep_held_queue().await.unwrap();
         assert_eq!(
             (held.purged, held.remaining, held.media_deferred),

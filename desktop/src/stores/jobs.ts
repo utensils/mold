@@ -54,6 +54,7 @@ export interface QueueEntry {
 /** Queue controls a host supports (from `GET /api/capabilities`). */
 export interface HostQueueCaps {
   canPause: boolean;
+  canPauseJob?: boolean;
   canCancelAll: boolean;
   /** Whether queued jobs can be reordered via `PATCH /api/queue/:id {position}`
    *  (older servers never report it → false). */
@@ -237,6 +238,7 @@ export const useJobsStore = defineStore("jobs", {
           (await apiJsonTo<{
             queue?: {
               can_pause?: boolean;
+              can_pause_job?: boolean;
               can_cancel_all?: boolean;
               can_reorder?: boolean;
               cooperative_cancellation?: boolean;
@@ -244,6 +246,7 @@ export const useJobsStore = defineStore("jobs", {
           }>(target, "/api/capabilities").then(
             (c) => ({
               canPause: c.queue?.can_pause === true,
+              canPauseJob: c.queue?.can_pause_job === true,
               canCancelAll: c.queue?.can_cancel_all === true,
               canReorder: c.queue?.can_reorder === true,
               canCancelRunning: c.queue?.cooperative_cancellation === true,
@@ -404,6 +407,22 @@ export const useJobsStore = defineStore("jobs", {
       const q = this.queues[hostId];
       if (q) q.paused = false;
       await this.refresh();
+    },
+    /** Pause or resume one waiting row without changing host-wide dispatch. */
+    async setJobPaused(hostId: string, jobId: string, paused: boolean) {
+      await this.queueControl(
+        hostId,
+        `/api/queue/${encodeURIComponent(jobId)}/${paused ? "pause" : "resume"}`,
+        "POST",
+      );
+      const snapshot = this.queues[hostId];
+      const apply = (entries: QueueEntry[] | undefined) => {
+        const entry = entries?.find(({ id }) => id === jobId);
+        if (entry) entry.state = paused ? "paused" : "queued";
+      };
+      apply(snapshot?.entries);
+      apply(snapshot?.tailEntries);
+      void this.refresh();
     },
     /** Cancel every queued job on the host (running jobs finish). */
     async cancelAll(hostId: string) {

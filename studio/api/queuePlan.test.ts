@@ -15,6 +15,7 @@ import {
   retryQueueJobRecoveringAmbiguity,
   moveQueueJobToBack,
   setQueueDevicePin,
+  setQueueJobPaused,
   setQueuePaused,
   type QueuePlan,
   type QueueListing,
@@ -52,6 +53,25 @@ describe("queue plan contract", () => {
       ).toBe("secret");
     },
   );
+
+  it.each([
+    [true, "/api/queue/job%2F1/pause"],
+    [false, "/api/queue/job%2F1/resume"],
+  ])("sets only one queue job paused=%s", async (paused, path) => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await setQueueJobPaused(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      "job/1",
+      paused,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://gpu.example${path}`,
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
 
   it("derives queue page size only from a positive host capacity", () => {
     expect(queuePageRequestForCapacity(8)).toEqual({ limit: 8 });

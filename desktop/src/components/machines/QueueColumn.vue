@@ -47,7 +47,7 @@ function statusLine(row: QueueSurfaceRow): string {
     const reason = row.entry.held_reason?.trim();
     return `held${reason ? ` (${reason})` : ""} · ${row.hostLabel}`;
   }
-  if (row.entry.state === "paused") return `paused after restart · ${row.hostLabel}`;
+  if (row.entry.state === "paused") return `paused · ${row.hostLabel}`;
   if (row.entry.state === "queued" && jobs.queues[row.hostId]?.paused === true) {
     return `paused · ${row.hostLabel}`;
   }
@@ -84,15 +84,10 @@ async function cancel(row: QueueSurfaceRow) {
 }
 
 async function togglePause(row: QueueSurfaceRow) {
-  const snapshot = jobs.queues[row.hostId];
+  const paused = row.entry.state === "paused";
   try {
-    if (snapshot?.paused || snapshot?.entries.some((entry) => entry.state === "paused")) {
-      await jobs.resume(row.hostId);
-      toasts.push(`Queue resumed on ${row.hostLabel}`);
-    } else {
-      await jobs.pause(row.hostId);
-      toasts.push(`Queue paused on ${row.hostLabel} — running job finishes`);
-    }
+    await jobs.setJobPaused(row.hostId, row.entry.id, !paused);
+    toasts.push(`${paused ? "Resumed" : "Paused"} one job on ${row.hostLabel}`);
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
   }
@@ -114,12 +109,11 @@ async function retry(row: QueueSurfaceRow) {
 
 function openQueueMenu(row: QueueSurfaceRow, event: MouseEvent) {
   const snapshot = jobs.queues[row.hostId];
-  const paused =
-    snapshot?.paused === true || snapshot?.entries.some((entry) => entry.state === "paused");
+  const paused = row.entry.state === "paused";
   const items: MenuEntry[] = [];
-  if (snapshot?.caps?.canPause || paused) {
+  if (snapshot?.caps?.canPauseJob && (row.entry.state === "queued" || paused)) {
     items.push({
-      label: paused ? "Resume queue" : "Pause queue",
+      label: paused ? "Resume job" : "Pause job",
       action: () => void togglePause(row),
     });
   }

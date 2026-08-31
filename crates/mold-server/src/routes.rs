@@ -316,6 +316,8 @@ use crate::queue::clean_error_message;
         patch_queue_job,
         cancel_queue_job,
         retry_queue_job,
+        pause_queue_job,
+        resume_queue_job,
         pause_queue,
         resume_queue,
         cancel_all_queue,
@@ -753,6 +755,8 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(cancel_queue_job),
         )
         .route("/api/queue/:id/retry", post(retry_queue_job))
+        .route("/api/queue/:id/pause", post(pause_queue_job))
+        .route("/api/queue/:id/resume", post(resume_queue_job))
         .route(
             "/api/queue/held/sweep",
             post(crate::queue_retention::sweep_held_queue),
@@ -6846,6 +6850,122 @@ async fn retry_queue_job(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/queue/{id}/pause",
+    tag = "queue",
+    params(("id" = String, Path, description = "Queued generation job id")),
+    responses(
+        (status = 204, description = "Only this queued job was paused"),
+        (status = 404, description = "Queue job not found"),
+        (status = 409, description = "Queue job is already running or held"),
+    )
+)]
+async fn pause_queue_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    set_one_queue_job_paused(&state, &id, true).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/queue/{id}/resume",
+    tag = "queue",
+    params(("id" = String, Path, description = "Paused generation job id")),
+    responses(
+        (status = 204, description = "Only this paused job was resumed"),
+        (status = 404, description = "Queue job not found"),
+        (status = 409, description = "Queue job is running or held"),
+    )
+)]
+async fn resume_queue_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    set_one_queue_job_paused(&state, &id, false).await
+}
+
+/// Change one row's lifecycle without touching `QueuePause`, the host-wide
+/// dispatch gate. The existing PATCH token is the scheduler fence: while the
+/// SQLite transition runs, only this hydrated row is excluded from grants.
+async fn set_one_queue_job_paused(
+    state: &AppState,
+    id: &str,
+    paused: bool,
+) -> Result<StatusCode, ApiError> {
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let runtime_token = {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        match state.job_registry.begin_queue_patch(id) {
+            Ok(token) => Some(token),
+            Err(crate::job_registry::TargetGpuUpdateError::NotFound) => None,
+            Err(crate::job_registry::TargetGpuUpdateError::AlreadyRunning) => {
+                return Err(ApiError::queue_job_running(format!(
+                    "queue job {id} is already running; only waiting jobs can be paused or resumed"
+                )));
+            }
+        }
+    };
+
+    let journal = state.queue_journal.clone();
+    let mutation_id = id.to_string();
+    let durable =
+        match spawn_queue_mutation(move || journal.set_job_paused(&mutation_id, paused)).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(token) = runtime_token {
+                    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+                    state.job_registry.finish_queue_patch(id, token);
+                }
+                return Err(error);
+            }
+        };
+
+    use mold_db::generation_queue::OwnedJobPauseOutcome;
+    match durable {
+        OwnedJobPauseOutcome::NotEligible => {
+            if let Some(token) = runtime_token {
+                let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+                state.job_registry.finish_queue_patch(id, token);
+            }
+            return Err(ApiError::queue_job_running(format!(
+                "queue job {id} is not eligible to {}",
+                if paused { "pause" } else { "resume" }
+            )));
+        }
+        OwnedJobPauseOutcome::NotOwned if runtime_token.is_none() => {
+            return Err(ApiError::queue_job_not_found(format!(
+                "queue job {id} not found"
+            )));
+        }
+        OwnedJobPauseOutcome::Updated
+        | OwnedJobPauseOutcome::Unchanged
+        | OwnedJobPauseOutcome::NotOwned => {}
+    }
+
+    if let Some(token) = runtime_token {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        let lifecycle = if paused {
+            crate::job_registry::JobLifecycle::Paused
+        } else {
+            crate::job_registry::JobLifecycle::Queued
+        };
+        if !state
+            .job_registry
+            .finish_queue_patch_state(id, token, lifecycle)
+        {
+            return Err(ApiError::queue_job_not_found(format!(
+                "queue job {id} changed while its pause state was being updated"
+            )));
+        }
+    }
+    if !paused {
+        state.queue_journal.wake_feeder();
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Response of `POST /api/queue/pause` and `POST /api/queue/resume` — the
 /// resulting pause state (`true` after pause, `false` after resume).
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -7179,6 +7299,7 @@ async fn server_capabilities(
         events: mold_core::EventsCapabilities { available: true },
         queue: mold_core::QueueCapabilities {
             can_pause: true,
+            can_pause_job: true,
             can_cancel_all: true,
             can_reorder: true,
             stable_device_pins: true,

@@ -282,6 +282,7 @@ export interface ServerCapabilities {
   };
   queue?: {
     can_pause?: boolean;
+    can_pause_job?: boolean;
     can_cancel_all?: boolean;
     can_reorder?: boolean;
     /** Running singleton generations accept cooperative cancellation. */

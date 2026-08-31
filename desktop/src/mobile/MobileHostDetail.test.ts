@@ -691,7 +691,7 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.get("[data-test='host-detail-queue']").text()).toContain("flux-dev:q8");
   });
 
-  it("gives held machine rows the shared pause, resume, and cancel swipe actions", async () => {
+  it("pauses one queued machine row without pausing its sibling or host", async () => {
     let currentQueue: QueueEntry[] = [
       { ...queueEntries[0]!, id: "job-held", state: "held", held_reason: "host memory" },
       { ...queueEntries[1]!, position: 0 },
@@ -703,7 +703,7 @@ describe("MobileHostDetail remote host data", () => {
           events: { available: true },
           devices: { available: true, lifecycle: true },
           dispatch: { v2_authoritative: true },
-          queue: { can_pause: true },
+          queue: { can_pause: true, can_pause_job: true },
         });
       }
       if (path === "/api/queue?limit=8") return Promise.resolve({ entries: currentQueue });
@@ -715,34 +715,33 @@ describe("MobileHostDetail remote host data", () => {
         currentQueue = currentQueue.filter((entry) => entry.id !== "job-held");
         return new Response(null, { status: 204 });
       }
+      if (url.endsWith("/api/queue/job-queued/pause") && init?.method === "POST") {
+        currentQueue = currentQueue.map((entry) =>
+          entry.id === "job-queued" ? { ...entry, state: "paused" } : entry,
+        );
+        return new Response(null, { status: 204 });
+      }
       return Response.json({ paused: url.endsWith("/pause") });
     });
     vi.stubGlobal("fetch", fetchMock);
     const view = await mountDetail();
     const held = view.get("[data-test='host-detail-queue-row-job-held']");
+    const queued = view.get("[data-test='host-detail-queue-row-job-queued']");
 
     expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Pause");
-    expect(held.get("[data-test='swipe-action-queue-pause']").text()).toBe("Pause");
+    expect(held.find("[data-test='swipe-action-job-pause']").exists()).toBe(false);
+    expect(queued.get("[data-test='swipe-action-job-pause']").text()).toBe("Pause");
     expect(held.get("[data-test='swipe-action-cancel']").text()).toBe("Cancel");
 
-    await held.get("[data-test='swipe-action-queue-pause']").trigger("click");
+    await queued.get("[data-test='swipe-action-job-pause']").trigger("click");
     await flushPromises();
     expect(fetchMock).toHaveBeenCalledWith(
-      `${studio.baseUrl}/api/queue/pause`,
+      `${studio.baseUrl}/api/queue/job-queued/pause`,
       expect.objectContaining({ method: "POST" }),
     );
     expect(held.text()).toContain("HELD");
     expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).toContain("PAUSED");
-    expect(view.get("[data-test='host-detail-queue-paused']").text()).toBe("PAUSED");
-    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Resume");
-
-    await held.get("[data-test='swipe-action-queue-resume']").trigger("click");
-    await flushPromises();
-    expect(fetchMock).toHaveBeenCalledWith(
-      `${studio.baseUrl}/api/queue/resume`,
-      expect.objectContaining({ method: "POST" }),
-    );
-    expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).toContain("NEXT UP");
+    expect(view.find("[data-test='host-detail-queue-paused']").exists()).toBe(false);
     expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Pause");
 
     await held.get("[data-test='swipe-action-cancel']").trigger("click");
@@ -762,7 +761,7 @@ describe("MobileHostDetail remote host data", () => {
           events: { available: true },
           devices: { available: true, lifecycle: true },
           dispatch: { v2_authoritative: true },
-          queue: { can_pause: true },
+          queue: { can_pause: true, can_pause_job: true },
         });
       }
       if (path === "/api/queue?limit=8") {
@@ -785,8 +784,14 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.get("[data-test='host-detail-queue-row-job-queued']").text()).not.toContain(
       "PAUSED",
     );
-    expect(view.get("[data-test='host-detail-queue-paused']").text()).toBe("PAUSED AFTER RESTART");
-    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Resume");
+    expect(view.find("[data-test='host-detail-queue-paused']").exists()).toBe(false);
+    expect(view.get("[data-test='host-detail-queue-pause']").text()).toBe("Pause");
+    expect(
+      view
+        .get("[data-test='host-detail-queue-row-job-paused']")
+        .get("[data-test='swipe-action-job-resume']")
+        .text(),
+    ).toBe("Resume");
   });
 
   it("refreshes host-wide pause state changed from another surface", async () => {

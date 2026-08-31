@@ -39,8 +39,8 @@ pub async fn run(action: QueueAction) -> Result<()> {
         } => queue_cancel(&client, &job_ids, all, batch.as_deref(), yes).await,
         QueueAction::Retry { job_ids, held } => queue_retry(&client, &job_ids, held).await,
         QueueAction::Move { job_id, to } => queue_move(&client, &job_id, to).await,
-        QueueAction::Pause => queue_pause(&client, true).await,
-        QueueAction::Resume => queue_pause(&client, false).await,
+        QueueAction::Pause { job_id } => queue_pause(&client, job_id.as_deref(), true).await,
+        QueueAction::Resume { job_id } => queue_pause(&client, job_id.as_deref(), false).await,
         QueueAction::Sweep => queue_sweep(&client).await,
     }
 }
@@ -334,7 +334,31 @@ async fn queue_move(client: &MoldClient, job_id: &str, to: usize) -> Result<()> 
     Ok(())
 }
 
-async fn queue_pause(client: &MoldClient, pause: bool) -> Result<()> {
+async fn queue_pause(client: &MoldClient, job_id: Option<&str>, pause: bool) -> Result<()> {
+    if let Some(job_id) = job_id {
+        if pause {
+            client.pause_queue_job(job_id).await
+        } else {
+            client.resume_queue_job(job_id).await
+        }
+        .with_context(|| {
+            format!(
+                "could not {} queue job {job_id} on {}",
+                if pause { "pause" } else { "resume" },
+                client.host()
+            )
+        })?;
+        println!(
+            "{} {job_id} on {}",
+            if pause {
+                "paused".yellow()
+            } else {
+                "resumed".green()
+            },
+            client.host()
+        );
+        return Ok(());
+    }
     let paused = if pause {
         client.pause_queue().await
     } else {

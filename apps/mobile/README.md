@@ -307,8 +307,11 @@ pushed screen opened from the header.
   `capabilities.queue.can_reorder` adds a non-destructive **To back**, which
   sends `PATCH /api/queue/:id {position}` — the server clamps a large index to
   the tail, so the phone never has to read a queue depth its bounded page
-  cannot see. There is deliberately no per-job pause: only the whole queue
-  pauses. Tapping the row body opens the shared `QueueEntryDetail` in a bottom
+  cannot see. A host advertising `capabilities.queue.can_pause_job` also adds
+  **Pause** or **Resume** for that exact row via
+  `POST /api/queue/:id/{pause|resume}`; this never changes the host-wide queue
+  gate or the state of sibling rows. Tapping the row body opens the shared
+  `QueueEntryDetail` in a bottom
   sheet with the prompt, setting groups, queue facts, the running preview, any
   hold reason in full with Copy, and its own inline two-step cancel; failures
   stay in a persistent inline line, never a toast. Android renders the same

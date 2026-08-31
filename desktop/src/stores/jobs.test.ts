@@ -276,6 +276,7 @@ describe("jobs store", () => {
     expect(q.paused).toBe(true);
     expect(q.caps).toEqual({
       canPause: true,
+      canPauseJob: false,
       canCancelAll: true,
       canReorder: true,
       canCancelRunning: false,
@@ -371,6 +372,12 @@ describe("jobs store", () => {
       ? never
       : [{ baseUrl: string }, string, { method: string }];
     expect(path).toBe("/api/queue/resume");
+    expect(jobs.queues["hal9000-7680"]?.paused).toBe(false);
+
+    await jobs.setJobPaused("hal9000-7680", "job/1", true);
+    [, path, init] = apiFetchTo.mock.lastCall as [{ baseUrl: string }, string, { method: string }];
+    expect(path).toBe("/api/queue/job%2F1/pause");
+    expect(init.method).toBe("POST");
     expect(jobs.queues["hal9000-7680"]?.paused).toBe(false);
   });
 

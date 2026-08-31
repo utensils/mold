@@ -102,6 +102,8 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/queue`                                   | key           | Server-authoritative job listing (queued, running, and held; UUIDv4 ids), paged by `?limit=` / `?cursor=`; used by the SPA to reconcile dropped SSE streams                                                                                                         |
 | `DELETE` | `/api/queue`                                   | key           | Cancel every queued or restart-paused job; running work is left alone                                                                                                                                                                                               |
 | `POST`   | `/api/queue/pause`                             | key           | Pause new-job dispatch                                                                                                                                                                                                                                              |
+| `POST`   | `/api/queue/:id/pause`                         | key           | Pause one waiting generation without pausing its siblings                                                                                                                                                                                                           |
+| `POST`   | `/api/queue/:id/resume`                        | key           | Resume one paused generation without changing host-wide dispatch                                                                                                                                                                                                    |
 | `POST`   | `/api/queue/resume`                            | key           | Resume new-job dispatch                                                                                                                                                                                                                                             |
 | `GET`    | `/api/queue/:id`                               | key           | Read one job in full, its submitted settings included                                                                                                                                                                                                               |
 | `PATCH`  | `/api/queue/:id`                               | key           | Update the preferred GPU lane and/or dispatch position for a queued job                                                                                                                                                                                             |
@@ -142,7 +144,8 @@ route requires a credential.
 `GET /api/capabilities` is additive and safe to feature-detect. Current
 servers advertise the accepted catalog sort values in
 `catalog.sort` (`downloads`, `recent`, `rating`), queue controls as
-`queue.can_pause`, `queue.can_cancel_all`, and `queue.can_reorder`, and
+`queue.can_pause`, `queue.can_pause_job`, `queue.can_cancel_all`, and
+`queue.can_reorder`, and
 server-assisted DNS-SD as `discovery.can_browse`, and the read-only device
 resource as `devices.available`. `devices.lifecycle` is true only when
 scheduler V2 is the authoritative runtime; legacy, observe, maintenance, and

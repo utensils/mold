@@ -710,6 +710,36 @@ impl JobRegistry {
         }
     }
 
+    /// Complete an exact queue mutation by changing the hydrated lifecycle
+    /// before releasing its scheduler exclusion. Used by per-job pause/resume
+    /// so buffered work stays registered but only that row leaves dispatch.
+    pub(crate) fn finish_queue_patch_state(
+        &self,
+        id: &str,
+        token: u64,
+        state: JobLifecycle,
+    ) -> bool {
+        debug_assert!(matches!(state, JobLifecycle::Queued | JobLifecycle::Paused));
+        let changed = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .is_some_and(|entry| {
+                    if entry.queue_patch_token != Some(token) {
+                        return false;
+                    }
+                    entry.state = state;
+                    entry.queue_patch_token = None;
+                    true
+                })
+        };
+        if changed {
+            self.mark_mutated();
+        }
+        changed
+    }
+
     pub fn set_target_gpu(
         &self,
         id: &str,
@@ -1203,6 +1233,25 @@ mod tests {
             reg.scheduler_lifecycle("patching"),
             Some(JobLifecycle::Queued)
         );
+    }
+
+    #[test]
+    fn one_job_pause_excludes_only_that_job_until_exact_resume() {
+        let reg = JobRegistry::new();
+        reg.register("paused", "model-a");
+        reg.register("sibling", "model-b");
+
+        let pause = reg.begin_queue_patch("paused").unwrap();
+        assert!(reg.finish_queue_patch_state("paused", pause, JobLifecycle::Paused));
+        assert_eq!(reg.queued_ids_in_order(), ["sibling"]);
+        assert_eq!(
+            reg.scheduler_lifecycle("paused"),
+            Some(JobLifecycle::Paused)
+        );
+
+        let resume = reg.begin_queue_patch("paused").unwrap();
+        assert!(reg.finish_queue_patch_state("paused", resume, JobLifecycle::Queued));
+        assert_eq!(reg.queued_ids_in_order(), ["paused", "sibling"]);
     }
 
     #[test]

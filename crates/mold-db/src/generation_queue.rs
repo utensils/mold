@@ -1410,6 +1410,84 @@ pub struct PausedWorkResume {
     pub chain_jobs: usize,
 }
 
+/// Result of changing one owner-fenced generation row between runnable and
+/// paused. `NotEligible` distinguishes an existing running/held row from an
+/// unknown id so the HTTP surface can return an honest conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedJobPauseOutcome {
+    Updated,
+    Unchanged,
+    NotOwned,
+    NotEligible,
+}
+
+/// Pause or resume exactly one generation row without touching the host-wide
+/// dispatch gate. The queue row and its durable batch child move in the same
+/// transaction, while the claim token is deliberately preserved: a hydrated
+/// job already owned by this runtime must remain the same job when resumed.
+pub fn set_owned_job_paused(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    paused: bool,
+    now_ms: i64,
+) -> Result<OwnedJobPauseOutcome> {
+    db.transact_immediate(|conn| {
+        let state = conn
+            .query_row(
+                "SELECT state FROM generation_queue WHERE id = ?1 AND owner_uuid = ?2",
+                params![job_id, owner_uuid],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(state) = state else {
+            return Ok(OwnedJobPauseOutcome::NotOwned);
+        };
+        let (from, to, child_from, child_to) = if paused {
+            if state == QueueRowState::Paused.as_str() {
+                return Ok(OwnedJobPauseOutcome::Unchanged);
+            }
+            if state != QueueRowState::Queued.as_str() {
+                return Ok(OwnedJobPauseOutcome::NotEligible);
+            }
+            ("queued", "paused", "accepted", "paused")
+        } else {
+            if state == QueueRowState::Queued.as_str() {
+                return Ok(OwnedJobPauseOutcome::Unchanged);
+            }
+            if state != QueueRowState::Paused.as_str() {
+                return Ok(OwnedJobPauseOutcome::NotEligible);
+            }
+            ("paused", "queued", "paused", "accepted")
+        };
+
+        conn.execute(
+            "UPDATE generation_batch_children
+                SET state = ?3, error = NULL, error_code = NULL,
+                    updated_at_ms = MAX(?4, updated_at_ms + 1),
+                    revision = revision + 1
+              WHERE job_id = ?1 AND state = ?2
+                AND EXISTS (
+                    SELECT 1 FROM generation_batches AS batch
+                     WHERE batch.id = generation_batch_children.batch_id
+                       AND batch.owner_uuid = ?5
+                )",
+            params![job_id, child_from, child_to, now_ms, owner_uuid],
+        )?;
+        let updated = conn.execute(
+            "UPDATE generation_queue
+                SET state = ?3, started_at = NULL, explicitly_paused = ?6,
+                    updated_at = MAX(?4, updated_at + 1)
+              WHERE id = ?1 AND owner_uuid = ?2 AND state = ?5",
+            params![job_id, owner_uuid, to, now_ms, from, i64::from(paused)],
+        )?;
+        if updated != 1 {
+            bail!("owned queue row {job_id} changed during per-job pause transition");
+        }
+        Ok(OwnedJobPauseOutcome::Updated)
+    })
+}
+
 pub fn resume_all_paused(
     db: &MetadataDb,
     owner_uuid: &str,
@@ -1422,6 +1500,7 @@ pub fn resume_all_paused(
                    FROM generation_queue AS q
                    JOIN generation_batch_children AS child ON child.job_id = q.id
                   WHERE q.owner_uuid = ?1 AND q.state = 'paused'
+                    AND q.explicitly_paused = 0
                     AND child.state NOT IN ('paused', 'cancelling')
                   LIMIT 1",
                 params![owner_uuid],
@@ -1434,7 +1513,7 @@ pub fn resume_all_paused(
 
         let resumed: i64 = conn.query_row(
             "SELECT COUNT(*) FROM generation_queue
-              WHERE owner_uuid = ?1 AND state = 'paused'",
+              WHERE owner_uuid = ?1 AND state = 'paused' AND explicitly_paused = 0",
             params![owner_uuid],
             |row| row.get(0),
         )?;
@@ -1446,15 +1525,15 @@ pub fn resume_all_paused(
               WHERE state = 'paused'
                 AND job_id IN (
                     SELECT id FROM generation_queue
-                     WHERE owner_uuid = ?1 AND state = 'paused'
+                     WHERE owner_uuid = ?1 AND state = 'paused' AND explicitly_paused = 0
                 )",
             params![owner_uuid, now_ms],
         )?;
         conn.execute(
             "UPDATE generation_queue
-                SET state = 'queued', claim_token = NULL, started_at = NULL,
+                SET state = 'queued', started_at = NULL, explicitly_paused = 0,
                     updated_at = MAX(?2, updated_at + 1)
-              WHERE owner_uuid = ?1 AND state = 'paused'",
+              WHERE owner_uuid = ?1 AND state = 'paused' AND explicitly_paused = 0",
             params![owner_uuid, now_ms],
         )?;
         let chains = conn.execute(
@@ -2647,6 +2726,86 @@ mod tests {
         assert_eq!(second.jobs_paused, 0);
         assert_eq!(second.replays_charged, 0);
         assert_eq!(get(&db, "job").unwrap().unwrap().replay_seen, 1);
+    }
+
+    #[test]
+    fn one_job_pause_never_stops_its_queued_siblings() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert(&db, &row("first", "owner-a", 1)).unwrap();
+        insert(&db, &row("paused", "owner-a", 2)).unwrap();
+        insert(&db, &row("third", "owner-a", 3)).unwrap();
+        insert(&db, &row("foreign", "owner-b", 1)).unwrap();
+
+        assert_eq!(
+            set_owned_job_paused(&db, "owner-a", "paused", true, 10).unwrap(),
+            OwnedJobPauseOutcome::Updated
+        );
+        assert_eq!(
+            get(&db, "paused").unwrap().unwrap().state,
+            QueueRowState::Paused
+        );
+        assert_eq!(
+            list_all(&db, "owner-a")
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.state == QueueRowState::Queued)
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["first", "third"]
+        );
+        assert_eq!(
+            get(&db, "foreign").unwrap().unwrap().state,
+            QueueRowState::Queued
+        );
+
+        assert_eq!(
+            set_owned_job_paused(&db, "owner-a", "paused", false, 11).unwrap(),
+            OwnedJobPauseOutcome::Updated
+        );
+        assert_eq!(claimable_ids(&db, "owner-a"), ["first", "paused", "third"]);
+    }
+
+    #[test]
+    fn global_resume_preserves_an_explicit_individual_pause() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_claimed(&db, &row("job", "owner-a", 1), "runtime-token").unwrap();
+        set_owned_job_paused(&db, "owner-a", "job", true, 10).unwrap();
+
+        let mut restart_paused = row("restart", "owner-a", 2);
+        restart_paused.state = QueueRowState::Paused;
+        insert(&db, &restart_paused).unwrap();
+
+        let resumed = resume_all_paused(&db, "owner-a", 11).unwrap();
+        assert_eq!(resumed.generation_jobs, 1);
+
+        assert_eq!(
+            get(&db, "job").unwrap().unwrap().state,
+            QueueRowState::Paused
+        );
+        assert_eq!(
+            get(&db, "restart").unwrap().unwrap().state,
+            QueueRowState::Queued
+        );
+        let (token, explicitly_paused): (Option<String>, bool) = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT claim_token, explicitly_paused FROM generation_queue WHERE id = 'job'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(token.as_deref(), Some("runtime-token"));
+        assert!(explicitly_paused);
+        assert_eq!(
+            claim_next(&db, "owner-a", "restart-token", 12)
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            "restart"
+        );
     }
 
     #[test]
