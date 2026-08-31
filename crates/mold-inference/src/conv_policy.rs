@@ -39,7 +39,7 @@
 //! the byte-stable path.
 
 use candle_core::cudnn_policy;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 /// Which family is asking, and therefore which default applies when the
 /// operator has expressed no preference through `MOLD_CONV`.
@@ -112,7 +112,7 @@ fn parse_backend_env(raw: Option<&str>) -> Option<ConvBackend> {
 /// the request is not silently honoured, because there is nothing to honour it
 /// with.
 pub fn resolve_for(policy: ConvPolicy) -> ConvBackend {
-    let requested = parse_backend_env(std::env::var("MOLD_CONV").ok().as_deref());
+    let requested = requested_backend_env();
     let wanted = requested.unwrap_or(match policy {
         ConvPolicy::Image => ConvBackend::Im2Col,
         ConvPolicy::Video => ConvBackend::Cudnn,
@@ -121,6 +121,29 @@ pub fn resolve_for(policy: ConvPolicy) -> ConvBackend {
         ConvBackend::Cudnn if cudnn_compiled() => ConvBackend::Cudnn,
         _ => ConvBackend::Im2Col,
     }
+}
+
+/// Read and cache the `MOLD_CONV` request, disclosing the resolved policy once.
+///
+/// Caching the *request* rather than a resolved backend is what lets one
+/// `OnceLock` serve both policies, mirroring `attention::requested_backend_env`.
+/// The log line matters more here than it looks: which convolution backend ran
+/// is otherwise invisible in a render's output, so without it the only evidence
+/// is the wall clock — and inferring a code path from a timing is how a change
+/// that never fired gets believed.
+fn requested_backend_env() -> Option<ConvBackend> {
+    static CACHED: OnceLock<Option<ConvBackend>> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let requested = parse_backend_env(crate::runtime_env::value("MOLD_CONV").as_deref());
+        tracing::info!(
+            requested = ?requested,
+            compiled = cudnn_compiled(),
+            image_default = ?ConvBackend::Im2Col,
+            video_default = ?if cudnn_compiled() { ConvBackend::Cudnn } else { ConvBackend::Im2Col },
+            "convolution backend policy resolved"
+        );
+        requested
+    })
 }
 
 /// Pin the process default to im2col.
@@ -157,6 +180,7 @@ impl ConvScope {
     pub fn apply(backend: ConvBackend) -> Self {
         install_process_default();
         let previous = cudnn_policy::set_enabled(backend == ConvBackend::Cudnn);
+        tracing::debug!(backend = backend.as_str(), "convolution scope applied");
         Self { previous, backend }
     }
 
