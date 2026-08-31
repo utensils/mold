@@ -1,0 +1,1 @@
+- **Mobile generation status.** Keeps Create queue status aligned with Machines lifecycle feedback and prevents long preparation details from clipping on phone layouts.

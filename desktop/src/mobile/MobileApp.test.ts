@@ -2248,6 +2248,114 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.text()).toContain("Queued");
   });
 
+  it("uses the Machines lifecycle authority for a locally submitted print", async () => {
+    let activityItems: Array<Record<string, unknown>> = [];
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({ events: { available: true }, ...durableQueueCapabilities });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: "studio-id",
+          observed_at_unix_ms: Date.now(),
+          items: activityItems,
+        });
+      }
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "lifecycle-job",
+              model: model.name,
+              state: "queued",
+              started_at_unix_ms: 1,
+              position: 0,
+            },
+          ],
+          plan: null,
+        });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        const clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        return Promise.resolve({
+          id: "lifecycle-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "lifecycle-job",
+              state: "queued",
+              created_at_ms: 10,
+              updated_at_ms: 11,
+            },
+          ],
+        });
+      }
+      return durableApiFallback(path, init, callTarget);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("show the real lifecycle");
+    window.dispatchEvent(new Event("pageshow"));
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-generation-status']").text()).toBe("NEXT UP");
+
+    activityItems = [
+      {
+        id: "lifecycle-job",
+        kind: "generation",
+        phase: "preparing",
+        model: model.name,
+        created_at_unix_ms: 10,
+        updated_at_unix_ms: 12,
+        preparation_progress: {
+          component: "Opening MiniMax H3 checkpoints",
+          bytes_done: 0,
+          bytes_total: 0,
+        },
+        can_cancel: true,
+      },
+    ];
+    window.dispatchEvent(new Event("pageshow"));
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-generation-status']").text()).toBe(
+      "PREPARING · OPENING MINIMAX H3 CHECKPOINTS",
+    );
+    expect(wrapper.get(".mobile-generation-job").classes()).toContain(
+      "mobile-generation-job--detailed-status",
+    );
+
+    activityItems = [
+      {
+        id: "lifecycle-job",
+        kind: "generation",
+        phase: "running",
+        model: model.name,
+        stage: "Encoding video",
+        created_at_unix_ms: 10,
+        updated_at_unix_ms: 12,
+        can_cancel: true,
+      },
+    ];
+    window.dispatchEvent(new Event("pageshow"));
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-generation-status']").text()).toBe("ENCODING VIDEO");
+    expect(wrapper.get(".mobile-generation-job").classes()).not.toContain(
+      "mobile-generation-job--detailed-status",
+    );
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Encoding video");
+    expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("1 active");
+  });
+
   it("confirms and tracks the exact model download when a pinned v2 host is missing it", async () => {
     let installed = false;
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {

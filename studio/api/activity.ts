@@ -21,6 +21,19 @@ export interface ActiveWorkItem {
   can_cancel: boolean;
 }
 
+/**
+ * Human-readable lifecycle detail from the host's active-work authority.
+ * Keep this shared so a job cannot say "Encoding" under Machines while the
+ * same snapshot is reduced to a generic phase on Create.
+ */
+export function activeWorkPhaseLabel(row: ActiveWorkItem): string {
+  if (row.phase === "preparing" && row.preparation_progress?.component) {
+    return `Preparing · ${row.preparation_progress.component}`;
+  }
+  if (row.stage?.trim()) return row.stage.trim();
+  return row.phase.replaceAll("_", " ");
+}
+
 export interface ActiveWorkSnapshot {
   instance_id: string;
   observed_at_unix_ms: number;

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import type { FleetActiveWork } from "@studio/api/activity";
+import {
+  activeWorkPhaseLabel,
+  type FleetActiveWork,
+} from "@studio/api/activity";
 import { resolveSwipeAxis, type SwipePhase } from "@studio/lib/swipeAction";
 
 const props = withDefaults(
@@ -94,14 +97,6 @@ function progress(row: FleetActiveWork): number | null {
     Math.min(100, Math.round((row.current / row.total) * 100)),
   );
 }
-
-function phase(row: FleetActiveWork): string {
-  if (row.phase === "preparing" && row.preparation_progress?.component) {
-    return `Preparing · ${row.preparation_progress.component}`;
-  }
-  if (row.stage) return row.stage;
-  return row.phase.replaceAll("_", " ");
-}
 </script>
 
 <template>
@@ -146,7 +141,7 @@ function phase(row: FleetActiveWork): string {
         <span class="live-activity-copy">
           <strong>{{ title(row) }}</strong>
           <span>
-            {{ row.hostLabel }} · {{ phase(row) }}
+            {{ row.hostLabel }} · {{ activeWorkPhaseLabel(row) }}
             <template v-if="progress(row) !== null">
               · {{ progress(row) }}%</template
             >
@@ -189,6 +184,8 @@ function phase(row: FleetActiveWork): string {
   z-index: 1;
   display: flex;
   width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   align-items: center;
   text-align: left;
   gap: 9px;
@@ -248,6 +245,7 @@ function phase(row: FleetActiveWork): string {
 }
 .live-activity-copy {
   display: grid;
+  flex: 1;
   min-width: 0;
   gap: 2px;
 }
@@ -259,9 +257,12 @@ function phase(row: FleetActiveWork): string {
   white-space: nowrap;
 }
 .live-activity-copy span {
+  overflow: hidden;
   color: var(--ink-3);
   font-size: 11px;
+  text-overflow: ellipsis;
   text-transform: capitalize;
+  white-space: nowrap;
 }
 .live-activity-list--compact .live-activity-surface {
   min-height: 38px;

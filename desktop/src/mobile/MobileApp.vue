@@ -159,6 +159,7 @@ import {
   resolveQueueWait,
 } from "@studio/lib/queuePosition";
 import {
+  activeWorkPhaseLabel,
   mergeFleetActivity,
   listActiveWork,
   reconcileActivityHost,
@@ -546,6 +547,8 @@ type ActivityRow =
       queueState: string | null;
       blockedReason: string | null;
       preparation: Extract<ActivityJobVM, { kind: "print" }>["preparation"];
+      /** Matching fresh `/api/activity` lifecycle, when the host has one. */
+      live: FleetActiveWork | null;
       sequence: null;
     }
   | { key: string; print: null; sequence: Extract<ActivityJobVM, { kind: "sequence" }> };
@@ -2383,9 +2386,36 @@ const queueStatusIndex = computed(() =>
     })),
   ),
 );
+const liveGenerationActivityIndex = computed(() => {
+  const index = new Map<string, FleetActiveWork>();
+  for (const row of mergeFleetActivity(Object.values(liveActivityHosts.value))) {
+    if (row.kind === "generation" && !row.stale) index.set(row.key, row);
+  }
+  return index;
+});
+
+function liveGenerationActivityFor(job: Job): FleetActiveWork | null {
+  const hostId = job.hostId ?? selectedHostId.value;
+  return job.id
+    ? (liveGenerationActivityIndex.value.get(`${hostId}:generation:${job.id}`) ?? null)
+    : null;
+}
+
+function mobilePrintPhase(job: Job, live: FleetActiveWork | null): PrintActivityVM["phase"] {
+  if (live) {
+    if (live.phase === "paused") return "paused";
+    if (live.phase === "queued" || live.phase === "preparing" || live.phase === "held") {
+      return "queued";
+    }
+    return "running";
+  }
+  return job.status === "queued" ? "queued" : "running";
+}
+
 const printActivity = computed<ActivityJobVM[]>(() => {
   const ordered = queuedJobs.value;
   return ordered.map((job) => {
+    const live = liveGenerationActivityFor(job);
     const vm: PrintActivityVM = {
       kind: "print" as const,
       key: `print:${job.clientId}`,
@@ -2393,7 +2423,7 @@ const printActivity = computed<ActivityJobVM[]>(() => {
       hostLabel: job.hostLabel ?? "",
       model: job.model,
       prompt: job.prompt,
-      phase: job.status === "queued" ? ("queued" as const) : ("running" as const),
+      phase: mobilePrintPhase(job, live),
       progress: null,
       chain: null,
       actions: ["cancel" as const],
@@ -2434,6 +2464,7 @@ const activityRows = computed<ActivityRow[]>(() =>
             queueState: vm.queueState ?? null,
             blockedReason: vm.blockedReason ?? null,
             preparation: vm.preparation ?? null,
+            live: liveGenerationActivityFor(print),
           },
         ]
       : [];
@@ -2447,7 +2478,9 @@ function activityRowHostId(row: ActivityRow): string {
 }
 
 function activityRowIsQueued(row: ActivityRow): boolean {
-  return row.print ? row.print.status === "queued" : row.sequence?.state === "queued";
+  return row.print
+    ? mobilePrintPhase(row.print, row.live) === "queued"
+    : row.sequence?.state === "queued";
 }
 
 function canPauseActivityRow(row: ActivityRow): boolean {
@@ -2564,6 +2597,9 @@ function fleetQueueResumeNeeded(row: FleetActiveWork): boolean {
  */
 function activityRowStatus(row: ActivityRow): string {
   if (!row.print) return "";
+  if (row.live && row.live.phase !== "queued" && row.live.phase !== "paused") {
+    return activeWorkPhaseLabel(row.live).toLocaleUpperCase();
+  }
   if (row.print.status !== "queued") return jobStatusCode(row.print);
   if (durableHold(row.print)) return "HELD";
   if (activityRowQueuePaused(row)) return "QUEUE PAUSED";
@@ -2575,6 +2611,10 @@ function activityRowStatus(row: ActivityRow): string {
       preparation: row.preparation,
     }),
   );
+}
+
+function activityRowHasDetailedStatus(row: ActivityRow): boolean {
+  return row.print !== null && activityRowStatus(row).length > 18;
 }
 const sharedMobileActivity = computed(() => {
   const local = new Set(
@@ -2914,13 +2954,17 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
 const runningRowCount = computed(
   () =>
     activityRows.value.filter((row) =>
-      row.print ? row.print.status !== "queued" : row.sequence.state === "running",
+      row.print
+        ? mobilePrintPhase(row.print, row.live) === "running"
+        : row.sequence.state === "running",
     ).length,
 );
 const waitingRowCount = computed(
   () =>
     activityRows.value.filter((row) =>
-      row.print ? row.print.status === "queued" : row.sequence.state === "queued",
+      row.print
+        ? mobilePrintPhase(row.print, row.live) !== "running"
+        : row.sequence.state === "queued",
     ).length,
 );
 const activityCounts = computed(() => ({
@@ -3109,6 +3153,10 @@ const generationStatus = computed(() => {
   }
   const active = activeGeneration.value;
   if (!active) return progress.value;
+  const live = liveGenerationActivityFor(active);
+  if (live && live.phase !== "queued" && live.phase !== "paused") {
+    return activeWorkPhaseLabel(live);
+  }
   switch (active.status) {
     case "queued": {
       if (active.stage) return active.stage;
@@ -11861,6 +11909,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   >
                     <div
                       class="mobile-generation-job"
+                      :class="{
+                        'mobile-generation-job--detailed-status': activityRowHasDetailedStatus(
+                          entry.local,
+                        ),
+                      }"
                       role="button"
                       tabindex="0"
                       @click="

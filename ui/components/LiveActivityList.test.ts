@@ -62,4 +62,29 @@ describe("LiveActivityList swipe actions", () => {
     expect(vertical.defaultPrevented).toBe(false);
     expect(item.classes()).not.toContain("live-activity-row--actions-open");
   });
+
+  it("contains a long preparation status inside the available phone row", () => {
+    const wrapper = mount(LiveActivityList, {
+      props: {
+        rows: [
+          {
+            ...row,
+            phase: "preparing",
+            preparation_progress: {
+              component: "Opening MiniMax H3 checkpoints",
+              bytes_done: 0,
+              bytes_total: 0,
+            },
+          },
+        ],
+      },
+    });
+    const detail = wrapper.get(".live-activity-copy > span");
+    expect(detail.text()).toContain(
+      "Preparing · Opening MiniMax H3 checkpoints",
+    );
+    expect(wrapper.get(".live-activity-surface").classes()).toContain(
+      "live-activity-surface",
+    );
+  });
 });
