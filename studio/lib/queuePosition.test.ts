@@ -257,6 +257,7 @@ describe("blockedReasonLabel", () => {
 
   it("treats every ordinary planner wait as bookkeeping, not a fault", () => {
     for (const reason of [
+      "no_schedulable_device",
       "no_idle_device",
       "lower_priority_opening",
       "warm_wait",
@@ -383,10 +384,13 @@ describe("resolveQueueWait", () => {
     expect(queueWaitCode(wait)).toBe("WAITING FOR MEMORY");
   });
 
-  it("lets a benign reason fall through to the position", () => {
-    expect(
-      resolveQueueWait({ position: 4, blockedReason: "no_idle_device" }),
-    ).toEqual({ kind: "position", position: 4 });
+  it("lets transient scheduler reasons fall through to the position", () => {
+    for (const blockedReason of ["no_idle_device", "no_schedulable_device"]) {
+      expect(resolveQueueWait({ position: 4, blockedReason })).toEqual({
+        kind: "position",
+        position: 4,
+      });
+    }
   });
 });
 

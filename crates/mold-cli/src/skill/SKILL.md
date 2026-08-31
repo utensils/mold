@@ -594,10 +594,10 @@ The `STATE` column resolves through `mold_core::queue_wait`, the Rust twin of
 `studio/lib/queuePosition.ts`: a running row counts denoise steps from
 `GET /api/queue/{id}/preview`, position 0 is `Next up`, everyone behind is
 `#N in line`, and only an ACTIONABLE `QueueBlockedReason` replaces the
-position — `no_idle_device`, `warm_wait`, `lower_priority_opening`, and
-`dependency_wait` are ordinary serialization and fall through. A reason this
-build has never heard of reads `Waiting on the host`, never a raw underscored
-identifier.
+position — `no_schedulable_device`, `no_idle_device`, `warm_wait`,
+`lower_priority_opening`, and `dependency_wait` are ordinary serialization and
+fall through. A reason this build has never heard of reads `Waiting on the
+host`, never a raw underscored identifier.
 
 Every operator action walks the durable continuation cursor
 (`MoldClient::list_queue_all`), never one page: `GET /api/queue` is bounded by

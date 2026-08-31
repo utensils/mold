@@ -745,13 +745,7 @@ fn queue_plan_detail(work: &mold_core::QueueWorkItem) -> String {
         parts.push(format!("~{}s", finish.saturating_sub(now).div_ceil(1000)));
     }
     parts.push(format!("{} confidence", work.estimate_confidence));
-    if let Some(reason) = work
-        .blocked_reason
-        .as_ref()
-        .map(mold_core::QueueBlockedReason::as_str)
-        .or(work.assignment_reason.as_deref())
-        .or(work.reason.as_deref())
-    {
+    if let Some(reason) = mold_core::queue_wait::queue_work_item_reason(work) {
         parts.push(reason.replace('_', " "));
     }
     parts.join(" · ")
@@ -1232,6 +1226,18 @@ mod tests {
         assert!(detail.contains('~'));
         assert!(detail.contains("medium confidence"));
         assert!(detail.contains("insufficient vram"));
+    }
+
+    #[test]
+    fn queue_plan_detail_omits_benign_planner_reasons() {
+        let detail = queue_plan_detail(&mold_core::QueueWorkItem {
+            activity_phase: mold_core::QueueActivityPhase::Queued,
+            blocked_reason: Some(mold_core::QueueBlockedReason::NoSchedulableDevice),
+            ..Default::default()
+        });
+
+        assert!(detail.starts_with("queued"));
+        assert!(!detail.contains("schedulable"));
     }
 
     #[test]

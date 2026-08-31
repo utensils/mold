@@ -7,11 +7,14 @@
 //! different ways is exactly the defect that policy exists to prevent.
 //!
 //! The load-bearing half is [`is_benign_queue_reason`]. A one-GPU host reports
-//! `no_idle_device` for every job behind the running one, `warm_wait` while it
-//! holds a slot for a warm device, and `lower_priority_opening` when
-//! higher-priority work took the opening this pass
-//! (`mold-scheduler/src/planner.rs`). Those are ordinary serialization, not
-//! faults, so a row carrying one keeps counting its place in line.
+//! `no_idle_device` for every job behind the running one, while an execution
+//! plan that is temporarily empty as active work owns resources reports
+//! `no_schedulable_device`. The coordinator deliberately keeps both states
+//! queued because the next planning pass can admit them. `warm_wait` holds a
+//! slot for a warm device, and `lower_priority_opening` means higher-priority
+//! work took the opening this pass (`mold-scheduler/src/planner.rs`). Those are
+//! ordinary serialization, not faults, so a row carrying one keeps counting
+//! its place in line.
 
 use crate::types::{QueueBlockedReason, QueuePlan, QueueWorkItem};
 
@@ -80,7 +83,7 @@ fn known_copy(reason: &QueueBlockedReason) -> Option<Option<&'static str>> {
         QueueBlockedReason::QueuePaused => Some("Queue paused"),
         QueueBlockedReason::MaintenanceMode => Some("Host in maintenance"),
         QueueBlockedReason::Cancelling => Some("Cancelling"),
-        QueueBlockedReason::NoSchedulableDevice => Some("No usable device"),
+        QueueBlockedReason::NoSchedulableDevice => None,
         QueueBlockedReason::NoIdleDevice => None,
         QueueBlockedReason::LowerPriorityOpening => None,
         QueueBlockedReason::Unknown(_) => return None,
@@ -116,6 +119,25 @@ pub fn blocked_reason_label(reason: Option<&QueueBlockedReason>) -> Option<Strin
     Some(match known_copy(reason?) {
         Some(Some(copy)) => copy.to_string(),
         _ => UNKNOWN_REASON_LABEL.to_string(),
+    })
+}
+
+/// Raw reason code for scheduler-plan detail surfaces, after applying the
+/// shared benign-reason policy. Typed blocking state is authoritative;
+/// assignment rationale remains useful when the typed block is ordinary queue
+/// bookkeeping, and the legacy alias is parsed before it is allowed through.
+pub fn queue_work_item_reason(work: &QueueWorkItem) -> Option<&str> {
+    if let Some(blocked) = work.blocked_reason.as_ref() {
+        if !is_benign_queue_reason(Some(blocked)) {
+            return Some(blocked.as_str());
+        }
+    }
+    if let Some(assignment) = work.assignment_reason.as_deref() {
+        return Some(assignment);
+    }
+    work.reason.as_deref().filter(|reason| {
+        let parsed = QueueBlockedReason::parse(reason);
+        !is_benign_queue_reason(Some(&parsed))
     })
 }
 
@@ -380,6 +402,7 @@ mod tests {
     #[test]
     fn ordinary_serialization_on_a_busy_host_keeps_the_position() {
         for benign in [
+            QueueBlockedReason::NoSchedulableDevice,
             QueueBlockedReason::NoIdleDevice,
             QueueBlockedReason::LowerPriorityOpening,
             QueueBlockedReason::WarmWait,
@@ -392,6 +415,25 @@ mod tests {
                 "{benign:?} must fall through to the position"
             );
         }
+    }
+
+    #[test]
+    fn plan_detail_reason_uses_the_same_benign_policy() {
+        let benign = QueueWorkItem {
+            blocked_reason: Some(QueueBlockedReason::NoSchedulableDevice),
+            reason: Some("no_schedulable_device".into()),
+            ..Default::default()
+        };
+        assert_eq!(queue_work_item_reason(&benign), None);
+
+        let actionable = QueueWorkItem {
+            blocked_reason: Some(QueueBlockedReason::InsufficientVram),
+            ..Default::default()
+        };
+        assert_eq!(
+            queue_work_item_reason(&actionable),
+            Some("insufficient_vram")
+        );
     }
 
     #[test]

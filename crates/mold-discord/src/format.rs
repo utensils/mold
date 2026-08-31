@@ -440,7 +440,11 @@ pub fn format_server_status_pages(
             .map(|plan| {
                 plan.work_items
                     .iter()
-                    .filter(|work| work.blocked_reason.is_some())
+                    .filter(|work| {
+                        work.blocked_reason.as_ref().is_some_and(|reason| {
+                            !mold_core::queue_wait::is_benign_queue_reason(Some(reason))
+                        })
+                    })
                     .count()
             })
             .unwrap_or(0);
@@ -502,11 +506,7 @@ pub fn format_server_status_pages(
                         .estimated_finish_unix_ms
                         .map(|value| value.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
-                    let reason = work
-                        .blocked_reason
-                        .as_ref()
-                        .map(mold_core::QueueBlockedReason::as_str)
-                        .or(work.assignment_reason.as_deref())
+                    let reason = mold_core::queue_wait::queue_work_item_reason(work)
                         .unwrap_or("none");
                     let preparation = work
                         .preparation_label()
@@ -1594,6 +1594,13 @@ mod tests {
                         estimate_confidence: mold_core::QueueEstimateConfidence::Low,
                         ..Default::default()
                     },
+                    mold_core::QueueWorkItem {
+                        work_id: "ordinary-wait".into(),
+                        activity_phase: mold_core::QueueActivityPhase::Queued,
+                        blocked_reason: Some(mold_core::QueueBlockedReason::NoSchedulableDevice),
+                        estimate_confidence: mold_core::QueueEstimateConfidence::Low,
+                        ..Default::default()
+                    },
                 ],
                 ..Default::default()
             }),
@@ -1606,11 +1613,12 @@ mod tests {
             .map(|(name, value, _)| format!("{name}: {value}"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(fields.contains("2 planned · 1 blocked"));
+        assert!(fields.contains("3 planned · 1 blocked"));
         assert!(fields.contains("cuda:stable-a/0"));
         assert!(fields.contains("high confidence"));
         assert!(fields.contains("warm_model"));
         assert!(fields.contains("insufficient_vram"));
+        assert!(!fields.contains("no_schedulable_device"));
     }
 
     #[test]
