@@ -1406,7 +1406,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 32);
+        assert_eq!(SCHEMA_VERSION, 33);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1560,7 +1560,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 32);
+        assert_eq!(SCHEMA_VERSION, 33);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1697,7 +1697,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 32);
+        assert_eq!(SCHEMA_VERSION, 33);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1959,7 +1959,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 32);
+        assert_eq!(SCHEMA_VERSION, 33);
     }
 
     #[test]
@@ -2445,7 +2445,7 @@ mod v32_tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 32);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(
             conn.query_row(
                 "SELECT explicitly_paused FROM generation_queue WHERE id = 'paused'",
