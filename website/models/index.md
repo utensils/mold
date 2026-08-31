@@ -170,8 +170,9 @@ All image families and `LTX Video` run on CUDA, Apple Metal, and CPU. LTX-2 /
 LTX-2.3 is performance-qualified on CUDA and Apple Metal (measured on the 19B
 and 22B distilled FP8 tiers; Metal is slower than a comparable CUDA card).
 LTX-2.5's compact distilled INT8 ConvRot split pack is qualified on Apple
-Metal; its BF16 route remains operator-deferred, and CUDA qualification is
-being completed separately. The LTX-2 family CPU path stays
+Metal; Q3_K_M, Q4_K_M, and Q6_K GGUF are also Metal-qualified, while its BF16
+route remains operator-deferred. CUDA has a separate completed qualification
+campaign. The LTX-2 family CPU path stays
 correctness-oriented and can be extremely slow. Wan is
 performance-qualified on CUDA; its CPU and Apple
 Metal paths are correctness-oriented (fp8-scaled Wan checkpoints stay

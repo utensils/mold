@@ -40,10 +40,11 @@ mold run ltx-2.5-22b-distilled:int8-conv \
 ```
 
 The compact LTX-2.5 INT8 ConvRot split pack is the recommended path on Apple
-Metal, where it is qualified; on CUDA it is implemented and runs, but its
-qualification campaign is still pending (see `docs/ltx-2.5.md`). It is gated on Hugging Face and includes the matching
-Gemma 4 encoder, audio/video VAEs, duration head, and latent upscalers. On CUDA
-its blocks stay resident in packed W8A8 form and execute a native INT8 GEMM.
+Metal, where it is qualified. CUDA has also completed its separate NVIDIA
+qualification campaign. The pack is gated on Hugging Face and includes the
+matching Gemma 4 encoder, audio/video VAEs, duration head, and latent
+upscalers. On CUDA its blocks stay resident in packed W8A8 form and execute a
+native INT8 GEMM.
 
 Seven pinned distilled GGUF tiers run natively beside it and are the smaller
 option on a 24 GB card — `ltx-2.5-22b-distilled` in tags `q3-k-s`, `q3`,
@@ -53,6 +54,18 @@ resident:
 ```bash
 mold run ltx-2.5-22b-distilled:q4 "a cat walks through autumn leaves" --frames 97
 ```
+
+On Apple Metal, these GGUF tiers retain only the packed transformer blocks
+that fit beyond the live unified-memory safety floor. Remaining blocks stream
+one tensor at a time from the checkpoint with bounded synchronization, so a
+smaller-memory Mac trades disk traffic and speed for a bounded working set.
+If even the minimum streaming working set would cross the live macOS safety
+floor, Mold refuses the request before transformer allocation with advice to
+free memory or reduce the request shape.
+Q3_K_M, Q4_K_M, and Q6_K are hardware-qualified on a 48 GiB Apple M4 Max at
+512x512, 9 frames, and 8 steps with visual prompt-fidelity inspection. Q3_K_M
+also completed a 97-frame MP4. The K_S, Q5_K_M, and Q8_0 tiers remain runnable
+but are not claimed by that Metal qualification campaign.
 
 See [LTX Video](/models/ltx2) for per-tier download sizes, qualified workflows,
 and the BF16 packs, whose execution remains operator-deferred on Metal.

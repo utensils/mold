@@ -72,6 +72,23 @@ but remains slower than a comparable CUDA card; streamed FP8 widening trades
 speed for fitting a 19B–22B model in unified memory. CPU exists for
 correctness-oriented native coverage and can be extremely slow.
 
+LTX-2.5 GGUF on Metal keeps only the packed transformer blocks that fit after
+preserving a live macOS safety floor. Overflow blocks stay in the GGUF file and
+are read one tensor at a time; bounded Metal command-buffer fences release each
+streaming window before more temporary weights can accumulate. If memory
+pressure changes during loading, Mold demotes resident blocks toward full disk
+streaming instead of retaining the original split. This does not change CUDA's
+residency or synchronization cadence. If the fixed weights, request
+activations, runtime headroom, and one streamed block cannot fit without
+crossing the live macOS floor, Mold fails before transformer allocation.
+
+Measured on a 48 GiB Apple M4 Max at 512x512, 9 frames, and 8 steps, whole-
+process RSS peaked at 13.14 GiB for Q3_K_M, 13.53 GiB for Q4_K_M, and 13.95 GiB
+for Q6_K. The compact INT8 ConvRot route peaked at 19.43 GiB under the same
+request. All four completed without the memory guard firing. These are
+single-host unified-memory measurements, not Metal-only VRAM figures or a
+promise for untested tiers.
+
 ### Offloading
 
 `--offload` uses mold-owned block streaming for FLUX, Flux.2, Z-Image,

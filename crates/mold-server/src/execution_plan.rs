@@ -2769,6 +2769,23 @@ struct PlanContext<'a> {
     equivalence_cache_only: bool,
 }
 
+fn should_auto_park_text_encoder(
+    supports_text_encoder_cpu: bool,
+    under_memory_pressure: bool,
+    pending_pushes_eager_over_budget: bool,
+    backend: GpuBackend,
+    family: &str,
+) -> bool {
+    let is_ltx2 = matches!(family, "ltx2" | "ltx-2" | "ltx2.3");
+    supports_text_encoder_cpu
+        && (under_memory_pressure || pending_pushes_eager_over_budget)
+        // CPU and Metal allocations consume the same unified-memory pool.
+        // Parking LTX-2 Gemma on the CPU therefore saves no capacity, while
+        // its packed ConvRot forward is substantially slower there. The
+        // prompt encoder is dropped before the transformer is materialized.
+        && !(backend == GpuBackend::Metal && is_ltx2)
+}
+
 fn build_plan(
     context: &PlanContext<'_>,
     device: &DeviceFact,
@@ -2852,8 +2869,13 @@ fn build_plan(
         .eager_peak_memory_bytes
         .saturating_add(pending_encoder_bytes)
         > device.available_vram_bytes.saturating_mul(9) / 10;
-    let auto_cpu_text = context.capabilities.supports_text_encoder_cpu
-        && (initial_memory.under_memory_pressure || pending_pushes_eager_over_budget);
+    let auto_cpu_text = should_auto_park_text_encoder(
+        context.capabilities.supports_text_encoder_cpu,
+        initial_memory.under_memory_pressure,
+        pending_pushes_eager_over_budget,
+        device.backend,
+        context.family,
+    );
 
     let mut placements = context
         .artifacts
@@ -5074,6 +5096,31 @@ mod tests {
                 available_vram_bytes: *bytes,
             })
             .collect()
+    }
+
+    #[test]
+    fn ltx2_metal_keeps_auto_gemma_on_unified_gpu_memory() {
+        assert!(!should_auto_park_text_encoder(
+            true,
+            true,
+            false,
+            GpuBackend::Metal,
+            "ltx2",
+        ));
+        assert!(should_auto_park_text_encoder(
+            true,
+            true,
+            false,
+            GpuBackend::Cuda,
+            "ltx2",
+        ));
+        assert!(should_auto_park_text_encoder(
+            true,
+            true,
+            false,
+            GpuBackend::Metal,
+            "flux2",
+        ));
     }
 
     /// A CPU-parked text encoder is dropped before the transformer loads, so

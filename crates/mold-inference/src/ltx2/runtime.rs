@@ -7166,9 +7166,38 @@ fn load_ltx2_av_transformer_with_loras_inner(
     } else {
         vb.rename_f(remap_ltx2_transformer_key)
     };
+    let accelerator = Ltx2Accelerator::of(device);
+    // Metal's unified-memory sample is a hard safety boundary, including for
+    // explicit full streaming. Streaming still needs every non-block tensor,
+    // the request activations, runtime headroom, and one materialized block at
+    // the same time; if that minimum crosses the macOS reserve, allocating any
+    // part of the transformer would defeat the guard this path promises.
+    let metal_gguf_guard = if accelerator == Ltx2Accelerator::Metal && checkpoint_is_gguf {
+        let sampled_live_budget = crate::device::available_system_memory_bytes()
+            .map(crate::device::metal_live_allocation_budget)
+            .unwrap_or(0);
+        let live_budget = ltx2_metal_live_budget(sampled_live_budget, vram_budget_override);
+        let weights = weight_index
+            .as_ref()
+            .context("LTX-2 GGUF header is required to enforce the Metal memory safety floor")
+            .and_then(|index| {
+                ltx2_transformer_weight_sizes(
+                    index,
+                    config.num_layers,
+                    compute_dtype(device),
+                    Ltx2ResidentWeightForm::Packed,
+                )
+            })?;
+        let minimum = ltx2_adaptive_transformer_plan(plan, stage, &weights, 0).peak_bytes();
+        ensure_ltx2_streaming_minimum_fits(accelerator, live_budget, minimum)?;
+        Some((live_budget, weights))
+    } else {
+        None
+    };
     if select_ltx2_transformer_residency_mode(
-        Ltx2Accelerator::of(device),
+        accelerator,
         checkpoint_is_fp8,
+        checkpoint_is_gguf,
         force_eager,
         force_streaming,
         false,
@@ -7177,28 +7206,38 @@ fn load_ltx2_av_transformer_with_loras_inner(
     {
         log_ltx2_residency_mode(provenance::RESIDENCY_MODE_EAGER, config.num_layers, 0);
         Ok(Ltx2AvTransformer3DModel::new(&config, vb, lora_registry)?)
-    } else if device.is_cuda() && !force_streaming {
+    } else if (device.is_cuda() || (device.is_metal() && checkpoint_is_gguf)) && !force_streaming {
         let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
-        let free_vram = match vram_budget_override {
-            Some(budget) => budget,
-            None => usable_free_vram_bytes(gpu_ordinal).unwrap_or(0),
+        let free_vram = match metal_gguf_guard.as_ref() {
+            Some((budget, _)) => *budget,
+            None => match vram_budget_override {
+                Some(budget) => budget,
+                None => usable_free_vram_bytes(gpu_ordinal).unwrap_or(0),
+            },
         };
-        let weights = weight_index
+        let weights = metal_gguf_guard
             .as_ref()
-            .context("LTX-2 checkpoint header is required for adaptive residency")
-            .and_then(|index| {
-                ltx2_transformer_weight_sizes(
-                    index,
-                    config.num_layers,
-                    compute_dtype(device),
-                    Ltx2ResidentWeightForm::for_convrot_backend(device.is_cuda()),
-                )
+            .map(|(_, weights)| weights.clone())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                weight_index
+                    .as_ref()
+                    .context("LTX-2 checkpoint header is required for adaptive residency")
+                    .and_then(|index| {
+                        ltx2_transformer_weight_sizes(
+                            index,
+                            config.num_layers,
+                            compute_dtype(device),
+                            Ltx2ResidentWeightForm::for_convrot_backend(device.is_cuda()),
+                        )
+                    })
             });
         match weights {
             Ok(weights)
                 if select_ltx2_transformer_residency_mode(
                     Ltx2Accelerator::of(device),
                     checkpoint_is_fp8,
+                    checkpoint_is_gguf,
                     force_eager,
                     force_streaming,
                     weights.blocks.iter().any(|size| *size > 0),
@@ -7242,10 +7281,11 @@ fn load_ltx2_av_transformer_with_loras_inner(
                             break Ok(transformer);
                         }
                         Err(err)
-                            if device.is_cuda()
-                                && residency_plan.resident_count() > 0
-                                && !ltx2_error_is_fatal_cuda(&err)
-                                && is_out_of_memory_error(&err) =>
+                            if residency_plan.resident_count() > 0
+                                && ltx2_adaptive_allocation_is_recoverable_oom(
+                                    Ltx2Accelerator::of(device),
+                                    &err,
+                                ) =>
                         {
                             emit_info(
                                 progress,
@@ -7254,7 +7294,11 @@ fn load_ltx2_av_transformer_with_loras_inner(
                                     residency_plan.resident_count()
                                 ),
                             );
-                            try_synchronize_device(gpu_ordinal)?;
+                            if device.is_cuda() {
+                                try_synchronize_device(gpu_ordinal)?;
+                            } else {
+                                ltx2_metal_oom_retry_sync_result(&err, device.synchronize())?;
+                            }
                             if !residency_plan.demote_largest_resident(&weights.blocks) {
                                 return Err(err.into());
                             }
@@ -7433,6 +7477,58 @@ fn ltx2_error_is_fatal_cuda(err: &impl std::fmt::Display) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+/// Whether adaptive block materialization may safely retry with fewer
+/// resident blocks. CUDA retains its fatal-context exclusions; Metal has no
+/// separate context-liveness taxonomy, so only its explicit OOM is retried.
+fn ltx2_adaptive_allocation_is_recoverable_oom(
+    accelerator: Ltx2Accelerator,
+    err: &impl std::fmt::Display,
+) -> bool {
+    match accelerator {
+        Ltx2Accelerator::Cuda => !ltx2_error_is_fatal_cuda(err) && is_out_of_memory_error(err),
+        Ltx2Accelerator::Metal => is_out_of_memory_error(err),
+        Ltx2Accelerator::Other => false,
+    }
+}
+
+/// Enforce Metal's live unified-memory reserve before allocating even the
+/// smallest viable streaming transformer. CUDA has its own scheduler/VRAM
+/// authority and deliberately retains its existing behavior.
+fn ensure_ltx2_streaming_minimum_fits(
+    accelerator: Ltx2Accelerator,
+    available_bytes: u64,
+    minimum_bytes: u64,
+) -> Result<()> {
+    if accelerator == Ltx2Accelerator::Metal && minimum_bytes > available_bytes {
+        anyhow::bail!(
+            "LTX-2 Metal GGUF requires at least {} of unified memory for its minimum streaming working set, but only {} is available after preserving the macOS safety floor; close memory-heavy applications or reduce the request dimensions/frame count, then retry",
+            fmt_gb(minimum_bytes),
+            fmt_gb(available_bytes),
+        );
+    }
+    Ok(())
+}
+
+fn ltx2_metal_live_budget(sampled_bytes: u64, override_bytes: Option<u64>) -> u64 {
+    override_bytes
+        .map(|override_bytes| override_bytes.min(sampled_bytes))
+        .unwrap_or(sampled_bytes)
+}
+
+/// A failed Metal fence after allocation OOM means the temporary resources
+/// are not proven released. Retrying would compound pressure, so preserve both
+/// errors and fail closed.
+fn ltx2_metal_oom_retry_sync_result<E: std::fmt::Display>(
+    allocation_oom: &impl std::fmt::Display,
+    sync_result: std::result::Result<(), E>,
+) -> Result<()> {
+    sync_result.map_err(|sync_err| {
+        anyhow::anyhow!(
+            "LTX-2 Metal could not release temporary allocations after {allocation_oom}: {sync_err}"
+        )
+    })
+}
+
 /// Whether a denoise-stage failure is a recoverable OOM.
 ///
 /// A fatal context error wins over the OOM substrings — an illegal address can
@@ -7582,6 +7678,7 @@ fn ltx2_effective_force_streaming(
 fn select_ltx2_transformer_residency_mode(
     accelerator: Ltx2Accelerator,
     checkpoint_is_fp8: bool,
+    checkpoint_is_gguf: bool,
     force_eager: bool,
     force_streaming: bool,
     has_block_sizes: bool,
@@ -7602,11 +7699,14 @@ fn select_ltx2_transformer_residency_mode(
     {
         return Ltx2TransformerResidencyMode::Eager;
     }
-    // Only CUDA can page blocks against a measured free-VRAM budget.
-    if accelerator != Ltx2Accelerator::Cuda {
-        return Ltx2TransformerResidencyMode::Streaming;
-    }
-    if has_block_sizes && free_vram > 0 {
+    // CUDA pages every indexed checkpoint against measured free VRAM. Metal
+    // does the same only for GGUF: its QTensors stay compact in unified
+    // memory, so retaining the safe prefix avoids re-reading and rebuilding
+    // the full 12-24 GB transformer on every denoise pass. Dense/FP8 Metal
+    // keeps the measured streaming default.
+    let supports_adaptive = accelerator == Ltx2Accelerator::Cuda
+        || (accelerator == Ltx2Accelerator::Metal && checkpoint_is_gguf);
+    if supports_adaptive && has_block_sizes && free_vram > 0 {
         Ltx2TransformerResidencyMode::Adaptive
     } else {
         Ltx2TransformerResidencyMode::Streaming
@@ -10871,6 +10971,7 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
                 true,
                 24_000_000_000
             ),
@@ -10890,6 +10991,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Metal,
                 true,
+                false,
                 force_eager,
                 force_streaming,
                 true,
@@ -10916,6 +11018,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Metal,
                 false,
+                false,
                 true,
                 false,
                 true,
@@ -10929,6 +11032,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Other,
                 true,
+                false,
                 true,
                 false,
                 true,
@@ -10945,11 +11049,119 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 0
             ),
             super::Ltx2TransformerResidencyMode::Streaming,
             "Metal never reaches the CUDA adaptive plan"
         );
+    }
+
+    #[test]
+    fn ltx2_metal_gguf_defaults_to_safe_adaptive_residency() {
+        let mode = |force_streaming, has_block_sizes, available| {
+            super::select_ltx2_transformer_residency_mode(
+                super::Ltx2Accelerator::Metal,
+                false,
+                true,
+                false,
+                force_streaming,
+                has_block_sizes,
+                available,
+            )
+        };
+
+        assert_eq!(
+            mode(false, true, 40_000_000_000),
+            super::Ltx2TransformerResidencyMode::Adaptive,
+            "packed QTensors should be retained instead of rebuilt every denoise pass"
+        );
+        assert_eq!(
+            mode(true, true, 40_000_000_000),
+            super::Ltx2TransformerResidencyMode::Streaming
+        );
+        assert_eq!(
+            mode(false, false, 40_000_000_000),
+            super::Ltx2TransformerResidencyMode::Streaming
+        );
+        assert_eq!(
+            mode(false, true, 0),
+            super::Ltx2TransformerResidencyMode::Streaming
+        );
+    }
+
+    #[test]
+    fn metal_adaptive_load_oom_is_recoverable_without_changing_cuda_fault_rules() {
+        let metal_oom = "Insufficient Memory (kIOGPUCommandBufferCallbackErrorOutOfMemory)";
+        assert!(super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Metal,
+            &metal_oom,
+        ));
+        assert!(!super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Metal,
+            &"Metal kernel compilation failed",
+        ));
+        assert!(!super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Cuda,
+            &"CUDA_ERROR_ILLEGAL_ADDRESS followed by out of memory",
+        ));
+        assert!(super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Cuda,
+            &"CUDA_ERROR_OUT_OF_MEMORY",
+        ));
+        assert!(!super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Other,
+            &"out of memory",
+        ));
+    }
+
+    #[test]
+    fn metal_gguf_refuses_a_budget_below_the_full_streaming_minimum() {
+        let minimum = 12_000_000_000;
+        let zero =
+            super::ensure_ltx2_streaming_minimum_fits(super::Ltx2Accelerator::Metal, 0, minimum)
+                .unwrap_err()
+                .to_string();
+        assert!(zero.contains("macOS safety floor"));
+        assert!(zero.contains("requires at least"));
+
+        assert!(super::ensure_ltx2_streaming_minimum_fits(
+            super::Ltx2Accelerator::Metal,
+            minimum - 1,
+            minimum,
+        )
+        .is_err());
+        assert!(super::ensure_ltx2_streaming_minimum_fits(
+            super::Ltx2Accelerator::Metal,
+            minimum,
+            minimum,
+        )
+        .is_ok());
+        assert!(
+            super::ensure_ltx2_streaming_minimum_fits(super::Ltx2Accelerator::Cuda, 0, minimum,)
+                .is_ok(),
+            "the live unified-memory floor is Metal-only"
+        );
+    }
+
+    #[test]
+    fn metal_budget_override_can_only_reduce_the_live_sample() {
+        assert_eq!(super::ltx2_metal_live_budget(20_000, None), 20_000);
+        assert_eq!(super::ltx2_metal_live_budget(20_000, Some(12_000)), 12_000);
+        assert_eq!(super::ltx2_metal_live_budget(20_000, Some(30_000)), 20_000);
+    }
+
+    #[test]
+    fn metal_oom_retry_fails_closed_when_the_release_fence_fails() {
+        let err = super::ltx2_metal_oom_retry_sync_result(
+            &"Insufficient Memory",
+            Err(anyhow::anyhow!("command buffer fence failed")),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("command buffer fence failed"));
+        assert!(err.contains("Insufficient Memory"));
     }
 
     /// `MOLD_LTX2_FORCE_STREAMING` was read with `is_some()`, so `0` and
@@ -11002,6 +11214,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Cuda,
                 true,
+                false,
                 true,
                 true,
                 true,
@@ -11048,6 +11261,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Cuda,
                 true,
+                false,
                 true,
                 false,
                 true,
@@ -11058,6 +11272,7 @@ mod tests {
         assert_eq!(
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Cuda,
+                false,
                 false,
                 true,
                 false,
@@ -11070,6 +11285,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Other,
                 true,
+                false,
                 true,
                 false,
                 true,

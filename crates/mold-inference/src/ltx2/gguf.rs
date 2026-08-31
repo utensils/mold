@@ -665,7 +665,9 @@ mod tests {
             .to_vec1::<u32>()
             .unwrap()[0];
 
-        let device = if candle_core::utils::cuda_is_available() {
+        let device = if candle_core::utils::metal_is_available() {
+            Device::new_metal(0).unwrap()
+        } else if candle_core::utils::cuda_is_available() {
             Device::new_cuda(0).unwrap()
         } else {
             Device::Cpu

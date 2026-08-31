@@ -2000,6 +2000,19 @@ pub fn metal_unified_capacity_with_safety_floor(live_available_bytes: u64) -> u6
     })
 }
 
+/// Unified-memory bytes a streaming runtime may allocate from the current
+/// live sample while preserving the host safety floor.
+///
+/// Unlike [`metal_unified_capacity_with_safety_floor`], this is deliberately
+/// pressure-sensitive: adaptive residency uses it after prompt encoding, so a
+/// busy Mac retains fewer model blocks and streams the remainder instead of
+/// reclaiming the memory needed by the desktop and other applications.
+pub fn metal_live_allocation_budget(live_available_bytes: u64) -> u64 {
+    let total = total_system_memory_bytes().unwrap_or(live_available_bytes);
+    let safety_floor = total.saturating_mul(15).saturating_div(100).max(8 << 30);
+    live_available_bytes.min(total).saturating_sub(safety_floor)
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn total_system_memory_bytes() -> Option<u64> {
     None
@@ -3638,6 +3651,17 @@ mod tests {
             installed.saturating_sub(floor)
         );
         assert!(floor >= 8 << 30);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_metal_budget_preserves_the_floor_under_current_pressure() {
+        let installed = total_system_memory_bytes().expect("macOS reports installed RAM");
+        let floor = (installed.saturating_mul(15) / 100).max(8 << 30);
+        let live = installed.saturating_sub(4 << 30);
+        assert_eq!(metal_live_allocation_budget(live), live - floor);
+        assert_eq!(metal_live_allocation_budget(floor), 0);
+        assert_eq!(metal_live_allocation_budget(floor / 2), 0);
     }
 
     // --- should_use_gpu: Metal always GPU ---
