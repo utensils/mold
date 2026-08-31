@@ -565,6 +565,46 @@ fn parse_temporal_upscale(value: Option<Ltx2TemporalUpscaleArg>) -> Option<Ltx2T
     value.map(|Ltx2TemporalUpscaleArg::X2| Ltx2TemporalUpscale::X2)
 }
 
+/// The `mold run` 3-D flags, grouped so `run()` gains one parameter instead
+/// of five — the same reason `GuidanceFlags` below exists.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MeshFlags {
+    pub octree: Option<u32>,
+    pub threshold: Option<f32>,
+    pub target_faces: Option<u32>,
+    pub texture: bool,
+    pub texture_resolution: Option<u32>,
+}
+
+impl MeshFlags {
+    /// Build the wire options, or `None` when the user passed no 3-D flag at
+    /// all.
+    ///
+    /// An empty object must never reach the server: a non-mesh family REFUSES
+    /// a present `mesh` field rather than ignoring it, so materialising one
+    /// for every raster render would break every raster render.
+    pub(crate) fn into_options(self) -> Option<mold_core::MeshRequestOptions> {
+        if self.octree.is_none()
+            && self.threshold.is_none()
+            && self.target_faces.is_none()
+            && !self.texture
+            && self.texture_resolution.is_none()
+        {
+            return None;
+        }
+        Some(mold_core::MeshRequestOptions {
+            octree_resolution: self.octree,
+            threshold: self.threshold,
+            target_faces: self.target_faces,
+            // Only ever `Some(true)`: `--texture` is a flag, and sending
+            // `Some(false)` would be indistinguishable from the default while
+            // making the request look like it opted out of something.
+            texture: self.texture.then_some(true),
+            texture_resolution: self.texture_resolution,
+        })
+    }
+}
+
 /// Raw `--stg-scale` / `--stg-blocks` / … flags, grouped so `run` keeps one
 /// parameter per feature rather than five more positional arguments.
 #[derive(Debug, Default, Clone)]
@@ -911,6 +951,7 @@ pub async fn run(
     spatial_upscale: Option<Ltx2SpatialUpscaleArg>,
     temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
     guidance_flags: GuidanceFlags,
+    mesh_flags: MeshFlags,
     wan_flags: WanFlags,
     camera_control: Option<String>,
     host: Option<String>,
@@ -1533,6 +1574,7 @@ pub async fn run(
             spatial_upscale,
             temporal_upscale,
             guidance_overrides,
+            mesh: mesh_flags.into_options(),
             sample_shift: wan.sample_shift,
             distill_strength_high: wan.distill_strength_high,
             distill_strength_low: wan.distill_strength_low,
@@ -1783,6 +1825,51 @@ mod placement_flag_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mesh_flags_without_any_value_stay_absent() {
+        // Load-bearing: a raster family REFUSES a present `mesh` field, so
+        // materialising an empty one for every ordinary render would break
+        // every ordinary render.
+        assert_eq!(super::MeshFlags::default().into_options(), None);
+    }
+
+    #[test]
+    fn mesh_flags_carry_only_the_flags_that_were_passed() {
+        let options = super::MeshFlags {
+            octree: Some(320),
+            ..Default::default()
+        }
+        .into_options()
+        .expect("one flag is enough to make the field present");
+        assert_eq!(options.octree_resolution, Some(320));
+        assert_eq!(options.threshold, None);
+        assert_eq!(options.target_faces, None);
+        assert_eq!(options.texture, None);
+        assert_eq!(options.texture_resolution, None);
+    }
+
+    #[test]
+    fn the_texture_flag_is_only_ever_sent_as_true() {
+        // `--texture` is a switch. Sending `Some(false)` when it is unset
+        // would be indistinguishable from the default while making the
+        // request look like it deliberately opted out.
+        let off = super::MeshFlags {
+            octree: Some(256),
+            ..Default::default()
+        }
+        .into_options()
+        .unwrap();
+        assert_eq!(off.texture, None);
+
+        let on = super::MeshFlags {
+            texture: true,
+            ..Default::default()
+        }
+        .into_options()
+        .unwrap();
+        assert_eq!(on.texture, Some(true));
+    }
+
     use super::*;
     use crate::test_support::ENV_LOCK;
 
