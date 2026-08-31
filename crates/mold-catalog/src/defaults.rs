@@ -172,7 +172,7 @@ pub fn runtime_defaults_for_family(
             width: 512,
             height: 512,
             steps: 5,
-            guidance: 1.0,
+            guidance: 5.0,
             is_schnell: None,
             frames: None,
             fps: None,

@@ -4931,6 +4931,13 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
     // `height` record that conditioning size so catalog rows and profiles
     // have an honest number; `validation` refuses a client-supplied canvas
     // for the family rather than silently ignoring it.
+    //
+    // `guidance` is 5.0 everywhere, but it means two different things and the
+    // checkpoint decides which: the undistilled tier has no guidance
+    // embedding and spends it on a real classifier-free guided branch (two
+    // forward passes per step), while the distilled tiers feed it to
+    // `guidance_in` and run one pass. Upstream defaults to 5.0 for both
+    // (`comfy/model_base.py:2116`), which is why the number does not change.
     let defaults = |steps: u32, guidance: f64, cond: u32| ManifestDefaults {
         steps,
         guidance,
@@ -4961,7 +4968,7 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
                 gated: false,
                 sha256: Some("bdbcef30dd0149a281e17d5b5b1fdad1122c904e098a42f3100e04e03c247bc4"),
             }],
-            defaults: defaults(5, 1.0, 1022),
+            defaults: defaults(5, 5.0, 1022),
             hidden: false,
         },
         // 1.1B DiT, step-distilled.
@@ -4977,7 +4984,7 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
                 gated: false,
                 sha256: Some("5ee5a81e4df08a1c65b79910bf5b145a90376e526794f4607a4d5d068d62f269"),
             }],
-            defaults: defaults(5, 1.0, 512),
+            defaults: defaults(5, 5.0, 512),
             hidden: false,
         },
         // 1.1B DiT, undistilled: real CFG at guidance 5.0, 30 steps.

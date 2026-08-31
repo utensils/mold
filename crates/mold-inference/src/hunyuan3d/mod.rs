@@ -25,5 +25,6 @@
 pub mod dino2;
 pub mod glb;
 pub mod mesh;
+pub mod sampler;
 pub mod shape_vae;
 pub mod transformer;
