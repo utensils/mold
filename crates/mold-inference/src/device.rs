@@ -1382,6 +1382,18 @@ pub const WAN_MEASURED_SLOPE_NUMERATOR: u64 = 214;
 pub const WAN_MEASURED_SLOPE_DENOMINATOR: u64 = 100;
 /// Token-independent denoise workspace, fitted as the intercept of that pair.
 pub const WAN_FIXED_WORKSPACE_BYTES: u64 = 2301 * 1024 * 1024;
+/// Token-shaped BF16 buffers the cached branch holds beyond the uncached one,
+/// within a single trajectory's forward. See [`wan_step_cache_bytes`].
+const WAN_STEP_CACHE_FORWARD_BUFFERS: u64 = 4;
+
+/// Token-shaped BF16 buffers the *other* trajectory's cache retains across the
+/// denoise when CFG runs two of them: its `previous_first_block` and its `tail`.
+const WAN_STEP_CACHE_PERSISTENT_BUFFERS: u64 = 2;
+
+/// F32 chunk buffers live at once inside the distance reduction: the upcast
+/// previous slice and the difference taken against it.
+const WAN_STEP_CACHE_REDUCTION_LIVE_BUFFERS: u64 = 2;
+
 /// Extra device memory a CFG step holds beyond a single forward.
 pub const WAN_CFG_RESIDENT_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -1456,6 +1468,8 @@ pub fn wan_calibrated_activation_bytes(
     frames: u32,
     geometry: WanActivationGeometry,
     cfg: bool,
+    steps: u32,
+    distilled: bool,
 ) -> u64 {
     wan_calibrated_activation_bytes_for(
         width,
@@ -1463,6 +1477,8 @@ pub fn wan_calibrated_activation_bytes(
         frames,
         geometry,
         cfg,
+        steps,
+        distilled,
         wan_effective_attention_backend(),
     )
 }
@@ -1485,19 +1501,102 @@ pub fn wan_effective_attention_backend() -> crate::attention::AttentionBackend {
 
 /// [`wan_calibrated_activation_bytes`] against an explicit backend, so the two
 /// calibrations are testable without the process-frozen `MOLD_ATTN` cache.
+#[allow(clippy::too_many_arguments)]
 pub fn wan_calibrated_activation_bytes_for(
     width: u32,
     height: u32,
     frames: u32,
     geometry: WanActivationGeometry,
     cfg: bool,
+    steps: u32,
+    distilled: bool,
     backend: crate::attention::AttentionBackend,
 ) -> u64 {
     let (slope_num, slope_den, workspace) = wan_calibration_for(backend);
     let derived = wan_activation_budget_bytes_for(width, height, frames, geometry, backend);
     let transformer = derived.saturating_mul(slope_num) / slope_den;
-    let cfg = if cfg { WAN_CFG_RESIDENT_BYTES } else { 0 };
-    transformer.saturating_add(cfg).saturating_add(workspace)
+    let cfg_bytes = if cfg { WAN_CFG_RESIDENT_BYTES } else { 0 };
+    // The step cache is charged HERE, after the slope, beside the other exact
+    // terms — never inside `derived`. The slope is a fitted multiplier on the
+    // tensors a block materializes; these are a separate, exact allocation,
+    // and folding them into `derived` would inflate them 2.14x (math) or 2.92x
+    // (flash). The calibration test would still pass, because it prices a
+    // distilled 4-step tier where the charge is zero, so that error lands
+    // silently and parks too many blocks — giving back the speedup the cache
+    // exists to buy.
+    let step_cache = wan_step_cache_bytes(width, height, frames, geometry, cfg, steps, distilled);
+    transformer
+        .saturating_add(cfg_bytes)
+        .saturating_add(step_cache)
+        .saturating_add(workspace)
+}
+
+/// Device bytes engaging the step cache adds, or zero when it will not engage.
+///
+/// Exact, not fitted. Every buffer below is a `[1, T, dim]` BF16 tensor the
+/// cached branch of `wan::model::transformer::forward_with_rope_cached`
+/// (`transformer.rs:1883-1904`) holds beyond what the uncached branch holds,
+/// so the charge is a token count times a buffer count:
+///
+/// | Buffer | Site | Lifetime | Count |
+/// | --- | --- | --- | --- |
+/// | `entry` | `transformer.rs:1887` | this forward | 1 |
+/// | `first_block_residual` | `transformer.rs:1891` | becomes the next `previous_first_block` | 1 |
+/// | retained `tail` | `step_cache.rs` `record_tail` | across the denoise | 1 |
+/// | the new tail | `transformer.rs:1902` | overlaps the old one while it is assigned | 1 |
+/// | the other trajectory's `previous_first_block` + `tail` | — | across the denoise | 2 when CFG |
+///
+/// `hidden` is not charged: the uncached branch holds it too, so it is already
+/// in the derived budget. `entry` and `after_first` are `Arc` clones sharing
+/// storage with `hidden` — they allocate nothing but pin allocations alive,
+/// which is why each is counted once and not twice.
+///
+/// The two trajectories do not run concurrently — the conditional and
+/// unconditional forwards are separate calls with separate caches
+/// (`wan::pipeline`) — so CFG adds only the other trajectory's *persistent*
+/// pair, not a second copy of the transients.
+///
+/// Engagement is delegated to [`WanStepCachePolicy::resolve`], never
+/// re-derived. A copy of `steps >= 12 && !distilled` here is how the estimate
+/// and the engine drift into disagreeing about whether the cache is even on.
+pub fn wan_step_cache_bytes(
+    width: u32,
+    height: u32,
+    frames: u32,
+    geometry: WanActivationGeometry,
+    cfg: bool,
+    steps: u32,
+    distilled: bool,
+) -> u64 {
+    use crate::wan::step_cache::{WanStepCachePolicy, WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS};
+
+    let requested = crate::wan::step_cache::requested_threshold().unwrap_or(None);
+    let (policy, _) = WanStepCachePolicy::resolve(requested, steps, distilled);
+    if !policy.is_on() {
+        return 0;
+    }
+
+    let tokens = wan_token_count(width, height, frames, geometry);
+    let per_token = geometry.dim.saturating_mul(BF16_BYTES);
+    let buffers = WAN_STEP_CACHE_FORWARD_BUFFERS
+        + if cfg {
+            WAN_STEP_CACHE_PERSISTENT_BUFFERS
+        } else {
+            0
+        };
+    let retained = tokens.saturating_mul(per_token).saturating_mul(buffers);
+
+    // The distance reduction upcasts a bounded token slice to F32, twice
+    // (the previous residual and the difference against it). Bounded by the
+    // chunk width rather than the clip length, which is the whole reason the
+    // reduction is chunked — see `step_cache::WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS`.
+    let reduction = (WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS as u64)
+        .min(tokens)
+        .saturating_mul(geometry.dim)
+        .saturating_mul(F32_BYTES)
+        .saturating_mul(WAN_STEP_CACHE_REDUCTION_LIVE_BUFFERS);
+
+    retained.saturating_add(reduction)
 }
 
 /// Map a manifest family slug (e.g. `"flux"`, `"sdxl"`, `"qwen-image"`) to the
@@ -3235,8 +3334,15 @@ mod tests {
         ];
 
         for (backend, frames, measured_peak_mib) in fits {
-            let budget =
-                wan_calibrated_activation_bytes_for(832, 480, frames, a14b, false, backend);
+            // `steps: 4, distilled: true` is not a convenience for zeroing the
+            // step-cache charge -- it is what these renders were: the fits were
+            // measured on `wan22-t2v-a14b:q5`, the 4-step Lightning distill
+            // tier, which `WanStepCachePolicy::resolve` refuses on both counts.
+            // Pricing them any other way would compare the calibration against
+            // a render nobody measured.
+            let budget = wan_calibrated_activation_bytes_for(
+                832, 480, frames, a14b, false, 4, true, backend,
+            );
             let predicted_mib = budget / MIB + UMT5_FLOOR_MIB;
             let measured = measured_peak_mib as i64;
             let predicted = predicted_mib as i64;
@@ -3245,6 +3351,96 @@ mod tests {
                 "{backend:?} at {frames}f: predicted {predicted} MiB against a measured \
                  {measured} MiB — the calibration no longer reproduces its own fit"
             );
+        }
+    }
+
+    /// The step-cache charge is exact, and it lands AFTER the fitted slope.
+    ///
+    /// This is the test that catches the error the issue's own plan would have
+    /// produced. Charging inside `wan_activation_budget_bytes_for` puts the
+    /// term on the wrong side of the 2.14x (math) multiplier, and nothing else
+    /// in the suite notices: the calibration test prices a distilled 4-step
+    /// tier where the charge is zero. The delta below is the arithmetic the
+    /// buffers actually are, so a misplaced term fails here loudly.
+    #[test]
+    fn the_step_cache_charge_is_exact_and_lands_after_the_slope() {
+        use crate::attention::AttentionBackend;
+        use crate::wan::step_cache::WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS;
+        let a14b = WanActivationGeometry::a14b();
+        let (width, height, frames) = (832u32, 480u32, 53u32);
+        let tokens = wan_token_count(width, height, frames, a14b);
+
+        for (cfg, buffers) in [(false, 4u64), (true, 6)] {
+            let engaged = wan_calibrated_activation_bytes_for(
+                width,
+                height,
+                frames,
+                a14b,
+                cfg,
+                20,
+                false,
+                AttentionBackend::Math,
+            );
+            let refused = wan_calibrated_activation_bytes_for(
+                width,
+                height,
+                frames,
+                a14b,
+                cfg,
+                4,
+                true,
+                AttentionBackend::Math,
+            );
+
+            let retained = tokens * a14b.dim * BF16_BYTES * buffers;
+            let reduction = (WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS as u64).min(tokens)
+                * a14b.dim
+                * F32_BYTES
+                * WAN_STEP_CACHE_REDUCTION_LIVE_BUFFERS;
+
+            assert_eq!(
+                engaged - refused,
+                retained + reduction,
+                "cfg={cfg}: the step-cache charge must be exactly the buffers it \
+                 names, unscaled by the fitted slope"
+            );
+        }
+    }
+
+    /// A refused cache costs nothing, on both refusal grounds.
+    #[test]
+    fn a_refused_step_cache_charges_nothing() {
+        let a14b = WanActivationGeometry::a14b();
+        for (steps, distilled) in [(4u32, false), (20, true), (4, true), (11, false)] {
+            assert_eq!(
+                wan_step_cache_bytes(832, 480, 53, a14b, true, steps, distilled),
+                0,
+                "steps={steps} distilled={distilled} must charge nothing"
+            );
+        }
+    }
+
+    /// The charge must key on the ENGINE's policy, never on a copy of it.
+    ///
+    /// A second `steps >= 12 && !distilled` here is how the estimate and the
+    /// denoise loop drift into disagreeing about whether the cache is even on
+    /// -- the same failure the raw-vs-calibrated split already produced once.
+    #[test]
+    fn the_charge_follows_the_policy_not_a_copy_of_it() {
+        use crate::wan::step_cache::{requested_threshold, WanStepCachePolicy};
+        let a14b = WanActivationGeometry::a14b();
+        let requested = requested_threshold().unwrap_or(None);
+
+        for steps in [4u32, 11, 12, 20, 50] {
+            for distilled in [false, true] {
+                let (policy, _) = WanStepCachePolicy::resolve(requested, steps, distilled);
+                let charged = wan_step_cache_bytes(832, 480, 53, a14b, true, steps, distilled) > 0;
+                assert_eq!(
+                    charged,
+                    policy.is_on(),
+                    "steps={steps} distilled={distilled}: the charge and the policy disagree"
+                );
+            }
         }
     }
 
@@ -3263,6 +3459,8 @@ mod tests {
                 frames,
                 a14b,
                 false,
+                4,
+                true,
                 AttentionBackend::Math,
             );
             let flash = wan_calibrated_activation_bytes_for(
@@ -3271,6 +3469,8 @@ mod tests {
                 frames,
                 a14b,
                 false,
+                4,
+                true,
                 AttentionBackend::Flash,
             );
             assert!(

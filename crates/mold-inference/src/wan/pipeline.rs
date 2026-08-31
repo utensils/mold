@@ -143,6 +143,18 @@ fn default_frames_for_vae(vae: crate::device::WanVaeGeneration) -> u32 {
     }
 }
 
+/// Whether a shipped distill adapter is active for this checkpoint.
+///
+/// The `:q5` fast tiers carry one and the quality tiers do not, which is
+/// exactly the split where residual reuse has something to reuse. One helper
+/// because two callers must agree: the step cache's own engagement decision
+/// and the activation budget that charges what engaging it holds. If they
+/// disagree, the budget prices a cache the engine refuses (or worse, the other
+/// way round).
+pub fn distill_is_active(paths: &mold_core::ModelPaths) -> bool {
+    paths.distilled_lora.is_some() || paths.low_noise_distilled_lora.is_some()
+}
+
 /// Device memory this render's denoise activations will need, for the block
 /// offload policy (#776 item 3).
 ///
@@ -154,6 +166,7 @@ fn denoise_activation_bytes(
     req: &GenerateRequest,
     files: &[PathBuf],
     config: &WanTransformerConfig,
+    distilled: bool,
 ) -> Option<u64> {
     // Prefer the config the caller already resolved over re-probing the files:
     // the probe can fail on an unfamiliar export, and a `None` here silently
@@ -183,12 +196,18 @@ fn denoise_activation_bytes(
     // The CALIBRATED budget, not the raw derived one. Using the raw sum here
     // under-estimated by 2.14x, so the policy parked nothing and the render
     // OOM'd at a shape admission had just accepted.
+    // `steps` and `distilled` decide whether the step cache engages, and so
+    // whether its retained tensors are charged (#1482). The policy is not
+    // re-derived here -- `wan_step_cache_bytes` calls the same
+    // `WanStepCachePolicy::resolve` the denoise loop does.
     Some(crate::device::wan_calibrated_activation_bytes(
         req.width,
         req.height,
         frames,
         geometry,
         needs_cfg_pass(req.guidance),
+        req.steps,
+        distilled,
     ))
 }
 
@@ -1662,7 +1681,7 @@ impl WanEngine {
                 device,
                 dtype,
                 &loras,
-                denoise_activation_bytes(req, &files, config),
+                denoise_activation_bytes(req, &files, config, distill_is_active(paths)),
             )?;
             progress.phase_done(
                 ProgressPhase::ModelLoad,
@@ -1713,7 +1732,12 @@ impl WanEngine {
             device,
             dtype,
             low_noise_config,
-            denoise_activation_bytes(req, &transformer_files(paths), config),
+            denoise_activation_bytes(
+                req,
+                &transformer_files(paths),
+                config,
+                distill_is_active(paths),
+            ),
         )
     }
 
@@ -2035,8 +2059,7 @@ impl WanEngine {
         // A shipped distill adapter is the signal: the `:q5` fast tiers carry
         // one, the quality tiers do not. That is exactly the split where
         // residual reuse has something to reuse.
-        let distill_is_active = self.base.paths.distilled_lora.is_some()
-            || self.base.paths.low_noise_distilled_lora.is_some();
+        let distill_is_active = distill_is_active(&self.base.paths);
         let (step_cache, refusal) = crate::wan::step_cache::WanStepCachePolicy::resolve(
             crate::wan::step_cache::requested_threshold()?,
             steps,

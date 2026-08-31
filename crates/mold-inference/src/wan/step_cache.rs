@@ -53,6 +53,22 @@ pub(crate) const AUTO_THRESHOLD: f64 = 0.10;
 /// not repeat.
 pub(crate) const MIN_CACHEABLE_STEPS: u32 = 12;
 
+/// Token slice width for the distance reduction.
+///
+/// The FBCache criterion is two scalars — `mean|previous|` and
+/// `mean|current - previous|` — but computing them over whole tensors
+/// materializes `[1, T, dim]` F32 temporaries, which at A14B 53f/832x480 is
+/// ~447 MB apiece against a ~224 MB BF16 residual. Three of them are live at
+/// once inside the reduction, so the check cost more device memory than
+/// everything the cache retains.
+///
+/// Reducing a slice at a time bounds that to this many tokens regardless of
+/// the clip length, which is what makes the charge in
+/// `device::wan_step_cache_bytes` a small constant rather than a term that
+/// grows with the shape. `device.rs` reads this constant so the estimate and
+/// the engine cannot disagree about the bound.
+pub(crate) const WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS: usize = 1024;
+
 /// Whether a render may reuse residuals, and how eagerly.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum WanStepCachePolicy {
@@ -152,7 +168,8 @@ pub(crate) fn parse_threshold(raw: &str) -> Result<Option<f64>> {
 ///
 /// Defaulting to `off` made the feature effectively unreachable: it shipped,
 /// was measured, and then every production render paid full price because
-/// nothing set the variable. `MOLD_WAN_STEP_CACHE=off` is the escape hatch.
+/// nothing set the variable. `MOLD_WAN_STEP_CACHE=off` is the escape hatch,
+/// and is bit-identical to denoising every block.
 pub(crate) fn requested_threshold() -> Result<Option<f64>> {
     threshold_for_env(crate::runtime_env::value("MOLD_WAN_STEP_CACHE").as_deref())
 }
@@ -162,24 +179,19 @@ pub(crate) fn requested_threshold() -> Result<Option<f64>> {
 pub(crate) fn threshold_for_env(raw: Option<&str>) -> Result<Option<f64>> {
     match raw {
         Some(raw) => parse_threshold(raw),
-        // Back to `off` until admission charges what the cache holds.
+        // `auto`, now that `device::wan_step_cache_bytes` charges what
+        // engaging the cache holds (#1482).
         //
-        // The 1.85x is real and the guards are right, but engaging the cache
-        // allocates two persistent token-shaped tensors PER TRAJECTORY that no
-        // estimate accounts for — `[1, T, dim]` each, so ~447 MB per
-        // trajectory at A14B 53f/832x480 and ~894 MB once CFG makes it two.
-        // `wan_calibrated_activation_bytes` does not know about them, and the
-        // block-offload policy reads that same figure, so a near-capacity plan
-        // would park too few blocks and OOM on memory nothing told it about.
-        //
-        // That is exactly the defect this branch exists to remove, so the
-        // default cannot land before the charge does. Charging it is
-        // straightforward and needs no calibration — the tensors are an exact,
-        // nameable allocation like the attention score tile, not a fitted
-        // residual — but the budget function would have to learn the step
-        // count and whether a distill adapter is active, which is what decides
-        // whether the cache engages at all.
-        None => Ok(None),
+        // This default could not land while the charge was missing: the cache
+        // retains token-shaped tensors per trajectory, and the block-offload
+        // policy reads the same estimate admission does, so a near-capacity
+        // plan parked too few blocks and OOM'd on memory nothing told it
+        // about. The charge is exact rather than fitted — a nameable
+        // allocation like the attention score tile — and keys on the step
+        // count and the distill adapter through the same
+        // [`WanStepCachePolicy::resolve`] the engine calls, so the estimate
+        // cannot claim the cache engages where the engine refuses it.
+        None => Ok(Some(AUTO_THRESHOLD)),
     }
 }
 
@@ -229,19 +241,49 @@ impl WanStepCache {
     /// means the same thing at every noise level; an all-zero previous
     /// residual yields no reuse rather than a division by zero.
     fn relative_distance(previous: &Tensor, current: &Tensor) -> candle_core::Result<f64> {
-        let previous = previous.to_dtype(candle_core::DType::F32)?;
-        let current = current.to_dtype(candle_core::DType::F32)?;
-        let scale = previous.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
+        // Reduced a token slice at a time. Upcasting both residuals whole cost
+        // three `[1, T, dim]` F32 buffers live at once — more device memory
+        // than the cache retains between steps, and unaccounted by anything.
+        // See [`WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS`].
+        //
+        // The sums accumulate in f64 rather than in the tensor's F32, so this
+        // is strictly more accurate than the whole-tensor `mean_all` it
+        // replaces, not an approximation of it.
+        let tokens = previous.dim(1)?;
+        let mut previous_sum = 0.0f64;
+        let mut delta_sum = 0.0f64;
+        let mut counted = 0usize;
+
+        let mut offset = 0usize;
+        while offset < tokens {
+            let width = WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS.min(tokens - offset);
+            let previous_chunk = previous
+                .narrow(1, offset, width)?
+                .to_dtype(candle_core::DType::F32)?;
+            let current_chunk = current
+                .narrow(1, offset, width)?
+                .to_dtype(candle_core::DType::F32)?;
+
+            previous_sum += previous_chunk.abs()?.sum_all()?.to_scalar::<f32>()? as f64;
+            delta_sum += (current_chunk - &previous_chunk)?
+                .abs()?
+                .sum_all()?
+                .to_scalar::<f32>()? as f64;
+
+            counted += previous_chunk.elem_count();
+            offset += width;
+        }
+
+        if counted == 0 {
+            return Ok(f64::INFINITY);
+        }
+        let scale = previous_sum / counted as f64;
         // NaN and zero both mean "no usable reference", and both must yield
         // no reuse rather than a division that produces one.
         if !scale.is_finite() || scale <= 0.0 {
             return Ok(f64::INFINITY);
         }
-        let delta = (current - previous)?
-            .abs()?
-            .mean_all()?
-            .to_scalar::<f32>()? as f64;
-        Ok(delta / scale)
+        Ok((delta_sum / counted as f64) / scale)
     }
 
     /// Decide what this step should do, given block 0's residual.
@@ -276,14 +318,16 @@ impl WanStepCache {
 mod tests {
     use super::*;
 
-    /// An unset `MOLD_WAN_STEP_CACHE` stays `off` until admission charges the
-    /// two persistent token-shaped tensors per trajectory that engaging the
-    /// cache allocates (~894 MB with CFG at A14B 53f/832x480). Turning it on
-    /// before then lets the block-offload policy park too few blocks against a
-    /// budget that does not know about them.
+    /// An unset `MOLD_WAN_STEP_CACHE` engages the cache, now that
+    /// `device::wan_step_cache_bytes` charges what engaging it holds (#1482).
+    ///
+    /// The pairing is the whole point: this default is only safe while the
+    /// estimate both admission and the block-offload policy read knows about
+    /// the retained tensors. If the charge is ever removed, this must go back
+    /// to `None` in the same change.
     #[test]
-    fn an_unset_env_stays_off_until_the_cache_is_charged() {
-        assert_eq!(threshold_for_env(None).expect("unset is valid"), None);
+    fn an_unset_env_engages_the_charged_cache() {
+        assert_eq!(threshold_for_env(None).unwrap(), Some(AUTO_THRESHOLD));
     }
 
     /// `off` is still the escape hatch, and still means off.
@@ -378,6 +422,59 @@ mod tests {
         let (policy, refusal) = WanStepCachePolicy::resolve(None, 20, false);
         assert_eq!(policy, WanStepCachePolicy::Off);
         assert_eq!(refusal, None);
+    }
+
+    /// The chunked reduction must compute the same criterion the whole-tensor
+    /// form did, including across a token count that is not a chunk multiple.
+    ///
+    /// This is the test that makes the memory saving safe to take: the
+    /// reduction is the only thing standing between a residual pair and a
+    /// skip/no-skip decision, so an error here silently changes which steps a
+    /// render skips rather than failing loudly.
+    #[test]
+    fn chunked_relative_distance_matches_the_whole_tensor_form() {
+        let device = Device::Cpu;
+        // Deliberately not a multiple of the chunk width, and wide enough to
+        // need three slices — the boundary cases are the tail chunk and the
+        // accumulation across chunks.
+        let tokens = WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS * 2 + 377;
+        let dim = 8;
+
+        let previous = Tensor::rand(-1.0f32, 1.0f32, (1, tokens, dim), &device).unwrap();
+        let current = Tensor::rand(-1.0f32, 1.0f32, (1, tokens, dim), &device).unwrap();
+
+        // The pre-#1482 whole-tensor form, kept here as the oracle.
+        let reference = {
+            let scale = previous.abs().unwrap().mean_all().unwrap();
+            let scale = scale.to_scalar::<f32>().unwrap() as f64;
+            let delta = (&current - &previous)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .mean_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap() as f64;
+            delta / scale
+        };
+
+        let chunked = WanStepCache::relative_distance(&previous, &current).unwrap();
+        assert!(
+            (chunked - reference).abs() < 1e-4,
+            "chunked {chunked} against whole-tensor {reference} — the reduction \
+             changed the criterion, not just its memory profile"
+        );
+    }
+
+    /// A single chunk's worth of tokens must take the same path as many.
+    #[test]
+    fn a_residual_shorter_than_one_chunk_still_reduces() {
+        let device = Device::Cpu;
+        let previous = Tensor::full(2.0f32, (1, 4, 8), &device).unwrap();
+        let current = Tensor::full(3.0f32, (1, 4, 8), &device).unwrap();
+        // mean|prev| = 2, mean|cur - prev| = 1, so the distance is 0.5.
+        let distance = WanStepCache::relative_distance(&previous, &current).unwrap();
+        assert!((distance - 0.5).abs() < 1e-6, "got {distance}");
     }
 
     fn constant(value: f32, device: &Device) -> Tensor {

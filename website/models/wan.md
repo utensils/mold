@@ -638,8 +638,14 @@ comparable quality, not the same frames faster — skipping steps changes the
 trajectory. The conditional and unconditional passes keep independent caches
 and the cache resets at the A14B expert swap. It refuses (with a message rather
 than a silent no-op) on the 4-step Lightning distill tiers and on schedules
-under 12 steps — neither has redundant steps to skip. `off` (the default) is
-bit-identical to the uncached engine.
+under 12 steps — neither has redundant steps to skip. `off` is bit-identical
+to the uncached engine.
+
+`auto` is the default. It can be, because the memory engaging the cache holds —
+the retained residuals per trajectory, and the transients around the distance
+check — is charged against the same activation estimate that admission and the
+block-offload policy both read. An uncharged cache is what kept this off: the
+policy would park too few blocks and OOM on memory nothing declared.
 
 ## Quantized checkpoints and adapters
 
