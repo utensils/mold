@@ -1911,6 +1911,14 @@ impl GuidanceCapabilities {
                     Self::FIXED_ONE
                 }
             }
+            // The undistilled FLUX.2 [klein] base checkpoints are the one
+            // Flux.2 tier that runs a real unconditional branch, so they are
+            // the one that can use a negative prompt. Every distilled tier —
+            // klein, klein-9b — and guidance-embedded dev keep one forward per
+            // step. See `validation::is_flux2_base_model`.
+            "flux2" | "flux.2" | "flux-2" if crate::validation::is_flux2_base_model(model) => {
+                Self::ADJUSTABLE_CFG
+            }
             "flux" | "flux2" | "flux.2" | "flux-2" | "z-image" | "qwen-image" | "qwen_image" => {
                 Self::ADJUSTABLE_NO_NEGATIVE
             }
@@ -6976,6 +6984,38 @@ mod tests {
             ),
             GuidanceCapabilities::FIXED_ONE,
         );
+    }
+
+    /// Only the undistilled FLUX.2 [klein] base checkpoints run an
+    /// unconditional branch, so they are the only Flux.2 tier that can accept
+    /// a negative prompt. Advertising one on a distilled tier would offer a
+    /// control the engine has nowhere to spend.
+    #[test]
+    fn flux2_negative_prompt_is_advertised_only_for_the_undistilled_base_tiers() {
+        for base in [
+            "flux2-klein-base:bf16",
+            "flux2-klein-base:q4",
+            "flux2-klein-base-9b:q8",
+        ] {
+            assert_eq!(
+                GuidanceCapabilities::for_recipe("flux2", base, None),
+                GuidanceCapabilities::ADJUSTABLE_CFG,
+                "{base} must advertise a negative prompt",
+            );
+        }
+        for distilled in [
+            "flux2-klein:bf16",
+            "flux2-klein:q4",
+            "flux2-klein-9b:q8",
+            "flux2-dev:bf16",
+            "flux2-dev:q4",
+        ] {
+            assert_eq!(
+                GuidanceCapabilities::for_recipe("flux2", distilled, None),
+                GuidanceCapabilities::ADJUSTABLE_NO_NEGATIVE,
+                "{distilled} must not advertise a negative prompt",
+            );
+        }
     }
 
     /// A recipe that pins guidance owns the default. The CLI has no per-model

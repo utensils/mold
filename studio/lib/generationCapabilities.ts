@@ -341,7 +341,9 @@ export function baseGenerationCapabilities(
       (profileCaps
         ? profileControlVisible(profileCaps.negative_prompt.mode)
         : advertisedDefault?.supports_negative_prompt) ??
-      (!NO_NEGATIVE_PROMPT_FAMILIES.has(normalized) && !fixedGuidance),
+      ((!NO_NEGATIVE_PROMPT_FAMILIES.has(normalized) ||
+        isFlux2BaseModel(model)) &&
+        !fixedGuidance),
     guidanceAdjustable: !fixedGuidance,
     fixedGuidance: fixedGuidance
       ? h3
@@ -438,6 +440,20 @@ export function isWanFamily(family: string): boolean {
 
 export function isQwenImageEditFamily(family: string): boolean {
   return family === "qwen-image-edit";
+}
+
+/**
+ * Whether a model is an UNDISTILLED FLUX.2 [klein] base checkpoint.
+ *
+ * These are the one Flux.2 tier trained without guidance distillation, so
+ * they sample with a real unconditional branch and can therefore use a
+ * negative prompt. Mirrors `mold_core::validation::is_flux2_base_model`; the
+ * host advertises the same answer through the generation profile, and this is
+ * the fallback for a host that advertises nothing.
+ */
+export function isFlux2BaseModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  return normalized.includes("klein-base") || normalized.includes("klein_base");
 }
 
 export function isFlux2DevModel(model: string): boolean {

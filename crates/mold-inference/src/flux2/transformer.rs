@@ -1504,6 +1504,22 @@ pub(crate) enum Flux2TransformerWrapper {
     Quantized(super::quantized_transformer::QuantizedFlux2Transformer),
 }
 
+/// The unconditional branch of a classifier-free-guided FLUX.2 render.
+///
+/// Only the undistilled [klein] base checkpoints use one: they carry no
+/// guidance embedding, so `guidance` can only reach the render as a real CFG
+/// scale over a second forward. `diffusers`'
+/// `pipeline_flux2_klein.py:747-753,862-875` is the contract — the negative
+/// prompt defaults to `""`, both branches see the identical latent and ids,
+/// and the combination is `neg + scale * (pos - neg)`.
+pub(crate) struct Flux2CfgBranch<'a> {
+    /// `guidance_scale`; the branch is constructed only when it exceeds 1.
+    pub scale: f64,
+    /// The negative prompt's encoder hidden states.
+    pub txt: &'a Tensor,
+    pub txt_ids: &'a Tensor,
+}
+
 impl Flux2TransformerWrapper {
     #[allow(clippy::too_many_arguments)]
     pub fn denoise(
@@ -1519,6 +1535,7 @@ impl Flux2TransformerWrapper {
         progress: &crate::progress::ProgressReporter,
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
         preview: Option<&crate::latent_preview::LatentPreviewer>,
+        cfg: Option<&Flux2CfgBranch<'_>>,
     ) -> anyhow::Result<Tensor> {
         use crate::progress::ProgressEvent;
         use std::time::Instant;
@@ -1547,34 +1564,35 @@ impl Flux2TransformerWrapper {
             } else {
                 (img.clone(), img_ids.clone())
             };
-            let pred = match self {
-                Self::BF16(m) => m.forward(
-                    &model_img,
-                    &model_img_ids,
-                    txt,
-                    txt_ids,
-                    &t_vec,
-                    vec_,
-                    Some(&guidance_tensor),
-                )?,
-                Self::Offloaded(m) => m.forward(
-                    &model_img,
-                    &model_img_ids,
-                    txt,
-                    txt_ids,
-                    &t_vec,
-                    vec_,
-                    Some(&guidance_tensor),
-                )?,
-                Self::Quantized(m) => m.forward(
-                    &model_img,
-                    &model_img_ids,
-                    txt,
-                    txt_ids,
-                    &t_vec,
-                    vec_,
-                    Some(&guidance_tensor),
-                )?,
+            let pred = self.forward_once(
+                &model_img,
+                &model_img_ids,
+                txt,
+                txt_ids,
+                &t_vec,
+                vec_,
+                &guidance_tensor,
+            )?;
+            // The unconditional branch. `None` leaves `pred` exactly what the
+            // single-forward path produced — the same conditioning, the same
+            // call — so a distilled render is byte-identical to one made
+            // before this branch existed.
+            let pred = match cfg {
+                Some(branch) => {
+                    let neg = self.forward_once(
+                        &model_img,
+                        &model_img_ids,
+                        branch.txt,
+                        branch.txt_ids,
+                        &t_vec,
+                        vec_,
+                        &guidance_tensor,
+                    )?;
+                    // `pipeline_flux2_klein.py:875`:
+                    // `noise_pred = neg + guidance_scale * (noise_pred - neg)`
+                    (&neg + ((&pred - &neg)? * branch.scale)?)?
+                }
+                None => pred,
             };
             let pred = pred.narrow(1, 0, img.dim(1)?)?;
             img = (img + &pred * (t_prev - t_curr))?;
@@ -1606,11 +1624,139 @@ impl Flux2TransformerWrapper {
         progress.checkpoint()?;
         Ok(img)
     }
+
+    /// One transformer forward, routed to whichever of the three arms this is.
+    ///
+    /// Extracted so the conditional pass and the CFG unconditional pass are
+    /// the SAME call rather than two hand-kept copies of a three-arm match:
+    /// the two must differ only in their text conditioning.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_once(
+        &self,
+        img: &Tensor,
+        img_ids: &Tensor,
+        txt: &Tensor,
+        txt_ids: &Tensor,
+        t_vec: &Tensor,
+        vec_: &Tensor,
+        guidance: &Tensor,
+    ) -> anyhow::Result<Tensor> {
+        let pred = match self {
+            Self::BF16(m) => m.forward(img, img_ids, txt, txt_ids, t_vec, vec_, Some(guidance))?,
+            Self::Offloaded(m) => {
+                m.forward(img, img_ids, txt, txt_ids, t_vec, vec_, Some(guidance))?
+            }
+            Self::Quantized(m) => {
+                m.forward(img, img_ids, txt, txt_ids, t_vec, vec_, Some(guidance))?
+            }
+        };
+        Ok(pred)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Denoise the tiny synthetic transformer for one step, optionally with an
+    /// unconditional branch. Returns the resulting latent as f32.
+    fn denoise_once(
+        wrapper: &Flux2TransformerWrapper,
+        guidance: f64,
+        cfg: Option<(&Tensor, &Tensor, f64)>,
+    ) -> Vec<f32> {
+        use crate::flux2::quantized_transformer::test_support::spread;
+        let device = candle_core::Device::Cpu;
+        let img = spread((3, 4), 3.1).reshape((1, 3, 4)).unwrap();
+        let txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
+        let img_ids = Tensor::zeros((1, 3, 4), DType::F32, &device).unwrap();
+        let txt_ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        let vec_ = Tensor::zeros((1, 1), DType::F32, &device).unwrap();
+        let branch = cfg.map(|(txt, txt_ids, scale)| Flux2CfgBranch {
+            scale,
+            txt,
+            txt_ids,
+        });
+        let progress = crate::progress::ProgressReporter::default();
+        wrapper
+            .denoise(
+                &img,
+                &img_ids,
+                None,
+                &txt,
+                &txt_ids,
+                &vec_,
+                &[1.0, 0.0],
+                guidance,
+                &progress,
+                None,
+                None,
+                branch.as_ref(),
+            )
+            .expect("denoise")
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+    }
+
+    /// A render that asks for no unconditional branch must take exactly the
+    /// path it took before the branch existed — same conditioning, same single
+    /// forward. Pinned by construction: `forward_once` is the only caller.
+    #[test]
+    fn a_render_without_a_cfg_branch_is_unchanged_by_a_scale_of_one() {
+        use crate::flux2::quantized_transformer::test_support::{
+            spread, tiny_cfg, tiny_transformer,
+        };
+        let cfg = tiny_cfg(false);
+        let wrapper = Flux2TransformerWrapper::Quantized(tiny_transformer(&cfg));
+        let device = candle_core::Device::Cpu;
+
+        let plain = denoise_once(&wrapper, 1.0, None);
+        // The SAME conditioning on both branches at scale 1.0:
+        // neg + 1.0 * (pos - neg) == pos.
+        let txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
+        let txt_ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+        let inert = denoise_once(&wrapper, 1.0, Some((&txt, &txt_ids, 1.0)));
+
+        assert_eq!(plain.len(), inert.len());
+        for (a, b) in plain.iter().zip(&inert) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+    }
+
+    /// The unconditional branch has to change the render — and in the
+    /// direction `pipeline_flux2_klein.py:875` specifies. A larger scale
+    /// pushes further from the unconditional prediction, so the distance from
+    /// the negative-only render must grow with it.
+    #[test]
+    fn cfg_scale_moves_the_render_away_from_the_unconditional_branch() {
+        use crate::flux2::quantized_transformer::test_support::{
+            spread, tiny_cfg, tiny_transformer,
+        };
+        let cfg = tiny_cfg(false);
+        let wrapper = Flux2TransformerWrapper::Quantized(tiny_transformer(&cfg));
+        let device = candle_core::Device::Cpu;
+        // A different negative conditioning than the positive prompt's.
+        let neg_txt = spread((2, 6), 9.9).reshape((1, 2, 6)).unwrap();
+        let neg_ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+
+        let unguided = denoise_once(&wrapper, 1.0, None);
+        let low = denoise_once(&wrapper, 2.0, Some((&neg_txt, &neg_ids, 2.0)));
+        let high = denoise_once(&wrapper, 6.0, Some((&neg_txt, &neg_ids, 6.0)));
+
+        let spread_of = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f32>()
+        };
+        assert!(
+            spread_of(&unguided, &low) > 1e-6,
+            "a CFG branch must change the render"
+        );
+        assert!(
+            spread_of(&unguided, &high) > spread_of(&unguided, &low),
+            "a larger CFG scale must push further from the unguided prediction"
+        );
+    }
 
     #[test]
     fn klein_config_dimensions() {

@@ -432,3 +432,40 @@ describe("baseGenerationCapabilities", () => {
     });
   });
 });
+
+describe("Flux.2 negative prompt", () => {
+  // The undistilled [klein] base checkpoints are the one Flux.2 tier that
+  // samples with a real unconditional branch, so they are the one tier whose
+  // negative prompt reaches the render. Mirrors
+  // `mold_core::validation::is_flux2_base_model`. A host that advertises its
+  // guidance capabilities still wins; this is the no-advertisement fallback.
+  it("is offered for undistilled base tiers only", () => {
+    for (const base of [
+      "flux2-klein-base:bf16",
+      "flux2-klein-base:q4",
+      "flux2-klein-base-9b:q8",
+    ]) {
+      expect(
+        baseGenerationCapabilities("flux2", base).supportsNegativePrompt,
+      ).toBe(true);
+    }
+    for (const distilled of [
+      "flux2-klein:bf16",
+      "flux2-klein-9b:q8",
+      "flux2-dev:q4",
+    ]) {
+      expect(
+        baseGenerationCapabilities("flux2", distilled).supportsNegativePrompt,
+      ).toBe(false);
+    }
+  });
+
+  it("still defers to what the host advertises", () => {
+    expect(
+      baseGenerationCapabilities("flux2", "flux2-klein-base:q4", null, {
+        adjustable: true,
+        supports_negative_prompt: false,
+      }).supportsNegativePrompt,
+    ).toBe(false);
+  });
+});

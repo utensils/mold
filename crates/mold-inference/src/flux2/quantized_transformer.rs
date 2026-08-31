@@ -545,8 +545,11 @@ impl QuantizedFlux2Transformer {
     }
 }
 
+/// Tiny synthetic Flux.2 transformers for unit tests. Shared with
+/// `super::transformer`'s tests, which exercise the denoise loop (and its
+/// classifier-free-guidance branch) over one of these.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
     use candle_core::Device;
@@ -554,7 +557,7 @@ mod tests {
     /// A Flux.2 config small enough to instantiate on CPU in a unit test while
     /// keeping every shape relationship the loader depends on (head_dim ==
     /// sum(axes_dim), mlp_ratio, fused QKV widths).
-    fn tiny_cfg(guidance_embed: bool) -> Flux2Config {
+    pub(crate) fn tiny_cfg(guidance_embed: bool) -> Flux2Config {
         Flux2Config {
             in_channels: 4,
             vec_in_dim: 0,
@@ -572,7 +575,7 @@ mod tests {
 
     /// Deterministic non-degenerate weights: a constant tensor would make every
     /// output row identical and hide a dropped conditioning term.
-    fn spread(shape: (usize, usize), salt: f32) -> Tensor {
+    pub(crate) fn spread(shape: (usize, usize), salt: f32) -> Tensor {
         let (rows, cols) = shape;
         let data: Vec<f32> = (0..rows * cols)
             .map(|i| ((i as f32 * 0.37 + salt).sin()) * 0.1)
@@ -582,7 +585,7 @@ mod tests {
 
     /// Every tensor `QuantizedFlux2Transformer::new` looks up for `cfg`, in the
     /// BFL-native GGUF naming unsloth/city96 publish.
-    fn tiny_gguf_tensors(cfg: &Flux2Config) -> Vec<(String, Tensor)> {
+    pub(crate) fn tiny_gguf_tensors(cfg: &Flux2Config) -> Vec<(String, Tensor)> {
         let h = cfg.hidden_size;
         let mlp = (h as f64 * cfg.mlp_ratio) as usize;
         let head_dim = h / cfg.num_heads;
@@ -665,7 +668,7 @@ mod tests {
         t
     }
 
-    fn tiny_transformer(cfg: &Flux2Config) -> QuantizedFlux2Transformer {
+    pub(crate) fn tiny_transformer(cfg: &Flux2Config) -> QuantizedFlux2Transformer {
         let tensors = tiny_gguf_tensors(cfg);
         let quantized: Vec<(String, QTensor)> = tensors
             .into_iter()
@@ -688,7 +691,10 @@ mod tests {
     }
 
     /// Run one forward with the tiny model at the given guidance value.
-    fn tiny_forward(model: &QuantizedFlux2Transformer, guidance: Option<f32>) -> Vec<f32> {
+    pub(crate) fn tiny_forward(
+        model: &QuantizedFlux2Transformer,
+        guidance: Option<f32>,
+    ) -> Vec<f32> {
         let device = Device::Cpu;
         let img = spread((3, 4), 3.1).reshape((1, 3, 4)).unwrap();
         let txt = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
@@ -713,6 +719,13 @@ mod tests {
             .to_vec1::<f32>()
             .unwrap()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
 
     /// FLUX.2 [dev] is guidance-distilled: `comfy/ldm/flux/model.py:171-173`
     /// adds `guidance_in(timestep_embedding(guidance))` into the conditioning

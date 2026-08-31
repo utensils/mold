@@ -10538,7 +10538,10 @@ mod tests {
             (
                 "flux2",
                 "crates/mold-inference/src/flux2/pipeline.rs",
-                "restore_cached_tensor(",
+                // Flux.2 asks for the render's prompts as a SET (a true-CFG
+                // base render encodes two), so its cache check is the helper
+                // that answers only when every one of them is already cached.
+                "restore_cached_prompts(",
                 &["Qwen3Encoder::load_"][..],
             ),
             (
