@@ -35,6 +35,7 @@ const props = withDefaults(
     gpuOrdinals: number[];
     canReorder?: boolean;
     canPause?: boolean;
+    canPauseJob?: boolean;
     canCancelAll?: boolean;
     canCancelRunning?: boolean;
     cancellingIds?: string[];
@@ -45,6 +46,7 @@ const props = withDefaults(
   {
     canReorder: false,
     canPause: false,
+    canPauseJob: false,
     canCancelAll: false,
     canCancelRunning: false,
     paused: false,
@@ -61,6 +63,7 @@ const emit = defineEmits<{
   setLane: [id: string, gpu: number | null];
   move: [id: string, position: number];
   togglePause: [];
+  setJobPaused: [id: string, paused: boolean];
   cancelAll: [];
 }>();
 
@@ -75,10 +78,7 @@ const cancellableIds = computed(() =>
     .filter((entry) => entry.state === "queued" || entry.state === "paused")
     .map((entry) => entry.id),
 );
-const restartPaused = computed(() =>
-  props.entries.some((entry) => entry.state === "paused"),
-);
-const resumeNeeded = computed(() => props.paused || restartPaused.value);
+const resumeNeeded = computed(() => props.paused);
 const entryIds = computed(() => props.entries.map((entry) => entry.id));
 const hasPlanOnlyWork = computed(
   () => queuePlanOnlyWork(props.plan, entryIds.value).length > 0,
@@ -160,7 +160,7 @@ function queuedIndexOf(id: string): number {
           outline
           data-test="paused-chip"
         >
-          {{ restartPaused && !paused ? "paused after restart" : "paused" }}
+          queue paused
         </BadgePill>
         <span class="qc__spacer" />
         <button
@@ -269,6 +269,20 @@ function queuedIndexOf(id: string): number {
               <Icon name="chevron-down" :size="14" />
             </button>
           </div>
+
+          <button
+            v-if="
+              canPauseJob &&
+              (entry.state === 'queued' || entry.state === 'paused')
+            "
+            type="button"
+            class="qc__control"
+            data-test="queue-job-pause"
+            :disabled="dimmed"
+            @click="emit('setJobPaused', entry.id, entry.state !== 'paused')"
+          >
+            {{ entry.state === "paused" ? "Resume" : "Pause" }}
+          </button>
 
           <button
             v-if="entry.state !== 'running' || canCancelRunning"

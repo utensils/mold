@@ -173,7 +173,7 @@ import {
   mergeQueueEntries,
   queuePageRequestForCapacity,
   retryQueueJobRecoveringAmbiguity,
-  setQueuePaused as setQueueDispatchPaused,
+  setQueueJobPaused,
   type QueueListing,
 } from "@studio/api/queuePlan";
 import {
@@ -2473,6 +2473,7 @@ const activityRows = computed<ActivityRow[]>(() =>
 );
 
 const queueControlHostIds = ref(new Set<string>());
+const pausedQueueJobIds = ref(new Set<string>());
 
 function activityRowHostId(row: ActivityRow): string {
   return row.print?.hostId ?? row.sequence?.hostId ?? selectedHostId.value;
@@ -2487,14 +2488,28 @@ function activityRowIsQueued(row: ActivityRow): boolean {
 function canPauseActivityRow(row: ActivityRow): boolean {
   const hostId = activityRowHostId(row);
   return (
-    activityRowIsQueued(row) &&
-    serverCapabilities[hostId]?.queue?.can_pause === true &&
+    row.print !== null &&
+    activityRowJobId(row) !== null &&
+    (row.queueState === "queued" || row.queueState === "paused" || activityRowIsQueued(row)) &&
+    serverCapabilities[hostId]?.queue?.can_pause_job === true &&
     activityRowQueueAuthority(row) !== null
   );
 }
 
 function activityRowQueuePaused(row: ActivityRow): boolean {
-  return hostTelemetry[activityRowHostId(row)]?.queuePaused === true;
+  const jobId = activityRowJobId(row);
+  return (
+    !!row.print && (row.queueState === "paused" || (!!jobId && pausedQueueJobIds.value.has(jobId)))
+  );
+}
+
+function activityRowJobId(row: ActivityRow): string | null {
+  if (!row.print) return null;
+  const durable = durableRecoveryForJob(row.print);
+  const durableId = durable
+    ? mobileDurableJobs(durable.recovery)[durable.childIndex]?.authority.jobId
+    : null;
+  return durableId || row.print.id || row.live?.id || null;
 }
 
 interface MobileQueueControlAuthority {
@@ -2536,56 +2551,75 @@ function fleetQueueAuthority(row: FleetActiveWork): MobileQueueControlAuthority 
 
 function canPauseFleetActivity(row: FleetActiveWork): boolean {
   return (
+    row.kind === "generation" &&
     (row.phase === "queued" || row.phase === "paused") &&
-    serverCapabilities[row.hostId]?.queue?.can_pause === true &&
+    serverCapabilities[row.hostId]?.queue?.can_pause_job === true &&
     fleetQueueAuthority(row) !== null
   );
 }
 
-async function setQueuePaused(
-  authority: MobileQueueControlAuthority,
-  paused: boolean,
-): Promise<void> {
+async function setActivityJobPaused(row: ActivityRow, paused: boolean): Promise<void> {
+  const fallbackHost = connectedHosts.value.find(
+    (candidate) => candidate.id === activityRowHostId(row),
+  );
+  const authority =
+    activityRowQueueAuthority(row) ??
+    (fallbackHost
+      ? {
+          host: fallbackHost,
+          target: mobileHostTarget(fallbackHost),
+          expectedInstanceId: fallbackHost.instanceId?.trim() ?? "",
+        }
+      : null);
+  const jobId = activityRowJobId(row);
+  if (!authority || !jobId) return;
   const { host, target, expectedInstanceId } = authority;
-  const hostId = host.id;
-  if (queueControlHostIds.value.has(hostId)) return;
-  queueControlHostIds.value = new Set(queueControlHostIds.value).add(hostId);
+  if (queueControlHostIds.value.has(host.id)) return;
+  queueControlHostIds.value = new Set(queueControlHostIds.value).add(host.id);
   try {
     const status = await apiJsonTo<ServerStatus>(target, "/api/status");
-    if (status.instance_id !== expectedInstanceId) {
+    if (expectedInstanceId && status.instance_id !== expectedInstanceId) {
       throw new Error(`${host.name} now reaches a different Mold server instance.`);
     }
-    captureHostTelemetry(hostId, status);
-    await setQueueDispatchPaused(target, paused);
-    if (hostTelemetry[hostId]) hostTelemetry[hostId]!.queuePaused = paused;
-    setGenerationStatus(
-      paused
-        ? `Paused ${host.name}'s queue. Running work continues.`
-        : `Resumed ${host.name}'s queue.`,
-    );
+    await setQueueJobPaused(target, jobId, paused);
+    const next = new Set(pausedQueueJobIds.value);
+    if (paused) next.add(jobId);
+    else next.delete(jobId);
+    pausedQueueJobIds.value = next;
+    setGenerationStatus(`${paused ? "Paused" : "Resumed"} one job on ${host.name}.`);
   } catch (caught) {
     setGenerationStatus(describeTransportError(caught, host.name), true);
   } finally {
     const next = new Set(queueControlHostIds.value);
-    next.delete(hostId);
+    next.delete(host.id);
     queueControlHostIds.value = next;
   }
 }
 
-async function setActivityHostQueuePaused(row: ActivityRow, paused: boolean): Promise<void> {
-  const authority = activityRowQueueAuthority(row);
-  if (!authority || !canPauseActivityRow(row)) return;
-  await setQueuePaused(authority, paused);
-}
-
-async function setFleetHostQueuePaused(row: FleetActiveWork, paused: boolean): Promise<void> {
+async function setFleetJobPaused(row: FleetActiveWork, paused: boolean): Promise<void> {
   const authority = fleetQueueAuthority(row);
   if (!authority || !canPauseFleetActivity(row)) return;
-  await setQueuePaused(authority, paused);
+  const { host, target, expectedInstanceId } = authority;
+  if (queueControlHostIds.value.has(host.id)) return;
+  queueControlHostIds.value = new Set(queueControlHostIds.value).add(host.id);
+  try {
+    const status = await apiJsonTo<ServerStatus>(target, "/api/status");
+    if (expectedInstanceId && status.instance_id !== expectedInstanceId) {
+      throw new Error(`${host.name} now reaches a different Mold server instance.`);
+    }
+    await setQueueJobPaused(target, row.id, paused);
+    await refreshMobileActivity();
+  } catch (caught) {
+    setGenerationStatus(describeTransportError(caught, host.name), true);
+  } finally {
+    const next = new Set(queueControlHostIds.value);
+    next.delete(host.id);
+    queueControlHostIds.value = next;
+  }
 }
 
 function fleetQueueResumeNeeded(row: FleetActiveWork): boolean {
-  return row.phase === "paused" || hostTelemetry[row.hostId]?.queuePaused === true;
+  return row.phase === "paused";
 }
 
 /**
@@ -2603,7 +2637,7 @@ function activityRowStatus(row: ActivityRow): string {
   }
   if (row.print.status !== "queued") return jobStatusCode(row.print);
   if (durableHold(row.print)) return "HELD";
-  if (activityRowQueuePaused(row)) return "QUEUE PAUSED";
+  if (activityRowQueuePaused(row)) return "PAUSED";
   return queueWaitCode(
     resolveQueueWait({
       state: row.queueState,
@@ -11056,7 +11090,7 @@ function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
 
 function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
   if (action === "queue-pause" || action === "queue-resume") {
-    void setActivityHostQueuePaused(row, action === "queue-pause");
+    void setActivityJobPaused(row, action === "queue-pause");
     return;
   }
   if (row.print) {
@@ -11980,8 +12014,8 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       type="button"
                       data-test="mobile-fleet-queue-control"
                       :disabled="queueControlHostIds.has(row.hostId)"
-                      :aria-label="`${fleetQueueResumeNeeded(row) ? 'Resume' : 'Pause'} ${row.hostLabel} queue`"
-                      @click.stop="setFleetHostQueuePaused(row, !fleetQueueResumeNeeded(row))"
+                      :aria-label="`${fleetQueueResumeNeeded(row) ? 'Resume' : 'Pause'} job on ${row.hostLabel}`"
+                      @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
                     >
                       {{ fleetQueueResumeNeeded(row) ? "Resume" : "Pause" }}
                     </button>

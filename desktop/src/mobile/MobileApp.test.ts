@@ -1169,7 +1169,11 @@ describe("MobileApp sequence generation", () => {
         return Promise.resolve({ ...status, queue_paused: false, queue_capacity: 2 });
       if (path === "/api/capabilities")
         return Promise.resolve({
-          queue: { can_pause: true, heterogeneous_batch_max_outputs: 8 },
+          queue: {
+            can_pause: true,
+            can_pause_job: true,
+            heterogeneous_batch_max_outputs: 8,
+          },
         });
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -1210,7 +1214,9 @@ describe("MobileApp sequence generation", () => {
     expect(row.classes()).toContain("live-activity-row--actions-open");
     await row.get("[data-test='mobile-fleet-queue-control']").trigger("click");
     await flushPromises();
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/pause", { method: "POST" });
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/foreign-queued/pause", {
+      method: "POST",
+    });
   });
 
   it("loads a tapped server-owned generation into Create like desktop", async () => {
@@ -5848,13 +5854,21 @@ describe("MobileApp generation queue", () => {
   });
 
   it("reveals exact-host pause, resume, and cancel actions with a natural queue swipe", async () => {
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status")
         return Promise.resolve({ ...status, queue_paused: false, queue_capacity: 2 });
       if (path === "/api/capabilities")
         return Promise.resolve({
-          queue: { can_pause: true, heterogeneous_batch_max_outputs: 8 },
+          queue: {
+            can_pause: true,
+            can_pause_job: true,
+            durable_queue: true,
+            heterogeneous_batch_max_outputs: 8,
+          },
         });
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        return Promise.resolve(durableBatchResponse(init, { state: "accepted" }));
+      }
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
       if (path === "/api/activity")
@@ -5866,10 +5880,6 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     await submitPrompt("pause this queued print");
-    openStreams[0]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 0, id: "job-pause" }),
-    );
     await flushPromises();
 
     const row = wrapper.get("[data-test='mobile-generation-job']");
@@ -5879,14 +5889,18 @@ describe("MobileApp generation queue", () => {
 
     await control.trigger("click");
     await flushPromises();
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/pause", { method: "POST" });
-    expect(row.get("[data-test='mobile-generation-status']").text()).toBe("QUEUE PAUSED");
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/durable-job-1/pause", {
+      method: "POST",
+    });
+    expect(row.get("[data-test='mobile-generation-status']").text()).toBe("PAUSED");
     const resume = row.get("[data-test='swipe-action-queue-resume']");
     expect(resume.text()).toBe("Resume");
 
     await resume.trigger("click");
     await flushPromises();
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/resume", { method: "POST" });
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/durable-job-1/resume", {
+      method: "POST",
+    });
     expect(row.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED");
     expect(row.get("[data-test='swipe-action-queue-pause']").text()).toBe("Pause");
   });

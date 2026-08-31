@@ -124,6 +124,7 @@ describe("QueueCard reorder index", () => {
         gpuOrdinals: [0, 1],
         canReorder: true,
         canPause: true,
+        canPauseJob: true,
         canCancelAll: true,
         paused: false,
       },
@@ -133,6 +134,10 @@ describe("QueueCard reorder index", () => {
     await wrapper.get("[data-test='cancel-all']").trigger("click");
     expect(wrapper.emitted("togglePause")).toHaveLength(1);
     expect(wrapper.emitted("cancelAll")).toHaveLength(1);
+    const rowPause = wrapper.findAll("[data-test='queue-job-pause']");
+    expect(rowPause).toHaveLength(2);
+    await rowPause[0]!.trigger("click");
+    expect(wrapper.emitted("setJobPaused")?.[0]).toEqual(["B", true]);
     expect(
       wrapper.findAll("[data-test='queue-lane']")[0]!.attributes("disabled"),
     ).toBeUndefined();
@@ -267,11 +272,12 @@ describe("cancel all", () => {
   });
 });
 
-describe("restart-paused rows", () => {
-  it("offers Resume even when the global pause flag is false", async () => {
+describe("per-job paused rows", () => {
+  it("offers row Resume while the global control remains Pause", async () => {
     const wrapper = mount(QueueCard, {
       props: {
         canPause: true,
+        canPauseJob: true,
         canCancelAll: true,
         paused: false,
         gpuOrdinals: [],
@@ -287,13 +293,12 @@ describe("restart-paused rows", () => {
       },
     });
 
-    expect(wrapper.get("[data-test='paused-chip']").text()).toContain(
-      "paused after restart",
-    );
-    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Resume");
+    expect(wrapper.find("[data-test='paused-chip']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Pause");
+    expect(wrapper.get("[data-test='queue-job-pause']").text()).toBe("Resume");
     expect(wrapper.find("[data-test='cancel-all']").exists()).toBe(true);
-    await wrapper.get("[data-test='pause-toggle']").trigger("click");
-    expect(wrapper.emitted("togglePause")).toHaveLength(1);
+    await wrapper.get("[data-test='queue-job-pause']").trigger("click");
+    expect(wrapper.emitted("setJobPaused")?.[0]).toEqual(["srv-paused", false]);
   });
 
   it("keeps an ordinary queued row waiting when only another row is restart-paused", () => {
@@ -319,7 +324,7 @@ describe("restart-paused rows", () => {
     expect(rows[0]!.text()).toContain("#1 in line");
     expect(rows[0]!.text()).not.toContain("Queue paused");
     expect(rows[1]!.text()).toContain("Paused");
-    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Resume");
+    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Pause");
   });
 });
 

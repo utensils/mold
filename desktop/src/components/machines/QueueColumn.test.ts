@@ -35,7 +35,13 @@ function seed(caps: Partial<HostQueueCaps> = {}) {
     hostId: "local",
     entries: [entry()],
     paused: null,
-    caps: { canPause: true, canCancelAll: true, canReorder: false, ...caps },
+    caps: {
+      canPause: true,
+      canPauseJob: true,
+      canCancelAll: true,
+      canReorder: false,
+      ...caps,
+    },
     gpuOrdinals: [],
     error: null,
   };
@@ -162,8 +168,31 @@ describe("QueueColumn", () => {
       clientY: 10,
     });
     const items = useContextMenuStore().entries.filter((item) => "label" in item);
-    expect(items.map((item) => item.label)).toEqual(["Pause queue", "Retry job", "Cancel job"]);
+    expect(items.map((item) => item.label)).toEqual(["Retry job", "Cancel job"]);
     expect(items.find((item) => item.label === "Retry job")?.disabled).not.toBe(true);
+  });
+
+  it("pauses only the selected queued row from its context menu", async () => {
+    const { wrapper, jobs } = await mountColumn();
+    jobs.queues.local!.entries.push(entry({ id: "sibling", position: 2 }));
+    const pauseOne = vi.spyOn(jobs, "setJobPaused").mockResolvedValue(undefined);
+    const pauseAll = vi.spyOn(jobs, "pause").mockResolvedValue(undefined);
+    await flushPromises();
+
+    await wrapper.findAll("[data-test='queue-surface-row']")[0]!.trigger("contextmenu", {
+      clientX: 10,
+      clientY: 10,
+    });
+    const action = useContextMenuStore().entries.find(
+      (item) => "label" in item && item.label === "Pause job",
+    );
+    expect(action).toBeDefined();
+    if (action && "action" in action) action.action();
+    await flushPromises();
+
+    expect(pauseOne).toHaveBeenCalledWith("local", "srv-1", true);
+    expect(pauseAll).not.toHaveBeenCalled();
+    expect(jobs.queues.local!.entries[1]!.state).toBe("queued");
   });
 
   it("cancels a queued row against its owning host", async () => {

@@ -167,7 +167,9 @@ mold queue cancel --all [--yes]          # DELETE /api/queue for queued rows onl
 mold queue cancel --batch <BATCH-ID>     # DELETE /api/generation-batches/{id}
 mold queue retry <JOB-ID>... | --held    # POST /api/queue/{id}/retry
 mold queue move <JOB-ID> --to <N>        # PATCH /api/queue/{id} {position}
-mold queue pause | mold queue resume     # POST /api/queue/pause | /resume
+mold queue pause | mold queue resume     # host-wide POST /api/queue/pause | /resume
+mold queue pause <JOB-ID>                 # pause only one waiting job
+mold queue resume <JOB-ID>                # resume only one paused job
 mold queue sweep                         # POST /api/queue/held/sweep + /api/generation-batches/sweep
 ```
 

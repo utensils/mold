@@ -9350,6 +9350,9 @@ impl DurableMediaCapabilities {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueueCapabilities {
     pub can_pause: bool,
+    /// Server supports per-row pause/resume without changing the global gate.
+    #[serde(default)]
+    pub can_pause_job: bool,
     pub can_cancel_all: bool,
     #[serde(default)]
     pub can_reorder: bool,
@@ -11228,6 +11231,7 @@ mod server_event_tests {
         )
         .unwrap();
         assert!(!caps.queue.can_pause);
+        assert!(!caps.queue.can_pause_job);
         assert!(!caps.queue.can_cancel_all);
         assert!(!caps.queue.can_reorder);
     }
@@ -11242,6 +11246,7 @@ mod server_event_tests {
         )
         .unwrap();
         assert!(caps.queue.can_pause);
+        assert!(!caps.queue.can_pause_job);
         assert!(caps.queue.can_cancel_all);
         assert!(!caps.queue.can_reorder);
     }
@@ -11686,6 +11691,7 @@ mod queue_plan_wire_tests {
         let legacy_queue: QueueCapabilities =
             serde_json::from_str(r#"{"can_pause":true,"can_cancel_all":true}"#).unwrap();
         assert!(!legacy_queue.durable_queue);
+        assert!(!legacy_queue.can_pause_job);
         assert!(!legacy_queue.cooperative_cancellation);
 
         let durable_media = serde_json::to_value(DurableMediaCapabilities::v1()).unwrap();

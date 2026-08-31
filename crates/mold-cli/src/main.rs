@@ -707,10 +707,16 @@ pub enum QueueAction {
         #[arg(long, value_name = "POSITION")]
         to: usize,
     },
-    /// Hold dispatch of new jobs; work already on a worker finishes
-    Pause,
-    /// Resume dispatch
-    Resume,
+    /// Pause one waiting job, or omit JOB-ID to hold host-wide dispatch
+    Pause {
+        #[arg(value_name = "JOB-ID")]
+        job_id: Option<String>,
+    },
+    /// Resume one paused job, or omit JOB-ID to resume host-wide dispatch
+    Resume {
+        #[arg(value_name = "JOB-ID")]
+        job_id: Option<String>,
+    },
     /// Run the held-row and settled-batch retention sweeps now
     Sweep,
 }
@@ -1578,7 +1584,8 @@ Examples:
   mold queue cancel --batch batch-7    Cancel one batch's remaining children
   mold queue retry --held              Resume every retryable hold
   mold queue move job-abc123 --to 0    Send a job to the head of the line
-  mold queue pause / mold queue resume
+  mold queue pause job-abc123          Pause only one waiting job
+  mold queue pause / mold queue resume Host-wide dispatch gate
   mold queue sweep                     Run the retention sweeps now
 
 Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). There is
@@ -3848,11 +3855,17 @@ mod tests {
         ] {
             let matched = match parse(&args).command {
                 Commands::Queue {
-                    action: QueueAction::Pause,
-                } => "pause",
+                    action: QueueAction::Pause { job_id },
+                } => {
+                    assert!(job_id.is_none());
+                    "pause"
+                }
                 Commands::Queue {
-                    action: QueueAction::Resume,
-                } => "resume",
+                    action: QueueAction::Resume { job_id },
+                } => {
+                    assert!(job_id.is_none());
+                    "resume"
+                }
                 Commands::Queue {
                     action: QueueAction::Sweep,
                 } => "sweep",
@@ -3860,6 +3873,12 @@ mod tests {
             };
             assert_eq!(matched, expected);
         }
+        assert!(matches!(
+            parse(&["queue", "pause", "job-1"]).command,
+            Commands::Queue {
+                action: QueueAction::Pause { job_id: Some(job_id) }
+            } if job_id == "job-1"
+        ));
     }
 
     // ── library tests ───────────────────────────────────────────────────

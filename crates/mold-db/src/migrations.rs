@@ -644,6 +644,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 31,
         kind: MigrationKind::Sql(V31_GENERATION_DIR_RECENCY_INDEX),
     },
+    Migration {
+        version: 32,
+        kind: MigrationKind::Sql(V32_GENERATION_QUEUE_EXPLICIT_PAUSE),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -655,6 +659,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
 const V31_GENERATION_DIR_RECENCY_INDEX: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_gen_dir_recency
     ON generations(output_dir, COALESCE(file_mtime_ms, created_at_ms) DESC);
+"#;
+
+/// Distinguish a user's explicit one-job pause from restart recovery. Global
+/// Resume releases only restart-paused work; it must never wake a row the user
+/// deliberately parked through `/api/queue/{id}/pause`.
+const V32_GENERATION_QUEUE_EXPLICIT_PAUSE: &str = r#"
+ALTER TABLE generation_queue
+    ADD COLUMN explicitly_paused INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -732,7 +744,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 31;
+pub const SCHEMA_VERSION: i64 = 32;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -1363,7 +1375,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 31);
+        assert_eq!(SCHEMA_VERSION, 32);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1517,7 +1529,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 31);
+        assert_eq!(SCHEMA_VERSION, 32);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1654,7 +1666,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 31);
+        assert_eq!(SCHEMA_VERSION, 32);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1916,7 +1928,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 31);
+        assert_eq!(SCHEMA_VERSION, 32);
     }
 
     #[test]
@@ -2367,5 +2379,50 @@ mod v27_tests {
             == r#"{"prompt":"unchanged"}"#
             && *created_at == 7));
         assert!(rows.windows(2).all(|pair| pair[0].4 < pair[1].4));
+    }
+}
+
+#[cfg(test)]
+mod v32_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn v31_upgrade_marks_existing_paused_rows_as_restart_recovery() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 31)
+        {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(function) => function(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        conn.execute(
+            "INSERT INTO generation_queue (
+                id, owner_uuid, state, model, request_json, output_dir,
+                completion_payload, created_at, updated_at
+             ) VALUES ('paused', 'owner', 'paused', 'model', '{}', '/gallery', 'full', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 32);
+        assert_eq!(
+            conn.query_row(
+                "SELECT explicitly_paused FROM generation_queue WHERE id = 'paused'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
     }
 }

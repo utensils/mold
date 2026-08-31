@@ -398,6 +398,20 @@ export async function setQueuePaused(
   });
 }
 
+/** Pause or resume one durable generation row without changing the host-wide
+ * dispatch gate. */
+export async function setQueueJobPaused(
+  target: ApiTarget,
+  workId: string,
+  paused: boolean,
+): Promise<void> {
+  await apiFetchTo(
+    target,
+    `/api/queue/${encodeURIComponent(workId)}/${paused ? "pause" : "resume"}`,
+    { method: "POST" },
+  );
+}
+
 export interface QueueJobAuthority {
   instanceId: string;
   batchId: string;

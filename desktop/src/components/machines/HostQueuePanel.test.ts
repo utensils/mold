@@ -97,7 +97,7 @@ async function mountPanel(
     hostId: "local",
     entries,
     paused: null,
-    caps: { canPause: true, canCancelAll: true, canReorder: true },
+    caps: { canPause: true, canPauseJob: true, canCancelAll: true, canReorder: true },
     gpuOrdinals,
     plan,
     error: null,
@@ -185,17 +185,18 @@ describe("HostQueuePanel", () => {
     expect(wrapper.get("[data-test='queue-row']").text()).not.toContain("NEXT UP");
   });
 
-  it("offers Resume for restart-paused work while the global gate is open", async () => {
+  it("offers per-job Resume while the global gate remains open", async () => {
     const entry = { ...queued("srv-paused", 0, 0), state: "paused" as const };
     const { wrapper, jobs } = await mountPanel([], [entry]);
-    const resume = vi.spyOn(jobs, "resume").mockResolvedValue(undefined);
+    const resume = vi.spyOn(jobs, "setJobPaused").mockResolvedValue(undefined);
 
-    expect(wrapper.get("[data-test='paused-chip']").text()).toContain("RESTART");
-    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Resume");
+    expect(wrapper.find("[data-test='paused-chip']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Pause");
+    expect(wrapper.get("[data-test='pause-entry']").text()).toBe("Resume");
     expect(wrapper.get("[data-test='cancel-entry']").text()).toBe("Cancel");
-    await wrapper.get("[data-test='pause-toggle']").trigger("click");
+    await wrapper.get("[data-test='pause-entry']").trigger("click");
     await flushPromises();
-    expect(resume).toHaveBeenCalledWith("local");
+    expect(resume).toHaveBeenCalledWith("local", "srv-paused", false);
   });
 
   it("does not label other queued work paused when only one row is restart-paused", async () => {
@@ -208,7 +209,22 @@ describe("HostQueuePanel", () => {
       .find((row) => row.text().includes("z-image"));
     expect(waitingRow?.text()).toContain("QUEUED #1");
     expect(waitingRow?.text()).not.toContain("PAUSED");
-    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Resume");
+    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Pause");
+  });
+
+  it("pauses only the selected queue row", async () => {
+    const { wrapper, jobs } = await mountPanel(
+      [],
+      [queued("selected", 0, 0), { ...queued("sibling", 1, 0), model: "z-image" }],
+    );
+    const pause = vi.spyOn(jobs, "setJobPaused").mockResolvedValue(undefined);
+    const rows = wrapper.findAll("[data-test='queue-row']");
+
+    await rows[0]!.get("[data-test='pause-entry']").trigger("click");
+    await flushPromises();
+
+    expect(pause).toHaveBeenCalledWith("local", "selected", true);
+    expect(rows[1]!.text()).not.toContain("PAUSED");
   });
 
   it("splits a multi-GPU host into per-GPU lanes", async () => {
@@ -483,7 +499,6 @@ describe("held rows", () => {
     expect(items.map((item) => item.label)).toEqual([
       "Show details",
       "Reuse settings",
-      "Pause queue",
       "Retry job",
       "Cancel job",
     ]);

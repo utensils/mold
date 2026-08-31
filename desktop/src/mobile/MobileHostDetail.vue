@@ -8,6 +8,7 @@ import {
   moveQueueJobToBack,
   queuePageRequestForCapacity,
   setQueuePaused as setQueueDispatchPaused,
+  setQueueJobPaused,
   setQueueDevicePin,
   type QueuePlan,
 } from "@studio/api/queuePlan";
@@ -848,9 +849,9 @@ let queueDetailTimer: ReturnType<typeof setInterval> | null = null;
 
 const canReorderQueue = computed(() => deviceCapabilities.value?.queue?.can_reorder === true);
 const canPauseQueue = computed(() => deviceCapabilities.value?.queue?.can_pause === true);
+const canPauseQueueJob = computed(() => deviceCapabilities.value?.queue?.can_pause_job === true);
 const dispatchPaused = computed(() => status.value?.queue_paused === true);
-const restartPaused = computed(() => queue.value.some((entry) => entry.state === "paused"));
-const resumeNeeded = computed(() => dispatchPaused.value || restartPaused.value);
+const resumeNeeded = computed(() => dispatchPaused.value);
 
 const inspectedQueueEntry = computed(
   () => queue.value.find((entry) => entry.id === inspectedQueueId.value) ?? null,
@@ -876,10 +877,10 @@ const inspectedQueueModel = computed(() => {
  *  non-destructive Move to back. */
 function queueRowActions(entry: QueueEntry): SwipeRowAction[] {
   const actions: SwipeRowAction[] = [];
-  if (canPauseQueue.value && ["queued", "paused", "held"].includes(entry.state)) {
+  if (canPauseQueueJob.value && (entry.state === "queued" || entry.state === "paused")) {
     actions.push({
-      id: resumeNeeded.value ? "queue-resume" : "queue-pause",
-      label: resumeNeeded.value ? "Resume" : "Pause",
+      id: entry.state === "paused" ? "job-resume" : "job-pause",
+      label: entry.state === "paused" ? "Resume" : "Pause",
     });
   }
   if (canReorderQueue.value && entry.state === "queued") {
@@ -934,8 +935,24 @@ async function setHostQueuePaused(paused: boolean): Promise<void> {
 
 async function onQueueRowAction(entry: QueueEntry, action: string) {
   queueRowError.value = null;
-  if (action === "queue-pause" || action === "queue-resume") {
-    await setHostQueuePaused(action === "queue-pause");
+  if (action === "job-pause" || action === "job-resume") {
+    const paused = action === "job-pause";
+    const epoch = loadEpoch;
+    const requestTarget = target.value;
+    queueControlBusy.value = true;
+    try {
+      await setQueueJobPaused(requestTarget, entry.id, paused);
+      if (epoch === loadEpoch && requestTarget.baseUrl === target.value.baseUrl) {
+        entry.state = paused ? "paused" : "queued";
+        await requestQueueRefresh(epoch);
+      }
+    } catch (caught) {
+      if (epoch === loadEpoch) {
+        queueRowError.value = describeTransportError(caught, props.host.name);
+      }
+    } finally {
+      if (epoch === loadEpoch) queueControlBusy.value = false;
+    }
     return;
   }
   if (action === "cancel") {
@@ -1251,9 +1268,7 @@ onBeforeUnmount(() => {
         <div class="mobile-section-head">
           <h2 id="host-queue-title">Queue</h2>
           <div class="mobile-host-queue-controls">
-            <span v-if="resumeNeeded" data-test="host-detail-queue-paused">
-              {{ restartPaused && !dispatchPaused ? "PAUSED AFTER RESTART" : "PAUSED" }}
-            </span>
+            <span v-if="resumeNeeded" data-test="host-detail-queue-paused"> PAUSED </span>
             <span data-test="host-detail-queue-total">{{ queueSummary }}</span>
             <button
               v-if="canPauseQueue"

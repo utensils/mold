@@ -4724,6 +4724,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_job_pause_leaves_dispatch_open_and_survives_a_global_pause_cycle() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for (id, created_at) in [("selected", 1), ("sibling", 2)] {
+            seed_durable_projection_row(
+                &db,
+                &owner,
+                id,
+                mold_db::generation_queue::QueueRowState::Queued,
+                created_at,
+                0,
+            );
+        }
+        let app = app_with_state(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/queue/selected/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let status = app
+            .clone()
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(json_body(status).await["queue_paused"], false);
+        assert_eq!(
+            state
+                .queue_journal
+                .list_all()
+                .into_iter()
+                .map(|row| (row.id, row.state))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "selected".to_string(),
+                    mold_db::generation_queue::QueueRowState::Paused,
+                ),
+                (
+                    "sibling".to_string(),
+                    mold_db::generation_queue::QueueRowState::Queued,
+                ),
+            ]
+        );
+
+        for path in ["/api/queue/pause", "/api/queue/resume"] {
+            let response = app
+                .clone()
+                .oneshot(Request::post(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert_eq!(
+            mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "selected")
+                .unwrap()
+                .unwrap()
+                .state,
+            mold_db::generation_queue::QueueRowState::Paused
+        );
+
+        let response = app
+            .oneshot(
+                Request::post("/api/queue/selected/resume")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "selected")
+                .unwrap()
+                .unwrap()
+                .state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+    }
+
+    #[tokio::test]
     async fn resume_releases_restart_paused_durable_work_and_activity_exposes_it() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -5152,6 +5239,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = json_body(resp).await;
         assert_eq!(body["queue"]["can_pause"], true);
+        assert_eq!(body["queue"]["can_pause_job"], true);
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
         assert!(

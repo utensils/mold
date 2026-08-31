@@ -18,6 +18,7 @@ import {
   mergeQueueEntries,
   queuePageRequestForCapacity,
   setQueueDevicePin,
+  setQueueJobPaused,
   type QueuePlan,
 } from "@studio/api/queuePlan";
 import {
@@ -177,9 +178,7 @@ const gpuOrdinals = computed(() => {
 const canReorder = computed(() => !!caps.value?.queue?.can_reorder);
 const isTarget = computed(() => targetId.value === hostId.value);
 const paused = computed(() => poll.status.value?.queue_paused === true);
-const resumeNeeded = computed(
-  () => paused.value || queue.value.some((entry) => entry.state === "paused"),
-);
+const resumeNeeded = computed(() => paused.value);
 
 const address = computed(() => {
   if (!host.value) return "";
@@ -706,6 +705,17 @@ async function onTogglePause() {
   }
 }
 
+async function onSetJobPaused(id: string, paused: boolean) {
+  const entry = host.value;
+  if (!entry) return;
+  try {
+    await setQueueJobPaused(hostApiTarget(entry), id, paused);
+    await reloadQueue();
+  } catch (e) {
+    toast("error", `Couldn't ${paused ? "pause" : "resume"} job: ${errMsg(e)}`);
+  }
+}
+
 async function onCancelAll() {
   const entry = host.value;
   if (!entry) return;
@@ -1182,6 +1192,7 @@ onBeforeUnmount(() => {
           :gpu-ordinals="gpuOrdinals"
           :can-reorder="canReorder"
           :can-pause="caps?.queue?.can_pause === true"
+          :can-pause-job="caps?.queue?.can_pause_job === true"
           :can-cancel-all="caps?.queue?.can_cancel_all === true"
           :can-cancel-running="caps?.queue?.cooperative_cancellation === true"
           :cancelling-ids="cancellingIds"
@@ -1192,6 +1203,7 @@ onBeforeUnmount(() => {
           @set-lane="onSetLane"
           @move="onMove"
           @toggle-pause="onTogglePause"
+          @set-job-paused="onSetJobPaused"
           @cancel-all="onCancelAll"
         />
         <button

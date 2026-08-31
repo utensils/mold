@@ -1341,6 +1341,24 @@ impl QueueJournal {
         Ok(resumed)
     }
 
+    pub(crate) fn set_job_paused(
+        &self,
+        id: &str,
+        paused: bool,
+    ) -> anyhow::Result<generation_queue::OwnedJobPauseOutcome> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::OwnedJobPauseOutcome::NotOwned);
+        };
+        let outcome = generation_queue::set_owned_job_paused(db, owner, id, paused, now_ms())?;
+        if outcome == generation_queue::OwnedJobPauseOutcome::Updated {
+            self.publish_state_committed(id);
+        }
+        if !paused && matches!(outcome, generation_queue::OwnedJobPauseOutcome::Updated) {
+            self.wake_feeder();
+        }
+        Ok(outcome)
+    }
+
     pub(crate) fn completed_output(
         &self,
         id: &str,

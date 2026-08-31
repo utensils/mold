@@ -69,6 +69,7 @@ const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const jobs = useJobsStore();
 const cancellingIds = ref<string[]>([]);
+const pausingIds = ref<string[]>([]);
 const retryingIds = ref<string[]>([]);
 const composer = useComposerStore();
 const toasts = useToastStore();
@@ -76,11 +77,8 @@ const contextMenu = useContextMenuStore();
 
 const primaryId = computed(() => hosts.primaryHost?.id ?? "local");
 const snapshot = computed(() => jobs.queues[props.host.id] ?? null);
-const restartPaused = computed(
-  () => snapshot.value?.entries.some((entry) => entry.state === "paused") === true,
-);
 const dispatchPaused = computed(() => snapshot.value?.paused === true);
-const resumeNeeded = computed(() => dispatchPaused.value || restartPaused.value);
+const resumeNeeded = computed(() => dispatchPaused.value);
 const caps = computed(() => snapshot.value?.caps ?? null);
 const queueStatus = computed(() => {
   const current = snapshot.value;
@@ -200,10 +198,10 @@ function openEntryMenu(entry: EnrichedQueueEntry, event: MouseEvent) {
     { label: "Reuse settings", action: () => void reuseEntry(entry) },
     { separator: true },
   ];
-  if (caps.value?.canPause || resumeNeeded.value) {
+  if (caps.value?.canPauseJob && (entry.state === "queued" || entry.state === "paused")) {
     items.push({
-      label: resumeNeeded.value ? "Resume queue" : "Pause queue",
-      action: () => void togglePause(),
+      label: entry.state === "paused" ? "Resume job" : "Pause job",
+      action: () => void toggleEntryPause(entry),
     });
   }
   if (entry.state === "held" && entry.retryable === true) {
@@ -284,6 +282,20 @@ async function togglePause() {
     }
   } catch (err) {
     toasts.push(String(err), "error");
+  }
+}
+
+async function toggleEntryPause(entry: EnrichedQueueEntry) {
+  if (pausingIds.value.includes(entry.id)) return;
+  pausingIds.value = [...pausingIds.value, entry.id];
+  const paused = entry.state !== "paused";
+  try {
+    await jobs.setJobPaused(props.host.id, entry.id, paused);
+    toasts.push(`${paused ? "Paused" : "Resumed"} job on ${props.host.label}`);
+  } catch (err) {
+    toasts.push(String(err), "error");
+  } finally {
+    pausingIds.value = pausingIds.value.filter((id) => id !== entry.id);
   }
 }
 
@@ -561,7 +573,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
       class="mb-2 flex items-center gap-2"
     >
       <span v-if="resumeNeeded" data-test="paused-chip" class="edge-code text-safelight">
-        {{ restartPaused && snapshot?.paused !== true ? "PAUSED AFTER RESTART" : "PAUSED" }}
+        PAUSED
       </span>
       <div class="flex-1" />
       <button
@@ -673,6 +685,22 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
                 </span>
               </div>
             </div>
+            <button
+              v-if="caps?.canPauseJob && (entry.state === 'queued' || entry.state === 'paused')"
+              type="button"
+              data-test="pause-entry"
+              :disabled="pausingIds.includes(entry.id)"
+              class="h-7 shrink-0 rounded-control px-2.5 text-body text-ink-3 hover:text-ink"
+              @click.stop="toggleEntryPause(entry)"
+            >
+              {{
+                pausingIds.includes(entry.id)
+                  ? "Working…"
+                  : entry.state === "paused"
+                    ? "Resume"
+                    : "Pause"
+              }}
+            </button>
             <button
               v-if="
                 entry.state === 'queued' ||

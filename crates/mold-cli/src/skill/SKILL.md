@@ -586,7 +586,9 @@ mold queue cancel --all [--yes]       # DELETE /api/queue — queued rows only; 
 mold queue cancel --batch <BATCH-ID>  # DELETE /api/generation-batches/{id}
 mold queue retry <JOB-ID>... | --held # POST /api/queue/{id}/retry
 mold queue move <JOB-ID> --to <N>     # PATCH /api/queue/{id} {position} — the host clamps past the tail
-mold queue pause | resume             # POST /api/queue/pause | /api/queue/resume
+mold queue pause | resume             # host-wide POST /api/queue/pause | /resume
+mold queue pause <JOB-ID>              # pause only one waiting row
+mold queue resume <JOB-ID>             # resume only one paused row
 mold queue sweep                      # POST /api/queue/held/sweep + POST /api/generation-batches/sweep
 ```
 
@@ -1560,6 +1562,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side listing plus additive scheduler `plan` (per-device lanes, timing estimates, blocked reasons, plan/replan versions). The plan is advisory until the worker revalidates its exact execution fingerprint and frozen artifacts.
 - `PATCH /api/queue/:id` — re-lane and/or reorder a queued job (`target_gpu?`, queued-only 0-based `position?`); omitted fields stay unchanged
+- `POST /api/queue/:id/pause|resume` — pause or resume exactly one generation row without changing the host-wide dispatch gate
 - `POST /api/queue/held/sweep` — run one held-row retention pass now; returns `{ "purged", "remaining", "media_deferred" }`. `501` when the metadata DB is disabled.
 - `POST /api/generation-batches/sweep` — run one settled-batch retention pass now (batches whose every child is terminal, newest settlement older than `queue.held_retention_days`); returns `{ "purged", "remaining" }`. `501` when the metadata DB is disabled.
 - `POST /api/queue/:id/retry` — resume an explicitly retryable held durable child. Send the complete authority captured from its admitted batch status as `{ "instance_id": "...", "batch_id": "...", "client_batch_id": "...", "job_id": "..." }`; the path and body job IDs must match. The server transactionally fences the serving instance and batch/client/job identity before returning 202. This is the unversioned canonical retry route; do not invent a versioned or bodyless variant.
