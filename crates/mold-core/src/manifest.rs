@@ -12,6 +12,13 @@ use std::sync::LazyLock;
 /// `ltx2` does.
 pub const HUNYUAN3D_FAMILY: &str = "hunyuan3d";
 
+/// The tier a surface picks when the caller names no 3-D model.
+///
+/// The 0.6B step-distilled one: it is the smallest download, the lowest VRAM
+/// and the fastest, and its geometry is close enough to the 1.1B tier that
+/// "try image-to-3D" should not cost six minutes on a first attempt.
+pub const HUNYUAN3D_DEFAULT_MODEL: &str = "hunyuan3d-mini-turbo:fp16";
+
 pub const UTILITY_FAMILIES: &[&str] = &["qwen3-expand", "companion"];
 
 /// Model families that are upscaler models (image-to-image enhancement, not generation).

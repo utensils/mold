@@ -77,6 +77,11 @@ state. Do so only when requested, and verify health plus the selected host
 afterward. For MCP async generation, keep the returned job ID and poll the same
 job; retry only when the status explicitly marks it retryable.
 
+`generate_mesh` is the one MCP generate tool whose schema requires `image`
+rather than `prompt`: the 3-D family has no text encoder, so there is nothing
+for a prompt to do. It returns a rendered poster plus mesh statistics; the
+glTF itself lands in the gallery and is fetched by filename.
+
 For published CUDA images, use Mold's live distribution resolver rather than
 guessing an architecture tag. Its current contract includes B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported. B200 support
 is simulated until hardware-qualified.
