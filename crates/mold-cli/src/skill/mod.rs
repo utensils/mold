@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 const SKILL_DIR_NAME: &str = "mold";
@@ -650,8 +650,7 @@ fn render_adapter(profile: RenderProfile) -> (String, &'static str, &'static str
             ("references", "Pi: load only the linked family or workflow reference needed for the current request.")
         }
         RenderProfile::Openclaw => {
-            fields.push("homepage: https://github.com/utensils/mold".to_string());
-            fields.push("metadata:\n  openclaw:\n    requires:\n      bins:\n        - mold".to_string());
+            fields.push("metadata:\n  openclaw:\n    homepage: https://github.com/utensils/mold\n    requires:\n      bins:\n        - mold".to_string());
             ("{baseDir}/references", "OpenClaw: `{baseDir}` anchors installed resources even when this user-wide skill is invoked outside the Mold repository.")
         }
         RenderProfile::Copilot => {
@@ -722,12 +721,57 @@ fn read_manifest(dir: &Path) -> Result<Option<ManagedManifest>> {
             path.display()
         );
     }
+    let mut paths = BTreeSet::new();
     for file in &manifest.files {
         if !safe_relative(Path::new(&file.path)) || file.path == MANIFEST_FILE {
             anyhow::bail!("unsafe managed path {:?} in {}", file.path, path.display());
         }
+        if !paths.insert(&file.path) {
+            anyhow::bail!(
+                "duplicate managed path {:?} in {}",
+                file.path,
+                path.display()
+            );
+        }
+        if file.sha256.len() != 64 || !file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            anyhow::bail!(
+                "invalid sha256 for managed path {:?} in {}",
+                file.path,
+                path.display()
+            );
+        }
     }
     Ok(Some(manifest))
+}
+
+fn validate_managed_files(dir: &Path, manifest: &ManagedManifest) -> Result<()> {
+    for file in &manifest.files {
+        let relative = Path::new(&file.path);
+        reject_symlink_ancestors(dir, relative, true)?;
+        let target = dir.join(relative);
+        let metadata = match std::fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", target.display()));
+            }
+        };
+        if !metadata.is_file() {
+            anyhow::bail!("managed path {} is not a regular file", target.display());
+        }
+        let actual = sha256(
+            &std::fs::read(&target)
+                .with_context(|| format!("failed to verify {}", target.display()))?,
+        );
+        if actual != file.sha256 {
+            anyhow::bail!(
+                "managed file {} was modified; refusing to overwrite or delete it",
+                target.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
@@ -798,6 +842,10 @@ fn replace_bundle(dir: &Path, bundle: &Bundle) -> Result<PathBuf> {
             dir.display()
         );
     }
+    let installed_manifest = read_manifest(dir)?;
+    if let Some(manifest) = &installed_manifest {
+        validate_managed_files(dir, manifest)?;
+    }
     let staging = tempfile::tempdir_in(parent)
         .with_context(|| format!("failed to stage skill beside {}", dir.display()))?;
     let staged_dir = staging.path().join(SKILL_DIR_NAME);
@@ -805,7 +853,7 @@ fn replace_bundle(dir: &Path, bundle: &Bundle) -> Result<PathBuf> {
     if dir.exists() {
         copy_tree(dir, &staged_dir)?;
     }
-    if let Some(manifest) = read_manifest(dir)? {
+    if let Some(manifest) = installed_manifest {
         for file in manifest.files {
             remove_stage_file(&staged_dir, &file.path)?;
         }
@@ -871,7 +919,11 @@ fn uninstall_bundle(dir: &Path) -> Result<usize> {
             dir.display()
         );
     }
-    let managed = if let Some(manifest) = read_manifest(dir)? {
+    let installed_manifest = read_manifest(dir)?;
+    if let Some(manifest) = &installed_manifest {
+        validate_managed_files(dir, manifest)?;
+    }
+    let managed = if let Some(manifest) = installed_manifest {
         manifest
             .files
             .into_iter()
@@ -1139,6 +1191,9 @@ mod tests {
         }
         let openclaw = render_bundle(RenderProfile::Openclaw).unwrap();
         assert!(openclaw.files["SKILL.md"].contains("{baseDir}/references"));
+        assert!(openclaw.files["SKILL.md"]
+            .contains("metadata:\n  openclaw:\n    homepage: https://github.com/utensils/mold\n"));
+        assert!(!openclaw.files["SKILL.md"].contains("\nhomepage:"));
         assert!(openclaw.files["SKILL.md"].contains("requires:\n      bins:\n        - mold"));
         let copilot = render_bundle(RenderProfile::Copilot).unwrap();
         let copilot_frontmatter = copilot.files["SKILL.md"].split("\n---\n").next().unwrap();
@@ -1363,6 +1418,66 @@ mod tests {
         );
         assert!(!dir.join("SKILL.md").exists());
         assert!(!dir.join(MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn modified_managed_file_blocks_upgrade_and_uninstall() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("mold");
+        replace_bundle(&dir, &render_bundle(RenderProfile::Portable).unwrap()).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "user customization").unwrap();
+
+        let upgrade =
+            replace_bundle(&dir, &render_bundle(RenderProfile::Codex).unwrap()).unwrap_err();
+        assert!(upgrade.to_string().contains("was modified"));
+        let uninstall = uninstall_bundle(&dir).unwrap_err();
+        assert!(uninstall.to_string().contains("was modified"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+            "user customization"
+        );
+        assert!(dir.join(MANIFEST_FILE).is_file());
+    }
+
+    #[test]
+    fn tampered_manifest_cannot_claim_a_user_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("mold");
+        replace_bundle(&dir, &render_bundle(RenderProfile::Portable).unwrap()).unwrap();
+        std::fs::write(dir.join("notes.md"), "keep this").unwrap();
+        let mut manifest = read_manifest(&dir).unwrap().unwrap();
+        manifest.files[0].path = "notes.md".to_string();
+        std::fs::write(
+            dir.join(MANIFEST_FILE),
+            format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+        )
+        .unwrap();
+
+        let error = uninstall_bundle(&dir).unwrap_err();
+        assert!(error.to_string().contains("was modified"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.md")).unwrap(),
+            "keep this"
+        );
+        assert!(dir.join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn duplicate_manifest_paths_are_rejected_before_deletion() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("mold");
+        replace_bundle(&dir, &render_bundle(RenderProfile::Portable).unwrap()).unwrap();
+        let mut manifest = read_manifest(&dir).unwrap().unwrap();
+        manifest.files.push(manifest.files[0].clone());
+        std::fs::write(
+            dir.join(MANIFEST_FILE),
+            format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+        )
+        .unwrap();
+
+        let error = uninstall_bundle(&dir).unwrap_err();
+        assert!(error.to_string().contains("duplicate managed path"));
+        assert!(dir.join("SKILL.md").is_file());
     }
 
     #[test]
