@@ -49,6 +49,7 @@ pub mod secure_file;
 pub mod time;
 pub mod types;
 pub mod validation;
+pub mod video_upscale;
 pub mod wan_expert_marker;
 
 #[cfg(test)]
@@ -125,6 +126,7 @@ pub use validation::{
     wan_dimension_alignment, Ltx2OutputRung, Ltx2SpatialComposition, ReferenceForm,
     RequestOrganization, LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
 };
+pub use video_upscale::*;
 
 pub use expand::{
     ApiExpander, ExpandConfig, ExpandResult, ExpandSettings, FamilyOverride, PromptExpander,

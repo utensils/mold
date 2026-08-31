@@ -652,6 +652,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 33,
         kind: MigrationKind::Sql(V33_GALLERY_RETAINED_MEDIA),
     },
+    Migration {
+        version: 34,
+        kind: MigrationKind::Sql(V34_VIDEO_UPSCALE_JOBS),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -671,6 +675,33 @@ CREATE INDEX IF NOT EXISTS idx_gen_dir_recency
 const V32_GENERATION_QUEUE_EXPLICIT_PAUSE: &str = r#"
 ALTER TABLE generation_queue
     ADD COLUMN explicitly_paused INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// Durable, independently resumable framewise video-upscale jobs. Source
+/// paths are resolved from authenticated gallery/upload authority at
+/// admission; callers never provide arbitrary server paths.
+const V34_VIDEO_UPSCALE_JOBS: &str = r#"
+CREATE TABLE video_upscale_jobs (
+    id                TEXT PRIMARY KEY,
+    state             TEXT NOT NULL CHECK (state IN
+                         ('queued','running','finalizing','paused','completed','failed','cancelled')),
+    source_json       TEXT NOT NULL,
+    source_path       TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    scale_factor      INTEGER NOT NULL,
+    tile_size         INTEGER,
+    completed_frames  INTEGER NOT NULL DEFAULT 0,
+    total_frames      INTEGER NOT NULL DEFAULT 0,
+    source_facts_json TEXT,
+    output_facts_json TEXT,
+    output_filename   TEXT,
+    error             TEXT,
+    work_dir          TEXT NOT NULL,
+    created_at_ms     INTEGER NOT NULL,
+    updated_at_ms     INTEGER NOT NULL
+);
+CREATE INDEX video_upscale_jobs_state_created
+    ON video_upscale_jobs(state, created_at_ms);
 "#;
 
 /// Repairable SQLite projection of encrypted gallery-owned source-media
@@ -699,7 +730,6 @@ CREATE TABLE gallery_media_bindings (
 CREATE INDEX gallery_media_bindings_set
 ON gallery_media_bindings(media_set_id, owner_uuid, job_id, output_dir, filename);
 "#;
-
 /// #1227 phase 2 moved face-identity extraction from admission onto the
 /// render's leased device, where it became a typed scheduler phase
 /// (`ProgressPhase::IdentityExtract`). Its EWMA needs a column: unlike an
@@ -775,7 +805,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 33;
+pub const SCHEMA_VERSION: i64 = 34;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -1406,7 +1436,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 33);
+        assert_eq!(SCHEMA_VERSION, 34);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1560,7 +1590,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 33);
+        assert_eq!(SCHEMA_VERSION, 34);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1697,7 +1727,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 33);
+        assert_eq!(SCHEMA_VERSION, 34);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1959,7 +1989,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 33);
+        assert_eq!(SCHEMA_VERSION, 34);
     }
 
     #[test]

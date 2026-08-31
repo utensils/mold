@@ -116,7 +116,11 @@ import {
   listHosts,
   originHost,
 } from "../lib/hostRegistry";
-import { hostDeleteGalleryImage } from "../components/machines/hostClient";
+import {
+  hostCapabilities,
+  hostDeleteGalleryImage,
+} from "../components/machines/hostClient";
+import { createFramewiseUpscale } from "@studio/api/videoUpscale";
 import type { GalleryImage, ModelInfoExtended } from "../types";
 import { mediaKind } from "../types";
 import GalleryGrid from "../components/gallery/GalleryGrid.vue";
@@ -1932,6 +1936,30 @@ async function onUseAsSource(item: GalleryImage) {
 }
 
 async function onUpscale(item: GalleryImage) {
+  const video =
+    item.format === "mp4" || /\.(?:mp4|mov|webm)$/i.test(item.filename);
+  if (video) {
+    try {
+      const host = hostForEntry(item);
+      if (!host) throw missingHostError(item);
+      const capabilities = await hostCapabilities(host);
+      if (!capabilities.video_upscale?.available) {
+        throw new Error(
+          "This host does not support durable Framewise upscale.",
+        );
+      }
+      const job = await createFramewiseUpscale(
+        { baseUrl: host.url, apiKey: host.apiKey ?? null },
+        item.filename,
+        "real-esrgan-x4plus:fp16",
+      );
+      closeLightbox();
+      toast("info", `Framewise upscale queued (${job.id}). ${job.disclosure}`);
+    } catch (err) {
+      toast("error", err instanceof Error ? err.message : String(err));
+    }
+    return;
+  }
   if (!(await setAsSource(item))) return;
   closeLightbox();
   toast("info", "Added as source — pick an upscaler in Controls.");

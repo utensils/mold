@@ -57,6 +57,9 @@ mold run ltx-video-0.9.6-distilled:bf16 "a fox in the snow" --frames 25
 # Turn a photo into a 3D mesh
 mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb
 
+# Upscale a Library video as a durable framewise job
+mold video-upscale create clip.mp4 --wait
+
 # Launch the web studio and API
 mold serve
 ```

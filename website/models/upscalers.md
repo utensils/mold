@@ -108,3 +108,17 @@ All upscaler models are sourced from trusted HuggingFace repositories:
 | Batch processing   | `real-esrgan-anime-v3:fp32`     | 5-10x faster             |
 | Video frames       | `real-esrgan-anime-v3:fp32`     | Smallest, fastest        |
 | Subtle enhancement | `real-esrgan-x2plus:fp16`       | 2x is less aggressive    |
+
+## Framewise video upscale
+
+`mold video-upscale create clip.mp4 --wait` creates a durable job from an
+existing Library video and publishes a new MP4. It decodes and processes one
+frame at a time with the same native Real-ESRGAN/Candle engine used for stills;
+it does not interpolate frames or perform temporal/generative restoration.
+Frame count, constant FPS, duration, and a codec-compatible primary audio track
+are verified before publication. Temporal flicker may remain.
+
+The first contract accepts MP4, MOV, and WebM Library sources, but deliberately
+rejects VFR, HDR/high-bit-depth sources, subtitles, chapters, multiple audio
+tracks, and primary audio that cannot be copied safely into MP4. Use
+`mold video-upscale status|pause|resume|cancel <job-id>` to manage a job.

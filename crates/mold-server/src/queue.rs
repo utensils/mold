@@ -771,6 +771,124 @@ pub(crate) fn save_video_to_dir_named(
     Ok(filename.to_string())
 }
 
+/// Publish an already-encoded video without materializing the whole file in
+/// memory. The staged file must share the gallery filesystem; framewise video
+/// jobs deliberately stage beneath the output directory to guarantee that.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_video_path_to_dir_named(
+    dir: &std::path::Path,
+    filename: &str,
+    staged: &std::path::Path,
+    format: OutputFormat,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+) -> anyhow::Result<String> {
+    let filename_path = std::path::Path::new(filename);
+    anyhow::ensure!(
+        filename_path.components().count() == 1
+            && matches!(
+                filename_path.components().next(),
+                Some(std::path::Component::Normal(_))
+            ),
+        "gallery filename must be one normal path component"
+    );
+    std::fs::create_dir_all(dir)?;
+    let authority = crate::batch_transaction::acquire_gallery_bookkeeping_lock(dir)?;
+    let path = dir.join(filename);
+    let created = match std::fs::hard_link(staged, &path) {
+        Ok(()) => {
+            crate::batch_transaction::sync_ordinary_gallery_directory(dir)?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            fn digest(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
+                use std::io::Read as _;
+                let mut file = std::fs::File::open(path)?;
+                let mut hash = Sha256::new();
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let read = file.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..read]);
+                }
+                Ok(hash.finalize().into())
+            }
+            anyhow::ensure!(
+                digest(&path)? == digest(staged)?,
+                "gallery replay target '{}' exists with different bytes",
+                path.display()
+            );
+            false
+        }
+        Err(error) => return Err(error).context("linking staged video into gallery"),
+    };
+    let params = mold_db::persist::OutputRecordParams {
+        format,
+        metadata,
+        source: RecordSource::Server,
+        generation_time_ms,
+        backend: Some(mold_inference::compiled_backend_label()),
+    };
+    let index = gallery_gate.committed_archive_index_while_locked(dir, &authority)?;
+    let record = if let Some(existing) = index.get(filename) {
+        anyhow::ensure!(
+            existing.record().format == format
+                && existing.record().metadata == *metadata
+                && !existing.record().metadata_synthetic,
+            "gallery replay target '{}' exists with different archived metadata",
+            path.display()
+        );
+        existing.record().clone()
+    } else {
+        let record = mold_db::persist::build_saved_output_record(dir, filename, &path, &params);
+        match crate::batch_transaction::archive_ordinary_gallery_record(
+            dir,
+            &path,
+            record,
+            gallery_gate,
+            &authority,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                if created {
+                    let _ = std::fs::remove_file(&path);
+                    let _ = crate::batch_transaction::sync_ordinary_gallery_directory(dir);
+                }
+                return Err(error).context("archiving framewise upscale publication");
+            }
+        }
+    };
+    drop(authority);
+    let seeded = db
+        .map(|db| {
+            db.upsert_reporting_organization(&record)
+                .context("recording framewise upscale gallery metadata")
+        })
+        .transpose()?
+        .map(|(_, seeded)| seeded);
+    if let Some(events) = events {
+        let seeded_filing = seeded.as_ref().is_some_and(|seeded| !seeded.is_empty());
+        let image_row = Some(Box::new(gallery_image_with_filing(
+            &record,
+            seeded.as_ref(),
+        )));
+        let announced = image_row.clone();
+        events.publish(mold_core::ServerEvent::GalleryAdded {
+            filename: filename.to_string(),
+            image: image_row,
+        });
+        if seeded_filing {
+            announce_seeded_filing(events, filename, announced);
+        }
+    }
+    Ok(filename.to_string())
+}
+
 fn write_gallery_bytes_no_replace(
     dir: &std::path::Path,
     desired: &str,

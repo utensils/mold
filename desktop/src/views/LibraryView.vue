@@ -99,6 +99,7 @@ import {
   minimaxH3TaskForModel,
   setMinimaxH3GalleryImageFirstFrame,
 } from "@studio/lib/minimaxH3Authoring";
+import { createFramewiseUpscale } from "@studio/api/videoUpscale";
 
 const GAP = 8;
 const PAD = 16;
@@ -386,6 +387,21 @@ async function upscaleItem(entry: MergedPrint) {
     for (const key of new Set([primaryId.value, "local"])) {
       if (key) void gallery.refreshHost(key);
     }
+  } catch (err) {
+    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  } finally {
+    upscalingFilename.value = null;
+  }
+}
+
+async function framewiseUpscaleItem(entry: MergedPrint) {
+  if (upscalingFilename.value) return;
+  const target = targetFor(entry);
+  if (!target) return;
+  upscalingFilename.value = entry.item.filename;
+  try {
+    const job = await createFramewiseUpscale(target, entry.item.filename, upscalerModel.value);
+    toasts.push(`Framewise upscale queued (${job.id}). ${job.disclosure}`);
   } catch (err) {
     toasts.push(err instanceof Error ? err.message : String(err), "error");
   } finally {
@@ -1084,12 +1100,19 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     },
     { separator: true },
     {
-      label: upscalingFilename.value === item.filename ? "Upscaling…" : "Upscale",
+      label:
+        upscalingFilename.value === item.filename
+          ? "Upscaling…"
+          : isVideo(item)
+            ? "Framewise upscale"
+            : "Upscale",
       // Upscale runs on the PRIMARY engine only for now — routing it to the
       // item's origin host is a follow-up.
       disabled:
-        isVideo(item) || entry.sourceKey !== primaryId.value || upscalingFilename.value !== null,
-      action: () => void upscaleItem(entry),
+        entry.sourceKey !== primaryId.value ||
+        upscalingFilename.value !== null ||
+        (isVideo(item) && !hosts.capabilities[entry.sourceKey]?.video_upscale?.available),
+      action: () => void (isVideo(item) ? framewiseUpscaleItem(entry) : upscaleItem(entry)),
     },
     {
       label: "Save locally",

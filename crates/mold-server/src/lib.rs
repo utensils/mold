@@ -88,6 +88,7 @@ mod signals;
 pub mod state;
 pub mod thumbnails;
 pub mod variant_dependencies;
+pub mod video_upscale;
 mod wan_admission;
 pub mod web_ui;
 // The arcstats parser and credit policy are pure and unit-tested on every

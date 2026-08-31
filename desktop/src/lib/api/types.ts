@@ -136,6 +136,18 @@ export interface ServerCapabilities {
   generation_profile_v1?: boolean;
   /** Restart-safe encrypted request-media queueing. Absent is unsupported. */
   durable_media?: DurableMediaCapabilities | null;
+  video_upscale?: {
+    available: boolean;
+    contract_version: number;
+    source_library: boolean;
+    source_upload: boolean;
+    input_containers: string[];
+    output_container: string;
+    preserves_primary_audio_when_compatible: boolean;
+    supports_vfr: boolean;
+    supports_hdr: boolean;
+    disclosure: string;
+  } | null;
   gallery: {
     can_delete: boolean;
     /** Trash support (soft delete + retention). Absent on older servers,
