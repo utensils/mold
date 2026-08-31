@@ -153,22 +153,22 @@ mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.26.0
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.26.0" }
 mold-candle = { path = "../mold-candle", package = "mold-ai-candle", version = "0.26.0" }
 anyhow = "1"
-candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "2a15732384b6086e6969cd3847b5c051e456ec22" }
-candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "2a15732384b6086e6969cd3847b5c051e456ec22" }
-candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "2a15732384b6086e6969cd3847b5c051e456ec22" }
+candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "744ae3b83cfac18db28107a353c449cc9b80d4ec" }
+candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "744ae3b83cfac18db28107a353c449cc9b80d4ec" }
+candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "744ae3b83cfac18db28107a353c449cc9b80d4ec" }
 cudarc = { version = "0.19.8", default-features = false, features = ["driver"], optional = true }
 # Optional flash-attention v2. Pulled in only by the `flash-attn` feature.
 #
 # Pinned to the same fork revision as every other candle crate above, so its
 # `Tensor` type is identical to ours. A crates.io `candle-flash-attn` depends
 # on the upstream-named `candle-core` and breaks the CUDA build (#1399).
-candle-flash-attn = { git = "https://github.com/utensils/candle.git", rev = "2a15732384b6086e6969cd3847b5c051e456ec22", optional = true }
+candle-flash-attn = { git = "https://github.com/utensils/candle.git", rev = "744ae3b83cfac18db28107a353c449cc9b80d4ec", optional = true }
 # ONNX evaluation for the InsightFace antelopev2 face models (PuLID only).
 # Pinned to the same fork revision as every other candle crate above, so its
 # `Tensor` type is identical to ours. CPU-only by
 # construction: `candle-onnx`'s `get_tensor` materializes every initializer on
 # `Device::Cpu` (candle-onnx/src/eval.rs:191-232).
-candle-onnx = { git = "https://github.com/utensils/candle.git", rev = "2a15732384b6086e6969cd3847b5c051e456ec22", optional = true }
+candle-onnx = { git = "https://github.com/utensils/candle.git", rev = "744ae3b83cfac18db28107a353c449cc9b80d4ec", optional = true }
 # `candle-onnx` does not re-export `prost`, and mold decodes the `ModelProto`
 # from a retained descriptor rather than through that crate's path-based
 # `read_file`. Same 0.14 release candle-onnx builds against, so cargo unifies
