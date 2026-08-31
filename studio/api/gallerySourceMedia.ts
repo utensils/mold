@@ -25,8 +25,6 @@ export interface RetainedSourceMediaReuseSession {
   session_handle: string;
 }
 
-export const RETAINED_MEDIA_REUSE_HEADER = "X-Mold-Retained-Media-Session";
-
 function inventoryPath(filename: string): string {
   return `/api/gallery/source-media/${encodeURIComponent(filename)}`;
 }

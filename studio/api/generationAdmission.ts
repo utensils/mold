@@ -360,7 +360,10 @@ export async function admitGenerationBatch<TRequest>(
   return parseGenerationBatchStatus(
     await apiJsonTo<unknown>(target, "/api/generation-batches", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...Object.fromEntries(new Headers(extraHeaders)) },
+      headers: {
+        "Content-Type": "application/json",
+        ...Object.fromEntries(new Headers(extraHeaders)),
+      },
       body: JSON.stringify(request),
       ...(signal ? { signal } : {}),
     }),
