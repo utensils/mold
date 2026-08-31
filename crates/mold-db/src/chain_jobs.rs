@@ -149,6 +149,23 @@ pub fn pause_active_for_restart(db: &MetadataDb, updated_at_ms: i64) -> Result<u
     })
 }
 
+/// Park work that has not been claimed yet while a graceful shutdown fences
+/// the runner. Running attempts settle themselves so an already accepted user
+/// cancellation cannot be overwritten by this restart transition.
+pub fn pause_queued_for_shutdown(db: &MetadataDb, updated_at_ms: i64) -> Result<usize> {
+    db.with_conn(|conn| {
+        let changed = conn.execute(
+            "UPDATE chain_jobs
+                SET state = 'paused',
+                    error = NULL,
+                    updated_at = MAX(?1, updated_at + 1)
+              WHERE state = 'queued'",
+            params![updated_at_ms],
+        )?;
+        Ok(changed)
+    })
+}
+
 /// Oldest queued job by `created_at` (FIFO runner contract).
 pub fn next_queued_job(db: &MetadataDb) -> Result<Option<ChainJobRow>> {
     db.with_conn(|conn| {
@@ -727,6 +744,26 @@ mod tests {
         assert_eq!(
             get_job(&db, &failed.id).unwrap().unwrap().state,
             ChainJobState::Failed
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_parks_only_unclaimed_jobs() {
+        let db = db();
+        let queued = job("01JBR55SHUTDOWNQ", ChainJobState::Queued, 1_000);
+        let running = job("01JBR55SHUTDOWNR", ChainJobState::Running, 1_000);
+        insert_job(&db, &queued).unwrap();
+        insert_job(&db, &running).unwrap();
+
+        assert_eq!(pause_queued_for_shutdown(&db, 2_000).unwrap(), 1);
+        assert_eq!(
+            get_job(&db, &queued.id).unwrap().unwrap().state,
+            ChainJobState::Paused
+        );
+        assert_eq!(
+            get_job(&db, &running.id).unwrap().unwrap().state,
+            ChainJobState::Running,
+            "the worker must settle a running attempt so an accepted user cancel wins"
         );
     }
 

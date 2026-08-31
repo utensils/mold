@@ -862,7 +862,8 @@ at the head stays intact.
 - **Resumable.** A failed stage settles the durable chain job as `failed`; its
   artifacts are retained and the job can be resumed with
   `mold jobs resume <id>` or `POST /api/chain-jobs/{id}/resume`. Auto-chained
-  (ephemeral) one-shots refuse resume.
+  one-shots use the same durable restart path: restart parks them with their
+  completed clips and source media intact, then an explicit resume continues.
 - **Multiple CLI authoring modes.** A large `--frames` request still replicates
   the main prompt across stages, but `mold run --prompt ... --prompt ...` builds
   one stage per prompt and `mold run --script shot.toml` sends the canonical

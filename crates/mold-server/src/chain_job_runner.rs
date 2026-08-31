@@ -150,7 +150,6 @@ pub enum RunnerCmd {
 //   latency-sensitive; the daily tick absorbs routine cleanup).
 //   ttl_days is read by the RUNNER from the settings DB
 //   (CHAIN_JOBS_ARTIFACT_TTL_DAYS, default 7) at each pass.
-// resume handler behavior add: ephemeral job → 409 CHAIN_JOB_EPHEMERAL.
 
 pub type ChainLeaseCallback = Box<dyn FnOnce(usize) -> Result<(), String> + Send>;
 
@@ -828,8 +827,8 @@ pub(crate) fn run_gc_pass(
     Ok(outcome)
 }
 
-/// Startup sweep (unconditional on claims — none survive restart): all
-/// non-running ephemerals removed. Ordering pin: lib.rs calls
+/// Startup sweep (unconditional on claims — none survive restart): settled
+/// ephemerals are removed. Ordering pin: lib.rs calls
 /// startup_reconcile → THIS → spawn_runner, strictly sequential.
 pub(crate) fn startup_gc_sweep(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<GcOutcome> {
     let mut outcome = GcOutcome {
@@ -3380,29 +3379,38 @@ fn set_cancelled(db: &MetadataDb, deps: &RunnerDeps, job_id: &str) -> anyhow::Re
         let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir)?;
         reset_running_stages_for_retry(db, job_id, &row.job_dir, &mut manifest, now_ms_i64())?;
     }
+    let user_requested = deps.cancel.was_user_requested(job_id);
+    let target = if user_requested {
+        ChainJobState::Cancelled
+    } else {
+        ChainJobState::Paused
+    };
+    let error = (!user_requested).then_some("server shutdown interrupted chain job");
     let changed = chain_jobs::try_transition(
         db,
         job_id,
         &[ChainJobState::Running],
-        ChainJobState::Cancelled,
-        None,
+        target,
+        error,
         now_ms_i64(),
     )?;
     if changed {
         deps.events.publish_then_remove(
             job_id,
             ChainJobEvent::StateChanged {
-                state: ChainJobState::Cancelled,
-                error: None,
+                state: target,
+                error: error.map(str::to_string),
             },
         );
-        publish_server_event(
-            deps,
-            mold_core::ServerEvent::ChainJobEnded {
-                id: job_id.to_string(),
-                state: ChainJobState::Cancelled,
-            },
-        );
+        if user_requested {
+            publish_server_event(
+                deps,
+                mold_core::ServerEvent::ChainJobEnded {
+                    id: job_id.to_string(),
+                    state: ChainJobState::Cancelled,
+                },
+            );
+        }
         deps.cancel.unregister(job_id);
     }
     Ok(())
@@ -5400,6 +5408,83 @@ mod tests {
             ChainJobState::Cancelled
         );
         assert!(!job_dir.join("stages/000/segment.mp4").exists());
+    }
+
+    #[test]
+    fn shutdown_interrupt_parks_ephemeral_job_instead_of_user_cancelling_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55SHUTDOWN",
+            &req,
+            ChainJobState::Queued,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&job_dir).unwrap();
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.cancel.request_all();
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let parked = chain_jobs::get_job(deps.db.as_ref().as_ref().unwrap(), &row.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parked.state, ChainJobState::Paused);
+        assert_eq!(
+            parked.error.as_deref(),
+            Some("server shutdown interrupted chain job")
+        );
+        assert!(job_dir.exists());
+    }
+
+    #[test]
+    fn user_cancel_still_wins_when_shutdown_interrupts_the_same_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55CANCELSHUTDOWN",
+            &req,
+            ChainJobState::Queued,
+        );
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.cancel.register(&row.id);
+        assert!(deps.cancel.request(&row.id));
+        deps.cancel.request_all();
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        assert_eq!(
+            chain_jobs::get_job(deps.db.as_ref().as_ref().unwrap(), &row.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ChainJobState::Cancelled
+        );
     }
 
     #[test]
@@ -8033,7 +8118,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_gc_sweep_removes_non_running_ephemerals_only() {
+    fn startup_gc_sweep_removes_settled_ephemerals_only() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
         let req = request(vec![TransitionMode::Smooth]);
@@ -8048,16 +8133,33 @@ mod tests {
         let mut manifest = ChainJobManifest::read_from_dir(&ephemeral_done.job_dir).unwrap();
         manifest.ephemeral = true;
         manifest.write_atomic(&ephemeral_done.job_dir).unwrap();
+        let mut restart_request = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        restart_request.source_image = Some(b"durable source image bytes".to_vec());
         let ephemeral_running = persist_job(
             &db,
             &jobs_root.join("01JBR55EPHRUN"),
             "01JBR55EPHRUN",
-            &req,
+            &restart_request,
             ChainJobState::Running,
         );
         let mut manifest = ChainJobManifest::read_from_dir(&ephemeral_running.job_dir).unwrap();
         manifest.ephemeral = true;
+        manifest.stage_status[0].state = StageState::Completed;
+        manifest.stage_status[0].segment = Some("stages/000/segment.mp4".into());
+        manifest.stage_status[0].tail_frames = Some(1);
+        manifest.stage_status[1].state = StageState::Running;
         manifest.write_atomic(&ephemeral_running.job_dir).unwrap();
+        let layout = JobDirLayout::new(ephemeral_running.job_dir.clone());
+        std::fs::create_dir_all(layout.tail_dir(0)).unwrap();
+        std::fs::write(layout.segment_path(0), b"durable completed segment").unwrap();
+        frame(77).save(layout.tail_dir(0).join("000.png")).unwrap();
+        let source_before = ChainJobManifest::read_from_dir(&ephemeral_running.job_dir)
+            .unwrap()
+            .request()
+            .unwrap()
+            .source_image;
+        let segment_before = std::fs::read(layout.segment_path(0)).unwrap();
+        let tail_before = std::fs::read(layout.tail_dir(0).join("000.png")).unwrap();
         let durable_done = persist_job(
             &db,
             &jobs_root.join("01JBR55DURABLE"),
@@ -8066,6 +8168,7 @@ mod tests {
             ChainJobState::Completed,
         );
 
+        startup_reconcile(&db, &jobs_root).unwrap();
         let outcome = startup_gc_sweep(&db, &jobs_root).unwrap();
 
         assert_eq!(outcome.swept_ephemeral_jobs, 1);
@@ -8073,10 +8176,30 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!ephemeral_done.job_dir.exists());
-        assert!(chain_jobs::get_job(&db, &ephemeral_running.id)
+        let recovered = chain_jobs::get_job(&db, &ephemeral_running.id)
             .unwrap()
-            .is_some());
+            .unwrap();
+        assert_eq!(recovered.state, ChainJobState::Paused);
         assert!(ephemeral_running.job_dir.exists());
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&ephemeral_running.job_dir)
+                .unwrap()
+                .request()
+                .unwrap()
+                .source_image,
+            source_before
+        );
+        assert_eq!(
+            std::fs::read(layout.segment_path(0)).unwrap(),
+            segment_before
+        );
+        assert_eq!(
+            std::fs::read(layout.tail_dir(0).join("000.png")).unwrap(),
+            tail_before
+        );
+        let stages = chain_jobs::stages_for_job(&db, &ephemeral_running.id).unwrap();
+        assert_eq!(stages[0].state, StageState::Completed);
+        assert_eq!(stages[1].state, StageState::Pending);
         assert!(chain_jobs::get_job(&db, &durable_done.id)
             .unwrap()
             .is_some());

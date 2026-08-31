@@ -42,6 +42,7 @@ import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
 import { thumbnailPath } from "../../lib/gallery/media";
 import type { FleetActiveWork } from "@studio/api/activity";
 import { compareNewestSubmitted } from "@studio/lib/activityOrder";
+import { apiFetchTo } from "@studio/api/client";
 
 const route = useRoute();
 const router = useRouter();
@@ -320,7 +321,13 @@ async function cancelSharedJob(row: FleetActiveWork) {
 
   cancellingSharedJobs.value = [...cancellingSharedJobs.value, row.key];
   try {
-    await jobs.cancelJob(row.hostId, row.id);
+    if (row.execution === "chain") {
+      await apiFetchTo(snapshot.target, `/api/chain-jobs/${encodeURIComponent(row.id)}/cancel`, {
+        method: "POST",
+      });
+    } else {
+      await jobs.cancelJob(row.hostId, row.id);
+    }
     const current = liveActivity.hosts[row.hostId]?.items.find(
       (item) => item.kind === row.kind && item.id === row.id,
     );

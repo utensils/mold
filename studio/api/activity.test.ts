@@ -271,6 +271,46 @@ describe("active work reconciliation", () => {
     ).toEqual([]);
   });
 
+  it("retains chain-backed generations when chain authority is unavailable", () => {
+    const previous = reconcileActivityHost(route, undefined, {
+      instance_id: "instance-a",
+      observed_at_unix_ms: 10,
+      items: [
+        {
+          id: "auto-chain-a",
+          kind: "generation",
+          execution: "chain",
+          phase: "running",
+          created_at_unix_ms: 1,
+          updated_at_unix_ms: 9,
+          can_cancel: true,
+        },
+        {
+          id: "queue-generation-a",
+          kind: "generation",
+          phase: "queued",
+          created_at_unix_ms: 2,
+          updated_at_unix_ms: 9,
+          can_cancel: true,
+        },
+      ],
+    });
+
+    const partial = reconcileActivityHost(route, previous, {
+      instance_id: "instance-a",
+      observed_at_unix_ms: 11,
+      items: [],
+      unavailable_kinds: ["sequence", "chain_generation"],
+    });
+
+    expect(partial.items.map((item) => item.id)).toEqual(["auto-chain-a"]);
+    expect(mergeFleetActivity([partial])[0]).toMatchObject({
+      id: "auto-chain-a",
+      stale: true,
+      hostError: "generation status is temporarily unavailable",
+    });
+  });
+
   it("keeps identical ids from different hosts as separate attributed rows", () => {
     const a = reconcileActivityHost(route, undefined, {
       instance_id: "instance-a",

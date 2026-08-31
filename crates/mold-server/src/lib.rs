@@ -1129,6 +1129,7 @@ pub async fn run_server(
     *state.shutdown_tx.lock().await = Some(shutdown_tx);
     let shutdown_scheduler = scheduler_shutdown.clone();
     let shutdown_chain_jobs = state.chain_jobs.clone();
+    let shutdown_metadata_db = state.metadata_db.clone();
     let shutdown_journal = state.queue_journal.clone();
     let shutdown_generation_cancel = state.generation_cancel.clone();
     let shutdown_event_streams = state.events.clone();
@@ -1141,6 +1142,7 @@ pub async fn run_server(
         arm_shutdown_deadline(shutdown_fatal_cuda);
         begin_runtime_shutdown(
             shutdown_chain_jobs.as_deref(),
+            shutdown_metadata_db.as_ref().as_ref(),
             &shutdown_scheduler,
             &shutdown_journal,
             &shutdown_generation_cancel,
@@ -1587,6 +1589,7 @@ fn arm_shutdown_deadline(fatal_cuda: std::sync::Arc<AtomicBool>) {
 /// of the ~20 discard sites has to know durability exists.
 fn begin_runtime_shutdown(
     chain_jobs: Option<&chain_job_runner::ChainJobRunnerHandle>,
+    metadata_db: Option<&mold_db::MetadataDb>,
     scheduler_shutdown: &tokio_util::sync::CancellationToken,
     queue_journal: &queue_journal::QueueJournal,
     generation_cancel: &generation_cancel::CancelRegistry,
@@ -1601,8 +1604,28 @@ fn begin_runtime_shutdown(
         );
     }
     if let Some(chain_jobs) = chain_jobs {
+        if let Some(db) = metadata_db {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(i64::MAX);
+            match mold_db::chain_jobs::pause_queued_for_shutdown(db, now_ms) {
+                Ok(paused) if paused > 0 => {
+                    tracing::info!(paused, "parked queued chain jobs for restart");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(%error, "failed to park active chain jobs for restart");
+                }
+            }
+        }
         let active_chains = chain_jobs.request_shutdown();
-        tracing::info!(active_chains, "cancelled chain work before HTTP drain");
+        tracing::info!(
+            active_chains,
+            "interrupted parked chain work before HTTP drain"
+        );
     }
     event_streams.shutdown();
     scheduler_shutdown.cancel();
@@ -1714,7 +1737,25 @@ mod tests {
     use tower::ServiceExt;
 
     #[test]
-    fn runtime_shutdown_cancels_chains_and_scheduler_before_http_drain() {
+    fn runtime_shutdown_parks_chains_before_interrupting_gpu_work() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        mold_db::chain_jobs::insert_job(
+            &db,
+            &mold_db::chain_jobs::ChainJobRow {
+                id: "chain-in-flight".into(),
+                state: mold_core::chain_job::ChainJobState::Queued,
+                model: "ltx2".into(),
+                request_json: "{}".into(),
+                job_dir: "/tmp/chain-in-flight".into(),
+                stage_count: 2,
+                current_stage: 0,
+                error: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                finalized_at_ms: None,
+            },
+        )
+        .unwrap();
         let chains = crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests();
         chains.register_cancel_for_tests("chain-in-flight");
         let scheduler = tokio_util::sync::CancellationToken::new();
@@ -1725,12 +1766,20 @@ mod tests {
         let event_streams = crate::events::EventBroadcaster::new();
         begin_runtime_shutdown(
             Some(&chains),
+            Some(&db),
             &scheduler,
             &journal,
             &singletons,
             &event_streams,
         );
 
+        assert_eq!(
+            mold_db::chain_jobs::get_job(&db, "chain-in-flight")
+                .unwrap()
+                .unwrap()
+                .state,
+            mold_core::chain_job::ChainJobState::Paused,
+        );
         assert!(chains.is_cancelling("chain-in-flight"));
         chains.register_cancel_for_tests("chain-claimed-during-shutdown");
         assert!(chains.is_cancelling("chain-claimed-during-shutdown"));
@@ -1759,6 +1808,7 @@ mod tests {
         };
 
         begin_runtime_shutdown(
+            None,
             None,
             &scheduler,
             &journal,
@@ -1876,6 +1926,7 @@ mod tests {
         assert!(!running.is_cancelled());
 
         begin_runtime_shutdown(
+            None,
             None,
             &scheduler,
             &journal,

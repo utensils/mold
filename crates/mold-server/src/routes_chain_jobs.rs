@@ -390,20 +390,17 @@ pub async fn resume_chain_job(
         .ok_or_else(|| not_found(&id))?;
     let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir)
         .map_err(|e| ApiError::internal(format!("failed to read chain manifest: {e:#}")))?;
-    if manifest.ephemeral {
-        return Err(conflict(
-            CHAIN_JOB_EPHEMERAL,
-            "ephemeral chain jobs are internal to legacy generate/chain shims and cannot be resumed",
-        ));
-    }
-    if ![
-        ChainJobState::Paused,
-        ChainJobState::Interrupted,
-        ChainJobState::Failed,
-        ChainJobState::Cancelled,
-    ]
-    .contains(&row.state)
-    {
+    let resumable_states: &[ChainJobState] = if manifest.ephemeral {
+        &[ChainJobState::Paused, ChainJobState::Interrupted]
+    } else {
+        &[
+            ChainJobState::Paused,
+            ChainJobState::Interrupted,
+            ChainJobState::Failed,
+            ChainJobState::Cancelled,
+        ]
+    };
+    if !resumable_states.contains(&row.state) {
         return Err(conflict_for_current_state(
             db,
             &id,
@@ -427,20 +424,9 @@ pub async fn resume_chain_job(
         .map(|stage| stage.idx)
         .unwrap_or(manifest.stage_status.len() as u32);
     let now = now_ms();
-    let queued = chain_jobs::try_transition(
-        db,
-        &id,
-        &[
-            ChainJobState::Paused,
-            ChainJobState::Interrupted,
-            ChainJobState::Failed,
-            ChainJobState::Cancelled,
-        ],
-        ChainJobState::Queued,
-        None,
-        now,
-    )
-    .map_err(|e| ApiError::internal(format!("failed to queue chain job: {e:#}")))?;
+    let queued =
+        chain_jobs::try_transition(db, &id, resumable_states, ChainJobState::Queued, None, now)
+            .map_err(|e| ApiError::internal(format!("failed to queue chain job: {e:#}")))?;
     if !queued {
         return Err(conflict_for_current_state(
             db,
@@ -455,13 +441,15 @@ pub async fn resume_chain_job(
     let updated = chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to reload chain job: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
-    state
-        .events
-        .publish(mold_core::ServerEvent::ChainJobQueued {
-            id: id.clone(),
-            model: updated.model.clone(),
-            stage_count: updated.stage_count,
-        });
+    if !manifest.ephemeral {
+        state
+            .events
+            .publish(mold_core::ServerEvent::ChainJobQueued {
+                id: id.clone(),
+                model: updated.model.clone(),
+                stage_count: updated.stage_count,
+            });
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(summary_for_row(
@@ -1137,10 +1125,6 @@ fn summary_for_row(row: &ChainJobRow, manifest: Option<&ChainJobManifest>) -> Ch
 
 fn read_manifest_optional(row: &ChainJobRow, _root: &FsPath) -> Option<ChainJobManifest> {
     ChainJobManifest::read_from_dir(&row.job_dir).ok()
-}
-
-pub(crate) fn chain_job_is_ephemeral(row: &ChainJobRow) -> bool {
-    ChainJobManifest::read_from_dir(&row.job_dir).is_ok_and(|manifest| manifest.ephemeral)
 }
 
 /// Re-check every persisted source of model identity before an old durable
@@ -2033,12 +2017,10 @@ mod tests {
         );
     }
 
-    /// An ephemeral job is one print's implementation detail, and everything
-    /// that treats a job as an authored sequence must skip it: the listing
-    /// behind History ▸ Sequences, the lifecycle broadcast behind "Now
-    /// developing", and resume.
+    /// An auto-chain remains absent from authored-sequence history and its
+    /// creation broadcast, but a restart-paused job must remain resumable.
     #[tokio::test]
-    async fn an_ephemeral_job_is_absent_from_the_listing_and_refuses_resume() {
+    async fn an_ephemeral_job_is_absent_from_authored_listing_but_can_resume() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
         let state = state_with(
@@ -2080,14 +2062,30 @@ mod tests {
             "an ephemeral job must not drive Now developing"
         );
 
+        chain_jobs::update_job_state(
+            db.as_ref().as_ref().unwrap(),
+            &created.job_id,
+            ChainJobState::Paused,
+            Some("server restarted while chain job was running"),
+            now_ms(),
+        )
+        .unwrap();
         let resumed = with_mold_home(home.path(), || {
             futures::executor::block_on(resume_chain_job(
                 State(state.clone()),
                 Path(created.job_id.clone()),
             ))
-        });
-        let error = resumed.expect_err("an ephemeral job cannot be resumed");
-        assert_eq!(error.status(), StatusCode::CONFLICT);
+        })
+        .unwrap();
+        assert_eq!(resumed.0, StatusCode::ACCEPTED);
+        assert_eq!(resumed.1 .0.state, ChainJobState::Queued);
+        assert!(
+            !matches!(
+                events.try_recv(),
+                Ok(mold_core::ServerEvent::ChainJobQueued { .. })
+            ),
+            "resuming an ephemeral job must not promote it into authored sequence events"
+        );
     }
 
     #[tokio::test]
@@ -2804,7 +2802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_ephemeral_job_returns_409() {
+    async fn resume_failed_ephemeral_job_is_not_offered_after_settlement() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
         let job_id = "01JBR55EPHRESUME";
@@ -2830,13 +2828,13 @@ mod tests {
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
 
-        let err = with_mold_home(home.path(), || {
+        let error = with_mold_home(home.path(), || {
             futures::executor::block_on(resume_chain_job(State(state), Path(job_id.to_string())))
         })
         .unwrap_err();
 
-        let resp = err.into_response();
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.code, CHAIN_JOB_NOT_RESUMABLE);
     }
 
     #[tokio::test]

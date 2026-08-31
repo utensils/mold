@@ -4136,6 +4136,11 @@ pub struct ActiveWorkItem {
     /// Extensible public class: `generation`, `sequence`, `download`, or a
     /// scheduler-owned future work kind.
     pub kind: String,
+    /// Additive execution authority when the public class alone is not enough
+    /// to route controls. `chain` identifies an auto-chained generation whose
+    /// durable lifecycle lives under `/api/chain-jobs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<String>,
     /// Extensible nonterminal lifecycle (`queued`, `preparing`, `loading`,
     /// `running`, `downloading`, or `cancelling`).
     pub phase: String,

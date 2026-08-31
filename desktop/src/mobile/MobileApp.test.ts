@@ -1219,6 +1219,110 @@ describe("MobileApp sequence generation", () => {
     });
   });
 
+  it("resumes a restart-paused auto-chain through its durable chain authority", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "restart-paused-auto-chain",
+              kind: "generation",
+              execution: "chain",
+              phase: "paused",
+              model: model.name,
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              can_cancel: true,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const row = wrapper.get(".live-activity-row");
+    const touch = (type: string, x: number, ended = false) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      const point = { clientX: x, clientY: 100 };
+      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
+      Object.defineProperty(event, "changedTouches", { value: [point] });
+      return event;
+    };
+    row.element.dispatchEvent(touch("touchstart", 260));
+    row.element.dispatchEvent(touch("touchmove", 160));
+    row.element.dispatchEvent(touch("touchend", 160, true));
+    await flushPromises();
+
+    const control = row.get("[data-test='mobile-fleet-queue-control']");
+    expect(control.text()).toBe("Resume");
+    await control.trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      target,
+      "/api/chain-jobs/restart-paused-auto-chain/resume",
+      { method: "POST" },
+    );
+  });
+
+  it("cancels a running auto-chain through its durable chain authority", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "running-auto-chain",
+              kind: "generation",
+              execution: "chain",
+              phase: "running",
+              model: model.name,
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              can_cancel: true,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const row = wrapper.get(".live-activity-row");
+    const touch = (type: string, x: number, ended = false) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      const point = { clientX: x, clientY: 100 };
+      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
+      Object.defineProperty(event, "changedTouches", { value: [point] });
+      return event;
+    };
+    row.element.dispatchEvent(touch("touchstart", 260));
+    row.element.dispatchEvent(touch("touchmove", 160));
+    row.element.dispatchEvent(touch("touchend", 160, true));
+    await flushPromises();
+
+    const control = row.get("[data-test='mobile-fleet-queue-control']");
+    expect(control.text()).toBe("Cancel");
+    await control.trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/running-auto-chain/cancel", {
+      method: "POST",
+    });
+  });
+
   it("loads a tapped server-owned generation into Create like desktop", async () => {
     const pagedStatus = { ...status, queue_capacity: 3 };
     const metadata = {
@@ -1248,7 +1352,7 @@ describe("MobileApp sequence generation", () => {
               model: model.name,
               created_at_unix_ms: 1,
               updated_at_unix_ms: 9,
-              can_cancel: false,
+              can_cancel: true,
             },
           ],
         });
@@ -1313,7 +1417,7 @@ describe("MobileApp sequence generation", () => {
     );
   });
 
-  it("loads a tapped server-owned sequence script into the clip rail", async () => {
+  it("routes a tapped server-owned auto-chain generation through its durable chain", async () => {
     const pinia = createPinia();
     const priorModel: ModelEntry = {
       ...model,
@@ -1336,21 +1440,22 @@ describe("MobileApp sequence generation", () => {
           observed_at_unix_ms: 10,
           items: [
             {
-              id: "foreign-sequence",
-              kind: "sequence",
+              id: "foreign-auto-chain",
+              kind: "generation",
+              execution: "chain",
               phase: "running",
               model: sequenceModel.name,
               created_at_unix_ms: 1,
               updated_at_unix_ms: 9,
-              can_cancel: false,
+              can_cancel: true,
             },
           ],
         });
       }
       if (path === "/api/queue") return Promise.resolve({ entries: [], plan: null });
-      if (path === "/api/chain-jobs/foreign-sequence") {
+      if (path === "/api/chain-jobs/foreign-auto-chain") {
         return Promise.resolve({
-          id: "foreign-sequence",
+          id: "foreign-auto-chain",
           state: "running",
           model: sequenceModel.name,
           stage_count: 2,
@@ -1358,7 +1463,7 @@ describe("MobileApp sequence generation", () => {
           created_at_unix_ms: 1,
           updated_at_unix_ms: 9,
           error: null,
-          ephemeral: false,
+          ephemeral: true,
           stages: [],
           script: {
             schema: "mold.chain.v1",
@@ -1383,9 +1488,10 @@ describe("MobileApp sequence generation", () => {
     await flushPromises();
     await flushPromises();
 
-    await wrapper
-      .get("[data-test='live-activity-select-studio-id:sequence:foreign-sequence']")
-      .trigger("click");
+    const autoChainRow = wrapper.get(
+      "[data-test='live-activity-select-studio-id:generation:foreign-auto-chain']",
+    );
+    await autoChainRow.trigger("click");
     await flushPromises();
 
     const draft = useSequenceDraftStore(pinia);
@@ -1401,7 +1507,8 @@ describe("MobileApp sequence generation", () => {
     // than composing copy for a value it did not choose — see
     // MobileSharedParams.test.ts for the note-bearing cases.
     expect(wrapper.text()).not.toContain("Distilled recipe fixes CFG");
-    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/chain-jobs/foreign-sequence");
+    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/chain-jobs/foreign-auto-chain");
+    expect(apiJsonTo.mock.calls.some(([, path]) => path === "/api/queue?limit=3")).toBe(false);
   });
 
   it("refuses to restore a stale queue row after the server instance changes", async () => {

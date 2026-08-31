@@ -4,6 +4,7 @@ import { compareNewestSubmitted } from "../lib/activityOrder";
 export interface ActiveWorkItem {
   id: string;
   kind: string;
+  execution?: string | null;
   phase: string;
   model?: string | null;
   created_at_unix_ms: number;
@@ -42,6 +43,10 @@ export interface ActiveWorkSnapshot {
   observed_at_unix_ms: number;
   items: ActiveWorkItem[];
   unavailable_kinds?: string[];
+}
+
+function activityAuthorityKind(item: ActiveWorkItem): string {
+  return item.execution === "chain" ? "chain_generation" : item.kind;
 }
 
 export interface ActivityHostRoute {
@@ -149,7 +154,9 @@ export function reconcileActivityHost(
     previous.instanceId === result.instance_id;
   const retained =
     (sameAuthority
-      ? previous?.items.filter((item) => unavailable.has(item.kind))
+      ? previous?.items.filter((item) =>
+          unavailable.has(activityAuthorityKind(item)),
+        )
       : undefined) ?? [];
   return {
     ...route,
@@ -157,7 +164,9 @@ export function reconcileActivityHost(
     instanceId: result.instance_id,
     observedAtUnixMs: result.observed_at_unix_ms,
     items: [
-      ...result.items.filter((item) => !unavailable.has(item.kind)),
+      ...result.items.filter(
+        (item) => !unavailable.has(activityAuthorityKind(item)),
+      ),
       ...retained,
     ],
     unavailableKinds,
@@ -189,9 +198,11 @@ export function mergeFleetActivity(
         hostLabel: host.hostLabel,
         routeUrl: host.routeUrl,
         instanceId: host.instanceId,
-        stale: host.stale || host.unavailableKinds.includes(item.kind),
-        hostError: host.unavailableKinds.includes(item.kind)
-          ? `${item.kind.replaceAll("_", " ")} status is temporarily unavailable`
+        stale:
+          host.stale ||
+          host.unavailableKinds.includes(activityAuthorityKind(item)),
+        hostError: host.unavailableKinds.includes(activityAuthorityKind(item))
+          ? `${item.execution === "chain" ? "generation" : item.kind.replaceAll("_", " ")} status is temporarily unavailable`
           : host.error,
       });
     }

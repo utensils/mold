@@ -1528,9 +1528,11 @@ stitched print, with full per-clip provenance. What differs:
 
 - it is absent from `GET /api/chain-jobs`, so it never appears in History ▸
   Sequences;
-- it emits no `chain_job_queued` event, so it never appears in "Now developing";
-- its working directory is swept after finalization, and `resume` answers
-  `409 CHAIN_JOB_EPHEMERAL`;
+- it emits no authored-sequence `chain_job_queued` event, while `/api/activity`
+  still exposes the live job in "Now developing" on every client;
+- graceful shutdown parks it as `paused` with its manifest, source media,
+  completed clips, and tail cache intact; `resume` requeues it explicitly;
+- its working directory is swept only after the job settles;
 - **its print records no `chain_job_id`**, so "Reuse settings" restores a
   one-shot rather than opening the clip rail for a job that no longer exists.
 

@@ -181,7 +181,8 @@ pub struct ChainJobManifest {
     pub schema: String,
     pub job_id: String,
     pub created_at_unix_ms: u64,
-    /// Sync-shim jobs (spec §9): artifacts deleted immediately after success.
+    /// Auto-chained one-shots: hidden from authored sequence history, but
+    /// durable and restart-resumable until they settle.
     #[serde(default)]
     pub ephemeral: bool,
     /// Full normalised [`ChainRequest`], canonically serde_json-encoded.
