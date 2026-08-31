@@ -17,6 +17,7 @@ path = "src/main.rs"
 [features]
 default = []
 cuda = ["mold-server/cuda", "mold-inference/cuda", "mold-tui?/cuda", "nvml"]
+cudnn = ["cuda", "mold-server/cudnn", "mold-inference/cudnn", "mold-tui?/cudnn"]
 nvml = ["mold-server/nvml"]
 metal = ["mold-server/metal", "mold-inference/metal", "mold-tui?/metal"]
 # FlashAttention v2 path for FLUX/FLUX2. Implies `cuda` via mold-inference.

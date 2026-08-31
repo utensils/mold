@@ -59,6 +59,14 @@ pub const PUBLIC_H3_METAL_SERVER_FEATURES: &[&str] = &[
 /// Keep the list explicit so a new feature cannot silently enter the reviewed
 /// public H3 build graph.
 pub const PUBLIC_H3_ORTHOGONAL_FEATURES: &[&str] = &[
+    // cuDNN convolutions (#1483). Orthogonal on the same footing as PuLID
+    // below: compiling the feature only makes the path reachable, and
+    // `mold_inference::conv_policy` resolves MiniMax H3 as an image family,
+    // which never installs a `ConvScope`. The process default is im2col, so no
+    // H3 convolution can take cuDNN and no H3 pixel moves. This mirrors the
+    // argument that lets the sm89 recipe compile `flash-attn` while H3 keeps
+    // the math attention default.
+    "CARGO_FEATURE_CUDNN",
     "CARGO_FEATURE_EXPAND",
     "CARGO_FEATURE_MDNS",
     "CARGO_FEATURE_METRICS",

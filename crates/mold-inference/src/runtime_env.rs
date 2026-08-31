@@ -24,6 +24,9 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_ATTN",
     "MOLD_ATTN_CHUNK",
     "MOLD_CFG_PLUS",
+    // #1483: selects the convolution backend, and cuDNN and im2col sum in a
+    // different order. Two renders that disagree on it are not interchangeable.
+    "MOLD_CONV",
     "MOLD_DEVICE",
     "MOLD_EAGER",
     "MOLD_FLUX_DELTA_CACHE",
@@ -179,6 +182,7 @@ mod tests {
     fn audit_covers_required_multi_gpu_engine_shaping_inputs() {
         for required in [
             "MOLD_CFG_PLUS",
+            "MOLD_CONV",
             "MOLD_EAGER",
             "MOLD_FLUX_KEEP_TRANSFORMER",
             "MOLD_KEEP_TE_RAM",

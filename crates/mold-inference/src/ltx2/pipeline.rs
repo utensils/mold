@@ -1720,6 +1720,10 @@ impl ChainStageRenderer for Ltx2Engine {
 
 impl InferenceEngine for Ltx2Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        // See the note in `wan::pipeline`: LTX-2's video VAE decomposes its
+        // 3-D convolutions into the same 2-D slices Wan does, so it takes the
+        // same convolution policy.
+        let _conv = crate::conv_policy::ConvScope::for_family("ltx2");
         self.pending_placement = req.placement.clone();
         let result = self.generate_inner(req);
         self.pending_placement = None;

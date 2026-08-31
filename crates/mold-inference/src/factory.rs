@@ -531,6 +531,10 @@ where
         crate::minimax_h3::engine::H3RuntimeLoadRequest<'_>,
     ) -> Result<Box<dyn InferenceEngine>>,
 {
+    // candle enables its cuDNN switch by default; mold pins it off so a family
+    // that has not opted in stays on the byte-stable im2col path. Idempotent,
+    // and this is the one construction path every engine goes through.
+    crate::conv_policy::install_process_default();
     // The compliance gate is intentionally the first operation. No path,
     // runtime, device, authority, or future loader inspection may precede it.
     mold_core::require_model_activation(&model_name, Some(&frozen.family))?;

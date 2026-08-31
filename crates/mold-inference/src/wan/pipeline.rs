@@ -2291,6 +2291,12 @@ fn video_frames_to_images(video: &Tensor, width: u32, height: u32) -> Result<Vec
 
 impl crate::engine::InferenceEngine for WanEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        // Wan is a video family, so its convolutions take cuDNN where the
+        // build has it (#1483). The scope covers the whole render and restores
+        // the previous backend on drop, including on an error return, so a
+        // failed clip cannot leave the next still on a path that would move
+        // its bytes.
+        let _conv = crate::conv_policy::ConvScope::for_family("wan");
         self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         let result = if req.is_extend() {
