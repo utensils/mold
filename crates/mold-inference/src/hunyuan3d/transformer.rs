@@ -260,8 +260,14 @@ impl Modulation {
         if parts.len() != self.chunks {
             candle_core::bail!("modulation produced {} chunks", parts.len());
         }
+        // `as_chunks::<3>()` rather than `chunks_exact(3)`: the width is a
+        // constant, so the array form gives a `&[Tensor; 3]` the compiler can
+        // bounds-check once instead of three times. `self.chunks` is a
+        // multiple of 3 by construction, so the remainder is always empty.
         Ok(parts
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|triple| ModulationOut {
                 shift: triple[0].clone(),
                 scale: triple[1].clone(),
