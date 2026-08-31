@@ -28,6 +28,14 @@ pub enum FactoryFamilyAvailability {
 }
 
 pub fn factory_family_availability(family: &str) -> Option<FactoryFamilyAvailability> {
+    // Hunyuan3D has a complete weight-free capability contract but no engine
+    // arm in the dispatch below yet, so the honest answer is contract-only.
+    // Without this, the generic "has a capability row" branch would claim
+    // `Runnable` and the only thing telling a caller otherwise would be a
+    // `bail!` after admission had already leased a GPU.
+    if mold_core::manifest::HUNYUAN3D_FAMILY == family || family == "hunyuan-3d" {
+        return Some(FactoryFamilyAvailability::ContractOnly);
+    }
     if let Some(contract) = mold_core::minimax_h3::capability_contract_for_model(family) {
         Some(
             if contract.generation.runtime_available

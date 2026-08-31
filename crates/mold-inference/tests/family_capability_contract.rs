@@ -19,6 +19,7 @@ const FACTORY_FAMILIES: &[&str] = &[
     "ltx2",
     "wan",
     "wuerstchen",
+    "hunyuan3d",
 ];
 
 #[test]
