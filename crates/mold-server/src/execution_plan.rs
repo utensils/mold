@@ -837,14 +837,12 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
         // Not a hand-mirror: this calls the engine's own parser, so
         // `MOLD_CONV=cudnn`, ` CuDNN `, and an unparseable typo land in the
         // execution class they will actually render in.
-        Some(value) if variable == RuntimeSemanticVariable::Conv => {
-            CanonicalRuntimeValue::Text(
-                match mold_inference::conv_policy::parse_backend_env(Some(value)) {
-                    Some(backend) => backend.as_str().to_string(),
-                    None => "family-default".to_string(),
-                },
-            )
-        }
+        Some(value) if variable == RuntimeSemanticVariable::Conv => CanonicalRuntimeValue::Text(
+            match mold_inference::conv_policy::parse_backend_env(Some(value)) {
+                Some(backend) => backend.as_str().to_string(),
+                None => "family-default".to_string(),
+            },
+        ),
         // Do not invent normalization for a runtime parser we have not made
         // authoritative here. Exact text is conservative: it can cause false
         // negatives, but never a false-equivalent execution class.
