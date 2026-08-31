@@ -416,6 +416,29 @@ pub struct ExecutionSemanticConfig {
     /// is skipped when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conv_backend: Option<SemanticConvBackend>,
+    /// Whether this render will actually reuse first-block residuals.
+    ///
+    /// The `runtime` list below records the ENV VALUE of
+    /// `MOLD_WAN_STEP_CACHE`, and an absent value canonicalizes to `Unset` —
+    /// which meant "off, bit-identical to the uncached engine" before #1482 and
+    /// "threshold 0.10, different pixels, ~1.7x faster" after it. Both hash the
+    /// same, so against one `mold.db` spanning that change a cached and an
+    /// uncached render land in the same equivalence class and the scheduler
+    /// reuses one's timings for the other.
+    ///
+    /// Resolved rather than read from the env, for the same reason
+    /// `conv_backend` is: the default is what changed, and a default is
+    /// invisible to a variable's value.
+    ///
+    /// This records the threshold in effect, not whether a particular request
+    /// engages it. The per-request refusals (`steps < 12`, a distilled adapter)
+    /// need no entry here: step count is already part of request identity, and
+    /// the adapter is already a component artifact.
+    ///
+    /// `None` for every non-wan family, so their fingerprints are byte-identical
+    /// to what they were before this existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wan_step_cache: Option<SemanticWanStepCache>,
     pub vae_tiling: SemanticVaeTiling,
     pub vae_dtype: SemanticVaeDType,
     pub runtime: Vec<RuntimeSemanticSetting>,
@@ -426,6 +449,16 @@ pub struct ExecutionSemanticConfig {
 pub enum SemanticConvBackend {
     Im2Col,
     Cudnn,
+}
+
+/// Whether a wan render reuses first-block residuals, and at what threshold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticWanStepCache {
+    /// Every block runs every step — bit-identical to the pre-cache engine.
+    Off,
+    /// Engaged. The threshold is carried in millionths so the value is exact
+    /// and `Eq`, which a bare `f64` could not be.
+    Threshold { micros: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -664,6 +697,20 @@ impl ExecutionSemanticConfig {
                     },
                 ),
             },
+            // Only wan has a step cache, so only wan carries the field; every
+            // other family's fingerprint is byte-identical to what it was
+            // before this existed.
+            wan_step_cache: (family == "wan").then(|| {
+                match mold_inference::wan_requested_step_cache_threshold()
+                    .ok()
+                    .flatten()
+                {
+                    None => SemanticWanStepCache::Off,
+                    Some(threshold) => SemanticWanStepCache::Threshold {
+                        micros: (threshold * 1_000_000.0).round().max(0.0) as u64,
+                    },
+                }
+            }),
             vae_tiling: match vae_tiling {
                 mold_inference::vae_tiling::TiledMode::Auto => SemanticVaeTiling::Auto,
                 mold_inference::vae_tiling::TiledMode::Force => SemanticVaeTiling::Force,
@@ -7815,6 +7862,7 @@ mod tests {
                 // flux is an image family: it never takes cuDNN, so its
                 // fingerprint carries no convolution backend at all.
                 conv_backend: None,
+                wan_step_cache: None,
                 vae_tiling: SemanticVaeTiling::Auto,
                 vae_dtype: SemanticVaeDType::Auto,
                 runtime: vec![RuntimeSemanticSetting {

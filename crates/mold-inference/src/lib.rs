@@ -114,6 +114,7 @@ pub use wan::pipeline::distill_is_active as wan_distill_is_active;
 /// Narrow public surface of the wan module: the checkpoint-header
 /// source-image classification `/api/models` advertises (#772).
 pub use wan::pipeline::source_image_capability as wan_source_image_capability;
+pub use wan::step_cache::requested_threshold as wan_requested_step_cache_threshold;
 pub(crate) mod weight_loader;
 pub mod wuerstchen;
 pub mod zimage;

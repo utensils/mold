@@ -1390,9 +1390,12 @@ const WAN_STEP_CACHE_FORWARD_BUFFERS: u64 = 4;
 /// denoise when CFG runs two of them: its `previous_first_block` and its `tail`.
 const WAN_STEP_CACHE_PERSISTENT_BUFFERS: u64 = 2;
 
-/// F32 chunk buffers live at once inside the distance reduction: the upcast
-/// previous slice and the difference taken against it.
-const WAN_STEP_CACHE_REDUCTION_LIVE_BUFFERS: u64 = 2;
+/// F32 chunk buffers live at once inside the distance reduction.
+///
+/// Three, not two: `previous_chunk.abs()` allocates a third while both upcast
+/// chunks are still live, and the `(current - previous)` / `.abs()` pair does
+/// the same on the other side of the reduction.
+const WAN_STEP_CACHE_REDUCTION_LIVE_BUFFERS: u64 = 3;
 
 /// Extra device memory a CFG step holds beyond a single forward.
 pub const WAN_CFG_RESIDENT_BYTES: u64 = 256 * 1024 * 1024;
@@ -1538,13 +1541,24 @@ pub fn wan_calibrated_activation_bytes_for(
 /// (`transformer.rs:1883-1904`) holds beyond what the uncached branch holds,
 /// so the charge is a token count times a buffer count:
 ///
+/// The four are the buffers live DURING the block 1..N loop, because that is
+/// where the block transients the fitted slope prices are also live — it is the
+/// global high-water mark, not merely a local one.
+///
 /// | Buffer | Site | Lifetime | Count |
 /// | --- | --- | --- | --- |
-/// | `entry` | `transformer.rs:1887` | this forward | 1 |
-/// | `first_block_residual` | `transformer.rs:1891` | becomes the next `previous_first_block` | 1 |
-/// | retained `tail` | `step_cache.rs` `record_tail` | across the denoise | 1 |
-/// | the new tail | `transformer.rs:1902` | overlaps the old one while it is assigned | 1 |
+/// | `entry` | `transformer.rs:1887` | pins the patchify output for the whole arm; the uncached branch drops it at the first `block.forward` | 1 |
+/// | `first_block_residual` | `transformer.rs:1891` | `Arc`-shared into `previous_first_block`, so counted once | 1 |
+/// | `after_first` | `transformer.rs:1897` | pins block 0's output across all remaining blocks | 1 |
+/// | retained `tail` | `step_cache.rs` `record_tail` | live until the new tail overwrites it | 1 |
 /// | the other trajectory's `previous_first_block` + `tail` | — | across the denoise | 2 when CFG |
+///
+/// `record_tail` (`transformer.rs:1902`) briefly holds a FIFTH — the new tail
+/// alongside the old — but that moment is after the loop, with the block
+/// transients already dropped, so it lands far below the loop peak. Do not
+/// "simplify" the count to 3 by reasoning that one of these is transient: every
+/// row above is simultaneously live inside the loop, and dropping one
+/// re-introduces the OOM this charge exists to prevent.
 ///
 /// `hidden` is not charged: the uncached branch holds it too, so it is already
 /// in the derived budget. `entry` and `after_first` are `Arc` clones sharing
@@ -1568,9 +1582,30 @@ pub fn wan_step_cache_bytes(
     steps: u32,
     distilled: bool,
 ) -> u64 {
+    // A malformed value prices as off here; the engine fails the render on it
+    // (`wan::pipeline` propagates the parse error), so the two cannot disagree
+    // about a render that actually runs.
+    let requested = crate::wan::step_cache::requested_threshold().unwrap_or(None);
+    wan_step_cache_bytes_for(
+        width, height, frames, geometry, cfg, steps, distilled, requested,
+    )
+}
+
+/// [`wan_step_cache_bytes`] against an explicit requested threshold, so a test
+/// is not at the mercy of a `MOLD_WAN_STEP_CACHE` the developer has exported.
+#[allow(clippy::too_many_arguments)]
+pub fn wan_step_cache_bytes_for(
+    width: u32,
+    height: u32,
+    frames: u32,
+    geometry: WanActivationGeometry,
+    cfg: bool,
+    steps: u32,
+    distilled: bool,
+    requested: Option<f64>,
+) -> u64 {
     use crate::wan::step_cache::{WanStepCachePolicy, WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS};
 
-    let requested = crate::wan::step_cache::requested_threshold().unwrap_or(None);
     let (policy, _) = WanStepCachePolicy::resolve(requested, steps, distilled);
     if !policy.is_on() {
         return 0;
@@ -3364,33 +3399,28 @@ mod tests {
     /// buffers actually are, so a misplaced term fails here loudly.
     #[test]
     fn the_step_cache_charge_is_exact_and_lands_after_the_slope() {
-        use crate::attention::AttentionBackend;
         use crate::wan::step_cache::WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS;
         let a14b = WanActivationGeometry::a14b();
         let (width, height, frames) = (832u32, 480u32, 53u32);
         let tokens = wan_token_count(width, height, frames, a14b);
 
         for (cfg, buffers) in [(false, 4u64), (true, 6)] {
-            let engaged = wan_calibrated_activation_bytes_for(
-                width,
-                height,
-                frames,
-                a14b,
-                cfg,
-                20,
-                false,
-                AttentionBackend::Math,
-            );
-            let refused = wan_calibrated_activation_bytes_for(
-                width,
-                height,
-                frames,
-                a14b,
-                cfg,
-                4,
-                true,
-                AttentionBackend::Math,
-            );
+            // Explicit threshold, not the env: `MOLD_WAN_STEP_CACHE=off` is the
+            // documented escape hatch and a developer may well have it exported.
+            let charge = |steps: u32, distilled: bool| {
+                wan_step_cache_bytes_for(
+                    width,
+                    height,
+                    frames,
+                    a14b,
+                    cfg,
+                    steps,
+                    distilled,
+                    Some(crate::wan::step_cache::AUTO_THRESHOLD),
+                )
+            };
+            let engaged = charge(20, false);
+            let refused = charge(4, true);
 
             let retained = tokens * a14b.dim * BF16_BYTES * buffers;
             let reduction = (WAN_STEP_CACHE_REDUCTION_CHUNK_TOKENS as u64).min(tokens)
@@ -3399,7 +3429,7 @@ mod tests {
                 * WAN_STEP_CACHE_REDUCTION_LIVE_BUFFERS;
 
             assert_eq!(
-                engaged - refused,
+                engaged.saturating_sub(refused),
                 retained + reduction,
                 "cfg={cfg}: the step-cache charge must be exactly the buffers it \
                  names, unscaled by the fitted slope"
@@ -3413,7 +3443,16 @@ mod tests {
         let a14b = WanActivationGeometry::a14b();
         for (steps, distilled) in [(4u32, false), (20, true), (4, true), (11, false)] {
             assert_eq!(
-                wan_step_cache_bytes(832, 480, 53, a14b, true, steps, distilled),
+                wan_step_cache_bytes_for(
+                    832,
+                    480,
+                    53,
+                    a14b,
+                    true,
+                    steps,
+                    distilled,
+                    Some(crate::wan::step_cache::AUTO_THRESHOLD),
+                ),
                 0,
                 "steps={steps} distilled={distilled} must charge nothing"
             );

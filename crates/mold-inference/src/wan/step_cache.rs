@@ -170,7 +170,7 @@ pub(crate) fn parse_threshold(raw: &str) -> Result<Option<f64>> {
 /// was measured, and then every production render paid full price because
 /// nothing set the variable. `MOLD_WAN_STEP_CACHE=off` is the escape hatch,
 /// and is bit-identical to denoising every block.
-pub(crate) fn requested_threshold() -> Result<Option<f64>> {
+pub fn requested_threshold() -> Result<Option<f64>> {
     threshold_for_env(crate::runtime_env::value("MOLD_WAN_STEP_CACHE").as_deref())
 }
 
