@@ -29,13 +29,7 @@ export type {
 
 // Matches `mold_core::OutputFormat` on the wire (lowercase strings).
 export type OutputFormat =
-  | "png"
-  | "jpeg"
-  | "gif"
-  | "apng"
-  | "webp"
-  | "mp4"
-  | "wav";
+  "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav";
 
 export type SeedMode = "random" | "static" | "increment";
 
@@ -336,9 +330,7 @@ export interface LoraWeight {
 
 // ── Device placement (Agent C: model-ui-overhaul §3) ──────────────────────
 export type DeviceRef =
-  | { kind: "auto" }
-  | { kind: "cpu" }
-  | { kind: "gpu"; ordinal: number };
+  { kind: "auto" } | { kind: "cpu" } | { kind: "gpu"; ordinal: number };
 
 export interface AdvancedPlacement {
   transformer: DeviceRef;
@@ -1226,11 +1218,7 @@ export interface Ltx2CameraControlInfo {
 // server's serde output.
 
 export type JobStatusWire =
-  | "queued"
-  | "active"
-  | "completed"
-  | "failed"
-  | "cancelled";
+  "queued" | "active" | "completed" | "failed" | "cancelled";
 
 export interface DownloadJobWire {
   id: string;
