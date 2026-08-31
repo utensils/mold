@@ -188,7 +188,9 @@ pushed screen opened from the header.
 - **Library** merges saved media from every configured host. Its full-screen
   viewer shows uncropped images, streams videos with native controls, plays
   audio-only prints (LTX-2 text-to-audio) as a waveform tile above a native
-  transport, swipes
+  transport, renders Hunyuan3D meshes in an orbitable WebGL viewer over the
+  saved poster (`@studio/components/MeshViewer.vue`, shared with desktop and
+  web), swipes
   horizontally between prints, explicitly copies or saves full-resolution
   stills through UIKit, saves original videos to Photos through a streaming
   native download, restores recorded prompt settings, and can use a still
@@ -343,7 +345,9 @@ pushed screen opened from the header.
   Dark; valid saved choices remain authoritative. Its default-on Photos
   preference automatically fetches each completed still from its authenticated
   host gallery and saves it through UIKit; post-generation upscales save both
-  images, while videos and audio-only prints remain in Mold Library. A
+  images, while videos, audio-only prints and 3-D meshes remain in Mold
+  Library — Photos has no destination for a `.wav` or a `.glb`, and saving one
+  there would fail silently rather than land anywhere the user could find it. A
   **Library** section carries **Tag new prints with their title**
   (`autoTagTitle`, on by default), the mirror Create reads into
   `GenerateForm.fileUnderAutoTag`; it only decides whether the removable ghost
