@@ -433,6 +433,19 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
                 .join("flux2-dev")
                 .join(&file.hf_filename);
         }
+        // The ungated dev mirrors (`shared_flux2_dev_open_files`) carry the
+        // same runtime roles, so they belong in the same bucket — one copy
+        // shared by every quantized dev tier. Their filenames never collide
+        // with BFL's (`split_files/...` and a bare `tokenizer.json` against
+        // BFL's `text_encoder/`, `vae/`, `tokenizer/` prefixes), so a host
+        // that installs both tiers keeps both sets intact.
+        if file.hf_repo == "Comfy-Org/flux2-dev"
+            || file.hf_repo == "unsloth/Mistral-Small-3.2-24B-Instruct-2506"
+        {
+            return PathBuf::from("shared")
+                .join("flux2-dev")
+                .join(&file.hf_filename);
+        }
         // Companion manifests (`t5-v1_1-xxl`, `clip-l`, etc.) route their
         // shared components to the canonical owning family's bucket so an
         // already-installed FLUX/SDXL/SD1.5 model's encoders/tokenizers are
@@ -2711,6 +2724,370 @@ fn flux2_manifests() -> Vec<ModelManifest> {
         },
         hidden: false,
     });
+
+    // ── FLUX.2 [dev] quantized tiers ────────────────────────────────────
+    // The BF16 tier above is gated end to end: BFL's `FLUX.2-dev` repo holds
+    // the transformer AND the Mistral3 encoder. These tiers pair an ungated
+    // transformer with `shared_flux2_dev_open_files()`, so the whole model is
+    // installable without a BFL license acceptance.
+    for (tag, filename, size, sha, description) in [
+        (
+            "q8",
+            "flux2-dev-Q8_0.gguf",
+            35_002_602_464u64,
+            "09d005300dd8dcbbd489bb75ada6254145c84c2c9c3d7cc1829e3c5dedcb42ce",
+            "FLUX.2 [dev] Q8 GGUF — near-BF16 quality at half the weights",
+        ),
+        (
+            "q6",
+            "flux2-dev-Q6_K.gguf",
+            27_396_232_160,
+            "0a662e0303d65b7da4741c7bc54bbccd4d7fc17b23e71ced36d177467f4a0ef1",
+            "FLUX.2 [dev] Q6 GGUF — fits a 32 GB GPU with room for activations",
+        ),
+        (
+            "q4",
+            "flux2-dev-Q4_K_M.gguf",
+            19_959_731_168,
+            "5f7ac6649e2f5e21a49a6f83931a67530bd887e2d34379c3da1d0f0406501de1",
+            "FLUX.2 [dev] Q4 GGUF — smallest dev tier, runs on a 24 GB GPU",
+        ),
+    ] {
+        let mut files = shared_flux2_dev_open_files();
+        files.push(ModelFile {
+            hf_repo: "unsloth/FLUX.2-dev-GGUF".to_string(),
+            hf_filename: filename.to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: size,
+            gated: false,
+            sha256: Some(sha),
+        });
+        manifests.push(ModelManifest {
+            name: format!("flux2-dev:{tag}"),
+            family: "flux2".to_string(),
+            description: description.to_string(),
+            files,
+            defaults: flux2_dev_defaults(),
+            hidden: false,
+        });
+    }
+
+    // Comfy-Org's mixed FP8: attention stays BF16, the MLP slabs are
+    // `float8_e4m3fn` with per-tensor `weight_scale` sidecars.
+    {
+        let mut files = shared_flux2_dev_open_files();
+        files.push(ModelFile {
+            hf_repo: "Comfy-Org/flux2-dev".to_string(),
+            hf_filename: "split_files/diffusion_models/flux2_dev_fp8mixed.safetensors".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 35_455_599_592,
+            gated: false,
+            sha256: Some("863a82e4ff950a42a6b0e80bea824828f129eb1a8fbbdbd9e8cb29859127b486"),
+        });
+        manifests.push(ModelManifest {
+            name: "flux2-dev:fp8".to_string(),
+            family: "flux2".to_string(),
+            description: "FLUX.2 [dev] FP8 (mixed) — BF16 attention, FP8 MLP".to_string(),
+            files,
+            defaults: flux2_dev_defaults(),
+            hidden: false,
+        });
+    }
+
+    // ── FLUX.2 [klein] FP8 tiers (BFL's own conversions) ────────────────
+    {
+        let mut files = shared_flux2_files();
+        files.push(ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-4b-fp8".to_string(),
+            hf_filename: "flux-2-klein-4b-fp8.safetensors".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 4_070_624_520,
+            gated: false,
+            sha256: Some("97ed34fe0567e436200f2faee3939b88f2b5d99f8af2a4dc16532c4245c0ccb6"),
+        });
+        manifests.push(ModelManifest {
+            name: "flux2-klein:fp8".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-4B FP8 — Apache 2.0, BFL's own FP8 conversion".to_string(),
+            files,
+            defaults: flux2_klein_defaults(),
+            hidden: false,
+        });
+    }
+    {
+        let mut files = shared_flux2_9b_files();
+        files.push(ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-9b-fp8".to_string(),
+            hf_filename: "flux-2-klein-9b-fp8.safetensors".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 9_433_061_528,
+            gated: true,
+            sha256: Some("865ba09f5b4c3cbd3468a4bd3acb9fcb2f8740c54317482f0bcd4ed1d3655cee"),
+        });
+        manifests.push(ModelManifest {
+            name: "flux2-klein-9b:fp8".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-9B FP8 — BFL's own FP8 conversion".to_string(),
+            files,
+            defaults: flux2_klein_defaults(),
+            hidden: false,
+        });
+    }
+
+    manifests.extend(flux2_klein_base_manifests());
+    manifests
+}
+
+/// Shared defaults for the guidance-distilled FLUX.2 [dev] tiers.
+fn flux2_dev_defaults() -> ManifestDefaults {
+    ManifestDefaults {
+        steps: 50,
+        guidance: 4.0,
+        width: 1024,
+        height: 1024,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: None,
+        fps: None,
+        source_image: None,
+    }
+}
+
+/// Shared defaults for the step-distilled FLUX.2 [klein] tiers.
+fn flux2_klein_defaults() -> ManifestDefaults {
+    ManifestDefaults {
+        steps: 4,
+        guidance: 1.0,
+        width: 1024,
+        height: 1024,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: None,
+        fps: None,
+        source_image: None,
+    }
+}
+
+/// Shared defaults for the undistilled FLUX.2 [klein] base tiers.
+///
+/// `guidance_scale=4.0, num_inference_steps=50` is the model card's own
+/// recipe, and 4.0 is a TRUE-CFG scale here: these checkpoints carry
+/// `guidance_embeds: false`, so `diffusers`'
+/// `pipeline_flux2_klein.py:593` runs an unconditional branch whenever
+/// `guidance_scale > 1` instead of feeding a guidance embedding.
+fn flux2_klein_base_defaults() -> ManifestDefaults {
+    ManifestDefaults {
+        steps: 50,
+        guidance: 4.0,
+        width: 1024,
+        height: 1024,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: None,
+        fps: None,
+        source_image: None,
+    }
+}
+
+/// Ungated runtime assets for FLUX.2 [dev].
+///
+/// BFL's `FLUX.2-dev` repo is license-gated, which would put every dev tier —
+/// including the ungated community quantizations — behind an access request.
+/// Comfy-Org republishes the same VAE (its sha256 is byte-identical to the
+/// gated file pinned in `shared_flux2_dev_files`) and a Mistral3 encoder
+/// already pruned to layers 0-29 plus `model.norm`, which is exactly the
+/// prefix `encoders::mistral3` streams (it captures hidden states after
+/// layers 10/20/30 and never touches the vision tower or LM head). Keys are
+/// HF-native (`model.layers.N.*`), so the streamed loader reads it unchanged.
+/// The tekken tokenizer comes from unsloth's ungated Mistral-Small mirror.
+fn shared_flux2_dev_open_files() -> Vec<ModelFile> {
+    vec![
+        ModelFile {
+            hf_repo: "Comfy-Org/flux2-dev".to_string(),
+            hf_filename: "split_files/text_encoders/mistral_3_small_flux2_bf16.safetensors"
+                .to_string(),
+            component: ModelComponent::TextEncoder,
+            size_bytes: 35_584_897_447,
+            gated: false,
+            sha256: Some("7d79902f60b1aeb3a6de2cfad02f4367b5e300a1387de3d03ac717cfa3df117c"),
+        },
+        ModelFile {
+            hf_repo: "Comfy-Org/flux2-dev".to_string(),
+            hf_filename: "split_files/vae/flux2-vae.safetensors".to_string(),
+            component: ModelComponent::Vae,
+            size_bytes: 336_213_556,
+            gated: false,
+            sha256: Some("d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"),
+        },
+        ModelFile {
+            hf_repo: "unsloth/Mistral-Small-3.2-24B-Instruct-2506".to_string(),
+            hf_filename: "tokenizer.json".to_string(),
+            component: ModelComponent::TextTokenizer,
+            size_bytes: 17_078_019,
+            gated: false,
+            sha256: Some("23ad081f384b2bdb3c97f6e5461dfce52c1174c7328854a55006988f0fef9da7"),
+        },
+    ]
+}
+
+/// FLUX.2 [klein] base — the undistilled checkpoints.
+///
+/// Architecturally identical to the distilled Klein tiers (`transformer/
+/// config.json` is byte-for-byte the same, `guidance_embeds: false`), so they
+/// reuse `Flux2Config::klein()` / `klein_9b()` and the same Qwen3 encoders.
+/// What differs is sampling: no step or guidance distillation, so they take
+/// ~50 steps and real classifier-free guidance with a negative prompt.
+fn flux2_klein_base_manifests() -> Vec<ModelManifest> {
+    let mut manifests = Vec::new();
+
+    // 4B base — Apache 2.0, ungated, Qwen3-4B encoder shared with Klein-4B.
+    {
+        let mut files = shared_flux2_files();
+        files.push(ModelFile {
+            hf_repo: "black-forest-labs/FLUX.2-klein-base-4B".to_string(),
+            hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: 7_751_109_744,
+            gated: false,
+            sha256: Some("e109674697ffa1a3983126e32512f5428a9442bd8df59f9c95566ee90a473bb6"),
+        });
+        manifests.push(ModelManifest {
+            name: "flux2-klein-base:bf16".to_string(),
+            family: "flux2".to_string(),
+            description:
+                "Flux.2 Klein-4B Base BF16 — Apache 2.0, undistilled, true CFG for fine-tuning"
+                    .to_string(),
+            files,
+            defaults: flux2_klein_base_defaults(),
+            hidden: false,
+        });
+    }
+    for (tag, filename, size, sha, quality) in [
+        (
+            "q8",
+            "flux-2-klein-base-4b-Q8_0.gguf",
+            4_300_644_928u64,
+            "77e37664ca374e6d30271c9ce2fed0ebf348e3c276333de7187957961a5b17db",
+            "near-BF16 quality",
+        ),
+        (
+            "q6",
+            "flux-2-klein-base-4b-Q6_K.gguf",
+            3_409_273_408,
+            "d3766256c3ecd90b85f5a84d2ebe4825e3d7889d334b84423c344424d197b4ce",
+            "smaller download",
+        ),
+        (
+            "q4",
+            "flux-2-klein-base-4b-Q4_K_M.gguf",
+            2_604_311_104,
+            "8348ff1f2b3ac3cf9eb62f38322fcbb6d92811d39aa036d0671cf7bef9411266",
+            "smallest download",
+        ),
+    ] {
+        let mut files = shared_flux2_files();
+        files.push(ModelFile {
+            hf_repo: "unsloth/FLUX.2-klein-base-4B-GGUF".to_string(),
+            hf_filename: filename.to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: size,
+            gated: false,
+            sha256: Some(sha),
+        });
+        manifests.push(ModelManifest {
+            name: format!("flux2-klein-base:{tag}"),
+            family: "flux2".to_string(),
+            description: format!(
+                "Flux.2 Klein-4B Base {} GGUF — undistilled, {quality}",
+                tag.to_uppercase()
+            ),
+            files,
+            defaults: flux2_klein_base_defaults(),
+            hidden: false,
+        });
+    }
+
+    // 9B base — gated like Klein-9B, Qwen3-8B encoder shared with it.
+    {
+        let mut files = shared_flux2_9b_files();
+        for (filename, size, sha) in [
+            (
+                "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+                9_801_069_272u64,
+                "1f63382abfccc0a8cbd034555010ebe9f94c5a33ffcc55ac08900ef2893e57b8",
+            ),
+            (
+                "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+                8_356_121_608,
+                "d891d8c65a14816e84148cb81d9455acd666f66ef703df497659ff0b1c1516ca",
+            ),
+        ] {
+            files.push(ModelFile {
+                hf_repo: "black-forest-labs/FLUX.2-klein-base-9B".to_string(),
+                hf_filename: filename.to_string(),
+                component: ModelComponent::TransformerShard,
+                size_bytes: size,
+                gated: true,
+                sha256: Some(sha),
+            });
+        }
+        manifests.push(ModelManifest {
+            name: "flux2-klein-base-9b:bf16".to_string(),
+            family: "flux2".to_string(),
+            description: "Flux.2 Klein-9B Base BF16 — undistilled, true CFG".to_string(),
+            files,
+            defaults: flux2_klein_base_defaults(),
+            hidden: false,
+        });
+    }
+    for (tag, filename, size, sha, quality) in [
+        (
+            "q8",
+            "flux-2-klein-base-9b-Q8_0.gguf",
+            9_978_304_800u64,
+            "0f625ee27883d25379e897ea7b4328ec13376455bf6c2159f3aef7a801c88f10",
+            "near-BF16 quality",
+        ),
+        (
+            "q6",
+            "flux-2-klein-base-9b-Q6_K.gguf",
+            7_865_424_160,
+            "3b8dd7d0f63d2f8ac6bfffc6b8239dcc614dd7c0344930b10779624591bdfda3",
+            "smaller download",
+        ),
+        (
+            "q4",
+            "flux-2-klein-base-9b-Q4_K_M.gguf",
+            5_909_829_920,
+            "70395338f2cb3647b6a259d3cc60e42d9adf0bbbc56a5ae95338389c1c8bb497",
+            "smallest download",
+        ),
+    ] {
+        let mut files = shared_flux2_9b_files();
+        files.push(ModelFile {
+            hf_repo: "unsloth/FLUX.2-klein-base-9B-GGUF".to_string(),
+            hf_filename: filename.to_string(),
+            component: ModelComponent::Transformer,
+            size_bytes: size,
+            gated: false,
+            sha256: Some(sha),
+        });
+        manifests.push(ModelManifest {
+            name: format!("flux2-klein-base-9b:{tag}"),
+            family: "flux2".to_string(),
+            description: format!(
+                "Flux.2 Klein-9B Base {} GGUF — undistilled, {quality}",
+                tag.to_uppercase()
+            ),
+            files,
+            defaults: flux2_klein_base_defaults(),
+            hidden: false,
+        });
+    }
+
     manifests
 }
 
@@ -7627,6 +8004,172 @@ mod tests {
         );
     }
 
+    /// The quantized dev tiers exist so a host without a BFL license
+    /// acceptance can still run FLUX.2 [dev]. If any file in them were gated,
+    /// the tier would be exactly as unreachable as `flux2-dev:bf16` and there
+    /// would be no reason for it to exist.
+    #[test]
+    fn flux2_dev_quantized_tiers_are_installable_without_a_bfl_license() {
+        for name in [
+            "flux2-dev:q8",
+            "flux2-dev:q6",
+            "flux2-dev:q4",
+            "flux2-dev:fp8",
+        ] {
+            let manifest = find_manifest_exact(name).unwrap();
+            assert_eq!(manifest.family, "flux2");
+            assert!(!manifest.is_gated(), "{name} must not be gated");
+            assert!(
+                manifest.files.iter().all(|file| file.sha256.is_some()),
+                "{name} must pin every file's sha256"
+            );
+            assert!(
+                manifest
+                    .files
+                    .iter()
+                    .all(|file| file.hf_repo != "black-forest-labs/FLUX.2-dev"),
+                "{name} must not reach into the gated BFL dev repo"
+            );
+            // Dev keeps its own defaults: 50 steps at guidance 4.0, which the
+            // guidance embedder consumes (unlike the distilled Klein tiers).
+            assert_eq!(manifest.defaults.steps, 50, "{name} steps");
+            assert_eq!(manifest.defaults.guidance, 4.0, "{name} guidance");
+            for file in manifest
+                .files
+                .iter()
+                .filter(|file| !is_model_specific_component(file.component))
+            {
+                assert!(
+                    storage_path(manifest, file).starts_with("shared/flux2-dev"),
+                    "{name} shared asset {} escaped the dev bucket",
+                    file.hf_filename
+                );
+            }
+        }
+    }
+
+    /// One copy of the 35 GB Mistral encoder is shared by every quantized dev
+    /// tier, and it must never land on top of a BFL file of the same role.
+    #[test]
+    fn flux2_dev_open_assets_share_one_path_and_never_shadow_the_gated_set() {
+        let q4 = find_manifest_exact("flux2-dev:q4").unwrap();
+        let fp8 = find_manifest_exact("flux2-dev:fp8").unwrap();
+        let encoder = |manifest: &ModelManifest| {
+            let file = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::TextEncoder)
+                .unwrap();
+            storage_path(manifest, file)
+        };
+        assert_eq!(encoder(q4), encoder(fp8));
+
+        let gated = find_manifest_exact("flux2-dev:bf16").unwrap();
+        let gated_paths: Vec<_> = gated
+            .files
+            .iter()
+            .map(|file| storage_path(gated, file))
+            .collect();
+        for file in &q4.files {
+            let path = storage_path(q4, file);
+            assert!(
+                !gated_paths.contains(&path),
+                "open dev asset collides with the gated set at {}",
+                path.display()
+            );
+        }
+    }
+
+    /// The undistilled base checkpoints are architecturally identical to the
+    /// distilled Klein tiers — same encoder files, same VAE — and differ only
+    /// in sampling: ~50 steps and a real CFG scale.
+    #[test]
+    fn flux2_klein_base_tiers_reuse_klein_assets_with_cfg_defaults() {
+        for (name, sibling) in [
+            ("flux2-klein-base:bf16", "flux2-klein:bf16"),
+            ("flux2-klein-base:q8", "flux2-klein:q8"),
+            ("flux2-klein-base:q6", "flux2-klein:q6"),
+            ("flux2-klein-base:q4", "flux2-klein:q4"),
+            ("flux2-klein-base-9b:bf16", "flux2-klein-9b:bf16"),
+            ("flux2-klein-base-9b:q8", "flux2-klein-9b:q8"),
+            ("flux2-klein-base-9b:q6", "flux2-klein-9b:q6"),
+            ("flux2-klein-base-9b:q4", "flux2-klein-9b:q4"),
+        ] {
+            let base = find_manifest_exact(name).unwrap();
+            let distilled = find_manifest_exact(sibling).unwrap();
+            assert_eq!(base.family, "flux2");
+            assert_eq!(base.defaults.steps, 50, "{name} steps");
+            assert_eq!(base.defaults.guidance, 4.0, "{name} guidance");
+
+            let shared = |manifest: &ModelManifest| {
+                let mut paths: Vec<_> = manifest
+                    .files
+                    .iter()
+                    .filter(|file| !is_model_specific_component(file.component))
+                    .map(|file| storage_path(manifest, file))
+                    .collect();
+                paths.sort();
+                paths
+            };
+            assert_eq!(
+                shared(base),
+                shared(distilled),
+                "{name} must reuse {sibling}'s encoder/VAE bytes"
+            );
+        }
+    }
+
+    /// The 4B base tier is Apache 2.0 all the way down; only the 9B halves
+    /// inherit Klein-9B's gate.
+    #[test]
+    fn flux2_klein_base_4b_is_ungated() {
+        assert!(!find_manifest_exact("flux2-klein-base:bf16")
+            .unwrap()
+            .is_gated());
+        assert!(!find_manifest_exact("flux2-klein-base:q4")
+            .unwrap()
+            .is_gated());
+    }
+
+    /// `resolve_model_name` walks `:q8 → :fp16 → :bf16 → :fp8`, so a bare base
+    /// name must not silently resolve to a distilled Klein tier.
+    #[test]
+    fn flux2_klein_base_bare_names_resolve_within_their_own_family() {
+        assert_eq!(
+            resolve_model_name("flux2-klein-base"),
+            "flux2-klein-base:q8"
+        );
+        assert_eq!(
+            resolve_model_name("flux2-klein-base-9b"),
+            "flux2-klein-base-9b:q8"
+        );
+        assert_eq!(resolve_model_name("flux2-klein"), "flux2-klein:q8");
+    }
+
+    /// FP8 tiers are single-file transformers; the engine header-peeks them,
+    /// so the file must be the only model-specific component.
+    #[test]
+    fn flux2_fp8_tiers_are_single_file_transformers() {
+        for (name, filename) in [
+            ("flux2-klein:fp8", "flux-2-klein-4b-fp8.safetensors"),
+            ("flux2-klein-9b:fp8", "flux-2-klein-9b-fp8.safetensors"),
+            (
+                "flux2-dev:fp8",
+                "split_files/diffusion_models/flux2_dev_fp8mixed.safetensors",
+            ),
+        ] {
+            let manifest = find_manifest_exact(name).unwrap();
+            let transformers: Vec<_> = manifest
+                .files
+                .iter()
+                .filter(|file| is_model_specific_component(file.component))
+                .collect();
+            assert_eq!(transformers.len(), 1, "{name} transformer count");
+            assert_eq!(transformers[0].hf_filename, filename);
+            assert_eq!(transformers[0].component, ModelComponent::Transformer);
+        }
+    }
+
     #[test]
     fn sd3_resolves_to_q8() {
         let manifest = find_manifest("sd3.5-large").unwrap();
@@ -7910,7 +8453,13 @@ mod tests {
         // LTX 2.5 GGUF bump (#1414): +7 Abiray Distilled transformer tiers
         // (:q3-k-s :q3 :q4-k-s :q4 :q5 :q6 :q8) on the shared int8-conv
         // companion graph — visible downloads, runtime still gated.
-        assert_eq!(known_manifests().len(), 177);
+        // Flux.2 completion bump: +14. FLUX.2 [dev] :q8 :q6 :q4 :fp8 (ungated
+        // transformers on the ungated Comfy-Org/unsloth runtime assets, so the
+        // whole tier installs without a BFL license acceptance), klein
+        // :fp8 and klein-9b:fp8 (BFL's own FP8 conversions), and the eight
+        // undistilled klein base tiers (4B and 9B × bf16/q8/q6/q4) which take
+        // real CFG instead of a guidance embedding.
+        assert_eq!(known_manifests().len(), 191);
     }
 
     #[test]
