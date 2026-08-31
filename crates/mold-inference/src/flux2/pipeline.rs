@@ -1513,17 +1513,21 @@ impl Flux2Engine {
         let denoise_start = Instant::now();
 
         let previewer = crate::latent_preview::LatentPreviewer::flux2(height, width);
-        let neg_state = neg_emb
+        // Both branches denoise the SAME image tokens, so the unconditional
+        // branch needs only its own text conditioning — batched to match the
+        // positive one, which `state.img` has already been packed into.
+        let neg_conditioning = neg_emb
             .as_ref()
-            .map(|emb| Flux2State::new(emb, &state.img))
+            .map(|emb| sampling::text_conditioning(emb, state.img.dim(0)?, state.img.device()))
             .transpose()?;
-        let cfg_branch = neg_state
-            .as_ref()
-            .map(|neg| super::transformer::Flux2CfgBranch {
-                scale: req.guidance,
-                txt: &neg.txt,
-                txt_ids: &neg.txt_ids,
-            });
+        let cfg_branch =
+            neg_conditioning
+                .as_ref()
+                .map(|(txt, txt_ids)| super::transformer::Flux2CfgBranch {
+                    scale: req.guidance,
+                    txt,
+                    txt_ids,
+                });
         if cfg_branch.is_some() {
             self.base.progress.info(&format!(
                 "Undistilled FLUX.2 base: classifier-free guidance at {:.2} (two forwards per step)",
@@ -1877,17 +1881,21 @@ impl Flux2Engine {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("transformer not loaded"))?;
         let previewer = crate::latent_preview::LatentPreviewer::flux2(height, width);
-        let neg_state = neg_emb
+        // Both branches denoise the SAME image tokens, so the unconditional
+        // branch needs only its own text conditioning — batched to match the
+        // positive one, which `state.img` has already been packed into.
+        let neg_conditioning = neg_emb
             .as_ref()
-            .map(|emb| Flux2State::new(emb, &state.img))
+            .map(|emb| sampling::text_conditioning(emb, state.img.dim(0)?, state.img.device()))
             .transpose()?;
-        let cfg_branch = neg_state
-            .as_ref()
-            .map(|neg| super::transformer::Flux2CfgBranch {
-                scale: req.guidance,
-                txt: &neg.txt,
-                txt_ids: &neg.txt_ids,
-            });
+        let cfg_branch =
+            neg_conditioning
+                .as_ref()
+                .map(|(txt, txt_ids)| super::transformer::Flux2CfgBranch {
+                    scale: req.guidance,
+                    txt,
+                    txt_ids,
+                });
         if cfg_branch.is_some() {
             progress.info(&format!(
                 "Undistilled FLUX.2 base: classifier-free guidance at {:.2} (two forwards per step)",
