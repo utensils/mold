@@ -306,6 +306,32 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_flow_shift: true,
             default_scheduler: None,
         },
+        // A source image is REQUIRED here, not optional: it is the family's
+        // only conditioning. Falling through to the all-false default below
+        // would hide the Create form's Source image row entirely and leave the
+        // TUI unable to submit a request the server would accept — the one
+        // control this family cannot do without. Everything else genuinely is
+        // false: no text encoder, so no negative prompt; no canvas; no
+        // strength, mask, ControlNet, LoRA or scheduler.
+        "hunyuan3d" | "hunyuan-3d" => ModelCapabilities {
+            supports_negative_prompt: false,
+            supports_scheduler: false,
+            supports_img2img: false,
+            supports_source_image: true,
+            supports_references: false,
+            supports_strength: false,
+            supports_mask: false,
+            supports_controlnet: false,
+            supports_lora: false,
+            supports_identity: false,
+            supports_video: false,
+            supports_duration_prediction: false,
+            supports_audio: false,
+            audio_required: false,
+            supports_video_upscale: false,
+            supports_flow_shift: false,
+            default_scheduler: None,
+        },
         _ => ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,
@@ -536,6 +562,16 @@ mod tests {
             );
         }
         assert!(!capabilities_for_family("wuerstchen").supports_lora);
+
+        // The 3-D family needs its own arm, not the all-false default: the
+        // source image is its ONLY conditioning, so hiding that row would
+        // leave the TUI unable to submit a request the server accepts.
+        let mesh = capabilities_for_family("hunyuan3d");
+        assert!(mesh.supports_source_image, "source image is required");
+        assert!(!mesh.supports_img2img, "there is no denoise strength here");
+        assert!(!mesh.supports_negative_prompt, "no text encoder at all");
+        assert!(!mesh.supports_video);
+        assert!(!mesh.supports_lora);
         assert!(!capabilities_for_family("ltx-video").supports_lora);
     }
 
