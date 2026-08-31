@@ -263,6 +263,7 @@ mod tests {
 
     fn dummy_request() -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

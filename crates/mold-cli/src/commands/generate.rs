@@ -1260,6 +1260,7 @@ pub async fn run(
                     })?;
                     let control = ic_lora_control.clone().unwrap_or_else(|| "hdr".to_string());
                     let mut probe_req = GenerateRequest {
+                        mesh: None,
                         video_only: None,
                         collection: None,
                         tags: None,
@@ -1423,6 +1424,7 @@ pub async fn run(
     }
 
     let mut req = GenerateRequest {
+        mesh: None,
         collection: resolved_filing.collection,
         tags: resolved_filing.tags,
         title,

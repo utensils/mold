@@ -579,6 +579,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
     };
 
     GenerateRequest {
+        mesh: None,
         video_only: None,
         collection: None,
         tags: None,

@@ -1428,6 +1428,15 @@ pub struct GenerateRequest {
     /// label it per family via `studio/lib/strengthSemantics.ts`..
     #[serde(default = "default_strength")]
     pub strength: f64,
+    /// 3-D controls. `None` on every request to a raster family, and a
+    /// non-`None` value there is refused rather than ignored.
+    ///
+    /// One nested struct rather than five sibling fields: the knobs are only
+    /// ever meaningful together, a non-mesh family rejects one field instead
+    /// of five, and every existing `GenerateRequest` literal in the workspace
+    /// gains one line instead of five.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshRequestOptions>,
     /// Mask image for inpainting (raw PNG/JPEG bytes, base64-encoded in JSON).
     /// White (255) = repaint, black (0) = preserve. Requires source_image.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
@@ -2264,6 +2273,36 @@ pub struct AudioData {
     pub thumbnail_width: u32,
     #[schema(example = 360)]
     pub thumbnail_height: u32,
+}
+
+/// Per-request 3-D controls.
+///
+/// Every field is optional: absent means the checkpoint's own default, which
+/// is what `manifest.rs` and the upstream `config.yaml` agree on.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshRequestOptions {
+    /// Resolution of the cubic query grid the shape VAE's occupancy field is
+    /// evaluated on. Memory and time scale with the CUBE of this — 256 is
+    /// ~17 million query points — so it is an allowlist
+    /// (`validation::MESH_OCTREE_RESOLUTIONS`), not a range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub octree_resolution: Option<u32>,
+    /// Iso-level at which the surface is extracted from the occupancy field.
+    /// Upstream's default is 0.6, not 0.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f32>,
+    /// Decimate to approximately this many triangles. Absent keeps the raw
+    /// surface-net output, which is dense and regular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_faces: Option<u32>,
+    /// Run the PBR texture stage. Requires the paint bundle to be installed;
+    /// a request that asks for it without one is refused at admission rather
+    /// than silently answered with bare geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<bool>,
+    /// Edge length of the generated texture atlas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_resolution: Option<u32>,
 }
 
 /// 3-D mesh output from a mesh model family.
@@ -5518,6 +5557,7 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -5769,6 +5809,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -5848,6 +5889,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6130,6 +6172,7 @@ mod tests {
     #[test]
     fn output_metadata_omits_strength_without_source_image() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6429,6 +6472,7 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6675,6 +6719,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6751,6 +6796,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6830,6 +6876,7 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7538,6 +7585,7 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7620,6 +7668,7 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7715,6 +7764,7 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7795,6 +7845,7 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7896,6 +7947,7 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -10004,6 +10056,34 @@ pub struct ServerCapabilities {
     /// deliver.
     #[serde(default)]
     pub licenses: bool,
+    /// 3-D mesh generation and delivery.
+    ///
+    /// Absent means NO, which is the correct answer for every server built
+    /// before this existed: a client that does not see it must not offer a
+    /// mesh model or try to render a `.glb` from the gallery, because such a
+    /// host has neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshCapabilities>,
+}
+
+/// What a host can do with 3-D artifacts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshCapabilities {
+    /// A mesh family has a runnable engine on this host. False on a host that
+    /// carries the manifests and the contract but no engine arm — which is a
+    /// real state (`FactoryFamilyAvailability::ContractOnly`), and one a
+    /// client must be able to distinguish from "this server is too old".
+    pub generation: bool,
+    /// Formats this host will STORE. GLB only today.
+    pub formats: Vec<OutputFormat>,
+    /// Formats `POST /api/gallery/export/:filename` can transcode a stored
+    /// mesh into. Separate from `formats` because OBJ is exportable but never
+    /// storable — it carries neither materials nor textures on its own.
+    pub export_formats: Vec<OutputFormat>,
+    /// Whether generated PBR textures are available. False means geometry
+    /// only, which is a materially different product and must not be
+    /// discovered by a user after waiting for a render.
+    pub textures: bool,
 }
 
 /// Why a host cannot admit a particular set of requests.

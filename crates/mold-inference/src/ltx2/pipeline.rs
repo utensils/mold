@@ -2218,6 +2218,7 @@ mod tests {
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -2548,6 +2549,7 @@ mod tests {
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -2628,6 +2630,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -2881,6 +2884,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

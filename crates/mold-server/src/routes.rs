@@ -387,6 +387,8 @@ use crate::queue::clean_error_message;
         mold_core::RemixVariant,
         mold_core::RemixDimension,
         mold_core::ImageData,
+        mold_core::MeshData,
+        mold_core::MeshCapabilities,
         mold_core::OutputFormat,
         mold_core::ModelInfo,
         mold_core::GenerationProfileSet,
@@ -7440,7 +7442,31 @@ async fn server_capabilities(
         } else {
             mold_core::IdentityCapabilities::default()
         },
+        mesh: Some(mesh_capabilities()),
     })
+}
+
+/// What this build can do with 3-D artifacts.
+///
+/// `generation` is read from the factory rather than from the presence of the
+/// manifests, so a build that ships the family contract without an engine arm
+/// says so instead of advertising a model it would refuse after admission.
+/// Delivery is advertised unconditionally because a stored `.glb` can be
+/// listed, served and exported by any build — including one that cannot
+/// generate a new one.
+fn mesh_capabilities() -> mold_core::MeshCapabilities {
+    let generation = matches!(
+        mold_inference::factory_family_availability(mold_core::manifest::HUNYUAN3D_FAMILY),
+        Some(mold_inference::FactoryFamilyAvailability::Runnable)
+    );
+    mold_core::MeshCapabilities {
+        generation,
+        formats: vec![mold_core::OutputFormat::Glb],
+        export_formats: vec![mold_core::OutputFormat::Glb, mold_core::OutputFormat::Obj],
+        // Geometry only. Flipped by the PBR paint stage, not before — a user
+        // must not discover that a render is untextured after waiting for it.
+        textures: false,
+    }
 }
 
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]

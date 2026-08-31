@@ -2559,6 +2559,7 @@ mod tests {
             CachedTensor::from_tensor(&txt_emb).unwrap(),
         );
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

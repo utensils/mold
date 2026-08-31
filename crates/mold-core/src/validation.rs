@@ -1979,6 +1979,123 @@ fn validate_generate_request_after_activation(
     validate_generate_request_after_activation_with(req, family_hint, ReferenceForm::Admitted)
 }
 
+/// Query-grid resolutions a mesh request may name.
+///
+/// An ALLOWLIST rather than a range, because cost is cubic: the shape VAE
+/// evaluates its occupancy field on `(n + 1)^3` points, so 256 is ~17 million
+/// and 384 is ~57 million. A range would let a client ask for a number whose
+/// only observable effect is an OOM twenty minutes in.
+///
+/// 256 is upstream's default (`comfy_extras/nodes_hunyuan3d.py`
+/// `VAEDecodeHunyuan3D`); the node's own bounds are 16..=512, and this is the
+/// reviewed subset within them.
+pub const MESH_OCTREE_RESOLUTIONS: &[u32] = &[128, 192, 256, 320, 384];
+
+/// Texture atlas edge lengths a mesh request may name.
+pub const MESH_TEXTURE_RESOLUTIONS: &[u32] = &[1024, 2048, 4096];
+
+/// Upper bound on requested decimation. Above this, decimation is not doing
+/// anything a raw surface-net extraction was not already doing.
+pub const MESH_MAX_TARGET_FACES: u32 = 2_000_000;
+
+/// Lower bound. Below a few hundred triangles the result is not a model of
+/// anything.
+pub const MESH_MIN_TARGET_FACES: u32 = 100;
+
+/// Family-shape rules for the 3-D families.
+///
+/// Two directions, both deliberate:
+///
+///   - A non-mesh family REFUSES `mesh` rather than ignoring it. Silently
+///     dropping it would mean a client that mistyped a model name gets a
+///     picture back with no indication that its octree resolution went
+///     nowhere.
+///   - A mesh family refuses `frames`, `fps` and a client-supplied canvas for
+///     the mirror-image reason: they describe an artifact this family does
+///     not produce, and accepting them would make "Reuse settings" replay
+///     numbers that never applied.
+fn validate_mesh_request(req: &GenerateRequest, family: Option<&str>) -> Result<(), String> {
+    let is_mesh_family = family == Some(crate::manifest::HUNYUAN3D_FAMILY);
+
+    let Some(options) = req.mesh.as_ref() else {
+        if is_mesh_family {
+            return validate_mesh_family_shape(req);
+        }
+        return Ok(());
+    };
+
+    if !is_mesh_family {
+        return Err(
+            "mesh options are only supported by 3-D families; this model renders raster output"
+                .to_string(),
+        );
+    }
+    validate_mesh_family_shape(req)?;
+
+    if let Some(resolution) = options.octree_resolution {
+        if !MESH_OCTREE_RESOLUTIONS.contains(&resolution) {
+            return Err(format!(
+                "mesh.octree_resolution ({resolution}) must be one of {MESH_OCTREE_RESOLUTIONS:?}"
+            ));
+        }
+    }
+    if let Some(threshold) = options.threshold {
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            return Err(format!(
+                "mesh.threshold ({threshold}) must be between 0.0 and 1.0"
+            ));
+        }
+    }
+    if let Some(target) = options.target_faces {
+        if !(MESH_MIN_TARGET_FACES..=MESH_MAX_TARGET_FACES).contains(&target) {
+            return Err(format!(
+                "mesh.target_faces ({target}) must be between {MESH_MIN_TARGET_FACES} and {MESH_MAX_TARGET_FACES}"
+            ));
+        }
+    }
+    if let Some(resolution) = options.texture_resolution {
+        if !MESH_TEXTURE_RESOLUTIONS.contains(&resolution) {
+            return Err(format!(
+                "mesh.texture_resolution ({resolution}) must be one of {MESH_TEXTURE_RESOLUTIONS:?}"
+            ));
+        }
+        if options.texture != Some(true) {
+            return Err(
+                "mesh.texture_resolution requires mesh.texture = true; it has no effect on a geometry-only render"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Rules that hold for a mesh family whether or not the request carried any
+/// `mesh` options.
+fn validate_mesh_family_shape(req: &GenerateRequest) -> Result<(), String> {
+    // The source image is the ONLY conditioning this family has — there is no
+    // text encoder anywhere in it. A request without one has nothing to
+    // generate from, and the prompt (if any) is recorded as provenance only.
+    if req.source_image.as_ref().is_none_or(Vec::is_empty) {
+        return Err(
+            "3-D generation requires a source image: it is the only conditioning this family has"
+                .to_string(),
+        );
+    }
+    if req.frames.is_some() || req.fps.is_some() {
+        return Err(
+            "frames and fps are not meaningful for 3-D generation; a mesh has no timeline"
+                .to_string(),
+        );
+    }
+    if req.mask_image.is_some() {
+        return Err("inpainting masks are not supported by 3-D families".to_string());
+    }
+    if req.control_image.is_some() || req.control_model.is_some() {
+        return Err("ControlNet is not supported by 3-D families".to_string());
+    }
+    Ok(())
+}
+
 fn validate_generate_request_after_activation_with(
     req: &GenerateRequest,
     family_hint: Option<&str>,
@@ -1992,6 +2109,8 @@ fn validate_generate_request_after_activation_with(
                 .to_string(),
         );
     }
+
+    validate_mesh_request(req, family)?;
 
     // Creation-time filing is validated before anything expensive: a bad tag
     // or an unset collection ref is a client mistake, and paying for a model
@@ -2012,7 +2131,11 @@ fn validate_generate_request_after_activation_with(
     };
     let audio_only =
         family == Some("ltx2") && req.pipeline.is_some_and(Ltx2PipelineMode::is_audio_only);
-    if !audio_only {
+    // A mesh has no canvas, so there is no dimension contract to check. The
+    // request's `width`/`height` are the manifest's conditioning size, which
+    // the engine letterboxes the SOURCE to; they never describe an output.
+    let canvasless = audio_only || family == Some(crate::manifest::HUNYUAN3D_FAMILY);
+    if !canvasless {
         validate_generation_dimensions_for_model(
             &req.model,
             req.width,
@@ -2995,6 +3118,127 @@ pub fn dimension_warning_composed(
 
 #[cfg(test)]
 mod tests {
+    fn mesh_request(model: &str) -> GenerateRequest {
+        let mut req = crate::test_support::minimal_generate_request(model);
+        req.source_image = Some(vec![0u8; 16]);
+        req
+    }
+
+    #[test]
+    fn a_mesh_family_requires_a_source_image() {
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.source_image = None;
+        let error = super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap_err();
+        assert!(error.contains("source image"), "{error}");
+
+        // An empty vec is the same absence, not a zero-byte image.
+        req.source_image = Some(Vec::new());
+        assert!(super::validate_mesh_request(&req, Some("hunyuan3d")).is_err());
+
+        req.source_image = Some(vec![0u8; 8]);
+        assert!(super::validate_mesh_request(&req, Some("hunyuan3d")).is_ok());
+    }
+
+    #[test]
+    fn a_raster_family_refuses_mesh_options_rather_than_ignoring_them() {
+        let mut req = crate::test_support::minimal_generate_request("flux-dev:q8");
+        assert!(super::validate_mesh_request(&req, Some("flux")).is_ok());
+
+        req.mesh = Some(crate::types::MeshRequestOptions {
+            octree_resolution: Some(256),
+            ..Default::default()
+        });
+        let error = super::validate_mesh_request(&req, Some("flux")).unwrap_err();
+        assert!(error.contains("only supported by 3-D families"), "{error}");
+    }
+
+    #[test]
+    fn a_mesh_family_refuses_a_timeline() {
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.frames = Some(97);
+        let error = super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap_err();
+        assert!(error.contains("no timeline"), "{error}");
+
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.fps = Some(24);
+        assert!(super::validate_mesh_request(&req, Some("hunyuan3d")).is_err());
+    }
+
+    #[test]
+    fn octree_resolution_is_an_allowlist_not_a_range() {
+        for resolution in super::MESH_OCTREE_RESOLUTIONS {
+            let mut req = mesh_request("hunyuan3d:fp16");
+            req.mesh = Some(crate::types::MeshRequestOptions {
+                octree_resolution: Some(*resolution),
+                ..Default::default()
+            });
+            assert!(
+                super::validate_mesh_request(&req, Some("hunyuan3d")).is_ok(),
+                "{resolution} must be admitted"
+            );
+        }
+        // 257 sits between two allowed values and inside the upstream node's
+        // own 16..=512 bounds. A range check would admit it.
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.mesh = Some(crate::types::MeshRequestOptions {
+            octree_resolution: Some(257),
+            ..Default::default()
+        });
+        let error = super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap_err();
+        assert!(error.contains("octree_resolution"), "{error}");
+    }
+
+    #[test]
+    fn threshold_rejects_out_of_range_and_non_finite_values() {
+        for bad in [-0.1f32, 1.1, f32::NAN, f32::INFINITY] {
+            let mut req = mesh_request("hunyuan3d:fp16");
+            req.mesh = Some(crate::types::MeshRequestOptions {
+                threshold: Some(bad),
+                ..Default::default()
+            });
+            assert!(
+                super::validate_mesh_request(&req, Some("hunyuan3d")).is_err(),
+                "threshold {bad} must be refused"
+            );
+        }
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.mesh = Some(crate::types::MeshRequestOptions {
+            threshold: Some(0.6),
+            ..Default::default()
+        });
+        assert!(super::validate_mesh_request(&req, Some("hunyuan3d")).is_ok());
+    }
+
+    #[test]
+    fn texture_resolution_without_texture_is_refused_not_silently_dropped() {
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.mesh = Some(crate::types::MeshRequestOptions {
+            texture_resolution: Some(2048),
+            texture: None,
+            ..Default::default()
+        });
+        let error = super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap_err();
+        assert!(error.contains("requires mesh.texture"), "{error}");
+
+        req.mesh = Some(crate::types::MeshRequestOptions {
+            texture_resolution: Some(2048),
+            texture: Some(true),
+            ..Default::default()
+        });
+        assert!(super::validate_mesh_request(&req, Some("hunyuan3d")).is_ok());
+    }
+
+    #[test]
+    fn a_mesh_family_refuses_raster_conditioning_it_cannot_honour() {
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.mask_image = Some(vec![0u8; 4]);
+        assert!(super::validate_mesh_request(&req, Some("hunyuan3d")).is_err());
+
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.control_model = Some("controlnet-canny-sd15".to_string());
+        assert!(super::validate_mesh_request(&req, Some("hunyuan3d")).is_err());
+    }
+
     use super::*;
     use crate::OutputFormat;
 
@@ -3701,6 +3945,7 @@ mod tests {
 
     fn valid_req() -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

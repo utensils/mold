@@ -2295,6 +2295,7 @@ fn build_generate_request(
     }
 
     Ok(GenerateRequest {
+        mesh: None,
         video_only: None,
         collection: None,
         tags: None,
@@ -4470,6 +4471,7 @@ mod tests {
     async fn async_job_registry_tracks_completed_image() {
         let jobs = AsyncJobRegistry::default();
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

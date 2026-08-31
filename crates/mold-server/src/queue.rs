@@ -4558,6 +4558,7 @@ mod tests {
     /// hand to `OutputMetadata::from_generate_request` in tests.
     fn fake_request(model: &str) -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
