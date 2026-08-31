@@ -1258,8 +1258,7 @@ fn recipe(
             formats: vec![OutputFormat::Glb],
             audio_requires_mp4: false,
             delivery_reason: Some(
-                "3-D delivery uses binary glTF; OBJ is available as a gallery export."
-                    .to_string(),
+                "3-D delivery uses binary glTF; OBJ is available as a gallery export.".to_string(),
             ),
         }
     } else if audio_only {
@@ -1313,8 +1312,16 @@ fn recipe(
         input.default_steps
     };
     let defaults = GenerationDefaultsProfile {
-        width: if audio_only || mesh_only { 0 } else { default_width },
-        height: if audio_only || mesh_only { 0 } else { default_height },
+        width: if audio_only || mesh_only {
+            0
+        } else {
+            default_width
+        },
+        height: if audio_only || mesh_only {
+            0
+        } else {
+            default_height
+        },
         steps: default_steps,
         guidance: effective_guidance,
         frames: temporal.as_ref().map(|profile| profile.frames.default),

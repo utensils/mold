@@ -4881,14 +4881,12 @@ pub fn paths_from_downloads(
         })?;
 
     // Utility models and LTX-2: transformer + optional tokenizer, no standalone VAE asset
-    let vae = if UTILITY_FAMILIES.contains(&family)
-        || family == "ltx2"
-        || family == HUNYUAN3D_FAMILY
-    {
-        find(ModelComponent::Vae).unwrap_or_default()
-    } else {
-        find(ModelComponent::Vae)?
-    };
+    let vae =
+        if UTILITY_FAMILIES.contains(&family) || family == "ltx2" || family == HUNYUAN3D_FAMILY {
+            find(ModelComponent::Vae).unwrap_or_default()
+        } else {
+            find(ModelComponent::Vae)?
+        };
 
     Some(ModelPaths {
         transformer,
@@ -4954,8 +4952,7 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "hunyuan3d-mini-turbo:fp16".to_string(),
             family: HUNYUAN3D_FAMILY.to_string(),
-            description: "Hunyuan3D 2.0 mini Turbo — image-to-3D mesh, step-distilled"
-                .to_string(),
+            description: "Hunyuan3D 2.0 mini Turbo — image-to-3D mesh, step-distilled".to_string(),
             files: vec![ModelFile {
                 hf_repo: "tencent/Hunyuan3D-2mini".to_string(),
                 hf_filename: "hunyuan3d-dit-v2-mini-turbo/model.fp16.safetensors".to_string(),
