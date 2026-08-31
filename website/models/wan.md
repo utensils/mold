@@ -284,13 +284,74 @@ the number of kernel launches is identical across the first three rows. The
 decoder's convolutions are doing real work at full output resolution. Batching
 the per-frame 2-D stages into one launch and widening the decode chunk were
 both built and measured; neither moved the number, and the wider chunk only
-added an OOM at 8 latent frames, so neither shipped. There is no knob that
-makes this phase cheaper — the levers that matter are resolution and frame
-count.
+added an OOM at 8 latent frames, so neither shipped.
+
+The knob turned out to be one layer down, in the convolution itself — see
+[cuDNN convolutions](#cudnn-convolutions) below.
 
 The decode is also _not_ where this family runs out of memory. Its transient is
 bounded to one latent frame at a time by construction, so `1280x704 x 121`
 decodes on a 24 GB card; the denoise is the memory wall.
+
+### cuDNN convolutions
+
+candle has two CUDA convolution implementations. The historical one builds an
+im2col column buffer and runs a single GEMM; a `--features cuda,cudnn` build
+adds NVIDIA's own kernels, and **that is the default for video families**, on
+the same clips-versus-stills argument as `MOLD_ATTN`. Image families stay on
+im2col in every build so an archived still renders the same bytes.
+`MOLD_CONV={cudnn,im2col}` overrides either direction.
+
+Measured on an RTX 4090, one steady-state latent frame of the Wan 2.1 VAE
+decoder at 832x480 in bf16, summing every convolution it issues:
+
+| Convolution backend           | Per latent frame | vs im2col |
+| ----------------------------- | ---------------: | --------: |
+| im2col                        |           845 ms |         - |
+| cuDNN, as candle shipped it   |           518 ms |     1.63x |
+| cuDNN, after the fork's fixes |           192 ms | **4.38x** |
+
+The gap between the second and third rows is the interesting part, and it was
+not cuDNN's doing. candle created every convolution descriptor at
+`CUDNN_DEFAULT_MATH`, which declines tensor-core engines for f16/bf16 — a bf16
+convolution ran _slower_ than the same convolution in f32 — and silently
+permits TF32 for f32. Selecting `TENSOR_OP` for half precision and `FMA` for
+the wide dtypes is 2.4x on bf16 at bit-identical output, and on f32 it is both
+1.4x faster and 100x more accurate. candle also zeroed the cuDNN workspace on
+every call, a memset of up to hundreds of MB that cuDNN never reads; dropping
+it is worth another ~10%.
+
+cuDNN is not always the right answer, so the fork chooses per convolution. A
+1x1 kernel is a matmul whose im2col buffer is a free reshape, and a small
+convolution finishes in less time than cuDNN spends creating descriptors and
+running its algorithm heuristic — neither of which candle caches. The gate is
+the size of the column buffer im2col would materialise, which is exactly the
+work cuDNN avoids; output elements are the wrong measure, as this decoder's own
+head convolution shows. 96->3 at 480x832 has barely a million output elements,
+a 690 MB column buffer, and runs 6.9x faster on cuDNN.
+
+Convolutions are ~76% of the decode, and the end-to-end effect was measured on
+the same card with a full render rather than projected from the table above --
+`wan22-t2v-a14b:q5`, 832x480, 81 frames, 4 steps, seed 1483, both arms warm and
+parking the same blocks:
+
+| `MOLD_CONV` | Decode |  Render |
+| ----------- | -----: | ------: |
+| `im2col`    | 23.3 s | 105.9 s |
+| `cudnn`     | 11.2 s |  94.9 s |
+|             |  2.08x |   1.12x |
+
+Decode saves 12.1 s and the render saves 11.0 s, so the whole gain lands in the
+phase it should. Note the render figure is the honest one to quote: a 4.38x on
+the convolutions is a 2.08x on the decode, because a quarter of the decode is
+not convolution and cuDNN pays a per-call setup candle does not cache. Frames
+match the im2col arm at ~40 dB PSNR -- the same shot, not the same bytes, which
+is the trade this family opts into.
+
+A cuDNN failure falls back to im2col rather than failing the render. Every
+Linux CUDA artifact compiles the feature -- the Nix packages, the four
+`release.yml` binaries, the Docker image, both AUR packages and the desktop
+AppImage. macOS and Windows do not: cuDNN is CUDA-only.
 
 ### When the VAE decode does not fit
 

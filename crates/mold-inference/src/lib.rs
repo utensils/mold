@@ -8,6 +8,7 @@ mod cache;
 pub(crate) mod cfg_plus_ddim;
 pub mod chain;
 pub mod controlnet;
+pub mod conv_policy;
 pub mod device;
 mod encoders;
 pub mod engine;

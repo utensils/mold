@@ -13,6 +13,7 @@ description = "Terminal UI for mold — interactive AI image generation"
 [features]
 default = []
 cuda = ["mold-inference/cuda"]
+cudnn = ["cuda", "mold-inference/cudnn"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]

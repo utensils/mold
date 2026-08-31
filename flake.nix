@@ -173,12 +173,13 @@
               pkgs.cudaPackages.cuda_nvtx.lib
               pkgs.cudaPackages.cuda_nvrtc.lib
               pkgs.cudaPackages.libcurand.lib
+              pkgs.cudaPackages.cudnn.lib
             ];
           }
           // lib.optionalAttrs isLinux {
             CUDA_PATH = "${cudaToolkit}";
             CUDA_COMPUTE_CAP = cudaComputeCap;
-            NIX_LDFLAGS = "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
+            NIX_LDFLAGS = "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs -L${pkgs.cudaPackages.cudnn.lib}/lib";
           };
 
           opensslLibDir = "${pkgs.lib.getLib pkgs.openssl}/lib";
@@ -232,10 +233,15 @@
           # `supports_identity` only when the feature is compiled, and the
           # identity photo well is gated on that advertisement, so a desktop
           # build without it hides face identity permanently.
-          desktopFeaturesFor = computeCap: [
-            (desktopFeatureFor computeCap)
-            "pulid"
-          ];
+          desktopFeaturesFor =
+            computeCap:
+            [
+              (desktopFeatureFor computeCap)
+              "pulid"
+            ]
+            # The desktop app embeds the same server, so it takes the same
+            # convolution backend on Linux CUDA (#1483).
+            ++ lib.optionals isLinux [ "cudnn" ];
           desktopFeatures = lib.concatStringsSep "," (desktopFeaturesFor cudaComputeCap);
 
           gpuFeature =
@@ -261,9 +267,12 @@
           releaseFeaturesFor =
             computeCap:
             if isLinux then
+              # `cudnn` is Linux-CUDA only and deliberately not implied by
+              # `cuda`: it links libcudnn and needs its headers, which a plain
+              # `cargo check --features cuda` must not require (#1483).
               "${
                 if computeCap == "89" then "h3-cuda" else "cuda"
-              },preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
+              },cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
             else if gpuFeature != "" then
               "${gpuFeature},h3,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid"
             else
@@ -425,12 +434,22 @@
             '';
           };
 
-          # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and include/cuda.h
+          # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and
+          # include/cuda.h, and so cudarc's build script finds cudnn_version.h
+          # and libcudnn for the `cudnn` feature (#1483). cuDNN adds ~1.2 GB to
+          # the closure; it is what makes a Wan VAE decode 4.4x cheaper on its
+          # convolutions, and `crate::conv_policy` still decides per family
+          # whether a render uses it.
           cudaToolkit = pkgs.symlinkJoin {
             name = "cuda-toolkit-merged";
             paths = [
               pkgs.cudaPackages.cuda_nvcc
               pkgs.cudaPackages.cuda_cudart
+            ]
+            ++ lib.optionals isLinux [
+              pkgs.cudaPackages.cudnn.dev
+              pkgs.cudaPackages.cudnn.include
+              pkgs.cudaPackages.cudnn.lib
             ];
           };
 
@@ -550,7 +569,7 @@
               cargoLock = {
                 lockFile = ./desktop/src-tauri/Cargo.lock;
                 outputHashes = {
-                  "candle-core-mold-0.11.1" = "sha256-WXh/6aHyhZBaR/Chg1cH6VAMHmjT+kphwcl75wM8+6A=";
+                  "candle-core-mold-0.11.1" = "sha256-givk1MIAncZN+YO/XI6DPMPaIOHw6G68DRR40y5Oims=";
                   "cudarc-0.19.8" = "sha256-ARnabIhBCzahrk/kVCt5084gftGDyCBme3jxg+mvkUA=";
                 };
               };
@@ -595,6 +614,7 @@
                   pkgs.cudaPackages.libcublas.lib
                   pkgs.cudaPackages.cuda_nvrtc.lib
                   pkgs.cudaPackages.libcurand.lib
+                  pkgs.cudaPackages.cudnn.lib
                 ]
               );
 
@@ -749,6 +769,7 @@
                       pkgs.cudaPackages.cuda_cudart
                       pkgs.cudaPackages.libcublas.lib
                       pkgs.cudaPackages.libcurand.lib
+                      pkgs.cudaPackages.cudnn.lib
                     ]
                   }:${pkgs.cudaPackages.cuda_cudart}/lib/stubs''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
                 '';

@@ -239,6 +239,21 @@ jobs:
           use-github-cache: false
           use-local-cache: false
 
+      - name: Install cuDNN
+        # Jimver installs the toolkit from the local .run installer, which does
+        # not add NVIDIA's apt repository, so cuDNN has to come from the
+        # keyring repo. The distro is derived at runtime rather than hardcoded
+        # so a runner image bump does not silently 404. cudarc links libcudnn
+        # dynamically and needs its headers at build time (#1483).
+        run: |
+          set -eux
+          . /etc/os-release
+          distro="${ID}$(echo "${VERSION_ID}" | tr -d '.')"
+          curl -fsSLO "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcudnn9-dev-cuda-12 libcudnn9-cuda-12
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: mozilla-actions/sccache-action@v0.0.7
@@ -271,7 +286,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "86"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
+        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 86 target/release/build
@@ -328,6 +343,21 @@ jobs:
           use-github-cache: false
           use-local-cache: false
 
+      - name: Install cuDNN
+        # Jimver installs the toolkit from the local .run installer, which does
+        # not add NVIDIA's apt repository, so cuDNN has to come from the
+        # keyring repo. The distro is derived at runtime rather than hardcoded
+        # so a runner image bump does not silently 404. cudarc links libcudnn
+        # dynamically and needs its headers at build time (#1483).
+        run: |
+          set -eux
+          . /etc/os-release
+          distro="${ID}$(echo "${VERSION_ID}" | tr -d '.')"
+          curl -fsSLO "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcudnn9-dev-cuda-12 libcudnn9-cuda-12
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: mozilla-actions/sccache-action@v0.0.7
@@ -363,7 +393,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
+        run: cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
@@ -421,6 +451,21 @@ jobs:
           use-github-cache: false
           use-local-cache: false
 
+      - name: Install cuDNN
+        # Jimver installs the toolkit from the local .run installer, which does
+        # not add NVIDIA's apt repository, so cuDNN has to come from the
+        # keyring repo. The distro is derived at runtime rather than hardcoded
+        # so a runner image bump does not silently 404. cudarc links libcudnn
+        # dynamically and needs its headers at build time (#1483).
+        run: |
+          set -eux
+          . /etc/os-release
+          distro="${ID}$(echo "${VERSION_ID}" | tr -d '.')"
+          curl -fsSLO "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcudnn9-dev-cuda-12 libcudnn9-cuda-12
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: mozilla-actions/sccache-action@v0.0.7
@@ -453,7 +498,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "100"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
+        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 100 target/release/build
@@ -510,6 +555,21 @@ jobs:
           use-github-cache: false
           use-local-cache: false
 
+      - name: Install cuDNN
+        # Jimver installs the toolkit from the local .run installer, which does
+        # not add NVIDIA's apt repository, so cuDNN has to come from the
+        # keyring repo. The distro is derived at runtime rather than hardcoded
+        # so a runner image bump does not silently 404. cudarc links libcudnn
+        # dynamically and needs its headers at build time (#1483).
+        run: |
+          set -eux
+          . /etc/os-release
+          distro="${ID}$(echo "${VERSION_ID}" | tr -d '.')"
+          curl -fsSLO "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcudnn9-dev-cuda-12 libcudnn9-cuda-12
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: mozilla-actions/sccache-action@v0.0.7
@@ -545,7 +605,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "120"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
+        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 120 target/release/build

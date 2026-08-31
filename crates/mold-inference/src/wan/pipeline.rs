@@ -2291,6 +2291,12 @@ fn video_frames_to_images(video: &Tensor, width: u32, height: u32) -> Result<Vec
 
 impl crate::engine::InferenceEngine for WanEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        // Wan is a video family, so its convolutions take cuDNN where the
+        // build has it (#1483). The scope covers the whole render and restores
+        // the previous backend on drop, including on an error return, so a
+        // failed clip cannot leave the next still on a path that would move
+        // its bytes.
+        let _conv = crate::conv_policy::ConvScope::for_family("wan");
         self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         let result = if req.is_extend() {
@@ -2549,6 +2555,12 @@ impl crate::chain::ChainStageRenderer for WanEngine {
         hdr_sidecar: Option<&crate::chain::StageSidecar>,
         _stage_progress: Option<&mut dyn FnMut(crate::chain::StageProgressEvent)>,
     ) -> Result<crate::chain::StageOutcome> {
+        // A chain stage is a second entry point into this engine: it reaches
+        // `generate_inner` without passing through `generate`, so it needs its
+        // own scope or every sequence — including the automatic chain a long
+        // `--frames` render becomes — would silently stay on im2col and ignore
+        // MOLD_CONV entirely.
+        let _conv = crate::conv_policy::ConvScope::for_family("wan");
         if hdr_sidecar.is_some() {
             bail!(
                 "WanEngine.render_stage: the HDR EXR sidecar is an LTX-2 feature; \

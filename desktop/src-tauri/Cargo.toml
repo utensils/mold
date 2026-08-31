@@ -121,6 +121,7 @@ default = []
 # CPU-only by default so CI runs without a GPU; desktop-dev/desktop-build
 # turn on the native GPU backend for real generation.
 cuda = ["mold-server/cuda", "nvml"]
+cudnn = ["cuda", "mold-server/cudnn"]
 # Device-free like the workspace's own `h3` (#1164). The Linux desktop
 # package names `h3-cuda`; `h3` + `cuda` is the graph that silently drops the
 # SM89 attention kernel and the mold-server build fence refuses it.
@@ -152,7 +153,7 @@ strip = true
 # TEMPORARY: mirror the root workspace's same-name compatibility patch because
 # this standalone Cargo root owns an independent dependency graph.
 [patch.crates-io]
-candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4" }
-candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4" }
-candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "5de41be79c45b6b82f8da0f8efd1b6ed11bb91b4" }
+candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "744ae3b83cfac18db28107a353c449cc9b80d4ec" }
+candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "744ae3b83cfac18db28107a353c449cc9b80d4ec" }
+candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "744ae3b83cfac18db28107a353c449cc9b80d4ec" }
 cudarc = { git = "https://github.com/utensils/cudarc", rev = "9b3b1bc276bc27c3e99343ee82db7f99705b9ed5" }

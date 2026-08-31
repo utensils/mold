@@ -303,6 +303,7 @@ pub enum RuntimeSemanticVariable {
     Attn,
     AttnChunk,
     CfgPlus,
+    Conv,
     Device,
     Eager,
     FluxDeltaCache,
@@ -400,9 +401,30 @@ pub struct ExecutionSemanticConfig {
     pub h3_factory_authority_sha256: Option<String>,
     pub attention_backend: SemanticAttentionBackend,
     pub attention_chunk: SemanticAttentionChunk,
+    /// The convolution backend this render will actually execute on.
+    ///
+    /// Without it, the same source revision built with and without the
+    /// `cudnn` feature produces one fingerprint for two different sets of
+    /// numerics and timings, so swapping those binaries against one `mold.db`
+    /// reuses the other's scheduler estimates. Resolved rather than read from
+    /// `MOLD_CONV`, because the default is per family and the feature may not
+    /// be compiled at all.
+    ///
+    /// `None` for families whose convolutions never take cuDNN, so their
+    /// fingerprints stay exactly as they were — the same reason `umt5_variant`
+    /// is skipped when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conv_backend: Option<SemanticConvBackend>,
     pub vae_tiling: SemanticVaeTiling,
     pub vae_dtype: SemanticVaeDType,
     pub runtime: Vec<RuntimeSemanticSetting>,
+}
+
+/// The convolution backend an execution actually runs on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticConvBackend {
+    Im2Col,
+    Cudnn,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -623,6 +645,24 @@ impl ExecutionSemanticConfig {
                     SemanticAttentionChunk::Size(*size as u64)
                 }
             },
+            // Only video families can take cuDNN, so only they carry the
+            // field; an image family's fingerprint is byte-identical to what
+            // it was before this existed.
+            conv_backend: match mold_inference::conv_policy::policy_for_family(family) {
+                mold_inference::conv_policy::ConvPolicy::Image => None,
+                mold_inference::conv_policy::ConvPolicy::Video => Some(
+                    match mold_inference::conv_policy::resolve_for(
+                        mold_inference::conv_policy::ConvPolicy::Video,
+                    ) {
+                        mold_inference::conv_policy::ConvBackend::Im2Col => {
+                            SemanticConvBackend::Im2Col
+                        }
+                        mold_inference::conv_policy::ConvBackend::Cudnn => {
+                            SemanticConvBackend::Cudnn
+                        }
+                    },
+                ),
+            },
             vae_tiling: match vae_tiling {
                 mold_inference::vae_tiling::TiledMode::Auto => SemanticVaeTiling::Auto,
                 mold_inference::vae_tiling::TiledMode::Force => SemanticVaeTiling::Force,
@@ -653,6 +693,7 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_ATTN" => RuntimeSemanticVariable::Attn,
         "MOLD_ATTN_CHUNK" => RuntimeSemanticVariable::AttnChunk,
         "MOLD_CFG_PLUS" => RuntimeSemanticVariable::CfgPlus,
+        "MOLD_CONV" => RuntimeSemanticVariable::Conv,
         "MOLD_DEVICE" => RuntimeSemanticVariable::Device,
         "MOLD_EAGER" => RuntimeSemanticVariable::Eager,
         "MOLD_FLUX_DELTA_CACHE" => RuntimeSemanticVariable::FluxDeltaCache,
@@ -832,6 +873,15 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
                 "1" | "true" | "on" | "yes"
             ))
         }
+        // Not a hand-mirror: this calls the engine's own parser, so
+        // `MOLD_CONV=cudnn`, ` CuDNN `, and an unparseable typo land in the
+        // execution class they will actually render in.
+        Some(value) if variable == RuntimeSemanticVariable::Conv => CanonicalRuntimeValue::Text(
+            match mold_inference::conv_policy::parse_backend_env(Some(value)) {
+                Some(backend) => backend.as_str().to_string(),
+                None => "family-default".to_string(),
+            },
+        ),
         // Do not invent normalization for a runtime parser we have not made
         // authoritative here. Exact text is conservative: it can cause false
         // negatives, but never a false-equivalent execution class.
@@ -7699,6 +7749,9 @@ mod tests {
                 h3_factory_authority_sha256: None,
                 attention_backend: SemanticAttentionBackend::Math,
                 attention_chunk: SemanticAttentionChunk::Auto,
+                // flux is an image family: it never takes cuDNN, so its
+                // fingerprint carries no convolution backend at all.
+                conv_backend: None,
                 vae_tiling: SemanticVaeTiling::Auto,
                 vae_dtype: SemanticVaeDType::Auto,
                 runtime: vec![RuntimeSemanticSetting {
