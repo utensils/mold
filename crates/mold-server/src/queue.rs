@@ -549,6 +549,79 @@ pub(crate) fn save_audio_to_dir(
     Some(filename)
 }
 
+/// Publish a mesh into the gallery.
+///
+/// Shaped exactly like [`save_audio_to_dir`], and for the same reason: the
+/// primary write is an ordinary single-file gallery publication, and the only
+/// extra work is a sidecar tile that must exist at save time because nothing
+/// downstream can render one on demand. A glTF buffer has no raster frame,
+/// so without the poster the gallery would show a placeholder forever.
+///
+/// `save_video_to_dir` is reused for the primary write rather than
+/// duplicated: it already owns filename allocation, the durable archive
+/// record, the rollback that deletes the file when the archive fails, and the
+/// `GalleryAdded` event. None of that is raster-specific.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_mesh_to_dir(
+    dir: &std::path::Path,
+    bytes: &[u8],
+    poster_png: &[u8],
+    format: OutputFormat,
+    model: &str,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+) -> Option<String> {
+    let filename = save_video_to_dir(
+        dir,
+        bytes,
+        // No GIF preview: there is no motion to preview, and the poster below
+        // is what every grid actually lays out.
+        &[],
+        format,
+        model,
+        metadata,
+        generation_time_ms,
+        db,
+        events,
+        gallery_gate,
+    )?;
+    if !poster_png.is_empty() {
+        save_mesh_poster_thumbnail(&filename, poster_png);
+    }
+    Some(filename)
+}
+
+pub(crate) fn save_mesh_poster_thumbnail(filename: &str, png_bytes: &[u8]) {
+    let thumb_dir = mold_core::Config::mold_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
+        .join("cache")
+        .join("thumbnails");
+    save_mesh_poster_thumbnail_to(&thumb_dir, filename, png_bytes);
+}
+
+/// Testable inner of [`save_mesh_poster_thumbnail`] with an explicit cache
+/// directory, so unit tests don't race on `MOLD_HOME`.
+fn save_mesh_poster_thumbnail_to(thumb_dir: &std::path::Path, filename: &str, png_bytes: &[u8]) {
+    if let Err(e) = std::fs::create_dir_all(thumb_dir) {
+        tracing::warn!(
+            "failed to create thumbnail cache dir {}: {e}",
+            thumb_dir.display()
+        );
+        return;
+    }
+    for thumb_path in mold_core::media_paths::mesh_poster_thumbnail_paths(thumb_dir, filename) {
+        if let Err(e) = std::fs::write(&thumb_path, png_bytes) {
+            tracing::warn!(
+                "failed to write mesh poster thumbnail {}: {e}",
+                thumb_path.display()
+            );
+        }
+    }
+}
+
 pub(crate) fn save_audio_waveform_thumbnail(filename: &str, png_bytes: &[u8]) {
     let thumb_dir = mold_core::Config::mold_dir()
         .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
@@ -2198,12 +2271,16 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             #[cfg(feature = "metrics")]
             crate::metrics::record_generation(&request.model, inference_duration);
 
-            if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
+            if response.images.is_empty()
+                && response.video.is_none()
+                && response.audio.is_none()
+                && response.mesh.is_none()
+            {
                 drop(request);
                 durable_generation_settlement::fail_async(
                     job,
                     DurableDisposition::Hold { retryable: true },
-                    "generation error: engine returned no images, video, or audio",
+                    "generation error: engine returned no images, video, audio, or mesh",
                 )
                 .await;
                 return;
@@ -2231,12 +2308,28 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     height: audio.thumbnail_height,
                     index: 0,
                 }
+            } else if let Some(ref mesh) = response.mesh {
+                // The poster PNG stands in for the raster payload, exactly as
+                // the waveform does for audio. The real glTF bytes are re-read
+                // from `response.mesh` by `build_sse_complete_event`.
+                ImageData {
+                    data: mesh.poster.clone(),
+                    format: OutputFormat::Png,
+                    width: mesh.poster_width,
+                    height: mesh.poster_height,
+                    index: 0,
+                }
             } else {
                 unreachable!("checked above");
             };
             let mut original_img = None;
+            // Post-generation upscaling is a RASTER operation. Every non-image
+            // kind reaches here with `img` holding a sidecar tile, and
+            // upscaling that would replace the artifact with a bigger picture
+            // of its own thumbnail.
             if response.video.is_none()
                 && response.audio.is_none()
+                && response.mesh.is_none()
                 && requested_post_upscale_model(&request).is_some()
             {
                 let upscale_result = upscale_generated_image_on_single_worker(
@@ -2304,7 +2397,31 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 let db = state.metadata_db.clone();
                 let events = state.events.clone();
                 let gallery_gate = state.gallery_publication_gate.clone();
-                let save_task = if let Some(ref audio) = response.audio {
+                let save_task = if let Some(ref mesh) = response.mesh {
+                    let mesh_data = mesh.data.clone();
+                    let mesh_poster = mesh.poster.clone();
+                    let mesh_format = mesh.format;
+                    // A mesh has no raster of its own; record the poster
+                    // tile's size so the gallery grid has a real aspect ratio
+                    // rather than the request's (meaningless) canvas.
+                    let mut mesh_metadata = metadata.clone();
+                    mesh_metadata.apply_output_dimensions(mesh.poster_width, mesh.poster_height);
+                    tokio::task::spawn_blocking(move || SavedOutputNames {
+                        output: save_mesh_to_dir(
+                            &dir,
+                            &mesh_data,
+                            &mesh_poster,
+                            mesh_format,
+                            &model,
+                            &mesh_metadata,
+                            Some(generation_time_ms),
+                            db.as_ref().as_ref(),
+                            Some(&events),
+                            &gallery_gate,
+                        ),
+                        original: None,
+                    })
+                } else if let Some(ref audio) = response.audio {
                     let audio_data = audio.data.clone();
                     let audio_thumbnail = audio.thumbnail.clone();
                     let audio_format = audio.format;

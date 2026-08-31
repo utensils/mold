@@ -37,6 +37,21 @@ pub fn audio_waveform_thumbnail_paths(
     ]
 }
 
+/// Both thumbnail-cache paths a mesh output needs.
+///
+/// Identical in shape to [`audio_waveform_thumbnail_paths`] and for the
+/// identical reason: a mesh has no raster frame, so neither the server's
+/// on-demand thumbnailer nor the TUI's `image::open` can produce a tile. The
+/// poster PNG is rendered at save time and written to both names, because the
+/// two consumers spell their cache entries differently and a saver must not
+/// guess which surface will open the print first.
+pub fn mesh_poster_thumbnail_paths(
+    thumbnail_dir: &std::path::Path,
+    filename: &str,
+) -> [PathBuf; 2] {
+    audio_waveform_thumbnail_paths(thumbnail_dir, filename)
+}
+
 fn expand_home(path: &str) -> PathBuf {
     if path == "~" {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from(path))
