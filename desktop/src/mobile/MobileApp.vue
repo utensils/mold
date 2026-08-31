@@ -361,6 +361,19 @@ import {
 } from "../stores/generation";
 import { newJob } from "../lib/generationJob";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
+import UpscaleDialog from "@ui/components/UpscaleDialog.vue";
+import {
+  createFramewiseUpscale,
+  getFramewiseUpscale,
+  transitionFramewiseUpscale,
+  upscaleLibraryImage,
+  type VideoUpscaleJob,
+} from "@studio/api/videoUpscale";
+import {
+  defaultUpscaler,
+  framewiseProgress,
+  framewiseStatus,
+} from "@studio/lib/upscale";
 import {
   mobileHostHealthLabel,
   mobileHostMatchesRoute,
@@ -10084,6 +10097,93 @@ async function emptyTrash(): Promise<void> {
 
 // ── Viewer (info sheet) handlers ────────────────────────────────────────────
 
+const viewerUpscaleItem = ref<GalleryPrint | null>(null);
+const viewerUpscaleModel = ref("");
+const viewerUpscaleBusy = ref(false);
+const viewerUpscaleJob = ref<VideoUpscaleJob | null>(null);
+let viewerUpscalePoll: ReturnType<typeof setTimeout> | null = null;
+const viewerUpscaleKind = computed(() =>
+  viewerUpscaleItem.value && isVideoItem(viewerUpscaleItem.value) ? "video" : "image",
+);
+
+function stopViewerUpscalePoll(): void {
+  if (viewerUpscalePoll) clearTimeout(viewerUpscalePoll);
+  viewerUpscalePoll = null;
+}
+function closeViewerUpscale(): void {
+  stopViewerUpscalePoll();
+  viewerUpscaleItem.value = null;
+  viewerUpscaleJob.value = null;
+}
+function openViewerUpscale(): void {
+  const print = selectedPrint.value;
+  if (!print || isAudioItem(print)) return;
+  stopViewerUpscalePoll();
+  viewerUpscaleItem.value = print;
+  viewerUpscaleJob.value = null;
+  viewerUpscaleModel.value = defaultUpscaler(upscalers.value);
+}
+async function pollViewerUpscale(): Promise<void> {
+  const print = viewerUpscaleItem.value;
+  const job = viewerUpscaleJob.value;
+  if (!print || !job || ["completed", "failed", "cancelled"].includes(job.state)) return;
+  try {
+    viewerUpscaleJob.value = await getFramewiseUpscale(print.target, job.id);
+    if (viewerUpscaleJob.value.state === "completed") {
+      generationAnnouncement.value = `Framewise upscale complete: ${viewerUpscaleJob.value.output_filename}`;
+      await refreshGallery();
+      return;
+    }
+  } catch (error) {
+    generationAnnouncement.value = describeTransportError(error, print.hostName);
+    return;
+  }
+  viewerUpscalePoll = setTimeout(() => void pollViewerUpscale(), 750);
+}
+async function startViewerUpscale(): Promise<void> {
+  const print = viewerUpscaleItem.value;
+  if (!print || viewerUpscaleBusy.value) return;
+  viewerUpscaleBusy.value = true;
+  try {
+    if (isVideoItem(print)) {
+      viewerUpscaleJob.value = await createFramewiseUpscale(
+        print.target,
+        print.filename,
+        viewerUpscaleModel.value,
+      );
+      generationAnnouncement.value = `Framewise upscale queued: ${viewerUpscaleJob.value.id}`;
+      void pollViewerUpscale();
+    } else {
+      const result = await upscaleLibraryImage(
+        print.target,
+        print.filename,
+        viewerUpscaleModel.value,
+      );
+      generationAnnouncement.value = `Upscaled image created: ${result.filename}`;
+      await refreshGallery();
+      closeViewerUpscale();
+    }
+  } catch (error) {
+    generationAnnouncement.value = describeTransportError(error, print.hostName);
+  } finally {
+    viewerUpscaleBusy.value = false;
+  }
+}
+async function transitionViewerUpscale(action: "pause" | "resume" | "cancel"): Promise<void> {
+  const print = viewerUpscaleItem.value;
+  if (!print || !viewerUpscaleJob.value) return;
+  try {
+    viewerUpscaleJob.value = await transitionFramewiseUpscale(
+      print.target,
+      viewerUpscaleJob.value.id,
+      action,
+    );
+    if (action === "resume") void pollViewerUpscale();
+  } catch (error) {
+    generationAnnouncement.value = describeTransportError(error, print.hostName);
+  }
+}
+
 function viewerCopies(): PendingGalleryPrint[] {
   const print = selectedPrint.value;
   return print ? logicalCopiesOf(scopeCopies(), print) : [];
@@ -11170,6 +11270,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unmounted = true;
+  stopViewerUpscalePoll();
   clearSelectedQueueRender();
   reusePrintEpoch += 1;
   reusePrintController?.abort();
@@ -13249,6 +13350,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       @close="closePrint"
       @reuse="reuseSelectedPrint"
       @use-source="useSelectedPrintAsSource"
+      @upscale="openViewerUpscale"
       @previous="navigateSelectedPrint(-1)"
       @next="navigateSelectedPrint(1)"
       @rename="renameSelectedPrint"
@@ -13257,6 +13359,23 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       @collection="collectSelectedPrint"
       @restore="restoreSelectedPrint"
       @delete-forever="deleteSelectedPrintForever"
+    />
+
+    <UpscaleDialog
+      :open="!!viewerUpscaleItem"
+      :kind="viewerUpscaleKind"
+      :source-name="viewerUpscaleItem?.filename ?? ''"
+      :models="upscalers"
+      v-model="viewerUpscaleModel"
+      :busy="viewerUpscaleBusy"
+      :job-state="viewerUpscaleJob?.state ?? null"
+      :status="viewerUpscaleJob ? framewiseStatus(viewerUpscaleJob) : null"
+      :progress="viewerUpscaleJob ? framewiseProgress(viewerUpscaleJob) : null"
+      @confirm="startViewerUpscale"
+      @close="closeViewerUpscale"
+      @pause="transitionViewerUpscale('pause')"
+      @resume="transitionViewerUpscale('resume')"
+      @cancel="transitionViewerUpscale('cancel')"
     />
 
     <MobileGalleryViewer

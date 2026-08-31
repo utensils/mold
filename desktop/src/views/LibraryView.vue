@@ -18,6 +18,7 @@ import {
 } from "@studio/lib/thumbnailScheduler";
 import { chunkForProbe, planPrewarm, type PrewarmCandidate } from "../lib/gallery/thumbnailPrewarm";
 import Icon from "@ui/components/Icon.vue";
+import UpscaleDialog from "@ui/components/UpscaleDialog.vue";
 import {
   loadGalleryThumbnailSize,
   saveGalleryThumbnailSize,
@@ -47,7 +48,6 @@ import {
   thumbnailTier,
 } from "../lib/gallery/media";
 import { applySelectionClick } from "../lib/gallery/selection";
-import { suggestedSaveName } from "../lib/gallery/saveName";
 import {
   planSequenceReuse,
   sequenceEditAvailability,
@@ -74,7 +74,6 @@ import {
   type LibraryScope,
   type MergedPrint,
 } from "../stores/gallery";
-import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useChainJobsStore } from "../stores/chainJobs";
 import { useComposerStore } from "../stores/composer";
@@ -99,7 +98,19 @@ import {
   minimaxH3TaskForModel,
   setMinimaxH3GalleryImageFirstFrame,
 } from "@studio/lib/minimaxH3Authoring";
-import { createFramewiseUpscale } from "@studio/api/videoUpscale";
+import {
+  createFramewiseUpscale,
+  getFramewiseUpscale,
+  transitionFramewiseUpscale,
+  upscaleLibraryImage,
+  type VideoUpscaleJob,
+} from "@studio/api/videoUpscale";
+import {
+  defaultUpscaler,
+  framewiseProgress,
+  framewiseStatus,
+  libraryUpscaleLabel,
+} from "@studio/lib/upscale";
 
 const GAP = 8;
 const PAD = 16;
@@ -115,7 +126,6 @@ const DESKTOP_LIBRARY_SCROLL_KEY = "desktop:library";
 const router = useRouter();
 const route = useRoute();
 const gallery = useGalleryStore();
-const hosts = useHostsStore();
 const models = useModelStore();
 const chains = useChainJobsStore();
 const composer = useComposerStore();
@@ -138,8 +148,6 @@ const modelLabelMemo = computed(() => {
   };
 });
 const modelLabel = (name: string) => modelLabelMemo.value(name);
-
-const primaryId = computed(() => hosts.primaryHost?.id ?? null);
 
 const targetFor = (entry: MergedPrint): ApiTarget | null => gallery.targetOf(entry.sourceKey);
 
@@ -322,90 +330,95 @@ async function saveToThisMac(entry: MergedPrint) {
   }
 }
 
-// ── Upscale (Real-ESRGAN via the engine; result saved to this Mac) ─────────
+// ── Upscale ────────────────────────────────────────────────────────────────
 const upscalingFilename = ref<string | null>(null);
+const upscaleEntry = ref<MergedPrint | null>(null);
+const upscaleModel = ref(defaultUpscaler(models.upscalers));
+const upscaleJob = ref<VideoUpscaleJob | null>(null);
+let upscalePoll: ReturnType<typeof setTimeout> | null = null;
+const upscaleKind = computed(() =>
+  upscaleEntry.value && isVideo(upscaleEntry.value.item) ? "video" : "image",
+);
 
-/** First known upscaler; the server auto-pulls it on first use. */
-const upscalerModel = computed(() => models.upscalers[0]?.name ?? "real-esrgan-x4plus");
-
-/**
- * Run the upscaler over the stream endpoint: its `complete` event carries
- * the result as base64, unlike the plain endpoint whose `image` is an
- * ImageData object with a JSON byte array. Resolves with the base64 image.
- */
-async function streamUpscale(image: string): Promise<string> {
-  const { sseStream } = await import("../lib/api/sse");
-  return new Promise<string>((resolve, reject) => {
-    const abort = new AbortController();
-    let settled = false;
-    void sseStream("/api/upscale/stream", {
-      method: "POST",
-      body: { model: upscalerModel.value, image, output_format: "png" },
-      signal: abort.signal,
-      retry: false,
-      onEvent: (event, data) => {
-        try {
-          if (event === "complete") {
-            settled = true;
-            resolve((JSON.parse(data) as { image: string }).image);
-          } else if (event === "error") {
-            settled = true;
-            const parsed = JSON.parse(data) as { message?: string; error?: string };
-            reject(new Error(parsed.message ?? parsed.error ?? data));
-          }
-        } catch (err) {
-          settled = true;
-          reject(err instanceof Error ? err : new Error(String(err)));
-        }
-      },
-      onClose: (err) => {
-        if (!settled) reject(err ?? new Error("The upscale stream ended without a result."));
-      },
-    });
-  });
+function stopUpscalePoll() {
+  if (upscalePoll) clearTimeout(upscalePoll);
+  upscalePoll = null;
 }
 
-async function upscaleItem(entry: MergedPrint) {
-  if (upscalingFilename.value) return;
-  upscalingFilename.value = entry.item.filename;
-  toasts.push(`Upscaling with ${upscalerModel.value}…`);
+function closeUpscaleDialog() {
+  stopUpscalePoll();
+  upscaleEntry.value = null;
+  upscaleJob.value = null;
+}
+
+function openUpscaleDialog(entry: MergedPrint) {
+  if (isAudio(entry.item) || !targetFor(entry)) return;
+  stopUpscalePoll();
+  upscaleEntry.value = entry;
+  upscaleJob.value = null;
+  upscaleModel.value = defaultUpscaler(models.upscalers);
+}
+
+async function pollUpscaleJob() {
+  const entry = upscaleEntry.value;
+  const job = upscaleJob.value;
+  const target = entry && targetFor(entry);
+  if (!entry || !job || !target || job.state === "completed" || job.state === "failed" || job.state === "cancelled") {
+    return;
+  }
   try {
-    const upscaled = await streamUpscale(await fetchItemBase64(entry));
-    // The upscale endpoints don't persist server-side — the local save IS
-    // the durable copy. A titled print saves under its title slug.
-    const saved = await ipc.saveOutputBytes(
-      suggestedSaveName(
-        { ...entry.item, title: orgOf(entry).title },
-        { suffix: "-upscaled", extension: "png" },
-      ),
-      upscaled,
-    );
-    toasts.push(`Upscaled — saved locally as ${saved}`);
-    // The save landed in this Mac's output dir: on a local/external primary
-    // the engine bucket reads that same dir; on a remote primary it's the
-    // IPC bucket. Refresh whichever of the two is loaded.
-    for (const key of new Set([primaryId.value, "local"])) {
-      if (key) void gallery.refreshHost(key);
+    upscaleJob.value = await getFramewiseUpscale(target, job.id);
+    if (upscaleJob.value.state === "completed") {
+      toasts.push(`Framewise upscale complete — ${upscaleJob.value.output_filename}`);
+      void gallery.refreshHost(entry.sourceKey);
     }
-  } catch (err) {
-    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+    return;
+  }
+  upscalePoll = setTimeout(() => void pollUpscaleJob(), 750);
+}
+
+async function startUpscale() {
+  const entry = upscaleEntry.value;
+  const target = entry && targetFor(entry);
+  if (!entry || !target || upscalingFilename.value) return;
+  upscalingFilename.value = entry.item.filename;
+  try {
+    if (isVideo(entry.item)) {
+      upscaleJob.value = await createFramewiseUpscale(
+        target,
+        entry.item.filename,
+        upscaleModel.value,
+      );
+      toasts.push(`Framewise upscale queued (${upscaleJob.value.id}).`);
+      void pollUpscaleJob();
+    } else {
+      const result = await upscaleLibraryImage(
+        target,
+        entry.item.filename,
+        upscaleModel.value,
+      );
+      toasts.push(`Upscaled — ${result.filename}`);
+      void gallery.refreshHost(entry.sourceKey);
+      closeUpscaleDialog();
+    }
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
   } finally {
     upscalingFilename.value = null;
   }
 }
 
-async function framewiseUpscaleItem(entry: MergedPrint) {
-  if (upscalingFilename.value) return;
-  const target = targetFor(entry);
-  if (!target) return;
-  upscalingFilename.value = entry.item.filename;
+async function transitionUpscale(action: "pause" | "resume" | "cancel") {
+  const entry = upscaleEntry.value;
+  const target = entry && targetFor(entry);
+  if (!entry || !target || !upscaleJob.value) return;
   try {
-    const job = await createFramewiseUpscale(target, entry.item.filename, upscalerModel.value);
-    toasts.push(`Framewise upscale queued (${job.id}). ${job.disclosure}`);
-  } catch (err) {
-    toasts.push(err instanceof Error ? err.message : String(err), "error");
-  } finally {
-    upscalingFilename.value = null;
+    upscaleJob.value = await transitionFramewiseUpscale(target, upscaleJob.value.id, action);
+    if (action === "resume") void pollUpscaleJob();
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
   }
 }
 
@@ -1103,16 +1116,12 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
       label:
         upscalingFilename.value === item.filename
           ? "Upscaling…"
-          : isVideo(item)
-            ? "Framewise upscale"
-            : "Upscale",
-      // Upscale runs on the PRIMARY engine only for now — routing it to the
-      // item's origin host is a follow-up.
+          : libraryUpscaleLabel(isVideo(item) ? "video" : "image").replace("…", ""),
       disabled:
-        entry.sourceKey !== primaryId.value ||
+        !targetFor(entry) ||
         upscalingFilename.value !== null ||
-        (isVideo(item) && !hosts.capabilities[entry.sourceKey]?.video_upscale?.available),
-      action: () => void (isVideo(item) ? framewiseUpscaleItem(entry) : upscaleItem(entry)),
+        isAudio(item),
+      action: () => openUpscaleDialog(entry),
     },
     {
       label: "Save locally",
@@ -2324,6 +2333,7 @@ onBeforeUnmount(() => {
   }
 });
 onUnmounted(() => {
+  stopUpscalePoll();
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("mold:library-select-all", selectAllFromShortcut);
   window.removeEventListener("pointermove", moveSelectionDrag);
@@ -2711,6 +2721,24 @@ onUnmounted(() => {
       @collections="(change) => toggleCollection([selectedEntry!], change)"
       @restore="restorePrints([selectedEntry!])"
       @delete-forever="askDeleteForever([selectedEntry!])"
+      @upscale="openUpscaleDialog(selectedEntry!)"
+    />
+
+    <UpscaleDialog
+      :open="!!upscaleEntry"
+      :kind="upscaleKind"
+      :source-name="upscaleEntry?.item.filename ?? ''"
+      :models="models.upscalers"
+      v-model="upscaleModel"
+      :busy="upscalingFilename !== null"
+      :job-state="upscaleJob?.state ?? null"
+      :status="upscaleJob ? framewiseStatus(upscaleJob) : null"
+      :progress="upscaleJob ? framewiseProgress(upscaleJob) : null"
+      @confirm="startUpscale"
+      @close="closeUpscaleDialog"
+      @pause="transitionUpscale('pause')"
+      @resume="transitionUpscale('resume')"
+      @cancel="transitionUpscale('cancel')"
     />
 
     <HistoryDrawer :open="historyOpen" @close="closeHistory" />

@@ -38,6 +38,7 @@ import SegmentedControl, {
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ThumbnailSizeSlider from "@ui/components/ThumbnailSizeSlider.vue";
 import Popover from "@ui/components/Popover.vue";
+import UpscaleDialog from "@ui/components/UpscaleDialog.vue";
 import {
   GALLERY_THUMBNAIL_SIZE_MAX,
   GALLERY_THUMBNAIL_SIZE_MIN,
@@ -116,11 +117,21 @@ import {
   listHosts,
   originHost,
 } from "../lib/hostRegistry";
+import { hostDeleteGalleryImage } from "../components/machines/hostClient";
 import {
-  hostCapabilities,
-  hostDeleteGalleryImage,
-} from "../components/machines/hostClient";
-import { createFramewiseUpscale } from "@studio/api/videoUpscale";
+  createFramewiseUpscale,
+  getFramewiseUpscale,
+  transitionFramewiseUpscale,
+  upscaleLibraryImage,
+  type VideoUpscaleJob,
+} from "@studio/api/videoUpscale";
+import {
+  defaultUpscaler,
+  framewiseProgress,
+  framewiseStatus,
+  libraryUpscaleLabel,
+} from "@studio/lib/upscale";
+import { selectUpscalers } from "../components/create/advanced/upscalers";
 import type { GalleryImage, ModelInfoExtended } from "../types";
 import { mediaKind } from "../types";
 import GalleryGrid from "../components/gallery/GalleryGrid.vue";
@@ -1935,35 +1946,98 @@ async function onUseAsSource(item: GalleryImage) {
   void router.push({ name: "create" });
 }
 
-async function onUpscale(item: GalleryImage) {
-  const video =
-    item.format === "mp4" || /\.(?:mp4|mov|webm)$/i.test(item.filename);
-  if (video) {
-    try {
-      const host = hostForEntry(item);
-      if (!host) throw missingHostError(item);
-      const capabilities = await hostCapabilities(host);
-      if (!capabilities.video_upscale?.available) {
-        throw new Error(
-          "This host does not support durable Framewise upscale.",
-        );
-      }
-      const job = await createFramewiseUpscale(
-        { baseUrl: host.url, apiKey: host.apiKey ?? null },
-        item.filename,
-        "real-esrgan-x4plus:fp16",
-      );
-      closeLightbox();
-      toast("info", `Framewise upscale queued (${job.id}). ${job.disclosure}`);
-    } catch (err) {
-      toast("error", err instanceof Error ? err.message : String(err));
+const upscaleItem = ref<GalleryImage | null>(null);
+const upscaleModel = ref("");
+const upscaleBusy = ref(false);
+const upscaleJob = ref<VideoUpscaleJob | null>(null);
+let upscalePoll: ReturnType<typeof setTimeout> | null = null;
+const upscalers = computed(() => selectUpscalers(models.value));
+const upscaleKind = computed(() =>
+  upscaleItem.value && mediaKind(upscaleItem.value.format, upscaleItem.value.filename) === "video"
+    ? "video"
+    : "image",
+);
+
+function stopUpscalePoll() {
+  if (upscalePoll) clearTimeout(upscalePoll);
+  upscalePoll = null;
+}
+function closeUpscaleDialog() {
+  stopUpscalePoll();
+  upscaleItem.value = null;
+  upscaleJob.value = null;
+}
+function onUpscale(item: GalleryImage) {
+  if (mediaKind(item.format, item.filename) === "audio") return;
+  stopUpscalePoll();
+  upscaleItem.value = item;
+  upscaleJob.value = null;
+  upscaleModel.value = defaultUpscaler(upscalers.value);
+}
+function upscaleTarget(item: GalleryImage) {
+  const host = hostForEntry(item);
+  if (!host) throw missingHostError(item);
+  return { baseUrl: host.url, apiKey: host.apiKey ?? null };
+}
+async function pollUpscaleJob() {
+  const item = upscaleItem.value;
+  const job = upscaleJob.value;
+  if (!item || !job || ["completed", "failed", "cancelled"].includes(job.state)) return;
+  try {
+    upscaleJob.value = await getFramewiseUpscale(upscaleTarget(item), job.id);
+    if (upscaleJob.value.state === "completed") {
+      toast("success", `Framewise upscale complete — ${upscaleJob.value.output_filename}`);
+      await refresh();
+      return;
     }
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
     return;
   }
-  if (!(await setAsSource(item))) return;
-  closeLightbox();
-  toast("info", "Added as source — pick an upscaler in Controls.");
-  void router.push({ name: "create" });
+  upscalePoll = setTimeout(() => void pollUpscaleJob(), 750);
+}
+async function startUpscale() {
+  const item = upscaleItem.value;
+  if (!item || upscaleBusy.value) return;
+  upscaleBusy.value = true;
+  try {
+    if (upscaleKind.value === "video") {
+      upscaleJob.value = await createFramewiseUpscale(
+        upscaleTarget(item),
+        item.filename,
+        upscaleModel.value,
+      );
+      toast("info", `Framewise upscale queued (${upscaleJob.value.id}).`);
+      void pollUpscaleJob();
+    } else {
+      const result = await upscaleLibraryImage(
+        upscaleTarget(item),
+        item.filename,
+        upscaleModel.value,
+      );
+      toast("success", `Upscaled — ${result.filename}`);
+      await refresh();
+      closeUpscaleDialog();
+    }
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    upscaleBusy.value = false;
+  }
+}
+async function transitionUpscale(action: "pause" | "resume" | "cancel") {
+  const item = upscaleItem.value;
+  if (!item || !upscaleJob.value) return;
+  try {
+    upscaleJob.value = await transitionFramewiseUpscale(
+      upscaleTarget(item),
+      upscaleJob.value.id,
+      action,
+    );
+    if (action === "resume") void pollUpscaleJob();
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+  }
 }
 
 /**
@@ -2085,6 +2159,11 @@ async function contextSource() {
   const item = contextMenu.value?.item;
   closeContextMenu();
   if (item) await onUseAsSource(item);
+}
+function contextUpscale() {
+  const item = contextMenu.value?.item;
+  closeContextMenu();
+  if (item) onUpscale(item);
 }
 async function contextDelete() {
   const item = contextMenu.value?.item;
@@ -2247,6 +2326,7 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  stopUpscalePoll();
   if (refreshTimer) clearInterval(refreshTimer);
 });
 </script>
@@ -2840,6 +2920,21 @@ onBeforeUnmount(() => {
         <button type="button" role="menuitem" @click="contextSource">
           Use as source
         </button>
+        <button
+          v-if="mediaKind(contextMenu.item.format, contextMenu.item.filename) !== 'audio'"
+          type="button"
+          role="menuitem"
+          data-test="context-upscale"
+          @click="contextUpscale"
+        >
+          {{
+            libraryUpscaleLabel(
+              mediaKind(contextMenu.item.format, contextMenu.item.filename) === "video"
+                ? "video"
+                : "image",
+            )
+          }}
+        </button>
         <template v-if="canOrganizeEntry(contextMenu.item)">
           <button
             type="button"
@@ -3084,6 +3179,23 @@ onBeforeUnmount(() => {
       @restore="restoreOne"
       @delete-forever="deleteForeverOne"
       @context-menu="openContextMenu"
+    />
+
+    <UpscaleDialog
+      :open="!!upscaleItem"
+      :kind="upscaleKind"
+      :source-name="upscaleItem?.filename ?? ''"
+      :models="upscalers"
+      v-model="upscaleModel"
+      :busy="upscaleBusy"
+      :job-state="upscaleJob?.state ?? null"
+      :status="upscaleJob ? framewiseStatus(upscaleJob) : null"
+      :progress="upscaleJob ? framewiseProgress(upscaleJob) : null"
+      @confirm="startUpscale"
+      @close="closeUpscaleDialog"
+      @pause="transitionUpscale('pause')"
+      @resume="transitionUpscale('resume')"
+      @cancel="transitionUpscale('cancel')"
     />
 
     <HistoryDrawer

@@ -130,6 +130,7 @@ const emit = defineEmits<{
   collections: [change: { slug?: string; name?: string; checked: boolean }];
   restore: [];
   deleteForever: [];
+  upscale: [];
 }>();
 
 const router = useRouter();
@@ -834,6 +835,15 @@ async function performVideoExport(options: VideoExportOptions) {
             {{ saveBusy ? "Saving…" : audio ? "Save audio" : video ? "Save video" : "Save image" }}
           </button>
         </div>
+        <button
+          v-if="!audio && !trashed"
+          type="button"
+          data-test="lightbox-upscale"
+          class="border-ce mt-2.5 h-10 w-full rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
+          @click="emit('upscale')"
+        >
+          {{ video ? "Framewise upscale…" : "Upscale…" }}
+        </button>
         <div class="mt-2 flex gap-2.5">
           <button
             v-if="canExportVideo"

@@ -226,7 +226,10 @@ pushed screen opened from the header.
   reachable saved hosts; a host failure leaves that copy visible and reports
   the partial cleanup.
   Persistent New badges match desktop Library visits, and post-generation
-  upscaled images carry the shared Upscaled badge.
+  upscaled images carry the shared Upscaled badge. The full-media viewer also
+  offers **Upscale…** for images and **Framewise upscale…** for videos through
+  the shared model/progress dialog, including first-use model download and
+  pause/resume/cancel for durable video jobs.
   Library organization (V3) rides each host's advertised
   `capabilities.gallery`: when a connected host advertises `organize` or
   `trash`, a 44pt **Prints | Collections | Trash** scope row (with counts)

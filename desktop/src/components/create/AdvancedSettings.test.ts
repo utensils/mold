@@ -207,7 +207,7 @@ describe("AdvancedSettings — section ordering contract", () => {
 
   it("renders video sections in the canonical order", () => {
     const wrapper = mountSettings(formFor("ltx2"), { upscalers: [upscaler] });
-    expect(sectionIds(wrapper)).toEqual(["negative", "lora", "output", "video"]);
+    expect(sectionIds(wrapper)).toEqual(["negative", "lora", "upscale", "output", "video"]);
   });
 
   it("keeps every family's rendered sections a subsequence of the canon", () => {
@@ -310,10 +310,10 @@ describe("AdvancedSettings — upscale", () => {
     expect(form.upscaleModel).toBe("real-esrgan-x4plus");
   });
 
-  it("hides the upscale accordion for video families", () => {
+  it("offers Framewise upscale for video families", () => {
     expect(
       accordionTitles(mountSettings(formFor("ltx2"), { upscalers: [upscaler] })),
-    ).not.toContain("Upscale after generate");
+    ).toContain("Framewise upscale after generate");
   });
 });
 

@@ -1508,7 +1508,8 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
     /// Upscaler model to apply after generation (e.g. "real-esrgan-x4plus:fp16").
-    /// When set, each generated image is upscaled before being returned.
+    /// Images are upscaled before return; videos queue a durable Framewise
+    /// upscale after the original clip reaches the Library.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upscale_model: Option<String>,
     /// Request a GIF preview alongside the primary video output.

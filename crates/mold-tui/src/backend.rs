@@ -2695,7 +2695,7 @@ mod tests {
         assert_eq!(request.spatial_upscale, None);
         assert_eq!(request.temporal_upscale, None);
         assert_eq!(request.guidance_overrides, None);
-        assert_eq!(request.upscale_model, None);
+        assert_eq!(request.upscale_model.as_deref(), Some("stale-upscaler"));
         assert_eq!(snapshot.negative_prompt, request.negative_prompt);
         assert_eq!(snapshot.params.frames, request.frames.unwrap());
         assert_eq!(snapshot.params.fps, request.fps.unwrap());

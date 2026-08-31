@@ -757,6 +757,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
         .route(
+            "/api/gallery/upscale",
+            post(crate::video_upscale::upscale_gallery_image),
+        )
+        .route(
             "/api/video-upscale-jobs",
             get(crate::video_upscale::list_jobs).post(crate::video_upscale::create_job),
         )

@@ -184,7 +184,7 @@ describe("applyMobileGalleryMetadata", () => {
     });
     expect(request.scheduler).toBeUndefined();
     expect(request.cfg_plus).toBeUndefined();
-    expect(request.upscale_model).toBeUndefined();
+    expect(request.upscale_model).toBe("hidden-upscaler");
   });
 
   it("hands back the print's saved title, and an empty one for untitled prints", () => {

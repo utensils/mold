@@ -60,9 +60,15 @@ const { pushMock, replaceMock } = vi.hoisted(() => ({
 }));
 const restoreSourceMock = vi.hoisted(() => vi.fn());
 const createFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+const getFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+const transitionFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+const upscaleLibraryImageMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@studio/api/videoUpscale", () => ({
   createFramewiseUpscale: createFramewiseUpscaleMock,
+  getFramewiseUpscale: getFramewiseUpscaleMock,
+  transitionFramewiseUpscale: transitionFramewiseUpscaleMock,
+  upscaleLibraryImage: upscaleLibraryImageMock,
 }));
 
 vi.mock("@studio/lib/generationSourceMedia", () => ({
@@ -254,12 +260,22 @@ describe("LibraryPage", () => {
     for (const fn of Object.values(orgApi)) fn.mockClear();
     fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
     restoreSourceMock.mockReset().mockResolvedValue(null);
-    createFramewiseUpscaleMock.mockReset().mockResolvedValue({
-      id: "vup-gallery-1",
-      state: "queued",
-      disclosure:
-        "Framewise upscale processes each frame independently; temporal flicker may remain.",
-    });
+  createFramewiseUpscaleMock.mockReset().mockResolvedValue({
+    id: "vup-gallery-1",
+    state: "queued",
+    completed_frames: 0,
+    total_frames: 1,
+    disclosure:
+      "Framewise upscale processes each frame independently; temporal flicker may remain.",
+  });
+  getFramewiseUpscaleMock.mockReset().mockResolvedValue({
+    id: "vup-gallery-1",
+    state: "failed",
+    completed_frames: 0,
+    total_frames: 1,
+    error: "test stop",
+    disclosure: "Framewise upscale",
+  });
     pushMock.mockReset();
     replaceMock.mockReset();
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
@@ -361,6 +377,7 @@ describe("LibraryPage", () => {
 
     await wrapper.get("[data-test='grid-open']").trigger("click");
     await wrapper.get("[data-test='lb-upscale']").trigger("click");
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
     await flushPromises();
 
     expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(

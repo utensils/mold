@@ -4791,7 +4791,16 @@ fn finish_generation_success(
     metadata.job_id = Some(job.id.clone());
     if let Some(video) = response.video.as_ref() {
         metadata.apply_video_output(video);
+        metadata.upscale_model = None;
     }
+    let video_upscale_model = response.video.as_ref().and_then(|_| {
+        job.request
+            .upscale_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(mold_core::manifest::resolve_model_name)
+    });
     let mut saved_names = crate::queue::SavedOutputNames::default();
     if let Some(ref dir) = job.output_dir {
         let _gallery_writer = job.gallery_publication_gate.blocking_write();
@@ -4868,6 +4877,7 @@ fn finish_generation_success(
     // cannot retain a completed job and replay it into a duplicate print.
     let job_id = job.id.clone();
     let output_dir = job.output_dir.clone();
+    let video_upscale_database = job.metadata_db.clone();
     let gallery_gate = job.gallery_publication_gate.clone();
     let registry = job.registry.clone();
     let completion_payload = job.completion_payload;
@@ -4885,6 +4895,22 @@ fn finish_generation_success(
     .is_err()
     {
         return;
+    }
+    if let (Some(model), Some(filename), Some(output_dir), Some(database)) = (
+        video_upscale_model,
+        saved_names.output.as_deref(),
+        output_dir.as_deref(),
+        video_upscale_database.as_ref().as_ref(),
+    ) {
+        if let Err(error) = crate::video_upscale::enqueue_gallery_video_job(
+            output_dir, database, filename, model, None,
+        ) {
+            tracing::warn!(
+                job_id = %job_id,
+                error = %error.error,
+                "could not queue generated video for Framewise upscale"
+            );
+        }
     }
     let completion = channels.progress_tx.is_some().then(|| {
         build_sse_completion_message(

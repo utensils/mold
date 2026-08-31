@@ -176,6 +176,18 @@ pub fn fail(db: &MetadataDb, id: &str, error: &str, now_ms: i64) -> Result<()> {
     })
 }
 
+/// Publication may already be externally visible when a later bookkeeping
+/// write fails. Keep that deterministic finalization retryable instead of
+/// reporting a terminal failure beside a committed Gallery output.
+pub fn pause_after_error(db: &MetadataDb, id: &str, error: &str, now_ms: i64) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE video_upscale_jobs SET state='paused',error=?2,updated_at_ms=?3 WHERE id=?1 AND state='finalizing'",
+            params![id, error, now_ms],
+        )? == 1)
+    })
+}
+
 /// Recovery is deliberately non-dispatching; unfinished work requires Resume.
 pub fn pause_unfinished_for_recovery(db: &MetadataDb, now_ms: i64) -> Result<usize> {
     db.with_conn(|conn| Ok(conn.execute("UPDATE video_upscale_jobs SET state='paused',updated_at_ms=?1 WHERE state IN ('queued','running','finalizing')", [now_ms])?))
@@ -286,6 +298,21 @@ mod tests {
         assert_eq!(
             get(&db, "vup-1").unwrap().unwrap().job.state,
             VideoUpscaleJobState::Completed
+        );
+    }
+
+    #[test]
+    fn finalization_errors_pause_for_reconciliation() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut row = stored();
+        row.job.state = VideoUpscaleJobState::Finalizing;
+        insert(&db, &row).unwrap();
+        assert!(pause_after_error(&db, "vup-1", "late bookkeeping failure", 2).unwrap());
+        let paused = get(&db, "vup-1").unwrap().unwrap();
+        assert_eq!(paused.job.state, VideoUpscaleJobState::Paused);
+        assert_eq!(
+            paused.job.error.as_deref(),
+            Some("late bookkeeping failure")
         );
     }
 }

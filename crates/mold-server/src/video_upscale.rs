@@ -16,7 +16,8 @@ use mold_core::{
     VIDEO_UPSCALE_CONTRACT_VERSION, VIDEO_UPSCALE_DISCLOSURE,
 };
 use mold_db::video_upscale_jobs::{self as jobs, StoredVideoUpscaleJob};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     convert::Infallible,
     fs,
@@ -28,6 +29,12 @@ use std::{
 use crate::{routes::ApiError, state::AppState};
 
 const CHECKPOINT_FRAMES: u64 = 16;
+const MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_OUTPUT_PIXELS: u64 = 35_389_440;
+const MAX_FRAME_BYTES: u64 = 128 * 1024 * 1024;
+const DISK_SAFETY_BYTES: u64 = 1024 * 1024 * 1024;
+const SOURCE_DIGEST_FILE: &str = "source.sha256";
+const SOURCE_METADATA_FILE: &str = "source-metadata.json";
 
 fn now_ms() -> i64 {
     mold_core::time::now_epoch_ms_u64() as i64
@@ -53,6 +60,35 @@ pub fn recover_at_startup(state: &AppState) {
         Ok(_) => {}
         Err(error) => tracing::error!(%error, "failed to recover framewise upscale jobs"),
     }
+
+    // A generated video is published from either the async single-worker path
+    // or a dedicated GPU owner thread. Both can durably enqueue the follow-up
+    // in SQLite; this lightweight dispatcher supplies the AppState needed to
+    // run it without making generation completion depend on a connected UI.
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            let Some(database) = state.metadata_db.as_ref().as_ref() else {
+                break;
+            };
+            let queued = match jobs::list(database) {
+                Ok(rows) => rows
+                    .into_iter()
+                    .filter(|job| job.state == VideoUpscaleJobState::Queued)
+                    .map(|job| job.id)
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    tracing::warn!(%error, "could not scan queued framewise upscale jobs");
+                    continue;
+                }
+            };
+            for id in queued {
+                spawn_job(state.clone(), id);
+            }
+        }
+    });
 }
 
 fn scale_for(model: &str) -> u32 {
@@ -64,21 +100,168 @@ fn scale_for(model: &str) -> u32 {
     }
 }
 
+fn copy_and_hash_source(source: &FsPath, destination: &FsPath) -> anyhow::Result<(u64, String)> {
+    let metadata = fs::metadata(source)?;
+    anyhow::ensure!(metadata.is_file(), "source is not a regular file");
+    anyhow::ensure!(
+        metadata.len() > 0 && metadata.len() <= MAX_SOURCE_BYTES,
+        "source exceeds the 2 GiB durable-job limit"
+    );
+    let partial = destination.with_extension("partial");
+    let _ = fs::remove_file(&partial);
+    let mut input = fs::File::open(source)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial)?;
+    let mut digest = Sha256::new();
+    let mut copied = 0_u64;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        copied = copied
+            .checked_add(read as u64)
+            .ok_or_else(|| anyhow::anyhow!("source byte count overflow"))?;
+        anyhow::ensure!(
+            copied <= MAX_SOURCE_BYTES,
+            "source changed beyond the 2 GiB limit"
+        );
+        digest.update(&buffer[..read]);
+        output.write_all(&buffer[..read])?;
+    }
+    output.sync_all()?;
+    fs::rename(&partial, destination)?;
+    Ok((copied, format!("{:x}", digest.finalize())))
+}
+
+fn source_sha256(path: &FsPath) -> anyhow::Result<String> {
+    let mut source = fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn validate_resource_bounds(
+    facts: &VideoUpscaleMediaFacts,
+    scale: u32,
+    source_bytes: u64,
+    available_bytes: u64,
+) -> anyhow::Result<()> {
+    let source_pixels = u64::from(facts.width)
+        .checked_mul(u64::from(facts.height))
+        .ok_or_else(|| anyhow::anyhow!("source pixel count overflow"))?;
+    let output_pixels = source_pixels
+        .checked_mul(u64::from(scale).pow(2))
+        .ok_or_else(|| anyhow::anyhow!("output pixel count overflow"))?;
+    anyhow::ensure!(
+        output_pixels <= MAX_OUTPUT_PIXELS,
+        "output would contain {output_pixels} pixels per frame; the limit is {MAX_OUTPUT_PIXELS}"
+    );
+    let source_frame_bytes = source_pixels
+        .checked_mul(3)
+        .ok_or_else(|| anyhow::anyhow!("source frame byte count overflow"))?;
+    let output_frame_bytes = output_pixels
+        .checked_mul(3)
+        .ok_or_else(|| anyhow::anyhow!("output frame byte count overflow"))?;
+    anyhow::ensure!(
+        source_frame_bytes <= MAX_FRAME_BYTES && output_frame_bytes <= MAX_FRAME_BYTES,
+        "decoded frame memory exceeds the 128 MiB per-frame limit"
+    );
+    let scaled_media = source_bytes
+        .checked_mul(u64::from(scale).pow(2))
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(|| anyhow::anyhow!("workspace estimate overflow"))?;
+    let checkpoint_workspace = output_frame_bytes
+        .checked_mul(CHECKPOINT_FRAMES)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(|| anyhow::anyhow!("checkpoint workspace estimate overflow"))?;
+    let required = source_bytes
+        .checked_add(scaled_media)
+        .and_then(|bytes| bytes.checked_add(checkpoint_workspace))
+        .and_then(|bytes| bytes.checked_add(DISK_SAFETY_BYTES))
+        .ok_or_else(|| anyhow::anyhow!("workspace estimate overflow"))?;
+    anyhow::ensure!(
+        available_bytes >= required,
+        "insufficient disk for durable Framewise upscale: need about {required} bytes, have {available_bytes}"
+    );
+    Ok(())
+}
+
+fn write_synced(path: &FsPath, bytes: &[u8]) -> anyhow::Result<()> {
+    let partial = path.with_extension("partial");
+    let _ = fs::remove_file(&partial);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::rename(partial, path)?;
+    Ok(())
+}
+
+fn prepare_pinned_source(
+    source: &FsPath,
+    pinned_source: &FsPath,
+    work_dir: &FsPath,
+    scale: u32,
+    metadata: &mold_core::OutputMetadata,
+) -> anyhow::Result<VideoUpscaleMediaFacts> {
+    let (source_bytes, digest) = copy_and_hash_source(source, pinned_source)?;
+    let facts = probe(pinned_source)?;
+    validate_resource_bounds(&facts, scale, source_bytes, fs2::available_space(work_dir)?)?;
+    write_synced(&work_dir.join(SOURCE_DIGEST_FILE), digest.as_bytes())?;
+    write_synced(
+        &work_dir.join(SOURCE_METADATA_FILE),
+        &serde_json::to_vec(metadata)?,
+    )?;
+    Ok(facts)
+}
+
+fn verify_pinned_source(stored: &StoredVideoUpscaleJob) -> anyhow::Result<()> {
+    let expected = fs::read_to_string(stored.work_dir.join(SOURCE_DIGEST_FILE))?;
+    let actual = source_sha256(&stored.source_path)?;
+    anyhow::ensure!(
+        expected.trim() == actual,
+        "durable Framewise upscale source identity changed"
+    );
+    Ok(())
+}
+
+fn source_metadata(stored: &StoredVideoUpscaleJob) -> anyhow::Result<mold_core::OutputMetadata> {
+    Ok(serde_json::from_slice(&fs::read(
+        stored.work_dir.join(SOURCE_METADATA_FILE),
+    )?)?)
+}
+
 fn spawn_job(state: AppState, id: String) {
     tokio::spawn(async move {
         if let Err(error) = run_job(state.clone(), &id).await {
-            let terminal = state
+            let current = state
                 .metadata_db
                 .as_ref()
                 .as_ref()
                 .and_then(|db| jobs::get(db, &id).ok().flatten())
-                .is_some_and(|stored| {
-                    stored.job.state == VideoUpscaleJobState::Paused
-                        || stored.job.state.is_terminal()
-                });
+                .map(|stored| stored.job.state);
+            let terminal = current
+                .is_some_and(|state| state == VideoUpscaleJobState::Paused || state.is_terminal());
             if !terminal {
                 if let Some(db) = state.metadata_db.as_ref().as_ref() {
-                    let _ = jobs::fail(db, &id, &format!("{error:#}"), now_ms());
+                    if current == Some(VideoUpscaleJobState::Finalizing) {
+                        let _ = jobs::pause_after_error(db, &id, &format!("{error:#}"), now_ms());
+                    } else {
+                        let _ = jobs::fail(db, &id, &format!("{error:#}"), now_ms());
+                    }
                 }
             }
             tracing::warn!(job_id = %id, %error, "framewise upscale stopped");
@@ -86,10 +269,10 @@ fn spawn_job(state: AppState, id: String) {
     });
 }
 
-pub async fn create_job(
-    State(state): State<AppState>,
-    Json(request): Json<CreateVideoUpscaleJobRequest>,
-) -> Result<(StatusCode, Json<VideoUpscaleJob>), ApiError> {
+async fn create_library_job(
+    state: &AppState,
+    request: CreateVideoUpscaleJobRequest,
+) -> Result<VideoUpscaleJob, ApiError> {
     if let Some(reason) = state
         .generation_unavailable_reason
         .read()
@@ -108,40 +291,83 @@ pub async fn create_job(
     mold_core::require_registered_manifest_activation(manifest)
         .map_err(ApiError::model_activation)?;
     let output_dir = state.config.read().await.effective_output_dir();
-    let source_path = match &request.source {
-        VideoUpscaleSource::Library { filename } => {
-            let database = db(&state)?;
-            if database.get(&output_dir, filename).map_err(|e| ApiError::internal(e.to_string()))?.is_none() {
-                return Err(ApiError::not_found("library source is not a committed gallery item"));
-            }
-            let candidate = output_dir.join(filename);
-            let root = output_dir.canonicalize().map_err(|e| ApiError::internal(e.to_string()))?;
-            let canonical = candidate.canonicalize().map_err(|_| ApiError::not_found("library source media is missing"))?;
-            if !canonical.starts_with(&root) || !canonical.is_file() {
-                return Err(ApiError::validation("library source escaped gallery authority"));
-            }
-            canonical
-        }
+    match &request.source {
+        VideoUpscaleSource::Library { filename } => enqueue_gallery_video_job(
+            &output_dir,
+            db(state)?,
+            filename,
+            model,
+            request.tile_size,
+        ),
         VideoUpscaleSource::Upload { .. } => return Err(ApiError::structured(
             "Video upload handles are not advertised by this first capability; import the video into Library first",
             "VIDEO_UPSCALE_UPLOAD_UNAVAILABLE", StatusCode::NOT_IMPLEMENTED, None, None)),
-    };
+    }
+}
+
+pub(crate) fn enqueue_gallery_video_job(
+    output_dir: &FsPath,
+    database: &mold_db::MetadataDb,
+    filename: &str,
+    model: String,
+    tile_size: Option<u32>,
+) -> Result<VideoUpscaleJob, ApiError> {
+    let source_metadata = database
+        .get(output_dir, filename)
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::not_found("library source is not a committed gallery item"))?
+        .metadata;
+    let candidate = output_dir.join(filename);
+    let root = output_dir
+        .canonicalize()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let source_path = candidate
+        .canonicalize()
+        .map_err(|_| ApiError::not_found("library source media is missing"))?;
+    if !source_path.starts_with(&root) || !source_path.is_file() {
+        return Err(ApiError::validation(
+            "library source escaped gallery authority",
+        ));
+    }
     let id = format!("vup-{}", uuid::Uuid::new_v4());
     let work_dir = output_dir.join(".mold-video-upscale-jobs").join(&id);
     fs::create_dir_all(&work_dir).map_err(|e| ApiError::internal(e.to_string()))?;
+    let extension = source_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("mp4");
+    let pinned_source = work_dir.join(format!("source.{extension}"));
+    let prepared = prepare_pinned_source(
+        &source_path,
+        &pinned_source,
+        &work_dir,
+        scale_for(&model),
+        &source_metadata,
+    );
+    let facts = match prepared {
+        Ok(facts) => facts,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&work_dir);
+            return Err(ApiError::validation(format!(
+                "framewise upscale source could not be admitted: {error:#}"
+            )));
+        }
+    };
     let now = now_ms();
     let stored = StoredVideoUpscaleJob {
         job: VideoUpscaleJob {
             contract_version: VIDEO_UPSCALE_CONTRACT_VERSION,
             id: id.clone(),
             state: VideoUpscaleJobState::Queued,
-            source: request.source,
+            source: VideoUpscaleSource::Library {
+                filename: filename.to_string(),
+            },
+            scale_factor: scale_for(&model),
             model,
-            scale_factor: scale_for(&request.model),
-            tile_size: request.tile_size,
+            tile_size,
             completed_frames: 0,
-            total_frames: 0,
-            source_facts: None,
+            total_frames: facts.frame_count,
+            source_facts: Some(facts),
             output_facts: None,
             output_filename: None,
             error: None,
@@ -149,12 +375,185 @@ pub async fn create_job(
             updated_at_ms: now,
             disclosure: VIDEO_UPSCALE_DISCLOSURE.into(),
         },
-        source_path,
+        source_path: pinned_source,
         work_dir,
     };
-    jobs::insert(db(&state)?, &stored).map_err(|e| ApiError::internal(e.to_string()))?;
-    spawn_job(state, id);
-    Ok((StatusCode::ACCEPTED, Json(stored.job)))
+    if let Err(error) = jobs::insert(database, &stored) {
+        let _ = fs::remove_dir_all(&stored.work_dir);
+        return Err(ApiError::internal(error.to_string()));
+    }
+    Ok(stored.job)
+}
+
+pub(crate) async fn create_generated_video_job(
+    state: &AppState,
+    filename: String,
+    model: String,
+) -> Result<VideoUpscaleJob, ApiError> {
+    let job = create_library_job(
+        state,
+        CreateVideoUpscaleJobRequest {
+            source: VideoUpscaleSource::Library { filename },
+            model,
+            tile_size: None,
+        },
+    )
+    .await?;
+    spawn_job(state.clone(), job.id.clone());
+    Ok(job)
+}
+
+pub async fn create_job(
+    State(state): State<AppState>,
+    Json(request): Json<CreateVideoUpscaleJobRequest>,
+) -> Result<(StatusCode, Json<VideoUpscaleJob>), ApiError> {
+    let job = create_library_job(&state, request).await?;
+    spawn_job(state, job.id.clone());
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateGalleryImageUpscaleRequest {
+    filename: String,
+    model: String,
+    #[serde(default)]
+    tile_size: Option<u32>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GalleryImageUpscaleResponse {
+    filename: String,
+    model: String,
+    scale_factor: u32,
+}
+
+pub async fn upscale_gallery_image(
+    State(state): State<AppState>,
+    Json(request): Json<CreateGalleryImageUpscaleRequest>,
+) -> Result<(StatusCode, Json<GalleryImageUpscaleResponse>), ApiError> {
+    let filename = request.filename.trim();
+    if filename != request.filename
+        || filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+    {
+        return Err(ApiError::validation(
+            "image upscale source must be one exact gallery filename",
+        ));
+    }
+    let extension = FsPath::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+        return Err(ApiError::validation(
+            "Library image upscale supports PNG, JPEG, and WebP sources",
+        ));
+    }
+    if let Some(tile_size) = request.tile_size {
+        if tile_size != 0 && tile_size < 64 {
+            return Err(ApiError::validation(
+                "tile_size must be 0 (disabled) or at least 64",
+            ));
+        }
+    }
+    let model = mold_core::manifest::resolve_model_name(&request.model);
+    let manifest = mold_core::manifest::find_manifest(&model)
+        .ok_or_else(|| ApiError::not_found(format!("unknown upscaler model '{model}'")))?;
+    if !mold_core::manifest::UPSCALER_FAMILIES.contains(&manifest.family.as_str()) {
+        return Err(ApiError::validation("model is not a native image upscaler"));
+    }
+    mold_core::require_registered_manifest_activation(manifest)
+        .map_err(ApiError::model_activation)?;
+
+    let output_dir = state.config.read().await.effective_output_dir();
+    let database = db(&state)?;
+    let mut metadata = database
+        .get(&output_dir, filename)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("library source is not a committed gallery item"))?
+        .metadata;
+    let root = output_dir
+        .canonicalize()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let source_path = output_dir
+        .join(filename)
+        .canonicalize()
+        .map_err(|_| ApiError::not_found("library source media is missing"))?;
+    if !source_path.starts_with(&root) || !source_path.is_file() {
+        return Err(ApiError::validation(
+            "library source escaped gallery authority",
+        ));
+    }
+    let source_bytes = fs::read(&source_path)
+        .map_err(|_| ApiError::not_found("library source media is missing"))?;
+    if source_bytes.len() as u64 > 64 * 1024 * 1024 {
+        return Err(ApiError::validation(
+            "Library image exceeds the 64 MiB upscale limit",
+        ));
+    }
+    let source = image::load_from_memory(&source_bytes)
+        .map_err(|error| ApiError::validation(format!("invalid source image: {error}")))?;
+    let scale = scale_for(&model);
+    let output_pixels = u64::from(source.width())
+        .saturating_mul(u64::from(source.height()))
+        .saturating_mul(u64::from(scale).pow(2));
+    if output_pixels > MAX_OUTPUT_PIXELS {
+        return Err(ApiError::validation(format!(
+            "upscaled image would contain {output_pixels} pixels; the limit is {MAX_OUTPUT_PIXELS}"
+        )));
+    }
+    if crate::model_manager::upscaler_model_needs_pull(&*state.config.read().await, &model) {
+        crate::model_manager::pull_model(&state, &model, None).await?;
+    }
+    let weights = state
+        .config
+        .read()
+        .await
+        .models
+        .get(&model)
+        .and_then(|config| config.transformer.as_ref())
+        .map(PathBuf::from)
+        .ok_or_else(|| ApiError::internal("upscaler model is not configured"))?;
+    let upscaled = upscale_frame(&state, &model, &weights, source_bytes, request.tile_size).await?;
+    let output = image::load_from_memory(&upscaled)
+        .map_err(|error| ApiError::internal(format!("invalid upscaler output: {error}")))?;
+    metadata.upscale_model = Some(model.clone());
+    metadata.generation_width = Some(source.width());
+    metadata.generation_height = Some(source.height());
+    metadata.width = output.width();
+    metadata.height = output.height();
+    metadata.output_format = Some(OutputFormat::Png);
+    metadata.job_id = None;
+    let image = mold_core::ImageData {
+        data: upscaled,
+        format: OutputFormat::Png,
+        width: output.width(),
+        height: output.height(),
+        index: 0,
+    };
+    let saved = crate::queue::save_image_to_dir_with_suffix(
+        &output_dir,
+        &image,
+        &model,
+        1,
+        Some("upscaled"),
+        Some(&metadata),
+        None,
+        Some(database),
+        Some(&state.events),
+        &state.gallery_publication_gate,
+    )
+    .ok_or_else(|| ApiError::internal("upscaled image could not be published"))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(GalleryImageUpscaleResponse {
+            filename: saved,
+            model,
+            scale_factor: scale,
+        }),
+    ))
 }
 
 pub async fn list_jobs(
@@ -647,6 +1046,7 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut stored = jobs::get(database, id)?.ok_or_else(|| anyhow::anyhow!("job disappeared"))?;
+    verify_pinned_source(&stored)?;
     let facts = match stored.job.source_facts.clone() {
         Some(facts) => facts,
         None => {
@@ -848,10 +1248,7 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
         VideoUpscaleSource::Library { filename } => filename.clone(),
         VideoUpscaleSource::Upload { .. } => "upload.mp4".into(),
     };
-    let mut metadata = database
-        .get(&output_dir, &source_name)?
-        .ok_or_else(|| anyhow::anyhow!("source gallery metadata disappeared"))?
-        .metadata;
+    let mut metadata = source_metadata(&stored)?;
     metadata.upscale_model = Some(model.clone());
     metadata.job_id = Some(id.into());
     metadata.source_video_path = Some(source_name.clone());
@@ -860,7 +1257,7 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
     metadata.generation_width = Some(facts.width);
     metadata.generation_height = Some(facts.height);
     metadata.frames = u32::try_from(facts.frame_count).ok();
-    metadata.fps = u32::try_from(n / d).ok();
+    metadata.fps = u32::try_from(n.saturating_add(d / 2) / d).ok();
     metadata.output_format = Some(OutputFormat::Mp4);
     let stem = FsPath::new(&source_name)
         .file_stem()

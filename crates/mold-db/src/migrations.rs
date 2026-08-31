@@ -2487,3 +2487,51 @@ mod v32_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod v34_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn current_main_v33_upgrades_without_colliding_and_adds_video_jobs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 33)
+        {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(function) => function(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        assert_eq!(current_version(&conn).unwrap(), 33);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='gallery_media_sets'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+        );
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='video_upscale_jobs'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+        );
+    }
+}

@@ -587,7 +587,7 @@ export interface GenerateRequest {
   batch_id?: string;
   batch_index?: number;
   batch_count?: number;
-  /** Post-generate upscaler model (e.g. "real-esrgan-x4plus"); image-only. */
+  /** Post-generate upscaler; video output queues durable Framewise processing. */
   upscale_model?: string;
   // Video families (ltx-video / ltx2). Frame count must be 8n+1.
   frames?: number;

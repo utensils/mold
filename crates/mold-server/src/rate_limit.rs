@@ -183,7 +183,9 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
             | "/api/chain-jobs/placement-preview"
             | "/api/expand"
             | "/api/upscale"
-            | "/api/upscale/stream",
+            | "/api/upscale/stream"
+            | "/api/gallery/upscale"
+            | "/api/video-upscale-jobs",
         ) => Some(RouteTier::Generation),
         ("POST", "/api/models/load" | "/api/models/pull") => Some(RouteTier::Generation),
         // Re-queues real GPU work and restores the dispatch budget, so it
@@ -367,6 +369,14 @@ mod tests {
         );
         assert_eq!(
             classify_route("/api/upscale/stream", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route("/api/gallery/upscale", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route("/api/video-upscale-jobs", &Method::POST),
             Some(RouteTier::Generation)
         );
         assert_eq!(

@@ -669,8 +669,11 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         <input v-model="form.cfgPlus" type="checkbox" data-test="mobile-cfg-plus" />
       </label>
 
-      <label v-if="!caps.supportsVideo && upscalers.length" class="field mobile-generate-field">
-        <span>Upscale</span>
+      <label
+        v-if="(!caps.supportsAudio || caps.supportsVideo) && upscalers.length"
+        class="field mobile-generate-field"
+      >
+        <span>{{ caps.supportsVideo ? "Framewise upscale" : "Upscale" }}</span>
         <select v-model="form.upscaleModel" class="control" data-test="mobile-upscale">
           <option value="">Off</option>
           <option v-for="upscaler in upscalers" :key="upscaler.name" :value="upscaler.name">

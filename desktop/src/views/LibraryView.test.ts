@@ -9,9 +9,15 @@ const { apiFetchTo, localGalleryDelete, localGalleryList } = vi.hoisted(() => ({
   localGalleryList: vi.fn(),
 }));
 const createFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+const getFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+const transitionFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+const upscaleLibraryImageMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@studio/api/videoUpscale", () => ({
   createFramewiseUpscale: createFramewiseUpscaleMock,
+  getFramewiseUpscale: getFramewiseUpscaleMock,
+  transitionFramewiseUpscale: transitionFramewiseUpscaleMock,
+  upscaleLibraryImage: upscaleLibraryImageMock,
 }));
 
 vi.mock("@tanstack/vue-virtual", () => ({
@@ -178,8 +184,18 @@ beforeEach(() => {
   createFramewiseUpscaleMock.mockResolvedValue({
     id: "vup-desktop-1",
     state: "queued",
+    completed_frames: 0,
+    total_frames: 1,
     disclosure:
       "Framewise upscale processes each frame independently; temporal flicker may remain.",
+  });
+  getFramewiseUpscaleMock.mockResolvedValue({
+    id: "vup-desktop-1",
+    state: "failed",
+    completed_frames: 0,
+    total_frames: 1,
+    error: "test stop",
+    disclosure: "Framewise upscale",
   });
 });
 
@@ -572,11 +588,13 @@ describe("LibraryView source reuse", () => {
     expect(upscale).toMatchObject({ disabled: false });
     useContextMenuStore().activate(upscale!);
     await flushPromises();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
 
     expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
       { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
       "existing-clip.mp4",
-      "real-esrgan-x4plus",
+      "real-esrgan-x4plus:fp16",
     );
     expect(useToastStore().items.at(-1)?.message).toContain(
       "Framewise upscale queued (vup-desktop-1)",

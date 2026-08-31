@@ -38,6 +38,40 @@ export function createFramewiseUpscale(
   });
 }
 
+export interface GalleryImageUpscaleResponse {
+  filename: string;
+  model: string;
+  scale_factor: number;
+}
+
+export function upscaleLibraryImage(
+  target: ApiTarget,
+  filename: string,
+  model: string,
+  tileSize?: number,
+): Promise<GalleryImageUpscaleResponse> {
+  return apiJsonTo(target, "/api/gallery/upscale", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      filename,
+      model,
+      ...(tileSize === undefined ? {} : { tile_size: tileSize }),
+    }),
+  });
+}
+
+export function listFramewiseUpscales(target: ApiTarget): Promise<VideoUpscaleJob[]> {
+  return apiJsonTo(target, "/api/video-upscale-jobs");
+}
+
+export function getFramewiseUpscale(
+  target: ApiTarget,
+  id: string,
+): Promise<VideoUpscaleJob> {
+  return apiJsonTo(target, `/api/video-upscale-jobs/${encodeURIComponent(id)}`);
+}
+
 export function transitionFramewiseUpscale(
   target: ApiTarget,
   id: string,

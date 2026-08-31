@@ -2219,9 +2219,6 @@ fn validate_generate_request_after_activation_with(
         if req.lora.is_some() || req.loras.is_some() {
             return Err("MiniMax H3 does not support LoRA".to_string());
         }
-        if req.upscale_model.is_some() {
-            return Err("MiniMax H3 does not support post-generation image upscaling".to_string());
-        }
         if req.pipeline.is_some()
             || req.ic_lora_control.is_some()
             || req.retake_range.is_some()

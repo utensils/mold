@@ -763,9 +763,9 @@ function reset() {
 
       <!-- 5 · Upscale after generate -->
       <AccordionSection
-        v-if="!caps.supportsVideo && upscalers.length"
+        v-if="(!caps.supportsAudio || caps.supportsVideo) && upscalers.length"
         icon="upscale"
-        title="Upscale after generate"
+        :title="caps.supportsVideo ? 'Framewise upscale after generate' : 'Upscale after generate'"
         :summary="form.upscaleModel || 'Off'"
         :open="true"
         :header-interactive="false"
