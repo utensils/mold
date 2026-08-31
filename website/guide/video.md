@@ -54,6 +54,11 @@ resident:
 mold run ltx-2.5-22b-distilled:q4 "a cat walks through autumn leaves" --frames 97
 ```
 
+On Apple Metal, these GGUF tiers retain only the packed transformer blocks
+that fit beyond the live unified-memory safety floor. Remaining blocks stream
+one tensor at a time from the checkpoint with bounded synchronization, so a
+smaller-memory Mac trades disk traffic and speed for a bounded working set.
+
 See [LTX Video](/models/ltx2) for per-tier download sizes, qualified workflows,
 and the BF16 packs, whose execution remains operator-deferred on Metal.
 

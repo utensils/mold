@@ -7169,6 +7169,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
     if select_ltx2_transformer_residency_mode(
         Ltx2Accelerator::of(device),
         checkpoint_is_fp8,
+        checkpoint_is_gguf,
         force_eager,
         force_streaming,
         false,
@@ -7177,10 +7178,13 @@ fn load_ltx2_av_transformer_with_loras_inner(
     {
         log_ltx2_residency_mode(provenance::RESIDENCY_MODE_EAGER, config.num_layers, 0);
         Ok(Ltx2AvTransformer3DModel::new(&config, vb, lora_registry)?)
-    } else if device.is_cuda() && !force_streaming {
+    } else if (device.is_cuda() || (device.is_metal() && checkpoint_is_gguf)) && !force_streaming {
         let gpu_ordinal = thread_gpu_ordinal().unwrap_or(0);
         let free_vram = match vram_budget_override {
             Some(budget) => budget,
+            None if device.is_metal() => crate::device::available_system_memory_bytes()
+                .map(crate::device::metal_live_allocation_budget)
+                .unwrap_or(0),
             None => usable_free_vram_bytes(gpu_ordinal).unwrap_or(0),
         };
         let weights = weight_index
@@ -7199,6 +7203,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
                 if select_ltx2_transformer_residency_mode(
                     Ltx2Accelerator::of(device),
                     checkpoint_is_fp8,
+                    checkpoint_is_gguf,
                     force_eager,
                     force_streaming,
                     weights.blocks.iter().any(|size| *size > 0),
@@ -7242,10 +7247,11 @@ fn load_ltx2_av_transformer_with_loras_inner(
                             break Ok(transformer);
                         }
                         Err(err)
-                            if device.is_cuda()
-                                && residency_plan.resident_count() > 0
-                                && !ltx2_error_is_fatal_cuda(&err)
-                                && is_out_of_memory_error(&err) =>
+                            if residency_plan.resident_count() > 0
+                                && ltx2_adaptive_allocation_is_recoverable_oom(
+                                    Ltx2Accelerator::of(device),
+                                    &err,
+                                ) =>
                         {
                             emit_info(
                                 progress,
@@ -7254,7 +7260,13 @@ fn load_ltx2_av_transformer_with_loras_inner(
                                     residency_plan.resident_count()
                                 ),
                             );
-                            try_synchronize_device(gpu_ordinal)?;
+                            if device.is_cuda() {
+                                try_synchronize_device(gpu_ordinal)?;
+                            } else if let Err(sync_err) = device.synchronize() {
+                                tracing::warn!(
+                                    "LTX-2 adaptive offload: Metal synchronize after OOM failed: {sync_err}"
+                                );
+                            }
                             if !residency_plan.demote_largest_resident(&weights.blocks) {
                                 return Err(err.into());
                             }
@@ -7433,6 +7445,20 @@ fn ltx2_error_is_fatal_cuda(err: &impl std::fmt::Display) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+/// Whether adaptive block materialization may safely retry with fewer
+/// resident blocks. CUDA retains its fatal-context exclusions; Metal has no
+/// separate context-liveness taxonomy, so only its explicit OOM is retried.
+fn ltx2_adaptive_allocation_is_recoverable_oom(
+    accelerator: Ltx2Accelerator,
+    err: &impl std::fmt::Display,
+) -> bool {
+    match accelerator {
+        Ltx2Accelerator::Cuda => !ltx2_error_is_fatal_cuda(err) && is_out_of_memory_error(err),
+        Ltx2Accelerator::Metal => is_out_of_memory_error(err),
+        Ltx2Accelerator::Other => false,
+    }
+}
+
 /// Whether a denoise-stage failure is a recoverable OOM.
 ///
 /// A fatal context error wins over the OOM substrings — an illegal address can
@@ -7582,6 +7608,7 @@ fn ltx2_effective_force_streaming(
 fn select_ltx2_transformer_residency_mode(
     accelerator: Ltx2Accelerator,
     checkpoint_is_fp8: bool,
+    checkpoint_is_gguf: bool,
     force_eager: bool,
     force_streaming: bool,
     has_block_sizes: bool,
@@ -7602,11 +7629,14 @@ fn select_ltx2_transformer_residency_mode(
     {
         return Ltx2TransformerResidencyMode::Eager;
     }
-    // Only CUDA can page blocks against a measured free-VRAM budget.
-    if accelerator != Ltx2Accelerator::Cuda {
-        return Ltx2TransformerResidencyMode::Streaming;
-    }
-    if has_block_sizes && free_vram > 0 {
+    // CUDA pages every indexed checkpoint against measured free VRAM. Metal
+    // does the same only for GGUF: its QTensors stay compact in unified
+    // memory, so retaining the safe prefix avoids re-reading and rebuilding
+    // the full 12-24 GB transformer on every denoise pass. Dense/FP8 Metal
+    // keeps the measured streaming default.
+    let supports_adaptive = accelerator == Ltx2Accelerator::Cuda
+        || (accelerator == Ltx2Accelerator::Metal && checkpoint_is_gguf);
+    if supports_adaptive && has_block_sizes && free_vram > 0 {
         Ltx2TransformerResidencyMode::Adaptive
     } else {
         Ltx2TransformerResidencyMode::Streaming
@@ -10871,6 +10901,7 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
                 true,
                 24_000_000_000
             ),
@@ -10890,6 +10921,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Metal,
                 true,
+                false,
                 force_eager,
                 force_streaming,
                 true,
@@ -10916,6 +10948,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Metal,
                 false,
+                false,
                 true,
                 false,
                 true,
@@ -10929,6 +10962,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Other,
                 true,
+                false,
                 true,
                 false,
                 true,
@@ -10945,11 +10979,70 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 0
             ),
             super::Ltx2TransformerResidencyMode::Streaming,
             "Metal never reaches the CUDA adaptive plan"
         );
+    }
+
+    #[test]
+    fn ltx2_metal_gguf_defaults_to_safe_adaptive_residency() {
+        let mode = |force_streaming, has_block_sizes, available| {
+            super::select_ltx2_transformer_residency_mode(
+                super::Ltx2Accelerator::Metal,
+                false,
+                true,
+                false,
+                force_streaming,
+                has_block_sizes,
+                available,
+            )
+        };
+
+        assert_eq!(
+            mode(false, true, 40_000_000_000),
+            super::Ltx2TransformerResidencyMode::Adaptive,
+            "packed QTensors should be retained instead of rebuilt every denoise pass"
+        );
+        assert_eq!(
+            mode(true, true, 40_000_000_000),
+            super::Ltx2TransformerResidencyMode::Streaming
+        );
+        assert_eq!(
+            mode(false, false, 40_000_000_000),
+            super::Ltx2TransformerResidencyMode::Streaming
+        );
+        assert_eq!(
+            mode(false, true, 0),
+            super::Ltx2TransformerResidencyMode::Streaming
+        );
+    }
+
+    #[test]
+    fn metal_adaptive_load_oom_is_recoverable_without_changing_cuda_fault_rules() {
+        let metal_oom = "Insufficient Memory (kIOGPUCommandBufferCallbackErrorOutOfMemory)";
+        assert!(super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Metal,
+            &metal_oom,
+        ));
+        assert!(!super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Metal,
+            &"Metal kernel compilation failed",
+        ));
+        assert!(!super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Cuda,
+            &"CUDA_ERROR_ILLEGAL_ADDRESS followed by out of memory",
+        ));
+        assert!(super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Cuda,
+            &"CUDA_ERROR_OUT_OF_MEMORY",
+        ));
+        assert!(!super::ltx2_adaptive_allocation_is_recoverable_oom(
+            super::Ltx2Accelerator::Other,
+            &"out of memory",
+        ));
     }
 
     /// `MOLD_LTX2_FORCE_STREAMING` was read with `is_some()`, so `0` and
@@ -11002,6 +11095,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Cuda,
                 true,
+                false,
                 true,
                 true,
                 true,
@@ -11048,6 +11142,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Cuda,
                 true,
+                false,
                 true,
                 false,
                 true,
@@ -11058,6 +11153,7 @@ mod tests {
         assert_eq!(
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Cuda,
+                false,
                 false,
                 true,
                 false,
@@ -11070,6 +11166,7 @@ mod tests {
             super::select_ltx2_transformer_residency_mode(
                 super::Ltx2Accelerator::Other,
                 true,
+                false,
                 true,
                 false,
                 true,

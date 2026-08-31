@@ -59,11 +59,20 @@ pub(crate) fn log_detail_tensor(index: usize, label: &str, xs: &Tensor) -> Resul
     Ok(())
 }
 
-fn should_synchronize_streaming_layer(
+fn should_fence_streamed_layer(
+    is_cuda: bool,
+    is_metal: bool,
+    block_was_streamed: bool,
     index: usize,
     total_layers: usize,
     prefetch_count: usize,
 ) -> bool {
+    // Preserve CUDA's established cadence exactly. Metal needs the same fence
+    // only after an on-demand block, so resident adaptive blocks keep running
+    // without an unnecessary command-buffer stall.
+    if !(is_cuda || is_metal && block_was_streamed) {
+        return false;
+    }
     let interval = prefetch_count.max(1);
     let layer_num = index + 1;
     layer_num.is_multiple_of(interval) || layer_num == total_layers
@@ -3007,13 +3016,14 @@ impl Ltx2VideoTransformer3DModel {
                         encoder_attention_mask,
                         skip_layer_mask,
                     )?;
-                    if hidden_states.device().is_cuda()
-                        && should_synchronize_streaming_layer(
-                            index,
-                            self.config.num_layers,
-                            self.config.streaming_prefetch_count,
-                        )
-                    {
+                    if should_fence_streamed_layer(
+                        hidden_states.device().is_cuda(),
+                        hidden_states.device().is_metal(),
+                        true,
+                        index,
+                        self.config.num_layers,
+                        self.config.streaming_prefetch_count,
+                    ) {
                         hidden_states.device().synchronize()?;
                     }
                     drop(block);
@@ -4575,13 +4585,14 @@ impl Ltx2AvTransformer3DModel {
                             );
                         }
                     }
-                    if video.x.device().is_cuda()
-                        && should_synchronize_streaming_layer(
-                            index,
-                            self.config.num_layers,
-                            self.config.streaming_prefetch_count,
-                        )
-                    {
+                    if should_fence_streamed_layer(
+                        video.x.device().is_cuda(),
+                        video.x.device().is_metal(),
+                        true,
+                        index,
+                        self.config.num_layers,
+                        self.config.streaming_prefetch_count,
+                    ) {
                         video.x.device().synchronize()?;
                     }
                 }
@@ -4636,13 +4647,14 @@ impl Ltx2AvTransformer3DModel {
                             );
                         }
                     }
-                    if video.x.device().is_cuda()
-                        && should_synchronize_streaming_layer(
-                            index,
-                            self.config.num_layers,
-                            self.config.streaming_prefetch_count,
-                        )
-                    {
+                    if should_fence_streamed_layer(
+                        video.x.device().is_cuda(),
+                        video.x.device().is_metal(),
+                        !should_reside,
+                        index,
+                        self.config.num_layers,
+                        self.config.streaming_prefetch_count,
+                    ) {
                         video.x.device().synchronize()?;
                     }
                 }
@@ -6651,20 +6663,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn streaming_layer_sync_uses_prefetch_interval_and_final_layer() {
-        assert!(!super::should_synchronize_streaming_layer(0, 6, 2));
-        assert!(super::should_synchronize_streaming_layer(1, 6, 2));
-        assert!(!super::should_synchronize_streaming_layer(2, 6, 2));
-        assert!(super::should_synchronize_streaming_layer(3, 6, 2));
-        assert!(!super::should_synchronize_streaming_layer(4, 6, 2));
-        assert!(super::should_synchronize_streaming_layer(5, 6, 2));
+    fn streaming_layer_fence_bounds_cuda_and_metal_prefetch_windows() {
+        let fence = |index, is_cuda, is_metal| {
+            super::should_fence_streamed_layer(is_cuda, is_metal, true, index, 6, 2)
+        };
+        for (index, expected) in [false, true, false, true, false, true]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(fence(index, true, false), expected);
+            assert_eq!(fence(index, false, true), expected);
+            assert!(!fence(index, false, false));
+        }
     }
 
     #[test]
-    fn streaming_layer_sync_treats_zero_prefetch_as_every_layer() {
-        assert!(super::should_synchronize_streaming_layer(0, 3, 0));
-        assert!(super::should_synchronize_streaming_layer(1, 3, 0));
-        assert!(super::should_synchronize_streaming_layer(2, 3, 0));
+    fn adaptive_resident_layers_do_not_pay_a_streaming_fence() {
+        assert!(!super::should_fence_streamed_layer(
+            false, true, false, 1, 6, 2,
+        ));
+        assert!(super::should_fence_streamed_layer(
+            false, true, true, 1, 6, 2,
+        ));
+        assert!(super::should_fence_streamed_layer(
+            true, false, false, 1, 6, 2,
+        ));
     }
 
     #[test]

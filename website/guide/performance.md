@@ -72,6 +72,14 @@ but remains slower than a comparable CUDA card; streamed FP8 widening trades
 speed for fitting a 19B–22B model in unified memory. CPU exists for
 correctness-oriented native coverage and can be extremely slow.
 
+LTX-2.5 GGUF on Metal keeps only the packed transformer blocks that fit after
+preserving a live macOS safety floor. Overflow blocks stay in the GGUF file and
+are read one tensor at a time; bounded Metal command-buffer fences release each
+streaming window before more temporary weights can accumulate. If memory
+pressure changes during loading, Mold demotes resident blocks toward full disk
+streaming instead of retaining the original split. This does not change CUDA's
+residency or synchronization cadence.
+
 ### Offloading
 
 `--offload` uses mold-owned block streaming for FLUX, Flux.2, Z-Image,

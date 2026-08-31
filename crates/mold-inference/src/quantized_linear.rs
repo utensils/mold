@@ -44,6 +44,17 @@ impl LinearDevice {
     }
 }
 
+/// Candle's Metal quantized kernels currently accept and return F32 only.
+/// Keep that cast boundary inside the quantized linear so the surrounding
+/// model can continue to use BF16 without tripping the backend assertion.
+fn quantized_kernel_dtype(device: LinearDevice, requested: DType) -> DType {
+    if device == LinearDevice::Metal {
+        DType::F32
+    } else {
+        requested
+    }
+}
+
 /// Which implementation a quantized linear resolves to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QuantizedLinearKind {
@@ -242,11 +253,12 @@ impl QuantizedLinear {
         kernel_dtype: DType,
         qmatmul_enabled: bool,
     ) -> Result<Self> {
+        let linear_device = LinearDevice::of(device);
+        let kernel_dtype = quantized_kernel_dtype(linear_device, kernel_dtype);
         let bias = bias
             .map(|b| b.to_device(device)?.to_dtype(kernel_dtype))
             .transpose()?;
         let in_features = weight.shape().dims().last().copied().unwrap_or_default();
-        let linear_device = LinearDevice::of(device);
         let arm = match select_linear_kind(
             linear_device,
             weight.dtype(),
@@ -438,6 +450,22 @@ mod tests {
                 false
             ),
             QuantizedLinearKind::Dequant,
+        );
+    }
+
+    #[test]
+    fn metal_quantized_matmul_uses_its_required_f32_cast_boundary() {
+        assert_eq!(
+            quantized_kernel_dtype(LinearDevice::Metal, DType::BF16),
+            DType::F32
+        );
+        assert_eq!(
+            quantized_kernel_dtype(LinearDevice::Cuda, DType::BF16),
+            DType::BF16
+        );
+        assert_eq!(
+            quantized_kernel_dtype(LinearDevice::Other, DType::F16),
+            DType::F16
         );
     }
 
