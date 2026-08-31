@@ -281,15 +281,18 @@ impl Hunyuan3dEngine {
         seed: u64,
     ) -> Result<Tensor> {
         let channels = loaded.dit.config().in_channels;
-        // CPU-seeded noise transferred to the execution device — the family
-        // capability's `SeedContract`, and what makes a seed reproducible
-        // across a CPU/CUDA/Metal move.
-        let noise = {
-            let cpu = Device::Cpu;
-            cpu.set_seed(seed)?;
-            Tensor::randn(0f32, 1.0, (1, channels, loaded.num_latents), &cpu)?
-        };
-        let mut latents = noise.to_device(&loaded.device)?.to_dtype(loaded.dtype)?;
+        // `seeded_randn` is the shared implementation of the family
+        // capability's `SeedContract::CpuSeededNoiseTransferredToExecutionDevice`.
+        // Calling candle's own `set_seed` + `randn` instead would produce a
+        // DIFFERENT stream — candle's per-backend RNG is not the crate-wide
+        // `StdRng` — so a seed would not reproduce across a CPU/CUDA/Metal
+        // move, which is exactly what the contract promises.
+        let mut latents = crate::engine::seeded_randn(
+            seed,
+            &[1, channels, loaded.num_latents],
+            &loaded.device,
+            loaded.dtype,
+        )?;
 
         // The unconditional branch is a zero context of the same shape, not an
         // empty one: `Hunyuan3Dv2Conditioning` builds it as

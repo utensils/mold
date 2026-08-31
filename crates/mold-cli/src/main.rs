@@ -916,7 +916,9 @@ pub enum LibraryAction {
         collection: Option<String>,
         #[arg(long)]
         favorite: bool,
-        #[arg(long, value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav"]))]
+        #[arg(long, value_parser = output_format_parser(&[
+            "png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav", "glb",
+        ]))]
         format: Option<OutputFormat>,
         #[arg(long, default_value_t = 50, value_parser = library_limit_parser)]
         limit: usize,
@@ -1003,9 +1005,12 @@ Examples:
         #[arg(short, long, help_heading = "Output", value_hint = ValueHint::FilePath)]
         output: Option<String>,
 
-        /// Output format (defaults to PNG for images and MP4 for video)
+        /// Output format (defaults to PNG for images, MP4 for video, GLB for
+        /// 3-D). `obj` is deliberately absent: mold never STORES an OBJ,
+        /// because one carries neither materials nor textures on its own —
+        /// it exists only as a gallery export transcode.
         #[arg(long, help_heading = "Output",
-              value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav"]))]
+              value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav", "glb"]))]
         format: Option<OutputFormat>,
 
         /// Disable embedded generation metadata in PNG output for this run
