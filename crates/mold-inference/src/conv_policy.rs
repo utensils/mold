@@ -87,11 +87,16 @@ pub fn policy_for_family(family: &str) -> ConvPolicy {
     }
 }
 
-/// Parse `MOLD_CONV`. `None` means "the operator said nothing", which is a
+/// Parse `MOLD_CONV`. Public because `mold-server`'s execution-equivalence
+/// classifier calls it: every other entry in that table hand-mirrors its
+/// engine's parser and carries a comment promising the two stay in step, which
+/// is a promise a refactor can quietly break. Sharing the function cannot drift.
+///
+/// `None` means "the operator said nothing", which is a
 /// different answer from "the operator asked for im2col" and is what the
 /// per-family default keys on. An unparseable value is also `None` — a typo
 /// must not silently pin a family to the other backend.
-fn parse_backend_env(raw: Option<&str>) -> Option<ConvBackend> {
+pub fn parse_backend_env(raw: Option<&str>) -> Option<ConvBackend> {
     let value = raw?;
     match value.trim().to_ascii_lowercase().as_str() {
         "cudnn" => Some(ConvBackend::Cudnn),
