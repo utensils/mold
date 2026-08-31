@@ -330,10 +330,26 @@ work cuDNN avoids; output elements are the wrong measure, as this decoder's own
 head convolution shows. 96->3 at 480x832 has barely a million output elements,
 a 690 MB column buffer, and runs 6.9x faster on cuDNN.
 
-Convolutions are ~76% of the decode, so the phase falls from 23.4 s to about
-10 s on an 81-frame 832x480 clip, and its share of the render from ~21% to
-~10%. A cuDNN failure falls back to im2col rather than failing the render, and
-only Linux CUDA release artifacts compile the feature.
+Convolutions are ~76% of the decode, and the end-to-end effect was measured on
+the same card with a full render rather than projected from the table above --
+`wan22-t2v-a14b:q5`, 832x480, 81 frames, 4 steps, seed 1483, both arms warm and
+parking the same blocks:
+
+| `MOLD_CONV` | Decode |     Render |
+| ----------- | -----: | ---------: |
+| `im2col`    | 23.3 s |    105.9 s |
+| `cudnn`     | 11.2 s |     94.9 s |
+|             |  2.08x |      1.12x |
+
+Decode saves 12.1 s and the render saves 11.0 s, so the whole gain lands in the
+phase it should. Note the render figure is the honest one to quote: a 4.38x on
+the convolutions is a 2.08x on the decode, because a quarter of the decode is
+not convolution and cuDNN pays a per-call setup candle does not cache. Frames
+match the im2col arm at ~40 dB PSNR -- the same shot, not the same bytes, which
+is the trade this family opts into.
+
+A cuDNN failure falls back to im2col rather than failing the render, and only
+Linux CUDA release artifacts compile the feature.
 
 ### When the VAE decode does not fit
 
