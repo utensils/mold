@@ -2548,7 +2548,10 @@ button:disabled {
 
 .mobile-generation-job {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(72px, 42%);
   align-items: center;
   gap: 12px;
   min-height: 72px;
@@ -2557,6 +2560,12 @@ button:disabled {
 
 .mobile-generation-job + .mobile-generation-job {
   border-top: 1px solid var(--edge);
+}
+
+.mobile-generation-job--detailed-status {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
 }
 
 .mobile-generation-job-copy {
@@ -2588,12 +2597,27 @@ button:disabled {
 
 .mobile-generation-job-action {
   display: grid;
+  min-width: 0;
   justify-items: end;
 }
 
 .mobile-generation-job-action > span {
+  max-width: 100%;
   margin-top: 0;
   color: var(--halide);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-align: right;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.mobile-generation-job--detailed-status .mobile-generation-job-action {
+  justify-items: start;
+}
+
+.mobile-generation-job--detailed-status .mobile-generation-job-action > span {
+  text-align: left;
 }
 
 .mobile-generation-cancel {

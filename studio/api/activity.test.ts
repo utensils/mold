@@ -1,9 +1,44 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeWorkPhaseLabel,
   mergeFleetActivity,
   parseActiveWorkSnapshot,
   reconcileActivityHost,
 } from "./activity";
+
+describe("activeWorkPhaseLabel", () => {
+  it("prefers the backend stage over a generic running phase", () => {
+    expect(
+      activeWorkPhaseLabel({
+        id: "job-1",
+        kind: "generation",
+        phase: "running",
+        stage: "Encoding video",
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        can_cancel: true,
+      }),
+    ).toBe("Encoding video");
+  });
+
+  it("names the component while preparation is still active", () => {
+    expect(
+      activeWorkPhaseLabel({
+        id: "job-1",
+        kind: "generation",
+        phase: "preparing",
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        preparation_progress: {
+          component: "Opening MiniMax H3 checkpoints",
+          bytes_done: 0,
+          bytes_total: 0,
+        },
+        can_cancel: true,
+      }),
+    ).toBe("Preparing · Opening MiniMax H3 checkpoints");
+  });
+});
 
 const route = {
   hostId: "host-a",

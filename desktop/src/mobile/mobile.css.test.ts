@@ -9,6 +9,8 @@ const pullComponent = readFileSync("src/mobile/MobileExpansionPullStatus.vue", "
 const composerComponent = readFileSync("src/mobile/MobileSequenceComposer.vue", "utf8");
 const sharedParamsComponent = readFileSync("src/mobile/MobileSharedParams.vue", "utf8");
 const seamPillComponent = readFileSync("../ui/components/SeamPill.vue", "utf8");
+const liveActivityComponent = readFileSync("../ui/components/LiveActivityList.vue", "utf8");
+const swipeActionRowComponent = readFileSync("../studio/components/SwipeActionRow.vue", "utf8");
 
 describe("mobile theme bootstrap", () => {
   it("paints fresh installs as Safelight Dark before Vue mounts", () => {
@@ -149,6 +151,33 @@ describe("mobile scrolling", () => {
     const wideDetail = css.match(/@media \(min-width: 900px\) \{([\s\S]*?)\n\}/);
     expect(wideDetail?.[1]).toMatch(
       /\.mobile-catalog-detail-scroll\s*\{[\s\S]*minmax\(320px,[\s\S]*minmax\(420px,/,
+    );
+  });
+});
+
+describe("mobile generation status containment", () => {
+  it("bounds local queue rows and wraps detailed backend status", () => {
+    const row = css.match(/\.mobile-generation-job\s*\{([^}]*)\}/s);
+    const detailed = css.match(/\.mobile-generation-job--detailed-status\s*\{([^}]*)\}/s);
+
+    expect(row?.[1]).toMatch(/width:\s*100%\s*;/);
+    expect(row?.[1]).toMatch(/min-width:\s*0\s*;/);
+    expect(row?.[1]).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+    expect(detailed?.[1]).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)\s*;/);
+    expect(css).toMatch(
+      /\.mobile-generation-job-action\s*>\s*span\s*\{[^}]*max-width:\s*100%\s*;[^}]*overflow-wrap:\s*anywhere\s*;[^}]*white-space:\s*normal\s*;/s,
+    );
+  });
+
+  it("bounds shared and swipeable activity surfaces before truncating detail", () => {
+    expect(liveActivityComponent).toMatch(
+      /\.live-activity-surface\s*\{[^}]*width:\s*100%\s*;[^}]*min-width:\s*0\s*;[^}]*box-sizing:\s*border-box\s*;/s,
+    );
+    expect(liveActivityComponent).toMatch(
+      /\.live-activity-copy\s+span\s*\{[^}]*overflow:\s*hidden\s*;[^}]*text-overflow:\s*ellipsis\s*;[^}]*white-space:\s*nowrap\s*;/s,
+    );
+    expect(swipeActionRowComponent).toMatch(
+      /\.swipe-row__surface\s*\{[^}]*width:\s*100%\s*;[^}]*min-width:\s*0\s*;[^}]*box-sizing:\s*border-box\s*;/s,
     );
   });
 });

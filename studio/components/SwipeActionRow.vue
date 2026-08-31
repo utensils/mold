@@ -209,6 +209,9 @@ defineExpose({ close });
 .swipe-row__surface {
   position: relative;
   display: flex;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   align-items: center;
   gap: 8px;
   background: var(--bench, var(--bath));
