@@ -1473,9 +1473,9 @@ Examples:
 
     /// Install the mold Agent Skill for AI coding agents
     ///
-    /// Generates a SKILL.md following the Agent Skills standard and installs
-    /// it for Claude Code, OpenAI Codex CLI, Pi, OpenClaw, GitHub Copilot CLI,
-    /// Cursor, Gemini CLI, Amp, Goose, or the generic Agent Skills directory.
+    /// Renders an agent-compatible managed skill bundle and installs it for
+    /// Claude Code, OpenAI Codex CLI, Pi, OpenClaw, GitHub Copilot CLI, Cursor,
+    /// Gemini CLI, Amp, Goose, or the generic Agent Skills directory.
     Skill(skill::SkillArgs),
 
     /// Start the inference server

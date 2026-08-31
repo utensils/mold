@@ -1,0 +1,12 @@
+[
+  {"agent":"claude","profile":"claude","user":".claude/skills","project":".claude/skills"},
+  {"agent":"codex","profile":"codex","user":".codex/skills","project":".agents/skills"},
+  {"agent":"pi","profile":"pi","user":".pi/agent/skills","project":".pi/skills"},
+  {"agent":"openclaw","profile":"openclaw","user":".openclaw/skills","project":".agents/skills"},
+  {"agent":"copilot","profile":"copilot","user":".copilot/skills","project":".github/skills"},
+  {"agent":"cursor","profile":"cursor","user":".cursor/skills","project":".agents/skills"},
+  {"agent":"gemini","profile":"gemini","user":".gemini/skills","project":".agents/skills"},
+  {"agent":"amp","profile":"portable","user":".config/agents/skills","project":".agents/skills"},
+  {"agent":"goose","profile":"goose","user":".config/goose/skills","project":".agents/skills"},
+  {"agent":"agents","profile":"portable","user":".agents/skills","project":".agents/skills"}
+]

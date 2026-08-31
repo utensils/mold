@@ -583,16 +583,25 @@ mold skill install openclaw --dir ~/repo
 mold skill uninstall codex
 mold skill uninstall --project
 mold skill show
+mold skill show codex
+mold skill show codex references/prompting/families/flux2.md
 ```
 
 Supported targets match nxv: `claude`, `codex`, `pi`, `openclaw`, `copilot`,
 `cursor`, `gemini`, `amp`, `goose`, and generic `agents`. User-wide is the
 default. `--project` uses the current directory, while `--dir` selects another
-project root. Install requires explicit names, `--detected`, or `--all` and
-atomically replaces the Mold-managed `mold/SKILL.md` and
-`mold/references/model-prompting.md` files. The reference gives agents
-family-specific prompt examples, audio/dialogue syntax, and model boundaries.
-Uninstall removes those managed files and preserves sibling files.
+project root. Install requires explicit names, `--detected`, or `--all`.
+Mold renders the agent's supported frontmatter and metadata, then atomically
+swaps a complete bundle containing a concise router, safety and CLI references,
+tested examples, a shared prompting guide, one base guide per manifest family,
+and only the H3, Wan, and LTX-2 task-specific leaves their grammars require. All
+agent renderers install the same canonical prompting files byte-for-byte. A hashed
+`.mold-skill.json` inventory lets later versions remove stale managed files
+while preserving user-added files; uninstall follows that same inventory.
+
+`mold skill show` prints the portable rendered `SKILL.md`. Add an agent name to
+inspect its adapter, and optionally a bundle-relative path to print a supporting
+file. Codex, for example, also renders `agents/openai.yaml`.
 
 ## `mold completions`
 

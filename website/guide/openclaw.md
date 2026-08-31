@@ -27,10 +27,13 @@ mold skill install openclaw
 
 For a project-local workspace, run `mold skill install openclaw --project` from
 its root or pass `--dir <PATH>`. Mold writes `.agents/skills/mold/SKILL.md` for
-project installs and `~/.openclaw/skills/mold/SKILL.md` user-wide, together
-with `references/model-prompting.md`. That routed reference teaches agents the
-prompt structure for each model family, including LTX-2.x and MiniMax H3
-speech/audio prompts.
+project installs and `~/.openclaw/skills/mold/SKILL.md` user-wide. The
+OpenClaw render includes its `{baseDir}` path convention and runtime metadata,
+plus a concise router, operational safety guidance, tested examples, and one
+shared prompting guide plus one base file under `references/prompting/families/`
+for each manifest family. H3, Wan, and LTX-2 add only their necessary task
+leaves. This keeps LTX-2.x and MiniMax H3 speech/audio grammar available without
+loading every family's instructions at once.
 
 ## Configure the Connection
 

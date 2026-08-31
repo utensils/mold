@@ -144,9 +144,10 @@ run:
 mold skill install --detected
 ```
 
-The installed bundle includes family-specific prompt recipes for every image
-and video family, including the distinct dialogue/audio grammars used by
-LTX-2.x and MiniMax H3.
+The installed bundle uses each agent's native metadata and discovery contract,
+with a concise router, safety guidance, tested examples, a shared prompting
+guide, one base guide per manifest family, and task leaves only for the distinct
+H3, Wan, and LTX-2 grammars that need them.
 
 ## Project
 
