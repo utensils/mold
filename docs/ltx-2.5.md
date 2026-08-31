@@ -133,10 +133,10 @@ are whole-process unified-memory measurements, not Metal-only VRAM figures.
 The memory guard did not fire, and every output was retained in the Mold
 Library.
 
-The sealed machine-readable Metal report covers the current-head INT8 audio
-and silent rows. GGUF qualification retains its clips, logs, TSV measurements,
-and inspected contact sheets beside that report; it is not represented as a
-GGUF row inside the INT8 report.
+The sealed machine-readable Metal report covers the INT8 audio and silent rows
+from the qualification rendering commit. GGUF qualification retains its clips,
+logs, TSV measurements, and inspected contact sheets beside that report; it is
+not represented as a GGUF row inside the INT8 report.
 
 Implemented and covered by focused planning, parsing, or unit contracts, but
 not claimed as executed Metal qualification by this report:
@@ -174,8 +174,8 @@ The implementation and parity fixtures are pinned to:
   `95c0d467cc2a4770b71fa25a117320377e6eb08f`.
 
 Retained parity artifacts, logs, prompts, seeds, and run manifests live under
-`/Volumes/ExternalStorage/mold2/output/verification/ltx-2.5/`. The current-head
-Metal report is
+`/Volumes/ExternalStorage/mold2/output/verification/ltx-2.5/`. The retained
+Metal report for the qualification rendering commit is
 `ltx25-metal-int8-verification-20260831T152436Z.json`; it seals source commit
 `8ac394ecdab96953a209bbe8f51e90d9e5ceaaf6`, the three focused Rust gates, and
 the retained INT8 audio and silent media. Downloaded model files remain under
