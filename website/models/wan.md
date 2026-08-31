@@ -335,11 +335,11 @@ the same card with a full render rather than projected from the table above --
 `wan22-t2v-a14b:q5`, 832x480, 81 frames, 4 steps, seed 1483, both arms warm and
 parking the same blocks:
 
-| `MOLD_CONV` | Decode |     Render |
-| ----------- | -----: | ---------: |
-| `im2col`    | 23.3 s |    105.9 s |
-| `cudnn`     | 11.2 s |     94.9 s |
-|             |  2.08x |      1.12x |
+| `MOLD_CONV` | Decode |  Render |
+| ----------- | -----: | ------: |
+| `im2col`    | 23.3 s | 105.9 s |
+| `cudnn`     | 11.2 s |  94.9 s |
+|             |  2.08x |   1.12x |
 
 Decode saves 12.1 s and the render saves 11.0 s, so the whole gain lands in the
 phase it should. Note the render figure is the honest one to quote: a 4.38x on
