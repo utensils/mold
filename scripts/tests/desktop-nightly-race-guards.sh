@@ -30,7 +30,7 @@ grep -Fq 'run: cargo test --manifest-path src-tauri/Cargo.toml' <<< "$rust_job" 
   || fail "the native desktop gate no longer runs the test suite"
 
 linux_job="$(sed -n '/^  desktop-linux:/,/^  desktop-nightly:/p' "$workflow")"
-grep -Fq 'bunx tauri build --features h3-cuda,pulid --bundles appimage --ci -v' <<< "$linux_job" \
+grep -Fq 'bunx tauri build --features h3-cuda,cudnn,pulid --bundles appimage --ci -v' <<< "$linux_job" \
   || fail "main pushes have no Linux packaging proof"
 grep -Fq "if: github.event_name != 'pull_request'" <<< "$linux_job" \
   || fail "Linux packaging is not reserved for main pushes"
@@ -81,7 +81,11 @@ manifest_upload_line="$(grep -nF "gh release upload latest \"\$manifest\"" "$wor
 # command to read.
 grep -Fq 'pulid = ["mold-core/pulid", "mold-server/pulid"]' "$repo_root/desktop/src-tauri/Cargo.toml" \
   || fail "the desktop crate no longer forwards the pulid feature"
-desktop_feature_recipe="$(sed -n '/desktopFeaturesFor = computeCap:/,/;/p' "$repo_root/flake.nix")"
+# The range starts at the binding name alone: nixfmt moves `computeCap:` onto
+# its own line as soon as the recipe grows past one line, and anchoring on the
+# joined form made this guard silently extract nothing and fail on the
+# assertion below rather than on the thing it is guarding.
+desktop_feature_recipe="$(sed -n '/desktopFeaturesFor =/,/;/p' "$repo_root/flake.nix")"
 grep -Fq '"pulid"' <<< "$desktop_feature_recipe" \
   || fail "the Nix desktop feature recipe no longer builds face identity"
 grep -Fq 'buildFeatures = desktopFeaturesFor computeCap;' "$repo_root/flake.nix" \
