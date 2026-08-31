@@ -4785,6 +4785,16 @@ pub struct SseCompleteEvent {
     /// describe this poster, not the mesh — a mesh has no raster size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_poster: Option<String>,
+    /// Axis-aligned bounds of the geometry, `[x, y, z]`.
+    ///
+    /// Carried rather than recomputed: `MeshData` PROMISES them, no consumer
+    /// re-derives them, and a client that framed a camera from a zeroed pair
+    /// would look at a degenerate box. Six floats on the wire is the cheaper
+    /// half of that trade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_bounds_min: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_bounds_max: Option<[f32; 3]>,
 
     /// GPU ordinal that handled this request (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7298,6 +7308,8 @@ mod tests {
             mesh_faces: None,
             mesh_textured: false,
             mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -8455,6 +8467,8 @@ mod tests {
             mesh_faces: None,
             mesh_textured: false,
             mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -8512,6 +8526,8 @@ mod tests {
             mesh_faces: None,
             mesh_textured: false,
             mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -8595,6 +8611,8 @@ mod tests {
             mesh_faces: None,
             mesh_textured: false,
             mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,

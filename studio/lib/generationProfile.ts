@@ -371,7 +371,21 @@ function isAdapterControl(value: unknown): value is AdapterControlProfile {
   );
 }
 
-const OUTPUT_FORMATS = ["png", "jpeg", "gif", "apng", "webp", "mp4", "wav"];
+// Must stay in step with `mold_core::OutputFormat`. This is a runtime GATE,
+// not a type: a format missing here makes `isOutputCapabilities` reject the
+// whole profile, and the model then renders with no controls at all rather
+// than with a wrong one — a silent, total failure that no type check catches.
+const OUTPUT_FORMATS = [
+  "png",
+  "jpeg",
+  "gif",
+  "apng",
+  "webp",
+  "mp4",
+  "wav",
+  "glb",
+  "obj",
+];
 
 function isOutputCapabilities(
   value: unknown,

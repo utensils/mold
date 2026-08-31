@@ -185,9 +185,11 @@ impl Hunyuan3dEngine {
             .unwrap_or(DEFAULT_OCTREE_RESOLUTION);
         let threshold = options.threshold.unwrap_or(DEFAULT_THRESHOLD);
         if options.texture == Some(true) {
-            // Refused rather than silently answered with bare geometry: a
-            // user who asked for materials must not discover their absence
-            // after waiting for a render.
+            // Defence in depth. `validation::validate_mesh_request` already
+            // refuses this at admission, which is the only place that can do
+            // so before a multi-gigabyte checkpoint is mapped; this guard
+            // exists so a caller that bypasses admission still cannot get
+            // bare geometry back from a request that asked for materials.
             bail!(
                 "PBR texture generation is not available in this build; \
                  omit --texture to render geometry only"
@@ -202,8 +204,15 @@ impl Hunyuan3dEngine {
             .as_deref()
             .filter(|bytes| !bytes.is_empty())
             .context("3-D generation requires a source image")?;
-        let image = image::DynamicImage::ImageRgb8(
-            crate::img_utils::decode_oriented_srgb(source).context("decode the source image")?,
+        // RGBA, not RGB: alpha is the SUBJECT MASK here, not decoration.
+        // `letterbox_square` crops and centres on the non-zero alpha bounding
+        // box, so flattening first would make a background-removed cutout —
+        // the input the docs recommend as the best one — indistinguishable
+        // from a full opaque frame and condition DINOv2 on the whole canvas,
+        // black transparent pixels included.
+        let image = image::DynamicImage::ImageRgba8(
+            crate::img_utils::decode_oriented_srgb_rgba(source)
+                .context("decode the source image")?,
         );
         let pixels = super::dino2::preprocess(
             &image,

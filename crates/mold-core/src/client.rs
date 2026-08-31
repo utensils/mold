@@ -371,12 +371,8 @@ impl MoldClient {
                     }),
                     vertex_count: meta.vertex_count,
                     face_count: meta.face_count,
-                    // Bounds are not carried on the wire: they are cheap to
-                    // recompute from the geometry the caller now holds, and a
-                    // six-float header would be the only float header in the
-                    // protocol.
-                    bounds_min: [0.0; 3],
-                    bounds_max: [0.0; 3],
+                    bounds_min: meta.bounds_min,
+                    bounds_max: meta.bounds_max,
                     textured: meta.textured,
                     // The poster cannot ride along in a body that is already
                     // the GLB. Only its recorded size travels.
@@ -710,10 +706,8 @@ impl MoldClient {
                                     format: complete.format,
                                     vertex_count: vertices,
                                     face_count: complete.mesh_faces.unwrap_or(0),
-                                    // Not carried on the wire; recomputable
-                                    // from the geometry the caller now holds.
-                                    bounds_min: [0.0; 3],
-                                    bounds_max: [0.0; 3],
+                                    bounds_min: complete.mesh_bounds_min.unwrap_or([0.0; 3]),
+                                    bounds_max: complete.mesh_bounds_max.unwrap_or([0.0; 3]),
                                     textured: complete.mesh_textured,
                                     poster,
                                     // `width`/`height` describe the poster on
@@ -2707,6 +2701,8 @@ struct MeshMeta {
     vertex_count: u32,
     face_count: u32,
     textured: bool,
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
     poster_width: u32,
     poster_height: u32,
 }
@@ -2725,6 +2721,8 @@ fn parse_mesh_headers(headers: &reqwest::header::HeaderMap) -> Option<MeshMeta> 
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
     };
+    let read_bounds =
+        |name: &str| parse_bounds(headers.get(name).and_then(|value| value.to_str().ok()));
     let vertex_count = read("x-mold-mesh-vertices")? as u32;
     Some(MeshMeta {
         // Stated by the server: a request that omitted `output_format` was
@@ -2740,9 +2738,36 @@ fn parse_mesh_headers(headers: &reqwest::header::HeaderMap) -> Option<MeshMeta> 
             .and_then(|v| v.to_str().ok())
             .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
             .unwrap_or(false),
+        bounds_min: read_bounds("x-mold-mesh-bounds-min"),
+        bounds_max: read_bounds("x-mold-mesh-bounds-max"),
         poster_width: read("x-mold-mesh-poster-width").unwrap_or(0) as u32,
         poster_height: read("x-mold-mesh-poster-height").unwrap_or(0) as u32,
     })
+}
+
+/// Parse an `x, y, z` bounds header. An absent or malformed value is the
+/// origin — an older server that does not send the header is not an error,
+/// and a caller reads a degenerate box rather than a wrong one.
+fn parse_bounds(raw: Option<&str>) -> [f32; 3] {
+    let Some(raw) = raw else {
+        return [0.0; 3];
+    };
+    let mut out = [0.0f32; 3];
+    let mut seen = 0usize;
+    for (slot, part) in out.iter_mut().zip(raw.split(',')) {
+        match part.trim().parse::<f32>() {
+            Ok(value) if value.is_finite() => {
+                *slot = value;
+                seen += 1;
+            }
+            _ => return [0.0; 3],
+        }
+    }
+    if seen == 3 {
+        out
+    } else {
+        [0.0; 3]
+    }
 }
 
 struct AudioMeta {
@@ -2905,6 +2930,44 @@ impl std::error::Error for ModelNotFoundError {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mesh_bounds_survive_the_wire_and_degrade_to_the_origin() {
+        assert_eq!(parse_bounds(Some("-1.5, 0, 2.25")), [-1.5, 0.0, 2.25]);
+        // An older server sends no header at all. That is not an error; the
+        // caller reads a degenerate box rather than a wrong one.
+        assert_eq!(parse_bounds(None), [0.0; 3]);
+        // Partial, malformed and non-finite values all collapse the whole
+        // triple rather than yielding a plausible-looking mixture.
+        assert_eq!(parse_bounds(Some("1,2")), [0.0; 3]);
+        assert_eq!(parse_bounds(Some("1,2,three")), [0.0; 3]);
+        assert_eq!(parse_bounds(Some("1,2,NaN")), [0.0; 3]);
+        assert_eq!(parse_bounds(Some("1,2,inf")), [0.0; 3]);
+    }
+
+    #[test]
+    fn mesh_headers_carry_the_bounds_the_meshdata_promises() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-mesh-vertices", "24576".parse().unwrap());
+        headers.insert("x-mold-mesh-faces", "49152".parse().unwrap());
+        headers.insert("x-mold-mesh-bounds-min", "-1,-1,-1".parse().unwrap());
+        headers.insert("x-mold-mesh-bounds-max", "1,1,1".parse().unwrap());
+        let meta = parse_mesh_headers(&headers).expect("a mesh response");
+        assert_eq!(meta.vertex_count, 24576);
+        assert_eq!(meta.face_count, 49152);
+        assert_eq!(meta.bounds_min, [-1.0, -1.0, -1.0]);
+        assert_eq!(meta.bounds_max, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_still_or_a_clip_is_never_read_as_a_mesh() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert!(parse_mesh_headers(&headers).is_none());
+        // A clip carries neither vertices nor faces; only the vertex header
+        // may promote a response to `MeshData`.
+        headers.insert("x-mold-video-frames", "97".parse().unwrap());
+        assert!(parse_mesh_headers(&headers).is_none());
+    }
+
     use super::*;
     use crate::test_support::ENV_LOCK;
 

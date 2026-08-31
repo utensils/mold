@@ -208,6 +208,63 @@ pub fn decode_oriented_srgb(bytes: &[u8]) -> Result<RgbImage> {
     })
 }
 
+/// [`decode_oriented_srgb`] that KEEPS the alpha channel.
+///
+/// Same orientation and ICC handling; the colour transform still runs on the
+/// three colour planes, and alpha is carried through untouched because it is
+/// not a colour and no profile describes it.
+///
+/// This exists for Hunyuan3D, where alpha is not decoration but the subject
+/// mask: `hunyuan3d::dino2::letterbox_square` crops and centres on the
+/// non-zero alpha bounding box, so flattening first makes a background-removed
+/// cutout — the input the docs recommend as the BEST one — indistinguishable
+/// from a full opaque frame, and conditions the vision tower on the whole
+/// canvas including the black transparent pixels.
+pub fn decode_oriented_srgb_rgba(bytes: &[u8]) -> Result<image::RgbaImage> {
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .context("failed to sniff source image format")?;
+    let mut decoder = reader
+        .into_decoder()
+        .context("failed to decode source image")?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let icc = decoder.icc_profile().unwrap_or_default();
+    let mut decoded =
+        DynamicImage::from_decoder(decoder).context("failed to decode source image")?;
+    decoded.apply_orientation(orientation);
+    let is_grayscale = matches!(
+        decoded.color(),
+        image::ColorType::L8
+            | image::ColorType::La8
+            | image::ColorType::L16
+            | image::ColorType::La16
+    );
+    let mut rgba = decoded.to_rgba8();
+    if let Some(profile) = icc {
+        if !profile.is_empty() {
+            let layout = if is_grayscale {
+                moxcms::Layout::Gray
+            } else {
+                moxcms::Layout::Rgb
+            };
+            let (width, height) = rgba.dimensions();
+            let mut rgb = RgbImage::new(width, height);
+            for (target, source) in rgb.pixels_mut().zip(rgba.pixels()) {
+                *target = image::Rgb([source.0[0], source.0[1], source.0[2]]);
+            }
+            let converted = convert_icc_to_srgb(rgb, &profile, layout);
+            for (target, source) in rgba.pixels_mut().zip(converted.pixels()) {
+                target.0[0] = source.0[0];
+                target.0[1] = source.0[1];
+                target.0[2] = source.0[2];
+            }
+        }
+    }
+    Ok(rgba)
+}
+
 /// Convert `rgb` from the embedded `profile` to sRGB, reading the source
 /// pixels in `source_layout` (`Gray` collapses the flattened RGB back to
 /// one channel — the three are identical for a decoded grayscale image).

@@ -3264,6 +3264,9 @@ pub(crate) fn apply_media_headers(
         // A mesh has no raster of its own. These are the poster tile's size,
         // which is what a gallery row records so the grid has a real aspect
         // ratio — the tile bytes cannot ride along in a body that is the GLB.
+        let fmt_bounds = |bounds: [f32; 3]| format!("{},{},{}", bounds[0], bounds[1], bounds[2]);
+        set("x-mold-mesh-bounds-min", fmt_bounds(mesh.bounds_min));
+        set("x-mold-mesh-bounds-max", fmt_bounds(mesh.bounds_max));
         set("x-mold-mesh-poster-width", mesh.poster_width.to_string());
         set("x-mold-mesh-poster-height", mesh.poster_height.to_string());
         return mesh.data.clone();

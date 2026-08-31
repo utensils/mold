@@ -2053,18 +2053,27 @@ fn validate_mesh_request(req: &GenerateRequest, family: Option<&str>) -> Result<
             ));
         }
     }
+    // Refused HERE, not in the engine. The engine's own guard fires after
+    // `load_inner` has mapped a multi-gigabyte checkpoint, so a `--texture`
+    // request would be admitted, queued, given a GPU and spend the whole load
+    // before failing. Admission is the only place that can refuse it for free.
+    if options.texture == Some(true) {
+        return Err("PBR texture generation is not available in this build; \
+             omit mesh.texture to render geometry only"
+            .to_string());
+    }
     if let Some(resolution) = options.texture_resolution {
         if !MESH_TEXTURE_RESOLUTIONS.contains(&resolution) {
             return Err(format!(
                 "mesh.texture_resolution ({resolution}) must be one of {MESH_TEXTURE_RESOLUTIONS:?}"
             ));
         }
-        if options.texture != Some(true) {
-            return Err(
-                "mesh.texture_resolution requires mesh.texture = true; it has no effect on a geometry-only render"
-                    .to_string(),
-            );
-        }
+        // `texture == Some(true)` is already refused above, so this is the
+        // only remaining case: a resolution for a stage that will not run.
+        return Err(
+            "mesh.texture_resolution requires mesh.texture = true; it has no effect on a geometry-only render"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -3219,13 +3228,21 @@ mod tests {
         });
         let error = super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap_err();
         assert!(error.contains("requires mesh.texture"), "{error}");
+    }
 
+    #[test]
+    fn asking_for_textures_is_refused_at_admission_not_after_the_load() {
+        // The engine also refuses, but only after mapping a multi-gigabyte
+        // checkpoint. Admission is the only place that can say no for free,
+        // and this test is what keeps the refusal here when the paint stage
+        // eventually lands and someone deletes one of the two guards.
+        let mut req = mesh_request("hunyuan3d:fp16");
         req.mesh = Some(crate::types::MeshRequestOptions {
-            texture_resolution: Some(2048),
             texture: Some(true),
             ..Default::default()
         });
-        assert!(super::validate_mesh_request(&req, Some("hunyuan3d")).is_ok());
+        let error = super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap_err();
+        assert!(error.contains("not available in this build"), "{error}");
     }
 
     #[test]
