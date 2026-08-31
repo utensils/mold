@@ -201,6 +201,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
         items.push(ActiveWorkItem {
             id: entry.id,
             kind: "generation".into(),
+            execution: None,
             phase: if cancelling { "cancelling" } else { phase }.into(),
             model: Some(entry.model),
             created_at_unix_ms: entry.started_at_unix_ms,
@@ -237,6 +238,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                         items.push(ActiveWorkItem {
                             id: row.id,
                             kind: "generation".into(),
+                            execution: None,
                             phase: "paused".into(),
                             model: Some(row.model),
                             created_at_unix_ms: nonnegative_ms(row.created_at_ms),
@@ -261,6 +263,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             Err(error) => {
                 tracing::warn!(%error, "failed to read active sequence work");
                 unavailable_kinds.push("sequence".to_string());
+                unavailable_kinds.push("chain_generation".to_string());
                 Vec::new()
             }
         };
@@ -270,9 +273,11 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 mold_core::chain_job::ChainJobState::Queued
                     | mold_core::chain_job::ChainJobState::Running
                     | mold_core::chain_job::ChainJobState::Paused
-            ) && !crate::routes_chain_jobs::chain_job_is_ephemeral(row)
+            )
         }) {
             represented.insert(row.id.clone());
+            let ephemeral = mold_core::chain_job::ChainJobManifest::read_from_dir(&row.job_dir)
+                .is_ok_and(|manifest| manifest.ephemeral);
             let cancelling = row.state == mold_core::chain_job::ChainJobState::Running
                 && state
                     .chain_jobs
@@ -292,7 +297,8 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             };
             items.push(ActiveWorkItem {
                 id: row.id,
-                kind: "sequence".into(),
+                kind: if ephemeral { "generation" } else { "sequence" }.into(),
+                execution: ephemeral.then(|| "chain".to_string()),
                 phase: phase.into(),
                 model: Some(row.model),
                 created_at_unix_ms: nonnegative_ms(row.created_at_ms),
@@ -303,7 +309,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                 stage: scheduled.and_then(|activity| activity.stage.clone()),
                 preparation_progress: scheduled
                     .and_then(|activity| activity.preparation_progress.clone()),
-                can_cancel: true,
+                can_cancel: row.state != mold_core::chain_job::ChainJobState::Paused,
             });
         }
     } else {
@@ -311,6 +317,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
         // durable sequences have disappeared. Let clients retain their last
         // verified sequence rows until this authority is available again.
         unavailable_kinds.push("sequence".to_string());
+        unavailable_kinds.push("chain_generation".to_string());
     }
 
     // Scheduler-only work includes preparation/utility phases that never
@@ -329,6 +336,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
         items.push(ActiveWorkItem {
             id: parent_id.clone(),
             kind: activity.kind.clone(),
+            execution: None,
             phase: activity.phase.into(),
             model: None,
             created_at_unix_ms: observed_at_unix_ms,
@@ -355,6 +363,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
         items.push(ActiveWorkItem {
             id: job.id,
             kind: "download".into(),
+            execution: None,
             phase: if active { "downloading" } else { "queued" }.into(),
             model: Some(job.model),
             created_at_unix_ms: job

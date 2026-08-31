@@ -13,7 +13,7 @@ export function useOpenLiveWork(routing: HostRouting) {
   const router = useRouter();
 
   return async (row: FleetActiveWork) => {
-    if (row.kind === "sequence") {
+    if (row.kind === "sequence" || row.execution === "chain") {
       setSequenceHandoff({
         kind: "inspect",
         hostId: row.hostId,

@@ -2550,6 +2550,9 @@ function fleetQueueAuthority(row: FleetActiveWork): MobileQueueControlAuthority 
 }
 
 function canPauseFleetActivity(row: FleetActiveWork): boolean {
+  if (row.execution === "chain") {
+    return (row.phase === "paused" || row.can_cancel) && fleetQueueAuthority(row) !== null;
+  }
   return (
     row.kind === "generation" &&
     (row.phase === "queued" || row.phase === "paused") &&
@@ -2607,7 +2610,14 @@ async function setFleetJobPaused(row: FleetActiveWork, paused: boolean): Promise
     if (expectedInstanceId && status.instance_id !== expectedInstanceId) {
       throw new Error(`${host.name} now reaches a different Mold server instance.`);
     }
-    await setQueueJobPaused(target, row.id, paused);
+    if (row.execution === "chain") {
+      const action = paused ? "cancel" : "resume";
+      await apiFetchTo(target, `/api/chain-jobs/${encodeURIComponent(row.id)}/${action}`, {
+        method: "POST",
+      });
+    } else {
+      await setQueueJobPaused(target, row.id, paused);
+    }
     await refreshMobileActivity();
   } catch (caught) {
     setGenerationStatus(describeTransportError(caught, host.name), true);
@@ -2620,6 +2630,11 @@ async function setFleetJobPaused(row: FleetActiveWork, paused: boolean): Promise
 
 function fleetQueueResumeNeeded(row: FleetActiveWork): boolean {
   return row.phase === "paused";
+}
+
+function fleetQueueControlLabel(row: FleetActiveWork): string {
+  if (fleetQueueResumeNeeded(row)) return "Resume";
+  return row.execution === "chain" ? "Cancel" : "Pause";
 }
 
 /**
@@ -2892,7 +2907,7 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
     await verifyAuthority();
     if (epoch !== mobileLiveWorkSelectionEpoch) return;
 
-    if (row.kind === "generation") {
+    if (row.kind === "generation" && row.execution !== "chain") {
       const queue = await listMobileQueue(host, target);
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
       if (!queue) {
@@ -2948,7 +2963,7 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
       return;
     }
 
-    if (row.kind === "sequence") {
+    if (row.kind === "sequence" || row.execution === "chain") {
       const detail = await apiJsonTo<ChainJobDetail>(
         target,
         `/api/chain-jobs/${encodeURIComponent(row.id)}`,
@@ -12014,10 +12029,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       type="button"
                       data-test="mobile-fleet-queue-control"
                       :disabled="queueControlHostIds.has(row.hostId)"
-                      :aria-label="`${fleetQueueResumeNeeded(row) ? 'Resume' : 'Pause'} job on ${row.hostLabel}`"
+                      :aria-label="`${fleetQueueControlLabel(row)} job on ${row.hostLabel}`"
                       @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
                     >
-                      {{ fleetQueueResumeNeeded(row) ? "Resume" : "Pause" }}
+                      {{ fleetQueueControlLabel(row) }}
                     </button>
                   </template>
                 </LiveActivityList>

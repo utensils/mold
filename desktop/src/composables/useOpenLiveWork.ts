@@ -15,7 +15,7 @@ export function useOpenLiveWork() {
   const toasts = useToastStore();
 
   return async (row: FleetActiveWork) => {
-    if (row.kind === "sequence") {
+    if (row.kind === "sequence" || row.execution === "chain") {
       composer.setSequence({ kind: "inspect", hostId: row.hostId, jobId: row.id });
       await router.push("/create");
       return;

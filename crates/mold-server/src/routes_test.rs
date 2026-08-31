@@ -3533,7 +3533,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         let items = body["items"].as_array().unwrap();
-        assert_eq!(items.len(), 9);
+        assert_eq!(items.len(), 10);
         let item = |id: &str| items.iter().find(|item| item["id"] == id).unwrap();
         assert_eq!(item("queued-a")["kind"], "generation");
         assert_eq!(item("queued-a")["phase"], "queued");
@@ -3562,10 +3562,10 @@ mod tests {
         assert_eq!(item("upscale-f")["kind"], "standalone_upscale");
         assert_eq!(item("upscale-f")["phase"], "running");
         assert!(item("upscale-f").get("stage").is_none());
-        assert!(
-            items.iter().all(|item| item["id"] != "one-shot-chain"),
-            "an auto-chained one-shot is represented by its generation row, not a second sequence"
-        );
+        assert_eq!(item("one-shot-chain")["kind"], "generation");
+        assert_eq!(item("one-shot-chain")["execution"], "chain");
+        assert_eq!(item("one-shot-chain")["phase"], "running");
+        assert_eq!(item("one-shot-chain")["can_cancel"], true);
         assert_eq!(item(&download_id)["kind"], "download");
         assert_eq!(item(&download_id)["phase"], "queued");
         assert_eq!(body["instance_id"], instance_id);
@@ -3665,7 +3665,10 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
-        assert_eq!(body["unavailable_kinds"], serde_json::json!(["sequence"]));
+        assert_eq!(
+            body["unavailable_kinds"],
+            serde_json::json!(["sequence", "chain_generation"])
+        );
     }
 
     #[tokio::test]

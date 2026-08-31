@@ -509,7 +509,10 @@ wakes the webview, and they appear in the SAME queue list as single prints:
 Cancel while live, Resume and Dismiss once settled. Submission, watching,
 cancellation, and relaunch recovery stay pinned to one immutable host ID,
 URL, instance ID, and Keychain-supplied API key. Local storage retains only
-the non-secret route identity and durable job ID. The initial mobile scope
+the non-secret route identity and durable job ID. Auto-chained one-shot videos
+use the same host activity authority: a server restart leaves them visible as
+paused with completed clips and source media intact, and Resume continues the
+durable job. The initial mobile scope
 does not include a local engine, the desktop TOML chain editor and full
 durable-jobs administration workspace, RunPod provisioning, desktop engine
 settings, or desktop self-update channels.

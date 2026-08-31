@@ -265,6 +265,53 @@ describe("NavRail developing jobs", () => {
     expect(cancel).toHaveBeenCalledWith("local", "foreign-running");
   });
 
+  it("cancels an auto-chain generation through its durable chain authority", async () => {
+    const wrapper = await mountAt("/create");
+    setLocalAuthority();
+    const liveActivity = useLiveActivityStore();
+    vi.spyOn(liveActivity, "refresh").mockResolvedValue(undefined);
+    const queueCancel = vi.spyOn(useJobsStore(), "cancelJob").mockResolvedValue(undefined);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 202 });
+    vi.stubGlobal("fetch", fetchMock);
+    liveActivity.hosts = {
+      local: {
+        hostId: "local",
+        hostLabel: "This Mac",
+        target: { baseUrl: "http://127.0.0.1:49152", apiKey: "secret" },
+        routeUrl: "http://127.0.0.1:49152",
+        instanceId: "local-instance",
+        observedAtUnixMs: 2,
+        stale: false,
+        error: null,
+        unavailableKinds: [],
+        items: [
+          {
+            id: "foreign-auto-chain",
+            kind: "generation",
+            execution: "chain",
+            phase: "running",
+            model: "ltx-2.3-22b-distilled:fp8",
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            can_cancel: true,
+          },
+        ],
+      },
+    };
+    await flushPromises();
+
+    await wrapper.get("[data-test^='live-activity-select-']").trigger("contextmenu");
+    const menu = useContextMenuStore();
+    menu.activate(menu.entries[0]!);
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:49152/api/chain-jobs/foreign-auto-chain/cancel",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(queueCancel).not.toHaveBeenCalled();
+  });
+
   it("does not send duplicate cancellation requests while one is in flight", async () => {
     const wrapper = await mountAt("/create");
     setLocalAuthority();

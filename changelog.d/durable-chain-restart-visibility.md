@@ -1,0 +1,1 @@
+- **Preserve chained videos across restarts.** Graceful server restarts now park authored and auto-chained videos with their source and partial media intact, expose auto-chains in the shared activity queue on desktop and mobile, and allow explicit resume instead of cancelling and deleting them.
