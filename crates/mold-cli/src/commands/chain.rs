@@ -182,6 +182,40 @@ pub fn decide_chain_routing(
     // continuation with the previous clip's final frame, so exactly one frame
     // is duplicated; a text-to-video checkpoint carries nothing and trims
     // nothing.
+    //
+    // "Carries nothing" is the whole problem, so it is a refusal rather than a
+    // zero. Stitching stages that cannot hand off does not make a longer video:
+    // with no image conditioning, every stage re-derives the scene from the
+    // same prompt and seed, so the render repeats. Measured on
+    // `wan22-t2v-a14b:q8` at 219 frames / 3 stages, frames a whole stage apart
+    // scored 38.1-44.2 dB PSNR against each other while frames ten apart INSIDE
+    // a stage scored 26.0 dB — a stage boundary moved the picture less than ten
+    // frames of ordinary motion did. Three renders, one clip's worth of video.
+    //
+    // Only the `--frames` auto-chain reaches here. An authored `--script`
+    // sequence builds its own `ChainRequest` and is untouched: there, repeated
+    // stages are what the author asked for.
+    // Scoped to a checkpoint that DECLARES it carries nothing. An
+    // unclassified model (an opaque `cv:`/`hf:` catalog id, `None` here) may
+    // well be image-conditioned, and #783 added wan auto-chaining precisely so
+    // those route; refusing them on a guess would undo that.
+    if is_wan
+        && matches!(
+            source_image,
+            Some(mold_core::SourceImageCapability::Unsupported)
+        )
+    {
+        return ChainRoutingDecision::Rejected {
+            reason: format!(
+                "'{model}' is text-to-video and cannot continue motion across a clip \
+                 boundary, so rendering {total_frames} frames would repeat the same \
+                 ~{effective_clip_frames}-frame clip rather than extend it. Use \
+                 --frames {effective_clip_frames} or fewer for one continuous clip, \
+                 or an image-to-video tier (wan22-i2v-a14b, wan22-ti2v-5b), which \
+                 seeds each continuation with the previous clip's final frame."
+            ),
+        };
+    }
     let motion_tail = if is_wan {
         if wan_carries_context(source_image) {
             WAN_HANDOFF_DUPLICATED_FRAMES
@@ -1890,7 +1924,12 @@ mod tests {
         );
 
         // A text-to-video checkpoint has no conditioning channel at all, so
-        // the seam carries nothing however large a tail was requested.
+        // the seam carries nothing however large a tail was requested — and
+        // that is now a refusal rather than a zero-length seam. Chaining it
+        // did not produce a longer video: with nothing handed across, every
+        // stage re-derived the scene from the same prompt and seed, so the
+        // render repeated (measured 38.1-44.2 dB PSNR between stage starts
+        // against 26.0 dB between frames ten apart inside one stage).
         let t2v = decide_chain_routing(
             Some(300),
             Some("wan"),
@@ -1901,12 +1940,9 @@ mod tests {
             None,
             Some(Unsupported),
         );
-        assert_eq!(
-            t2v,
-            ChainRoutingDecision::Chain {
-                clip_frames: 81,
-                motion_tail: 0,
-            },
+        assert!(
+            matches!(t2v, ChainRoutingDecision::Rejected { .. }),
+            "a declared t2v checkpoint must refuse rather than repeat: {t2v:?}"
         );
         // An unclassified checkpoint is "unknown", not an assumed handoff.
         assert_eq!(
@@ -2192,6 +2228,90 @@ mod tests {
                 motion_tail: 4,
             },
         );
+    }
+
+    /// A wan text-to-video checkpoint cannot carry motion across a stage
+    /// boundary, so auto-chaining one does not produce a longer video — it
+    /// produces the same clip again.
+    ///
+    /// Measured on `wan22-t2v-a14b:q8` at 219 frames / 3 stages: frames a whole
+    /// stage apart (73) scored 38.1-44.2 dB PSNR against each other, while
+    /// frames 10 apart INSIDE a stage scored 26.0 dB. A stage boundary moved the
+    /// picture less than ten frames of ordinary motion did, because with no
+    /// image conditioning each stage re-derives the scene from the same prompt
+    /// and seed. Refuse it the way a non-chainable family is refused, rather
+    /// than spending three renders to hand back one clip repeated.
+    #[test]
+    fn a_text_to_video_wan_checkpoint_refuses_to_auto_chain() {
+        let d = decide_chain_routing(
+            Some(201),
+            Some("wan"),
+            "wan22-t2v-a14b:q8",
+            None,
+            0,
+            16,
+            None,
+            Some(mold_core::SourceImageCapability::Unsupported),
+        );
+        match d {
+            ChainRoutingDecision::Rejected { reason } => {
+                assert!(
+                    reason.contains("--frames"),
+                    "the refusal must name the flag to change: {reason}"
+                );
+                assert!(
+                    reason.contains("continue") || reason.contains("continuous"),
+                    "the refusal must say WHY, not just that it declined: {reason}"
+                );
+                assert!(
+                    reason.contains("i2v") || reason.contains("ti2v"),
+                    "the refusal must name a tier that CAN do it: {reason}"
+                );
+            }
+            other => panic!("a declared t2v checkpoint must not auto-chain, got {other:?}"),
+        }
+
+        // An unclassified checkpoint is not refused on a guess: it may be
+        // image-conditioned, and #783 added wan auto-chaining so opaque
+        // catalog ids route rather than being rejected.
+        assert!(
+            matches!(
+                decide_chain_routing(Some(201), Some("wan"), "cv:12345", None, 0, 16, None, None),
+                ChainRoutingDecision::Chain { .. }
+            ),
+            "an unknown checkpoint must still chain"
+        );
+    }
+
+    /// The refusal must be scoped to checkpoints that genuinely cannot hand
+    /// off. TI2V/I2V carry the previous clip's final frame, so they still chain.
+    #[test]
+    fn an_image_conditioned_wan_checkpoint_still_auto_chains() {
+        for capability in [
+            mold_core::SourceImageCapability::Optional,
+            mold_core::SourceImageCapability::Required,
+        ] {
+            let d = decide_chain_routing(
+                Some(241),
+                Some("wan"),
+                "wan22-ti2v-5b:q8",
+                None,
+                0,
+                24,
+                None,
+                Some(capability),
+            );
+            assert!(
+                matches!(
+                    d,
+                    ChainRoutingDecision::Chain {
+                        motion_tail: WAN_HANDOFF_DUPLICATED_FRAMES,
+                        ..
+                    }
+                ),
+                "{capability:?} carries context and must still chain, got {d:?}"
+            );
+        }
     }
 
     #[test]

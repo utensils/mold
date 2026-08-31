@@ -641,6 +641,17 @@ than a silent no-op) on the 4-step Lightning distill tiers and on schedules
 under 12 steps — neither has redundant steps to skip. `off` (the default) is
 bit-identical to the uncached engine.
 
+### Long clips and `--frames`
+
+`--frames` past a tier's single-pass budget auto-chains into stages. That only
+produces a longer _video_ on a checkpoint that can hand motion to the next
+stage: an I2V or TI2V tier seeds each continuation with the previous clip's
+final frame. A **text-to-video** checkpoint has no image conditioning at all, so
+it carries nothing across the boundary and every stage re-derives the scene from
+the same prompt and seed — the result is the same clip repeated, not a longer
+one. `mold run` refuses that up front rather than spending the renders; ask for
+`--frames` within the tier's budget, or use `wan22-i2v-a14b` / `wan22-ti2v-5b`.
+
 ## Quantized checkpoints and adapters
 
 A14B ships as GGUF. Quantized weights stay quantized in memory and dequantize
