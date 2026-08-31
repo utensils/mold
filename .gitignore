@@ -83,6 +83,11 @@ uat-*
 *.apng
 *.webp
 *.mp4
+# ...but the website gallery is published site content, committed on purpose.
+# The media rules above exist for scratch renders in the working tree, and
+# without this negation those posters are both tracked and ignored, which
+# makes release-plz refuse to compute versions at all.
+!website/public/gallery/**
 # HDR renders write one EXR per frame, so a single short clip is tens of
 # megabytes across dozens of files.
 *.exr
