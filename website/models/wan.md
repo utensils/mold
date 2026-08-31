@@ -641,6 +641,12 @@ than a silent no-op) on the 4-step Lightning distill tiers and on schedules
 under 12 steps — neither has redundant steps to skip. `off` is bit-identical
 to the uncached engine.
 
+The 0.10 threshold was tuned on A14B at 33f/832x480, and it holds there: an
+A/B on `wan22-t2v-a14b:q8` renders comparable detail at 1.46x on an L40S. It is
+a per-tier judgement, not a universal one — on TI2V-5B at 121f/1280x704 the same
+threshold buys 1.68x but visibly softens fine detail, so a shape far from where
+it was tuned is worth an A/B against `off` before trusting it.
+
 `auto` is the default. It can be, because the memory engaging the cache holds —
 the retained residuals per trajectory, and the transients around the distance
 check — is charged against the same activation estimate that admission and the
