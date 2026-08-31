@@ -16577,16 +16577,27 @@ mod tests {
         let mut immediate = false;
         coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
         coordinator.start_needed_preparations();
-        let event = tokio::time::timeout(Duration::from_secs(5), coordinator.preparation_rx.recv())
-            .await
-            .expect("Ref2VA preparation must complete")
-            .expect("preparation event");
-        match &event {
-            PreparationEvent::Ready { work_id, .. } => assert_eq!(work_id, "ref2va"),
-            PreparationEvent::Failed { error, .. } => {
-                panic!("Ref2VA preparation failed: {error}")
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match coordinator
+                    .preparation_rx
+                    .recv()
+                    .await
+                    .expect("preparation event")
+                {
+                    PreparationEvent::Progress { work_id } => assert_eq!(work_id, "ref2va"),
+                    PreparationEvent::Ready { work_id, .. } => {
+                        assert_eq!(work_id, "ref2va");
+                        break;
+                    }
+                    PreparationEvent::Failed { error, .. } => {
+                        panic!("Ref2VA preparation failed: {error}")
+                    }
+                }
             }
-        }
+        })
+        .await
+        .expect("Ref2VA preparation must complete");
         assert_eq!(
             observed_references.load(std::sync::atomic::Ordering::SeqCst),
             2
