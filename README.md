@@ -54,6 +54,9 @@ mold run qwen-image-edit-2511:q4 "make the chair red" --image chair.png
 # Generate video
 mold run ltx-video-0.9.6-distilled:bf16 "a fox in the snow" --frames 25
 
+# Turn a photo into a 3D mesh
+mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb
+
 # Launch the web studio and API
 mold serve
 ```
@@ -64,13 +67,15 @@ with prompt, model, seed, and generation metadata.
 ## What it supports
 
 - **Models:** FLUX.1, Flux.2, Stable Diffusion, Z-Image, Qwen-Image,
-  Wuerstchen, LTX Video, Wan, and MiniMax H3. See the
+  Wuerstchen, LTX Video, Wan, MiniMax H3, and Hunyuan3D. See the
   [model catalog](https://utensils.io/mold/models/) for variants and hardware
   requirements.
 - **Images:** text-to-image, image editing, inpainting, ControlNet, LoRA,
   identity photos, prompt expansion, and upscaling.
 - **Video and audio:** text/image-to-video, sequences, clip continuation,
   lip dub, text-to-audio, and MP4 output with generated audio.
+- **3D:** image-to-mesh with Hunyuan3D, published to the Library as binary
+  glTF with a rendered poster tile.
 - **Multiple machines:** connect local, LAN, Tailscale, and RunPod hosts, then
   route work and browse one combined Library.
 - **Organization:** title, favorite, tag, collect, restore, and manage prints
@@ -147,7 +152,8 @@ mold skill install --detected
 The installed bundle uses each agent's native metadata and discovery contract,
 with a concise router, safety guidance, tested examples, a shared prompting
 guide, one base guide per manifest family, and task leaves only for the distinct
-H3, Wan, and LTX-2 grammars that need them.
+H3, Wan, and LTX-2 grammars that need them. Hunyuan3D's base guide is the one
+that tells an agent NOT to write a prompt.
 
 ## Project
 

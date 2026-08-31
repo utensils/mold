@@ -105,6 +105,7 @@ export default defineConfig({
           items: [
             { text: 'Generating Images', link: '/guide/generating' },
             { text: 'Video', link: '/guide/video' },
+            { text: '3D Meshes', link: '/guide/mesh' },
             { text: 'Terminal UI', link: '/guide/tui' },
             { text: 'Desktop App', link: '/guide/desktop' },
             { text: 'iPhone App', link: '/guide/iphone' },
@@ -141,6 +142,7 @@ export default defineConfig({
             { text: 'LTX Video', link: '/models/ltx2' },
             { text: 'MiniMax H3', link: '/models/minimax-h3' },
             { text: 'Wan Video', link: '/models/wan' },
+            { text: 'Hunyuan3D', link: '/models/hunyuan3d' },
             { text: 'Upscalers', link: '/models/upscalers' },
           ],
         },

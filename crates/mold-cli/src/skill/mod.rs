@@ -110,6 +110,11 @@ const FAMILY_GUIDES: &[FamilyGuide] = &[
         contents: include_str!("references/prompting/families/z-image.md"),
     },
     FamilyGuide {
+        family: "hunyuan3d",
+        path: "references/prompting/families/hunyuan3d.md",
+        contents: include_str!("references/prompting/families/hunyuan3d.md"),
+    },
+    FamilyGuide {
         family: "wuerstchen",
         path: "references/prompting/families/wuerstchen.md",
         contents: include_str!("references/prompting/families/wuerstchen.md"),
