@@ -129,7 +129,7 @@ Post-generation upscale persists distinct `-original` and `-upscaled` entries on
 **Built-in catalog (name:tag), quantization variants:**
 
 - FLUX: `flux-schnell`, `flux-dev`, `flux-krea`, `jibmix-flux`, `iniverse-mix`, `ultrareal-v2/v3/v4` — tags `bf16`/`fp8`/`q8`/`q6`/`q5`/`q4`/`q3`.
-- Flux.2: `flux2-klein`, `flux2-klein-9b` — `bf16`/`q8`/`q6`/`q4` (4B and 9B variants); `flux2-dev:bf16`.
+- Flux.2: `flux2-klein`, `flux2-klein-9b` — `bf16`/`fp8`/`q8`/`q6`/`q4` (4B and 9B variants); `flux2-klein-base`, `flux2-klein-base-9b` — the undistilled base tiers, `bf16`/`q8`/`q6`/`q4`, sampled with true CFG and a negative prompt; `flux2-dev` — `bf16` (gated) plus the ungated `q8`/`q6`/`q4`/`fp8` tiers.
 - SD1.5: `sd15:fp16`, `dreamshaper-v8`, `realistic-vision-v5`.
 - SDXL: `sdxl-base`, `sdxl-turbo`, `juggernaut-xl`, `dreamshaper-xl`, `realvis-xl`, `playground-v2.5`, `pony-v6`, `cyberrealistic-pony` — `fp16`.
 - SD3.5: `sd3.5-large:q4/q8`, `sd3.5-large-turbo:q8`, `sd3.5-medium:q8`.

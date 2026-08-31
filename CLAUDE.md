@@ -6,7 +6,7 @@ Keep lean: only things not obvious from the code, `--help`, or `git log`. Area-s
 
 ## What mold is
 
-Local AI image/video generation CLI built on [candle](https://github.com/huggingface/candle). Supports FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein and Dev, Qwen-Image, Wuerstchen v2, LTX-Video, LTX-2, and Wan 2.1/2.2 (T2V; the family's frame grid is `4k+1` and its sampler deliberately follows the diffusers/Lightning flow-UniPC schedule, not upstream Wan's `fm_solvers_unipc.py` — see `crates/mold-inference/src/wan/sampler.rs`). Runs locally on GPU or talks to a remote `mold serve` over HTTP. Single binary, everything feature-gated.
+Local AI image/video generation CLI built on [candle](https://github.com/huggingface/candle). Supports FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein (distilled and base) and Dev, Qwen-Image, Wuerstchen v2, LTX-Video, LTX-2, and Wan 2.1/2.2 (T2V; the family's frame grid is `4k+1` and its sampler deliberately follows the diffusers/Lightning flow-UniPC schedule, not upstream Wan's `fm_solvers_unipc.py` — see `crates/mold-inference/src/wan/sampler.rs`). Runs locally on GPU or talks to a remote `mold serve` over HTTP. Single binary, everything feature-gated.
 
 ## Commands
 

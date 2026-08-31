@@ -232,8 +232,72 @@ impl DecoderLayer {
     }
 }
 
+/// The two key namespaces FLUX.2's Mistral3 conditioner ships under.
+///
+/// BFL's own `FLUX.2-dev/text_encoder` shards keep the full
+/// `Mistral3ForConditionalGeneration` layout, so the language model sits under
+/// `language_model.model.*`. Comfy-Org's single-file republication of the same
+/// encoder strips that wrapper and puts it at `model.*`, with the vision tower
+/// and projector beside it at the root. Both carry identical tensors under the
+/// prefix; only the namespace differs.
+const MISTRAL3_LM_PREFIXES: [&str; 2] = ["language_model.model", "model"];
+
+/// The last decoder layer the streamed encoder runs. Layers past it, the final
+/// norm, the vision tower, and the LM head are never touched.
+fn last_required_layer() -> usize {
+    *CAPTURE_LAYERS.last().expect("CAPTURE_LAYERS is non-empty")
+}
+
+/// Header-peek the configured files and resolve which namespace holds the
+/// language model, requiring the exact prefix this encoder streams: the token
+/// embedding plus every decoder layer up to the last captured one.
+///
+/// This replaces a shard COUNT check. The count was a proxy for "the runtime
+/// prefix is present", and it is the wrong proxy: it refuses a single-file
+/// republication of the same weights, and it would accept eight shards of some
+/// other checkpoint. Asking the headers what is actually there answers the
+/// real question and names what is missing when it is not.
+fn resolve_lm_prefix(encoder_paths: &[PathBuf]) -> Result<&'static str> {
+    if encoder_paths.is_empty() {
+        anyhow::bail!("FLUX.2 [dev] requires a Mistral3 text encoder; none is configured");
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    for path in encoder_paths {
+        let header = crate::weight_loader::read_safetensors_header(path)
+            .with_context(|| format!("peek Mistral3 encoder header at {}", path.display()))?;
+        keys.extend(header.into_keys());
+    }
+
+    let last_layer = last_required_layer();
+    for prefix in MISTRAL3_LM_PREFIXES {
+        if !keys.contains(&format!("{prefix}.embed_tokens.weight")) {
+            continue;
+        }
+        if let Some(missing) = (0..=last_layer).find(|layer| {
+            !keys.contains(&format!("{prefix}.layers.{layer}.input_layernorm.weight"))
+        }) {
+            anyhow::bail!(
+                "Mistral3 text encoder at {} is incomplete: FLUX.2 [dev] streams decoder layers 0-{last_layer} under `{prefix}`, but layer {missing} is missing",
+                encoder_paths
+                    .first()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+            );
+        }
+        return Ok(prefix);
+    }
+    anyhow::bail!(
+        "no Mistral3 language model found in the configured FLUX.2 [dev] text encoder ({} file(s)); expected `{}.embed_tokens.weight` or `{}.embed_tokens.weight`",
+        encoder_paths.len(),
+        MISTRAL3_LM_PREFIXES[0],
+        MISTRAL3_LM_PREFIXES[1],
+    );
+}
+
 pub(crate) struct Mistral3Encoder {
     encoder_paths: Vec<PathBuf>,
+    /// Resolved at load from the checkpoint's own headers.
+    lm_prefix: &'static str,
     tokenizer: Arc<Tokenizer>,
     device: Device,
     dtype: DType,
@@ -246,14 +310,10 @@ impl Mistral3Encoder {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
-        if encoder_paths.len() != 8 {
-            anyhow::bail!(
-                "FLUX.2 [dev] requires the first 8 Mistral3 runtime shards (model-00001 through model-00008), found {} configured shard(s)",
-                encoder_paths.len()
-            );
-        }
+        let lm_prefix = resolve_lm_prefix(encoder_paths)?;
         Ok(Self {
             encoder_paths: encoder_paths.to_vec(),
+            lm_prefix,
             tokenizer,
             device: device.clone(),
             dtype,
@@ -285,8 +345,7 @@ impl Mistral3Encoder {
             "FLUX.2 [dev] Mistral3 encoder",
             &crate::progress::ProgressReporter::default(),
         )?
-        .pp("language_model")
-        .pp("model");
+        .pp(self.lm_prefix);
 
         let input_ids = Tensor::from_vec(tokens, (1, MAX_LENGTH), &self.device)?;
         let mut hidden = {
@@ -355,6 +414,103 @@ mod tests {
     #[test]
     fn hidden_state_indices_are_after_layers_ten_twenty_and_thirty() {
         assert_eq!(CAPTURE_LAYERS, [9, 19, 29]);
+    }
+
+    /// Write a safetensors file whose header carries exactly `keys` (each a
+    /// 1-element F32 tensor). Only the header is ever read by the resolver.
+    fn write_header_fixture(name: &str, keys: &[String]) -> PathBuf {
+        use safetensors::tensor::{serialize_to_file, Dtype, TensorView};
+        let path = std::env::temp_dir().join(format!(
+            "mold-mistral3-{name}-{}-{}.safetensors",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let payload = 0.0f32.to_le_bytes();
+        let mut views = std::collections::HashMap::new();
+        for key in keys {
+            views.insert(
+                key.clone(),
+                TensorView::new(Dtype::F32, vec![1], &payload).unwrap(),
+            );
+        }
+        serialize_to_file(&views, &None, &path).unwrap();
+        path
+    }
+
+    fn language_model_keys(prefix: &str, through_layer: usize) -> Vec<String> {
+        let mut keys = vec![format!("{prefix}.embed_tokens.weight")];
+        for layer in 0..=through_layer {
+            keys.push(format!("{prefix}.layers.{layer}.input_layernorm.weight"));
+        }
+        keys
+    }
+
+    /// The encoder is identified by the tensors it needs, not by a shard
+    /// count: BFL ships it as eight `language_model.model.*` shards and
+    /// Comfy-Org ships the same weights as one `model.*` file.
+    #[test]
+    fn both_published_layouts_resolve_to_their_language_model_prefix() {
+        for prefix in MISTRAL3_LM_PREFIXES {
+            let path = write_header_fixture(
+                "layout",
+                &language_model_keys(prefix, last_required_layer()),
+            );
+            assert_eq!(
+                resolve_lm_prefix(std::slice::from_ref(&path)).unwrap(),
+                prefix,
+            );
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    /// A sharded encoder is resolved across its files, exactly as the streamed
+    /// load reads it.
+    #[test]
+    fn a_sharded_encoder_resolves_across_its_shards() {
+        let all = language_model_keys("language_model.model", last_required_layer());
+        let (head, tail) = all.split_at(all.len() / 2);
+        let first = write_header_fixture("shard1", head);
+        let second = write_header_fixture("shard2", tail);
+        assert_eq!(
+            resolve_lm_prefix(&[first.clone(), second.clone()]).unwrap(),
+            "language_model.model",
+        );
+        std::fs::remove_file(&first).ok();
+        std::fs::remove_file(&second).ok();
+    }
+
+    /// A truncated encoder must be refused at load with the missing layer
+    /// named, rather than failing mid-stream on layer 29 after minutes of
+    /// setup.
+    #[test]
+    fn an_encoder_missing_a_streamed_layer_is_refused_by_name() {
+        let path = write_header_fixture(
+            "truncated",
+            &language_model_keys("model", last_required_layer() - 1),
+        );
+        let error = resolve_lm_prefix(std::slice::from_ref(&path))
+            .expect_err("a truncated encoder must be refused")
+            .to_string();
+        assert!(
+            error.contains(&format!("layer {} is missing", last_required_layer())),
+            "unhelpful error: {error}",
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_checkpoint_without_a_language_model_is_refused() {
+        let path = write_header_fixture("no-lm", &["vision_tower.ln_pre.weight".to_string()]);
+        let error = resolve_lm_prefix(std::slice::from_ref(&path))
+            .expect_err("a checkpoint with no language model must be refused")
+            .to_string();
+        assert!(error.contains("no Mistral3 language model"), "{error}");
+        std::fs::remove_file(&path).ok();
+
+        assert!(resolve_lm_prefix(&[]).is_err());
     }
 
     #[test]
