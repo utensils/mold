@@ -14,6 +14,7 @@ import {
 } from "@studio/api/queuePlan";
 import { watchSelectedQueuePreview, type QueueJobProgress } from "@studio/api/generationSelection";
 import DevicePanel from "@studio/components/DevicePanel.vue";
+import { queueScopeLabel } from "@studio/lib/queuePlanPresentation";
 import QueuePlanWorkList from "@studio/components/QueuePlanWorkList.vue";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import SwipeActionRow from "@studio/components/SwipeActionRow.vue";
@@ -149,12 +150,6 @@ const durableBacklog = computed(() => {
   const depth = status.value?.queue_depth;
   return typeof depth === "number" && Number.isSafeInteger(depth) && depth >= 0 ? depth : null;
 });
-const runtimeWindow = computed(() => {
-  const capacity = status.value?.queue_capacity;
-  return typeof capacity === "number" && Number.isSafeInteger(capacity) && capacity > 0
-    ? capacity
-    : null;
-});
 const queueEntryIds = computed(() => queue.value.map((entry) => entry.id));
 const queueStatus = computed(() =>
   buildQueueStatusIndex([
@@ -168,10 +163,11 @@ const queueStatus = computed(() =>
 );
 const displayQueue = computed(() => [...queue.value].sort(compareNewestQueueEntry));
 const planOnlyWork = computed(() => queuePlanOnlyWork(queuePlan.value, queueEntryIds.value));
+const visibleQueueWork = computed(() => queue.value.length + planOnlyWork.value.length);
 const queueSummary = computed(() => {
-  const visibleWork = queue.value.length + planOnlyWork.value.length;
-  if (durableBacklog.value !== null) return `${Math.max(durableBacklog.value, visibleWork)} total`;
-  return `${visibleWork} loaded`;
+  if (durableBacklog.value !== null)
+    return `${Math.max(durableBacklog.value, visibleQueueWork.value)} total`;
+  return `${visibleQueueWork.value} loaded`;
 });
 const modelLabel = (name: string) => modelDisplayNameForId(name, installed.value);
 
@@ -1283,9 +1279,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <p class="mobile-empty-note" data-test="host-detail-queue-scope">
-          <template v-if="queueApiAvailable">{{ queue.length }} loaded</template>
-          <template v-else>Queue page unavailable</template>
-          <template v-if="runtimeWindow"> · Runtime window {{ runtimeWindow }}</template>
+          {{ queueScopeLabel(visibleQueueWork, durableBacklog, queueApiAvailable) }}
         </p>
         <div
           v-if="devices !== null || queuePlan !== null || deviceError"

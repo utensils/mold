@@ -3,6 +3,11 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { DeviceInfo } from "../api/devices";
 import type { QueuePlan, QueueWorkItem } from "../api/queuePlan";
 import { normalizeBlockedReason } from "../lib/queuePosition";
+import {
+  queueCompletionLabel,
+  queueLanePositionLabel,
+  queuePlanUpdateLabel,
+} from "../lib/queuePlanPresentation";
 
 const props = withDefaults(
   defineProps<{
@@ -95,16 +100,12 @@ const lifecycleNote = computed(() => {
   return "Live GPU controls are unavailable on this server.";
 });
 
-function shortId(id: string): string {
-  return id.length > 14 ? `…${id.slice(-12)}` : id;
-}
-
 function gib(bytes: number | null): string {
   return bytes === null ? "—" : `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
 function memoryLabel(device: DeviceInfo): string {
-  return `${gib(device.memory.used_bytes)} / ${gib(device.memory.total_bytes)}`;
+  return `${gib(device.memory.used_bytes)} of ${gib(device.memory.total_bytes)}`;
 }
 
 function stateLabel(device: DeviceInfo): string {
@@ -122,10 +123,18 @@ function planned(device: DeviceInfo): QueueWorkItem[] {
         (work) =>
           work.planned_lane_kind === "device" &&
           work.planned_device_id === device.id &&
+          work.work_id !== device.active_work_id &&
           !blockedReason(work),
       )
       .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? []
   );
+}
+
+function activeWorkLabel(device: DeviceInfo): string {
+  const work = props.plan?.work_items.find(
+    (candidate) => candidate.work_id === device.active_work_id,
+  );
+  return work ? workLabel(work) : "Generation in progress";
 }
 
 /**
@@ -150,11 +159,16 @@ function pinnedDevice(work: QueueWorkItem): DeviceInfo | null {
   );
 }
 
+function pinnedDeviceLabel(work: QueueWorkItem): string {
+  return pinnedDevice(work)?.name ?? "an unavailable machine";
+}
+
 function eta(work: QueueWorkItem): string {
-  const finish = work.estimated_finish_unix_ms;
-  if (finish == null) return "ETA pending";
-  const seconds = Math.max(0, Math.ceil((finish - nowUnixMs.value) / 1000));
-  return `~${seconds}s · ${work.estimate_confidence} confidence`;
+  return queueCompletionLabel(
+    work.estimated_finish_unix_ms,
+    work.estimate_confidence,
+    nowUnixMs.value,
+  );
 }
 
 function workKindLabel(kind: unknown): string {
@@ -170,12 +184,10 @@ function workLabel(work: QueueWorkItem): string {
 }
 
 function replanLabel(): string | null {
-  const deadline = props.plan?.next_replan_at_unix_ms;
-  if (deadline == null) return null;
-  return `Tentative plan · optimizing in ${Math.max(
-    0,
-    Math.ceil((deadline - nowUnixMs.value) / 1000),
-  )}s`;
+  return queuePlanUpdateLabel(
+    props.plan?.next_replan_at_unix_ms,
+    nowUnixMs.value,
+  );
 }
 
 function canToggle(): boolean {
@@ -217,7 +229,7 @@ onBeforeUnmount(() => {
     data-test="device-panel"
   >
     <header class="device-panel__head">
-      <span>Compute</span>
+      <span>Compute plan</span>
       <span
         v-if="replanLabel()"
         class="device-panel__tentative"
@@ -257,15 +269,14 @@ onBeforeUnmount(() => {
           </span>
         </div>
         <div class="device-card__meta">
-          <code :title="device.id">{{ shortId(device.id) }}</code>
           <span v-if="device.ordinal !== null">GPU {{ device.ordinal }}</span>
           <span>{{ stateLabel(device) }}</span>
         </div>
 
         <div class="device-card__metrics">
-          <span>VRAM {{ memoryLabel(device) }}</span>
+          <span>GPU memory {{ memoryLabel(device) }}</span>
           <span>
-            Utilization
+            GPU use
             {{
               device.telemetry.utilization_percent === null
                 ? "—"
@@ -283,21 +294,19 @@ onBeforeUnmount(() => {
           </span>
         </div>
         <div v-if="device.active_work_id" class="device-card__line">
-          <span class="device-card__line-label">Active</span>
-          <code class="device-card__line-value" :title="device.active_work_id">
-            {{ shortId(device.active_work_id) }}
-          </code>
+          <span class="device-card__line-label">Running now</span>
+          <span class="device-card__line-value">{{ activeWorkLabel(device) }}</span>
         </div>
         <ol
           v-if="planned(device).length"
           class="device-card__lane"
           data-test="device-lane"
         >
-          <li v-for="work in planned(device)" :key="work.work_id">
-            <span class="device-card__work" :title="work.work_id">
-              {{ work.work_id }} · {{ workLabel(work) }}
+          <li v-for="(work, index) in planned(device)" :key="work.work_id">
+            <span class="device-card__work">
+              {{ queueLanePositionLabel(index) }} · {{ workLabel(work) }}
             </span>
-            <span class="device-card__eta">· {{ eta(work) }}</span>
+            <span class="device-card__eta">{{ eta(work) }}</span>
           </li>
         </ol>
         <button
@@ -325,11 +334,11 @@ onBeforeUnmount(() => {
           <span>No matching compute device in this snapshot</span>
         </div>
         <ol class="device-card__lane">
-          <li v-for="work in unassignedDeviceWork" :key="work.work_id">
-            <span class="device-card__work" :title="work.work_id">
-              {{ work.work_id }} · {{ workLabel(work) }}
+          <li v-for="(work, index) in unassignedDeviceWork" :key="work.work_id">
+            <span class="device-card__work">
+              {{ queueLanePositionLabel(index) }} · {{ workLabel(work) }}
             </span>
-            <span class="device-card__eta">· {{ eta(work) }}</span>
+            <span class="device-card__eta">{{ eta(work) }}</span>
           </li>
         </ol>
       </article>
@@ -346,11 +355,11 @@ onBeforeUnmount(() => {
           <span>One task at a time</span>
         </div>
         <ol class="device-card__lane" data-test="cpu-utility-lane-list">
-          <li v-for="work in cpuUtilityWork" :key="work.work_id">
-            <span class="device-card__work" :title="work.work_id">
-              {{ work.work_id }} · {{ workLabel(work) }}
+          <li v-for="(work, index) in cpuUtilityWork" :key="work.work_id">
+            <span class="device-card__work">
+              {{ queueLanePositionLabel(index) }} · {{ workLabel(work) }}
             </span>
-            <span class="device-card__eta">· {{ eta(work) }}</span>
+            <span class="device-card__eta">{{ eta(work) }}</span>
           </li>
         </ol>
       </article>
@@ -364,11 +373,11 @@ onBeforeUnmount(() => {
           <span class="device-card__badge">OTHER</span>
         </div>
         <ol class="device-card__lane">
-          <li v-for="work in otherComputeWork" :key="work.work_id">
-            <span class="device-card__work" :title="work.work_id">
-              {{ work.work_id }} · {{ workLabel(work) }}
+          <li v-for="(work, index) in otherComputeWork" :key="work.work_id">
+            <span class="device-card__work">
+              {{ queueLanePositionLabel(index) }} · {{ workLabel(work) }}
             </span>
-            <span class="device-card__eta">· {{ eta(work) }}</span>
+            <span class="device-card__eta">{{ eta(work) }}</span>
           </li>
         </ol>
       </article>
@@ -381,9 +390,9 @@ onBeforeUnmount(() => {
     >
       <strong>Blocked</strong>
       <div v-for="work in blocked" :key="work.work_id">
-        {{ work.work_id }} · {{ blockedReason(work) }}
+        {{ workLabel(work) }} · {{ blockedReason(work) }}
         <template v-if="work.hard_pinned_device_id">
-          · pinned to {{ shortId(work.hard_pinned_device_id) }}
+          · pinned to {{ pinnedDeviceLabel(work) }}
           <button
             v-if="mutable"
             type="button"

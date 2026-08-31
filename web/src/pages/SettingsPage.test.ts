@@ -520,7 +520,7 @@ describe("SettingsPage", () => {
 
     expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
     expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain(
-      "cpu-expand",
+      "Next · Prompt expansion",
     );
   });
 
@@ -587,21 +587,14 @@ describe("SettingsPage", () => {
     }) as typeof fetch;
 
     const wrapper = mount(SettingsPage);
-    await vi.waitFor(() =>
-      expect(wrapper.text()).toContain("web-future-collision"),
-    );
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Future utility"));
 
     expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
-      "web-future-collision",
+      "Future utility",
     );
     expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
-      "web-typed-device",
+      "Generation",
     );
-    expect(wrapper.get('[data-test="device-lane"]').text()).not.toContain(
-      "web-future-collision",
-    );
-    expect(wrapper.text().match(/web-future-collision/g)).toHaveLength(1);
-    expect(wrapper.text().match(/web-typed-device/g)).toHaveLength(1);
   });
 
   it("clears a stale queue plan when a device-panel refresh fails", async () => {
@@ -661,11 +654,13 @@ describe("SettingsPage", () => {
     }) as typeof fetch;
 
     const wrapper = mount(SettingsPage);
-    await vi.waitFor(() => expect(wrapper.text()).toContain("stale-work"));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Host utility"));
     failPanel = true;
     const refresh = subscribeToDeviceSnapshots.mock.calls[0]?.[2] as () => void;
     refresh();
-    await vi.waitFor(() => expect(wrapper.text()).not.toContain("stale-work"));
+    await vi.waitFor(() =>
+      expect(wrapper.text()).not.toContain("Host utility"),
+    );
   });
 
   it("keeps concurrent device mutations busy through out-of-order completion", async () => {

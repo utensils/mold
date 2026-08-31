@@ -3246,6 +3246,14 @@ fn run_claimed_h3_generation(
         }
     };
 
+    // The private H3 route bypasses `process_job_with_sink`, but durable
+    // dispatch accounting is a generation-owner invariant rather than an
+    // engine implementation detail. Claim at the same allocation boundary as
+    // every other model so completion can settle the exact running row.
+    let Some(job) = claim_generation_dispatch(job) else {
+        return false;
+    };
+
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let _private_load_lock = match worker.model_load_lock.lock() {
         Ok(lock) => lock,
@@ -3879,33 +3887,10 @@ fn process_job_with_sink(
         return false;
     }
 
-    // Charge the attempt here, on the owner thread, immediately before the
-    // model load — the phase that can take the process down with it. Charging
-    // at replay instead would delete a job that merely waited behind a long
-    // render through a few deploys, having never touched a GPU.
-    if let Some(ticket) = job.journal.as_ref() {
-        match ticket.claim_dispatch() {
-            crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } => {
-                durable_generation_settlement::refuse_exhausted_dispatch_blocking(
-                    job,
-                    &model_name,
-                    attempts,
-                    cap,
-                );
-                return false;
-            }
-            crate::queue_journal::DispatchClaim::Fenced => {
-                durable_generation_settlement::refuse_fenced_dispatch(job, &job_id);
-                return false;
-            }
-            crate::queue_journal::DispatchClaim::Cancelled => {
-                finish_generation_cancelled(job, true);
-                return false;
-            }
-            crate::queue_journal::DispatchClaim::Granted
-            | crate::queue_journal::DispatchClaim::Untracked => {}
-        }
-    }
+    let Some(claimed_job) = claim_generation_dispatch(job) else {
+        return false;
+    };
+    job = claimed_job;
 
     // Every job gets a token, so a shutdown aborts it at the next inference
     // checkpoint instead of holding the deploy open. Registered through a
@@ -4707,6 +4692,39 @@ fn process_job_with_sink(
             );
             false
         }
+    }
+}
+
+/// Charge a durable generation attempt on its GPU owner immediately before
+/// model-specific allocation begins. Keeping this outside either engine route
+/// prevents a private model adapter from executing a queue row that completion
+/// can never settle.
+fn claim_generation_dispatch(job: GpuJob) -> Option<GpuJob> {
+    let Some(ticket) = job.journal.as_ref() else {
+        return Some(job);
+    };
+    let model_name = job.model.clone();
+    let job_id = job.id.clone();
+    match ticket.claim_dispatch() {
+        crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } => {
+            durable_generation_settlement::refuse_exhausted_dispatch_blocking(
+                job,
+                &model_name,
+                attempts,
+                cap,
+            );
+            None
+        }
+        crate::queue_journal::DispatchClaim::Fenced => {
+            durable_generation_settlement::refuse_fenced_dispatch(job, &job_id);
+            None
+        }
+        crate::queue_journal::DispatchClaim::Cancelled => {
+            finish_generation_cancelled(job, true);
+            None
+        }
+        crate::queue_journal::DispatchClaim::Granted
+        | crate::queue_journal::DispatchClaim::Untracked => Some(job),
     }
 }
 
@@ -6959,6 +6977,32 @@ mod tests {
             claimed_h3_job_fixture(id).await;
         let output = tempfile::tempdir().unwrap();
         job.output_dir = Some(output.path().to_path_buf());
+        let durable_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            durable_db.clone(),
+            Some(output.path()),
+            "test-instance",
+        ));
+        // `record_for_test` intentionally refuses raw private-H3 admissions:
+        // production seals their durable media first. The ticket state
+        // machine itself is model-neutral, so mint a media-free row and attach
+        // its real ticket to the private owner route under test.
+        let mut durable_request = job.request.clone();
+        durable_request.model = "flux-dev:q4".to_string();
+        job.journal = Some(
+            journal
+                .record_for_test(crate::queue_journal::JournalAdmission {
+                    id,
+                    request: &durable_request,
+                    output_dir: Some(output.path()),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    batch_child: false,
+                })
+                .expect("fake H3 generation is durably queued"),
+        );
+        job.metadata_db = durable_db;
         let (runs, drops) = install_fake_h3_attempt(&mut job, FakeH3Outcome::Success);
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
         let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
@@ -6975,6 +7019,10 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 1);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(settlements.load(Ordering::SeqCst), 1);
+        assert!(
+            journal.list_all().is_empty(),
+            "the private H3 owner must claim and settle its durable queue row"
+        );
         assert_eq!(queue.pending(), 1);
         assert!(registry.snapshot().entries.is_empty());
         assert_eq!(result.response.gpu, Some(0));
@@ -11470,6 +11518,39 @@ mod tests {
         let event_json = serde_json::to_string(&event).unwrap();
         assert!(!event_json.contains("runtime-secret"));
         assert!(!event_json.contains("source.mp4"));
+    }
+
+    #[test]
+    fn generic_generation_owner_charges_the_shared_durable_dispatch_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(tmp.path()),
+            "test-instance",
+        ));
+        let mut job = fake_upscale_job(Config::default(), "unused");
+        job.id = "generic-owner-route".to_string();
+        job.model = "flux-dev:q4".to_string();
+        job.journal = Some(
+            journal
+                .record_for_test(crate::queue_journal::JournalAdmission {
+                    id: &job.id,
+                    request: &job.request,
+                    output_dir: Some(tmp.path()),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    batch_child: false,
+                })
+                .expect("test generation is durable"),
+        );
+
+        let claimed = claim_generation_dispatch(job).expect("generic owner receives its claim");
+        let row = journal.list_all().into_iter().next().unwrap();
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Running);
+        assert_eq!(row.dispatch_attempts, 1);
+        assert_eq!(claimed.model, "flux-dev:q4");
     }
 
     /// A replayed job has no client, so the gallery file IS the delivery.
