@@ -313,6 +313,7 @@ mod tests {
                 }]
             };
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images,
@@ -18618,6 +18619,7 @@ mod tests {
         let waveform = vec![0x89, 0x50, 0x4E, 0x47];
         let wav = b"RIFF....WAVEfmt ".to_vec();
         let response = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: Some(mold_core::AudioData {
                 data: wav.clone(),
@@ -18679,6 +18681,7 @@ mod tests {
             index: 0,
         };
         let still = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![img()],
@@ -18698,6 +18701,7 @@ mod tests {
         assert_eq!(headers[axum::http::header::CONTENT_TYPE], "image/png");
 
         let clip = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),

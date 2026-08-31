@@ -312,6 +312,7 @@ mod tests {
 
     fn req() -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

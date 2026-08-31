@@ -501,7 +501,10 @@ fn save_durable_batch_download(
             None,
         );
     }
-    if preview && !format.is_video() && !format.is_audio() {
+    // `bytes` is the artifact, and only a raster artifact can be previewed in
+    // a terminal. A mesh and an audio print each have a sidecar tile, which
+    // their own save paths preview instead.
+    if preview && !format.is_video() && !format.is_audio() && !format.is_mesh() {
         preview_image(bytes);
     }
     Ok(())
@@ -836,6 +839,10 @@ pub struct Ltx2Options {
     /// Advanced multimodal-guider overrides. `None` keeps every pipeline
     /// constant, which is what makes existing seeds reproducible.
     pub guidance_overrides: Option<Ltx2GuidanceOverrides>,
+    /// 3-D controls. `None` for every raster render — a non-mesh family
+    /// REFUSES a present `mesh` field rather than ignoring it, so this must
+    /// stay absent unless the user actually passed a 3-D flag.
+    pub mesh: Option<mold_core::MeshRequestOptions>,
     /// Wan flow shift (#782). `None` keeps the per-tier default.
     pub sample_shift: Option<f64>,
     /// Wan Lightning distill strengths (#795). `None` = 1.0.
@@ -980,6 +987,7 @@ pub async fn run(
         spatial_upscale,
         temporal_upscale,
         guidance_overrides,
+        mesh: mesh_options,
         sample_shift,
         distill_strength_high,
         distill_strength_low,
@@ -1260,6 +1268,7 @@ pub async fn run(
                     })?;
                     let control = ic_lora_control.clone().unwrap_or_else(|| "hdr".to_string());
                     let mut probe_req = GenerateRequest {
+                        mesh: None,
                         video_only: None,
                         collection: None,
                         tags: None,
@@ -1423,6 +1432,7 @@ pub async fn run(
     }
 
     let mut req = GenerateRequest {
+        mesh: mesh_options,
         collection: resolved_filing.collection,
         tags: resolved_filing.tags,
         title,
@@ -1821,8 +1831,31 @@ pub async fn run(
         collected.finish()
     };
 
-    // Output: audio, video, or image.
-    if let Some(ref audio) = response.audio {
+    // Output: mesh, audio, video, or image — narrowest kind first, matching
+    // the probe order the client and server both use.
+    if let Some(ref mesh) = response.mesh {
+        if batch > 1 {
+            // Batch meshes were persisted per item before aggregation.
+        } else if piped && output.is_none() {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&mesh.data)?;
+            stdout.flush()?;
+        } else {
+            save_and_preview_mesh(
+                mesh,
+                &output,
+                model,
+                1,
+                0,
+                preview,
+                Some(PersistArgs {
+                    request: &req,
+                    seed_used: response.seed_used,
+                    generation_time_ms: response.generation_time_ms,
+                }),
+            )?;
+        }
+    } else if let Some(ref audio) = response.audio {
         // --- Audio-only output (LTX-2 text-to-audio) ---
         if batch > 1 {
             // Batch tracks were persisted per item before aggregation.
@@ -2197,6 +2230,11 @@ fn default_output_format(
     if is_h3 {
         return OutputFormat::Mp4;
     }
+    // A mesh family emits GLB and nothing else, so this is not a default the
+    // request can outrank — the same shape as the H3 rule above.
+    if family == Some(mold_core::manifest::HUNYUAN3D_FAMILY) {
+        return OutputFormat::Glb;
+    }
     if audio_only_pipeline && format == OutputFormat::Png {
         return OutputFormat::Wav;
     }
@@ -2252,6 +2290,8 @@ fn container_label(format: OutputFormat) -> &'static str {
         OutputFormat::Webp => "WebP",
         OutputFormat::Mp4 => "MP4",
         OutputFormat::Wav => "WAV",
+        OutputFormat::Glb => "GLB",
+        OutputFormat::Obj => "OBJ",
     }
 }
 
@@ -3096,6 +3136,7 @@ struct BatchOutputs {
     images: Vec<ImageData>,
     video: Option<mold_core::VideoData>,
     audio: Option<mold_core::AudioData>,
+    mesh: Option<mold_core::MeshData>,
     total_time_ms: u64,
     last_seed_used: u64,
     last_model: String,
@@ -3123,9 +3164,24 @@ impl BatchOutputs {
         self.last_seed_used = response.seed_used;
         self.last_model = response.model.clone();
 
-        // Audio is probed first for the same reason every other surface probes
-        // it first: an audio print has no frames and no raster, so a
-        // video-shaped or image-shaped probe would miss it entirely.
+        // Narrowest kind first, for the same reason every other surface
+        // orders its probes that way: a mesh has no frames, no sample rate
+        // and no raster, so a wider probe would miss it entirely.
+        if let Some(mesh) = response.mesh.as_ref() {
+            if ctx.batch > 1 {
+                save_and_preview_mesh(
+                    mesh,
+                    ctx.output,
+                    ctx.model,
+                    ctx.batch,
+                    index,
+                    ctx.preview,
+                    persist,
+                )?;
+            }
+            self.mesh = response.mesh.take();
+        }
+
         if let Some(audio) = response.audio.as_ref() {
             if ctx.batch > 1 {
                 save_and_preview_audio(
@@ -3175,10 +3231,11 @@ impl BatchOutputs {
         Ok(())
     }
 
-    /// The aggregate handed to the single-output code path. Video and audio
-    /// carry the last item's artifact; every image is retained.
+    /// The aggregate handed to the single-output code path. Video, audio and
+    /// mesh carry the last item's artifact; every image is retained.
     fn finish(self) -> GenerateResponse {
         GenerateResponse {
+            mesh: self.mesh,
             request_warnings: Vec::new(),
             audio: self.audio,
             images: self.images,
@@ -3367,6 +3424,93 @@ fn save_and_preview_audio(
         preview_image(&audio.thumbnail);
     }
     Ok(())
+}
+
+fn save_and_preview_mesh(
+    mesh: &mold_core::MeshData,
+    output: &Option<String>,
+    model: &str,
+    batch: u32,
+    index: u32,
+    preview: bool,
+    persist: Option<PersistArgs<'_>>,
+) -> anyhow::Result<()> {
+    if output.as_deref() == Some("-") {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&mesh.data)?;
+        stdout.flush()?;
+        return Ok(());
+    }
+    let slug = title_slug_for(persist.as_ref());
+    let filename = batch_media_filename(
+        output,
+        model,
+        mesh.format.extension(),
+        batch,
+        index,
+        slug.as_deref(),
+    );
+
+    if std::path::Path::new(&filename).exists() {
+        status!("{} Overwriting: {}", theme::icon_alert(), filename);
+    }
+    std::fs::write(&filename, &mesh.data)?;
+    let size = mesh.bounds_max[0] - mesh.bounds_min[0];
+    status!(
+        "{} Saved: {} ({} verts, {} tris, {}{:.2} units wide)",
+        theme::icon_done(),
+        filename.bold(),
+        mesh.vertex_count,
+        mesh.face_count,
+        if mesh.textured { "textured, " } else { "" },
+        size,
+    );
+    cache_mesh_poster_thumbnail(std::path::Path::new(&filename), &mesh.poster);
+    if let Some(persist) = persist {
+        crate::metadata_db::record_local_save(
+            std::path::Path::new(&filename),
+            persist.request,
+            persist.seed_used,
+            persist.generation_time_ms,
+            mesh.format,
+            // A mesh has no raster size; the row records the POSTER's, which
+            // is what the gallery grid lays out. Same contract as audio.
+            Some((mesh.poster_width, mesh.poster_height)),
+            None,
+        );
+    }
+    if preview && !mesh.poster.is_empty() {
+        preview_image(&mesh.poster);
+    }
+    Ok(())
+}
+
+/// Mirror of [`cache_audio_waveform_thumbnail`]: a locally saved `.glb` has
+/// no frame either surface can decode, so the poster has to be written to
+/// the shared cache at save time or the TUI and the desktop app both show a
+/// placeholder for a print that has a perfectly good tile.
+fn cache_mesh_poster_thumbnail(saved: &std::path::Path, png_bytes: &[u8]) {
+    if png_bytes.is_empty() {
+        return;
+    }
+    let Some(leaf) = saved.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let thumb_dir = mold_core::Config::mold_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
+        .join("cache")
+        .join("thumbnails");
+    if std::fs::create_dir_all(&thumb_dir).is_err() {
+        return;
+    }
+    for path in mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, leaf) {
+        if let Err(error) = std::fs::write(&path, png_bytes) {
+            tracing::warn!(
+                "failed to cache mesh poster thumbnail {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 fn cache_audio_waveform_thumbnail(saved: &std::path::Path, png_bytes: &[u8]) {
@@ -4686,6 +4830,7 @@ mod tests {
             Some(42),
             1,
             Ltx2Options {
+                mesh: None,
                 frames: None,
                 predict_duration: false,
                 fps: None,
@@ -5041,6 +5186,7 @@ mod tests {
         let prompts = vec!["first clip".to_string(), "second clip".to_string()];
         let batch_requests = local_batch_requests(&request, 2, 91, Some(&prompts));
         let response = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),
@@ -6260,6 +6406,7 @@ mod audio_batch_passthrough_tests {
 
     fn audio_response(seed: u64, bytes: &[u8]) -> GenerateResponse {
         GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: Some(mold_core::AudioData {
                 data: bytes.to_vec(),

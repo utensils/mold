@@ -161,6 +161,22 @@ pub fn runtime_defaults_for_family(
             frames: None,
             fps: None,
         },
+        // Image-to-3D. `width`/`height` record the image-CONDITIONING size the
+        // checkpoints letterbox their source to (`image_processor.size` in the
+        // upstream config), not an output canvas: a mesh has none. `frames`
+        // and `fps` must stay `None` — `families_roundtrip` asserts they agree
+        // with `Family::is_video()`, and a mesh is not video. The mini tier
+        // conditions at 1022; the 1.1B tiers at 512, which is what the
+        // family-level default names.
+        "hunyuan3d" | "hunyuan-3d" => CatalogRuntimeDefaults {
+            width: 512,
+            height: 512,
+            steps: 5,
+            guidance: 5.0,
+            is_schnell: None,
+            frames: None,
+            fps: None,
+        },
         _ => CatalogRuntimeDefaults {
             width: 1024,
             height: 1024,

@@ -278,6 +278,7 @@ import {
 import {
   galleryMediaPath,
   isAudioItem,
+  isMeshItem,
   isVideoItem,
   streamableMediaUrl,
   thumbnailPath,
@@ -12650,10 +12651,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     data-test="gallery-thumbnail-pending"
                   />
                   <span
-                    v-if="isVideoItem(print) || isAudioItem(print)"
+                    v-if="isVideoItem(print) || isAudioItem(print) || isMeshItem(print)"
                     class="gallery-video-badge"
                     aria-hidden="true"
-                    >{{ isAudioItem(print) ? "♪" : "▶" }}</span
+                    >{{ isMeshItem(print) ? "◈" : isAudioItem(print) ? "♪" : "▶" }}</span
                   >
                   <span
                     v-if="

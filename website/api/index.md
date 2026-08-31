@@ -605,7 +605,7 @@ and cannot recover their original boundaries, so servers must continue sending
 this as one joined field until a future structured warning encoding replaces it.
 :::
 
-### Video and audio responses
+### Mesh, video and audio responses
 
 A video render returns the encoded clip itself, with `x-mold-video-frames`,
 `x-mold-video-fps`, `x-mold-video-width`, `x-mold-video-height`, and (when
@@ -647,6 +647,32 @@ server rendered for gallery grids; audio has no dimensions of its own, and
 the tile's bytes cannot ride along in a body that is already the WAV. Probe
 `x-mold-audio-sample-rate` before the video headers: an audio print has no
 frames, so a video-shaped probe falls through and mislabels the response.
+
+A 3-D render returns the binary glTF itself as
+`content-type: model/gltf-binary`, never its poster tile:
+
+```http
+HTTP/1.1 200 OK
+content-type: model/gltf-binary
+x-mold-seed-used: 42
+x-mold-mesh-format: glb
+x-mold-mesh-vertices: 24576
+x-mold-mesh-faces: 49152
+x-mold-mesh-textured: false
+x-mold-mesh-poster-width: 512
+x-mold-mesh-poster-height: 512
+```
+
+The `x-mold-mesh-poster-*` headers describe the PNG the server rendered for
+gallery grids, exactly as the audio ones describe the waveform tile: a mesh
+has no dimensions of its own, and the tile cannot ride along in a body that
+is already the GLB.
+
+**Probe order is mesh, then audio, then video — narrowest first.** Each of
+these artifacts is missing whatever the next probe keys on: a mesh has no
+sample rate and no frames, an audio print has no frames. A client that probes
+in any other order falls through to the image branch and hands its caller
+glTF or WAV bytes labelled as a picture.
 
 ### MiniMax H3 reference uploads
 

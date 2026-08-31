@@ -310,6 +310,7 @@ pub enum RuntimeSemanticVariable {
     FluxKeepTransformer,
     H3TurboAdapter,
     H3TurboTier,
+    Hunyuan3dDecodeChunks,
     KeepTeRam,
     LongPrompts,
     LoraBypass,
@@ -698,6 +699,7 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_EAGER" => RuntimeSemanticVariable::Eager,
         "MOLD_FLUX_DELTA_CACHE" => RuntimeSemanticVariable::FluxDeltaCache,
         "MOLD_FLUX_KEEP_TRANSFORMER" => RuntimeSemanticVariable::FluxKeepTransformer,
+        "MOLD_HUNYUAN3D_DECODE_CHUNKS" => RuntimeSemanticVariable::Hunyuan3dDecodeChunks,
         "MOLD_H3_TURBO_ADAPTER" => RuntimeSemanticVariable::H3TurboAdapter,
         "MOLD_H3_TURBO_TIER" => RuntimeSemanticVariable::H3TurboTier,
         "MOLD_KEEP_TE_RAM" => RuntimeSemanticVariable::KeepTeRam,
@@ -3093,16 +3095,30 @@ fn build_plan(
     }
 
     let predicted_vram = memory.peak_memory_bytes.max(pending_dependency_peak);
+    // A 3-D render's dominant HOST cost is something no component path
+    // accounts for: the full occupancy grid, which the decode loop copies back
+    // chunk by chunk and accumulates, plus the extracted mesh. At octree 384
+    // that is ~270 MB the component walk above cannot see, because it belongs
+    // to no weight file.
+    let mesh_host = if context.family == mold_core::manifest::HUNYUAN3D_FAMILY {
+        crate::hunyuan3d_admission::host_peak_bytes(
+            crate::hunyuan3d_admission::Hunyuan3dShape::from_request(context.request),
+        )
+    } else {
+        0
+    };
     let predicted_host = host_bytes_by_path
         .values()
         .fold(BASE_HOST_TRANSIENT, |total, bytes| {
             total.saturating_add(*bytes)
-        });
+        })
+        .saturating_add(mesh_host);
     let predicted_warm_host = recurring_host_bytes_by_path
         .values()
         .fold(BASE_HOST_TRANSIENT, |total, bytes| {
             total.saturating_add(*bytes)
-        });
+        })
+        .saturating_add(mesh_host);
     let fingerprint = execution_fingerprint(
         context.model,
         device,

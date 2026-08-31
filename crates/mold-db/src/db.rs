@@ -976,6 +976,8 @@ fn format_to_str(f: OutputFormat) -> &'static str {
         OutputFormat::Webp => "webp",
         OutputFormat::Mp4 => "mp4",
         OutputFormat::Wav => "wav",
+        OutputFormat::Glb => "glb",
+        OutputFormat::Obj => "obj",
     }
 }
 
@@ -988,6 +990,8 @@ fn format_from_str(s: &str) -> Option<OutputFormat> {
         "webp" => OutputFormat::Webp,
         "mp4" => OutputFormat::Mp4,
         "wav" => OutputFormat::Wav,
+        "glb" => OutputFormat::Glb,
+        "obj" => OutputFormat::Obj,
         _ => return None,
     })
 }

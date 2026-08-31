@@ -60,6 +60,11 @@ pub enum SeedContract {
 pub enum MediaKind {
     Image,
     Video,
+    /// A 3-D mesh artifact. Disjoint from both raster kinds — no frames, no
+    /// canvas — so every duration and resolution projection must treat it the
+    /// way it treats a still, while every "decode this as pixels" path must
+    /// stop.
+    Mesh,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -521,6 +526,54 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
             "crates/mold-inference/src/wuerstchen/pipeline.rs::wuerstchen_loads_vqgan_tensors_through_shared_pool",
         ),
     },
+
+    FamilyBatchCapability {
+        family: "hunyuan3d",
+        aliases: &["hunyuan-3d"],
+        // Nothing here is hardware-qualified yet. The whole shape path is
+        // dense f32/bf16 matmuls and attention with no custom kernel, so it
+        // is portable by construction — but `Supported` is a claim about
+        // measured performance on real weights, and the UAT has not run.
+        // `CorrectnessOnly` is the honest answer until it does.
+        backends: BackendApplicability {
+            cuda: BackendQualification::CorrectnessOnly,
+            metal: BackendQualification::CorrectnessOnly,
+            cpu: BackendQualification::CorrectnessOnly,
+        },
+        placement: ComponentPlacementCapability {
+            // There is no text encoder in the family at all, and the shape
+            // VAE's decoder is the single most compute-heavy stage — pushing
+            // it to the CPU would turn a seconds-long decode into minutes.
+            text_encoder_cpu: false,
+            vae_cpu: false,
+            audio_components_cpu: false,
+        },
+        // One 1.1B DiT at hidden size 1024. There are no blocks large enough
+        // for streaming offload to pay for itself.
+        block_offload: false,
+        // The shape VAE is not a raster VAE: it decodes an occupancy field by
+        // cross-attending query points, and it is already chunked over those
+        // points by `MOLD_HUNYUAN3D_DECODE_CHUNKS`. The shared image tiler has
+        // nothing to tile.
+        tiled_vae: TiledVaeCapability::Unsupported,
+        execution: SINGLETON,
+        determinism: EXACT,
+        seed_contract: CPU_SEED,
+        media: MediaKind::Mesh,
+        workflows: WorkflowCapabilities {
+            // A source image is not optional here — it is the only
+            // conditioning the family has.
+            source: true,
+            edit_references: false,
+            lora: false,
+            generated_audio: false,
+            chain: false,
+        },
+        tier1: TIER1,
+        tier2: deep(
+            "crates/mold-inference/src/hunyuan3d/transformer.rs::forward_preserves_the_channels_before_length_layout",
+        ),
+    },
 ];
 
 pub fn production_family_capabilities() -> &'static [FamilyBatchCapability] {
@@ -580,6 +633,7 @@ mod tests {
             "ltx2",
             "wan",
             "wuerstchen",
+            "hunyuan3d",
         ];
         #[cfg(feature = "h3")]
         let expected = {

@@ -12,6 +12,7 @@ import type {
 } from "@studio/lib/generationReferences";
 import type { Ltx2GuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
+import type { OutputFormat as WireOutputFormat } from "@studio/lib/generated/generationProfileV1";
 import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
@@ -320,7 +321,22 @@ export interface ModelEntry {
 
 // ── Generation ───────────────────────────────────────────────────────────
 
-export type OutputFormat = "png" | "jpeg" | "webp" | "gif" | "apng" | "mp4" | "wav";
+/// Re-exported from the GENERATED mirror of `mold_core::OutputFormat` rather
+/// than restated here.
+///
+/// This file used to declare its own copy, and in #1495 that copy went stale:
+/// `web/src/types.ts` gained `glb` and this one did not, so the desktop build
+/// failed on a comparison TypeScript could prove was always false. That is the
+/// lucky outcome — the same divergence in `generationProfile.ts`'s runtime
+/// format gate silently discarded a whole server-authored profile instead.
+///
+/// An alias cannot drift. Adding a variant in Rust and regenerating reaches
+/// every surface at once.
+///
+/// `obj` is never a STORED format — mold only produces one as a gallery
+/// export — but it is in the union so a hand-placed `.obj` classifies as a
+/// mesh rather than falling through to the image branch.
+export type OutputFormat = WireOutputFormat;
 
 /** Solver override, spelled exactly as mold-core's kebab-case enum plus a
  * `"default"` sentinel meaning "omit the field". `ddim` / `euler-ancestral`

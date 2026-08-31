@@ -271,6 +271,8 @@ const MEDIA_MIME_BY_EXTENSION: Record<string, string> = {
   mp4: "video/mp4",
   webm: "video/webm",
   wav: "audio/wav",
+  glb: "model/gltf-binary",
+  obj: "model/obj",
 };
 
 /** MIME type for a gallery filename — native byte fetches carry no header. */
@@ -539,3 +541,21 @@ export const isVideoItem = (item: GalleryImage): boolean =>
  */
 export const isAudioItem = (item: GalleryImage): boolean =>
   item.format === "wav" || item.filename.toLowerCase().endsWith(".wav");
+
+/**
+ * Whether a gallery print is a 3-D mesh. Separate from both raster predicates
+ * for the same reason `isAudioItem` is separate from `isVideoItem`: a mesh has
+ * neither frames nor pixels, so every `<video>`, `<img>`, ▶ badge and
+ * frame-seeking path must keep reading it as "not that" while it gets its own
+ * viewer. Grids show the poster tile the save path wrote; only the lightbox
+ * loads the geometry.
+ */
+export const isMeshItem = (item: GalleryImage): boolean => {
+  const lower = item.filename.toLowerCase();
+  return (
+    item.format === "glb" ||
+    item.format === "obj" ||
+    lower.endsWith(".glb") ||
+    lower.endsWith(".obj")
+  );
+};

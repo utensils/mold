@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MeshViewer from "@studio/components/MeshViewer.vue";
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import {
   galleryThumbnailScheduler,
@@ -17,8 +18,12 @@ const props = withDefaults(
   defineProps<{
     path: string;
     video?: boolean;
+    /** Render as a 3-D mesh viewer. Mutually exclusive with `video`/`audio`. */
+    mesh?: boolean;
     /** Audio-only print: renders a transport instead of a raster element. */
     audio?: boolean;
+    /** Poster shown while a mesh loads, and kept on failure. */
+    poster?: string;
     alt?: string;
     controls?: boolean;
     /** Explicit host to fetch from; defaults to the primary connection. */
@@ -33,6 +38,7 @@ const props = withDefaults(
   }>(),
   {
     video: false,
+    mesh: false,
     audio: false,
     alt: "",
     controls: false,
@@ -96,7 +102,9 @@ async function load() {
           })()
         : await fullSizeMediaUrl(props.path, {
             ...options,
-            allowLegacyBlob: !props.video && !props.audio,
+            // A mesh is fetched whole by the viewer, exactly as audio is,
+            // so it may not take the legacy blob path either.
+            allowLegacyBlob: !props.video && !props.audio && !props.mesh,
             video: props.video,
           });
       if (epoch === loadEpoch) src.value = url;
@@ -149,6 +157,13 @@ onUnmounted(() => {
     loop
     playsinline
     disablepictureinpicture
+  />
+  <MeshViewer
+    v-else-if="mesh && src"
+    :src="src"
+    v-bind="poster ? { poster } : {}"
+    :alt="alt"
+    class="h-full w-full"
   />
   <audio v-else-if="audio && src" :src="src" class="w-full" controls />
   <img

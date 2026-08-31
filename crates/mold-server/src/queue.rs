@@ -549,6 +549,79 @@ pub(crate) fn save_audio_to_dir(
     Some(filename)
 }
 
+/// Publish a mesh into the gallery.
+///
+/// Shaped exactly like [`save_audio_to_dir`], and for the same reason: the
+/// primary write is an ordinary single-file gallery publication, and the only
+/// extra work is a sidecar tile that must exist at save time because nothing
+/// downstream can render one on demand. A glTF buffer has no raster frame,
+/// so without the poster the gallery would show a placeholder forever.
+///
+/// `save_video_to_dir` is reused for the primary write rather than
+/// duplicated: it already owns filename allocation, the durable archive
+/// record, the rollback that deletes the file when the archive fails, and the
+/// `GalleryAdded` event. None of that is raster-specific.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_mesh_to_dir(
+    dir: &std::path::Path,
+    bytes: &[u8],
+    poster_png: &[u8],
+    format: OutputFormat,
+    model: &str,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+) -> Option<String> {
+    let filename = save_video_to_dir(
+        dir,
+        bytes,
+        // No GIF preview: there is no motion to preview, and the poster below
+        // is what every grid actually lays out.
+        &[],
+        format,
+        model,
+        metadata,
+        generation_time_ms,
+        db,
+        events,
+        gallery_gate,
+    )?;
+    if !poster_png.is_empty() {
+        save_mesh_poster_thumbnail(&filename, poster_png);
+    }
+    Some(filename)
+}
+
+pub(crate) fn save_mesh_poster_thumbnail(filename: &str, png_bytes: &[u8]) {
+    let thumb_dir = mold_core::Config::mold_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
+        .join("cache")
+        .join("thumbnails");
+    save_mesh_poster_thumbnail_to(&thumb_dir, filename, png_bytes);
+}
+
+/// Testable inner of [`save_mesh_poster_thumbnail`] with an explicit cache
+/// directory, so unit tests don't race on `MOLD_HOME`.
+fn save_mesh_poster_thumbnail_to(thumb_dir: &std::path::Path, filename: &str, png_bytes: &[u8]) {
+    if let Err(e) = std::fs::create_dir_all(thumb_dir) {
+        tracing::warn!(
+            "failed to create thumbnail cache dir {}: {e}",
+            thumb_dir.display()
+        );
+        return;
+    }
+    for thumb_path in mold_core::media_paths::mesh_poster_thumbnail_paths(thumb_dir, filename) {
+        if let Err(e) = std::fs::write(&thumb_path, png_bytes) {
+            tracing::warn!(
+                "failed to write mesh poster thumbnail {}: {e}",
+                thumb_path.display()
+            );
+        }
+    }
+}
+
 pub(crate) fn save_audio_waveform_thumbnail(filename: &str, png_bytes: &[u8]) {
     let thumb_dir = mold_core::Config::mold_dir()
         .unwrap_or_else(|| std::path::PathBuf::from(".mold"))
@@ -1202,6 +1275,7 @@ async fn upscale_generated_image_on_single_worker(
     let mut response = mold_core::GenerateResponse {
         request_warnings: Vec::new(),
         audio: None,
+        mesh: None,
         images: vec![],
         video: None,
         generation_time_ms: 0,
@@ -1279,11 +1353,57 @@ pub(crate) fn build_sse_complete_event(
     // as-built, image metadata gets the payload's actual dimensions.
     let event_metadata = metadata.map(|meta| {
         let mut meta = meta.clone();
-        if response.video.is_none() {
+        // Only a raster print's metadata records the payload's own
+        // dimensions. A clip already carries them, and neither audio nor a
+        // mesh has any — `img` there is the sidecar tile, not the artifact.
+        if response.video.is_none() && response.audio.is_none() && response.mesh.is_none() {
             apply_output_dimensions_to_metadata(&mut meta, img);
         }
         Box::new(meta)
     });
+    if let Some(ref mesh) = response.mesh {
+        return SseCompleteEvent {
+            request_warnings: response.request_warnings.clone(),
+            image: if include_media {
+                b64.encode(&mesh.data)
+            } else {
+                String::new()
+            },
+            format: mesh.format,
+            // As with audio, the raster dimensions a client lays the tile out
+            // with are the POSTER's. A mesh has none of its own.
+            width: mesh.poster_width,
+            height: mesh.poster_height,
+            original_image: None,
+            original_width: None,
+            original_height: None,
+            seed_used: response.seed_used,
+            generation_time_ms: response.generation_time_ms,
+            model: response.model.clone(),
+            video_frames: None,
+            video_fps: None,
+            video_thumbnail: None,
+            video_gif_preview: None,
+            video_has_audio: false,
+            video_duration_ms: None,
+            video_audio_sample_rate: None,
+            video_audio_channels: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+            audio_duration_ms: None,
+            audio_thumbnail: None,
+            mesh_vertices: Some(mesh.vertex_count),
+            mesh_faces: Some(mesh.face_count),
+            mesh_textured: mesh.textured,
+            mesh_poster: include_media.then(|| b64.encode(&mesh.poster)),
+            mesh_bounds_min: Some(mesh.bounds_min),
+            mesh_bounds_max: Some(mesh.bounds_max),
+            gpu: response.gpu,
+            filename: saved.output.clone(),
+            original_filename: None,
+            metadata: event_metadata,
+        };
+    }
     if let Some(ref audio) = response.audio {
         return SseCompleteEvent {
             request_warnings: response.request_warnings.clone(),
@@ -1315,6 +1435,12 @@ pub(crate) fn build_sse_complete_event(
             audio_channels: Some(audio.channels),
             audio_duration_ms: Some(audio.duration_ms),
             audio_thumbnail: include_media.then(|| b64.encode(&audio.thumbnail)),
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             gpu: response.gpu,
             filename: saved.output.clone(),
             original_filename: None,
@@ -1354,6 +1480,12 @@ pub(crate) fn build_sse_complete_event(
             video_duration_ms: video.duration_ms,
             video_audio_sample_rate: video.audio_sample_rate,
             video_audio_channels: video.audio_channels,
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             gpu: response.gpu,
             filename: saved.output.clone(),
             original_filename: None,
@@ -1390,6 +1522,12 @@ pub(crate) fn build_sse_complete_event(
             video_duration_ms: None,
             video_audio_sample_rate: None,
             video_audio_channels: None,
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             gpu: response.gpu,
             filename: saved.output.clone(),
             original_filename: saved.original.clone(),
@@ -2141,12 +2279,16 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             #[cfg(feature = "metrics")]
             crate::metrics::record_generation(&request.model, inference_duration);
 
-            if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
+            if response.images.is_empty()
+                && response.video.is_none()
+                && response.audio.is_none()
+                && response.mesh.is_none()
+            {
                 drop(request);
                 durable_generation_settlement::fail_async(
                     job,
                     DurableDisposition::Hold { retryable: true },
-                    "generation error: engine returned no images, video, or audio",
+                    "generation error: engine returned no images, video, audio, or mesh",
                 )
                 .await;
                 return;
@@ -2174,12 +2316,28 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     height: audio.thumbnail_height,
                     index: 0,
                 }
+            } else if let Some(ref mesh) = response.mesh {
+                // The poster PNG stands in for the raster payload, exactly as
+                // the waveform does for audio. The real glTF bytes are re-read
+                // from `response.mesh` by `build_sse_complete_event`.
+                ImageData {
+                    data: mesh.poster.clone(),
+                    format: OutputFormat::Png,
+                    width: mesh.poster_width,
+                    height: mesh.poster_height,
+                    index: 0,
+                }
             } else {
                 unreachable!("checked above");
             };
             let mut original_img = None;
+            // Post-generation upscaling is a RASTER operation. Every non-image
+            // kind reaches here with `img` holding a sidecar tile, and
+            // upscaling that would replace the artifact with a bigger picture
+            // of its own thumbnail.
             if response.video.is_none()
                 && response.audio.is_none()
+                && response.mesh.is_none()
                 && requested_post_upscale_model(&request).is_some()
             {
                 let upscale_result = upscale_generated_image_on_single_worker(
@@ -2247,7 +2405,31 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 let db = state.metadata_db.clone();
                 let events = state.events.clone();
                 let gallery_gate = state.gallery_publication_gate.clone();
-                let save_task = if let Some(ref audio) = response.audio {
+                let save_task = if let Some(ref mesh) = response.mesh {
+                    let mesh_data = mesh.data.clone();
+                    let mesh_poster = mesh.poster.clone();
+                    let mesh_format = mesh.format;
+                    // A mesh has no raster of its own; record the poster
+                    // tile's size so the gallery grid has a real aspect ratio
+                    // rather than the request's (meaningless) canvas.
+                    let mut mesh_metadata = metadata.clone();
+                    mesh_metadata.apply_output_dimensions(mesh.poster_width, mesh.poster_height);
+                    tokio::task::spawn_blocking(move || SavedOutputNames {
+                        output: save_mesh_to_dir(
+                            &dir,
+                            &mesh_data,
+                            &mesh_poster,
+                            mesh_format,
+                            &model,
+                            &mesh_metadata,
+                            Some(generation_time_ms),
+                            db.as_ref().as_ref(),
+                            Some(&events),
+                            &gallery_gate,
+                        ),
+                        original: None,
+                    })
+                } else if let Some(ref audio) = response.audio {
                     let audio_data = audio.data.clone();
                     let audio_thumbnail = audio.thumbnail.clone();
                     let audio_format = audio.format;
@@ -3936,6 +4118,7 @@ mod tests {
     #[test]
     fn durable_terminal_result_carries_saved_gallery_names_and_terminal_facts() {
         let response = mold_core::GenerateResponse {
+            mesh: None,
             images: Vec::new(),
             video: None,
             audio: None,
@@ -4383,6 +4566,7 @@ mod tests {
     /// hand to `OutputMetadata::from_generate_request` in tests.
     fn fake_request(model: &str) -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -5071,6 +5255,7 @@ mod tests {
             journal: None,
         };
         let response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: Vec::new(),
@@ -5999,6 +6184,7 @@ mod tests {
             audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
         };
         let response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             images: Vec::new(),
             video: Some(video.clone()),
@@ -6157,6 +6343,7 @@ mod tests {
             audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
         };
         let response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             images: Vec::new(),
             video: Some(video.clone()),
@@ -6427,6 +6614,7 @@ mod tests {
             index: 0,
         };
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: vec![identity.to_string()],
             audio: None,
             images: vec![image.clone()],
@@ -6484,6 +6672,7 @@ mod tests {
     fn build_sse_complete_event_audio_carries_wav_payload_and_no_video_fields() {
         let audio = fake_audio(48_000);
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: Some(audio.clone()),
             images: vec![],
@@ -6530,6 +6719,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_audio_omits_media_for_metadata_only_payloads() {
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: Some(fake_audio(24_000)),
             images: vec![],
@@ -6613,6 +6803,7 @@ mod tests {
             audio_channels: Some(2),
         };
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
@@ -6722,6 +6913,7 @@ mod tests {
             audio_channels: None,
         };
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
@@ -6746,6 +6938,7 @@ mod tests {
     #[test]
     fn build_sse_complete_event_image_clears_all_video_fields() {
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
@@ -6779,6 +6972,7 @@ mod tests {
         req.batch_index = Some(2);
         req.batch_count = Some(3);
         let resp = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
@@ -6837,6 +7031,7 @@ mod tests {
     #[test]
     fn metadata_only_completion_fails_when_the_output_was_not_saved() {
         let response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
@@ -6865,6 +7060,7 @@ mod tests {
         let mut req = fake_request("flux-dev:q4");
         req.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
         let mut response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
@@ -6959,6 +7155,7 @@ mod tests {
             audio_channels: None,
         };
         let mut response = mold_core::GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],

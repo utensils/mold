@@ -66,7 +66,9 @@ pub(crate) fn encode_rgb_image(
         | OutputFormat::Apng
         | OutputFormat::Webp
         | OutputFormat::Mp4
-        | OutputFormat::Wav => {
+        | OutputFormat::Wav
+        | OutputFormat::Glb
+        | OutputFormat::Obj => {
             anyhow::bail!("{format} encoding is not supported for single images")
         }
     }
@@ -477,6 +479,7 @@ mod tests {
     #[test]
     fn test_build_output_metadata_respects_opt_out() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

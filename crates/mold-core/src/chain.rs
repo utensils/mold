@@ -774,6 +774,7 @@ impl ChainRequest {
                 .join("\n")
         };
         GenerateRequest {
+            mesh: None,
             video_only: None,
             // A sequence has exactly one gallery print — the stitched output.
             // Its title and filing come from the chain request and ride the

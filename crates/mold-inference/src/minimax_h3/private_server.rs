@@ -4752,6 +4752,7 @@ fn private_run_output(
     let response = GenerateResponse {
         images: Vec::new(),
         request_warnings: Vec::new(),
+        mesh: None,
         video: Some(VideoData {
             video_only: None,
             attention_path: None,

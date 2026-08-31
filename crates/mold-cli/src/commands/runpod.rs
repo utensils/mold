@@ -1755,6 +1755,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         .clone()
         .or_else(|| config.default_negative_prompt.clone());
     let req = mold_core::GenerateRequest {
+        mesh: None,
         video_only: None,
         collection: None,
         tags: None,

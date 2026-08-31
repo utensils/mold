@@ -11,8 +11,8 @@ use crate::types::{
     GalleryBulkMutationRequest, GalleryBulkMutationResult, GalleryImage, GalleryOrganizeRequest,
     GalleryPatchRequest, GenerateRequest, GenerateResponse, GenerationBatchAdmissionRequest,
     GenerationBatchStatus, GenerationBatchStatusRequest, GenerationBatchStatusResponse,
-    GenerationRetryRequest, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat,
-    QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
+    GenerationRetryRequest, ImageData, LoraInfo, MeshData, ModelInfo, ModelInfoExtended,
+    OutputFormat, QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
     ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent, SseErrorEvent,
     SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest, TrashSweepResult,
     VideoData,
@@ -345,9 +345,11 @@ impl MoldClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<usize>().ok());
 
-        // Detect an audio-only response before the video probe: an audio print
-        // has no frames, so a video-shaped probe falls through to the image
-        // branch and hands the caller WAV bytes labelled as an image.
+        // Probe order is mesh, then audio, then video, narrowest first. Each
+        // of these artifacts is missing whatever the next probe keys on, so a
+        // wider probe running first would fall through to the image branch and
+        // hand the caller non-raster bytes labelled as a picture.
+        let mesh_meta = parse_mesh_headers(resp.headers());
         let audio_meta = parse_audio_headers(resp.headers());
         // Detect video response via x-mold-video-frames header
         let video_meta = parse_video_headers(resp.headers());
@@ -358,8 +360,40 @@ impl MoldClient {
         let data = resp.bytes().await?.to_vec();
         let generation_time_ms = start.elapsed().as_millis() as u64;
 
+        if let Some(meta) = mesh_meta {
+            return Ok(GenerateResponse {
+                mesh: Some(MeshData {
+                    data,
+                    format: meta.format.unwrap_or(if format.is_mesh() {
+                        format
+                    } else {
+                        OutputFormat::Glb
+                    }),
+                    vertex_count: meta.vertex_count,
+                    face_count: meta.face_count,
+                    bounds_min: meta.bounds_min,
+                    bounds_max: meta.bounds_max,
+                    textured: meta.textured,
+                    // The poster cannot ride along in a body that is already
+                    // the GLB. Only its recorded size travels.
+                    poster: Vec::new(),
+                    poster_width: meta.poster_width,
+                    poster_height: meta.poster_height,
+                }),
+                images: Vec::new(),
+                video: None,
+                audio: None,
+                generation_time_ms,
+                model,
+                seed_used,
+                gpu,
+                request_warnings,
+            });
+        }
+
         if let Some(meta) = audio_meta {
             return Ok(GenerateResponse {
+                mesh: None,
                 audio: Some(AudioData {
                     data,
                     // The request's format only stands in for an older server
@@ -425,6 +459,7 @@ impl MoldClient {
 
         Ok(GenerateResponse {
             audio: None,
+            mesh: None,
             images,
             generation_time_ms,
             model,
@@ -650,11 +685,45 @@ impl MoldClient {
                             complete.model
                         };
 
-                        // Detect an audio-only response via `audio_sample_rate`.
-                        // Checked before video: an audio print has no frames,
-                        // so the video probe below would fall through to the
-                        // image branch and hand the caller WAV bytes labelled
-                        // as an image.
+                        // Narrowest probe first: mesh, then audio, then
+                        // video. A mesh has no sample rate and no frames and
+                        // an audio print has no frames, so running a wider
+                        // probe first drops each of them into the image branch
+                        // and hands the caller non-raster bytes labelled as a
+                        // picture.
+                        if let Some(vertices) = complete.mesh_vertices {
+                            let poster = complete
+                                .mesh_poster
+                                .as_deref()
+                                .and_then(|s| b64.decode(s).ok())
+                                .unwrap_or_default();
+                            return Ok(GenerateResponse {
+                                images: Vec::new(),
+                                video: None,
+                                audio: None,
+                                mesh: Some(MeshData {
+                                    data: payload,
+                                    format: complete.format,
+                                    vertex_count: vertices,
+                                    face_count: complete.mesh_faces.unwrap_or(0),
+                                    bounds_min: complete.mesh_bounds_min.unwrap_or([0.0; 3]),
+                                    bounds_max: complete.mesh_bounds_max.unwrap_or([0.0; 3]),
+                                    textured: complete.mesh_textured,
+                                    poster,
+                                    // `width`/`height` describe the poster on
+                                    // a mesh event, exactly as they describe
+                                    // the waveform on an audio one.
+                                    poster_width: complete.width,
+                                    poster_height: complete.height,
+                                }),
+                                generation_time_ms: complete.generation_time_ms,
+                                model,
+                                seed_used: complete.seed_used,
+                                gpu: complete.gpu,
+                                request_warnings,
+                            });
+                        }
+
                         if let Some(sample_rate) = complete.audio_sample_rate {
                             let thumbnail = complete
                                 .audio_thumbnail
@@ -664,6 +733,7 @@ impl MoldClient {
                             return Ok(GenerateResponse {
                                 images: Vec::new(),
                                 video: None,
+                                mesh: None,
                                 audio: Some(AudioData {
                                     data: payload,
                                     format: complete.format,
@@ -744,6 +814,7 @@ impl MoldClient {
 
                         return Ok(GenerateResponse {
                             audio: None,
+                            mesh: None,
                             images,
                             generation_time_ms: complete.generation_time_ms,
                             model,
@@ -2625,6 +2696,80 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
     })
 }
 
+struct MeshMeta {
+    format: Option<OutputFormat>,
+    vertex_count: u32,
+    face_count: u32,
+    textured: bool,
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+    poster_width: u32,
+    poster_height: u32,
+}
+
+/// Parse mesh metadata from HTTP response headers.
+///
+/// Returns `Some` when `x-mold-mesh-vertices` is present. Probed FIRST, ahead
+/// of audio and video, for the same reason audio is probed ahead of video: a
+/// mesh response has no frames and no sample rate, so both of those probes
+/// fall through to the image branch and would hand the caller glTF bytes
+/// labelled as a picture.
+fn parse_mesh_headers(headers: &reqwest::header::HeaderMap) -> Option<MeshMeta> {
+    let read = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+    let read_bounds =
+        |name: &str| parse_bounds(headers.get(name).and_then(|value| value.to_str().ok()));
+    let vertex_count = read("x-mold-mesh-vertices")? as u32;
+    Some(MeshMeta {
+        // Stated by the server: a request that omitted `output_format` was
+        // normalised server-side and is no evidence of what came back.
+        format: headers
+            .get("x-mold-mesh-format")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<OutputFormat>().ok()),
+        vertex_count,
+        face_count: read("x-mold-mesh-faces").unwrap_or(0) as u32,
+        textured: headers
+            .get("x-mold-mesh-textured")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
+            .unwrap_or(false),
+        bounds_min: read_bounds("x-mold-mesh-bounds-min"),
+        bounds_max: read_bounds("x-mold-mesh-bounds-max"),
+        poster_width: read("x-mold-mesh-poster-width").unwrap_or(0) as u32,
+        poster_height: read("x-mold-mesh-poster-height").unwrap_or(0) as u32,
+    })
+}
+
+/// Parse an `x, y, z` bounds header. An absent or malformed value is the
+/// origin — an older server that does not send the header is not an error,
+/// and a caller reads a degenerate box rather than a wrong one.
+fn parse_bounds(raw: Option<&str>) -> [f32; 3] {
+    let Some(raw) = raw else {
+        return [0.0; 3];
+    };
+    let mut out = [0.0f32; 3];
+    let mut seen = 0usize;
+    for (slot, part) in out.iter_mut().zip(raw.split(',')) {
+        match part.trim().parse::<f32>() {
+            Ok(value) if value.is_finite() => {
+                *slot = value;
+                seen += 1;
+            }
+            _ => return [0.0; 3],
+        }
+    }
+    if seen == 3 {
+        out
+    } else {
+        [0.0; 3]
+    }
+}
+
 struct AudioMeta {
     format: Option<OutputFormat>,
     sample_rate: u32,
@@ -2785,6 +2930,44 @@ impl std::error::Error for ModelNotFoundError {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mesh_bounds_survive_the_wire_and_degrade_to_the_origin() {
+        assert_eq!(parse_bounds(Some("-1.5, 0, 2.25")), [-1.5, 0.0, 2.25]);
+        // An older server sends no header at all. That is not an error; the
+        // caller reads a degenerate box rather than a wrong one.
+        assert_eq!(parse_bounds(None), [0.0; 3]);
+        // Partial, malformed and non-finite values all collapse the whole
+        // triple rather than yielding a plausible-looking mixture.
+        assert_eq!(parse_bounds(Some("1,2")), [0.0; 3]);
+        assert_eq!(parse_bounds(Some("1,2,three")), [0.0; 3]);
+        assert_eq!(parse_bounds(Some("1,2,NaN")), [0.0; 3]);
+        assert_eq!(parse_bounds(Some("1,2,inf")), [0.0; 3]);
+    }
+
+    #[test]
+    fn mesh_headers_carry_the_bounds_the_meshdata_promises() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-mold-mesh-vertices", "24576".parse().unwrap());
+        headers.insert("x-mold-mesh-faces", "49152".parse().unwrap());
+        headers.insert("x-mold-mesh-bounds-min", "-1,-1,-1".parse().unwrap());
+        headers.insert("x-mold-mesh-bounds-max", "1,1,1".parse().unwrap());
+        let meta = parse_mesh_headers(&headers).expect("a mesh response");
+        assert_eq!(meta.vertex_count, 24576);
+        assert_eq!(meta.face_count, 49152);
+        assert_eq!(meta.bounds_min, [-1.0, -1.0, -1.0]);
+        assert_eq!(meta.bounds_max, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_still_or_a_clip_is_never_read_as_a_mesh() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert!(parse_mesh_headers(&headers).is_none());
+        // A clip carries neither vertices nor faces; only the vertex header
+        // may promote a response to `MeshData`.
+        headers.insert("x-mold-video-frames", "97".parse().unwrap());
+        assert!(parse_mesh_headers(&headers).is_none());
+    }
+
     use super::*;
     use crate::test_support::ENV_LOCK;
 

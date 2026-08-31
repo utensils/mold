@@ -1589,6 +1589,7 @@ fn build_request(
     });
 
     Ok(GenerateRequest {
+        mesh: None,
         video_only: None,
         collection: params
             .collection

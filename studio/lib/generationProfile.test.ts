@@ -359,6 +359,39 @@ describe("closestProfileAspect — custom sizes highlight the nearest shape", ()
   });
 });
 
+describe("output format gate", () => {
+  it("accepts the canvasless GLB contract a 3-D family advertises", () => {
+    // `OUTPUT_FORMATS` is a runtime GATE, not a type: a missing format makes
+    // `isOutputCapabilities` reject the whole profile, and the model then
+    // renders with the legacy raster fallback — canvas controls and PNG
+    // output — instead of the contract the server actually sent. Nothing
+    // fails loudly, which is why this is asserted rather than reviewed.
+    const model = profileModel();
+    const set = model.generation_profile as GenerationProfileSet;
+    for (const recipe of set.recipes) {
+      recipe.capabilities.output = {
+        default_format: "glb",
+        formats: ["glb"],
+        audio_requires_mp4: false,
+      };
+    }
+    expect(advertisedGenerationProfile(model)).not.toBeNull();
+  });
+
+  it("still rejects a format the server could not have produced", () => {
+    const model = profileModel();
+    const set = model.generation_profile as GenerationProfileSet;
+    for (const recipe of set.recipes) {
+      recipe.capabilities.output = {
+        default_format: "tiff",
+        formats: ["tiff"],
+        audio_requires_mp4: false,
+      } as unknown as GenerationRecipeProfile["capabilities"]["output"];
+    }
+    expect(advertisedGenerationProfile(model)).toBeNull();
+  });
+});
+
 describe("controlNote", () => {
   it("returns the server's own sentence for a fixed control", () => {
     expect(

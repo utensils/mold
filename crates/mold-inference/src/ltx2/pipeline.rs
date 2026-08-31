@@ -1093,6 +1093,7 @@ impl Ltx2Engine {
             .map(|probe| probe.fps)
             .unwrap_or(plan.frame_rate);
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
@@ -1274,6 +1275,7 @@ impl Ltx2Engine {
         };
 
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
@@ -1388,6 +1390,7 @@ impl Ltx2Engine {
         Self::log_timing("pipeline.encode_native_audio", start);
 
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             images: vec![],
             video: None,
@@ -2215,6 +2218,7 @@ mod tests {
 
     fn request(output_format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -2545,6 +2549,7 @@ mod tests {
 
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -2625,6 +2630,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -2878,6 +2884,7 @@ mod tests {
             0,
         );
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

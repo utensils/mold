@@ -20,6 +20,7 @@ pub enum Family {
     MinimaxH3,
     QwenImage,
     Wuerstchen,
+    Hunyuan3d,
 }
 
 pub const ALL_FAMILIES: &[Family] = &[
@@ -35,6 +36,7 @@ pub const ALL_FAMILIES: &[Family] = &[
     Family::MinimaxH3,
     Family::QwenImage,
     Family::Wuerstchen,
+    Family::Hunyuan3d,
 ];
 
 /// Families permitted in ordinary acquisition surfaces for this build.
@@ -72,6 +74,7 @@ impl Family {
             Family::MinimaxH3 => "minimax-h3",
             Family::QwenImage => "qwen-image",
             Family::Wuerstchen => "wuerstchen",
+            Family::Hunyuan3d => "hunyuan3d",
         }
     }
 
@@ -95,6 +98,34 @@ impl Family {
             | Family::Sd3
             | Family::ZImage
             | Family::QwenImage
+            | Family::Wuerstchen
+            | Family::Hunyuan3d => false,
+        }
+    }
+
+    /// Whether this family generates a 3-D mesh rather than raster frames.
+    ///
+    /// The third media class, and deliberately a SEPARATE predicate from
+    /// [`Self::is_video`] rather than a widening of it: a mesh has no frames,
+    /// no fps and no canvas, so every duration and resolution control must
+    /// read `false` here exactly as it does for an image family — while every
+    /// "this is an image" assumption downstream must read `true` here and
+    /// stop. Exhaustive on purpose, for the same reason `is_video` is: a new
+    /// family must state which side it falls on.
+    pub fn is_mesh(&self) -> bool {
+        match self {
+            Family::Hunyuan3d => true,
+            Family::Flux
+            | Family::Flux2
+            | Family::Sd15
+            | Family::Sdxl
+            | Family::Sd3
+            | Family::ZImage
+            | Family::LtxVideo
+            | Family::Ltx2
+            | Family::Wan
+            | Family::MinimaxH3
+            | Family::QwenImage
             | Family::Wuerstchen => false,
         }
     }
@@ -114,6 +145,7 @@ impl Family {
             "minimax-h3" | "minimax_h3" | "minimaxh3" => Family::MinimaxH3,
             "qwen-image" => Family::QwenImage,
             "wuerstchen" => Family::Wuerstchen,
+            "hunyuan3d" | "hunyuan-3d" => Family::Hunyuan3d,
             other => return Err(UnknownFamily(other.to_string())),
         })
     }

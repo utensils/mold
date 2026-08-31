@@ -894,6 +894,14 @@ where
                 block_offload: offload,
             })
         }
+        "hunyuan3d" | "hunyuan-3d" => Ok(boxed_inference_engine(
+            crate::hunyuan3d::engine::Hunyuan3dEngine::new(
+                model_name.to_string(),
+                paths,
+                load_strategy,
+                gpu_ordinal,
+            ),
+        )),
         "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,
             paths,
@@ -902,7 +910,7 @@ where
             shared_pool,
         ))),
         other => bail!(
-            "unknown model family '{}' for model '{}'. Supported: flux, flux2, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wan, wuerstchen",
+            "unknown model family '{}' for model '{}'. Supported: flux, flux2, hunyuan3d, ltx-video, ltx2, sd15, sd3, sdxl, z-image, qwen-image, qwen-image-edit, wan, wuerstchen",
             other,
             model_name
         ),

@@ -5629,6 +5629,11 @@ impl App {
                         // no control for. Cycling exits back to the raster start
                         // rather than offering a format that would 422.
                         OutputFormat::Wav => OutputFormat::Png,
+                        // Nor are the mesh containers. A 3-D family emits GLB
+                        // and nothing else, so the control is not a choice
+                        // there; and offering GLB on a raster model would 422
+                        // for the same reason `wav` would.
+                        OutputFormat::Glb | OutputFormat::Obj => OutputFormat::Png,
                     };
                     if p.enable_audio == Some(true) && p.format != OutputFormat::Mp4 {
                         p.enable_audio = None;
@@ -13074,6 +13079,7 @@ mod tests {
 
         // Inject a GenerationComplete with model A (the model that actually ran)
         let response = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![mold_core::ImageData {
@@ -13141,6 +13147,7 @@ mod tests {
             app.generate.params.guidance_overrides = submitted_guidance.clone();
 
             let response = GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![mold_core::ImageData {
@@ -13195,6 +13202,7 @@ mod tests {
             app.generate.params.guidance = 4.0;
 
             let response = GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: Vec::new(),
@@ -13290,6 +13298,7 @@ mod tests {
             app.generate.prompt = TextArea::from(["a timeline test"]);
 
             let response = GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![mold_core::ImageData {
@@ -14427,6 +14436,7 @@ mod tests {
     /// Build a completed response carrying `request_warnings`.
     fn response_with_advisories(warnings: Vec<String>) -> GenerateResponse {
         GenerateResponse {
+            mesh: None,
             request_warnings: warnings,
             audio: None,
             images: vec![mold_core::ImageData {

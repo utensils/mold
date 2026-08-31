@@ -781,6 +781,12 @@ pub enum ActivationFamily {
     ZImageDit,
     /// Wuerstchen v2 cascade (Stage C/B decoder).
     Wuerstchen,
+    /// Hunyuan3D shape DiT + shape VAE. Present so the family can be NAMED in
+    /// a hint; its numbers do not come from the pixel-area model at all —
+    /// `mold-server/src/hunyuan3d_admission.rs` is the authority, because a
+    /// mesh has no canvas and the peak is set by token counts and the decode
+    /// chunk size, neither of which appears in an area.
+    Hunyuan3dShape,
     /// T5 / CLIP / Qwen3 / Gemma text encoder workspace.
     SmallTransformer,
     /// LTX-Video (0.9.6 / 0.9.8 2B or 13B) video transformer. Loads the
@@ -890,6 +896,9 @@ pub fn activation_bytes(
         // Wuerstchen v2: cascade Stage B has a chunky conv stack — ~67%
         // above FLUX.
         ActivationFamily::Wuerstchen => 217.0,
+        // Never the authority — see the variant's doc. This factor exists so
+        // an unexpected caller gets a FLUX-class number rather than a panic.
+        ActivationFamily::Hunyuan3dShape => 130.0,
         // T5 / CLIP / Qwen3 encoders work over tokens × hidden, not pixels.
         // Image-space scaling is a soft proxy for "small workspace" — the
         // floor usually dominates for typical inputs.
@@ -1504,6 +1513,7 @@ pub fn activation_family_for(family_slug: &str) -> ActivationFamily {
         "qwen-image" | "qwen-image-edit" => ActivationFamily::QwenImageDit,
         "z-image" => ActivationFamily::ZImageDit,
         "wuerstchen" => ActivationFamily::Wuerstchen,
+        "hunyuan3d" | "hunyuan-3d" => ActivationFamily::Hunyuan3dShape,
         // LTX-Video (0.9.6 / 0.9.8 2B or 13B): loads the entire transformer
         // into VRAM during each generate call. The file-size-based preflight
         // applies normally — the 13B BF16 checkpoint is ~26 GB and must be

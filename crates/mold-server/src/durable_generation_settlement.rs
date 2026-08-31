@@ -784,6 +784,7 @@ mod tests {
         let registry = crate::job_registry::JobRegistry::new();
         registry.register("unsaved", "mock-model");
         let response = mold_core::GenerateResponse {
+            mesh: None,
             images: Vec::new(),
             video: None,
             audio: None,
@@ -822,6 +823,7 @@ mod tests {
         // print was interrupted rather than that it failed.
         harness.journal.retain_all();
         let response = mold_core::GenerateResponse {
+            mesh: None,
             images: Vec::new(),
             video: None,
             audio: None,

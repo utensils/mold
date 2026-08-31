@@ -139,6 +139,8 @@ const aspectStyle = computed(() => {
   const w = props.item.metadata.width;
   const h = props.item.metadata.height;
   if (w > 0 && h > 0) return { aspectRatio: `${w} / ${h}` };
+  // A mesh has no aspect of its own; its poster is square by construction.
+  if (kind.value === "mesh") return { aspectRatio: "1 / 1" };
   return kind.value === "video" || kind.value === "audio"
     ? { aspectRatio: "16 / 9" }
     : { aspectRatio: "1 / 1" };
@@ -381,7 +383,15 @@ function onRecreate(evt: Event) {
         >
           <path d="M3 12a9 9 0 1 1 18 0" />
         </svg>
-        {{ kind === "video" ? "video" : kind === "audio" ? "audio" : "anim" }}
+        {{
+          kind === "video"
+            ? "video"
+            : kind === "audio"
+              ? "audio"
+              : kind === "mesh"
+                ? "3D"
+                : "anim"
+        }}
       </div>
 
       <!-- Format chip (top-right) + favorite heart beside it -->

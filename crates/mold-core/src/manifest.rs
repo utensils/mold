@@ -7,6 +7,18 @@ use std::sync::LazyLock;
 
 /// Model families that are utility models (not image generators).
 /// These are excluded from default-model selection and don't produce ModelPaths.
+/// The image-to-3D mesh family. Its checkpoints bundle DiT + shape VAE +
+/// image encoder in one file, so it takes the same standalone-VAE exemption
+/// `ltx2` does.
+pub const HUNYUAN3D_FAMILY: &str = "hunyuan3d";
+
+/// The tier a surface picks when the caller names no 3-D model.
+///
+/// The 0.6B step-distilled one: it is the smallest download, the lowest VRAM
+/// and the fastest, and its geometry is close enough to the 1.1B tier that
+/// "try image-to-3D" should not cost six minutes on a first attempt.
+pub const HUNYUAN3D_DEFAULT_MODEL: &str = "hunyuan3d-mini-turbo:fp16";
+
 pub const UTILITY_FAMILIES: &[&str] = &["qwen3-expand", "companion"];
 
 /// Model families that are upscaler models (image-to-image enhancement, not generation).
@@ -1394,6 +1406,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(flux2_manifests());
     manifests.extend(qwen_image_manifests());
     manifests.extend(wuerstchen_manifests());
+    manifests.extend(hunyuan3d_manifests());
     manifests.extend(ltx_video_manifests());
     manifests.extend(ltx2_manifests());
     manifests.extend(crate::ltx25_manifest::manifests());
@@ -4875,11 +4888,12 @@ pub fn paths_from_downloads(
         })?;
 
     // Utility models and LTX-2: transformer + optional tokenizer, no standalone VAE asset
-    let vae = if UTILITY_FAMILIES.contains(&family) || family == "ltx2" {
-        find(ModelComponent::Vae).unwrap_or_default()
-    } else {
-        find(ModelComponent::Vae)?
-    };
+    let vae =
+        if UTILITY_FAMILIES.contains(&family) || family == "ltx2" || family == HUNYUAN3D_FAMILY {
+            find(ModelComponent::Vae).unwrap_or_default()
+        } else {
+            find(ModelComponent::Vae)?
+        };
 
     Some(ModelPaths {
         transformer,
@@ -4900,6 +4914,103 @@ pub fn paths_from_downloads(
         text_tokenizer: find(ModelComponent::TextTokenizer),
         decoder: find(ModelComponent::Decoder),
     })
+}
+
+/// Hunyuan3D 2.0 image-to-3D shape checkpoints.
+///
+/// Each checkpoint is ONE self-contained safetensors file carrying three
+/// prefixes — `model.` (the flow-matching DiT), `vae.` (the vecset shape VAE)
+/// and `conditioner.main_image_encoder.model.` (a DINOv2-giant vision tower).
+/// The manifest therefore declares a single [`ModelComponent::Transformer`]
+/// file and the family is exempted from the standalone-VAE requirement in
+/// [`paths_from_downloads`], exactly as `ltx2` is: there is no separate VAE
+/// asset to name, and inventing one would make `manifest_files_exist` look
+/// for a file that upstream never publishes.
+///
+/// Geometry only — texturing pulls the separate `hunyuan3d-paint` bundle.
+///
+/// Sizes and digests are the HF LFS `size`/`oid` for each blob, read from
+/// `https://huggingface.co/api/models/<repo>/tree/main/<dir>`.
+fn hunyuan3d_manifests() -> Vec<ModelManifest> {
+    // The shape path takes no text prompt and no output canvas: the source
+    // image is letterboxed to the conditioning resolution the checkpoint's
+    // `image_processor.size` names, and the artifact is a mesh. `width`/
+    // `height` record that conditioning size so catalog rows and profiles
+    // have an honest number; `validation` refuses a client-supplied canvas
+    // for the family rather than silently ignoring it.
+    //
+    // `guidance` is 5.0 everywhere, but it means two different things and the
+    // checkpoint decides which: the undistilled tier has no guidance
+    // embedding and spends it on a real classifier-free guided branch (two
+    // forward passes per step), while the distilled tiers feed it to
+    // `guidance_in` and run one pass. Upstream defaults to 5.0 for both
+    // (`comfy/model_base.py:2116`), which is why the number does not change.
+    let defaults = |steps: u32, guidance: f64, cond: u32| ManifestDefaults {
+        steps,
+        guidance,
+        width: cond,
+        height: cond,
+        is_schnell: false,
+        scheduler: None,
+        negative_prompt: None,
+        frames: None,
+        fps: None,
+        source_image: Some(crate::types::SourceImageCapability::Required),
+    };
+
+    vec![
+        // Default: 0.6B DiT, step-distilled, ~5 GB VRAM. Conditions DINOv2 at
+        // 1022 rather than 518 (`hunyuan3d-dit-v2-mini-turbo/config.yaml`
+        // `image_processor.size: 1022`), which is why a "0.6B" model is still
+        // 3.8 GB on disk — the vision tower is 1.1B of it.
+        ModelManifest {
+            name: "hunyuan3d-mini-turbo:fp16".to_string(),
+            family: HUNYUAN3D_FAMILY.to_string(),
+            description: "Hunyuan3D 2.0 mini Turbo — image-to-3D mesh, step-distilled".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "tencent/Hunyuan3D-2mini".to_string(),
+                hf_filename: "hunyuan3d-dit-v2-mini-turbo/model.fp16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 3_822_584_202,
+                gated: false,
+                sha256: Some("bdbcef30dd0149a281e17d5b5b1fdad1122c904e098a42f3100e04e03c247bc4"),
+            }],
+            defaults: defaults(5, 5.0, 1022),
+            hidden: false,
+        },
+        // 1.1B DiT, step-distilled.
+        ModelManifest {
+            name: "hunyuan3d-turbo:fp16".to_string(),
+            family: HUNYUAN3D_FAMILY.to_string(),
+            description: "Hunyuan3D 2.0 Turbo — image-to-3D mesh, step-distilled".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "tencent/Hunyuan3D-2".to_string(),
+                hf_filename: "hunyuan3d-dit-v2-0-turbo/model.fp16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 4_930_777_530,
+                gated: false,
+                sha256: Some("5ee5a81e4df08a1c65b79910bf5b145a90376e526794f4607a4d5d068d62f269"),
+            }],
+            defaults: defaults(5, 5.0, 512),
+            hidden: false,
+        },
+        // 1.1B DiT, undistilled: real CFG at guidance 5.0, 30 steps.
+        ModelManifest {
+            name: "hunyuan3d:fp16".to_string(),
+            family: HUNYUAN3D_FAMILY.to_string(),
+            description: "Hunyuan3D 2.0 — image-to-3D mesh, highest shape fidelity".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "tencent/Hunyuan3D-2".to_string(),
+                hf_filename: "hunyuan3d-dit-v2-0/model.fp16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 4_928_151_562,
+                gated: false,
+                sha256: Some("360bc281fc956d4acac0c3d36d5ec0ebf8cdddbf4b8892e894d12419388d479b"),
+            }],
+            defaults: defaults(30, 5.0, 512),
+            hidden: false,
+        },
+    ]
 }
 
 fn ltx_video_manifests() -> Vec<ModelManifest> {
@@ -8476,7 +8587,11 @@ mod tests {
         // :fp8 and klein-9b:fp8 (BFL's own FP8 conversions), and the eight
         // undistilled klein base tiers (4B and 9B × bf16/q8/q6/q4) which take
         // real CFG instead of a guidance embedding.
-        assert_eq!(known_manifests().len(), 191);
+        // Hunyuan3D bump (#1495): +3 image-to-3D shape checkpoints —
+        // `hunyuan3d-mini-turbo:fp16`, `hunyuan3d-turbo:fp16`,
+        // `hunyuan3d:fp16`. One self-contained file each (DiT + shape VAE +
+        // DINOv2-giant), so each contributes exactly one manifest.
+        assert_eq!(known_manifests().len(), 194);
     }
 
     #[test]
@@ -9093,6 +9208,7 @@ mod tests {
                 && !manifest.is_upscaler()
                 && !manifest.is_auxiliary()
                 && manifest.family != "ltx2"
+                && manifest.family != HUNYUAN3D_FAMILY
             {
                 assert!(
                     components.contains(&ModelComponent::Vae),
@@ -9102,6 +9218,23 @@ mod tests {
             }
 
             match manifest.family.as_str() {
+                HUNYUAN3D_FAMILY => {
+                    // One file, one component. The shape VAE and the DINOv2
+                    // conditioner live inside it under the `vae.` and
+                    // `conditioner.` prefixes, which is why the standalone-VAE
+                    // requirement above exempts this family.
+                    assert!(
+                        components.contains(&ModelComponent::Transformer),
+                        "{} (hunyuan3d) missing Transformer",
+                        manifest.name
+                    );
+                    assert_eq!(
+                        manifest.files.len(),
+                        1,
+                        "{} (hunyuan3d) must be a single self-contained checkpoint",
+                        manifest.name
+                    );
+                }
                 "flux" => {
                     assert!(
                         components.contains(&ModelComponent::Transformer),

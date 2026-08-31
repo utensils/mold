@@ -148,9 +148,19 @@ pub fn is_audio_filename(filename: &str) -> bool {
     filename.to_ascii_lowercase().ends_with(".wav")
 }
 
-/// Dispatch on the filename: video poster, or raster decode. Audio has no
-/// pixels to read (its waveform tile is written at save time) and is refused
-/// here so callers reach for the sidecar or the placeholder.
+pub fn is_mesh_filename(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower.ends_with(".glb") || lower.ends_with(".obj")
+}
+
+/// Dispatch on the filename: video poster, or raster decode. Audio and mesh
+/// have no pixels to read (their sidecar tiles are written at save time) and
+/// are refused here so callers reach for the sidecar or the placeholder.
+///
+/// Refusing is what keeps the raster decode from ever being handed a glTF
+/// buffer or a RIFF header. `image::open` on either would fail anyway, but it
+/// would fail AFTER reading the whole file, and the route's failure fallback
+/// would then serve the source bytes to an `<img>` tag.
 pub fn render_thumbnail(
     source: &Path,
     filename: &str,
@@ -159,6 +169,9 @@ pub fn render_thumbnail(
 ) -> anyhow::Result<RenderedThumbnail> {
     if is_audio_filename(filename) {
         anyhow::bail!("audio prints have no raster thumbnail to render");
+    }
+    if is_mesh_filename(filename) {
+        anyhow::bail!("mesh prints have no raster thumbnail to render");
     }
     if is_video_filename(filename) {
         render_video_thumbnail(source, max_dim, format)
@@ -332,6 +345,8 @@ pub fn sweep_orphans(
 }
 
 pub const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#a)"/><g fill="rgba(226,232,240,0.85)"><rect x="52" y="112" width="8" height="32" rx="4"/><rect x="72" y="92" width="8" height="72" rx="4"/><rect x="92" y="68" width="8" height="120" rx="4"/><rect x="112" y="100" width="8" height="56" rx="4"/><rect x="132" y="76" width="8" height="104" rx="4"/><rect x="152" y="104" width="8" height="48" rx="4"/><rect x="172" y="86" width="8" height="84" rx="4"/><rect x="192" y="116" width="8" height="24" rx="4"/></g></svg>"##;
+
+pub const MESH_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="m" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#m)"/><g fill="none" stroke="rgba(226,232,240,0.85)" stroke-width="6" stroke-linejoin="round"><polygon points="128,58 196,98 196,168 128,208 60,168 60,98"/><polyline points="60,98 128,138 196,98"/><line x1="128" y1="138" x2="128" y2="208"/></g></svg>"##;
 
 pub const VIDEO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#g)"/><circle cx="128" cy="128" r="52" fill="rgba(255,255,255,0.08)"/><polygon points="112,100 112,156 160,128" fill="rgba(226,232,240,0.85)"/></svg>"##;
 

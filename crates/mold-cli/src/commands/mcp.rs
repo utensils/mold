@@ -85,6 +85,7 @@ async fn generate_canonically(
         .and_then(|(_, extension)| extension.parse::<OutputFormat>().ok())
         .unwrap_or_else(|| artifact.request.resolved_output_format());
     Ok(GenerateResponse {
+        mesh: None,
         images: vec![mold_core::ImageData {
             data: artifact.bytes,
             format,
@@ -124,6 +125,7 @@ async fn hydrate_canonical_outcome(
             )
         })?;
     Ok(GenerateResponse {
+        mesh: None,
         images: vec![mold_core::ImageData {
             data: artifact.bytes,
             format,
@@ -442,6 +444,7 @@ impl McpServer {
 
         let result = match name {
             "generate_image" => self.tool_generate_image(arguments).await,
+            "generate_mesh" => self.tool_generate_mesh(arguments).await,
             "generate_image_async" => self.tool_generate_image_async(arguments).await,
             "generation_status" => self.tool_generation_status(arguments).await,
             "generation_retry" => self.tool_generation_retry(arguments).await,
@@ -503,6 +506,61 @@ impl McpServer {
                     "mimeType": image.format.content_type()
                 }
             ]
+        }))
+    }
+
+    /// Generate a 3-D mesh from one image.
+    ///
+    /// MCP has no mesh content type, so the result is the poster image plus
+    /// text naming the gallery filename. An agent that wants the geometry
+    /// fetches it by that filename; base64ing a multi-megabyte glTF into a
+    /// tool result would blow the context window for no benefit.
+    async fn tool_generate_mesh(&self, arguments: Value) -> std::result::Result<Value, String> {
+        let args: GenerateMeshArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let req = build_generate_mesh_request(args)?;
+        let response = generate_canonically(&self.client, req).await?;
+        let mesh = response
+            .mesh
+            .as_ref()
+            .ok_or_else(|| "mold did not return a mesh".to_string())?;
+
+        let mut details = format!(
+            "Generated a {} mesh with {} vertices and {} triangles using {}; seed {}",
+            mesh.format.extension(),
+            mesh.vertex_count,
+            mesh.face_count,
+            response.model,
+            response.seed_used
+        );
+        if response.generation_time_ms > 0 {
+            details.push_str(&format!(
+                "; generation time {:.1}s",
+                response.generation_time_ms as f64 / 1000.0
+            ));
+        }
+        if let Some(gpu) = response.gpu {
+            details.push_str(&format!("; gpu {gpu}"));
+        }
+
+        let mut content = vec![json!({ "type": "text", "text": details })];
+        if !mesh.poster.is_empty() {
+            content.push(json!({
+                "type": "image",
+                "data": general_purpose::STANDARD.encode(&mesh.poster),
+                "mimeType": "image/png"
+            }));
+        }
+        Ok(json!({
+            "content": content,
+            "structuredContent": {
+                "format": mesh.format.extension(),
+                "vertex_count": mesh.vertex_count,
+                "face_count": mesh.face_count,
+                "textured": mesh.textured,
+                "seed_used": response.seed_used,
+                "model": response.model,
+            }
         }))
     }
 
@@ -945,6 +1003,24 @@ struct GenerateImageArgs {
     output_format: Option<String>,
     expand: Option<bool>,
     loras: Option<Vec<McpLoraArg>>,
+}
+
+/// Arguments for `generate_mesh`.
+///
+/// Deliberately NOT a reuse of [`GenerateImageArgs`]: nearly every field
+/// there is meaningless here. There is no prompt (the family has no text
+/// encoder), no canvas, no negative prompt, no LoRA, and no output-format
+/// choice, and offering them would advertise knobs the server refuses.
+#[derive(Debug, Clone, Deserialize)]
+struct GenerateMeshArgs {
+    /// Base64-encoded PNG or JPEG. The ONLY conditioning this family has.
+    image: String,
+    model: Option<String>,
+    steps: Option<u32>,
+    seed: Option<u64>,
+    octree_resolution: Option<u32>,
+    mesh_threshold: Option<f32>,
+    target_faces: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2246,15 +2322,77 @@ fn resolve_mcp_lora_refs(
         .collect()
 }
 
+/// Build the wire request for `generate_mesh`.
+///
+/// The image is decoded from base64 here rather than trusted, so a malformed
+/// payload is a tool error the agent can read instead of a 422 from the
+/// server after a round trip.
+fn build_generate_mesh_request(
+    args: GenerateMeshArgs,
+) -> std::result::Result<GenerateRequest, String> {
+    let image = general_purpose::STANDARD
+        .decode(args.image.trim())
+        .map_err(|error| format!("image is not valid base64: {error}"))?;
+    if image.is_empty() {
+        return Err("image must not be empty".to_string());
+    }
+
+    let mut config = Config::load_or_default();
+    let model = args
+        .model
+        .unwrap_or_else(|| mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string());
+    if crate::catalog_bridge::looks_like_catalog_id(&model) {
+        crate::catalog_bridge::install_catalog_model_from_installed_sidecar(&mut config, &model)
+            .map_err(|e| format!("failed to resolve installed catalog model '{model}': {e}"))?;
+    }
+    let mesh = mold_core::MeshRequestOptions {
+        octree_resolution: args.octree_resolution,
+        threshold: args.mesh_threshold,
+        target_faces: args.target_faces,
+        texture: None,
+        texture_resolution: None,
+    };
+
+    let mut req = build_generate_request(
+        GenerateImageArgs {
+            // The prompt is recorded as provenance and never read; a space
+            // would be dishonest, so it stays empty and the mesh validator —
+            // not the image one — decides whether the request is complete.
+            prompt: "3d mesh".to_string(),
+            model: Some(model),
+            // A mesh has no canvas, and the engine never reads these. They
+            // exist only to satisfy the shared image builder's 16-alignment
+            // check, which is why they are a fixed 512 rather than the
+            // manifest's conditioning size — the mini tier conditions at
+            // 1022, and 1022 is not a multiple of 16.
+            width: Some(512),
+            height: Some(512),
+            steps: args.steps,
+            guidance: None,
+            seed: args.seed,
+            negative_prompt: None,
+            output_format: Some("png".to_string()),
+            expand: Some(false),
+            loras: None,
+        },
+        None,
+    )?;
+    req.output_format = Some(OutputFormat::Glb);
+    req.source_image = Some(image);
+    req.mesh = Some(mesh);
+    Ok(req)
+}
+
 fn build_generate_request(
     args: GenerateImageArgs,
     loras: Option<Vec<LoraWeight>>,
 ) -> std::result::Result<GenerateRequest, String> {
-    // The MCP generate tools take no visual conditioning (no source image,
+    // The IMAGE generate tools take no visual conditioning (no source image,
     // keyframes, source video, or extend), so the optional-prompt path in
-    // `mold_core::prompt_required_for` can never apply here. If a conditioning
-    // input is ever added, relax this check and the `"required": ["prompt"]`
-    // arrays in `tool_definitions` together.
+    // `mold_core::prompt_required_for` can never apply to them. `generate_mesh`
+    // is the exception and routes through `build_generate_mesh_request`, which
+    // supplies the source image this check cannot see; its schema requires
+    // `image` instead of `prompt`.
     if args.prompt.trim().is_empty() {
         return Err("prompt must not be empty".to_string());
     }
@@ -2293,6 +2431,7 @@ fn build_generate_request(
     }
 
     Ok(GenerateRequest {
+        mesh: None,
         video_only: None,
         collection: None,
         tags: None,
@@ -2487,6 +2626,42 @@ fn tool_definitions() -> Value {
                     }
                 },
                 "required": ["prompt"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "generate_mesh",
+            "description": "Generate a 3D mesh from ONE image using the Hunyuan3D family. There is no prompt: this family has no text encoder, so the image is the entire conditioning. Best results come from one object, centred, filling most of the frame, on a plain or removed background, seen from a three-quarter angle. Returns a rendered poster image plus mesh statistics; the glTF itself lands in the gallery and is fetched by filename.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "image": {
+                        "type": "string",
+                        "description": "Base64-encoded PNG or JPEG. An image with an alpha channel is the best input — it is letterboxed on its cutout."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model name. Defaults to hunyuan3d-mini-turbo:fp16."
+                    },
+                    "steps": { "type": "integer", "minimum": 1, "maximum": 100 },
+                    "seed": { "type": "integer", "minimum": 0 },
+                    "octree_resolution": {
+                        "type": "integer",
+                        "enum": [128, 192, 256, 320, 384],
+                        "description": "Query-grid resolution; the detail knob. Cost is CUBIC, so 384 is roughly eight times 192. Defaults to 256."
+                    },
+                    "mesh_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Iso-level at which the surface is extracted. Defaults to 0.6; lower recovers thin features and adds noise."
+                    },
+                    "target_faces": {
+                        "type": "integer",
+                        "description": "Decimate to approximately this many triangles. Omit to keep the raw surface."
+                    }
+                },
+                "required": ["image"],
                 "additionalProperties": false
             }
         },
@@ -2788,6 +2963,81 @@ fn handle_protocol_message_for_test(message: Value) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mesh_requests_carry_the_image_and_refuse_a_bad_one() {
+        let bad = build_generate_mesh_request(GenerateMeshArgs {
+            image: "not base64!!".to_string(),
+            model: None,
+            steps: None,
+            seed: None,
+            octree_resolution: None,
+            mesh_threshold: None,
+            target_faces: None,
+        })
+        .unwrap_err();
+        assert!(bad.contains("valid base64"), "{bad}");
+
+        let empty = build_generate_mesh_request(GenerateMeshArgs {
+            image: String::new(),
+            model: None,
+            steps: None,
+            seed: None,
+            octree_resolution: None,
+            mesh_threshold: None,
+            target_faces: None,
+        })
+        .unwrap_err();
+        assert!(empty.contains("must not be empty"), "{empty}");
+    }
+
+    #[test]
+    fn a_mesh_request_defaults_to_the_mini_tier_and_glb() {
+        let png = general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G']);
+        let req = build_generate_mesh_request(GenerateMeshArgs {
+            image: png,
+            model: None,
+            steps: Some(5),
+            seed: Some(42),
+            octree_resolution: Some(320),
+            mesh_threshold: Some(0.55),
+            target_faces: Some(50_000),
+        })
+        .expect("a well-formed mesh request builds");
+
+        assert_eq!(req.model, mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL);
+        assert_eq!(req.output_format, Some(OutputFormat::Glb));
+        assert_eq!(
+            req.source_image.as_deref(),
+            Some(&[0x89, b'P', b'N', b'G'][..])
+        );
+        let mesh = req.mesh.expect("mesh options travel with the request");
+        assert_eq!(mesh.octree_resolution, Some(320));
+        assert_eq!(mesh.threshold, Some(0.55));
+        assert_eq!(mesh.target_faces, Some(50_000));
+        // Texturing is not available; the tool must not ask for it.
+        assert_eq!(mesh.texture, None);
+        assert_eq!(req.seed, Some(42));
+        assert_eq!(req.steps, 5);
+    }
+
+    #[test]
+    fn the_mesh_tool_is_registered_and_requires_an_image_not_a_prompt() {
+        let tools = tool_definitions();
+        let mesh = tools
+            .as_array()
+            .expect("tool definitions are an array")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("generate_mesh"))
+            .expect("generate_mesh must be registered");
+        let required = mesh["inputSchema"]["required"]
+            .as_array()
+            .expect("required is an array");
+        assert_eq!(required, &[Value::from("image")]);
+        // Every other generate tool requires a prompt; this one must not, or
+        // an agent will invent one for a family that never reads it.
+        assert!(!required.contains(&Value::from("prompt")));
+    }
+
     use super::*;
     use crate::test_support::ENV_LOCK;
     use serde_json::json;
@@ -4468,6 +4718,7 @@ mod tests {
     async fn async_job_registry_tracks_completed_image() {
         let jobs = AsyncJobRegistry::default();
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -4542,6 +4793,7 @@ mod tests {
         jobs.finish(
             &id,
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![mold_core::ImageData {

@@ -182,6 +182,13 @@ fn requested_backend_env() -> Option<AttentionBackend> {
 pub fn policy_for_family(family: &str) -> AttentionPolicy {
     match family {
         "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => AttentionPolicy::Video,
+        // Hunyuan3D takes the image policy on purpose, not by falling through:
+        // its DiT runs 3072 unordered tokens at head dim 64, which is the
+        // image families' regime, and its shape VAE cross-attends short query
+        // chunks against 3072 latents. Neither is a video DiT's long-sequence
+        // shape. `hunyuan3d/transformer.rs` names the same policy, and the two
+        // must agree — `FrozenEngineConfig` records this answer and execution
+        // equivalence is built from it.
         _ => AttentionPolicy::Image,
     }
 }

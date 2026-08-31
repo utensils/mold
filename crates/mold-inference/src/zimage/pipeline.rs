@@ -1610,6 +1610,7 @@ impl ZImageEngine {
         );
 
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
@@ -2046,6 +2047,7 @@ impl ZImageEngine {
         tracing::info!(generation_time_ms, seed, "Z-Image generation complete");
 
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
@@ -2991,6 +2993,7 @@ mod tests {
             CachedTensor::from_tensor(&cap_feats).unwrap(),
         );
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

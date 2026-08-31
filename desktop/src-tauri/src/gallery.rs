@@ -1623,6 +1623,13 @@ fn content_type(filename: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "mp4" => "video/mp4",
+        // `wav` was missing here for as long as audio prints have existed; a
+        // mesh would have inherited the same bug, so both are named now. A
+        // `<model-viewer>` and an `<audio>` element both refuse an
+        // `application/octet-stream` body.
+        "wav" => "audio/wav",
+        "glb" => "model/gltf-binary",
+        "obj" => "model/obj",
         _ => "application/octet-stream",
     }
 }

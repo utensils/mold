@@ -4472,12 +4472,16 @@ fn process_job_with_sink(
                 }
             }
 
-            if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
+            if response.images.is_empty()
+                && response.video.is_none()
+                && response.audio.is_none()
+                && response.mesh.is_none()
+            {
                 drop(request);
                 durable_generation_settlement::fail_blocking(
                     job,
                     DurableDisposition::Hold { retryable: true },
-                    "generation error: engine returned no images, video, or audio",
+                    "generation error: engine returned no images, video, audio, or mesh",
                 );
                 return false;
             }
@@ -4503,10 +4507,24 @@ fn process_job_with_sink(
                     height: audio.thumbnail_height,
                     index: 0,
                 }
+            } else if let Some(ref mesh) = response.mesh {
+                // Poster tile stands in for the raster payload; the real glTF
+                // bytes travel on `response.mesh`.
+                ImageData {
+                    data: mesh.poster.clone(),
+                    format: OutputFormat::Png,
+                    width: mesh.poster_width,
+                    height: mesh.poster_height,
+                    index: 0,
+                }
             } else {
                 unreachable!("checked above");
             };
-            if response.video.is_none() && response.audio.is_none() {
+            // Post-generation upscaling is a RASTER operation. A clip, an
+            // audio print and a mesh all reach here with `img` holding a
+            // sidecar tile, and upscaling that tile would replace the artifact
+            // with a bigger picture of its own thumbnail.
+            if response.video.is_none() && response.audio.is_none() && response.mesh.is_none() {
                 if let Some(upscale_model) = request
                     .upscale_model
                     .as_deref()
@@ -4762,7 +4780,25 @@ fn finish_generation_success(
         let generation_time_ms = response.generation_time_ms as i64;
         let db = job.metadata_db.as_ref().as_ref();
         let events = Some(job.events.as_ref());
-        if let Some(ref audio) = response.audio {
+        if let Some(ref mesh) = response.mesh {
+            // Same shape as the audio arm below: a mesh has no raster of its
+            // own, so the gallery row records the POSTER's size or the grid
+            // lays the tile out with the request's meaningless dimensions.
+            let mut mesh_metadata = metadata.clone();
+            mesh_metadata.apply_output_dimensions(mesh.poster_width, mesh.poster_height);
+            saved_names.output = crate::queue::save_mesh_to_dir(
+                dir,
+                &mesh.data,
+                &mesh.poster,
+                mesh.format,
+                &job.model,
+                &mesh_metadata,
+                Some(generation_time_ms),
+                db,
+                events,
+                &job.gallery_publication_gate,
+            );
+        } else if let Some(ref audio) = response.audio {
             // Record the waveform tile's raster size — see the queue's
             // single-worker path for why.
             let mut audio_metadata = metadata.clone();
@@ -6734,6 +6770,7 @@ mod tests {
         });
         crate::h3_private_bridge::H3ClaimedRunOutput {
             response: GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 images: Vec::new(),
                 video,
@@ -7750,6 +7787,7 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             std::fs::remove_file(&self.weights)?;
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![self.generated.clone()],
@@ -7789,6 +7827,7 @@ mod tests {
                 .recv()
                 .unwrap();
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![ImageData {
@@ -8417,6 +8456,7 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             self.record("generate");
             Ok(GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![ImageData {
@@ -9709,6 +9749,7 @@ mod tests {
             .unwrap();
             let original = fake_upscale_image();
             let response = GenerateResponse {
+                mesh: None,
                 request_warnings: Vec::new(),
                 audio: None,
                 images: vec![original.clone()],
@@ -11419,6 +11460,7 @@ mod tests {
 
     fn fake_response() -> GenerateResponse {
         GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![fake_image()],
@@ -12132,6 +12174,7 @@ mod tests {
         let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
         let job = fake_upscale_job(Config::default(), "real-esrgan-x4plus:fp16");
         let mut response = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],

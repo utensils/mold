@@ -1428,6 +1428,15 @@ pub struct GenerateRequest {
     /// label it per family via `studio/lib/strengthSemantics.ts`..
     #[serde(default = "default_strength")]
     pub strength: f64,
+    /// 3-D controls. `None` on every request to a raster family, and a
+    /// non-`None` value there is refused rather than ignored.
+    ///
+    /// One nested struct rather than five sibling fields: the knobs are only
+    /// ever meaningful together, a non-mesh family rejects one field instead
+    /// of five, and every existing `GenerateRequest` literal in the workspace
+    /// gains one line instead of five.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshRequestOptions>,
     /// Mask image for inpainting (raw PNG/JPEG bytes, base64-encoded in JSON).
     /// White (255) = repaint, black (0) = preserve. Requires source_image.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
@@ -2125,6 +2134,13 @@ pub struct GenerateResponse {
     /// frameless artifact would mis-render it everywhere at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioData>,
+    /// 3-D mesh output (additive). Present only for mesh families — currently
+    /// Hunyuan3D image-to-3D. A fourth slot for the same reason `audio` is a
+    /// third: a populated `video` means "this response is a video" to every
+    /// existing consumer, and a populated `images` means "these are pictures".
+    /// A mesh is neither, and must not be reachable by either read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshData>,
     #[schema(example = 1234)]
     pub generation_time_ms: u64,
     #[schema(example = "flux-schnell:q8")]
@@ -2257,6 +2273,78 @@ pub struct AudioData {
     pub thumbnail_width: u32,
     #[schema(example = 360)]
     pub thumbnail_height: u32,
+}
+
+/// Per-request 3-D controls.
+///
+/// Every field is optional: absent means the checkpoint's own default, which
+/// is what `manifest.rs` and the upstream `config.yaml` agree on.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshRequestOptions {
+    /// Resolution of the cubic query grid the shape VAE's occupancy field is
+    /// evaluated on. Memory and time scale with the CUBE of this — 256 is
+    /// ~17 million query points — so it is an allowlist
+    /// (`validation::MESH_OCTREE_RESOLUTIONS`), not a range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub octree_resolution: Option<u32>,
+    /// Iso-level at which the surface is extracted from the occupancy field.
+    /// Upstream's default is 0.6, not 0.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f32>,
+    /// Decimate to approximately this many triangles. Absent keeps the raw
+    /// surface-net output, which is dense and regular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_faces: Option<u32>,
+    /// Run the PBR texture stage. Requires the paint bundle to be installed;
+    /// a request that asks for it without one is refused at admission rather
+    /// than silently answered with bare geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<bool>,
+    /// Edge length of the generated texture atlas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_resolution: Option<u32>,
+}
+
+/// 3-D mesh output from a mesh model family.
+///
+/// The bytes are ONE self-contained file. For [`OutputFormat::Glb`] that
+/// means geometry, UVs, normals and any PBR textures all live in the same
+/// binary glTF as embedded buffer views, which is what lets a mesh be one
+/// gallery row with no schema change — the same shape a still or a clip has.
+/// Loose textures would need a second table and a rework of every gallery
+/// projection; see #1496.
+///
+/// `poster` is the mesh counterpart of [`AudioData::thumbnail`]: a rendered
+/// still that grids and the TUI cell can lay out without a 3-D renderer.
+/// Only the lightbox loads the geometry itself.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshData {
+    /// Encoded mesh bytes. Always an [`OutputFormat::is_mesh`] variant.
+    pub data: Vec<u8>,
+    /// Output format. Always [`OutputFormat::Glb`] today: OBJ exists as a
+    /// gallery export transcode, never as a stored artifact.
+    pub format: OutputFormat,
+    #[schema(example = 24576)]
+    pub vertex_count: u32,
+    #[schema(example = 49152)]
+    pub face_count: u32,
+    /// Axis-aligned bounds in the mesh's own coordinate space, `[x, y, z]`.
+    /// Recorded so a client can frame a camera without parsing the geometry.
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    /// Whether the mesh carries generated PBR textures, as opposed to bare
+    /// geometry. Distinct from "has a material": an untextured mesh still
+    /// gets a default material so viewers shade it.
+    pub textured: bool,
+    /// Rendered poster PNG for gallery grids and the TUI cell.
+    pub poster: Vec<u8>,
+    /// Raster size of `poster`. A mesh has no dimensions of its own, so this
+    /// is what gallery rows record and what grids lay the tile out with —
+    /// exactly as `thumbnail_width`/`_height` do for audio.
+    #[schema(example = 512)]
+    pub poster_width: u32,
+    #[schema(example = 512)]
+    pub poster_height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -2784,6 +2872,15 @@ pub enum OutputFormat {
     Webp,
     Mp4,
     Wav,
+    /// Binary glTF. The stored form of every 3-D artifact: one self-contained
+    /// file carrying geometry, UVs, normals and any PBR textures as embedded
+    /// buffer views, so a mesh remains one gallery row exactly like a print.
+    Glb,
+    /// Wavefront OBJ. **Export-only** — a `.obj` is never the stored artifact
+    /// because it cannot carry its own material or textures, so mold serves it
+    /// as a transcode alongside the `.mtl` and texture files rather than
+    /// publishing a file that is incomplete on its own.
+    Obj,
 }
 
 impl OutputFormat {
@@ -2797,6 +2894,8 @@ impl OutputFormat {
             OutputFormat::Webp => "webp",
             OutputFormat::Mp4 => "mp4",
             OutputFormat::Wav => "wav",
+            OutputFormat::Glb => "glb",
+            OutputFormat::Obj => "obj",
         }
     }
 
@@ -2810,6 +2909,8 @@ impl OutputFormat {
             OutputFormat::Webp => "image/webp",
             OutputFormat::Mp4 => "video/mp4",
             OutputFormat::Wav => "audio/wav",
+            OutputFormat::Glb => "model/gltf-binary",
+            OutputFormat::Obj => "model/obj",
         }
     }
 
@@ -2828,6 +2929,17 @@ impl OutputFormat {
     /// branch must stay `false` so nothing tries to seek frames out of them.
     pub fn is_audio(&self) -> bool {
         matches!(self, OutputFormat::Wav)
+    }
+
+    /// Whether this format carries 3-D geometry and no raster frames.
+    ///
+    /// The third disjoint media class, added the way [`Self::is_audio`] was:
+    /// every `is_video` and `is_audio` branch must stay `false` for a mesh, or
+    /// a viewer tries to seek frames out of a glTF buffer. Gallery grids show
+    /// the sidecar poster PNG a mesh save writes; only the lightbox loads the
+    /// geometry.
+    pub fn is_mesh(&self) -> bool {
+        matches!(self, OutputFormat::Glb | OutputFormat::Obj)
     }
 }
 
@@ -2849,6 +2961,8 @@ impl std::str::FromStr for OutputFormat {
             "webp" => Ok(OutputFormat::Webp),
             "mp4" => Ok(OutputFormat::Mp4),
             "wav" => Ok(OutputFormat::Wav),
+            "glb" => Ok(OutputFormat::Glb),
+            "obj" => Ok(OutputFormat::Obj),
             other => Err(format!("unknown format: {other}")),
         }
     }
@@ -4653,6 +4767,35 @@ pub struct SseCompleteEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_thumbnail: Option<String>,
 
+    // ── Mesh-only fields (additive; absent for every raster response) ───
+    /// Vertex count. Presence of this field signals a mesh response, where
+    /// `image` carries the encoded glTF bytes and `format` is an
+    /// [`OutputFormat::is_mesh`] variant. Probed BEFORE `audio_sample_rate`
+    /// and `video_frames` for the same reason audio is probed before video:
+    /// a mesh has neither, so a wider probe would classify it as an image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_vertices: Option<u32>,
+    /// Triangle count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_faces: Option<u32>,
+    /// Whether the mesh carries generated PBR textures.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mesh_textured: bool,
+    /// Base64-encoded poster PNG for the gallery tile. `width`/`height`
+    /// describe this poster, not the mesh — a mesh has no raster size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_poster: Option<String>,
+    /// Axis-aligned bounds of the geometry, `[x, y, z]`.
+    ///
+    /// Carried rather than recomputed: `MeshData` PROMISES them, no consumer
+    /// re-derives them, and a client that framed a camera from a zeroed pair
+    /// would look at a degenerate box. Six floats on the wire is the cheaper
+    /// half of that trade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_bounds_min: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_bounds_max: Option<[f32; 3]>,
+
     /// GPU ordinal that handled this request (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
@@ -5424,6 +5567,7 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -5675,6 +5819,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -5754,6 +5899,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6036,6 +6182,7 @@ mod tests {
     #[test]
     fn output_metadata_omits_strength_without_source_image() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6335,6 +6482,7 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6581,6 +6729,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6657,6 +6806,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -6736,6 +6886,7 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7153,6 +7304,12 @@ mod tests {
     #[test]
     fn sse_complete_event_roundtrip() {
         let event = SseCompleteEvent {
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -7440,6 +7597,7 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7522,6 +7680,7 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7617,6 +7776,7 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7697,6 +7857,7 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -7798,6 +7959,7 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,
@@ -8301,6 +8463,12 @@ mod tests {
     #[test]
     fn sse_complete_event_video_roundtrip() {
         let event = SseCompleteEvent {
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -8354,6 +8522,12 @@ mod tests {
     #[test]
     fn sse_complete_event_video_no_audio_omits_audio_fields() {
         let event = SseCompleteEvent {
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -8433,6 +8607,12 @@ mod tests {
     fn sse_complete_event_image_no_video_fields_in_json() {
         // An image-only event should not include any video_* keys in JSON
         let event = SseCompleteEvent {
+            mesh_vertices: None,
+            mesh_faces: None,
+            mesh_textured: false,
+            mesh_poster: None,
+            mesh_bounds_min: None,
+            mesh_bounds_max: None,
             request_warnings: Vec::new(),
             audio_sample_rate: None,
             audio_channels: None,
@@ -9894,6 +10074,34 @@ pub struct ServerCapabilities {
     /// deliver.
     #[serde(default)]
     pub licenses: bool,
+    /// 3-D mesh generation and delivery.
+    ///
+    /// Absent means NO, which is the correct answer for every server built
+    /// before this existed: a client that does not see it must not offer a
+    /// mesh model or try to render a `.glb` from the gallery, because such a
+    /// host has neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshCapabilities>,
+}
+
+/// What a host can do with 3-D artifacts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshCapabilities {
+    /// A mesh family has a runnable engine on this host. False on a host that
+    /// carries the manifests and the contract but no engine arm — which is a
+    /// real state (`FactoryFamilyAvailability::ContractOnly`), and one a
+    /// client must be able to distinguish from "this server is too old".
+    pub generation: bool,
+    /// Formats this host will STORE. GLB only today.
+    pub formats: Vec<OutputFormat>,
+    /// Formats `POST /api/gallery/export/:filename` can transcode a stored
+    /// mesh into. Separate from `formats` because OBJ is exportable but never
+    /// storable — it carries neither materials nor textures on its own.
+    pub export_formats: Vec<OutputFormat>,
+    /// Whether generated PBR textures are available. False means geometry
+    /// only, which is a materially different product and must not be
+    /// discovered by a user after waiting for a render.
+    pub textures: bool,
 }
 
 /// Why a host cannot admit a particular set of requests.

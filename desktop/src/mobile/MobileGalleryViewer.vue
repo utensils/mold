@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MeshViewer from "@studio/components/MeshViewer.vue";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
@@ -11,6 +12,7 @@ import {
   evictMedia,
   galleryMediaPath,
   isAudioItem,
+  isMeshItem,
   isVideoItem,
   streamableMediaUrl,
 } from "../lib/gallery/media";
@@ -117,6 +119,7 @@ const loadError = ref("");
 const mediaLoadKey = ref(0);
 const video = computed(() => isVideoItem(props.item));
 const audio = computed(() => isAudioItem(props.item));
+const mesh = computed(() => isMeshItem(props.item));
 const canExportVideo = computed(
   () => props.exportEnabled && video.value && props.item.filename.toLowerCase().endsWith(".mp4"),
 );
@@ -323,7 +326,9 @@ function currentMediaLoad(): MediaLoad {
     cacheKey: props.cacheKey,
     // Audio is small and not Range-streamed, so the legacy blob path is a
     // fine fallback for it; only video must refuse to buffer whole files.
-    allowLegacyBlob: !isVideoItem(props.item),
+    // A mesh, like a clip, is fetched whole by its viewer and must not take
+    // the legacy blob path.
+    allowLegacyBlob: !isVideoItem(props.item) && !isMeshItem(props.item),
   };
 }
 
@@ -669,6 +674,17 @@ onBeforeUnmount(() => {
         alt=""
         aria-hidden="true"
         draggable="false"
+      />
+      <MeshViewer
+        v-else-if="mesh"
+        :key="mediaLoadKey"
+        class="gallery-viewer-media"
+        :src="mediaUrl"
+        :poster="thumbnailUrl"
+        :alt="item.metadata.prompt || item.filename"
+        data-test="gallery-viewer-mesh"
+        @ready="mediaReady"
+        @fail="mediaFailed"
       />
       <div v-else-if="audio" class="gallery-viewer-audio">
         <img

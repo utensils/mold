@@ -374,6 +374,11 @@ pub fn companions_for(
         Family::ZImage => {
             push(&mut out, "z-image-te");
         }
+        // Hunyuan3D checkpoints are self-contained: one safetensors carries
+        // the DiT, the shape VAE and the DINOv2 conditioner. There is no
+        // text encoder and no separate VAE asset anywhere in the family, so
+        // there is nothing to pull alongside a discovered checkpoint.
+        Family::Hunyuan3d => {}
         Family::LtxVideo => {
             push(&mut out, "t5-v1_1-xxl");
             // Civitai LTX-Video checkpoints are transformer-only; VAE

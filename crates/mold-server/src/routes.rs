@@ -387,6 +387,8 @@ use crate::queue::clean_error_message;
         mold_core::RemixVariant,
         mold_core::RemixDimension,
         mold_core::ImageData,
+        mold_core::MeshData,
+        mold_core::MeshCapabilities,
         mold_core::OutputFormat,
         mold_core::ModelInfo,
         mold_core::GenerationProfileSet,
@@ -3237,9 +3239,39 @@ pub(crate) fn apply_media_headers(
     img: mold_core::ImageData,
     headers: &mut HeaderMap,
 ) -> Vec<u8> {
-    // Audio is probed first for the same reason the SSE client probes it
-    // first: an audio print has no frames, so the video probe below would
-    // fall through and hand the caller a waveform PNG.
+    // Narrowest probe first: mesh, then audio, then video. Each is missing
+    // whatever the next probe keys on — a mesh has no sample rate and no
+    // frames, an audio print has no frames — so a wider probe running first
+    // falls through and answers with the sidecar tile instead of the
+    // artifact the caller asked for.
+    if let Some(mesh) = response.mesh.as_ref() {
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(mesh.format.content_type()),
+        );
+        let mut set = |name: &'static str, value: String| {
+            if let Ok(v) = HeaderValue::from_str(&value) {
+                headers.insert(name, v);
+            }
+        };
+        // Stated rather than inferred, exactly as for audio: a caller may
+        // omit `output_format` and let the server normalise a mesh family to
+        // GLB, so the request is no evidence of what came back.
+        set("x-mold-mesh-format", mesh.format.extension().to_string());
+        set("x-mold-mesh-vertices", mesh.vertex_count.to_string());
+        set("x-mold-mesh-faces", mesh.face_count.to_string());
+        set("x-mold-mesh-textured", mesh.textured.to_string());
+        // A mesh has no raster of its own. These are the poster tile's size,
+        // which is what a gallery row records so the grid has a real aspect
+        // ratio — the tile bytes cannot ride along in a body that is the GLB.
+        let fmt_bounds = |bounds: [f32; 3]| format!("{},{},{}", bounds[0], bounds[1], bounds[2]);
+        set("x-mold-mesh-bounds-min", fmt_bounds(mesh.bounds_min));
+        set("x-mold-mesh-bounds-max", fmt_bounds(mesh.bounds_max));
+        set("x-mold-mesh-poster-width", mesh.poster_width.to_string());
+        set("x-mold-mesh-poster-height", mesh.poster_height.to_string());
+        return mesh.data.clone();
+    }
+
     if let Some(audio) = response.audio.as_ref() {
         headers.insert(
             header::CONTENT_TYPE,
@@ -7413,7 +7445,31 @@ async fn server_capabilities(
         } else {
             mold_core::IdentityCapabilities::default()
         },
+        mesh: Some(mesh_capabilities()),
     })
+}
+
+/// What this build can do with 3-D artifacts.
+///
+/// `generation` is read from the factory rather than from the presence of the
+/// manifests, so a build that ships the family contract without an engine arm
+/// says so instead of advertising a model it would refuse after admission.
+/// Delivery is advertised unconditionally because a stored `.glb` can be
+/// listed, served and exported by any build — including one that cannot
+/// generate a new one.
+fn mesh_capabilities() -> mold_core::MeshCapabilities {
+    let generation = matches!(
+        mold_inference::factory_family_availability(mold_core::manifest::HUNYUAN3D_FAMILY),
+        Some(mold_inference::FactoryFamilyAvailability::Runnable)
+    );
+    mold_core::MeshCapabilities {
+        generation,
+        formats: vec![mold_core::OutputFormat::Glb],
+        export_formats: vec![mold_core::OutputFormat::Glb, mold_core::OutputFormat::Obj],
+        // Geometry only. Flipped by the PBR paint stage, not before — a user
+        // must not discover that a render is untextured after waiting for it.
+        textures: false,
+    }
 }
 
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -9383,6 +9439,10 @@ fn content_type_for_filename(name: &str) -> &'static str {
         "video/mp4"
     } else if lower.ends_with(".wav") {
         "audio/wav"
+    } else if lower.ends_with(".glb") {
+        "model/gltf-binary"
+    } else if lower.ends_with(".obj") {
+        "model/obj"
     } else {
         "application/octet-stream"
     }
@@ -9472,18 +9532,27 @@ async fn render_gallery_thumbnail(
     // save time — there is nothing in a WAV for a raster decoder to read, so
     // a missing cache entry goes straight to the placeholder.
     let is_audio = lower.ends_with(".wav");
-    let thumb_path = if is_audio {
+    // A mesh is the same shape of problem as audio: its poster PNG is
+    // rendered at save time because there is nothing in a glTF buffer for a
+    // raster decoder to read. Both therefore share the save-time sidecar name
+    // (`<file>.png`) rather than the versioned cache path.
+    let is_mesh = crate::thumbnails::is_mesh_filename(&clean_name);
+    let thumb_path = if is_audio || is_mesh {
         thumb_dir.join(format!("{clean_name}.png"))
     } else {
         variant.cache_path(&thumb_dir, &clean_name, &media_version)
     };
-    if is_audio && !thumb_path.is_file() {
+    if (is_audio || is_mesh) && !thumb_path.is_file() {
         return thumbnail_response(
             &headers,
             "image/svg+xml",
             "public, max-age=300",
             &etag,
-            AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec(),
+            if is_mesh {
+                MESH_PLACEHOLDER_SVG.as_bytes().to_vec()
+            } else {
+                AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec()
+            },
         );
     }
 
@@ -9530,16 +9599,22 @@ async fn render_gallery_thumbnail(
                 error = %err,
                 "thumbnail decode failed; falling back to source bytes"
             );
-            // For videos, the browser can't render the raw mp4 as an <img>
-            // either, so serving the source doesn't help — fall back to the
-            // SVG play-icon placeholder instead.
-            if is_video {
+            // For videos and meshes, the browser can't render the raw bytes
+            // as an <img> either, so serving the source doesn't help — and
+            // for a mesh it is actively wrong, because it would hand a
+            // multi-megabyte glTF buffer to an <img> tag that can only
+            // discard it. Fall back to the SVG placeholder instead.
+            if is_video || is_mesh {
                 return thumbnail_response(
                     &headers,
                     "image/svg+xml",
                     "public, max-age=300",
                     &etag,
-                    VIDEO_PLACEHOLDER_SVG.as_bytes().to_vec(),
+                    if is_mesh {
+                        MESH_PLACEHOLDER_SVG.as_bytes().to_vec()
+                    } else {
+                        VIDEO_PLACEHOLDER_SVG.as_bytes().to_vec()
+                    },
                 );
             }
             let raw = tokio::fs::read(&source_path)
@@ -9575,7 +9650,8 @@ async fn render_gallery_thumbnail(
 // desktop app's offline tiles share them; these names stay as thin aliases
 // for the route, the warmup, and the trash sweeper.
 use crate::thumbnails::{
-    file_media_version, versioned_thumbnail_path, AUDIO_PLACEHOLDER_SVG, VIDEO_PLACEHOLDER_SVG,
+    file_media_version, versioned_thumbnail_path, AUDIO_PLACEHOLDER_SVG, MESH_PLACEHOLDER_SVG,
+    VIDEO_PLACEHOLDER_SVG,
 };
 
 fn thumbnail_singleflight(path: &std::path::Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {

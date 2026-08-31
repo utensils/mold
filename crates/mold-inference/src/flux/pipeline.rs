@@ -2447,6 +2447,7 @@ impl FluxEngine {
         tracing::info!(generation_time_ms, seed, "sequential generation complete");
 
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
@@ -3354,6 +3355,7 @@ impl FluxEngine {
         tracing::info!(generation_time_ms, seed, "generation complete");
 
         Ok(GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
@@ -3714,6 +3716,7 @@ mod tests {
         plural: Option<Vec<LoraWeight>>,
     ) -> GenerateRequest {
         GenerateRequest {
+            mesh: None,
             video_only: None,
             collection: None,
             tags: None,

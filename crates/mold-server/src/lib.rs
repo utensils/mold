@@ -22,6 +22,7 @@ mod h3_attempt;
     feature = "h3-private-uat"
 ))]
 mod h3_private_bridge;
+mod hunyuan3d_admission;
 pub mod test_support;
 // Agent A (downloads)
 pub mod device_registry;

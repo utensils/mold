@@ -213,6 +213,7 @@ mod tests {
 
     fn video_response(data: Vec<u8>, preview: Vec<u8>, format: OutputFormat) -> GenerateResponse {
         GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],
@@ -288,6 +289,7 @@ mod tests {
     #[test]
     fn select_attachment_falls_back_to_images_when_no_video() {
         let resp = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![ImageData {
@@ -311,6 +313,7 @@ mod tests {
     #[test]
     fn select_attachment_returns_none_when_empty() {
         let resp = GenerateResponse {
+            mesh: None,
             request_warnings: Vec::new(),
             audio: None,
             images: vec![],

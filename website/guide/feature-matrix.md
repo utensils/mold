@@ -31,6 +31,7 @@ features today?
 | LTX-2           | Yes     | No         | Keyframes                                             |
 | Wan Video       | N/A     | N/A        | First/last frame on capable checkpoints               |
 | MiniMax H3      | N/A     | N/A        | Required first frame (FL2VA) or ordered refs (Ref2VA) |
+| Hunyuan3D       | N/A     | N/A        | Required source image — the only conditioning it has  |
 
 ## Control and Adapters
 
@@ -50,6 +51,7 @@ features today?
 | LTX Video       | ltx-video       | No         | No   |
 | Wan Video       | wan             | No         | Yes  |
 | MiniMax H3      | minimax-h3      | No         | No¹  |
+| Hunyuan3D       | hunyuan3d       | No         | No   |
 
 ¹ H3 Turbo model tags contain manifest-pinned, reviewed distillation adapters.
 They do not enable arbitrary request-time LoRA stacks.
@@ -71,6 +73,10 @@ They do not enable arbitrary request-time LoRA stacks.
 | LTX Video       | No               | No                 |
 | Wan Video       | Yes              | Yes¹               |
 | MiniMax H3      | No               | No                 |
+| Hunyuan3D       | N/A²             | No                 |
+
+² Hunyuan3D has no text encoder at all, so neither a prompt nor a negative
+prompt is read. The source image is the entire conditioning.
 
 ¹ Wan's solver set is disjoint from the UNet schedulers: it takes
 `--sample-solver unipc|euler|dpm++`, which travels in the same `scheduler` wire
@@ -121,19 +127,27 @@ the full multiscale refinement path.
 
 ## Backend Support
 
-| Family          | CUDA           | Metal                         | CPU              |
-| --------------- | -------------- | ----------------------------- | ---------------- |
-| FLUX.1 / FLUX.2 | Yes            | Yes                           | Yes (slow)       |
-| SDXL / SD 1.5   | Yes            | Yes                           | Yes              |
-| SD 3.5          | Yes            | Yes                           | Yes              |
-| Z-Image         | Yes            | Yes                           | Yes              |
-| Wuerstchen v2   | Yes            | Yes                           | Yes              |
-| Qwen-Image      | Yes            | Yes                           | Yes              |
-| Qwen-Image-Edit | Yes            | Yes                           | Yes              |
-| LTX Video       | Yes            | Yes                           | Yes              |
-| **LTX-2**       | Yes            | Yes                           | Correctness-only |
-| Wan Video       | Yes            | Correctness-only              | Correctness-only |
-| MiniMax H3      | SM89 H3 builds | Correctness-only, unqualified | No               |
+| Family          | CUDA             | Metal                         | CPU              |
+| --------------- | ---------------- | ----------------------------- | ---------------- |
+| FLUX.1 / FLUX.2 | Yes              | Yes                           | Yes (slow)       |
+| SDXL / SD 1.5   | Yes              | Yes                           | Yes              |
+| SD 3.5          | Yes              | Yes                           | Yes              |
+| Z-Image         | Yes              | Yes                           | Yes              |
+| Wuerstchen v2   | Yes              | Yes                           | Yes              |
+| Qwen-Image      | Yes              | Yes                           | Yes              |
+| Qwen-Image-Edit | Yes              | Yes                           | Yes              |
+| LTX Video       | Yes              | Yes                           | Yes              |
+| **LTX-2**       | Yes              | Yes                           | Correctness-only |
+| Wan Video       | Yes              | Correctness-only              | Correctness-only |
+| MiniMax H3      | SM89 H3 builds   | Correctness-only, unqualified | No               |
+| Hunyuan3D       | Correctness-only | Correctness-only              | Correctness-only |
+
+::: warning Hunyuan3D is not performance-qualified
+The shape path is dense matmuls and attention with no custom kernel, so it is
+portable by construction — but "Yes" in this table is a claim about MEASURED
+performance on real weights, and that campaign has not run. Correctness-only is
+the honest answer until it does.
+:::
 
 ::: tip LTX-2 Metal qualification
 LTX-2 / LTX-2.3's Apple Metal path is performance-qualified: BF16 transformer

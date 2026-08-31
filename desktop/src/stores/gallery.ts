@@ -7,6 +7,7 @@ import {
   evictMedia,
   galleryMediaPath,
   isAudioItem,
+  isMeshItem,
   isVideoItem,
   type GallerySource,
 } from "../lib/gallery/media";
@@ -156,7 +157,7 @@ export interface GalleryChip {
 }
 
 /** Media-kind chip filter: everything, stills only, or video only. */
-export type GalleryKindFilter = "all" | "image" | "video" | "audio";
+export type GalleryKindFilter = "all" | "image" | "video" | "audio" | "mesh";
 
 /** Per-kind counts over the host-chip-filtered set (kind chip labels). */
 export interface GalleryKindCounts {
@@ -164,6 +165,7 @@ export interface GalleryKindCounts {
   image: number;
   video: number;
   audio: number;
+  mesh: number;
 }
 
 const emptyBucket = (): GalleryBucket => ({
@@ -654,6 +656,10 @@ export const useGalleryStore = defineStore("gallery", {
           // Three disjoint kinds, not a video/not-video split: an audio print
           // has no frames and must not fall into the Images bucket.
           entries = entries.filter((e) => {
+            // Narrowest predicate first: each kind is missing whatever the
+            // next one tests for, so a wider test running first would claim
+            // a mesh or an audio print as an image.
+            if (isMeshItem(e.item)) return mediaKind === "mesh";
             if (isAudioItem(e.item)) return mediaKind === "audio";
             if (isVideoItem(e.item)) return mediaKind === "video";
             return mediaKind === "image";
@@ -749,15 +755,18 @@ export const useGalleryStore = defineStore("gallery", {
           : this.hostFiltered;
       let video = 0;
       let audio = 0;
+      let mesh = 0;
       for (const e of entries) {
-        if (isAudioItem(e.item)) audio++;
+        if (isMeshItem(e.item)) mesh++;
+        else if (isAudioItem(e.item)) audio++;
         else if (isVideoItem(e.item)) video++;
       }
       return {
         all: entries.length,
-        image: entries.length - video - audio,
+        image: entries.length - video - audio - mesh,
         video,
         audio,
+        mesh,
       };
     },
     /** Per-source chips for the gallery header (HostFilterChips adds All). */
