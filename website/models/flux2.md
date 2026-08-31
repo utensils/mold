@@ -16,13 +16,13 @@ storage requirements even when GPU residency is bounded.
 
 ### Variants
 
-| Model            | Size    | Gated | Notes                                    |
-| ---------------- | ------- | ----- | ---------------------------------------- |
-| `flux2-dev:q4`   | 20 GB   | no    | Smallest dev tier; fits a 24 GB GPU      |
-| `flux2-dev:q6`   | 27 GB   | no    | Fits a 32 GB GPU with room to spare      |
-| `flux2-dev:q8`   | 35 GB   | no    | Near-BF16 quality                        |
-| `flux2-dev:fp8`  | 35 GB   | no    | Mixed FP8 — BF16 attention, FP8 MLP      |
-| `flux2-dev:bf16` | 65 GB   | yes   | Full precision, 7 shards                 |
+| Model            | Size  | Gated | Notes                               |
+| ---------------- | ----- | ----- | ----------------------------------- |
+| `flux2-dev:q4`   | 20 GB | no    | Smallest dev tier; fits a 24 GB GPU |
+| `flux2-dev:q6`   | 27 GB | no    | Fits a 32 GB GPU with room to spare |
+| `flux2-dev:q8`   | 35 GB | no    | Near-BF16 quality                   |
+| `flux2-dev:fp8`  | 35 GB | no    | Mixed FP8 — BF16 attention, FP8 MLP |
+| `flux2-dev:bf16` | 65 GB | yes   | Full precision, 7 shards            |
 
 Sizes are the transformer alone. Every tier also pulls the Mistral3 encoder,
 VAE, and tokenizer (~36 GB), shared across tiers.
@@ -112,16 +112,16 @@ the branch entirely.
 
 ## Variants
 
-| Model                      | Steps | Size   | Notes                       |
-| -------------------------- | ----- | ------ | --------------------------- |
-| `flux2-klein-base:q4`      | 50    | 2.6 GB | Smallest base tier          |
-| `flux2-klein-base:q6`      | 50    | 3.4 GB | Better quality              |
-| `flux2-klein-base:q8`      | 50    | 4.3 GB | Near-BF16 quality           |
-| `flux2-klein-base:bf16`    | 50    | 7.8 GB | Full precision 4B           |
-| `flux2-klein-base-9b:q4`   | 50    | 5.9 GB | Smallest 9B base            |
-| `flux2-klein-base-9b:q6`   | 50    | 7.9 GB | Better quality              |
-| `flux2-klein-base-9b:q8`   | 50    | 10 GB  | Near-BF16 quality           |
-| `flux2-klein-base-9b:bf16` | 50    | 18 GB  | Full precision, 2 shards    |
+| Model                      | Steps | Size   | Notes                    |
+| -------------------------- | ----- | ------ | ------------------------ |
+| `flux2-klein-base:q4`      | 50    | 2.6 GB | Smallest base tier       |
+| `flux2-klein-base:q6`      | 50    | 3.4 GB | Better quality           |
+| `flux2-klein-base:q8`      | 50    | 4.3 GB | Near-BF16 quality        |
+| `flux2-klein-base:bf16`    | 50    | 7.8 GB | Full precision 4B        |
+| `flux2-klein-base-9b:q4`   | 50    | 5.9 GB | Smallest 9B base         |
+| `flux2-klein-base-9b:q6`   | 50    | 7.9 GB | Better quality           |
+| `flux2-klein-base-9b:q8`   | 50    | 10 GB  | Near-BF16 quality        |
+| `flux2-klein-base-9b:bf16` | 50    | 18 GB  | Full precision, 2 shards |
 
 Every base tier shares the distilled tiers' encoder and VAE bytes, so a host
 that already has `flux2-klein` installed downloads only the transformer.
