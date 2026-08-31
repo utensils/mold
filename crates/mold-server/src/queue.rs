@@ -1149,7 +1149,7 @@ fn post_upscale_model_to_pull(
         return Ok(None);
     };
     let model_name = mold_core::manifest::resolve_model_name(requested);
-    if model_manager::configured_upscaler_weights_exist(config, &model_name) {
+    if !model_manager::upscaler_model_needs_pull(config, &model_name) {
         return Ok(None);
     }
     if mold_core::manifest::find_manifest(&model_name).is_none() {

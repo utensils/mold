@@ -171,6 +171,13 @@ pub(crate) fn configured_upscaler_weights_exist(config: &Config, model: &str) ->
         .is_some_and(|path| Path::new(path).is_file())
 }
 
+/// First-use acquisition gate shared by every native upscaler surface.
+/// A configured-but-missing file is not installed; pulling repairs stale
+/// configuration instead of deferring the failure to engine construction.
+pub(crate) fn upscaler_model_needs_pull(config: &Config, model: &str) -> bool {
+    !configured_upscaler_weights_exist(config, model)
+}
+
 pub(crate) enum PullStatus {
     AlreadyAvailable,
     Pulled,

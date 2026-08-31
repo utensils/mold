@@ -59,6 +59,11 @@ const { pushMock, replaceMock } = vi.hoisted(() => ({
   replaceMock: vi.fn(),
 }));
 const restoreSourceMock = vi.hoisted(() => vi.fn());
+const createFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@studio/api/videoUpscale", () => ({
+  createFramewiseUpscale: createFramewiseUpscaleMock,
+}));
 
 vi.mock("@studio/lib/generationSourceMedia", () => ({
   restoreGenerationSourceMedia: restoreSourceMock,
@@ -189,6 +194,7 @@ const LightboxStub = defineComponent({
     <button data-test="lb-reuse" @click="$emit('reuse', item)">reuse</button>
     <button data-test="lb-delete" @click="$emit('delete', item)">delete</button>
     <button data-test="lb-source" @click="$emit('use-source', item)">source</button>
+    <button data-test="lb-upscale" @click="$emit('upscale', item)">upscale</button>
     <span data-test="lb-key">{{ item.hostId }}|{{ item.filename }}</span>
   </div>`,
 });
@@ -248,6 +254,12 @@ describe("LibraryPage", () => {
     for (const fn of Object.values(orgApi)) fn.mockClear();
     fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
     restoreSourceMock.mockReset().mockResolvedValue(null);
+    createFramewiseUpscaleMock.mockReset().mockResolvedValue({
+      id: "vup-gallery-1",
+      state: "queued",
+      disclosure:
+        "Framewise upscale processes each frame independently; temporal flicker may remain.",
+    });
     pushMock.mockReset();
     replaceMock.mockReset();
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
@@ -334,6 +346,30 @@ describe("LibraryPage", () => {
     );
     expect(wrapper.get("[data-test='gallery-context-menu']").text()).toContain(
       "Use as source",
+    );
+  });
+
+  it("queues an existing Library video for Framewise upscale", async () => {
+    listGalleryMock.mockResolvedValue([
+      { ...cat, filename: "existing-clip.mp4", format: "mp4" },
+    ]);
+    hostCapabilitiesMock.mockResolvedValue({
+      gallery: { can_delete: true },
+      video_upscale: { available: true },
+    });
+    const wrapper = await mounted();
+
+    await wrapper.get("[data-test='grid-open']").trigger("click");
+    await wrapper.get("[data-test='lb-upscale']").trigger("click");
+    await flushPromises();
+
+    expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
+      { baseUrl: window.location.origin, apiKey: null },
+      "existing-clip.mp4",
+      "real-esrgan-x4plus:fp16",
+    );
+    expect(useNotifications().toasts.at(-1)?.text).toContain(
+      "Framewise upscale queued (vup-gallery-1)",
     );
   });
 

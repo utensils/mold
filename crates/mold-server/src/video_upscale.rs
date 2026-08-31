@@ -656,14 +656,10 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
         }
     };
     let model = stored.job.model.clone();
-    let needs_pull = state
-        .config
-        .read()
-        .await
-        .models
-        .get(&model)
-        .and_then(|c| c.transformer.as_ref())
-        .is_none();
+    let needs_pull = {
+        let config = state.config.read().await;
+        crate::model_manager::upscaler_model_needs_pull(&config, &model)
+    };
     if needs_pull {
         crate::model_manager::pull_model(&state, &model, None)
             .await
@@ -896,6 +892,7 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mold_core::ModelConfig;
     #[test]
     fn rational_rate_is_exact() {
         assert_eq!(rational("24000/1001").unwrap(), (24000, 1001));
@@ -904,6 +901,39 @@ mod tests {
     fn scale_is_derived_conservatively() {
         assert_eq!(scale_for("real-esrgan-x2plus:fp16"), 2);
         assert_eq!(scale_for("real-esrgan-x4plus:fp16"), 4);
+    }
+
+    #[test]
+    fn first_use_and_stale_paths_trigger_upscaler_acquisition() {
+        let model = "real-esrgan-x4plus:fp16";
+        let mut config = mold_core::Config::default();
+        assert!(crate::model_manager::upscaler_model_needs_pull(
+            &config, model
+        ));
+
+        let temp = tempfile::tempdir().unwrap();
+        config.models.insert(
+            model.into(),
+            ModelConfig {
+                transformer: Some(
+                    temp.path()
+                        .join("missing.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(crate::model_manager::upscaler_model_needs_pull(
+            &config, model
+        ));
+
+        let weights = temp.path().join("installed.safetensors");
+        fs::write(&weights, b"weights").unwrap();
+        config.models.get_mut(model).unwrap().transformer = Some(weights.display().to_string());
+        assert!(!crate::model_manager::upscaler_model_needs_pull(
+            &config, model
+        ));
     }
 
     #[test]

@@ -8,6 +8,11 @@ const { apiFetchTo, localGalleryDelete, localGalleryList } = vi.hoisted(() => ({
   localGalleryDelete: vi.fn().mockResolvedValue(undefined),
   localGalleryList: vi.fn(),
 }));
+const createFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@studio/api/videoUpscale", () => ({
+  createFramewiseUpscale: createFramewiseUpscaleMock,
+}));
 
 vi.mock("@tanstack/vue-virtual", () => ({
   useVirtualizer: (options: { value: { count: number } }) => ({
@@ -98,6 +103,7 @@ async function mountView(
   remotePrint?: GalleryImage,
   seed?: (gallery: ReturnType<typeof useGalleryStore>) => void,
   route = "/library",
+  localServer = false,
 ) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -111,8 +117,10 @@ async function mountView(
   const pinia = createPinia();
   setActivePinia(pinia);
   const connection = useConnectionStore();
-  connection.info = null;
-  connection.status = "error";
+  connection.info = localServer
+    ? { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" }
+    : null;
+  connection.status = localServer ? "ready" : "error";
   const gallery = useGalleryStore();
   gallery.buckets.local = {
     items: [...prints],
@@ -138,9 +146,14 @@ async function mountView(
     };
   }
   seed?.(gallery);
+  if (localServer) {
+    useHostsStore().capabilities.local = {
+      video_upscale: { available: true },
+    } as never;
+  }
   localGalleryList.mockResolvedValue({
     images: [...(gallery.buckets.local?.items ?? prints)],
-    target: null,
+    target: localServer ? { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" } : null,
   });
 
   const wrapper = mount(LibraryView, {
@@ -162,6 +175,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   apiFetchTo.mockResolvedValue(new Response());
+  createFramewiseUpscaleMock.mockResolvedValue({
+    id: "vup-desktop-1",
+    state: "queued",
+    disclosure:
+      "Framewise upscale processes each frame independently; temporal flicker may remain.",
+  });
 });
 
 describe("LibraryView session scroll", () => {
@@ -528,6 +547,40 @@ describe("LibraryView source reuse", () => {
     });
     expect(router.currentRoute.value.path).toBe("/create");
     expect(useToastStore().items.at(-1)?.message).toBe("Loaded as source video");
+    wrapper.unmount();
+  });
+
+  it("queues an existing local Library video from its context menu", async () => {
+    const video = {
+      ...prints[0]!,
+      filename: "existing-clip.mp4",
+      format: "mp4",
+    } as GalleryImage;
+    const { wrapper } = await mountView(
+      undefined,
+      (gallery) => {
+        gallery.buckets.local!.items = [video];
+      },
+      "/library",
+      true,
+    );
+
+    await wrapper.get(".ms-lib-tile").trigger("contextmenu");
+    const upscale = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Framewise upscale",
+    );
+    expect(upscale).toMatchObject({ disabled: false });
+    useContextMenuStore().activate(upscale!);
+    await flushPromises();
+
+    expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      "existing-clip.mp4",
+      "real-esrgan-x4plus",
+    );
+    expect(useToastStore().items.at(-1)?.message).toContain(
+      "Framewise upscale queued (vup-desktop-1)",
+    );
     wrapper.unmount();
   });
 });

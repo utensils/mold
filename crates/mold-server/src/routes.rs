@@ -3825,11 +3825,7 @@ async fn upscale(
     // Auto-pull upscaler model if not downloaded
     let needs_pull = {
         let config = state.config.read().await;
-        config
-            .models
-            .get(&model_name)
-            .and_then(|c| c.transformer.as_ref())
-            .is_none()
+        model_manager::upscaler_model_needs_pull(&config, &model_name)
     };
     if needs_pull {
         if mold_core::manifest::find_manifest(&model_name).is_none() {
@@ -3911,11 +3907,7 @@ async fn upscale_stream(
     // Check if model needs pulling before spawning the SSE stream
     let needs_pull = {
         let config = state.config.read().await;
-        config
-            .models
-            .get(&model_name)
-            .and_then(|c| c.transformer.as_ref())
-            .is_none()
+        model_manager::upscaler_model_needs_pull(&config, &model_name)
     };
 
     // Validate the model exists in the manifest if we need to pull
