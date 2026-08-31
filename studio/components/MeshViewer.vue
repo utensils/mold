@@ -1,0 +1,844 @@
+<script setup lang="ts">
+/*
+ * Shared 3-D print viewer — the lightbox's answer to a `.glb` the way `<video>`
+ * is its answer to an `.mp4`. Mounted by web, desktop and the iPhone gallery.
+ *
+ * Raw WebGL on purpose: this SPA is embedded in the `mold` binary, so a mesh
+ * library would be paid for by every download of every install. What is here
+ * is the small part of one that a single-primitive Hunyuan3D mesh needs — a
+ * Lambert key/fill with a rim term, an orbit camera, and nothing else. The
+ * container parsing lives in `@studio/lib/glb` so it can be tested without a
+ * GPU or a DOM.
+ *
+ * A viewer that cannot start is NEVER a black rectangle: no WebGL, a refused
+ * fetch, a corrupt file and a shader that will not link all land on the poster
+ * the gallery already has, with one line saying why.
+ */
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { GlbParseError, parseGlb, type ParsedMesh } from "../lib/glb";
+
+const props = defineProps<{
+  /** GLB URL the caller has already authorized (media-token URLs included). */
+  src: string;
+  /** Poster frame shown while loading and kept forever on any failure. */
+  poster?: string;
+  /** Describes the subject for assistive technology. */
+  alt?: string;
+}>();
+
+const emit = defineEmits<{
+  /** The mesh is on the GPU and the first frame has been drawn. */
+  ready: [stats: { vertexCount: number; triangleCount: number }];
+  /** Rendering is impossible; the poster is showing instead. */
+  fail: [message: string];
+}>();
+
+type Status = "loading" | "ready" | "failed";
+
+const status = ref<Status>("loading");
+const note = ref("");
+const stats = ref<{ vertexCount: number; triangleCount: number } | null>(null);
+const canvas = ref<HTMLCanvasElement | null>(null);
+const root = ref<HTMLElement | null>(null);
+
+const label = computed(() => {
+  const subject = props.alt?.trim() || "Generated 3-D mesh";
+  if (status.value !== "ready") return subject;
+  return `${subject}. Interactive 3-D view: drag or use the arrow keys to orbit, plus and minus to zoom.`;
+});
+const summary = computed(() => {
+  const value = stats.value;
+  if (!value) return "";
+  const format = (n: number) => n.toLocaleString("en-US");
+  return `${format(value.triangleCount)} triangles · ${format(value.vertexCount)} vertices`;
+});
+
+// ── Matrices (column-major, the order WebGL uniforms want) ─────────────────
+
+type Mat4 = Float32Array;
+
+function identity(): Mat4 {
+  const m = new Float32Array(16);
+  m[0] = 1;
+  m[5] = 1;
+  m[10] = 1;
+  m[15] = 1;
+  return m;
+}
+
+function multiply(a: Mat4, b: Mat4): Mat4 {
+  const out = new Float32Array(16);
+  for (let column = 0; column < 4; column += 1) {
+    for (let row = 0; row < 4; row += 1) {
+      let sum = 0;
+      for (let k = 0; k < 4; k += 1) {
+        sum += (a[k * 4 + row] ?? 0) * (b[column * 4 + k] ?? 0);
+      }
+      out[column * 4 + row] = sum;
+    }
+  }
+  return out;
+}
+
+function translation(x: number, y: number, z: number): Mat4 {
+  const m = identity();
+  m[12] = x;
+  m[13] = y;
+  m[14] = z;
+  return m;
+}
+
+function rotationX(angle: number): Mat4 {
+  const m = identity();
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  m[5] = c;
+  m[6] = s;
+  m[9] = -s;
+  m[10] = c;
+  return m;
+}
+
+function rotationY(angle: number): Mat4 {
+  const m = identity();
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  m[0] = c;
+  m[2] = -s;
+  m[8] = s;
+  m[10] = c;
+  return m;
+}
+
+function perspective(
+  fovy: number,
+  aspect: number,
+  near: number,
+  far: number,
+): Mat4 {
+  const m = new Float32Array(16);
+  const f = 1 / Math.tan(fovy / 2);
+  m[0] = f / (aspect || 1);
+  m[5] = f;
+  m[10] = (far + near) / (near - far);
+  m[11] = -1;
+  m[14] = (2 * far * near) / (near - far);
+  return m;
+}
+
+/** Upper-left 3×3. The camera only rotates, so this IS the normal matrix. */
+function upper3x3(m: Mat4): Float32Array {
+  return new Float32Array([
+    m[0] ?? 0,
+    m[1] ?? 0,
+    m[2] ?? 0,
+    m[4] ?? 0,
+    m[5] ?? 0,
+    m[6] ?? 0,
+    m[8] ?? 0,
+    m[9] ?? 0,
+    m[10] ?? 0,
+  ]);
+}
+
+// ── Shaders ────────────────────────────────────────────────────────────────
+// GLSL ES 1.00 so one source compiles on both WebGL2 and a WebGL1 fallback.
+
+const VERTEX_SHADER = `
+attribute vec3 aPosition;
+attribute vec3 aNormal;
+attribute vec3 aColor;
+attribute vec2 aUv;
+uniform mat4 uModelView;
+uniform mat4 uProjection;
+uniform mat3 uNormalMatrix;
+varying vec3 vNormal;
+varying vec3 vView;
+varying vec3 vColor;
+varying vec2 vUv;
+void main() {
+  vec4 view = uModelView * vec4(aPosition, 1.0);
+  vNormal = uNormalMatrix * aNormal;
+  vView = view.xyz;
+  vColor = aColor;
+  vUv = aUv;
+  gl_Position = uProjection * view;
+}
+`;
+
+const FRAGMENT_SHADER = `
+precision mediump float;
+uniform sampler2D uTexture;
+uniform float uHasTexture;
+varying vec3 vNormal;
+varying vec3 vView;
+varying vec3 vColor;
+varying vec2 vUv;
+void main() {
+  // Extracted surfaces are not reliably closed and the material is
+  // doubleSided, so a back face is lit by its flipped normal, not left black.
+  vec3 normal = normalize(vNormal);
+  if (!gl_FrontFacing) normal = -normal;
+  vec3 eye = normalize(-vView);
+  vec3 key = normalize(vec3(0.45, 0.72, 0.85));
+  vec3 fill = normalize(vec3(-0.65, -0.15, 0.35));
+  float kd = max(dot(normal, key), 0.0);
+  float fd = max(dot(normal, fill), 0.0);
+  float rim = pow(1.0 - max(dot(normal, eye), 0.0), 2.5);
+  vec3 albedo = vColor;
+  if (uHasTexture > 0.5) albedo *= texture2D(uTexture, vUv).rgb;
+  vec3 lit = albedo * (0.20 + 0.72 * kd + 0.22 * fd) + vec3(0.16, 0.19, 0.24) * rim;
+  gl_FragColor = vec4(clamp(lit, 0.0, 1.0), 1.0);
+}
+`;
+
+// ── GL state ───────────────────────────────────────────────────────────────
+
+type GL = WebGLRenderingContext | WebGL2RenderingContext;
+
+interface Scene {
+  gl: GL;
+  program: WebGLProgram;
+  buffers: WebGLBuffer[];
+  texture: WebGLTexture | null;
+  indexCount: number;
+  indexType: number;
+  /** World-space centre and radius, for framing and near/far planes. */
+  center: [number, number, number];
+  radius: number;
+  uniforms: {
+    modelView: WebGLUniformLocation | null;
+    projection: WebGLUniformLocation | null;
+    normalMatrix: WebGLUniformLocation | null;
+    texture: WebGLUniformLocation | null;
+    hasTexture: WebGLUniformLocation | null;
+  };
+}
+
+let scene: Scene | null = null;
+let controller: AbortController | null = null;
+let frame = 0;
+let intersection: IntersectionObserver | null = null;
+let resize: ResizeObserver | null = null;
+/** RAF is only ever scheduled while both of these hold. */
+let onScreen = true;
+let pageVisible = true;
+
+const camera = { yaw: 0.6, pitch: 0.35, zoom: 1 };
+const HOME = { ...camera };
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 6;
+const FOV = (38 * Math.PI) / 180;
+/** A mesh larger than this is refused rather than allowed to wedge the tab. */
+const MAX_BYTES = 256 * 1024 * 1024;
+
+function fail(message: string): void {
+  if (status.value === "failed") return;
+  status.value = "failed";
+  note.value = message;
+  releaseGl();
+  emit("fail", message);
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+
+function requestFrame(): void {
+  if (frame !== 0 || !scene || !onScreen || !pageVisible) return;
+  frame = requestAnimationFrame(() => {
+    frame = 0;
+    draw();
+  });
+}
+
+function resizeCanvas(gl: GL): void {
+  const element = canvas.value;
+  if (!element) return;
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  const width = Math.max(1, Math.round((element.clientWidth || 320) * ratio));
+  const height = Math.max(1, Math.round((element.clientHeight || 320) * ratio));
+  if (element.width !== width || element.height !== height) {
+    element.width = width;
+    element.height = height;
+  }
+  gl.viewport(0, 0, element.width, element.height);
+}
+
+function draw(): void {
+  if (!scene) return;
+  const { gl, program, uniforms } = scene;
+  resizeCanvas(gl);
+  const element = canvas.value;
+  const aspect = element ? element.width / Math.max(1, element.height) : 1;
+
+  const distance = (scene.radius / Math.sin(FOV / 2)) * 1.35 * camera.zoom;
+  const modelView = multiply(
+    multiply(
+      translation(0, 0, -distance),
+      multiply(rotationX(camera.pitch), rotationY(camera.yaw)),
+    ),
+    translation(-scene.center[0], -scene.center[1], -scene.center[2]),
+  );
+  const span = scene.radius * 4 + distance;
+  const projection = perspective(
+    FOV,
+    aspect,
+    Math.max(distance - scene.radius * 2, scene.radius * 0.01),
+    span,
+  );
+
+  gl.useProgram(program);
+  gl.uniformMatrix4fv(uniforms.modelView, false, modelView);
+  gl.uniformMatrix4fv(uniforms.projection, false, projection);
+  gl.uniformMatrix3fv(uniforms.normalMatrix, false, upper3x3(modelView));
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.drawElements(gl.TRIANGLES, scene.indexCount, scene.indexType, 0);
+}
+
+// ── Upload ─────────────────────────────────────────────────────────────────
+
+function compile(gl: GL, type: number, source: string): WebGLShader {
+  const shader = gl.createShader(type);
+  if (!shader) throw new Error("the GPU refused a shader object");
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(shader) ?? "unknown error";
+    gl.deleteShader(shader);
+    throw new Error(`shader failed to compile: ${log}`);
+  }
+  return shader;
+}
+
+function link(gl: GL): WebGLProgram {
+  const program = gl.createProgram();
+  if (!program) throw new Error("the GPU refused a program object");
+  const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
+  const fragment = compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+  gl.attachShader(program, vertex);
+  gl.attachShader(program, fragment);
+  gl.linkProgram(program);
+  // The shaders are owned by the program once attached; flagging them for
+  // delete here is what frees them when the program goes.
+  gl.deleteShader(vertex);
+  gl.deleteShader(fragment);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const log = gl.getProgramInfoLog(program) ?? "unknown error";
+    gl.deleteProgram(program);
+    throw new Error(`shader program failed to link: ${log}`);
+  }
+  return program;
+}
+
+function attribute(
+  gl: GL,
+  program: WebGLProgram,
+  name: string,
+  data: Float32Array | null,
+  size: number,
+  fallback: number[],
+  buffers: WebGLBuffer[],
+): void {
+  const location = gl.getAttribLocation(program, name);
+  if (location < 0) return;
+  if (!data) {
+    // A constant vertex attribute costs no buffer: an untextured or
+    // uncolored mesh takes the same code path as a full one.
+    gl.disableVertexAttribArray(location);
+    if (size === 2)
+      gl.vertexAttrib2f(location, fallback[0] ?? 0, fallback[1] ?? 0);
+    else
+      gl.vertexAttrib3f(
+        location,
+        fallback[0] ?? 1,
+        fallback[1] ?? 1,
+        fallback[2] ?? 1,
+      );
+    return;
+  }
+  const buffer = gl.createBuffer();
+  if (!buffer) throw new Error(`the GPU refused a buffer for ${name}`);
+  buffers.push(buffer);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(location);
+  gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
+}
+
+async function decodeTexture(blob: Blob): Promise<ImageBitmap | null> {
+  // No createImageBitmap (very old WebKit): the mesh still shades, it just
+  // shades with its vertex colors. Worth strictly less than a second fetch.
+  if (typeof createImageBitmap !== "function") return null;
+  try {
+    return await createImageBitmap(blob);
+  } catch {
+    return null;
+  }
+}
+
+async function upload(mesh: ParsedMesh): Promise<void> {
+  const element = canvas.value;
+  if (!element) return;
+  const options: WebGLContextAttributes = {
+    alpha: true,
+    antialias: true,
+    depth: true,
+    premultipliedAlpha: true,
+    powerPreference: "low-power",
+  };
+  const gl =
+    (element.getContext("webgl2", options) as WebGL2RenderingContext | null) ??
+    (element.getContext("webgl", options) as WebGLRenderingContext | null);
+  if (!gl) {
+    fail("This browser can't display 3-D previews, so here's the poster.");
+    return;
+  }
+
+  const isWebgl2 =
+    typeof WebGL2RenderingContext !== "undefined" &&
+    gl instanceof WebGL2RenderingContext;
+  let indices: Uint32Array | Uint16Array = mesh.indices;
+  let indexType: number = gl.UNSIGNED_INT;
+  if (!isWebgl2 && !gl.getExtension("OES_element_index_uint")) {
+    if (mesh.vertexCount > 65536) {
+      fail("This mesh is too detailed for this browser's WebGL 1 renderer.");
+      return;
+    }
+    indices = Uint16Array.from(mesh.indices);
+    indexType = gl.UNSIGNED_SHORT;
+  }
+
+  const buffers: WebGLBuffer[] = [];
+  let program: WebGLProgram;
+  try {
+    program = link(gl);
+  } catch (error) {
+    fail(errorNote(error));
+    return;
+  }
+  gl.useProgram(program);
+
+  attribute(gl, program, "aPosition", mesh.positions, 3, [0, 0, 0], buffers);
+  attribute(gl, program, "aNormal", mesh.normals, 3, [0, 0, 1], buffers);
+  attribute(gl, program, "aColor", mesh.colors, 3, [0.82, 0.82, 0.86], buffers);
+  attribute(gl, program, "aUv", mesh.uvs, 2, [0, 0], buffers);
+
+  const indexBuffer = gl.createBuffer();
+  if (!indexBuffer) {
+    fail("The GPU refused the mesh's index buffer.");
+    return;
+  }
+  buffers.push(indexBuffer);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+
+  const uniforms = {
+    modelView: gl.getUniformLocation(program, "uModelView"),
+    projection: gl.getUniformLocation(program, "uProjection"),
+    normalMatrix: gl.getUniformLocation(program, "uNormalMatrix"),
+    texture: gl.getUniformLocation(program, "uTexture"),
+    hasTexture: gl.getUniformLocation(program, "uHasTexture"),
+  };
+
+  let texture: WebGLTexture | null = null;
+  const bitmap =
+    mesh.uvs && mesh.baseColorTexture
+      ? await decodeTexture(mesh.baseColorTexture)
+      : null;
+  // The await above is the one place this function yields, so an unmount
+  // between the fetch and here must not upload into a dead context.
+  if (controller?.signal.aborted) {
+    bitmap?.close();
+    for (const buffer of buffers) gl.deleteBuffer(buffer);
+    gl.deleteProgram(program);
+    return;
+  }
+  if (bitmap) {
+    texture = gl.createTexture();
+    if (texture) {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      // glTF's UV origin is the image's top-left, which is exactly what an
+      // unflipped upload gives: never enable UNPACK_FLIP_Y_WEBGL here.
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        bitmap,
+      );
+      // No mipmaps: mold's textures are not power-of-two, and WebGL1 renders
+      // an NPOT texture black unless it is CLAMP_TO_EDGE + non-mipmap.
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.uniform1i(uniforms.texture, 0);
+    }
+    bitmap.close();
+  }
+  gl.uniform1f(uniforms.hasTexture, texture ? 1 : 0);
+
+  gl.enable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE); // mold writes doubleSided materials
+  gl.clearColor(0, 0, 0, 0);
+
+  const { min, max } = mesh.bounds;
+  const center: [number, number, number] = [
+    (min[0] + max[0]) / 2,
+    (min[1] + max[1]) / 2,
+    (min[2] + max[2]) / 2,
+  ];
+  const radius =
+    Math.max(
+      Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2,
+      1e-4,
+    ) || 1;
+
+  scene = {
+    gl,
+    program,
+    buffers,
+    texture,
+    indexCount: indices.length,
+    indexType,
+    center,
+    radius,
+    uniforms,
+  };
+  stats.value = {
+    vertexCount: mesh.vertexCount,
+    triangleCount: mesh.triangleCount,
+  };
+  status.value = "ready";
+  note.value = "";
+  draw();
+  emit("ready", stats.value);
+}
+
+function errorNote(error: unknown): string {
+  if (error instanceof GlbParseError) return "This mesh file couldn't be read.";
+  if (error instanceof Error && error.name === "AbortError") return "";
+  return "The 3-D view couldn't start, so here's the poster.";
+}
+
+// ── Lifecycle ──────────────────────────────────────────────────────────────
+
+async function load(): Promise<void> {
+  const request = new AbortController();
+  controller = request;
+  status.value = "loading";
+  note.value = "";
+  stats.value = null;
+  try {
+    const response = await fetch(props.src, { signal: request.signal });
+    if (!response.ok) {
+      throw new Error(`mesh request failed with HTTP ${response.status}`);
+    }
+    const buffer = await response.arrayBuffer();
+    if (request.signal.aborted) return;
+    if (buffer.byteLength > MAX_BYTES) {
+      fail("This mesh is too large to preview in the browser.");
+      return;
+    }
+    const mesh = parseGlb(buffer);
+    if (request.signal.aborted) return;
+    await upload(mesh);
+  } catch (error) {
+    if (request.signal.aborted) return;
+    fail(errorNote(error) || "The 3-D view couldn't start.");
+  }
+}
+
+function releaseGl(): void {
+  if (frame !== 0) {
+    cancelAnimationFrame(frame);
+    frame = 0;
+  }
+  const current = scene;
+  scene = null;
+  if (!current) return;
+  const { gl } = current;
+  for (const buffer of current.buffers) gl.deleteBuffer(buffer);
+  if (current.texture) gl.deleteTexture(current.texture);
+  gl.deleteProgram(current.program);
+  // A lightbox opens and closes all session; without this the browser hits its
+  // hard context limit (~16) and silently stops giving this page a GPU.
+  gl.getExtension("WEBGL_lose_context")?.loseContext();
+}
+
+function onPageVisibility(): void {
+  pageVisible = !document.hidden;
+  requestFrame();
+}
+
+onMounted(() => {
+  if (typeof IntersectionObserver === "function" && root.value) {
+    intersection = new IntersectionObserver((entries) => {
+      onScreen = entries.some((entry) => entry.isIntersecting);
+      requestFrame();
+    });
+    intersection.observe(root.value);
+  }
+  if (typeof ResizeObserver === "function" && root.value) {
+    resize = new ResizeObserver(() => requestFrame());
+    resize.observe(root.value);
+  }
+  document.addEventListener("visibilitychange", onPageVisibility);
+  pageVisible = !document.hidden;
+  void load();
+});
+
+onBeforeUnmount(() => {
+  controller?.abort();
+  controller = null;
+  intersection?.disconnect();
+  intersection = null;
+  resize?.disconnect();
+  resize = null;
+  document.removeEventListener("visibilitychange", onPageVisibility);
+  releaseGl();
+  pointers.clear();
+});
+
+watch(
+  () => props.src,
+  () => {
+    controller?.abort();
+    releaseGl();
+    resetView();
+    void load();
+  },
+);
+
+// ── Orbit ──────────────────────────────────────────────────────────────────
+
+const PITCH_LIMIT = Math.PI / 2 - 0.01;
+const pointers = new Map<number, { x: number; y: number }>();
+let pinchDistance = 0;
+
+function orbit(dx: number, dy: number): void {
+  camera.yaw += dx;
+  camera.pitch = Math.min(
+    PITCH_LIMIT,
+    Math.max(-PITCH_LIMIT, camera.pitch + dy),
+  );
+  requestFrame();
+}
+
+function zoomBy(factor: number): void {
+  camera.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, camera.zoom * factor));
+  requestFrame();
+}
+
+function resetView(): void {
+  camera.yaw = HOME.yaw;
+  camera.pitch = HOME.pitch;
+  camera.zoom = HOME.zoom;
+  requestFrame();
+}
+
+function spread(): number {
+  const [a, b] = [...pointers.values()];
+  if (!a || !b) return 0;
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function onPointerDown(event: PointerEvent): void {
+  if (status.value !== "ready") return;
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (pointers.size === 2) pinchDistance = spread();
+  (event.currentTarget as Element | null)?.setPointerCapture?.(event.pointerId);
+}
+
+function onPointerMove(event: PointerEvent): void {
+  const previous = pointers.get(event.pointerId);
+  if (!previous) return;
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (pointers.size >= 2) {
+    const next = spread();
+    if (pinchDistance > 0 && next > 0) zoomBy(pinchDistance / next);
+    pinchDistance = next;
+    return;
+  }
+  orbit(
+    (event.clientX - previous.x) * 0.008,
+    (event.clientY - previous.y) * 0.008,
+  );
+}
+
+function onPointerUp(event: PointerEvent): void {
+  pointers.delete(event.pointerId);
+  pinchDistance = pointers.size === 2 ? spread() : 0;
+  (event.currentTarget as Element | null)?.releasePointerCapture?.(
+    event.pointerId,
+  );
+}
+
+function onWheel(event: WheelEvent): void {
+  if (status.value !== "ready") return;
+  event.preventDefault();
+  zoomBy(Math.exp(event.deltaY * 0.0015));
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (status.value !== "ready") return;
+  const step = event.shiftKey ? 0.3 : 0.12;
+  switch (event.key) {
+    case "ArrowLeft":
+      orbit(-step, 0);
+      break;
+    case "ArrowRight":
+      orbit(step, 0);
+      break;
+    case "ArrowUp":
+      orbit(0, -step);
+      break;
+    case "ArrowDown":
+      orbit(0, step);
+      break;
+    case "+":
+    case "=":
+      zoomBy(1 / 1.15);
+      break;
+    case "-":
+    case "_":
+      zoomBy(1.15);
+      break;
+    case "0":
+      resetView();
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+}
+</script>
+
+<template>
+  <div
+    ref="root"
+    class="mesh-viewer"
+    data-test="mesh-viewer"
+    :data-status="status"
+  >
+    <img
+      v-if="poster && status !== 'ready'"
+      :src="poster"
+      :alt="alt || 'Poster frame for the generated mesh'"
+      class="mesh-viewer__poster"
+      data-test="mesh-viewer-poster"
+      draggable="false"
+    />
+    <canvas
+      v-show="status === 'ready'"
+      ref="canvas"
+      class="mesh-viewer__canvas"
+      data-test="mesh-viewer-canvas"
+      role="img"
+      tabindex="0"
+      :aria-label="label"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="onPointerUp"
+      @wheel="onWheel"
+      @keydown="onKeydown"
+      @dblclick="resetView"
+    />
+    <p
+      v-if="status !== 'ready'"
+      class="mesh-viewer__note"
+      data-test="mesh-viewer-note"
+      role="status"
+    >
+      {{ status === "loading" ? "Loading the 3-D view…" : note }}
+    </p>
+    <div v-else class="mesh-viewer__controls">
+      <span class="mesh-viewer__stats" data-test="mesh-viewer-stats">
+        {{ summary }}
+      </span>
+      <button
+        type="button"
+        class="mesh-viewer__reset"
+        data-test="mesh-viewer-reset"
+        @click="resetView"
+      >
+        Reset view
+      </button>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.mesh-viewer {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 180px;
+  overflow: hidden;
+  border-radius: var(--radius-card, 12px);
+  /* The bed prints are always viewed on; the canvas clears to transparent so
+     this token shows through and follows the theme without a GL reupload. */
+  background: var(--print, #141110);
+  color: var(--on-media, #f5efff);
+}
+.mesh-viewer__poster,
+.mesh-viewer__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.mesh-viewer__canvas {
+  touch-action: none;
+  cursor: grab;
+  outline-offset: -3px;
+}
+.mesh-viewer__canvas:active {
+  cursor: grabbing;
+}
+.mesh-viewer__note {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  margin: 0;
+  padding: 8px 12px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.55));
+  color: inherit;
+  font-size: 12px;
+  text-align: center;
+}
+.mesh-viewer__controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  pointer-events: none;
+}
+.mesh-viewer__stats {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
+}
+.mesh-viewer__reset {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--edge, rgba(255, 255, 255, 0.2));
+  border-radius: var(--radius-control, 9px);
+  background: rgba(0, 0, 0, 0.42);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+</style>

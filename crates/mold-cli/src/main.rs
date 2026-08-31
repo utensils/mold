@@ -148,6 +148,57 @@ struct Cli {
     command: Commands,
 }
 
+/// `mold run`'s 3-D controls.
+///
+/// A flattened `Args` struct rather than five more fields on
+/// `Commands::Run`. That variant is already enormous — around ninety fields —
+/// and clap's generated `from_arg_matches` constructs it through several
+/// frames by value; in a debug build, five more inline `Option`s pushed the
+/// first CLI parse test past the 2 MiB test-thread stack and aborted the
+/// process. Flattening keeps the group in its own frame, and it reads better
+/// besides: these five only ever make sense together.
+#[derive(clap::Args, Debug, Clone, Default)]
+struct MeshArgs {
+    /// Resolution of the query grid a 3-D model's occupancy field is
+    /// evaluated on. Higher captures finer detail; cost is CUBIC, so 384 is
+    /// roughly eight times 192. Defaults to 256.
+    #[arg(long, value_name = "N", help_heading = "3D")]
+    octree: Option<u32>,
+
+    /// Iso-level at which the surface is extracted (0.0-1.0).
+    /// Defaults to 0.6.
+    #[arg(long, value_name = "T", help_heading = "3D")]
+    mesh_threshold: Option<f32>,
+
+    /// Decimate the mesh to approximately this many triangles.
+    /// Omitted keeps the raw surface-net output.
+    #[arg(long, value_name = "N", help_heading = "3D")]
+    target_faces: Option<u32>,
+
+    /// Generate PBR textures as well as geometry. Requires the paint bundle;
+    /// without it the request is refused rather than answered with a bare
+    /// white mesh.
+    #[arg(long, help_heading = "3D")]
+    texture: bool,
+
+    /// Edge length of the generated texture atlas (1024, 2048 or 4096).
+    /// Requires --texture.
+    #[arg(long, value_name = "N", requires = "texture", help_heading = "3D")]
+    texture_resolution: Option<u32>,
+}
+
+impl MeshArgs {
+    fn into_flags(self) -> commands::run::MeshFlags {
+        commands::run::MeshFlags {
+            octree: self.octree,
+            threshold: self.mesh_threshold,
+            target_faces: self.target_faces,
+            texture: self.texture,
+            texture_resolution: self.texture_resolution,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum ConfigAction {
     /// List all configuration values
@@ -1010,32 +1061,8 @@ Examples:
         #[arg(long, default_value = "1", help_heading = "Image", value_parser = clap::value_parser!(u32).range(1..))]
         batch: u32,
 
-        /// Resolution of the query grid a 3-D model's occupancy field is
-        /// evaluated on. Higher captures finer detail; cost is CUBIC, so 384
-        /// is roughly eight times 192. Defaults to 256.
-        #[arg(long, value_name = "N", help_heading = "3D")]
-        octree: Option<u32>,
-
-        /// Iso-level at which the surface is extracted (0.0-1.0).
-        /// Defaults to 0.6.
-        #[arg(long, value_name = "T", help_heading = "3D")]
-        mesh_threshold: Option<f32>,
-
-        /// Decimate the mesh to approximately this many triangles.
-        /// Omitted keeps the raw surface-net output.
-        #[arg(long, value_name = "N", help_heading = "3D")]
-        target_faces: Option<u32>,
-
-        /// Generate PBR textures as well as geometry. Requires the paint
-        /// bundle; without it the request is refused rather than answered
-        /// with a bare white mesh.
-        #[arg(long, help_heading = "3D")]
-        texture: bool,
-
-        /// Edge length of the generated texture atlas (1024, 2048 or 4096).
-        /// Requires --texture.
-        #[arg(long, value_name = "N", requires = "texture", help_heading = "3D")]
-        texture_resolution: Option<u32>,
+        #[command(flatten)]
+        mesh: MeshArgs,
 
         /// Number of video frames to generate (video models only, e.g. ltx-video).
         /// Implies video output mode; release builds default to MP4.
@@ -2311,11 +2338,7 @@ async fn run() -> anyhow::Result<()> {
             guidance,
             seed,
             batch,
-            octree,
-            mesh_threshold,
-            target_faces,
-            texture,
-            texture_resolution,
+            mesh,
             frames,
             predict_duration,
             fps,
@@ -2539,13 +2562,7 @@ async fn run() -> anyhow::Result<()> {
                     modality_scale,
                     skip_step: guidance_skip_step,
                 },
-                commands::run::MeshFlags {
-                    octree,
-                    threshold: mesh_threshold,
-                    target_faces,
-                    texture,
-                    texture_resolution,
-                },
+                mesh.into_flags(),
                 commands::run::WanFlags {
                     sample_solver,
                     sample_shift,

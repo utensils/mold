@@ -201,6 +201,9 @@ function isMotion(entry: GalleryImage): boolean {
 function isAudio(entry: GalleryImage): boolean {
   return tileKind(entry) === "audio";
 }
+function isMesh(entry: GalleryImage): boolean {
+  return tileKind(entry) === "mesh";
+}
 // The grid always shows the cached thumbnail (fast, poster-friendly for video),
 // addressed on the host that owns the print (see useThumbnailSources).
 const { srcFor: tileSrc } = useThumbnailSources();
@@ -396,6 +399,24 @@ onBeforeUnmount(() => {
                   <span v-if="durationLabel(entry)">{{
                     durationLabel(entry)
                   }}</span>
+                </span>
+              </template>
+              <template v-else-if="isMesh(entry)" #overlay>
+                <span class="gg__vbadge">
+                  <svg
+                    class="gg__vplay"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 2.6 20 7v10l-8 4.4L4 17V7z" />
+                    <path d="M4 7l8 4.4L20 7" />
+                    <path d="M12 11.4V21.4" />
+                  </svg>
+                  <span>3D</span>
                 </span>
               </template>
               <template v-else-if="isAudio(entry)" #overlay>

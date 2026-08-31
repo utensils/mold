@@ -23,8 +23,11 @@
 //!     per-checkpoint `config.yaml` shipped beside each weights file.
 
 pub mod dino2;
+pub mod engine;
 pub mod glb;
 pub mod mesh;
+pub mod poster;
+pub mod raster;
 pub mod sampler;
 pub mod shape_vae;
 pub mod transformer;

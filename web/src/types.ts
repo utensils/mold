@@ -29,7 +29,15 @@ export type {
 
 // Matches `mold_core::OutputFormat` on the wire (lowercase strings).
 export type OutputFormat =
-  "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav";
+  | "png"
+  | "jpeg"
+  | "gif"
+  | "apng"
+  | "webp"
+  | "mp4"
+  | "wav"
+  | "glb"
+  | "obj";
 
 export type SeedMode = "random" | "static" | "increment";
 
@@ -188,10 +196,14 @@ export interface GalleryImage extends GalleryOrganizationFields {
   metadata_synthetic?: boolean;
 }
 
-export type MediaKind = "image" | "animated" | "video" | "audio";
+export type MediaKind = "image" | "animated" | "video" | "audio" | "mesh";
 
 export const VIDEO_FORMATS: ReadonlyArray<OutputFormat> = ["mp4"];
 export const AUDIO_FORMATS: ReadonlyArray<OutputFormat> = ["wav"];
+// `obj` is never a STORED format — mold only produces one as a gallery export
+// — but it is listed so a hand-placed `.obj` is classified as a mesh rather
+// than falling through to the image branch and being handed to an <img> tag.
+export const MESH_FORMATS: ReadonlyArray<OutputFormat> = ["glb", "obj"];
 export const ANIMATED_FORMATS: ReadonlyArray<OutputFormat> = [
   "gif",
   "apng",
@@ -203,6 +215,10 @@ export function mediaKind(
   filename: string,
 ): MediaKind {
   const resolved = fmt ?? inferFormatFromName(filename);
+  // Narrowest kind first, matching the probe order the server and the Rust
+  // client both use: a mesh has no frames and no samples, so a wider test
+  // running first would classify it as an image.
+  if (resolved && MESH_FORMATS.includes(resolved)) return "mesh";
   if (resolved && VIDEO_FORMATS.includes(resolved)) return "video";
   if (resolved && AUDIO_FORMATS.includes(resolved)) return "audio";
   if (resolved && ANIMATED_FORMATS.includes(resolved)) return "animated";
@@ -309,6 +325,8 @@ export function inferFormatFromName(filename: string): OutputFormat | null {
   const lower = filename.toLowerCase();
   if (lower.endsWith(".mp4")) return "mp4";
   if (lower.endsWith(".wav")) return "wav";
+  if (lower.endsWith(".glb")) return "glb";
+  if (lower.endsWith(".obj")) return "obj";
   if (lower.endsWith(".gif")) return "gif";
   if (lower.endsWith(".apng")) return "apng";
   if (lower.endsWith(".webp")) return "webp";

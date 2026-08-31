@@ -61,6 +61,7 @@ const props = withDefaults(
     index: number;
     count: number;
     video: boolean;
+    mesh?: boolean;
     /** Audio-only print: no raster to show, a transport instead. */
     audio?: boolean;
     source?: GallerySource;
@@ -95,6 +96,7 @@ const props = withDefaults(
     tagSuggestions?: TagCount[];
   }>(),
   {
+    mesh: false,
     audio: false,
     source: "host",
     target: null,
@@ -317,12 +319,12 @@ function imageMenu(): MenuEntry[] {
   return [
     {
       label: "Copy image",
-      disabled: props.video || props.audio,
+      disabled: props.video || props.audio || props.mesh,
       action: () => void copyImage(),
     },
     {
       label: "Use as source",
-      disabled: props.audio,
+      disabled: props.audio || props.mesh,
       action: () => emit("useSource"),
     },
     {
@@ -467,6 +469,7 @@ async function performVideoExport(options: VideoExportOptions) {
             :target="target"
             :cache-key="cacheKey"
             :video="video"
+            :mesh="mesh"
             :controls="video"
             :alt="meta.prompt"
             class="!object-contain"

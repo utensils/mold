@@ -34,6 +34,7 @@ import {
   resolveThumbnailSrc,
 } from "../../lib/galleryMedia";
 import type { GalleryImage, ModelInfoExtended, TagCount } from "../../types";
+import MeshViewer from "@studio/components/MeshViewer.vue";
 import { mediaKind } from "../../types";
 import { formatResolution, shortModel } from "../../util/format";
 import {
@@ -136,6 +137,7 @@ const kind = computed(() =>
 );
 const isVideoFile = computed(() => kind.value === "video");
 const isAudioFile = computed(() => kind.value === "audio");
+const isMeshFile = computed(() => kind.value === "mesh");
 const canExportVideo = computed(
   () =>
     isVideoFile.value && props.item?.filename.toLowerCase().endsWith(".mp4"),
@@ -221,6 +223,7 @@ watch(() => props.item, resolveMedia, { immediate: true });
 const blockedTitle = computed(() => {
   if (isVideoFile.value) return "Can't stream this clip";
   if (isAudioFile.value) return "Can't play this take";
+  if (isMeshFile.value) return "Can't load this mesh";
   return "Can't load this print";
 });
 
@@ -473,6 +476,13 @@ async function performVideoExport(options: VideoExportOptions) {
             <span class="lb__blocked-title">{{ blockedTitle }}</span>
             <span class="lb__blocked-body">{{ streamMessage }}</span>
           </p>
+          <MeshViewer
+            v-else-if="isMeshFile && mediaSrc"
+            :src="mediaSrc"
+            :poster="posterSrc"
+            :alt="prompt || item.filename"
+            class="lb__media"
+          />
           <video
             v-else-if="isVideoFile && mediaSrc"
             :src="mediaSrc"
@@ -875,6 +885,13 @@ async function performVideoExport(options: VideoExportOptions) {
             <span class="lb__blocked-title">{{ blockedTitle }}</span>
             <span class="lb__blocked-body">{{ streamMessage }}</span>
           </p>
+          <MeshViewer
+            v-else-if="isMeshFile && mediaSrc"
+            :src="mediaSrc"
+            :poster="posterSrc"
+            :alt="prompt || item.filename"
+            class="lb__media"
+          />
           <video
             v-else-if="isVideoFile && mediaSrc"
             :src="mediaSrc"

@@ -53,7 +53,7 @@ export type FeatureControlProfile = { mode: ControlMode, required: boolean, reas
 
 export type AdapterControlProfile = { mode: ControlMode, max_count: number, reason?: string | null, };
 
-export type OutputFormat = "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav";
+export type OutputFormat = "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav" | "glb" | "obj";
 
 export type OutputCapabilitiesProfile = { default_format: OutputFormat, formats: Array<OutputFormat>, audio_requires_mp4: boolean, delivery_reason?: string | null, };
 

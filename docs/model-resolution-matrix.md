@@ -366,6 +366,53 @@ Models: `flux2-klein:fp8`.
 
 Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
+## `hunyuan3d`
+
+### `hunyuan3d-mini-turbo:fp16`
+
+Schema 1 · hash `4ccaac67362463a032d4b74989c6e3e354db53238b9027e062aadb9580f4de7c` · default recipe `default`
+
+Models: `hunyuan3d-mini-turbo:fp16`.
+
+#### Default (`default`)
+
+- Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `0x0`, 5 steps, guidance 5.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### `hunyuan3d-turbo:fp16`
+
+Schema 1 · hash `3bf38807d68ee8cef70aca182d861ac419b86488bdd9db202afb3c0e3ca82f15` · default recipe `default`
+
+Models: `hunyuan3d-turbo:fp16`.
+
+#### Default (`default`)
+
+- Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `0x0`, 5 steps, guidance 5.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### `hunyuan3d:fp16`
+
+Schema 1 · hash `20b77d62e3fc96cd924d68030183b648e4ad67fa162b3e2ac20c992fcd7271fc` · default recipe `default`
+
+Models: `hunyuan3d:fp16`.
+
+#### Default (`default`)
+
+- Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `0x0`, 30 steps, guidance 5.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ## `ltx-video`
 
 ### `ltx-video-0.9.6-distilled:bf16`

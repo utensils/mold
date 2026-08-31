@@ -35,6 +35,11 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     // adapter path plus tier id until manifests own it. Both change which
     // adapter runs, which integrator consumes it, and the step count, so both
     // are engine-shaping.
+    // #1495: the number of occupancy-field query points the Hunyuan3D shape
+    // VAE decodes per chunk. Chunking changes only how the same points are
+    // batched, but batch boundaries move floating-point summation order, so
+    // two renders that disagree on it are not bit-identical.
+    "MOLD_HUNYUAN3D_DECODE_CHUNKS",
     "MOLD_H3_TURBO_ADAPTER",
     "MOLD_H3_TURBO_TIER",
     "MOLD_KEEP_TE_RAM",

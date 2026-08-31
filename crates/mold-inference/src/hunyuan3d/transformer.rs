@@ -174,7 +174,7 @@ fn block_index(key: &str, prefix: &str) -> Option<usize> {
 /// `dim = 256` and `max_period = self.max_period`. Note the concatenation
 /// order is `[cos, sin]`, not the more common `[sin, cos]`.
 pub fn timestep_embedding(t: &Tensor, dim: usize, max_period: f64, dtype: DType) -> Result<Tensor> {
-    if dim % 2 != 0 {
+    if !dim.is_multiple_of(2) {
         candle_core::bail!("timestep embedding dim must be even, got {dim}");
     }
     let half = dim / 2;

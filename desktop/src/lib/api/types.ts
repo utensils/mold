@@ -320,7 +320,19 @@ export interface ModelEntry {
 
 // ── Generation ───────────────────────────────────────────────────────────
 
-export type OutputFormat = "png" | "jpeg" | "webp" | "gif" | "apng" | "mp4" | "wav";
+export type OutputFormat =
+  | "png"
+  | "jpeg"
+  | "webp"
+  | "gif"
+  | "apng"
+  | "mp4"
+  | "wav"
+  // `obj` is never a STORED format — mold only produces one as a gallery
+  // export — but it is in the union so a hand-placed `.obj` classifies as a
+  // mesh instead of falling through to the image branch.
+  | "glb"
+  | "obj";
 
 /** Solver override, spelled exactly as mold-core's kebab-case enum plus a
  * `"default"` sentinel meaning "omit the field". `ddim` / `euler-ancestral`

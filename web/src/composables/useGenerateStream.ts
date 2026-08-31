@@ -1216,8 +1216,17 @@ async function durableCompletionResult(
   const format =
     print.format ?? metadata.output_format ?? inferFormatFromName(filename);
   if (!format) throw new Error(`completed output '${filename}' has no format`);
+  // Narrowest kind first, matching `mediaKind` and the server's own probe
+  // order — a mesh has no frames and no samples, so a wider test running
+  // first would classify it as an image and try to draw glTF bytes.
   const kind =
-    format === "mp4" ? "video" : format === "wav" ? "audio" : "image";
+    format === "glb" || format === "obj"
+      ? "mesh"
+      : format === "mp4"
+        ? "video"
+        : format === "wav"
+          ? "audio"
+          : "image";
   let thumbnail: string | null = null;
   if (kind !== "image") {
     thumbnail = await fetchGalleryThumbnailBlob(host, filename)

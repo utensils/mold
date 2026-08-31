@@ -20,6 +20,14 @@ use serde_json::Value;
 pub struct SafetensorsHeader {
     pub metadata: BTreeMap<String, Value>,
     pub tensor_names: Vec<String>,
+    /// Declared shape per tensor, in header order.
+    ///
+    /// Present so a loader can infer a checkpoint's ARCHITECTURE from the file
+    /// rather than from its filename — Hunyuan3D's DiT geometry comes entirely
+    /// out of two `Linear` shapes and a block-prefix count, exactly as
+    /// `comfy/model_detection.py` does it. Still header-only: the shapes are
+    /// declared in the JSON, so nothing reads a tensor byte.
+    pub tensor_shapes: BTreeMap<String, Vec<usize>>,
 }
 
 /// Read a safetensors header without touching tensor payload bytes.
@@ -49,9 +57,23 @@ pub fn read_safetensors_header(path: &Path) -> std::io::Result<SafetensorsHeader
             .collect(),
         Some(_) | None => BTreeMap::new(),
     };
+    let mut tensor_names = Vec::with_capacity(header.len());
+    let mut tensor_shapes = BTreeMap::new();
+    for (name, value) in header {
+        if let Some(shape) = value.get("shape").and_then(Value::as_array) {
+            let dims: Vec<usize> = shape
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(|dim| dim as usize)
+                .collect();
+            tensor_shapes.insert(name.clone(), dims);
+        }
+        tensor_names.push(name);
+    }
     Ok(SafetensorsHeader {
         metadata,
-        tensor_names: header.into_keys().collect(),
+        tensor_names,
+        tensor_shapes,
     })
 }
 

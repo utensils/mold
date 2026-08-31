@@ -41,6 +41,7 @@ import {
   fetchGalleryMediaBytes,
   galleryMediaPath,
   isAudioItem,
+  isMeshItem,
   isVideoItem,
   prepareNativeThumbnail,
   thumbnailTier,
@@ -1187,6 +1188,7 @@ const kindOptions = computed(() => [
   { value: "image" as GalleryKindFilter, label: "Images" },
   { value: "video" as GalleryKindFilter, label: "Video" },
   { value: "audio" as GalleryKindFilter, label: "Audio" },
+  { value: "mesh" as GalleryKindFilter, label: "3D" },
 ]);
 const setKind = (value: GalleryKindFilter) => (gallery.mediaKind = value);
 
@@ -1796,6 +1798,7 @@ const selectedEntry = computed<MergedPrint | null>(
 /** Shared with the store's kind filter so badge and chips never disagree. */
 const isVideo = (i: GalleryImage) => isVideoItem(i);
 const isAudio = (i: GalleryImage) => isAudioItem(i);
+const isMesh = (i: GalleryImage) => isMeshItem(i);
 
 async function copyImage(entry: MergedPrint) {
   try {
@@ -2657,6 +2660,7 @@ onUnmounted(() => {
       :count="entries.length"
       :video="isVideo(selectedEntry.item)"
       :audio="isAudio(selectedEntry.item)"
+      :mesh="isMesh(selectedEntry.item)"
       :source="gallery.mediaSourceOf(selectedEntry.sourceKey)"
       :target="targetFor(selectedEntry)"
       :cache-key="selectedEntry.sourceKey"

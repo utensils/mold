@@ -760,7 +760,6 @@ fn extract_request_fields(
     )?;
 
     let sanitized = mold_core::GenerateRequest {
-        mesh: None,
         prompt,
         negative_prompt,
         model,
@@ -808,6 +807,7 @@ fn extract_request_fields(
         gif_preview,
         enable_audio,
         video_only,
+        mesh,
         audio_file: None,
         audio_file_path: None,
         source_video: None,
