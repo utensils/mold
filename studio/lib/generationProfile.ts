@@ -6,6 +6,7 @@ import type {
   GenerationProfileSet,
   IntegerControl,
   OutputCapabilitiesProfile,
+  OutputFormat,
   FloatControl,
   ProfileAspectGroup,
   ProfileFpsControl,
@@ -371,10 +372,19 @@ function isAdapterControl(value: unknown): value is AdapterControlProfile {
   );
 }
 
-// Must stay in step with `mold_core::OutputFormat`. This is a runtime GATE,
-// not a type: a format missing here makes `isOutputCapabilities` reject the
-// whole profile, and the model then renders with no controls at all rather
-// than with a wrong one — a silent, total failure that no type check catches.
+// A runtime GATE, not a type. A format missing here makes
+// `isOutputCapabilities` reject the WHOLE profile, so the model renders with
+// the legacy raster fallback — canvas controls and PNG output — rather than
+// the contract the server actually sent. Nothing fails loudly, which is how
+// `glb` slipped through in #1495 and shipped a canvasless family with a
+// canvas.
+//
+// The two assertions below make that divergence a COMPILE error instead:
+// `satisfies` proves every entry is a real format, and `_EveryFormatIsGated`
+// fails to typecheck if `OutputFormat` — generated from
+// `mold_core::OutputFormat` — gains a variant this list does not. Adding a
+// format in Rust and regenerating now breaks the build here, which is the
+// only signal that arrives before a user sees the wrong form.
 const OUTPUT_FORMATS = [
   "png",
   "jpeg",
@@ -385,17 +395,34 @@ const OUTPUT_FORMATS = [
   "wav",
   "glb",
   "obj",
-];
+] as const satisfies readonly OutputFormat[];
+
+type _EveryFormatIsGated =
+  Exclude<OutputFormat, (typeof OUTPUT_FORMATS)[number]> extends never
+    ? true
+    : [
+        "unlisted OutputFormat variant",
+        Exclude<OutputFormat, (typeof OUTPUT_FORMATS)[number]>,
+      ];
+const _EVERY_FORMAT_IS_GATED: _EveryFormatIsGated = true;
+void _EVERY_FORMAT_IS_GATED;
+
+/// Runtime membership test. `OUTPUT_FORMATS` is now `readonly OutputFormat[]`,
+/// so its own `includes` refuses an arbitrary `string` — which is exactly the
+/// question being asked of untrusted wire data.
+function isOutputFormat(value: unknown): value is OutputFormat {
+  return (OUTPUT_FORMATS as readonly string[]).includes(String(value));
+}
 
 function isOutputCapabilities(
   value: unknown,
 ): value is OutputCapabilitiesProfile {
   return (
     isRecord(value) &&
-    OUTPUT_FORMATS.includes(String(value.default_format)) &&
+    isOutputFormat(value.default_format) &&
     Array.isArray(value.formats) &&
     value.formats.length > 0 &&
-    value.formats.every((format) => OUTPUT_FORMATS.includes(String(format))) &&
+    value.formats.every(isOutputFormat) &&
     value.formats.includes(value.default_format) &&
     typeof value.audio_requires_mp4 === "boolean" &&
     (value.delivery_reason === undefined ||

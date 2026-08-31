@@ -1,4 +1,5 @@
 import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+import type { OutputFormat as WireOutputFormat } from "@studio/lib/generated/generationProfileV1";
 import type {
   GenerationReference,
   GenerationReferenceMetadata,
@@ -27,9 +28,10 @@ export type {
   TagCount,
 } from "@studio/lib/api/galleryOrganization";
 
-// Matches `mold_core::OutputFormat` on the wire (lowercase strings).
-export type OutputFormat =
-  "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav" | "glb" | "obj";
+// Aliased to the GENERATED mirror of `mold_core::OutputFormat` rather than
+// restated. A hand-kept copy is exactly what went stale in #1495 — see the
+// note on the same alias in `desktop/src/lib/api/types.ts`.
+export type OutputFormat = WireOutputFormat;
 
 export type SeedMode = "random" | "static" | "increment";
 
