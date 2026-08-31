@@ -5943,10 +5943,12 @@ describe("MobileApp generation queue", () => {
     expect(second?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
   });
 
-  it("counts the line on a busy single-GPU host instead of naming the planner", async () => {
-    // Reported from a 1-GPU host with five z-image jobs queued: the waiting
-    // rows rendered the scheduler's own `no idle device` string, which just
-    // means the one GPU is busy — normal serialization, not a fault.
+  it("keeps a transient empty execution plan in the queue on a busy host", async () => {
+    // Reported from a MiniMax H3 render on a 1-GPU host: while the running job
+    // owned the resources needed to resolve the next execution plan, the
+    // waiting row briefly rendered `No usable device` before becoming `Next
+    // up`. The coordinator keeps this state queued because the active render
+    // can release exactly what the next planning pass needs.
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
@@ -5986,7 +5988,7 @@ describe("MobileApp generation queue", () => {
                 queue_rank: 1,
                 bypass_count: 0,
                 estimate_confidence: "low",
-                blocked_reason: "no_idle_device",
+                blocked_reason: "no_schedulable_device",
               },
             ],
           },
@@ -6005,9 +6007,8 @@ describe("MobileApp generation queue", () => {
     const second = wrapper
       .findAll("[data-test='mobile-generation-job']")
       .find((row) => row.text().includes("second prompt"));
-    // The point of this test is the WAITING row's vocabulary: `no_idle_device`
-    // is ordinary serialization on a one-GPU host, so it must fall through to
-    // the position rather than name the planner.
+    // This is queue bookkeeping for every model family, so it must fall
+    // through to the authoritative position rather than name the planner.
     expect(second?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
     // The active/queued header is not asserted here: a durable print's
     // liveness comes from its own batch lifecycle rather than this listing,

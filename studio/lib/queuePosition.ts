@@ -174,11 +174,13 @@ export type QueueBlockedReasonId = (typeof QUEUE_BLOCKED_REASONS)[number];
  *
  * `null` is the load-bearing half: those reasons are ordinary queue
  * bookkeeping, not faults. A one-GPU host reports `no_idle_device` for every
- * job behind the running one, `warm_wait` while it holds a slot for a warm
- * device, and `lower_priority_opening` when higher-priority work took the
- * opening this pass (`mold-scheduler/src/planner.rs`). Rendering those is how
- * four ordinary queued rows came to read "no idle device" instead of their
- * place in line. A `null` row falls through to its position.
+ * job behind the running one, while an execution plan that is temporarily
+ * empty as the active job owns resources reports `no_schedulable_device`.
+ * The coordinator deliberately keeps both jobs queued because the next
+ * planning pass can admit them. `warm_wait` holds a slot for a warm device,
+ * and `lower_priority_opening` means higher-priority work took the opening
+ * this pass (`mold-scheduler/src/planner.rs`). A `null` row falls through to
+ * its authoritative queue position.
  */
 const BLOCKED_REASON_COPY: Record<QueueBlockedReasonId, string | null> = {
   device_disabled: "Device turned off",
@@ -198,7 +200,7 @@ const BLOCKED_REASON_COPY: Record<QueueBlockedReasonId, string | null> = {
   queue_paused: "Queue paused",
   maintenance_mode: "Host in maintenance",
   cancelling: "Cancelling",
-  no_schedulable_device: "No usable device",
+  no_schedulable_device: null,
   no_idle_device: null,
   lower_priority_opening: null,
   preparing: "Preparing",
