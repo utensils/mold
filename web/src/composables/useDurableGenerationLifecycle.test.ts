@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { triangleGlb } from "@studio/lib/glbFixture";
 import type { GenerateRequestWire, GalleryImage } from "../types";
 import type { HostRoute } from "../lib/hostRouting";
 import { GENERATION_REQUEST_MEDIA_FIELDS } from "../lib/generationRequestMedia";
@@ -1017,6 +1018,12 @@ describe("web durable generation lifecycle", () => {
       format: "wav" as const,
       artifact: wavBlob(),
     },
+    {
+      name: "GLB",
+      filename: "print-1.glb",
+      format: "glb" as const,
+      artifact: new Blob([triangleGlb()], { type: "model/gltf-binary" }),
+    },
   ])(
     "hydrates durable $name completion as typed playable media",
     async (media) => {
@@ -1071,6 +1078,16 @@ describe("web durable generation lifecycle", () => {
         expect(result.video_fps).toBe(24);
         expect(result.video_thumbnail).toBeTruthy();
         expect(result.audio_sample_rate).toBeUndefined();
+      } else if (media.format === "glb") {
+        // `isMeshCompletion` keys on the vertex count; the poster is the
+        // gallery thumbnail, and the counts come from the stored glTF.
+        expect(result.mesh_vertices).toBe(3);
+        expect(result.mesh_faces).toBe(1);
+        expect(result.mesh_poster).toBeTruthy();
+        expect(result.mesh_bounds_min).toHaveLength(3);
+        expect(result.mesh_bounds_max).toHaveLength(3);
+        expect(result.audio_sample_rate).toBeUndefined();
+        expect(result.video_frames).toBeUndefined();
       } else {
         expect(result.audio_sample_rate).toBe(24_000);
         expect(result.audio_channels).toBe(2);
