@@ -115,6 +115,7 @@ export default defineConfig({
             { text: 'Identity Photos', link: '/guide/identity' },
             { text: 'Upscaling', link: '/guide/upscaling' },
             { text: 'Prompt Expansion', link: '/guide/expansion' },
+            { text: 'Prompting Guides', link: '/guide/prompting' },
             { text: 'Feature Support', link: '/guide/feature-matrix' },
             { text: 'Remote Workflows', link: '/guide/remote-workflows' },
             { text: 'Performance', link: '/guide/performance' },

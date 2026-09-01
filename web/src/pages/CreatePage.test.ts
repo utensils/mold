@@ -2610,6 +2610,13 @@ describe("CreatePage layout and behavior", () => {
       model_family: "flux",
       variations: 3,
       task: "text-to-image",
+      // Generation facts ride along so the expander knows the exact identity
+      // and canvas; the structure is the studio twin's, never media bytes.
+      context: expect.objectContaining({
+        model: expect.any(String),
+        width: expect.any(Number),
+        height: expect.any(Number),
+      }),
     });
     // The origin expands through relative dispatch: same machine, no target.
     expect(expandTarget).toBeUndefined();

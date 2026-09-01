@@ -154,3 +154,9 @@ remaining open and can be paused, resumed, or cancelled. See
 | ------------------------ | ------------------------- | ---------------------- |
 | `MOLD_UPSCALE_MODEL`     | `real-esrgan-x4plus:fp16` | Default upscaler model |
 | `MOLD_UPSCALE_TILE_SIZE` | `512`                     | Default tile size      |
+
+Framewise video upscale shells out to `ffmpeg` and `ffprobe`. Release recipes
+that bundle those binaries pin their paths at build time through the
+`MOLD_BUNDLED_FFMPEG` and `MOLD_BUNDLED_FFPROBE` compile-time variables; a
+build without them uses the tools found on `PATH`, and a host with neither
+reports Framewise as unavailable.

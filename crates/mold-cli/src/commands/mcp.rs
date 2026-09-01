@@ -453,6 +453,8 @@ impl McpServer {
             "list_models" => self.tool_list_models(arguments).await,
             "list_loras" => self.tool_list_loras(arguments).await,
             "server_status" => self.tool_server_status().await,
+            "expand_prompt" => self.tool_expand_prompt(arguments).await,
+            "remix_prompt" => self.tool_remix_prompt(arguments).await,
             other => Err(format!("unknown tool: {other}")),
         };
 
@@ -883,6 +885,91 @@ impl McpServer {
                 )
             }],
             "structuredContent": { "loras": loras }
+        }))
+    }
+
+    async fn tool_expand_prompt(&self, arguments: Value) -> std::result::Result<Value, String> {
+        let args: ExpandPromptArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        if args.prompt.trim().is_empty() {
+            return Err("prompt must not be empty".to_string());
+        }
+        let (family, context) = prompt_transform_target(args.model.as_deref(), args.context);
+        let request = mold_core::ExpandRequest {
+            prompt: args.prompt,
+            model_family: args.model_family.unwrap_or(family),
+            variations: args.variations.unwrap_or(1).max(1),
+            style: args.style.filter(|style| !style.trim().is_empty()),
+            task: args.task,
+            context,
+        };
+        let response = self
+            .client
+            .expand_prompt(&request)
+            .await
+            .map_err(|e| format!("prompt expansion failed: {e}"))?;
+        let text = if response.expanded.len() == 1 {
+            response.expanded[0].clone()
+        } else {
+            response
+                .expanded
+                .iter()
+                .enumerate()
+                .map(|(index, prompt)| format!("{}. {prompt}", index + 1))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        Ok(json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": response
+        }))
+    }
+
+    async fn tool_remix_prompt(&self, arguments: Value) -> std::result::Result<Value, String> {
+        let args: RemixPromptArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        if args.prompt.trim().is_empty() {
+            return Err("prompt must not be empty".to_string());
+        }
+        let (family, context) = prompt_transform_target(args.model.as_deref(), args.context);
+        let request = mold_core::RemixRequest {
+            source_prompt: args.prompt,
+            root_prompt: None,
+            source_kind: mold_core::RemixSourceKind::Direct,
+            model_family: args.model_family.unwrap_or(family),
+            variations: args.variations.unwrap_or(3).max(1),
+            style: args.style.filter(|style| !style.trim().is_empty()),
+            task: args.task,
+            dimensions: args.dimensions.unwrap_or_default(),
+            context,
+        };
+        let response = self
+            .client
+            .remix_prompt(&request)
+            .await
+            .map_err(|e| format!("prompt remix failed: {e}"))?;
+        let text = response
+            .variants
+            .iter()
+            .enumerate()
+            .map(|(index, variant)| {
+                let labels = variant
+                    .dimensions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if labels.is_empty() {
+                    format!("{}. {}", index + 1, variant.prompt)
+                } else {
+                    format!("{}. ({labels}) {}", index + 1, variant.prompt)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": response
         }))
     }
 
@@ -2507,6 +2594,150 @@ fn build_generate_request(
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct ExpandPromptArgs {
+    prompt: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    model_family: Option<String>,
+    #[serde(default)]
+    variations: Option<usize>,
+    #[serde(default)]
+    style: Option<String>,
+    #[serde(default)]
+    task: Option<mold_core::ExpandTask>,
+    #[serde(default)]
+    context: Option<mold_core::ExpandContext>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemixPromptArgs {
+    prompt: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    model_family: Option<String>,
+    #[serde(default)]
+    variations: Option<usize>,
+    #[serde(default)]
+    style: Option<String>,
+    #[serde(default)]
+    task: Option<mold_core::ExpandTask>,
+    #[serde(default)]
+    dimensions: Option<Vec<mold_core::RemixDimension>>,
+    #[serde(default)]
+    context: Option<mold_core::ExpandContext>,
+}
+
+/// Resolve the family for a prompt transform from the model name (built-in
+/// manifests only; the server re-resolves catalog models) and fold the model
+/// identity into the context so the expander can pick a per-checkpoint leaf.
+fn prompt_transform_target(
+    model: Option<&str>,
+    context: Option<mold_core::ExpandContext>,
+) -> (String, Option<mold_core::ExpandContext>) {
+    let model = model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(mold_core::manifest::resolve_model_name);
+    let family = model
+        .as_deref()
+        .and_then(mold_core::manifest::find_manifest)
+        .map(|manifest| manifest.family.clone())
+        .unwrap_or_else(|| "flux".to_string());
+    let context = match (model, context) {
+        (None, context) => context,
+        (Some(model), Some(mut context)) => {
+            if context.model.is_none() {
+                context.model = Some(model);
+            }
+            Some(context)
+        }
+        (Some(model), None) => Some(mold_core::ExpandContext {
+            model: Some(model),
+            ..mold_core::ExpandContext::default()
+        }),
+    };
+    (family, context)
+}
+
+const PROMPTING_RESOURCE_PREFIX: &str = "mold://prompting/";
+
+/// Every prompting guide as an MCP resource, plus one route resource per
+/// built-in generation model so a host can read exactly the guides that
+/// apply to the checkpoint it is about to drive.
+fn resource_definitions() -> Vec<Value> {
+    let mut resources = Vec::new();
+    for (path, _) in mold_core::prompting::rendered_files() {
+        resources.push(json!({
+            "uri": format!("{PROMPTING_RESOURCE_PREFIX}{path}"),
+            "name": path,
+            "title": format!("Mold prompting guide: {path}"),
+            "description": "Prompting guide from Mold's single prompting corpus; the same text drives mold expand and remix.",
+            "mimeType": "text/markdown"
+        }));
+    }
+    for manifest in
+        mold_core::manifest::visible_manifests().filter(|manifest| manifest.is_generation_model())
+    {
+        let base = mold_core::manifest::model_base_name(&manifest.name);
+        let uri = format!("{PROMPTING_RESOURCE_PREFIX}route/{base}");
+        if resources.iter().any(|resource| resource["uri"] == uri) {
+            continue;
+        }
+        resources.push(json!({
+            "uri": uri,
+            "name": format!("route/{base}"),
+            "title": format!("Prompting route for {base}"),
+            "description": format!(
+                "Shared practice, the {} family guide, and the task or model leaves that apply to {base}, concatenated in read order.",
+                manifest.family
+            ),
+            "mimeType": "text/markdown"
+        }));
+    }
+    resources
+}
+
+fn read_resource(uri: &str) -> std::result::Result<Value, String> {
+    let path = uri
+        .strip_prefix(PROMPTING_RESOURCE_PREFIX)
+        .ok_or_else(|| format!("unknown resource: {uri}"))?;
+    let text = if let Some(model) = path.strip_prefix("route/") {
+        let resolved = mold_core::manifest::resolve_model_name(model);
+        let manifest = mold_core::manifest::find_manifest(&resolved)
+            .ok_or_else(|| format!("unknown model for prompting route: {model}"))?;
+        let route = mold_core::prompting::route(&manifest.family, Some(&resolved), None)
+            .map_err(|error| error.to_string())?;
+        let files = mold_core::prompting::rendered_files();
+        route
+            .paths()
+            .into_iter()
+            .filter_map(|wanted| {
+                files
+                    .iter()
+                    .find(|(candidate, _)| *candidate == wanted)
+                    .map(|(_, contents)| contents.clone())
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n")
+    } else {
+        mold_core::prompting::rendered_files()
+            .into_iter()
+            .find(|(candidate, _)| *candidate == path)
+            .map(|(_, contents)| contents)
+            .ok_or_else(|| format!("unknown resource: {uri}"))?
+    };
+    Ok(json!({
+        "contents": [{
+            "uri": uri,
+            "mimeType": "text/markdown",
+            "text": text
+        }]
+    }))
+}
+
 fn handle_protocol_message(message: Value) -> Option<Value> {
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(Value::as_str)?;
@@ -2518,7 +2749,7 @@ fn handle_protocol_message(message: Value) -> Option<Value> {
             id,
             json!({
                 "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": { "tools": {} },
+                "capabilities": { "tools": {}, "resources": {} },
                 "serverInfo": {
                     "name": "mold",
                     "version": mold_core::build_info::version_string()
@@ -2528,7 +2759,20 @@ fn handle_protocol_message(message: Value) -> Option<Value> {
         ("ping", Some(id)) => Some(response(id, json!({}))),
         ("tools/list", Some(id)) => Some(response(id, json!({ "tools": tool_definitions() }))),
         ("prompts/list", Some(id)) => Some(response(id, json!({ "prompts": [] }))),
-        ("resources/list", Some(id)) => Some(response(id, json!({ "resources": [] }))),
+        ("resources/list", Some(id)) => {
+            Some(response(id, json!({ "resources": resource_definitions() })))
+        }
+        ("resources/read", Some(id)) => {
+            let uri = message
+                .get("params")
+                .and_then(|params| params.get("uri"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Some(match read_resource(uri) {
+                Ok(result) => response(id, result),
+                Err(err) => error_response(id, -32002, err),
+            })
+        }
         (other, Some(id)) => Some(error_response(
             id,
             -32601,
@@ -2538,10 +2782,103 @@ fn handle_protocol_message(message: Value) -> Option<Value> {
 }
 
 fn tool_definitions() -> Value {
+    let mut tools = builtin_tool_definitions();
+    let list = tools.as_array_mut().expect("tool definitions are an array");
+    list.push(expand_prompt_tool());
+    list.push(remix_prompt_tool());
+    tools
+}
+
+/// JSON schema for the `context` argument shared by the prompt-transform
+/// tools. Mirrors `mold_core::ExpandContext`.
+fn expand_context_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Generation facts rendered after the model's prompting guide: exact model identity, width, height, frames, fps, clip_frames, audio, negative_prompt_supported, ordered references [{kind: image|video|audio, has_audio, role: first-frame|last-frame|keyframe|source|identity|edit|reference}], and lora names. Duration is never sent; it is frames / fps.",
+        "properties": {
+            "model": { "type": "string" },
+            "width": { "type": "integer", "minimum": 1 },
+            "height": { "type": "integer", "minimum": 1 },
+            "frames": { "type": "integer", "minimum": 1 },
+            "fps": { "type": "integer", "minimum": 1 },
+            "clip_frames": { "type": "integer", "minimum": 1 },
+            "negative_prompt_supported": { "type": "boolean" },
+            "audio": { "type": "boolean" },
+            "references": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["image", "video", "audio"] },
+                        "has_audio": { "type": "boolean" },
+                        "role": { "type": "string", "enum": ["first-frame", "last-frame", "keyframe", "source", "identity", "edit", "reference"] }
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": false
+                }
+            },
+            "loras": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn expand_prompt_tool() -> Value {
+    json!(
+        {
+            "name": "expand_prompt",
+            "description": "Rewrite a short prompt into a complete one for a specific mold model. The server applies that model's prompting guide (the same guide published as the mold://prompting/ resources) plus the generation facts in context, so the result already uses the model's reference-label syntax, length, and structure. Use before generate_image when the user's prompt is brief.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "The short prompt to expand." },
+                    "model": { "type": "string", "description": "Target mold model name, such as wan22-i2v-a14b:q5. Selects the family guide and any per-checkpoint leaf." },
+                    "model_family": { "type": "string", "description": "Family override when the model is a catalog identity the local manifest cannot resolve." },
+                    "variations": { "type": "integer", "minimum": 1, "maximum": 10, "description": "How many distinct expansions to return (default 1)." },
+                    "style": { "type": "string", "description": "Natural-language style directive woven into the rewrite." },
+                    "task": { "type": "string", "enum": ["text-to-image", "text-to-video", "image-to-video", "video-to-video", "retake", "keyframe-interpolation", "audio-driven-video", "reference-to-audio-video", "text-to-audio"], "description": "Conditioning contract. Omit to let the server infer it from the family." },
+                    "context": expand_context_schema()
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            }
+        }
+    )
+}
+
+fn remix_prompt_tool() -> Value {
+    json!(
+        {
+            "name": "remix_prompt",
+            "description": "Produce subject-preserving alternatives of an existing prompt, each varying one creative dimension (composition, camera, lighting, setting, mood, movement, style) while keeping the subject, constraints, and the target model's prompting guide.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "The prompt to remix." },
+                    "model": { "type": "string", "description": "Target mold model name." },
+                    "model_family": { "type": "string", "description": "Family override for catalog identities." },
+                    "variations": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Exact number of alternatives (default 3)." },
+                    "style": { "type": "string", "description": "Locked style kept in every alternative." },
+                    "task": { "type": "string", "enum": ["text-to-image", "text-to-video", "image-to-video", "video-to-video", "retake", "keyframe-interpolation", "audio-driven-video", "reference-to-audio-video", "text-to-audio"] },
+                    "dimensions": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["composition", "camera", "lighting", "setting", "mood", "movement", "style"] },
+                        "description": "Dimensions to vary; omit for the task-safe default set."
+                    },
+                    "context": expand_context_schema()
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            }
+        }
+    )
+}
+
+fn builtin_tool_definitions() -> Value {
     json!([
         {
             "name": "generate_image",
-            "description": "Generate one image with mold. Requires a running mold serve process, unless MOLD_HOST points at a remote mold server.",
+            "description": "Generate one image with mold. Requires a running mold serve process, unless MOLD_HOST points at a remote mold server. For a brief prompt, call expand_prompt first or set expand: true; the model's prompting guide is readable at mold://prompting/route/<model>.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4269,7 +4606,68 @@ mod tests {
 
         assert_eq!(response["id"], 1);
         assert_eq!(response["result"]["capabilities"]["tools"], json!({}));
+        assert_eq!(response["result"]["capabilities"]["resources"], json!({}));
         assert_eq!(response["result"]["serverInfo"]["name"], "mold");
+    }
+
+    #[test]
+    fn prompt_transform_tools_are_registered_with_the_context_schema() {
+        let tools = tool_definitions();
+        let tools = tools.as_array().unwrap();
+        assert_eq!(tools.len(), 12, "tool count is documented; update the docs");
+        for name in ["expand_prompt", "remix_prompt"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            assert_eq!(tool["inputSchema"]["required"], json!(["prompt"]));
+            let context = &tool["inputSchema"]["properties"]["context"]["properties"];
+            for field in ["model", "frames", "fps", "references", "loras"] {
+                assert!(context.get(field).is_some(), "{name} context lacks {field}");
+            }
+        }
+        let (family, context) = prompt_transform_target(Some("wan22-i2v-a14b"), None);
+        assert_eq!(family, "wan");
+        assert_eq!(
+            context.and_then(|context| context.model),
+            Some(mold_core::manifest::resolve_model_name("wan22-i2v-a14b"))
+        );
+    }
+
+    #[test]
+    fn prompting_guides_are_readable_resources() {
+        let list = handle_protocol_message_for_test(json!({
+            "jsonrpc": "2.0",
+            "id": "res",
+            "method": "resources/list"
+        }))
+        .unwrap();
+        let resources = list["result"]["resources"].as_array().unwrap();
+        assert!(resources
+            .iter()
+            .any(|resource| resource["uri"] == "mold://prompting/families/wan.md"));
+        assert!(resources
+            .iter()
+            .any(|resource| resource["uri"] == "mold://prompting/route/wan22-t2v-a14b"));
+        let read = handle_protocol_message_for_test(json!({
+            "jsonrpc": "2.0",
+            "id": "read",
+            "method": "resources/read",
+            "params": { "uri": "mold://prompting/route/wan22-t2v-a14b" }
+        }))
+        .unwrap();
+        let text = read["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(text.contains("# Shared prompting practice"), "{text}");
+        assert!(text.contains("# Wan prompting"), "{text}");
+        assert!(text.contains("---"), "route files are separated");
+        let missing = handle_protocol_message_for_test(json!({
+            "jsonrpc": "2.0",
+            "id": "missing",
+            "method": "resources/read",
+            "params": { "uri": "mold://prompting/nope.md" }
+        }))
+        .unwrap();
+        assert_eq!(missing["error"]["code"], -32002);
     }
 
     #[test]

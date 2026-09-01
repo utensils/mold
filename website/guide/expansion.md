@@ -20,6 +20,32 @@ mold expand "a cat" --variations 3 --json
 mold expand "she turns toward the window" --model ltx-2-19b-distilled:fp8 --task image-to-video
 ```
 
+## What the expander is told
+
+Every expansion and remix starts from the target model's prompting guide, the
+same text installed with the agent skill and published on the
+[Prompting Guides](/guide/prompting) page: shared practice, the family base,
+a task leaf when the identity or task selects one, and a model leaf for
+checkpoints with quirks of their own. Sections titled `CLI` and `Sources` and
+every shell example are left out; everything else becomes the system prompt.
+
+After the guide comes a generation-context block built from the request: the
+exact model, canvas and orientation, frame count, fps, and the derived duration,
+chained clip length, whether audio is generated, whether a negative prompt is
+honoured, the ordered references with the names the model expects (`<Picture 1>`
+for MiniMax H3, `image 1` for FLUX.2 and Qwen-Image-Edit, the role otherwise),
+and active LoRA adapter names. `mold run --expand`, inline `expand: true`, and
+the app Expand and Remix actions derive it automatically; `mold expand` and
+`mold remix` take it from `--width`, `--height`, `--frames`, `--fps`,
+`--clip-frames`, and `--reference`, and `/api/expand` takes it as `context`.
+
+```bash
+# The expander is told this is an 81-frame, 16 fps image-to-video clip with an
+# opening frame, so it writes motion-only prose under Wan's I2V budget.
+mold expand "the balloon lifts off" --model wan22-i2v-a14b:q5 \
+  --frames 81 --fps 16 --reference image:first-frame
+```
+
 ## Video and conditioning policy
 
 Mold derives the expansion task from the generation request on every Create
@@ -159,14 +185,15 @@ max_tokens = 300
 thinking = false              # Qwen3 thinking mode: higher quality, slower
 
 # Custom system prompts (placeholders: {WORD_LIMIT}, {MODEL_NOTES};
-# batch_prompt also takes {N})
+# batch_prompt also takes {N}). {MODEL_NOTES} is the prompting-guide excerpt;
+# the generation-context block is appended after the template either way.
 # system_prompt = "You are an image prompt writer..."
 # batch_prompt = "Write {N} distinct variations..."
 
-# Per-family tuning
+# Per-family tuning. word_limit re-renders the guide with the new budget;
+# style_notes replaces the guide text entirely (for Expand and Remix alike).
 [expand.families.sd15]
 word_limit = 50
-style_notes = "SD 1.5 uses CLIP-L (77 tokens). Use comma-separated keywords."
 
 [expand.families.flux]
 word_limit = 200

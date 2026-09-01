@@ -2,7 +2,7 @@
 
 Derived from a 13-area verified audit. **343 findings; 338 confirmed, 5 not.** No files were edited.
 
-Path abbreviations used throughout: `wg/` = `website/guide/`, `wm/` = `website/models/`, `wa/` = `website/api/`, `wd/` = `website/deployment/`, `ws/` = `website/` (root), `dd/` = `desktop/docs/`, `da/` = `docs/architecture/`, `cr/` = `.claude/rules/`, `SKILL` = `crates/mold-cli/src/skill/SKILL.md`.
+Path abbreviations used throughout: `wg/` = `website/guide/`, `wm/` = `website/models/`, `wa/` = `website/api/`, `wd/` = `website/deployment/`, `ws/` = `website/` (root), `dd/` = `desktop/docs/`, `da/` = `docs/architecture/`, `cr/` = `.claude/rules/`, `SKILL` = the pre-#1497 monolithic `crates/mold-cli/src/skill/SKILL.md` (since split into `crates/mold-cli/src/skill/template.md` plus the prompting corpus under `crates/mold-core/src/prompting/`; `SKILL:<line>` anchors below refer to the historical file and need re-anchoring case by case).
 
 ---
 

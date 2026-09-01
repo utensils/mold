@@ -408,6 +408,9 @@ use crate::queue::clean_error_message;
         mold_core::ReferenceUploadCompleteResponse,
         mold_core::minimax_h3::GenerationReferencePreparedShape,
         crate::routes_chain_jobs::ChainPlacementPreviewRequest,
+        mold_core::ExpandContext,
+        mold_core::ExpandReference,
+        mold_core::ExpandReferenceRole,
         mold_core::ExpandRequest,
         mold_core::ExpandResponse,
         mold_core::RemixRequest,
@@ -1369,9 +1372,6 @@ async fn prepare_generation_inner(
     } else {
         require_server_model_activation(state, &request.model).await?
     };
-    // Expand only after live catalog resolution, so opaque cv:/hf: IDs use
-    // their authoritative family and conditioning-aware task template.
-    maybe_expand_prompt(state, request, preferred_gpu, resolved_family.as_deref()).await?;
     let canonical_model = mold_core::manifest::resolve_model_name(&request.model);
     let resolved_profile = if private_h3_ingress {
         None
@@ -1382,6 +1382,18 @@ async fn prepare_generation_inner(
             .find(|entry| entry.info.name == request.model || entry.info.name == canonical_model)
             .and_then(|entry| entry.generation_profile)
     };
+    // Expand only after live catalog resolution, so opaque cv:/hf: IDs use
+    // their authoritative family and conditioning-aware task template. The
+    // resolved profile is looked up first so the expander sees the recipe's
+    // frame, fps, and negative-prompt facts when the request left them unset.
+    maybe_expand_prompt(
+        state,
+        request,
+        preferred_gpu,
+        resolved_family.as_deref(),
+        resolved_profile.as_ref(),
+    )
+    .await?;
     // The effective, delivery-qualified recipe owns the output default. A
     // family heuristic here can select MP4 even when this binary did not link
     // the encoder, causing an omitted field to fail its own advertised profile.
@@ -3629,6 +3641,7 @@ async fn maybe_expand_prompt(
     req: &mut mold_core::GenerateRequest,
     preferred_gpu: Option<usize>,
     resolved_family: Option<&str>,
+    resolved_profile: Option<&mold_core::GenerationProfileSet>,
 ) -> Result<(), ApiError> {
     if req.expand != Some(true) {
         return Ok(());
@@ -3674,6 +3687,11 @@ async fn maybe_expand_prompt(
 
     let mut expand_config = expand_settings.to_expand_config(&model_family, 1);
     expand_config.task = mold_core::ExpandTask::for_generation(&model_family, req);
+    expand_config.context = Some(mold_core::ExpandContext::for_generation(
+        &model_family,
+        req,
+        resolved_profile,
+    ));
     let original_prompt = req.prompt.clone();
 
     // Drop config lock before blocking
@@ -3750,6 +3768,7 @@ fn expand_config_for_request(
     config.task = req
         .task
         .unwrap_or_else(|| mold_core::ExpandTask::for_family(&req.model_family));
+    config.context = req.context.clone();
     config
 }
 
@@ -3852,6 +3871,7 @@ async fn remix_prompt(
     remix_config.operation = mold_core::PromptTransformOperation::Remix;
     remix_config.remix_dimensions = dimensions.clone();
     remix_config.style = req.style.clone();
+    remix_config.context = req.context.clone();
     // Expansion template overrides are intentionally not Remix overrides.
     remix_config.system_prompt = None;
     remix_config.batch_prompt = None;
@@ -11962,6 +11982,7 @@ mod tests {
             variations: 2,
             style: Some("oil painting".to_string()),
             task: Some(mold_core::ExpandTask::ImageToVideo),
+            context: None,
         };
         let config = expand_config_for_request(&settings, &req);
         assert_eq!(config.style.as_deref(), Some("oil painting"));
@@ -11975,6 +11996,7 @@ mod tests {
             variations: 1,
             style: None,
             task: None,
+            context: None,
         };
         let config = expand_config_for_request(&settings, &bare);
         assert!(config.style.is_none());
@@ -12684,7 +12706,7 @@ mod tests {
         }))
         .unwrap();
 
-        maybe_expand_prompt(&state, &mut request, None, None)
+        maybe_expand_prompt(&state, &mut request, None, None, None)
             .await
             .unwrap();
 
@@ -12710,7 +12732,7 @@ mod tests {
         }))
         .unwrap();
 
-        let error = maybe_expand_prompt(&state, &mut request, None, Some("flux"))
+        let error = maybe_expand_prompt(&state, &mut request, None, Some("flux"), None)
             .await
             .unwrap_err();
         assert_eq!(error.status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);

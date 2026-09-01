@@ -170,7 +170,7 @@ import {
   defaultSourceFitPolicy,
   parseSourceFitPolicy,
 } from "@studio/lib/sourceFit";
-import { expansionTaskForRequest } from "@studio/lib/expandTask";
+import { expansionContextForRequest, expansionTaskForRequest } from "@studio/lib/expandTask";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";
@@ -2470,6 +2470,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     model: form.model,
     family: form.family,
     task: expansionTaskForRequest(form.family, request),
+    context: expansionContextForRequest(form.family, request),
     requestedCount: count,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: stickyTarget.value,
@@ -2511,6 +2512,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         model_family: form.family,
         variations: requestedCount,
         task,
+        context: expansionContextForRequest(form.family, request),
         ...(style ? { style } : {}),
         dimensions,
       },
@@ -2736,6 +2738,7 @@ async function expandForCurrentBatch(
         variations: count,
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
         task: inputs.task,
+        ...(inputs.context ? { context: inputs.context } : {}),
         ...(styleDirective ? { style: styleDirective } : {}),
       },
       route.target,

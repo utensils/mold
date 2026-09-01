@@ -456,7 +456,12 @@ export interface ExpandRequest {
   style?: string;
   /** Resolved generation/conditioning policy; no media bytes travel here. */
   task?: ExpandTask;
+  /** Identity, canvas, clip, and ordered references (additive). */
+  context?: ExpandContext;
 }
+
+/** Mirrors `mold_core::ExpandContext` (see `@studio/lib/expandTask`). */
+export type ExpandContext = import("@studio/lib/expandTask").ExpandContext;
 
 /** `POST /api/expand` — mirrors mold-core `ExpandResponse`. */
 export interface ExpandResponse {
@@ -477,6 +482,8 @@ export interface RemixRequest {
   task: ExpandTask;
   style?: string;
   dimensions: RemixDimension[];
+  /** Identity, canvas, clip, and ordered references (additive). */
+  context?: ExpandContext;
 }
 
 export interface RemixResponse {

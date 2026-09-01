@@ -2,7 +2,10 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use mold_core::{Config, ExpandSettings, PromptExpander};
+use mold_core::{
+    Config, ExpandContext, ExpandReference, ExpandReferenceRole, ExpandSettings,
+    GenerationReferenceKind, PromptExpander,
+};
 
 use crate::output::status;
 use crate::theme;
@@ -29,6 +32,7 @@ fn expand_progress_callback() -> mold_inference::progress::ProgressCallback {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     prompt: &str,
     model: Option<&str>,
@@ -37,6 +41,7 @@ pub async fn run(
     backend_override: Option<&str>,
     model_override: Option<&str>,
     task_override: Option<&str>,
+    context: Option<ExpandContext>,
 ) -> Result<()> {
     mold_core::expand::validate_expansion_variation_count(variations)?;
     let mut config = Config::load_or_default();
@@ -76,6 +81,7 @@ pub async fn run(
             .parse::<mold_core::ExpandTask>()
             .map_err(anyhow::Error::msg)?;
     }
+    expand_config.context = context;
 
     // Get expander (auto-pulls expand model if needed)
     let expander = create_expander(&expand_settings, &config).await?;
@@ -173,6 +179,75 @@ pub(crate) async fn create_expander(
              Use an API backend instead: --expand-backend http://localhost:11434"
         );
     }
+}
+
+/// Build the expander's generation context from `mold expand` / `mold remix`
+/// flags. Returns `None` when no fact was given so old behaviour is kept.
+pub(crate) fn context_from_flags(
+    model: Option<&str>,
+    width: Option<u32>,
+    height: Option<u32>,
+    frames: Option<u32>,
+    fps: Option<u32>,
+    clip_frames: Option<u32>,
+    references: &[String],
+) -> Result<Option<ExpandContext>> {
+    let mut parsed = Vec::new();
+    for spec in references {
+        let (kind, role) = spec
+            .split_once(':')
+            .map_or((spec.as_str(), None), |(kind, role)| (kind, Some(role)));
+        let kind = match kind.trim().to_ascii_lowercase().as_str() {
+            "image" | "picture" => GenerationReferenceKind::Image,
+            "video" => GenerationReferenceKind::Video,
+            "audio" => GenerationReferenceKind::Audio,
+            other => anyhow::bail!(
+                "unknown reference kind '{other}' in --reference {spec}. Valid: image, video, audio"
+            ),
+        };
+        let role = match role.map(|role| role.trim().to_ascii_lowercase()) {
+            None => None,
+            Some(role) => Some(match role.as_str() {
+                "first-frame" | "first" => ExpandReferenceRole::FirstFrame,
+                "last-frame" | "last" => ExpandReferenceRole::LastFrame,
+                "keyframe" => ExpandReferenceRole::Keyframe,
+                "source" => ExpandReferenceRole::Source,
+                "identity" | "id" => ExpandReferenceRole::Identity,
+                "edit" => ExpandReferenceRole::Edit,
+                "reference" => ExpandReferenceRole::Reference,
+                other => anyhow::bail!(
+                    "unknown reference role '{other}' in --reference {spec}. Valid: first-frame, last-frame, keyframe, source, identity, edit, reference"
+                ),
+            }),
+        };
+        parsed.push(ExpandReference {
+            kind,
+            has_audio: false,
+            role,
+        });
+    }
+    if model.is_none()
+        && width.is_none()
+        && height.is_none()
+        && frames.is_none()
+        && fps.is_none()
+        && clip_frames.is_none()
+        && parsed.is_empty()
+    {
+        return Ok(None);
+    }
+    Ok(Some(ExpandContext {
+        model: model.map(mold_core::manifest::resolve_model_name),
+        width,
+        height,
+        frames,
+        fps,
+        clip_frames,
+        negative_prompt_supported: None,
+        audio: None,
+        references: parsed,
+        loras: Vec::new(),
+    }))
 }
 
 /// Resolve the model family string from a model name (public for use from run.rs).

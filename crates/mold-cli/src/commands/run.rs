@@ -1323,6 +1323,103 @@ pub async fn run(
         )
     };
 
+    // Facts the expander renders after the family guide: exact identity,
+    // canvas, clip length, and the ordered references it must name.
+    let expansion_context = {
+        let mut references = Vec::new();
+        if let Some(refs) = h3_authoring.references.as_ref() {
+            for reference in refs {
+                references.push(mold_core::ExpandReference {
+                    kind: reference.kind(),
+                    has_audio: matches!(
+                        reference,
+                        mold_core::GenerationReference::Video {
+                            has_audio: true,
+                            ..
+                        }
+                    ),
+                    role: Some(mold_core::ExpandReferenceRole::Reference),
+                });
+            }
+        }
+        if keyframes.as_ref().is_some_and(|k| k.len() > 1) {
+            for _ in keyframes.as_ref().unwrap() {
+                references.push(mold_core::ExpandReference::image(
+                    mold_core::ExpandReferenceRole::Keyframe,
+                ));
+            }
+        } else if source_image.is_some() {
+            let role = if mold_core::ExpandTask::for_family(&family)
+                != mold_core::ExpandTask::TextToImage
+            {
+                mold_core::ExpandReferenceRole::FirstFrame
+            } else if family == "qwen-image-edit" {
+                mold_core::ExpandReferenceRole::Edit
+            } else {
+                mold_core::ExpandReferenceRole::Source
+            };
+            references.push(mold_core::ExpandReference::image(role));
+        }
+        if let Some(edits) = edit_images.as_ref() {
+            for _ in edits {
+                references.push(mold_core::ExpandReference::image(
+                    mold_core::ExpandReferenceRole::Edit,
+                ));
+            }
+        }
+        let identity_count = identity
+            .id_images
+            .as_ref()
+            .map_or(usize::from(identity.id_image.is_some()), Vec::len);
+        for _ in 0..identity_count {
+            references.push(mold_core::ExpandReference::image(
+                mold_core::ExpandReferenceRole::Identity,
+            ));
+        }
+        if source_video_bytes.is_some() || extend_video_bytes.is_some() {
+            references.push(mold_core::ExpandReference {
+                kind: mold_core::GenerationReferenceKind::Video,
+                has_audio: false,
+                role: Some(mold_core::ExpandReferenceRole::Source),
+            });
+        }
+        if audio_file_bytes.is_some() {
+            references.push(mold_core::ExpandReference {
+                kind: mold_core::GenerationReferenceKind::Audio,
+                has_audio: false,
+                role: Some(mold_core::ExpandReferenceRole::Source),
+            });
+        }
+        let resolved = config.resolved_model_config(&model);
+        Some(mold_core::ExpandContext {
+            model: Some(mold_core::manifest::resolve_model_name(&model)),
+            width,
+            height,
+            frames: frames.or_else(|| resolved.effective_frames()),
+            fps,
+            clip_frames,
+            negative_prompt_supported: None,
+            audio: if audio {
+                Some(true)
+            } else if no_audio {
+                Some(false)
+            } else {
+                None
+            },
+            references,
+            loras: lora
+                .iter()
+                .map(|path| {
+                    std::path::Path::new(path)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or(path)
+                        .to_string()
+                })
+                .collect(),
+        })
+    };
+
     // Expansion strategy:
     // - If --local or server unreachable: expand client-side (existing path)
     // - If remote: delegate to server (single request: expand=true on GenerateRequest;
@@ -1357,6 +1454,7 @@ pub async fn run(
         let model_family = super::expand::resolve_family_from_config(&model, &config);
         let mut expand_config = settings.to_expand_config(&model_family, batch.max(1) as usize);
         expand_config.task = expansion_task;
+        expand_config.context = expansion_context.clone();
 
         let expander = super::expand::create_expander(&settings, &config).await?;
 
@@ -1415,6 +1513,7 @@ pub async fn run(
             variations,
             style: None,
             task: Some(expansion_task),
+            context: expansion_context.clone(),
         };
 
         crate::output::status!("{} Expanding prompt (server)...", crate::theme::icon_info());
@@ -1476,6 +1575,7 @@ pub async fn run(
                 let family = super::expand::resolve_family_from_config(&model, &config);
                 let mut expand_config = settings.to_expand_config(&family, batch.max(1) as usize);
                 expand_config.task = expansion_task;
+                expand_config.context = expansion_context.clone();
                 match super::expand::create_expander(&settings, &config).await {
                     Ok(expander) => match expander.expand(&prompt, &expand_config) {
                         Ok(result) => {
