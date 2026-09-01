@@ -112,6 +112,58 @@ async function cancelDownload(target: ApiTarget, id: string) {
   }
 }
 
+/** Submit exact pinned terms with a download request and return once the host
+ * has accepted the enqueue. Older hosts expose no record-only endpoint, so
+ * this is also their compatibility seam: consent is recorded as a side effect
+ * of the queued pull, but the dialog must not stay open for the whole transfer.
+ */
+async function startAcceptedDownload(
+  target: ApiTarget,
+  requirement: LicenseRequirement,
+  signal?: AbortSignal,
+): Promise<CreateDownloadResponse> {
+  try {
+    const response = await apiFetchTo(target, "/api/downloads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...(signal ? { signal } : {}),
+      body: JSON.stringify({
+        model: requirement.installModel,
+        accept_licenses: requirement.licenses.map(acceptanceFor),
+      }),
+    });
+    return (await response.json()) as CreateDownloadResponse;
+  } catch (error) {
+    if (error instanceof ApiError) {
+      if (
+        error.status === 409 &&
+        typeof error.body === "object" &&
+        error.body !== null &&
+        typeof (error.body as Record<string, unknown>).id === "string"
+      ) {
+        return error.body as unknown as CreateDownloadResponse;
+      }
+      const current = licenseFromErrorBody(error.body);
+      if (current) {
+        throw new ApiError(error.message, error.status, {
+          ...(error.body as object),
+          license: current,
+        });
+      }
+    }
+    throw error;
+  }
+}
+
+/** Accept on a pre-standalone-route host and dismiss once its pull is queued. */
+export async function acceptAndQueueDownload(
+  target: ApiTarget,
+  requirement: LicenseRequirement,
+  signal?: AbortSignal,
+): Promise<void> {
+  await startAcceptedDownload(target, requirement, signal);
+}
+
 /** Accept exact pinned terms on one host, download the owning bundle there,
  * and resolve only when that host reports the job terminal. */
 export async function acceptAndDownload(
@@ -126,41 +178,7 @@ export async function acceptAndDownload(
     bytesDone: 0,
     bytesTotal: 0,
   });
-  let created: CreateDownloadResponse;
-  try {
-    const response = await apiFetchTo(target, "/api/downloads", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      ...(signal ? { signal } : {}),
-      body: JSON.stringify({
-        model: requirement.installModel,
-        accept_licenses: requirement.licenses.map(acceptanceFor),
-      }),
-    });
-    created = (await response.json()) as CreateDownloadResponse;
-  } catch (error) {
-    if (error instanceof ApiError) {
-      if (
-        error.status === 409 &&
-        typeof error.body === "object" &&
-        error.body !== null &&
-        typeof (error.body as Record<string, unknown>).id === "string"
-      ) {
-        created = error.body as unknown as CreateDownloadResponse;
-      } else {
-        const current = licenseFromErrorBody(error.body);
-        if (current) {
-          throw new ApiError(error.message, error.status, {
-            ...(error.body as object),
-            license: current,
-          });
-        }
-        throw error;
-      }
-    } else {
-      throw error;
-    }
-  }
+  const created = await startAcceptedDownload(target, requirement, signal);
   let missingSnapshots = 0;
   try {
     for (;;) {

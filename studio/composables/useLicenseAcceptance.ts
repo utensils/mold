@@ -2,6 +2,7 @@ import { ref } from "vue";
 import { ApiError, type ApiTarget } from "../api/client";
 import {
   acceptAndDownload,
+  acceptAndQueueDownload,
   recordLicenseAcceptances,
   type LicenseDownloadProgress,
 } from "../api/licenseAcceptance";
@@ -102,6 +103,12 @@ export function useLicenseAcceptance() {
               (cause.status === 404 || cause.status === 405);
             if (!missingRoute) throw cause;
             downloaded = true;
+            await acceptAndQueueDownload(
+              prompt.target,
+              requirement,
+              controller.signal,
+            );
+            continue;
           }
         }
         await acceptAndDownload(
