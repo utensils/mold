@@ -22,7 +22,7 @@ import { gpuFleetLabel, gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { addressLabel, prepareHosts, versionLabel } from "../lib/discovery";
 import { formatGB } from "../lib/format";
 import { hostIdFromUrl, inferBackendFromGpuName } from "../lib/hosts";
-import { podGpuName, type RunPodPod } from "../lib/runpod";
+import { podGpuName, podProxyUrl, runPodForHostUrl, type RunPodPod } from "../lib/runpod";
 import { useHostsStore, type HostView } from "../stores/hosts";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
@@ -54,6 +54,29 @@ async function stopPod(pod: RunPodPod) {
     toasts.push(`Stopped ${pod.name ?? pod.id}`);
   } catch (err) {
     toasts.push(String(err), "error");
+  }
+}
+
+function hostForPod(pod: RunPodPod): HostView | null {
+  return hosts.all.find((host) => runPodForHostUrl([pod], host.baseUrl) !== null) ?? null;
+}
+
+async function openPodDetail(pod: RunPodPod) {
+  try {
+    const host = hostForPod(pod) ?? (await hosts.connect(podProxyUrl(pod.id), null, pod.name));
+    openDetail(host);
+  } catch (err) {
+    toasts.push(`The instance is still starting: ${String(err)}`, "error");
+  }
+}
+
+async function targetPod(pod: RunPodPod) {
+  try {
+    const host = hostForPod(pod) ?? (await hosts.connect(podProxyUrl(pod.id), null, pod.name));
+    await appPrefs.update({ generateTargetHost: host.id });
+    toasts.push(`${host.label} is the generation target`);
+  } catch (err) {
+    toasts.push(`The instance is still starting: ${String(err)}`, "error");
   }
 }
 
@@ -150,6 +173,35 @@ function connectedHostMenu(host: HostView): MenuEntry[] {
         ]
       : []),
   ];
+}
+
+function podMenu(pod: RunPodPod): MenuEntry[] {
+  const host = hostForPod(pod);
+  const proxyUrl = podProxyUrl(pod.id);
+  const entries: MenuEntry[] = host
+    ? connectedHostMenu(host)
+    : [
+        { label: "Open details", action: () => void openPodDetail(pod) },
+        {
+          label: "Set as generation target",
+          action: () => void targetPod(pod),
+        },
+        { label: "Copy address", action: () => void copyAddress(proxyUrl) },
+        { label: "Open web UI", action: () => void openHostUrl(proxyUrl) },
+      ];
+  entries.push(
+    { separator: true },
+    { label: "Manage RunPod", action: () => void router.push("/machines/runpod") },
+  );
+  if (!pod.networkVolume) {
+    entries.push({
+      label: "Stop pod",
+      danger: true,
+      disabled: runpod.mutating === `stop:${pod.id}`,
+      action: () => void stopPod(pod),
+    });
+  }
+  return entries;
 }
 
 function rememberedHostMenu(host: SavedHost): MenuEntry[] {
@@ -439,10 +491,21 @@ async function onConnected() {
             v-for="pod in runpod.runningPods"
             :key="pod.id"
             data-test="runpod-running"
-            class="border-edge flex items-center gap-3 rounded-chrome border bg-bench px-4 py-3"
+            class="border-edge relative flex cursor-pointer items-center gap-3 rounded-chrome border bg-bench px-4 py-3 text-left transition-colors hover:border-ink-3"
+            @click="openPodDetail(pod)"
+            @contextmenu="contextMenu.open($event, podMenu(pod))"
           >
-            <span class="h-2 w-2 shrink-0 rounded-full bg-halide" />
-            <div class="min-w-0 flex-1">
+            <button
+              type="button"
+              data-test="runpod-open"
+              :aria-label="`Open ${pod.name ?? pod.id} machine details`"
+              class="absolute inset-0 rounded-chrome focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-halide"
+              @click.stop="openPodDetail(pod)"
+            />
+            <span
+              class="pointer-events-none relative z-10 h-2 w-2 shrink-0 rounded-full bg-halide"
+            />
+            <div class="pointer-events-none relative z-10 min-w-0 flex-1">
               <div class="truncate text-body font-semibold text-ink">{{ pod.name ?? pod.id }}</div>
               <div class="data-mono truncate text-caption text-ink-3">
                 {{ podGpuName(pod) }} · RunPod
@@ -453,7 +516,15 @@ async function onConnected() {
               :uptime-seconds="pod.uptimeSeconds"
               :stoppable="!pod.networkVolume"
               :busy="runpod.mutating === `stop:${pod.id}`"
+              class="relative z-10"
               @stop="stopPod(pod)"
+            />
+            <Icon
+              name="chevron-right"
+              data-test="machine-chevron"
+              :size="16"
+              :stroke-width="2"
+              class="pointer-events-none relative z-10 shrink-0 text-ink-3"
             />
           </div>
 

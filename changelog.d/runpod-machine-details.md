@@ -1,0 +1,1 @@
+- **Open RunPod machines from Machines.** Running pod rows now open their Mold machine details and expose the relevant machine and RunPod actions from the right-click menu.
