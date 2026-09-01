@@ -5779,8 +5779,8 @@ onBeforeUnmount(() => {
           >
             Will render as
             <span class="font-semibold">{{ chainDecision.stageCount }}</span>
-            chained clips of {{ chainDecision.clipFrames }} frames — expect this
-            to take substantially longer than a single clip.
+            chained clips of up to {{ chainDecision.clipFrames }} frames —
+            expect this to take substantially longer than a single clip.
           </div>
           <div
             v-else-if="singleShotPreservationNote"

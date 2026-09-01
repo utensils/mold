@@ -24,11 +24,12 @@ wan has no latent motion tail, so its smooth handoff is last-frame image
 conditioning. `wan22-ti2v-5b` and `wan22-i2v-a14b` continue across the seam;
 a text-to-video checkpoint concatenates independent clips (Join / Cut /
 Crossfade). Clip lengths sit on wan's `4k+1` grid, and `--frames` past the
-per-clip envelope auto-chains instead of failing.
+per-clip envelope auto-chains instead of failing — the last clip is sized so
+the stitched video delivers exactly the frames you asked for.
 
 ```bash
 mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
-  --frames 100 --clip-frames 49
+  --frames 97 --clip-frames 49
 ```
 
 ## Single-clip generation

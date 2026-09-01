@@ -1354,7 +1354,28 @@ pub async fn run(
 
                 // Expand the single-prompt inputs into a canonical
                 // ChainRequest and normalise before handing off to run_chain.
-                let mut chain_req = inputs.to_chain_request().normalise()?;
+                // Normalise exact-fits the last stage to `total_frames`
+                // (#1509); the totals can still differ when the lattice
+                // cannot close (a zero motion tail, an off-grid total), and
+                // a request that cannot be honoured exactly must be
+                // disclosed, never silently over-rendered.
+                // Pass the resolved family: an opaque `cv:`/`hf:` id has no
+                // manifest for normalise to consult, and family-blind
+                // normalisation would exact-fit an opaque wan chain on the
+                // LTX 8k+1 grid and repeat its opening image onto every
+                // continuation (the wan stage-source rule keys on family).
+                let mut chain_req = inputs
+                    .to_chain_request()
+                    .normalise_with_family(family.as_deref())?;
+                let stitched_total = chain_req.estimated_total_frames();
+                if stitched_total != total_frames {
+                    status!(
+                        "{} --frames {total_frames} is not exactly renderable as a chain of \
+                         {}-frame clips (motion tail {mt}); rendering {stitched_total} frames",
+                        theme::icon_warn(),
+                        cf,
+                    );
+                }
                 if hdr_chain.is_some() {
                     // The EXR sequence and the reference slices both follow
                     // the stitched timeline, so the chain must deliver
