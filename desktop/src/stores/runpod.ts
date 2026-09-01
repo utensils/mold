@@ -130,13 +130,42 @@ export const useRunPodStore = defineStore("runpod", {
           const connectedHostIds = hosts.extras
             .filter((host) => isRunPodHostUrl(id, host.url))
             .map((host) => host.id);
+          let savedHostIds: string[] = [];
+          let cleanupFailed = false;
+          try {
+            savedHostIds = (await ipc.appSettingsGet()).savedHosts
+              .filter((host) => isRunPodHostUrl(id, host.url))
+              .map((host) => host.id);
+          } catch {
+            // The pod deletion may still proceed, but without the saved-host
+            // inventory Studio cannot prove every alias was forgotten.
+            cleanupFailed = true;
+          }
+          const connected = new Set(connectedHostIds);
+          const hostIds = [...new Set([...connectedHostIds, ...savedHostIds])];
           await ipc.runpodDelete(id);
-          const cleanup = await Promise.allSettled(
-            connectedHostIds.map((hostId) => hosts.disconnect(hostId)),
-          );
-          if (cleanup.some((result) => result.status === "rejected")) {
+          // Serialize the settings writes: forget_remote_host mutates its
+          // in-memory store under a lock, then saves after releasing the lock.
+          // Concurrent aliases could otherwise persist out of order.
+          for (const hostId of hostIds) {
+            if (connected.has(hostId)) {
+              try {
+                await hosts.disconnect(hostId);
+              } catch {
+                // disconnect() retires the live host and its activity before
+                // persisting. The stronger forget command below independently
+                // removes saved/reconnect state, so it can recover that write.
+              }
+            }
+            try {
+              await ipc.forgetRemoteHost(hostId);
+            } catch {
+              cleanupFailed = true;
+            }
+          }
+          if (cleanupFailed) {
             this.operationError =
-              "The RunPod instance was deleted and its activity was cleared, but Studio couldn't save the disconnected host. It may reappear after restart; disconnect it again if it does.";
+              "The RunPod instance was deleted and its activity was cleared, but Studio couldn't fully forget its Mold host. It may reappear after restart; forget it from Machines if it does.";
           }
         }
         await this.load();
