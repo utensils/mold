@@ -35,6 +35,19 @@ describe("isUpscaledImage", () => {
     expect(isUpscaledImage(item)).toBe(true);
   });
 
+  it("badges a Framewise video by its server-issued filename when the fit lands on the source size", () => {
+    // A 4096×1716 source ×2 is fitted back to 4096×1716 by the edge cap.
+    const item = print("wide-framewise-upscaled-0a1b2c3d.mp4", {
+      width: 4096,
+      height: 1716,
+      generation_width: 4096,
+      generation_height: 1716,
+      upscale_model: "real-esrgan-x2plus:fp16",
+      source_video_path: "wide.mp4",
+    });
+    expect(isUpscaledImage(item)).toBe(true);
+  });
+
   it("leaves a generated video unbadged when an upscaler was merely requested", () => {
     const item = print("clip.mp4", {
       width: 960,

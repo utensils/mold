@@ -322,10 +322,13 @@ audio track. Temporal flicker may remain.
 The published MP4 is H.264 at level 5.2 or below, so it decodes on phones,
 in browsers, and in the Library thumbnailer. Real-ESRGAN always runs at its
 native factor; when the enlarged frame would exceed that level (more than
-36 864 macroblocks, or an edge over 4096 px) the encoder resamples it to the
-largest frame of the same aspect ratio that fits. A 960×960 clip upscaled ×4
+36 864 macroblocks, more than 2 073 600 macroblocks per second at the source
+frame rate, or an edge over 4096 px) the encoder resamples it to the largest
+frame of the same aspect ratio that fits. A 960×960 clip upscaled ×4 at 24 fps
 therefore publishes at 3072×3072 rather than 3840×3840, and the print's
-metadata records the published size beside the source size.
+metadata records the published size beside the source size. A job paused
+before this fit existed re-renders from frame 0 on resume rather than
+stitching checkpoints of two sizes.
 
 The MVP rejects rather than discards VFR timing, HDR/high-bit-depth video,
 subtitles, chapters, multiple audio tracks, and incompatible audio codecs.

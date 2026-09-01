@@ -52,6 +52,10 @@ const FRAMEWISE_CODEC_UNAVAILABLE: &str =
 /// here; a frame above it publishes a print with no thumbnail that phones will
 /// not play (hal9000, 2026-09-01: 3840×3840 is 57 600 macroblocks, level 6.0).
 const H264_LEVEL_5_2_MAX_MACROBLOCKS: u64 = 36_864;
+/// Level 5.2's throughput ceiling (Table A-1, MaxMBPS). At 24 fps the frame
+/// ceiling binds; at 60 fps this one does, so the fit must read the source
+/// rate or libx264 still writes level 6.0 for a frame that fits by area.
+const H264_LEVEL_5_2_MAX_MACROBLOCKS_PER_SECOND: u64 = 2_073_600;
 /// Longest edge common hardware decoders accept; 4096×2304 is level 5.2's
 /// reference shape, while the level alone would allow an 8 688 px edge.
 const H264_MAX_EDGE: u32 = 4096;
@@ -60,21 +64,33 @@ fn h264_macroblocks(width: u32, height: u32) -> u64 {
     u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16))
 }
 
-fn fits_h264_level_5_2(width: u32, height: u32) -> bool {
-    width <= H264_MAX_EDGE
-        && height <= H264_MAX_EDGE
-        && h264_macroblocks(width, height) <= H264_LEVEL_5_2_MAX_MACROBLOCKS
+/// The per-frame macroblock ceiling at an exact frame rate `(numerator,
+/// denominator)`: MaxFS, tightened by MaxMBPS once the rate is high enough.
+fn h264_level_5_2_macroblock_ceiling(fps: (u64, u64)) -> u64 {
+    let (numerator, denominator) = fps;
+    if numerator == 0 || denominator == 0 {
+        return H264_LEVEL_5_2_MAX_MACROBLOCKS;
+    }
+    (H264_LEVEL_5_2_MAX_MACROBLOCKS_PER_SECOND * denominator / numerator)
+        .clamp(1, H264_LEVEL_5_2_MAX_MACROBLOCKS)
 }
 
-/// The encode dimensions for an upscaled frame: the upscaler's own output when
-/// it already decodes at level 5.2, otherwise the largest even-sided frame of
-/// the same aspect ratio that does. The super-resolution pass is untouched;
-/// only the encoder resamples, and only when it must.
-fn fit_h264_level_5_2(width: u32, height: u32) -> (u32, u32) {
-    if fits_h264_level_5_2(width, height) {
+fn fits_h264_level_5_2(width: u32, height: u32, fps: (u64, u64)) -> bool {
+    width <= H264_MAX_EDGE
+        && height <= H264_MAX_EDGE
+        && h264_macroblocks(width, height) <= h264_level_5_2_macroblock_ceiling(fps)
+}
+
+/// The encode dimensions for an upscaled frame at the source's exact rate: the
+/// upscaler's own output when it already decodes at level 5.2, otherwise the
+/// largest even-sided frame of the same aspect ratio that does. The
+/// super-resolution pass is untouched; only the encoder resamples, and only
+/// when it must.
+fn fit_h264_level_5_2(width: u32, height: u32, fps: (u64, u64)) -> (u32, u32) {
+    if fits_h264_level_5_2(width, height, fps) {
         return (width, height);
     }
-    let max_pixels = (H264_LEVEL_5_2_MAX_MACROBLOCKS * 256) as f64;
+    let max_pixels = (h264_level_5_2_macroblock_ceiling(fps) * 256) as f64;
     let pixels = f64::from(width) * f64::from(height);
     let factor = (max_pixels / pixels)
         .sqrt()
@@ -86,7 +102,7 @@ fn fit_h264_level_5_2(width: u32, height: u32) -> (u32, u32) {
     // Macroblock rounding can leave the count a row over the ceiling; trim the
     // longer edge two pixels at a time, which moves the aspect ratio by well
     // under a tenth of a percent.
-    while !fits_h264_level_5_2(fitted_width.max(2), fitted_height.max(2)) {
+    while !fits_h264_level_5_2(fitted_width.max(2), fitted_height.max(2), fps) {
         if fitted_width >= fitted_height {
             fitted_width -= 2;
         } else {
@@ -97,15 +113,44 @@ fn fit_h264_level_5_2(width: u32, height: u32) -> (u32, u32) {
 }
 
 /// The publication guard behind `fit_h264_level_5_2`: whatever the encoder
-/// accepted, a frame above the level 5.2 ceiling never reaches the gallery.
+/// accepted, a frame above the level 5.2 ceiling at the output's own rate
+/// never reaches the gallery.
 fn verify_decodable_output(output: &VideoUpscaleMediaFacts) -> anyhow::Result<()> {
+    let fps = rational(&output.fps)?;
     anyhow::ensure!(
-        fits_h264_level_5_2(output.width, output.height),
-        "output frame {}x{} exceeds the H.264 level 5.2 ceiling that phones and thumbnails decode",
+        fits_h264_level_5_2(output.width, output.height, fps),
+        "output frame {}x{} at {} fps exceeds the H.264 level 5.2 ceiling that phones and thumbnails decode",
         output.width,
-        output.height
+        output.height,
+        output.fps
     );
     Ok(())
+}
+
+/// Checkpoints rendered before the level 5.2 fit (or under a different fit)
+/// carry the wrong frame size; concatenating them would fail the publication
+/// guard and strand the job as `Failed`. Returns the frame count that can be
+/// trusted: `completed` when the first chunk matches, `0` after discarding
+/// every chunk when it does not.
+fn discard_incompatible_checkpoints(
+    work_dir: &FsPath,
+    completed: u64,
+    out_width: u32,
+    out_height: u32,
+) -> u64 {
+    if completed == 0 {
+        return 0;
+    }
+    let first = work_dir.join(format!("chunk-{:012}.mp4", 0));
+    let compatible =
+        probe(&first).is_ok_and(|chunk| chunk.width == out_width && chunk.height == out_height);
+    if compatible {
+        return completed;
+    }
+    for start in (0..completed).step_by(CHECKPOINT_FRAMES as usize) {
+        let _ = fs::remove_file(work_dir.join(format!("chunk-{start:012}.mp4")));
+    }
+    0
 }
 
 fn codec_command(tool: &str) -> Command {
@@ -1328,7 +1373,8 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
         .height
         .checked_mul(stored.job.scale_factor)
         .ok_or_else(|| anyhow::anyhow!("output height overflow"))?;
-    let (out_width, out_height) = fit_h264_level_5_2(upscaled_width, upscaled_height);
+    let (out_width, out_height) =
+        fit_h264_level_5_2(upscaled_width, upscaled_height, rational(&facts.fps)?);
     if (out_width, out_height) != (upscaled_width, upscaled_height) {
         tracing::info!(
             job = id,
@@ -1343,6 +1389,16 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
     );
     let frame_bytes = usize::try_from(u64::from(facts.width) * u64::from(facts.height) * 3)?;
     let mut completed = stored.job.completed_frames;
+    let trusted =
+        discard_incompatible_checkpoints(&stored.work_dir, completed, out_width, out_height);
+    if trusted != completed {
+        tracing::warn!(
+            job = id,
+            "discarding Framewise checkpoints whose frame size no longer matches the level 5.2 fit; re-rendering from frame 0"
+        );
+        completed = trusted;
+        jobs::update_progress(database, id, completed, now_ms())?;
+    }
     for start in (0..completed).step_by(CHECKPOINT_FRAMES as usize) {
         if !stored
             .work_dir
@@ -1848,23 +1904,42 @@ mod tests {
         assert_eq!(scale_for("real-esrgan-x4plus:fp16"), 4);
     }
 
+    const FPS_24: (u64, u64) = (24, 1);
+
     #[test]
     fn level_5_2_fit_keeps_frames_that_already_decode() {
-        assert_eq!(fit_h264_level_5_2(1920, 1080), (1920, 1080));
+        assert_eq!(fit_h264_level_5_2(1920, 1080, FPS_24), (1920, 1080));
         // 4K UHD is 32 400 macroblocks: inside the ceiling, untouched.
-        assert_eq!(fit_h264_level_5_2(3840, 2160), (3840, 2160));
+        assert_eq!(fit_h264_level_5_2(3840, 2160, FPS_24), (3840, 2160));
         // 704×1216 ×2 and 768×1344 ×2 stay put as well.
-        assert_eq!(fit_h264_level_5_2(1408, 2432), (1408, 2432));
-        assert_eq!(fit_h264_level_5_2(1536, 2688), (1536, 2688));
+        assert_eq!(fit_h264_level_5_2(1408, 2432, FPS_24), (1408, 2432));
+        assert_eq!(fit_h264_level_5_2(1536, 2688, FPS_24), (1536, 2688));
     }
 
     #[test]
     fn level_5_2_fit_shrinks_the_hal9000_square_to_the_ceiling() {
         // 960×960 ×4 — the print that published with no thumbnail and would
         // not play on a phone. 3072×3072 is exactly 36 864 macroblocks.
-        assert_eq!(fit_h264_level_5_2(3840, 3840), (3072, 3072));
-        assert!(!fits_h264_level_5_2(3840, 3840));
-        assert!(fits_h264_level_5_2(3072, 3072));
+        assert_eq!(fit_h264_level_5_2(3840, 3840, FPS_24), (3072, 3072));
+        assert!(!fits_h264_level_5_2(3840, 3840, FPS_24));
+        assert!(fits_h264_level_5_2(3072, 3072, FPS_24));
+    }
+
+    #[test]
+    fn level_5_2_fit_reads_the_throughput_ceiling_at_high_frame_rates() {
+        // MaxFS alone would pass 3072×3072 at 60 fps, but that is 2 211 840
+        // macroblocks per second against level 5.2's 2 073 600.
+        assert_eq!(h264_level_5_2_macroblock_ceiling(FPS_24), 36_864);
+        assert_eq!(h264_level_5_2_macroblock_ceiling((60, 1)), 34_560);
+        assert_eq!(h264_level_5_2_macroblock_ceiling((60_000, 1_001)), 34_594);
+        assert!(!fits_h264_level_5_2(3072, 3072, (60, 1)));
+        let (width, height) = fit_h264_level_5_2(3840, 3840, (60, 1));
+        assert!(fits_h264_level_5_2(width, height, (60, 1)));
+        assert!(width < 3072 && height < 3072);
+        // 4K UHD at 60 fps is 1 944 000 macroblocks per second: still level 5.2.
+        assert_eq!(fit_h264_level_5_2(3840, 2160, (60, 1)), (3840, 2160));
+        // A degenerate rate never divides by zero and falls back to MaxFS.
+        assert_eq!(h264_level_5_2_macroblock_ceiling((0, 1)), 36_864);
     }
 
     #[test]
@@ -1883,22 +1958,24 @@ mod tests {
         ];
         for (width, height) in sources {
             for scale in [2_u32, 4] {
-                let (upscaled_width, upscaled_height) = (width * scale, height * scale);
-                let (fitted_width, fitted_height) =
-                    fit_h264_level_5_2(upscaled_width, upscaled_height);
-                assert!(
-                    fits_h264_level_5_2(fitted_width, fitted_height),
-                    "{upscaled_width}x{upscaled_height} fitted to {fitted_width}x{fitted_height} still exceeds level 5.2"
-                );
-                assert!(fitted_width <= upscaled_width && fitted_height <= upscaled_height);
-                assert_eq!(fitted_width % 2, 0);
-                assert_eq!(fitted_height % 2, 0);
-                let source_ratio = f64::from(upscaled_width) / f64::from(upscaled_height);
-                let fitted_ratio = f64::from(fitted_width) / f64::from(fitted_height);
-                assert!(
-                    ((fitted_ratio - source_ratio) / source_ratio).abs() < 0.01,
-                    "{upscaled_width}x{upscaled_height} → {fitted_width}x{fitted_height} changed the aspect ratio"
-                );
+                for fps in [FPS_24, (30_000, 1_001), (60, 1)] {
+                    let (upscaled_width, upscaled_height) = (width * scale, height * scale);
+                    let (fitted_width, fitted_height) =
+                        fit_h264_level_5_2(upscaled_width, upscaled_height, fps);
+                    assert!(
+                        fits_h264_level_5_2(fitted_width, fitted_height, fps),
+                        "{upscaled_width}x{upscaled_height} fitted to {fitted_width}x{fitted_height} still exceeds level 5.2 at {fps:?}"
+                    );
+                    assert!(fitted_width <= upscaled_width && fitted_height <= upscaled_height);
+                    assert_eq!(fitted_width % 2, 0);
+                    assert_eq!(fitted_height % 2, 0);
+                    let source_ratio = f64::from(upscaled_width) / f64::from(upscaled_height);
+                    let fitted_ratio = f64::from(fitted_width) / f64::from(fitted_height);
+                    assert!(
+                        ((fitted_ratio - source_ratio) / source_ratio).abs() < 0.01,
+                        "{upscaled_width}x{upscaled_height} → {fitted_width}x{fitted_height} changed the aspect ratio"
+                    );
+                }
             }
         }
     }
@@ -1924,6 +2001,51 @@ mod tests {
         output.width = 3072;
         output.height = 3072;
         verify_decodable_output(&output).unwrap();
+        // The same frame at 60 fps exceeds the throughput ceiling.
+        output.fps = "60/1".into();
+        assert!(verify_decodable_output(&output)
+            .unwrap_err()
+            .to_string()
+            .contains("60/1 fps"));
+    }
+
+    #[test]
+    fn checkpoints_from_a_different_fit_are_discarded_before_resume() {
+        let _fixture_guard = FFMPEG_FIXTURE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !ffmpeg_fixture_tools_available() {
+            eprintln!("skipping ffmpeg integration fixture: ffmpeg/ffprobe unavailable");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path();
+        // Two checkpoints rendered at 32×32 by a release without the fit.
+        for start in [0_u64, CHECKPOINT_FRAMES] {
+            let chunk = work_dir.join(format!("chunk-{start:012}.mp4"));
+            let mut encoder = spawn_encoder(&chunk, 32, 32, 32, 32, "24/1").unwrap();
+            let mut stdin = encoder.stdin.take().unwrap();
+            stdin.write_all(&vec![0x40_u8; 32 * 32 * 3]).unwrap();
+            drop(stdin);
+            assert!(encoder.wait_with_output().unwrap().status.success());
+        }
+        let completed = CHECKPOINT_FRAMES * 2;
+        // The same fit keeps every checkpoint.
+        assert_eq!(
+            discard_incompatible_checkpoints(work_dir, completed, 32, 32),
+            completed
+        );
+        assert!(work_dir.join("chunk-000000000016.mp4").is_file());
+        // A different fitted size discards them all, so the job re-renders
+        // instead of concatenating mismatched frames and failing publication.
+        assert_eq!(
+            discard_incompatible_checkpoints(work_dir, completed, 24, 24),
+            0
+        );
+        assert!(!work_dir.join("chunk-000000000000.mp4").is_file());
+        assert!(!work_dir.join("chunk-000000000016.mp4").is_file());
+        // Nothing completed means nothing to check.
+        assert_eq!(discard_incompatible_checkpoints(work_dir, 0, 24, 24), 0);
     }
 
     #[test]
@@ -1936,7 +2058,7 @@ mod tests {
             return;
         }
         let (width, height) = (3840_u32, 3840_u32);
-        let (encode_width, encode_height) = fit_h264_level_5_2(width, height);
+        let (encode_width, encode_height) = fit_h264_level_5_2(width, height, FPS_24);
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("fitted.mp4");
         let mut encoder =
