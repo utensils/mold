@@ -1205,26 +1205,6 @@ fn runtime_grant_fences_are_typed_and_include_worker_readiness() {
         plan.validate_lease_for_grant(
             lease,
             &GrantValidationSnapshot {
-                available_vram_bytes: lease
-                    .placement
-                    .device_available_vram_bytes
-                    .saturating_sub(1),
-                ..current.clone()
-            }
-        ),
-        Err(PlanValidationError::DeviceVramSampleChanged {
-            device_id: "gpu-0".into(),
-            planned_bytes: lease.placement.device_available_vram_bytes,
-            current_bytes: lease
-                .placement
-                .device_available_vram_bytes
-                .saturating_sub(1),
-        })
-    );
-    assert_eq!(
-        plan.validate_lease_for_grant(
-            lease,
-            &GrantValidationSnapshot {
                 available_vram_bytes: lease.placement.predicted_vram_bytes.saturating_sub(1),
                 ..current.clone()
             }
@@ -1353,6 +1333,61 @@ fn runtime_grant_fences_are_typed_and_include_worker_readiness() {
             work_id: "other-job".into(),
             device_id: "gpu-0".into(),
         })
+    );
+}
+
+#[test]
+fn prepared_h3_capacity_drift_grants_the_first_of_three_jobs_when_the_peak_still_fits() {
+    // Private H3 preparation freezes the admission observation into every
+    // candidate. The generic scheduler sees only that 24 GiB value, the
+    // immutable execution fingerprint, and the predicted 8 GiB peak.
+    let jobs = (0..3)
+        .map(|index| work(&format!("h3-{index}"), index, vec![candidate("gpu-0", 1)]))
+        .collect();
+    let plan = Planner::default()
+        .plan(&snapshot(vec![device("gpu-0")], jobs, 128))
+        .expect("three prepared H3 candidates produce a valid queue plan");
+    let lease = plan
+        .immediate_leases
+        .first()
+        .expect("the oldest prepared H3 job owns the idle device");
+    assert_eq!(lease.work_id.as_str(), "h3-0");
+
+    let current = GrantValidationSnapshot {
+        work_id: lease.work_id.clone(),
+        device_id: lease.device_id.clone(),
+        state_version: plan.state_version,
+        plan_version: plan.plan_version,
+        sample_generation: plan.reservation.sample_generation,
+        ledger_sequence: plan.reservation.ledger_sequence,
+        work_ready: true,
+        work_cancelled: false,
+        worker_generation: lease.worker_generation,
+        worker_ready: true,
+        device_admin_state: DeviceAdminState::Enabled,
+        device_health: DeviceHealth::Healthy,
+        execution_fingerprint: lease.placement.execution_fingerprint.clone(),
+        available_vram_bytes: 23 * GIB,
+    };
+    assert_eq!(
+        plan.validate_lease_for_grant(lease, &current),
+        Ok(()),
+        "a harmless CUDA context delta must not livelock the prepared H3 queue"
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                available_vram_bytes: lease.placement.predicted_vram_bytes.saturating_sub(1),
+                ..current
+            }
+        ),
+        Err(PlanValidationError::InsufficientCurrentVram {
+            device_id: "gpu-0".into(),
+            planned_bytes: lease.placement.predicted_vram_bytes,
+            available_bytes: lease.placement.predicted_vram_bytes.saturating_sub(1),
+        }),
+        "the same H3 grant must still fail closed on a real shortfall"
     );
 }
 
