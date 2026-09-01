@@ -128,6 +128,6 @@ so it is stored on the host that will fetch the weights — on desktop, pick tha
 machine in **Settings → Model licenses**, and on mobile it is whichever host you
 have selected.
 
-Texturing weights (`hunyuan3d-paint`) are covered by a *separate* Tencent 2.1
+Texturing weights (`hunyuan3d-paint`) are covered by a _separate_ Tencent 2.1
 agreement and must be accepted on their own. They install today, but the PBR
 paint engine is not implemented yet, so they satisfy the gate without rendering.

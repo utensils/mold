@@ -534,21 +534,21 @@ Common subcommands are `doctor`, `availability`, `deploy`, `status`, `logs`,
 
 ## Other Commands
 
-| Command                                                       | Purpose                                                                                           |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `mold default [MODEL]`                                        | Get or set the default model                                                                      |
-| `mold stats [--json]`                                         | Show disk usage for models, output, logs, and shared components                                   |
-| `mold clean [--force] [--older-than DURATION]`                | Report stale downloads, orphaned files, and old outputs (dry run); `--force` deletes them         |
-| `mold server start/status/stop`                               | Manage a background server daemon                                                                 |
-| `mold server discover`                                        | Find mold servers advertised on the local network (mDNS)                                          |
-| `mold rm <MODELS...> [--force]`                               | Remove downloaded models                                                                          |
-| `mold ps`                                                     | Show server status or local mold processes                                                        |
-| `mold unload`                                                 | Unload the current server model                                                                   |
-| `mold update [--check] [--force] [--nightly] [--version TAG]` | Update a stable, nightly, or exact release binary                                                 |
-| `mold licenses [--local]`                                     | Show third-party model licenses and whether the machine that would run the pull has accepted them |
+| Command                                                       | Purpose                                                                                                |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `mold default [MODEL]`                                        | Get or set the default model                                                                           |
+| `mold stats [--json]`                                         | Show disk usage for models, output, logs, and shared components                                        |
+| `mold clean [--force] [--older-than DURATION]`                | Report stale downloads, orphaned files, and old outputs (dry run); `--force` deletes them              |
+| `mold server start/status/stop`                               | Manage a background server daemon                                                                      |
+| `mold server discover`                                        | Find mold servers advertised on the local network (mDNS)                                               |
+| `mold rm <MODELS...> [--force]`                               | Remove downloaded models                                                                               |
+| `mold ps`                                                     | Show server status or local mold processes                                                             |
+| `mold unload`                                                 | Unload the current server model                                                                        |
+| `mold update [--check] [--force] [--nightly] [--version TAG]` | Update a stable, nightly, or exact release binary                                                      |
+| `mold licenses [--local]`                                     | Show third-party model licenses and whether the machine that would run the pull has accepted them      |
 | `mold licenses accept <ID>...`                                | Record acceptance of pinned terms WITHOUT downloading; `--local` records here instead of on the server |
-| `mold skill <COMMAND>`                                        | Manage Mold's embedded Agent Skill                                                                |
-| `mold version`                                                | Show version, build date, and git SHA                                                             |
+| `mold skill <COMMAND>`                                        | Manage Mold's embedded Agent Skill                                                                     |
+| `mold version`                                                | Show version, build date, and git SHA                                                                  |
 
 ## Running commands without `mold serve`
 
