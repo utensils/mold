@@ -311,9 +311,9 @@ describe("AdvancedSettings — upscale", () => {
   });
 
   it("offers Framewise upscale for video families", () => {
-    expect(
-      accordionTitles(mountSettings(formFor("ltx2"), { upscalers: [upscaler] })),
-    ).toContain("Framewise upscale after generate");
+    expect(accordionTitles(mountSettings(formFor("ltx2"), { upscalers: [upscaler] }))).toContain(
+      "Framewise upscale after generate",
+    );
   });
 });
 

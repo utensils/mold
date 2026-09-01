@@ -252,7 +252,9 @@ const showPlacement = computed(() => props.placementGpus.length > 0);
 
 // Native upscalers apply directly to stills and queue a durable Framewise
 // upscale after video publication. Audio-only families have no raster frames.
-const showUpscale = computed(() => !caps.value.supportsAudio || caps.value.supportsVideo);
+const showUpscale = computed(
+  () => !caps.value.supportsAudio || caps.value.supportsVideo,
+);
 
 // The Scheduler type permits parameterized object variants; the drawer only
 // surfaces the named string schedulers.

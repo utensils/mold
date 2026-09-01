@@ -18,7 +18,8 @@ export function defaultUpscaler(choices: UpscalerChoice[]): string {
         choice.downloaded && /^real-esrgan-x4plus(?::|$)/.test(choice.name),
     )?.name ??
     choices.find((choice) => choice.downloaded)?.name ??
-    choices.find((choice) => /^real-esrgan-x4plus(?::|$)/.test(choice.name))?.name ??
+    choices.find((choice) => /^real-esrgan-x4plus(?::|$)/.test(choice.name))
+      ?.name ??
     choices[0]?.name ??
     "real-esrgan-x4plus:fp16"
   );

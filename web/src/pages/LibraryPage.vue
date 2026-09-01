@@ -1510,7 +1510,8 @@ async function performRefresh() {
           async (host) =>
             [
               host.id,
-              (await hostCapabilities(host)).video_upscale?.gallery_image === true,
+              (await hostCapabilities(host)).video_upscale?.gallery_image ===
+                true,
             ] as const,
         ),
       ),
@@ -1970,7 +1971,8 @@ let upscalePoll: ReturnType<typeof setTimeout> | null = null;
 let upscaleEpoch = 0;
 const upscalers = computed(() => selectUpscalers(models.value));
 const upscaleKind = computed(() =>
-  upscaleItem.value && mediaKind(upscaleItem.value.format, upscaleItem.value.filename) === "video"
+  upscaleItem.value &&
+  mediaKind(upscaleItem.value.format, upscaleItem.value.filename) === "video"
     ? "video"
     : "image",
 );
@@ -2015,12 +2017,7 @@ function upscaleTarget(item: GalleryImage) {
 async function pollUpscaleJob() {
   const item = upscaleItem.value;
   const job = upscaleJob.value;
-  if (
-    !item ||
-    !job ||
-    !shouldPollFramewiseJob(job)
-  )
-    return;
+  if (!item || !job || !shouldPollFramewiseJob(job)) return;
   const epoch = upscaleEpoch;
   try {
     const next = await getFramewiseUpscale(upscaleTarget(item), job.id);
@@ -2988,7 +2985,10 @@ onBeforeUnmount(() => {
           Use as source
         </button>
         <button
-          v-if="mediaKind(contextMenu.item.format, contextMenu.item.filename) !== 'audio'"
+          v-if="
+            mediaKind(contextMenu.item.format, contextMenu.item.filename) !==
+            'audio'
+          "
           type="button"
           role="menuitem"
           data-test="context-upscale"
@@ -2996,7 +2996,8 @@ onBeforeUnmount(() => {
         >
           {{
             libraryUpscaleLabel(
-              mediaKind(contextMenu.item.format, contextMenu.item.filename) === "video"
+              mediaKind(contextMenu.item.format, contextMenu.item.filename) ===
+                "video"
                 ? "video"
                 : "image",
             )

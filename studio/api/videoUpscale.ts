@@ -13,7 +13,8 @@ export interface VideoUpscaleJob {
   contract_version: number;
   id: string;
   state: VideoUpscaleJobState;
-  source?: { kind: "library"; filename: string } | { kind: "upload"; handle: string };
+  source?:
+    { kind: "library"; filename: string } | { kind: "upload"; handle: string };
   model: string;
   completed_frames: number;
   total_frames: number;
@@ -62,7 +63,9 @@ export function upscaleLibraryImage(
   });
 }
 
-export function listFramewiseUpscales(target: ApiTarget): Promise<VideoUpscaleJob[]> {
+export function listFramewiseUpscales(
+  target: ApiTarget,
+): Promise<VideoUpscaleJob[]> {
   return apiJsonTo(target, "/api/video-upscale-jobs");
 }
 
@@ -70,7 +73,10 @@ export async function findRecoverableFramewiseUpscale(
   target: ApiTarget,
   filename: string,
 ): Promise<VideoUpscaleJob | null> {
-  return recoverableFramewiseUpscale(await listFramewiseUpscales(target), filename);
+  return recoverableFramewiseUpscale(
+    await listFramewiseUpscales(target),
+    filename,
+  );
 }
 
 export function recoverableFramewiseUpscale(

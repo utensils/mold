@@ -13,7 +13,13 @@ const props = withDefaults(
     status?: string | null;
     progress?: number | null;
   }>(),
-  { models: () => [], busy: false, jobState: null, status: null, progress: null },
+  {
+    models: () => [],
+    busy: false,
+    jobState: null,
+    status: null,
+    progress: null,
+  },
 );
 
 const emit = defineEmits<{
@@ -28,31 +34,50 @@ const emit = defineEmits<{
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="upscale-dialog__backdrop" @click.self="emit('close')">
+    <div
+      v-if="open"
+      class="upscale-dialog__backdrop"
+      @click.self="emit('close')"
+    >
       <section
         class="upscale-dialog"
         role="dialog"
         aria-modal="true"
-        :aria-label="kind === 'video' ? 'Framewise upscale video' : 'Upscale image'"
+        :aria-label="
+          kind === 'video' ? 'Framewise upscale video' : 'Upscale image'
+        "
         data-test="upscale-dialog"
       >
         <header>
           <div>
             <p class="upscale-dialog__eyebrow">Library tool</p>
-            <h2>{{ kind === "video" ? "Framewise upscale video" : "Upscale image" }}</h2>
+            <h2>
+              {{
+                kind === "video" ? "Framewise upscale video" : "Upscale image"
+              }}
+            </h2>
           </div>
-          <button class="upscale-dialog__close" aria-label="Close" @click="emit('close')">×</button>
+          <button
+            class="upscale-dialog__close"
+            aria-label="Close"
+            @click="emit('close')"
+          >
+            ×
+          </button>
         </header>
 
-        <p class="upscale-dialog__source" :title="sourceName">{{ sourceName }}</p>
+        <p class="upscale-dialog__source" :title="sourceName">
+          {{ sourceName }}
+        </p>
         <p class="upscale-dialog__copy">
           <template v-if="kind === 'video'">
-            Every frame is enhanced independently and assembled into a new video. Frame count,
-            constant FPS, duration, and compatible primary audio are preserved. Temporal flicker
-            may remain.
+            Every frame is enhanced independently and assembled into a new
+            video. Frame count, constant FPS, duration, and compatible primary
+            audio are preserved. Temporal flicker may remain.
           </template>
           <template v-else>
-            Creates a new upscaled Library image and keeps the original unchanged.
+            Creates a new upscaled Library image and keeps the original
+            unchanged.
           </template>
         </p>
 
@@ -62,23 +87,43 @@ const emit = defineEmits<{
             :value="modelValue"
             :disabled="busy || !!jobState"
             data-test="upscale-model"
-            @change="emit('update:modelValue', ($event.target as HTMLSelectElement).value)"
+            @change="
+              emit(
+                'update:modelValue',
+                ($event.target as HTMLSelectElement).value,
+              )
+            "
           >
             <option v-if="!models.length" :value="modelValue">
               {{ modelValue }} (downloads on first use)
             </option>
-            <option v-for="model in models" :key="model.name" :value="model.name">
-              {{ model.name }}{{ model.downloaded ? "" : " (downloads on first use)" }}
+            <option
+              v-for="model in models"
+              :key="model.name"
+              :value="model.name"
+            >
+              {{ model.name
+              }}{{ model.downloaded ? "" : " (downloads on first use)" }}
             </option>
           </select>
         </label>
 
-        <div v-if="jobState" class="upscale-dialog__job" data-test="upscale-job">
+        <div
+          v-if="jobState"
+          class="upscale-dialog__job"
+          data-test="upscale-job"
+        >
           <div class="upscale-dialog__jobrow">
             <span>{{ status }}</span>
-            <span v-if="progress != null">{{ Math.round(progress * 100) }}%</span>
+            <span v-if="progress != null"
+              >{{ Math.round(progress * 100) }}%</span
+            >
           </div>
-          <progress v-if="progress != null" :value="progress" max="1"></progress>
+          <progress
+            v-if="progress != null"
+            :value="progress"
+            max="1"
+          ></progress>
         </div>
 
         <footer>
@@ -115,7 +160,13 @@ const emit = defineEmits<{
             data-test="start-upscale"
             @click="emit('confirm')"
           >
-            {{ busy ? "Starting…" : kind === "video" ? "Start Framewise upscale" : "Upscale" }}
+            {{
+              busy
+                ? "Starting…"
+                : kind === "video"
+                  ? "Start Framewise upscale"
+                  : "Upscale"
+            }}
           </button>
         </footer>
       </section>

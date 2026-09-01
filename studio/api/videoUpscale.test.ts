@@ -25,7 +25,10 @@ describe("recoverableFramewiseUpscale", () => {
   it("restores the newest active or restart-paused job for a Library video", () => {
     expect(
       recoverableFramewiseUpscale(
-        [job("paused", "clip.mp4", "paused"), job("other", "other.mp4", "running")],
+        [
+          job("paused", "clip.mp4", "paused"),
+          job("other", "other.mp4", "running"),
+        ],
         "clip.mp4",
       )?.id,
     ).toBe("paused");

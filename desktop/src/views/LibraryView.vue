@@ -384,22 +384,13 @@ async function pollUpscaleJob() {
   const entry = upscaleEntry.value;
   const job = upscaleJob.value;
   const target = entry && targetFor(entry);
-  if (
-    !entry ||
-    !job ||
-    !target ||
-    !shouldPollFramewiseJob(job)
-  ) {
+  if (!entry || !job || !target || !shouldPollFramewiseJob(job)) {
     return;
   }
   const epoch = upscaleEpoch;
   try {
     const next = await getFramewiseUpscale(target, job.id);
-    if (
-      epoch !== upscaleEpoch ||
-      upscaleEntry.value !== entry ||
-      upscaleJob.value?.id !== job.id
-    )
+    if (epoch !== upscaleEpoch || upscaleEntry.value !== entry || upscaleJob.value?.id !== job.id)
       return;
     upscaleJob.value = next;
     if (next.state === "completed") {
@@ -464,22 +455,14 @@ async function startUpscale() {
   upscalingFilename.value = entry.item.filename;
   try {
     if (isVideo(entry.item)) {
-      const created = await createFramewiseUpscale(
-        target,
-        entry.item.filename,
-        upscaleModel.value,
-      );
+      const created = await createFramewiseUpscale(target, entry.item.filename, upscaleModel.value);
       if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
       upscaleJob.value = created;
       toasts.push(`Framewise upscale queued (${created.id}).`);
       void pollUpscaleJob();
     } else {
       if (hosts.capabilities[entry.sourceKey]?.video_upscale?.gallery_image === true) {
-        const result = await upscaleLibraryImage(
-          target,
-          entry.item.filename,
-          upscaleModel.value,
-        );
+        const result = await upscaleLibraryImage(target, entry.item.filename, upscaleModel.value);
         toasts.push(`Upscaled — ${result.filename}`);
         void gallery.refreshHost(entry.sourceKey);
       } else {
@@ -1212,10 +1195,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
         upscalingFilename.value === item.filename
           ? "Upscaling…"
           : libraryUpscaleLabel(isVideo(item) ? "video" : "image").replace("…", ""),
-      disabled:
-        !targetFor(entry) ||
-        upscalingFilename.value !== null ||
-        isAudio(item),
+      disabled: !targetFor(entry) || upscalingFilename.value !== null || isAudio(item),
       action: () => openUpscaleDialog(entry),
     },
     {
