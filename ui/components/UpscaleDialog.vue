@@ -1,5 +1,8 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted } from "vue";
+
 type Choice = { name: string; downloaded?: boolean };
+type ExecutionHost = { key: string; label: string };
 
 const props = withDefaults(
   defineProps<{
@@ -8,6 +11,8 @@ const props = withDefaults(
     sourceName: string;
     models?: Choice[];
     modelValue: string;
+    executionHosts?: ExecutionHost[];
+    executionHostValue?: string;
     busy?: boolean;
     jobState?: string | null;
     status?: string | null;
@@ -16,6 +21,8 @@ const props = withDefaults(
   }>(),
   {
     models: () => [],
+    executionHosts: () => [],
+    executionHostValue: "",
     busy: false,
     jobState: null,
     status: null,
@@ -26,12 +33,23 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   "update:modelValue": [value: string];
+  "update:executionHostValue": [value: string];
   confirm: [];
   close: [];
   pause: [];
   resume: [];
   cancel: [];
 }>();
+
+function onKeydown(event: KeyboardEvent) {
+  if (!props.open || event.key !== "Escape") return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  emit("close");
+}
+
+onMounted(() => window.addEventListener("keydown", onKeydown));
+onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 </script>
 
 <template>
@@ -82,6 +100,29 @@ const emit = defineEmits<{
             unchanged.
           </template>
         </p>
+
+        <label v-if="executionHosts.length > 1" class="upscale-dialog__field">
+          <span>Run on</span>
+          <select
+            :value="executionHostValue"
+            :disabled="busy || !!jobState"
+            data-test="upscale-host"
+            @change="
+              emit(
+                'update:executionHostValue',
+                ($event.target as HTMLSelectElement).value,
+              )
+            "
+          >
+            <option
+              v-for="host in executionHosts"
+              :key="host.key"
+              :value="host.key"
+            >
+              {{ host.label }}
+            </option>
+          </select>
+        </label>
 
         <label class="upscale-dialog__field">
           <span>Upscaler</span>
@@ -264,6 +305,9 @@ h2 {
   gap: 7px;
   font-size: 13px;
   font-weight: 650;
+}
+.upscale-dialog__field + .upscale-dialog__field {
+  margin-top: 14px;
 }
 select {
   width: 100%;
