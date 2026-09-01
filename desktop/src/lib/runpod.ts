@@ -190,19 +190,21 @@ function endpointHostname(value: string): string | null {
   }
 }
 
+/** Whether a Mold endpoint is the canonical proxy owned by one RunPod pod. */
+export function isRunPodHostUrl(podId: string, hostUrl: string | null | undefined): boolean {
+  if (!hostUrl) return false;
+  return endpointHostname(hostUrl) === endpointHostname(podProxyUrl(podId));
+}
+
 /** Match a routed Mold host to the running RunPod proxy that owns it. */
 export function runPodForHostUrl(
   pods: readonly RunPodPod[],
   hostUrl: string | null | undefined,
 ): RunPodPod | null {
   if (!hostUrl) return null;
-  const hostname = endpointHostname(hostUrl);
-  if (!hostname) return null;
   return (
     pods.find(
-      (pod) =>
-        pod.desiredStatus.toUpperCase() === "RUNNING" &&
-        endpointHostname(podProxyUrl(pod.id)) === hostname,
+      (pod) => pod.desiredStatus.toUpperCase() === "RUNNING" && isRunPodHostUrl(pod.id, hostUrl),
     ) ?? null
   );
 }
