@@ -302,7 +302,7 @@ async fn create_library_job(
             model,
             request.tile_size,
         ),
-        VideoUpscaleSource::Upload { .. } => return Err(ApiError::structured(
+        VideoUpscaleSource::Upload { .. } => Err(ApiError::structured(
             "Video upload handles are not advertised by this first capability; import the video into Library first",
             "VIDEO_UPSCALE_UPLOAD_UNAVAILABLE", StatusCode::NOT_IMPLEMENTED, None, None)),
     }
