@@ -316,7 +316,9 @@ pushed screen opened from the header.
   `QueueEntryDetail` in a bottom
   sheet with the prompt, setting groups, queue facts, the running preview, any
   hold reason in full with Copy, and its own inline two-step cancel; failures
-  stay in a persistent inline line, never a toast. Android renders the same
+  stay in a persistent inline line, never a toast. Compact details and actions
+  remain bounded to the phone viewport, and a downward swipe from the top of
+  the sheet dismisses it. Android renders the same
   component — nothing in the gesture is iOS-only.
   When a host advertises `capabilities.gallery.trash`, host detail adds a
   **Library** card: a **Trash retention** select reading and writing that

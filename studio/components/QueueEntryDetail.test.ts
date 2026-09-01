@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import QueueEntryDetail from "./QueueEntryDetail.vue";
@@ -6,6 +8,20 @@ import {
   type QueueDetailMetadata,
 } from "../lib/queueEntryDetail";
 import type { QueueEntry } from "../api/queuePlan";
+
+const componentPath = [
+  "components/QueueEntryDetail.vue",
+  "studio/components/QueueEntryDetail.vue",
+  "../studio/components/QueueEntryDetail.vue",
+]
+  .map((candidate) => resolve(process.cwd(), candidate))
+  .find((candidate) => existsSync(candidate));
+
+if (!componentPath) {
+  throw new Error("Could not locate QueueEntryDetail.vue from the test root");
+}
+
+const componentSource = readFileSync(componentPath, "utf8");
 
 const metadata: QueueDetailMetadata = {
   prompt: "a cat on a porch",
@@ -36,6 +52,25 @@ function model(entry: Partial<QueueEntry> = {}, extra = {}) {
 }
 
 describe("QueueEntryDetail", () => {
+  it("bounds compact details and actions to viewport-safe columns", () => {
+    const root = componentSource.match(/\.qed\s*\{([^}]*)\}/s);
+    const compactActions = componentSource.match(
+      /\.qed--compact \.qed__actions\s*\{([^}]*)\}/s,
+    );
+    const compactButton = componentSource.match(
+      /\.qed--compact \.qed__actions button\s*\{([^}]*)\}/s,
+    );
+
+    expect(root?.[1]).toMatch(/width:\s*100%\s*;/);
+    expect(root?.[1]).toMatch(/min-width:\s*0\s*;/);
+    expect(root?.[1]).toMatch(/max-width:\s*100%\s*;/);
+    expect(root?.[1]).toMatch(/box-sizing:\s*border-box\s*;/);
+    expect(compactActions?.[1]).toMatch(
+      /grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)\s*;/,
+    );
+    expect(compactButton?.[1]).toMatch(/min-width:\s*0\s*;/);
+  });
+
   it("renders the prompt, the settings groups, and the queue facts", () => {
     const wrapper = mount(QueueEntryDetail, { props: { model: model() } });
 

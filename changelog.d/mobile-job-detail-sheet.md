@@ -1,0 +1,1 @@
+- **Keep mobile job details on screen.** Keep Machine job details and actions inside the mobile viewport and allow dismissing the sheet with a downward swipe.
