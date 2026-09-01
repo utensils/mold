@@ -426,7 +426,25 @@ pub(crate) fn enqueue_gallery_video_job(
     model: String,
     tile_size: Option<u32>,
 ) -> Result<VideoUpscaleJob, ApiError> {
-    require_framewise_codec_runtime()?;
+    enqueue_gallery_video_job_with_codec_runtime(
+        output_dir,
+        database,
+        filename,
+        model,
+        tile_size,
+        framewise_codec_runtime_available(),
+    )
+}
+
+fn enqueue_gallery_video_job_with_codec_runtime(
+    output_dir: &FsPath,
+    database: &mold_db::MetadataDb,
+    filename: &str,
+    model: String,
+    tile_size: Option<u32>,
+    codec_runtime_available: bool,
+) -> Result<VideoUpscaleJob, ApiError> {
+    require_framewise_codec_runtime_with(codec_runtime_available)?;
     let source_metadata = database
         .get(output_dir, filename)
         .map_err(|e| ApiError::internal(e.to_string()))?
@@ -1533,12 +1551,13 @@ mod tests {
             shutdown: lifecycle_shutdown,
             handle,
         };
-        let job = enqueue_gallery_video_job(
+        let job = enqueue_gallery_video_job_with_codec_runtime(
             temp.path(),
             state.metadata_db.as_ref().as_ref().unwrap(),
             "source.mp4",
             "real-esrgan-x4plus:fp16".into(),
             None,
+            true,
         )
         .unwrap();
 
@@ -1645,12 +1664,13 @@ mod tests {
             shutdown: lifecycle_shutdown,
             handle,
         };
-        let job = enqueue_gallery_video_job(
+        let job = enqueue_gallery_video_job_with_codec_runtime(
             temp.path(),
             state.metadata_db.as_ref().as_ref().unwrap(),
             "source.mp4",
             "real-esrgan-x4plus:fp16".into(),
             None,
+            true,
         )
         .unwrap();
 
@@ -1746,12 +1766,13 @@ mod tests {
         );
         db.upsert(&record).unwrap();
 
-        let job = enqueue_gallery_video_job(
+        let job = enqueue_gallery_video_job_with_codec_runtime(
             gallery,
             &db,
             "source.mp4",
             "real-esrgan-x4plus:fp16".into(),
             None,
+            true,
         )
         .unwrap();
         let stored = jobs::get(&db, &job.id).unwrap().unwrap();
