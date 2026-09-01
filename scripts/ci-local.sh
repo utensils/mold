@@ -286,7 +286,7 @@ if wants contracts; then
                   regression-matrix-transient-retry wan-regression-matrix \
                   ltx25-comfy-metal-reference ltx25-metal-verification \
                   ltx25-comfy-cuda-reference ltx25-cuda-verification \
-                  ltx25-comfy-oracle-provision; do
+                  ltx25-comfy-oracle-provision hunyuan3d-metal-uat; do
     script="scripts/tests/${contract}.sh"
     if [ -f "$script" ]; then
       step "contracts: ${contract}" bash "$script"

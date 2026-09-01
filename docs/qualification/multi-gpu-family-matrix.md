@@ -52,7 +52,7 @@ noise transferred to the execution device.
 | `ltx2` | `ltx-2`, `ltx2.3` | supported / supported / correctness-only | Gemma text encoder | yes | native temporal chunks | `[1]` / cooperative | video; source/keyframes/retake/LoRA/chain; generated audio is checkpoint-specific |
 | `wan` | — | supported / correctness-only / correctness-only | UMT5 text encoder | yes | no | `[1]` / cooperative | video; source, LoRA, chain and extend — both per checkpoint, since only an image-conditioned one carries context across a seam or accepts a continuation; no generated audio |
 | `wuerstchen` | `wuerstchen-v2` | supported / supported / supported | none | no | no | `[1]` / cooperative | image; source and inpaint; no LoRA |
-| `hunyuan3d` | `hunyuan-3d` | correctness-only / correctness-only / correctness-only | none | no | no | `[1]` / cooperative | mesh; source image REQUIRED (the only conditioning the family has); no text encoder, LoRA, audio or chain |
+| `hunyuan3d` | `hunyuan-3d` | correctness-only / supported / correctness-only | none | no | no | `[1]` / cooperative | mesh; source image REQUIRED (the only conditioning the family has); no text encoder, LoRA, audio or chain; Metal qualified on `hunyuan3d-mini-turbo:fp16` (M4 Max, octree 192/256/320) against ComfyUI on the same checkpoint, image and seed |
 
 The registry intentionally does not claim generic tiled VAE for Z-Image.
 Qwen-Image has a separate CUDA tiler, and LTX-2 uses native temporal/framewise
@@ -82,7 +82,7 @@ yet, so they carry the same Tier-1 caveat as the rest of the wan row.
 | `ltx2` | runtime qualification | `scripts/regression-matrix.sh`, video/source/audio/durable-chain cases |
 | `wan` | runtime qualification | `scripts/regression-matrix.sh`, text-to-video, image-to-video, first/last-frame, and single-frame-still cases across every installed tier (no hardware campaign recorded yet); admission memory is `mold-server/src/wan_admission.rs`, calibrated against four measured RTX 4090 peaks |
 | `wuerstchen` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base/source cases |
-| `hunyuan3d` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base case; no hardware campaign recorded yet, which is why all three backends read correctness-only rather than supported |
+| `hunyuan3d` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base case; Metal campaign: `scripts/capture-hunyuan3d-comfy-metal-reference.sh` then `scripts/capture-hunyuan3d-metal-uat.sh` (framed source, octree 192/256/320, seed 25026 plus a 25027 noise floor, `scripts/hunyuan3d-mesh-compare.py` Chamfer/extent/face-count gates; evidence under `$MOLD_HOME/output/verification/hunyuan3d/`); CUDA and CPU have no hardware campaign recorded, which is why they still read correctness-only |
 
 These are executable owners, not a claim that every case passed on the current
 branch. A hardware report must identify the exact commit, binary, device UUID,

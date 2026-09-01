@@ -22,6 +22,7 @@
 //!   - Tencent: `hy3dgen/shapegen/` in `Tencent-Hunyuan/Hunyuan3D-2`, and the
 //!     per-checkpoint `config.yaml` shipped beside each weights file.
 
+pub mod backend;
 pub mod dino2;
 pub mod engine;
 pub mod glb;

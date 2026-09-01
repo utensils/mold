@@ -65,7 +65,9 @@ mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
 
 `--octree` (128 | 192 | 256 | 320 | 384, default 256) is the detail knob and
 its cost is cubic. `--mesh-threshold` (default 0.6) moves the extracted
-surface: lower recovers thin features and adds noise.
+surface: lower recovers thin features and adds noise; it is the same `[0, 1]`
+occupancy scale ComfyUI's `VoxelToMesh` thresholds, so a value tuned there
+carries over.
 
 ## Sources
 

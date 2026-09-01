@@ -53,12 +53,21 @@ const VISION_PREFIX: &str = "conditioner.main_image_encoder.model";
 pub const DEFAULT_OCTREE_RESOLUTION: usize = 256;
 /// Default surface-net iso-level. Upstream's `VoxelToMesh` default — note it
 /// is 0.6, not the 0.5 a reader might assume for a binary occupancy field.
+///
+/// It is a level on the OCCUPANCY scale produced by [`occupancy_from_logits`],
+/// not on the raw VAE logits: ComfyUI's node thresholds what the VAE wrapper
+/// hands it, and that wrapper has already mapped the logits through the
+/// image post-process `(x + 1) / 2` clamped to `[0, 1]`. On raw logits 0.6
+/// means 0.2. Thresholding the raw logits at 0.6 instead — what the first cut
+/// did — shrinks every surface inward and drops half the triangles.
 pub const DEFAULT_THRESHOLD: f32 = 0.6;
 /// Half-width of the query cube. `VanillaVolumeDecoder`'s `bounds` default.
 const QUERY_BOUNDS: f32 = 1.01;
-/// Query points per decode chunk. Upstream's `num_chunks` default.
+/// Query points per decode chunk on CUDA and the CPU. Upstream's `num_chunks`
+/// default. Metal takes a larger, measured default — see
+/// [`super::backend::decode_chunk_default`].
 const DEFAULT_DECODE_CHUNK: usize = 8_000;
-/// Env override for [`DEFAULT_DECODE_CHUNK`].
+/// Env override for the decode chunk size.
 const DECODE_CHUNK_ENV: &str = "MOLD_HUNYUAN3D_DECODE_CHUNKS";
 /// Edge length of the gallery poster.
 const POSTER_SIZE: u32 = 512;
@@ -67,16 +76,32 @@ const POSTER_SIZE: u32 = 512;
 /// chunk at 17M points would be ~2,100 SSE frames for a single stage.
 const DECODE_TICKS: usize = 64;
 
+/// The two edge lengths a source image passes through on its way to the
+/// vision tower.
+///
+/// They are separate `config.yaml` entries and are NOT the same number on
+/// every tier, which is why they travel together. See
+/// [`super::dino2::preprocess`] for what each one does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Conditioning {
+    /// `image_processor.params.size` — the white square the alpha-cropped
+    /// subject is centred on.
+    letterbox: u32,
+    /// `conditioner.params.main_image_encoder.kwargs.image_size` — what
+    /// DINOv2 actually receives. Always a whole number of 14px patches.
+    encoder: u32,
+}
+
 struct Loaded {
     dit: Hunyuan3dDit,
     vae: ShapeVae,
     vision: Dinov2Model,
     device: Device,
     dtype: DType,
-    /// Edge length the source image is letterboxed to before the vision
-    /// tower sees it. Per-checkpoint: 512 for the 1.1B tiers, 1022 for the
-    /// mini tier (`image_processor.size` in each `config.yaml`).
-    conditioning_size: u32,
+    /// The letterbox and encoder edge lengths this checkpoint conditions at.
+    /// Per-tier, and derived from the DiT geometry rather than the model
+    /// name — see [`conditioning_for`].
+    conditioning: Conditioning,
     /// Number of latent tokens the DiT denoises.
     num_latents: usize,
 }
@@ -102,12 +127,12 @@ impl Hunyuan3dEngine {
     /// Clamped rather than trusted: a zero would loop forever and a value
     /// larger than the grid just allocates the whole thing, which is exactly
     /// what chunking exists to avoid.
-    fn decode_chunk() -> usize {
+    fn decode_chunk(device: &Device) -> usize {
         crate::runtime_env::value(DECODE_CHUNK_ENV)
             .and_then(|raw| raw.trim().parse::<usize>().ok())
             .filter(|value| *value > 0)
             .map(|value| value.clamp(256, 1_000_000))
-            .unwrap_or(DEFAULT_DECODE_CHUNK)
+            .unwrap_or_else(|| super::backend::decode_chunk_default(device, DEFAULT_DECODE_CHUNK))
     }
 
     fn load_inner(&mut self) -> Result<Loaded> {
@@ -124,21 +149,14 @@ impl Hunyuan3dEngine {
         let header = mold_core::safetensors_probe::read_safetensors_header(&checkpoint)
             .with_context(|| format!("read safetensors header at {}", checkpoint.display()))?;
         let dit_cfg = detect_dit_config(&header)?;
-        let vae_cfg = detect_vae_config(&header, &self.base.model_name);
-        let conditioning_size = conditioning_size_for(&self.base.model_name);
+        let vae_cfg = detect_vae_config(&dit_cfg);
+        let conditioning = conditioning_for(&dit_cfg);
 
         let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
-        // The checkpoints ship fp16. bf16 on CUDA and fp16 elsewhere matches
-        // what every other mold engine does with a half-precision checkpoint;
-        // CPU stays f32 because half-precision matmul there is emulated and
-        // slower than the widening.
-        let dtype = if device.is_cpu() {
-            DType::F32
-        } else if device.is_cuda() {
-            DType::BF16
-        } else {
-            DType::F16
-        };
+        // F16 on every accelerator, not the crate's usual BF16-on-CUDA. See
+        // `super::backend`: ComfyUI runs all three networks in fp16, and
+        // BF16 cannot resolve the query grid the shape VAE is evaluated on.
+        let dtype = super::backend::compute_dtype(&device);
 
         let vb = crate::weight_loader::load_safetensors_with_progress(
             std::slice::from_ref(&checkpoint),
@@ -161,7 +179,7 @@ impl Hunyuan3dEngine {
             vision,
             device,
             dtype,
-            conditioning_size,
+            conditioning,
             num_latents: vae_cfg.num_latents,
         })
     }
@@ -216,7 +234,8 @@ impl Hunyuan3dEngine {
         );
         let pixels = super::dino2::preprocess(
             &image,
-            loaded.conditioning_size,
+            loaded.conditioning.letterbox,
+            loaded.conditioning.encoder,
             &loaded.device,
             loaded.dtype,
         )?;
@@ -313,9 +332,7 @@ impl Hunyuan3dEngine {
         };
         let guidance = plan
             .guidance_embed
-            .map(|value| Tensor::new(&[value as f32], &loaded.device))
-            .transpose()?
-            .map(|t| t.to_dtype(loaded.dtype))
+            .map(|value| guidance_tensor(value, &loaded.device))
             .transpose()?;
 
         let total = plan.steps();
@@ -325,7 +342,7 @@ impl Hunyuan3dEngine {
             let (sigma, sigma_next) = (window[0], window[1]);
             // `timestep(sigma) == sigma` at multiplier 1.0 — see the sampler
             // module doc for the derivation.
-            let timestep = Tensor::new(&[sigma as f32], &loaded.device)?.to_dtype(loaded.dtype)?;
+            let timestep = timestep_tensor(sigma, &loaded.device)?;
 
             let velocity = match (&uncond, plan.cfg_scale) {
                 (Some(uncond), Some(scale)) => {
@@ -374,7 +391,7 @@ impl Hunyuan3dEngine {
         drop(prepared);
 
         let total = super::shape_vae::query_grid_len(octree);
-        let chunk = Self::decode_chunk();
+        let chunk = Self::decode_chunk(&loaded.device);
         let chunks = total.div_ceil(chunk);
         let tick_every = chunks.div_ceil(DECODE_TICKS).max(1);
 
@@ -418,14 +435,16 @@ impl Hunyuan3dEngine {
             phase_started.elapsed(),
         );
 
-        // `reshape_grid_logits` reproduces upstream's trailing `movedim`,
-        // which is the only thing that keeps the mesh unmirrored. Doing it on
-        // the flat Vec would mean re-implementing that transpose by hand, so
-        // it goes through the tensor.
+        // `reshape_grid_logits` reproduces BOTH upstream moves between the
+        // decoder and the mesher (`vae.py:976`, then `comfy/sd.py:1277`);
+        // either one alone rotates the mesh. Doing them on the flat Vec would
+        // mean re-implementing two transposes by hand, so it goes through the
+        // tensor.
         let dim = octree + 1;
         let flat = Tensor::from_vec(logits, (1, total), &Device::Cpu)?;
         let reshaped = ShapeVae::reshape_grid_logits(&flat, octree)?;
-        let ordered = reshaped.flatten_all()?.to_vec1::<f32>()?;
+        let mut ordered = reshaped.flatten_all()?.to_vec1::<f32>()?;
+        occupancy_from_logits(&mut ordered);
         OccupancyGrid::new(ordered, [dim, dim, dim])
     }
 
@@ -505,36 +524,108 @@ fn detect_dit_config(
     Ok(cfg)
 }
 
+/// DiT depth of the 0.6B mini tier.
+///
+/// This ONE number separates the two published tiers, and ComfyUI keys on it
+/// exactly this way: `Hunyuan3Dv2mini.unet_config` is
+/// `{"image_model": "hunyuan3d2", "depth": 8}`
+/// (`comfy/supported_models.py:1593-1597`), against the base
+/// `Hunyuan3Dv2`'s `{"image_model": "hunyuan3d2"}` at `:1543-1546`.
+const MINI_TIER_DIT_DEPTH: usize = 8;
+
+/// Whether a detected DiT geometry is the 0.6B mini tier.
+fn is_mini_tier(dit: &DitConfig) -> bool {
+    dit.depth == MINI_TIER_DIT_DEPTH
+}
+
+/// Map raw occupancy logits onto the scale ComfyUI's mesher thresholds.
+///
+/// `VAEDecodeHunyuan3D` reaches `ShapeVAE.decode` through the generic
+/// `comfy.sd.VAE.decode` wrapper, and the ShapeVAE branch of that class
+/// (`comfy/sd.py:838-856`) never overrides `process_output`, so the default
+/// image post-process — `image.add_(1.0).div_(2.0).clamp_(0.0, 1.0)`
+/// (`comfy/sd.py:505`) — is applied in place to the voxel grid
+/// (`comfy/sd.py:1233`) before `VoxelToMesh` ever sees it. The node's 0.6
+/// default, and every threshold a user types, is a level on THIS scale.
+/// Mirroring it keeps `--mesh-threshold` meaning what it means in the oracle,
+/// and keeps the surface-net interpolation identical, clamp included.
+fn occupancy_from_logits(logits: &mut [f32]) {
+    for value in logits.iter_mut() {
+        *value = ((*value + 1.0) * 0.5).clamp(0.0, 1.0);
+    }
+}
+
 /// Pick the shape-VAE config.
 ///
 /// Only ONE field differs between the published tiers — `scale_factor` — and
 /// it is not recoverable from the tensors, because it is a scalar the
-/// `config.yaml` carries and the checkpoint does not. So it comes from the
-/// model identity, and the fallback is the 1.1B value rather than an error:
-/// a community repack under an unrecognized name still decodes, just with the
-/// base tier's scale.
-fn detect_vae_config(
-    _header: &mold_core::safetensors_probe::SafetensorsHeader,
-    model_name: &str,
-) -> ShapeVaeConfig {
-    if model_name.contains("mini") {
+/// `config.yaml` carries and the checkpoint does not. It is recoverable from
+/// the DiT DEPTH though, which the header does carry, so the tier comes from
+/// the weights rather than from whatever name the file was installed under.
+/// A repack, a re-quantization, or a locally renamed checkpoint then takes
+/// the right scale instead of silently rendering a subtly wrong mesh.
+///
+/// The values match `comfy/latent_formats.py`: `Hunyuan3Dv2mini.scale_factor`
+/// is 1.0188137142395404 (`:945`) and `Hunyuan3Dv2`'s is 0.9990943042622529
+/// (`:935`).
+fn detect_vae_config(dit: &DitConfig) -> ShapeVaeConfig {
+    if is_mini_tier(dit) {
         ShapeVaeConfig::v2_0_mini()
     } else {
         ShapeVaeConfig::v2_0()
     }
 }
 
-/// Edge length the source image is letterboxed to.
+/// The letterbox and encoder edge lengths this checkpoint conditions at.
 ///
-/// `image_processor.size` in each checkpoint's `config.yaml`: 1022 for the
-/// mini tier, 512 for the 1.1B ones. It is not in the safetensors, so like
-/// `scale_factor` it comes from the model identity.
-fn conditioning_size_for(model_name: &str) -> u32 {
-    if model_name.contains("mini") {
-        1022
+/// Both are `config.yaml` entries the safetensors does not carry, so like the
+/// VAE scale factor they key on the detected DiT depth:
+///
+/// | Tier | `image_processor.params.size` | `...main_image_encoder.kwargs.image_size` |
+/// | --- | --- | --- |
+/// | 1.1B (`hunyuan3d-dit-v2-0`, `-turbo`) | 512 | 518 |
+/// | 0.6B (`hunyuan3d-dit-v2-mini-turbo`) | 1022 | 1022 |
+///
+/// 518 is also DINOv2-giant's own stored resolution
+/// (`comfy/image_encoders/dino2_giant.json`) and ComfyUI's conditioning size
+/// for this family (`comfy/clip_vision.py:38`, `:68`). 512 is not a legal
+/// encoder size at all — it is not a multiple of the 14px patch — so
+/// conflating the two made the base tiers fail at image encode rather than
+/// render differently.
+fn conditioning_for(dit: &DitConfig) -> Conditioning {
+    if is_mini_tier(dit) {
+        Conditioning {
+            letterbox: 1022,
+            encoder: 1022,
+        }
     } else {
-        512
+        Conditioning {
+            letterbox: 512,
+            encoder: 518,
+        }
     }
+}
+
+/// The timestep tensor for one sampler step. **Always F32**, never the
+/// compute dtype.
+///
+/// Upstream floats the timestep before the model sees it
+/// (`comfy/model_base.py:222`) and casts only the finished sinusoidal
+/// embedding (`comfy/ldm/hunyuan3d/model.py:82`, built by
+/// `comfy/ldm/flux/layers.py:38-47`). Building this in F16 instead would round
+/// the sigma to about three significant digits and then let the 1000x
+/// `time_factor` multiply amplify the error into every cosine argument, which
+/// is a different denoising trajectory rather than a slightly noisier one.
+fn timestep_tensor(sigma: f64, device: &Device) -> Result<Tensor> {
+    Ok(Tensor::new(&[sigma as f32], device)?)
+}
+
+/// The guidance tensor for a distilled checkpoint. **Always F32**, matching
+/// `torch.FloatTensor([guidance])` (`comfy/model_base.py:2098-2100`); it goes
+/// through the same [`super::transformer::timestep_embedding`] and takes the
+/// same cast at the end.
+fn guidance_tensor(value: f64, device: &Device) -> Result<Tensor> {
+    Ok(Tensor::new(&[value as f32], device)?)
 }
 
 impl InferenceEngine for Hunyuan3dEngine {
@@ -656,17 +747,98 @@ mod tests {
         assert!(error.contains("no transformer blocks"), "{error}");
     }
 
+    /// Tier identity is a property of the WEIGHTS, not of the name mold
+    /// happened to install them under.
+    ///
+    /// ComfyUI keys the mini tier on the DiT depth — `Hunyuan3Dv2mini`'s
+    /// `unet_config` is `{"image_model": "hunyuan3d2", "depth": 8}`
+    /// (`comfy/supported_models.py:1593-1597`) — and mold already detects
+    /// that depth from the checkpoint header. Keying on
+    /// `model_name.contains("mini")` instead made a repack, a community
+    /// re-quantization, or a renamed local file take the wrong scale factor
+    /// and the wrong conditioning size, silently: the mesh still renders.
     #[test]
-    fn the_mini_tier_takes_its_own_scale_factor_and_conditioning_size() {
-        // Both come from `config.yaml`, not from the tensors, so they key on
-        // the model identity — and getting either wrong is silent: the mesh
-        // still renders, just subtly wrong.
-        let base = detect_vae_config(&header(16, 32, false), "hunyuan3d:fp16");
-        let mini = detect_vae_config(&header(8, 16, true), "hunyuan3d-mini-turbo:fp16");
-        assert_ne!(base.scale_factor, mini.scale_factor);
-        assert_eq!(conditioning_size_for("hunyuan3d:fp16"), 512);
-        assert_eq!(conditioning_size_for("hunyuan3d-turbo:fp16"), 512);
-        assert_eq!(conditioning_size_for("hunyuan3d-mini-turbo:fp16"), 1022);
+    fn tier_identity_comes_from_the_dit_depth() {
+        let mini_dit = detect_dit_config(&header(8, 16, true)).unwrap();
+        let mini = detect_vae_config(&mini_dit);
+        assert_eq!(mini, ShapeVaeConfig::v2_0_mini());
+        assert_eq!(
+            conditioning_for(&mini_dit),
+            Conditioning {
+                letterbox: 1022,
+                encoder: 1022,
+            }
+        );
+
+        for dit in [DitConfig::v2_0(), DitConfig::v2_0_turbo()] {
+            let vae = detect_vae_config(&dit);
+            assert_eq!(
+                vae,
+                ShapeVaeConfig::v2_0(),
+                "depth {} is a base tier",
+                dit.depth
+            );
+
+            // `image_processor.params.size` is the letterbox and
+            // `conditioner.params.main_image_encoder.kwargs.image_size` is
+            // what DINOv2 actually receives. They are NOT the same number on
+            // the base tiers, and 512 is not even a legal encoder size:
+            // 512 % 14 == 8, so `Dinov2Model::forward` refuses it.
+            let sizes = conditioning_for(&dit);
+            assert_eq!(
+                sizes,
+                Conditioning {
+                    letterbox: 512,
+                    encoder: 518,
+                }
+            );
+            assert_eq!(
+                sizes.encoder % 14,
+                0,
+                "the encoder size must be a whole number of patches"
+            );
+            assert_eq!(
+                sizes.encoder as usize,
+                Dinov2Config::giant().image_size,
+                "the base tiers condition at the tower's own stored resolution"
+            );
+        }
+    }
+
+    /// The mesher thresholds ComfyUI's post-processed occupancy, not the raw
+    /// logits: `(x + 1) / 2` clamped to `[0, 1]` (`comfy/sd.py:505`, applied
+    /// at `:1233`). A raw logit of 0.2 is the node's default 0.6 iso-level,
+    /// and anything past ±1 saturates exactly as it does upstream.
+    #[test]
+    fn occupancy_is_the_vae_wrappers_image_post_process_of_the_logits() {
+        let mut values = vec![-3.0, -1.0, -0.5, 0.0, 0.2, 1.0, 5.0];
+        occupancy_from_logits(&mut values);
+        let expected = [0.0, 0.0, 0.25, 0.5, 0.6, 1.0, 1.0];
+        for (got, want) in values.iter().zip(expected) {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "occupancy {got} should be {want} (from {values:?})"
+            );
+        }
+    }
+
+    /// Both scalars are f32 on every device and in every build. The DiT
+    /// widens defensively, but the sigma has to arrive intact: the 1000x
+    /// `time_factor` multiply inside the sinusoidal embedding amplifies
+    /// whatever precision the caller threw away.
+    #[test]
+    fn the_timestep_and_guidance_tensors_are_always_f32() {
+        let device = Device::Cpu;
+
+        let timestep = timestep_tensor(0.9, &device).unwrap();
+        assert_eq!(timestep.dtype(), DType::F32);
+        assert_eq!(timestep.dims(), &[1]);
+        assert!((timestep.to_vec1::<f32>().unwrap()[0] - 0.9).abs() < 1e-7);
+
+        let guidance = guidance_tensor(5.0, &device).unwrap();
+        assert_eq!(guidance.dtype(), DType::F32);
+        assert_eq!(guidance.dims(), &[1]);
+        assert!((guidance.to_vec1::<f32>().unwrap()[0] - 5.0).abs() < 1e-7);
     }
 
     #[test]
@@ -674,6 +846,25 @@ mod tests {
         // The default holds when nothing is set. The clamp itself is asserted
         // through the public constant bounds rather than by mutating the
         // process environment, which `runtime_env` deliberately caches.
-        assert_eq!(Hunyuan3dEngine::decode_chunk(), DEFAULT_DECODE_CHUNK);
+        assert_eq!(
+            Hunyuan3dEngine::decode_chunk(&Device::Cpu),
+            DEFAULT_DECODE_CHUNK
+        );
+    }
+
+    /// Metal's default is the measured one, not upstream's, and the env
+    /// override still wins over it (asserted through the resolver's shape:
+    /// with nothing set, the backend default is what comes back).
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_takes_the_measured_decode_chunk_default() {
+        let Ok(metal) = Device::new_metal(0) else {
+            return;
+        };
+        assert_eq!(
+            Hunyuan3dEngine::decode_chunk(&metal),
+            super::super::backend::decode_chunk_default(&metal, DEFAULT_DECODE_CHUNK)
+        );
+        assert_ne!(Hunyuan3dEngine::decode_chunk(&metal), DEFAULT_DECODE_CHUNK);
     }
 }

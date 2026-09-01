@@ -65,6 +65,12 @@ impl Default for Hunyuan3dShape {
         Self {
             conditioning_size: 512,
             octree_resolution: 256,
+            // Upstream's `num_chunks` and the engine's CUDA/CPU default. The
+            // Metal engine defaults to 32,000 (measured: 19% off the decode
+            // wall at octree 256, byte-identical mesh), but Metal's math
+            // attention tiles queries at 512 rows regardless, so the true
+            // Metal peak is far BELOW what this term prices even at 8,000;
+            // the estimate stays conservative on both backends.
             decode_chunk: 8_000,
         }
     }
@@ -93,9 +99,22 @@ impl Hunyuan3dShape {
         }
     }
 
+    /// Edge the encoder actually sees.
+    ///
+    /// `conditioning_size` is the request's `width`, which the manifest seeds
+    /// with the LETTERBOX edge (512 for the 1.1B tiers, 1022 for mini) — see
+    /// [`Self::from_request`]. The conditioner resizes that square up to the encoder's
+    /// own `image_size` before patching — 518 for the 1.1B tiers, per
+    /// `hunyuan3d-dit-v2-0/config.yaml` and the `ImageEncoder` in Tencent's
+    /// `conditioner.py`; mini's 1022 is already its encoder size. The next
+    /// multiple of the patch reproduces both without a per-tier table.
+    pub fn encoder_edge(&self) -> u64 {
+        (self.conditioning_size as u64).div_ceil(VISION_PATCH) * VISION_PATCH
+    }
+
     /// Token count DINOv2 sees: one patch per 14 px, plus the CLS token.
     pub fn vision_tokens(&self) -> u64 {
-        let grid = (self.conditioning_size as u64) / VISION_PATCH;
+        let grid = self.encoder_edge() / VISION_PATCH;
         grid * grid + 1
     }
 
@@ -153,6 +172,26 @@ pub fn host_peak_bytes(shape: Hunyuan3dShape) -> u64 {
 mod tests {
     use super::*;
 
+    /// The 1.1B tiers letterbox to 512 but encode at 518 (37x37 patches), so
+    /// an estimate built on the letterbox edge would price a 36x36 grid and
+    /// undercount the score matrix. Mini is already a multiple of the patch.
+    #[test]
+    fn vision_tokens_are_counted_on_the_encoder_edge_not_the_letterbox() {
+        let base = Hunyuan3dShape {
+            conditioning_size: 512,
+            ..Hunyuan3dShape::default()
+        };
+        assert_eq!(base.encoder_edge(), 518);
+        assert_eq!(base.vision_tokens(), 37 * 37 + 1);
+
+        let mini = Hunyuan3dShape {
+            conditioning_size: 1022,
+            ..Hunyuan3dShape::default()
+        };
+        assert_eq!(mini.encoder_edge(), 1022);
+        assert_eq!(mini.vision_tokens(), 73 * 73 + 1);
+    }
+
     #[test]
     fn the_mini_tiers_conditioning_dominates_its_own_peak() {
         // 1022 px conditioning is 5,330 DINOv2 tokens — a bigger sequence
@@ -163,8 +202,9 @@ mod tests {
             ..Hunyuan3dShape::default()
         };
         assert_eq!(mini.vision_tokens(), 73 * 73 + 1);
+        // The 512 px letterbox is encoded at 518 px: 37x37 patches, not 36x36.
         let base = Hunyuan3dShape::default();
-        assert_eq!(base.vision_tokens(), 36 * 36 + 1);
+        assert_eq!(base.vision_tokens(), 37 * 37 + 1);
         assert!(
             activation_peak_bytes(mini) > activation_peak_bytes(base),
             "the 1022 px tier must be estimated above the 512 px one"

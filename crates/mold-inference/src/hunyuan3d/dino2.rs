@@ -20,6 +20,11 @@
 //!   checkpoint is the giant.
 //! * `hy3dgen/shapegen/preprocessors.py` (`Tencent-Hunyuan/Hunyuan3D-2`) —
 //!   `ImageProcessorV2.recenter` / `load_image`, mirrored by [`preprocess`].
+//! * `hy3dgen/shapegen/models/conditioner.py` — `ImageEncoder.__init__`'s
+//!   `Resize(image_size, BILINEAR, antialias=True)` + `CenterCrop(image_size)`,
+//!   which is the SECOND resize [`preprocess`] performs. The letterbox size
+//!   and the encoder size are different numbers on the 1.1B tiers (512 and
+//!   518) and equal on the mini tier (1022), so [`preprocess`] takes both.
 //!
 //! The DA3 extensions in `dino2.py` (2-D RoPE, QK-norm, alternating
 //! cross-view attention, camera tokens) are all keyed off config fields that
@@ -614,8 +619,27 @@ impl Dinov2Model {
 // Preprocessing
 // ---------------------------------------------------------------------------
 
-/// Letterbox to a square, resize to `target`, and normalize — the tensor
-/// [`Dinov2Model::forward`] wants, as `[1, 3, target, target]`.
+/// Letterbox to a square of side `letterbox`, resize to `encoder`, and
+/// normalize — the tensor [`Dinov2Model::forward`] wants, as
+/// `[1, 3, encoder, encoder]`.
+///
+/// **The two sizes are different numbers and both come from the checkpoint's
+/// `config.yaml`.** `image_processor.params.size` is the letterbox square and
+/// `conditioner.params.main_image_encoder.kwargs.image_size` is what the
+/// tower receives: 512 and 518 on the 1.1B tiers, 1022 and 1022 on the mini
+/// tier. Upstream's `ImageEncoder.__init__`
+/// (`hy3dgen/shapegen/models/conditioner.py`) is where the second step lives —
+/// a `transforms.Resize(image_size, BILINEAR, antialias=True)` followed by
+/// `CenterCrop(image_size)`, applied after the letterbox. ComfyUI reaches the
+/// same 518 from the other direction (`comfy/clip_vision.py:38`, `:68`, over
+/// `comfy/image_encoders/dino2_giant.json`'s `"image_size": 518`).
+///
+/// Conflating them is not a quality question: 512 is not a multiple of the
+/// 14px patch size, so [`Dinov2Model::forward`] refuses it outright. The
+/// centre crop is a no-op here — the letterbox already produced a square, so
+/// the resize lands exactly on `encoder` in both axes — and the second resize
+/// is skipped entirely when the two sizes agree, so the mini tier keeps its
+/// existing single-resample bytes.
 ///
 /// Mirrors `ImageProcessorV2.recenter` + `load_image`
 /// (`hy3dgen/shapegen/preprocessors.py:31-84`): the opaque content is cropped
@@ -635,27 +659,45 @@ impl Dinov2Model {
 /// on a photograph:
 ///   * the content resize is `image`'s `Triangle` (support scaled by the
 ///     downsampling ratio) where upstream has `cv2.INTER_AREA`;
-///   * the final square resize is `CatmullRom` (Keys cubic, `a = -0.5`) where
+///   * the letterbox resize is `CatmullRom` (Keys cubic, `a = -0.5`) where
 ///     upstream has `cv2.INTER_CUBIC` (`a = -0.75`).
+///
+/// The encoder resize is `Triangle`, matching torchvision's `BILINEAR`. It is
+/// an upscale on every shipped tier (512 to 518), so `antialias=True` has
+/// nothing to do and the two agree.
 ///
 /// An image with no alpha channel is treated as fully opaque, which makes the
 /// bounding box the whole frame and the operation a plain letterbox.
 pub fn preprocess(
     image: &DynamicImage,
-    target: u32,
+    letterbox: u32,
+    encoder: u32,
     device: &Device,
     dtype: DType,
 ) -> Result<Tensor> {
-    ensure!(target > 0, "target size must be positive");
+    ensure!(letterbox > 0, "letterbox size must be positive");
+    ensure!(encoder > 0, "encoder size must be positive");
     let square = letterbox_square(image, BORDER_RATIO)?;
     let resized = image::imageops::resize(
         &square,
-        target,
-        target,
+        letterbox,
+        letterbox,
         image::imageops::FilterType::CatmullRom,
     );
+    // Skipped when the sizes agree: an identity resample still filters, and
+    // the mini tier's bytes must not move.
+    let resized = if encoder == letterbox {
+        resized
+    } else {
+        image::imageops::resize(
+            &resized,
+            encoder,
+            encoder,
+            image::imageops::FilterType::Triangle,
+        )
+    };
 
-    let side = target as usize;
+    let side = encoder as usize;
     let plane = side * side;
     let mut planar = vec![0.0_f32; 3 * plane];
     for (x, y, pixel) in resized.enumerate_pixels() {
@@ -876,7 +918,13 @@ mod tests {
     }
 
     fn synthetic_model(cfg: &Dinov2Config) -> Dinov2Model {
-        let vb = VarBuilder::from_tensors(synthetic_weights(cfg), DType::F32, &Device::Cpu);
+        synthetic_model_on(cfg, &Device::Cpu, DType::F32)
+    }
+
+    /// The weights are authored on the CPU in F32; `VarBuilder::from_tensors`
+    /// casts and moves each one as the model asks for it.
+    fn synthetic_model_on(cfg: &Dinov2Config, device: &Device, dtype: DType) -> Dinov2Model {
+        let vb = VarBuilder::from_tensors(synthetic_weights(cfg), dtype, device);
         Dinov2Model::new(cfg, vb).expect("synthetic weights cover every requested key")
     }
 
@@ -912,6 +960,70 @@ mod tests {
         let out = model.forward(&pixels).expect("forward");
         assert_eq!(out.dims(), &[2, 1 + 64, cfg.hidden_size]);
         assert!(out
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .all(|v| v.is_finite()));
+    }
+
+    /// The vision tower runs in F16 on Metal, at an off-resolution input so
+    /// `interpolate_pos_encoding` executes against a Metal tensor rather than
+    /// taking the equal-length short circuit. That path drops to the CPU in
+    /// F32 to resample and must come back on the right device and dtype; a
+    /// CPU-only test cannot tell the two apart.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn synthetic_dinov2_forward_runs_on_metal_in_f16() {
+        let Ok(metal) = Device::new_metal(0) else {
+            return;
+        };
+        let cfg = synthetic_config();
+        let model = synthetic_model_on(&cfg, &metal, DType::F16);
+        let mut seed = 0x5EED_FEED;
+        // 16x16 -> 8x8 patches against a stored 4x4 grid: off-resolution.
+        let pixels = deterministic(&[2, 3, 16, 16], &mut seed)
+            .to_device(&metal)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+
+        let out = model.forward(&pixels).expect("forward");
+        assert_eq!(out.dims(), &[2, 1 + 64, cfg.hidden_size]);
+        assert_eq!(out.dtype(), DType::F16);
+        assert!(out
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .all(|v| v.is_finite()));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn synthetic_dinov2_forward_runs_on_cuda_in_f16() {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return;
+        };
+        let cfg = synthetic_config();
+        let model = synthetic_model_on(&cfg, &cuda, DType::F16);
+        let mut seed = 0x5EED_FEEE;
+        let pixels = deterministic(&[2, 3, 16, 16], &mut seed)
+            .to_device(&cuda)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+
+        let out = model.forward(&pixels).expect("forward");
+        assert_eq!(out.dims(), &[2, 1 + 64, cfg.hidden_size]);
+        assert_eq!(out.dtype(), DType::F16);
+        assert!(out
+            .to_dtype(DType::F32)
+            .unwrap()
             .flatten_all()
             .unwrap()
             .to_vec1::<f32>()
@@ -1031,7 +1143,7 @@ mod tests {
             48,
             image::Rgb([255, 255, 255]),
         ));
-        let out = preprocess(&image, 28, &Device::Cpu, DType::F32).expect("preprocess");
+        let out = preprocess(&image, 28, 28, &Device::Cpu, DType::F32).expect("preprocess");
         assert_eq!(out.dims(), &[1, 3, 28, 28]);
 
         for channel in 0..3 {
@@ -1065,7 +1177,7 @@ mod tests {
             }
         }
         let image = DynamicImage::ImageRgba8(rgba);
-        let out = preprocess(&image, 56, &Device::Cpu, DType::F32).expect("preprocess");
+        let out = preprocess(&image, 56, 56, &Device::Cpu, DType::F32).expect("preprocess");
         assert_eq!(out.dims(), &[1, 3, 56, 56]);
 
         let red = out.i((0, 0)).unwrap().to_vec2::<f32>().unwrap();
@@ -1104,6 +1216,104 @@ mod tests {
             32,
             image::Rgba([1, 2, 3, 0]),
         ));
-        assert!(preprocess(&image, 28, &Device::Cpu, DType::F32).is_err());
+        assert!(preprocess(&image, 28, 28, &Device::Cpu, DType::F32).is_err());
+    }
+
+    /// The letterbox size and the encoder size are two different numbers on
+    /// the 1.1B tiers, and it is the second one the tower must receive.
+    ///
+    /// `hunyuan3d-dit-v2-0/config.yaml` sets `image_processor.params.size` to
+    /// 512 and `conditioner.params.main_image_encoder.kwargs.image_size` to
+    /// 518; `ImageEncoder.__init__` in `hy3dgen/shapegen/models/conditioner.py`
+    /// applies a `Resize(518, BILINEAR, antialias=True)` plus
+    /// `CenterCrop(518)` after the letterbox. ComfyUI lands on the same 518
+    /// (`comfy/clip_vision.py:38`, `:68`, over
+    /// `comfy/image_encoders/dino2_giant.json`'s `"image_size": 518`).
+    ///
+    /// Handing DINOv2 the 512 letterbox instead is not a subtle quality loss:
+    /// 512 is not a multiple of the 14px patch size, so `Dinov2Model::forward`
+    /// refuses it and image encoding fails outright.
+    #[test]
+    fn preprocess_resizes_the_letterbox_to_the_encoder_size() {
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            64,
+            48,
+            image::Rgb([255, 255, 255]),
+        ));
+        let out = preprocess(&image, 512, 518, &Device::Cpu, DType::F32).expect("preprocess");
+        assert_eq!(out.dims(), &[1, 3, 518, 518]);
+        assert_eq!(518 % Dinov2Config::giant().patch_size, 0);
+
+        // A uniformly white source stays white through both resizes, so the
+        // channel constants still pin the normalization.
+        for channel in 0..3 {
+            let expected = (1.0 - IMAGE_MEAN[channel]) / IMAGE_STD[channel];
+            let plane = out
+                .i((0, channel))
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            for value in plane {
+                assert!(
+                    (value - expected).abs() < 1e-4,
+                    "channel {channel}: expected {expected}, got {value}"
+                );
+            }
+        }
+    }
+
+    /// The mini tier letterboxes and encodes at the same 1022, so the second
+    /// resize must not run at all — an identity resample is still a resample,
+    /// and it would change the bytes the tower sees on the tier that was
+    /// already correct.
+    #[test]
+    fn preprocess_skips_the_second_resize_when_sizes_agree() {
+        let mut rgba = image::RgbaImage::from_pixel(120, 60, image::Rgba([0, 0, 0, 0]));
+        for y in 10..50 {
+            for x in 20..100 {
+                rgba.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+            }
+        }
+        let image = DynamicImage::ImageRgba8(rgba);
+
+        let same = preprocess(&image, 56, 56, &Device::Cpu, DType::F32).expect("preprocess");
+        assert_eq!(same.dims(), &[1, 3, 56, 56]);
+
+        // Bit-identical to the single-resize path this test's fixture was
+        // written against.
+        let reference = preprocess_letterbox_only(&image, 56);
+        let a = same.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (index, (got, want)) in a.iter().zip(&reference).enumerate() {
+            assert_eq!(
+                got, want,
+                "sample {index}: the equal-size path must not resample twice"
+            );
+        }
+    }
+
+    /// The letterbox-and-normalize path with no second resize, transcribed so
+    /// the test above compares against something independent of `preprocess`'s
+    /// own branch.
+    fn preprocess_letterbox_only(image: &DynamicImage, target: u32) -> Vec<f32> {
+        let square = letterbox_square(image, BORDER_RATIO).expect("letterbox");
+        let resized = image::imageops::resize(
+            &square,
+            target,
+            target,
+            image::imageops::FilterType::CatmullRom,
+        );
+        let side = target as usize;
+        let plane = side * side;
+        let mut planar = vec![0.0_f32; 3 * plane];
+        for (x, y, pixel) in resized.enumerate_pixels() {
+            let offset = y as usize * side + x as usize;
+            for (channel, raw) in pixel.0.iter().enumerate() {
+                planar[channel * plane + offset] =
+                    (*raw as f32 / 255.0 - IMAGE_MEAN[channel]) / IMAGE_STD[channel];
+            }
+        }
+        planar
     }
 }

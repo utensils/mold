@@ -48,6 +48,9 @@ mold run hunyuan3d --image chair.png \
 | `--mesh-threshold` | 0.6     | Iso-level. Lower recovers thin features and adds noise.    |
 | `--target-faces`   | none    | Decimate to approximately this triangle count.             |
 
+`--mesh-threshold` is a level on the same `[0, 1]` occupancy scale ComfyUI's
+`VoxelToMesh` node uses, so a value tuned there carries over unchanged.
+
 `--octree` accepts 128, 192, 256, 320 or 384 — an allowlist, not a range,
 because the model evaluates its occupancy field on `(n + 1)³` points and an
 arbitrary value between two rungs buys nothing while risking an
