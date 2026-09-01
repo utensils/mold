@@ -1046,6 +1046,8 @@ pub fn into_seal_media(
         .zip(&mut serialized_json)
         .zip(opened_paths)
     {
+        #[cfg(not(unix))]
+        let _ = &opened_path;
         let role = record.role.wire_label();
         let position = record.position.wire_label();
         let item = match record.payload {

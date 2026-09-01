@@ -43,6 +43,7 @@ extract_filter() {
 }
 
 rust_job=$(extract_job "$ci" rust)
+windows_rust_job=$(extract_job "$ci" windows-rust)
 cuda_job=$(extract_job "$ci" cuda-check)
 producer_command='cargo clippy -p mold-ai-inference --features dev-bins,h3-cuda --bin h3_runtime_qualification_record -- -D warnings'
 if grep -Fq -- "$producer_command" <<< "$rust_job"; then
@@ -50,6 +51,10 @@ if grep -Fq -- "$producer_command" <<< "$rust_job"; then
 fi
 [[ -z "$cuda_job" ]] \
   || fail "routine CI still contains the redundant 40-minute CUDA forced-local job"
+[[ -n "$windows_rust_job" ]] \
+  || fail "PR-visible Windows Rust typecheck is missing"
+grep -Fq 'cargo check --locked -p mold-ai-server' <<< "$windows_rust_job" \
+  || fail "Windows Rust gate does not compile the server routes used by the nightly CLI"
 grep -Fq 'cargo build --release -p mold-ai --features cuda' "$release_workflow" \
   || fail "release CI no longer compiles the shipped CUDA artifacts"
 
