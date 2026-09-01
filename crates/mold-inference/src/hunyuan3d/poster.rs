@@ -11,6 +11,10 @@
 //! near-white geometry (`#e2e8f0`). A grid mixing the two should read as one
 //! set, so a mesh whose poster failed does not look like a different feature.
 //!
+//! A turntable is this poster set spinning: [`turntable_cameras`] sweeps the
+//! azimuth from the poster view and [`render_frame_rgb`] gives one frame per
+//! camera; `super::turntable` stacks them into a GIF, APNG or WebP.
+//!
 //! Pure CPU on top of [`super::raster`]; see that module for the camera and
 //! G-buffer contract.
 
@@ -61,6 +65,21 @@ pub fn render_poster(mesh: &Mesh, size: u32) -> anyhow::Result<Vec<u8>> {
 
 /// [`render_poster`] from an arbitrary view.
 pub fn render_poster_from(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Result<Vec<u8>> {
+    let img = render_frame_rgb(mesh, camera, size)?;
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+        .context("encode mesh poster as PNG")?;
+    Ok(png)
+}
+
+/// The poster's pixels before any container: a `size x size` RGB frame
+/// shaded exactly as [`render_poster_from`] would encode it.
+///
+/// This is the unit a turntable stacks — one call per camera from
+/// [`turntable_cameras`], handed to the animation encoders in
+/// `ltx_video::video_enc` — so the first frame of a looping GIF is
+/// pixel-identical to the gallery poster.
+pub fn render_frame_rgb(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Result<RgbImage> {
     if mesh.is_empty() {
         bail!("cannot render a poster: the mesh has no geometry");
     }
@@ -75,12 +94,45 @@ pub fn render_poster_from(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Re
     }
 
     let shaded = shade(&gb, camera);
-    let img = downsample(&shaded, ss, size);
+    Ok(downsample(&shaded, ss, size))
+}
 
-    let mut png = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
-        .context("encode mesh poster as PNG")?;
-    Ok(png)
+/// The cameras of a `frames`-long turntable, starting at [`poster_camera`].
+///
+/// Every frame keeps the poster's elevation, margin and projection and only
+/// the azimuth moves, so frame 0 IS the gallery poster and the animation
+/// reads as that poster set spinning.
+///
+/// Two sweeps, chosen to match how the animation encoders play them back:
+///
+/// * **Loop** (`bounce = false`): one full turn in steps of `360 / frames`,
+///   so the last frame stops one step SHORT of the first. A player that
+///   wraps from the last frame to the first then takes a step like any
+///   other; rendering the full 360° as its own frame would hold the poster
+///   twice at every loop point.
+/// * **Bounce** (`bounce = true`): a half turn, first frame to last
+///   inclusive, in steps of `180 / (frames - 1)`. The GIF encoder's bounce
+///   (`encode_gif_with_options`) appends the interior frames in reverse, so
+///   the playback swings 0° -> 180° -> 0°: the far side is seen once on the
+///   way out, and the reversal reads as a deliberate to-and-fro. A full
+///   turn played forward then backward would show the object snap into
+///   reverse at the very frame it had come round to the front again.
+pub fn turntable_cameras(frames: usize, bounce: bool) -> Vec<Camera> {
+    let start = poster_camera();
+    if frames <= 1 {
+        return vec![start; frames];
+    }
+    let step = if bounce {
+        180.0 / (frames - 1) as f32
+    } else {
+        360.0 / frames as f32
+    };
+    (0..frames)
+        .map(|index| Camera {
+            azimuth_deg: start.azimuth_deg + step * index as f32,
+            ..start
+        })
+        .collect()
 }
 
 /// Shade the G-buffers into a supersampled sRGB image.
@@ -411,6 +463,78 @@ mod tests {
             ..Default::default()
         };
         assert!(render_poster(&collinear, 64).is_err());
+    }
+
+    /// The RGB frame is the poster before PNG encoding: the same pixels a
+    /// turntable stacks into an animation, so a GIF's first frame IS the
+    /// gallery poster.
+    #[test]
+    fn render_frame_rgb_is_the_decoded_poster() {
+        let mesh = cube(0.5);
+        let camera = poster_camera();
+        let frame = render_frame_rgb(&mesh, &camera, 96).expect("render frame");
+        assert_eq!((frame.width(), frame.height()), (96, 96));
+        let png = render_poster_from(&mesh, &camera, 96).expect("render poster");
+        assert_eq!(decode(&png), frame);
+        assert!(render_frame_rgb(&Mesh::default(), &camera, 96).is_err());
+        assert!(render_frame_rgb(&mesh, &camera, MAX_POSTER_SIZE + 1).is_err());
+    }
+
+    /// A looping turntable is ONE full turn whose last frame stops one step
+    /// short of the first, so the loop point is a step like any other rather
+    /// than a held duplicate. Every frame keeps the poster's elevation and
+    /// margin, and frame 0 is the poster itself.
+    #[test]
+    fn turntable_cameras_loop_is_a_seamless_full_turn() {
+        let cameras = turntable_cameras(36, false);
+        assert_eq!(cameras.len(), 36);
+        let poster = poster_camera();
+        assert_eq!(cameras[0], poster);
+        for (index, camera) in cameras.iter().enumerate() {
+            let expected = POSTER_AZIMUTH_DEG + 10.0 * index as f32;
+            assert!(
+                (camera.azimuth_deg - expected).abs() < 1e-3,
+                "frame {index}: azimuth {} != {expected}",
+                camera.azimuth_deg
+            );
+            assert_eq!(camera.elevation_deg, poster.elevation_deg);
+            assert_eq!(camera.margin, poster.margin);
+            assert_eq!(camera.projection, poster.projection);
+        }
+        let last = cameras.last().unwrap();
+        assert!(
+            (last.azimuth_deg - (POSTER_AZIMUTH_DEG + 350.0)).abs() < 1e-3,
+            "the last frame must stop one step short of a full turn, got {}",
+            last.azimuth_deg
+        );
+        assert_eq!(turntable_cameras(1, false), vec![poster]);
+        assert!(turntable_cameras(0, false).is_empty());
+    }
+
+    /// A bouncing turntable sweeps a half turn, first frame to last
+    /// inclusive. The encoder's bounce plays the interior frames back in
+    /// reverse, so the reversal reads as a deliberate to-and-fro rather than
+    /// a full turn snapping back on itself.
+    #[test]
+    fn turntable_cameras_bounce_is_a_half_turn_inclusive() {
+        let cameras = turntable_cameras(9, true);
+        assert_eq!(cameras.len(), 9);
+        assert_eq!(cameras[0], poster_camera());
+        for (index, camera) in cameras.iter().enumerate() {
+            let expected = POSTER_AZIMUTH_DEG + 22.5 * index as f32;
+            assert!(
+                (camera.azimuth_deg - expected).abs() < 1e-3,
+                "frame {index}: azimuth {} != {expected}",
+                camera.azimuth_deg
+            );
+        }
+        let last = cameras.last().unwrap();
+        assert!(
+            (last.azimuth_deg - (POSTER_AZIMUTH_DEG + 180.0)).abs() < 1e-3,
+            "a bounce ends exactly half a turn from the poster, got {}",
+            last.azimuth_deg
+        );
+        assert_eq!(turntable_cameras(1, true), vec![poster_camera()]);
     }
 
     /// Guards the save path: the poster runs inline when a mesh print is

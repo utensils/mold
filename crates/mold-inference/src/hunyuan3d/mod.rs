@@ -32,3 +32,4 @@ pub mod raster;
 pub mod sampler;
 pub mod shape_vae;
 pub mod transformer;
+pub mod turntable;
