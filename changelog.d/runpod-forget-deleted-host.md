@@ -1,0 +1,1 @@
+- **Forget deleted RunPod hosts.** Deleting a RunPod instance now removes its saved reconnect entry and credentials, including aliases that are already disconnected.
