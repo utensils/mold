@@ -179,6 +179,17 @@ describe("MobileGenerateParameters", () => {
     expect(form.upscaleModel).toBe(upscaler.name);
   });
 
+  it("offers first-use Framewise upscale for video generation", async () => {
+    const { wrapper, form } = mountParameters(formFor("ltx2"), [upscaler]);
+
+    const field = wrapper.get("[data-test='mobile-upscale']");
+    expect(field.element.closest("label")?.textContent).toContain("Framewise upscale");
+    expect(field.text()).toContain("downloads on first use");
+
+    await field.setValue(upscaler.name);
+    expect(form.upscaleModel).toBe(upscaler.name);
+  });
+
   it("capability-gates scheduler and CFG++", async () => {
     const sd15 = mountParameters(formFor("sd15"));
     expect(sd15.wrapper.find("[data-test='mobile-scheduler']").exists()).toBe(true);

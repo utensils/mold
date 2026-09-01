@@ -74,6 +74,8 @@ const props = withDefaults(
     organizationError?: string;
     tagSuggestions?: TagCount[];
     collections?: MobileCollectionCard[];
+    /** The owning host can accept an upscale request for this saved print. */
+    upscaleEnabled?: boolean;
   }>(),
   {
     reusing: false,
@@ -94,6 +96,7 @@ const props = withDefaults(
     organizationError: "",
     tagSuggestions: () => [],
     collections: () => [],
+    upscaleEnabled: true,
   },
 );
 
@@ -803,7 +806,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="gallery-viewer-actions">
         <button
-          v-if="!audio && !trashed"
+          v-if="upscaleEnabled && !audio && !mesh && !trashed"
           class="secondary-button gallery-viewer-upscale"
           type="button"
           data-test="gallery-viewer-upscale"

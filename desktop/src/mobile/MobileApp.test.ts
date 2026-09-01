@@ -9146,13 +9146,156 @@ describe("MobileApp gallery", () => {
     wrapper.get("[data-test='gallery-item'] img").element.dispatchEvent(contextMenu);
     expect(contextMenu.defaultPrevented).toBe(false);
     expect(wrapper.find("[data-test='mobile-gallery-actions']").exists()).toBe(false);
-    expect(invoke).toHaveBeenCalledWith("extend_gallery_context_menu");
+    expect(invoke).toHaveBeenCalledWith("extend_gallery_context_menu", {
+      upscaleLabel: "Framewise upscale…",
+    });
 
     window.dispatchEvent(new CustomEvent("mold:native-gallery-select"));
     await flushPromises();
     expect(wrapper.get("[data-test='mobile-gallery-actions']").text()).toContain("1 selected");
     expect(wrapper.get("[data-test='gallery-item']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-test='mobile-gallery-selection-indicator']").text()).toBe("✓");
+  });
+
+  it("opens Framewise upscale from mobile Library selection and the native iOS menu", async () => {
+    isNativeIOSRuntime.mockReturnValue(true);
+    const upscaler: ModelEntry = {
+      ...model,
+      name: "real-esrgan-x4plus:fp16",
+      family: "upscaler",
+      description: "4x video upscaler",
+      downloaded: false,
+    };
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/models") return Promise.resolve([model, upscaler]);
+      if (path === "/api/video-upscale-jobs") return Promise.resolve([]);
+      return base(callTarget, path, init);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    const selectionUpscale = wrapper.get("[data-test='mobile-gallery-upscale']");
+    expect(selectionUpscale.text()).toBe("Upscale");
+    await selectionUpscale.trigger("click");
+    await flushPromises();
+    expect(document.querySelector("[data-test='upscale-dialog']")?.getAttribute("aria-label")).toBe(
+      "Framewise upscale video",
+    );
+    expect(document.querySelector("[data-test='upscale-model']")?.textContent).toContain(
+      "downloads on first use",
+    );
+
+    (document.querySelector(".upscale-dialog__close") as HTMLButtonElement).click();
+    await flushPromises();
+    const contextMenu = new Event("contextmenu", { bubbles: true, cancelable: true });
+    wrapper.get("[data-test='gallery-item'] img").element.dispatchEvent(contextMenu);
+    expect(invoke).toHaveBeenCalledWith("extend_gallery_context_menu", {
+      upscaleLabel: "Framewise upscale…",
+    });
+    window.dispatchEvent(new CustomEvent("mold:native-gallery-upscale"));
+    await flushPromises();
+    expect(document.querySelector("[data-test='upscale-dialog']")?.getAttribute("aria-label")).toBe(
+      "Framewise upscale video",
+    );
+  });
+
+  it("uses the selected Library image as the older-host upscale fallback source", async () => {
+    serveStillModel();
+    const imagePrint: GalleryImage = {
+      ...print,
+      filename: "selected-upscale.png",
+      format: "png",
+      metadata: { ...print.metadata, model: stillModel.name, output_format: "png" },
+    };
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/gallery") return Promise.resolve([imagePrint]);
+      return base(callTarget, path, init);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='mobile-gallery-upscale']").trigger("click");
+    await flushPromises();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(
+      apiFetchTo.mock.calls.some(([, path]) => String(path).includes("selected-upscale.png")),
+    ).toBe(true);
+    expect(wrapper.getComponent(MobileSourceControls).props("form")).toMatchObject({
+      sourceImageName: "selected-upscale.png",
+    });
+  });
+
+  it("announces an older-host image upscale fallback failure after closing the dialog", async () => {
+    serveStillModel();
+    const imagePrint: GalleryImage = {
+      ...print,
+      filename: "unavailable-upscale.png",
+      format: "png",
+      metadata: { ...print.metadata, model: stillModel.name, output_format: "png" },
+    };
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/gallery") return Promise.resolve([imagePrint]);
+      return base(callTarget, path, init);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='mobile-gallery-upscale']").trigger("click");
+    await flushPromises();
+    apiFetchTo.mockRejectedValueOnce(new Error("source unavailable"));
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(document.querySelector("[data-test='upscale-dialog']")).toBeNull();
+    expect(wrapper.text()).toContain("source unavailable");
+  });
+
+  it("moves mobile viewer upscale above the native dialog top layer", async () => {
+    const upscaler: ModelEntry = {
+      ...model,
+      name: "real-esrgan-x4plus:fp16",
+      family: "upscaler",
+      description: "4x video upscaler",
+      downloaded: false,
+    };
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/models") return Promise.resolve([model, upscaler]);
+      if (path === "/api/video-upscale-jobs") return Promise.resolve([]);
+      return base(callTarget, path, init);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-upscale']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
+    expect(document.querySelector("[data-test='upscale-dialog']")?.getAttribute("aria-label")).toBe(
+      "Framewise upscale video",
+    );
   });
 
   it("keeps a tapped Library tile selected after iOS dispatches its delayed click", async () => {
@@ -9759,6 +9902,18 @@ describe("MobileApp gallery", () => {
     expect(wrapper.get("[data-test='gallery-viewer-image']").attributes("src")).toBe(
       "https://studio/media/full-video",
     );
+
+    await wrapper.get("[data-test='gallery-viewer-upscale']").trigger("click");
+    await flushPromises();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(
+      apiFetchTo.mock.calls.some(([, path]) => String(path).includes("expand-this-result.png")),
+    ).toBe(true);
+    expect(wrapper.getComponent(MobileSourceControls).props("form")).toMatchObject({
+      sourceImageName: "expand-this-result.png",
+    });
   });
 
   it("shows New and Upscaled indicators on mobile Library tiles", async () => {

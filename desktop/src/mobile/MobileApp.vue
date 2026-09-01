@@ -3135,6 +3135,20 @@ const generatedPreviewTarget = computed<ApiTarget>(() => {
   const host = generatedPreviewHost.value;
   return host ? mobileHostTarget(host) : { baseUrl: "", apiKey: null };
 });
+const generatedUpscalePrint = computed<GalleryPrint | null>(() => {
+  const item = generatedPreviewItem.value;
+  const host = generatedPreviewHost.value;
+  if (!item || !host || isAudioItem(item) || isMeshItem(item)) return null;
+  return {
+    ...item,
+    hostId: host.id,
+    cacheKey: host.id,
+    hostName: host.name,
+    target: mobileHostTarget(host),
+    thumbnailUrl: resultUrl.value,
+    thumbnailPending: false,
+  };
+});
 const resultPreviewError = computed(() => {
   const job = latestResultJob.value;
   return job?.resultError ? describeTransportError(job.resultError, job.hostLabel) : "";
@@ -8535,9 +8549,16 @@ async function restoreReusedH3BoundaryMedia(print: {
   }
 }
 
-async function useSelectedPrintAsSource(): Promise<void> {
-  const print = selectedPrint.value;
-  if (!print || !canUseSelectedPrintAsSource.value || usingPrintAsSource.value) return;
+async function useSelectedPrintAsSource(
+  print: GalleryPrint | null = selectedPrint.value,
+): Promise<boolean> {
+  if (
+    !print ||
+    !isStillImageFile(print.filename) ||
+    !caps.value.supportsImg2img ||
+    usingPrintAsSource.value
+  )
+    return false;
   invalidateRetainedSourceReuse();
   const epoch = ++sourceUseEpoch;
   sourceUseController?.abort();
@@ -8550,7 +8571,7 @@ async function useSelectedPrintAsSource(): Promise<void> {
     const response = await apiFetchTo(print.target, galleryMediaPath(print.filename, "host"), {
       signal: controller.signal,
     });
-    if (!isCurrent()) return;
+    if (!isCurrent()) return false;
     const h3Task = minimaxH3TaskForModel(form.model);
     const attachmentMode = caps.value.sourceImageMode !== "single";
     const existingBytes = inlineGenerationMediaBytes(
@@ -8567,11 +8588,11 @@ async function useSelectedPrintAsSource(): Promise<void> {
       throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
     }
     const blob = await response.blob();
-    if (!isCurrent()) return;
+    if (!isCurrent()) return false;
     if (blob.size === 0) throw new Error("That gallery image is empty.");
     if (exceedsBudget(blob.size)) throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
     const base64 = await blobToBase64(blob);
-    if (!isCurrent()) return;
+    if (!isCurrent()) return false;
     if (h3Task) {
       const dimensions = imageDimensionsFromBase64(base64) ?? {
         width: print.metadata.width,
@@ -8588,7 +8609,7 @@ async function useSelectedPrintAsSource(): Promise<void> {
         h3Task === "ref2va"
           ? await appendMinimaxH3GalleryImageReference(form.h3Authoring, image)
           : setMinimaxH3GalleryImageFirstFrame(form.h3Authoring, image);
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
       if (!result.ok) throw new Error(result.error);
       form.h3Authoring = result.state;
       setGenerationStatus(
@@ -8620,8 +8641,10 @@ async function useSelectedPrintAsSource(): Promise<void> {
     dismissSelectedPrint();
     galleryRefreshDeferred = false;
     tab.value = "generate";
+    return true;
   } catch (error) {
     if (isCurrent()) reusePrintError.value = describeTransportError(error, print.hostName);
+    return false;
   } finally {
     if (epoch === sourceUseEpoch) {
       usingPrintAsSource.value = false;
@@ -10119,9 +10142,8 @@ function closeViewerUpscale(): void {
   viewerUpscaleItem.value = null;
   viewerUpscaleJob.value = null;
 }
-async function openViewerUpscale(): Promise<void> {
-  const print = selectedPrint.value;
-  if (!print || isAudioItem(print)) return;
+async function openUpscaleForPrint(print: GalleryPrint | null): Promise<void> {
+  if (!print || isAudioItem(print) || isMeshItem(print)) return;
   stopViewerUpscalePoll();
   const epoch = ++viewerUpscaleEpoch;
   viewerUpscaleItem.value = print;
@@ -10129,29 +10151,30 @@ async function openViewerUpscale(): Promise<void> {
   viewerUpscaleModel.value = defaultUpscaler(upscalers.value);
   if (isVideoItem(print)) {
     try {
-      const recovered = await findRecoverableFramewiseUpscale(
-        print.target,
-        print.filename,
-      );
+      const recovered = await findRecoverableFramewiseUpscale(print.target, print.filename);
       if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
       viewerUpscaleJob.value = recovered;
       if (recovered) viewerUpscaleModel.value = recovered.model;
-      if (shouldPollFramewiseJob(viewerUpscaleJob.value))
-        void pollViewerUpscale();
+      if (shouldPollFramewiseJob(viewerUpscaleJob.value)) void pollViewerUpscale();
     } catch {
       // Older hosts do not expose durable Framewise history.
     }
   }
 }
+function openViewerUpscale(): Promise<void> {
+  const print = selectedPrint.value;
+  if (print) closePrint();
+  return openUpscaleForPrint(print);
+}
+function openGeneratedUpscale(): Promise<void> {
+  const print = generatedUpscalePrint.value;
+  generatedViewerOpen.value = false;
+  return openUpscaleForPrint(print);
+}
 async function pollViewerUpscale(): Promise<void> {
   const print = viewerUpscaleItem.value;
   const job = viewerUpscaleJob.value;
-  if (
-    !print ||
-    !job ||
-    !shouldPollFramewiseJob(job)
-  )
-    return;
+  if (!print || !job || !shouldPollFramewiseJob(job)) return;
   const epoch = viewerUpscaleEpoch;
   try {
     const next = await getFramewiseUpscale(print.target, job.id);
@@ -10203,8 +10226,13 @@ async function startViewerUpscale(): Promise<void> {
       closeViewerUpscale();
     } else {
       closeViewerUpscale();
-      await useSelectedPrintAsSource();
-      generationAnnouncement.value = "Added as source — pick an upscaler in generation controls.";
+      const added = await useSelectedPrintAsSource(print);
+      if (added) {
+        generationAnnouncement.value = "Added as source — pick an upscaler in generation controls.";
+      } else {
+        generationAnnouncement.value =
+          reusePrintError.value || "Couldn’t add that image as an upscale source.";
+      }
     }
   } catch (error) {
     if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
@@ -10220,11 +10248,7 @@ async function transitionViewerUpscale(action: "pause" | "resume" | "cancel"): P
   stopViewerUpscalePoll();
   const epoch = ++viewerUpscaleEpoch;
   try {
-    const transitioned = await transitionFramewiseUpscale(
-      print.target,
-      job.id,
-      action,
-    );
+    const transitioned = await transitionFramewiseUpscale(print.target, job.id, action);
     if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
     viewerUpscaleJob.value = transitioned;
     if (action === "resume") void pollViewerUpscale();
@@ -10319,6 +10343,20 @@ function clearSelectedGalleryPrints(): void {
   galleryDeleteConfirming.value = false;
 }
 
+const singleSelectedUpscalePrint = computed<GalleryPrint | null>(() => {
+  const selected = selectedRepresentatives();
+  if (selected.length !== 1) return null;
+  const print = selected[0];
+  return print && !isAudioItem(print) && !isMeshItem(print) ? (print as GalleryPrint) : null;
+});
+
+function openSelectedGalleryUpscale(): void {
+  const print = singleSelectedUpscalePrint.value;
+  if (!print) return;
+  setGallerySelectMode(false);
+  void openUpscaleForPrint(print);
+}
+
 function toggleGallerySelection(print: GalleryPrint): void {
   const key = galleryPrintKey(print);
   const next = new Set(gallerySelection.value);
@@ -10331,8 +10369,21 @@ function toggleGallerySelection(print: GalleryPrint): void {
 function rememberNativeGalleryContext(print: GalleryPrint): void {
   nativeGalleryContextKey = galleryPrintKey(print);
   if (isNativeIOSRuntime()) {
-    void invoke("extend_gallery_context_menu").catch(() => undefined);
+    const upscaleLabel = isVideoItem(print)
+      ? "Framewise upscale…"
+      : isAudioItem(print) || isMeshItem(print)
+        ? null
+        : "Upscale…";
+    void invoke("extend_gallery_context_menu", { upscaleLabel }).catch(() => undefined);
   }
+}
+
+function upscaleNativeGalleryContextPrint(): void {
+  const key = nativeGalleryContextKey;
+  nativeGalleryContextKey = null;
+  if (!key) return;
+  const print = gallery.value.find((candidate) => galleryPrintKey(candidate) === key) ?? null;
+  void openUpscaleForPrint(print);
 }
 
 function selectNativeGalleryContextPrint(): void {
@@ -11254,6 +11305,7 @@ onMounted(async () => {
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
   window.addEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  window.addEventListener("mold:native-gallery-upscale", upscaleNativeGalleryContextPrint);
   window.addEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.addEventListener("scroll", scheduleMobileGalleryWindow, { passive: true });
   // The pinch tracks globally so a finger that slides off the grid mid-gesture
@@ -11358,6 +11410,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
   window.removeEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  window.removeEventListener("mold:native-gallery-upscale", upscaleNativeGalleryContextPrint);
   window.removeEventListener("popstate", handleAndroidHistoryPop);
   mobileContent.value?.removeEventListener("scroll", scheduleMobileGalleryWindow);
   nativeGalleryContextKey = null;
@@ -12916,6 +12969,16 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             </button>
           </template>
           <button
+            v-if="
+              !galleryDeleteConfirming && libraryScope !== 'trash' && singleSelectedUpscalePrint
+            "
+            type="button"
+            data-test="mobile-gallery-upscale"
+            @click="openSelectedGalleryUpscale"
+          >
+            Upscale
+          </button>
+          <button
             v-if="!galleryDeleteConfirming && libraryScope === 'trash'"
             type="button"
             class="is-primary"
@@ -13437,9 +13500,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :thumbnail-url="resultUrl"
       :media-url-override="resultUrl"
       :export-enabled="generatedPreviewHost !== null"
+      :upscale-enabled="generatedUpscalePrint !== null"
       :generation-announcement="generationAnnouncement"
       @close="generatedViewerOpen = false"
       @reuse="generatedViewerOpen = false"
+      @upscale="openGeneratedUpscale"
     />
 
     <MobileLibrarySheet

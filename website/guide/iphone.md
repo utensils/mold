@@ -259,8 +259,10 @@ and web setting, so resizing on your phone never changes the grid on your Mac.
 One-finger scrolling through the grid is unaffected.
 
 Press and hold an image to open the native iOS image menu for Share, Save to
-Photos, Copy, Copy Subject, and Look Up. Tap **Select** to select multiple
-prints; the action bar can select all loaded prints, clear the selection, or
+Photos, Copy, Copy Subject, and Look Up. That menu also offers **Upscale…** for
+images and **Framewise upscale…** for videos. Tap **Select** to select multiple
+prints; with one image or video selected, the action bar offers the same
+upscale flow, and it can also select all loaded prints, clear the selection, or
 delete the selection. Deletion removes every matching copy from each reachable
 saved host, including legacy copies whose auto-save filename differs. If a host
 cannot complete the delete, its copy remains visible and Library reports the
@@ -271,6 +273,9 @@ Tap a tile to open the full-screen viewer:
 - images are shown uncropped;
 - generated images open this same viewer when tapped;
 - videos stream from their owning host with native playback and seeking;
+- **Upscale…** enlarges an image, while **Framewise upscale…** queues a durable
+  video job with pause, resume, and cancel; missing Real-ESRGAN weights download
+  on first use and temporal flicker may remain;
 - use **Save video** to add the original MP4 to Photos;
 - swipe left or right to move through the loaded prints;
 - use **Copy image** or **Save photo** instead of the system long-press menu;
@@ -280,7 +285,9 @@ Tap a tile to open the full-screen viewer:
 New installs also save completed stills to the iPhone Photos library
 automatically. Disable **Settings → Photos → Save to Photos automatically** if
 you want outputs to remain only in Mold Library. Post-generation upscaling
-saves both the original and upscaled image; videos remain on their Mold host.
+saves both the original and upscaled image. Video generation offers the same
+Framewise upscaler picker, and the just-generated viewer can queue it after the
+original is published; videos remain on their Mold host.
 
 Prints added since the prior Library visit carry a **New** badge. Images enlarged
 by post-generation or standalone upscaling carry an **Upscaled** badge on both

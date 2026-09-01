@@ -199,9 +199,12 @@ pushed screen opened from the header.
   as a new draft (raising any clip duration the selected model's motion tail no
   longer allows, and saying so); iPhone is reuse-only — **Edit sequence** stays
   a desktop/web action until mobile has a chain-detail recovery route.
-  Generated stills open the same viewer on tap. Press and hold a Library image
+  Generated media opens the same viewer on tap. Press and hold a Library image
   to keep the native iOS Share, Save to Photos, Copy, Copy Subject, and Look Up
-  menu, plus **Select** to enter multi-select with that print selected.
+  menu, plus **Upscale…** (or **Framewise upscale…** for video) and **Select**.
+  Android and iOS selection mode exposes the same Upscale action when exactly
+  one image or video is selected. The just-generated media viewer is wired to
+  the same flow once the owning host has published the print.
   Pinch the grid to resize thumbnails between two and five across — the iPhone
   counterpart to the web/desktop thumbnail-size slider. The choice persists at
   `mold.mobile.galleryColumns.v1`, separately from the shared pixel-target key
