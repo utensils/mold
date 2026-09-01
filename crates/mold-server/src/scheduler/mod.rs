@@ -5870,15 +5870,15 @@ impl Coordinator {
                     let current_execution = current_generation_plans
                         .get(&work_id)
                         .and_then(|plans| exact_leased_execution_plan(plans, lease));
-                    if planned_execution.is_none() || planned_execution != current_execution {
+                    let (Some(planned_execution), Some(current_execution)) =
+                        (planned_execution, current_execution)
+                    else {
+                        return false;
+                    };
+                    if !same_execution_contract(&planned_execution, &current_execution) {
                         return false;
                     }
-                    ExecutionFingerprint::new(
-                        current_execution
-                            .expect("checked equal concrete execution plans")
-                            .execution_fingerprint
-                            .clone(),
-                    )
+                    ExecutionFingerprint::new(current_execution.execution_fingerprint.clone())
                 } else {
                     let Some(utility) = utility else {
                         return false;
@@ -7105,6 +7105,25 @@ fn exact_leased_execution_plan(
                 && plan.execution_fingerprint == lease.placement.execution_fingerprint.as_str()
         })
         .cloned()
+}
+
+/// Compare the immutable worker contract without treating the sampled free
+/// VRAM that admitted it as part of that identity.
+///
+/// The selected plan still has to resolve again with the same fingerprint and
+/// every artifact/placement/load field. The grant fence separately proves the
+/// fresh device still covers the predicted peak. Keeping the observation in a
+/// full derived equality made small CUDA context deltas invalidate every H3
+/// lease while several prepared rows kept the coordinator busy replanning.
+fn same_execution_contract(
+    planned: &crate::execution_plan::ResolvedExecutionPlan,
+    current: &crate::execution_plan::ResolvedExecutionPlan,
+) -> bool {
+    let mut planned = planned.clone();
+    let mut current = current.clone();
+    planned.admitted_available_vram_bytes = 0;
+    current.admitted_available_vram_bytes = 0;
+    planned == current
 }
 
 /// Deterministic planning and validation refusals remain visible but cannot
@@ -13031,6 +13050,22 @@ mod tests {
         .unwrap()
         .remove(0);
         wanted.execution_fingerprint = "wanted".into();
+        let mut capacity_drift = wanted.clone();
+        capacity_drift.admitted_available_vram_bytes = capacity_drift
+            .admitted_available_vram_bytes
+            .saturating_sub(1 << 20);
+        assert!(
+            same_execution_contract(&wanted, &capacity_drift),
+            "sampled free VRAM is not part of the immutable execution contract"
+        );
+        let mut changed_demand = wanted.clone();
+        changed_demand.predicted_vram_peak_bytes = changed_demand
+            .predicted_vram_peak_bytes
+            .saturating_add(1 << 20);
+        assert!(
+            !same_execution_contract(&wanted, &changed_demand),
+            "a changed execution demand must still invalidate the grant"
+        );
         let mut stale = wanted.clone();
         stale.execution_fingerprint = "stale".into();
         let lease = mold_scheduler::ImmediateLease {

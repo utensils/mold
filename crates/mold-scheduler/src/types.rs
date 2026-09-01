@@ -861,16 +861,12 @@ impl Plan {
                 available_bytes: current.available_vram_bytes,
             });
         }
-        if !lease.placement.frozen_device_capacity
-            && lease.placement.device_available_vram_bytes != u64::MAX
-            && current.available_vram_bytes != lease.placement.device_available_vram_bytes
-        {
-            return Err(PlanValidationError::DeviceVramSampleChanged {
-                device_id: lease.device_id.clone(),
-                planned_bytes: lease.placement.device_available_vram_bytes,
-                current_bytes: current.available_vram_bytes,
-            });
-        }
+        // Free-VRAM telemetry is an observation, not execution identity. A
+        // harmless allocator/context delta may change it between planning and
+        // this fence even though the freshly resolved fingerprint is identical.
+        // Requiring byte equality turns that ordinary drift into an endless
+        // plan/replan loop. The immutable fingerprint above protects the chosen
+        // placement and load strategy; the lower-bound check protects capacity.
         if !self.immediate_leases.contains(lease) {
             return Err(PlanValidationError::LeaseNotProposed {
                 work_id: lease.work_id.clone(),
@@ -971,6 +967,9 @@ pub enum PlanValidationError {
         planned_bytes: u64,
         available_bytes: u64,
     },
+    /// Retained for downstream source compatibility. Grant validation no
+    /// longer emits this error because a changed sample is safe when the
+    /// execution fingerprint is unchanged and the predicted peak still fits.
     DeviceVramSampleChanged {
         device_id: DeviceId,
         planned_bytes: u64,
