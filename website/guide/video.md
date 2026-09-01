@@ -319,5 +319,13 @@ and publishes a new gallery MP4 without replacing the source. It preserves and
 verifies constant FPS, frame count, duration, and a codec-compatible primary
 audio track. Temporal flicker may remain.
 
+The published MP4 is H.264 at level 5.2 or below, so it decodes on phones,
+in browsers, and in the Library thumbnailer. Real-ESRGAN always runs at its
+native factor; when the enlarged frame would exceed that level (more than
+36 864 macroblocks, or an edge over 4096 px) the encoder resamples it to the
+largest frame of the same aspect ratio that fits. A 960×960 clip upscaled ×4
+therefore publishes at 3072×3072 rather than 3840×3840, and the print's
+metadata records the published size beside the source size.
+
 The MVP rejects rather than discards VFR timing, HDR/high-bit-depth video,
 subtitles, chapters, multiple audio tracks, and incompatible audio codecs.

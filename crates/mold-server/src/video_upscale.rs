@@ -2,6 +2,13 @@
 //!
 //! ffmpeg is a bounded codec bridge only: decoded RGB frames cross one at a
 //! time and every super-resolution operation stays in the native Candle path.
+//!
+//! The published MP4 must decode everywhere the source did. Real-ESRGAN runs at
+//! its native factor, but the ENCODE is fitted inside the H.264 level 5.2 frame
+//! ceiling (`fit_h264_level_5_2`): a 960×960 clip ×4 is 3840×3840, which
+//! libx264 will happily write as level 6.0 and which no phone hardware decoder,
+//! no browser, and not even mold's own openh264 thumbnailer can read. Fitting
+//! is resampling for a codec constraint, so it belongs to the codec bridge.
 
 use axum::{
     extract::{Path, State},
@@ -39,6 +46,67 @@ const SOURCE_DIGEST_FILE: &str = "source.sha256";
 const SOURCE_METADATA_FILE: &str = "source-metadata.json";
 const FRAMEWISE_CODEC_UNAVAILABLE: &str =
     "Framewise upscale is unavailable because this Mold host does not provide ffmpeg and ffprobe";
+/// H.264 level 5.2 frame ceiling in 16×16 macroblocks (ITU-T H.264 Table A-1,
+/// MaxFS). iOS and Android hardware decoders, browsers, and the openh264
+/// decoder behind `mold_inference::ltx2::media::extract_first_frame` all stop
+/// here; a frame above it publishes a print with no thumbnail that phones will
+/// not play (hal9000, 2026-09-01: 3840×3840 is 57 600 macroblocks, level 6.0).
+const H264_LEVEL_5_2_MAX_MACROBLOCKS: u64 = 36_864;
+/// Longest edge common hardware decoders accept; 4096×2304 is level 5.2's
+/// reference shape, while the level alone would allow an 8 688 px edge.
+const H264_MAX_EDGE: u32 = 4096;
+
+fn h264_macroblocks(width: u32, height: u32) -> u64 {
+    u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16))
+}
+
+fn fits_h264_level_5_2(width: u32, height: u32) -> bool {
+    width <= H264_MAX_EDGE
+        && height <= H264_MAX_EDGE
+        && h264_macroblocks(width, height) <= H264_LEVEL_5_2_MAX_MACROBLOCKS
+}
+
+/// The encode dimensions for an upscaled frame: the upscaler's own output when
+/// it already decodes at level 5.2, otherwise the largest even-sided frame of
+/// the same aspect ratio that does. The super-resolution pass is untouched;
+/// only the encoder resamples, and only when it must.
+fn fit_h264_level_5_2(width: u32, height: u32) -> (u32, u32) {
+    if fits_h264_level_5_2(width, height) {
+        return (width, height);
+    }
+    let max_pixels = (H264_LEVEL_5_2_MAX_MACROBLOCKS * 256) as f64;
+    let pixels = f64::from(width) * f64::from(height);
+    let factor = (max_pixels / pixels)
+        .sqrt()
+        .min(f64::from(H264_MAX_EDGE) / f64::from(width))
+        .min(f64::from(H264_MAX_EDGE) / f64::from(height))
+        .min(1.0);
+    let mut fitted_width = ((f64::from(width) * factor).floor() as u32) & !1;
+    let mut fitted_height = ((f64::from(height) * factor).floor() as u32) & !1;
+    // Macroblock rounding can leave the count a row over the ceiling; trim the
+    // longer edge two pixels at a time, which moves the aspect ratio by well
+    // under a tenth of a percent.
+    while !fits_h264_level_5_2(fitted_width.max(2), fitted_height.max(2)) {
+        if fitted_width >= fitted_height {
+            fitted_width -= 2;
+        } else {
+            fitted_height -= 2;
+        }
+    }
+    (fitted_width.max(2), fitted_height.max(2))
+}
+
+/// The publication guard behind `fit_h264_level_5_2`: whatever the encoder
+/// accepted, a frame above the level 5.2 ceiling never reaches the gallery.
+fn verify_decodable_output(output: &VideoUpscaleMediaFacts) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        fits_h264_level_5_2(output.width, output.height),
+        "output frame {}x{} exceeds the H.264 level 5.2 ceiling that phones and thumbnails decode",
+        output.width,
+        output.height
+    );
+    Ok(())
+}
 
 fn codec_command(tool: &str) -> Command {
     let bundled = match tool {
@@ -1087,27 +1155,42 @@ fn spawn_decoder(source: &FsPath, start: u64, count: u64) -> anyhow::Result<std:
         .spawn()?)
 }
 
+/// Encode raw RGB frames of `width`×`height` (the upscaler's output) into an
+/// H.264 chunk of `encode_width`×`encode_height` (the level-5.2 fit). The two
+/// differ only when the fit had to shrink the frame; then the encoder resamples
+/// with Lanczos on its way to yuv420p.
 fn spawn_encoder(
     path: &FsPath,
     width: u32,
     height: u32,
+    encode_width: u32,
+    encode_height: u32,
     fps: &str,
 ) -> anyhow::Result<std::process::Child> {
-    Ok(codec_command("ffmpeg")
+    let mut command = codec_command("ffmpeg");
+    command.args([
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        &format!("{width}x{height}"),
+        "-r",
+        fps,
+        "-i",
+        "pipe:0",
+    ]);
+    if (encode_width, encode_height) != (width, height) {
+        command.args([
+            "-vf",
+            &format!("scale={encode_width}:{encode_height}:flags=lanczos"),
+        ]);
+    }
+    Ok(command
         .args([
-            "-v",
-            "error",
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            &format!("{width}x{height}"),
-            "-r",
-            fps,
-            "-i",
-            "pipe:0",
             "-an",
             "-c:v",
             "libx264",
@@ -1237,14 +1320,23 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
         .and_then(|c| c.transformer.as_ref())
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("upscaler model is not configured"))?;
-    let out_width = facts
+    let upscaled_width = facts
         .width
         .checked_mul(stored.job.scale_factor)
         .ok_or_else(|| anyhow::anyhow!("output width overflow"))?;
-    let out_height = facts
+    let upscaled_height = facts
         .height
         .checked_mul(stored.job.scale_factor)
         .ok_or_else(|| anyhow::anyhow!("output height overflow"))?;
+    let (out_width, out_height) = fit_h264_level_5_2(upscaled_width, upscaled_height);
+    if (out_width, out_height) != (upscaled_width, upscaled_height) {
+        tracing::info!(
+            job = id,
+            upscaled = %format!("{upscaled_width}x{upscaled_height}"),
+            encoded = %format!("{out_width}x{out_height}"),
+            "Framewise output fitted to the H.264 level 5.2 frame ceiling"
+        );
+    }
     anyhow::ensure!(
         out_width % 2 == 0 && out_height % 2 == 0,
         "H.264 output dimensions must be even"
@@ -1276,7 +1368,14 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
         let _ = fs::remove_file(&partial);
         let _ = fs::remove_file(&chunk);
         let mut decoder = spawn_decoder(&stored.source_path, completed, count)?;
-        let mut encoder = spawn_encoder(&partial, out_width, out_height, &facts.fps)?;
+        let mut encoder = spawn_encoder(
+            &partial,
+            upscaled_width,
+            upscaled_height,
+            out_width,
+            out_height,
+            &facts.fps,
+        )?;
         let mut decoder_out = decoder
             .stdout
             .take()
@@ -1306,7 +1405,7 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!(e.error))?;
             let rgb = image::load_from_memory(&upscaled)?.to_rgb8();
             anyhow::ensure!(
-                rgb.width() == out_width && rgb.height() == out_height,
+                rgb.width() == upscaled_width && rgb.height() == upscaled_height,
                 "upscaler returned unexpected dimensions"
             );
             encoder_in.write_all(rgb.as_raw())?;
@@ -1390,6 +1489,13 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
     );
     let output_facts = probe(&final_path)?;
     verify_preserved_facts(&facts, &output_facts)?;
+    verify_decodable_output(&output_facts)?;
+    anyhow::ensure!(
+        output_facts.width == out_width && output_facts.height == out_height,
+        "output frame {}x{} did not match the fitted {out_width}x{out_height}",
+        output_facts.width,
+        output_facts.height
+    );
     if should_stop(database, id, &stored.work_dir)? {
         return Ok(());
     }
@@ -1740,6 +1846,124 @@ mod tests {
     fn scale_is_derived_conservatively() {
         assert_eq!(scale_for("real-esrgan-x2plus:fp16"), 2);
         assert_eq!(scale_for("real-esrgan-x4plus:fp16"), 4);
+    }
+
+    #[test]
+    fn level_5_2_fit_keeps_frames_that_already_decode() {
+        assert_eq!(fit_h264_level_5_2(1920, 1080), (1920, 1080));
+        // 4K UHD is 32 400 macroblocks: inside the ceiling, untouched.
+        assert_eq!(fit_h264_level_5_2(3840, 2160), (3840, 2160));
+        // 704×1216 ×2 and 768×1344 ×2 stay put as well.
+        assert_eq!(fit_h264_level_5_2(1408, 2432), (1408, 2432));
+        assert_eq!(fit_h264_level_5_2(1536, 2688), (1536, 2688));
+    }
+
+    #[test]
+    fn level_5_2_fit_shrinks_the_hal9000_square_to_the_ceiling() {
+        // 960×960 ×4 — the print that published with no thumbnail and would
+        // not play on a phone. 3072×3072 is exactly 36 864 macroblocks.
+        assert_eq!(fit_h264_level_5_2(3840, 3840), (3072, 3072));
+        assert!(!fits_h264_level_5_2(3840, 3840));
+        assert!(fits_h264_level_5_2(3072, 3072));
+    }
+
+    #[test]
+    fn level_5_2_fit_preserves_aspect_and_honours_every_bound() {
+        let sources = [
+            (704, 1216),
+            (1216, 704),
+            (768, 1344),
+            (960, 960),
+            (1280, 720),
+            (1920, 1080),
+            (2048, 2048),
+            (4096, 2304),
+            // A wide banner: the edge cap, not the macroblock count, binds.
+            (3000, 200),
+        ];
+        for (width, height) in sources {
+            for scale in [2_u32, 4] {
+                let (upscaled_width, upscaled_height) = (width * scale, height * scale);
+                let (fitted_width, fitted_height) =
+                    fit_h264_level_5_2(upscaled_width, upscaled_height);
+                assert!(
+                    fits_h264_level_5_2(fitted_width, fitted_height),
+                    "{upscaled_width}x{upscaled_height} fitted to {fitted_width}x{fitted_height} still exceeds level 5.2"
+                );
+                assert!(fitted_width <= upscaled_width && fitted_height <= upscaled_height);
+                assert_eq!(fitted_width % 2, 0);
+                assert_eq!(fitted_height % 2, 0);
+                let source_ratio = f64::from(upscaled_width) / f64::from(upscaled_height);
+                let fitted_ratio = f64::from(fitted_width) / f64::from(fitted_height);
+                assert!(
+                    ((fitted_ratio - source_ratio) / source_ratio).abs() < 0.01,
+                    "{upscaled_width}x{upscaled_height} → {fitted_width}x{fitted_height} changed the aspect ratio"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn publication_guard_refuses_frames_above_level_5_2() {
+        let mut output = VideoUpscaleMediaFacts {
+            container: "mp4".into(),
+            video_codec: "h264".into(),
+            width: 3840,
+            height: 3840,
+            frame_count: 124,
+            fps: "24/1".into(),
+            duration_ms: 5_167,
+            primary_audio_codec: Some("aac".into()),
+            primary_audio_sample_rate: Some(48_000),
+            primary_audio_channels: Some(2),
+        };
+        assert!(verify_decodable_output(&output)
+            .unwrap_err()
+            .to_string()
+            .contains("level 5.2"));
+        output.width = 3072;
+        output.height = 3072;
+        verify_decodable_output(&output).unwrap();
+    }
+
+    #[test]
+    fn encoder_fits_oversized_frames_so_the_thumbnailer_can_decode_them() {
+        let _fixture_guard = FFMPEG_FIXTURE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !ffmpeg_fixture_tools_available() {
+            eprintln!("skipping ffmpeg integration fixture: ffmpeg/ffprobe unavailable");
+            return;
+        }
+        let (width, height) = (3840_u32, 3840_u32);
+        let (encode_width, encode_height) = fit_h264_level_5_2(width, height);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("fitted.mp4");
+        let mut encoder =
+            spawn_encoder(&path, width, height, encode_width, encode_height, "24/1").unwrap();
+        let mut stdin = encoder.stdin.take().unwrap();
+        let frame = vec![0x80_u8; usize::try_from(width * height * 3).unwrap()];
+        for _ in 0..3 {
+            stdin.write_all(&frame).unwrap();
+        }
+        drop(stdin);
+        let output = encoder.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let facts = probe(&path).unwrap();
+        assert_eq!((facts.width, facts.height), (encode_width, encode_height));
+        assert_eq!(facts.frame_count, 3);
+        verify_decodable_output(&facts).unwrap();
+        // The gallery thumbnail is this exact decoder; the unfitted 3840×3840
+        // print answered "failed to decode H.264 frame from MP4" here.
+        let poster = mold_inference::ltx2::media::extract_first_frame(&path).unwrap();
+        assert_eq!(
+            (poster.width(), poster.height()),
+            (encode_width, encode_height)
+        );
     }
 
     #[test]
