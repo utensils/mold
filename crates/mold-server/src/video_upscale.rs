@@ -70,8 +70,8 @@ pub(crate) fn framewise_codec_runtime_available() -> bool {
     })
 }
 
-fn require_framewise_codec_runtime() -> Result<(), ApiError> {
-    if framewise_codec_runtime_available() {
+pub(crate) fn require_framewise_codec_runtime_with(available: bool) -> Result<(), ApiError> {
+    if available {
         Ok(())
     } else {
         Err(ApiError::with_code(
@@ -80,6 +80,10 @@ fn require_framewise_codec_runtime() -> Result<(), ApiError> {
             StatusCode::SERVICE_UNAVAILABLE,
         ))
     }
+}
+
+fn require_framewise_codec_runtime() -> Result<(), ApiError> {
+    require_framewise_codec_runtime_with(framewise_codec_runtime_available())
 }
 
 fn now_ms() -> i64 {
@@ -731,6 +735,7 @@ pub async fn resume_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<VideoUpscaleJob>, ApiError> {
+    require_framewise_codec_runtime()?;
     let job = transition_job(
         &state,
         &id,
@@ -1439,6 +1444,13 @@ mod tests {
         assert!(!available);
         assert_eq!(checked, ["ffmpeg", "ffprobe"]);
         assert!(detect_framewise_codec_runtime(|_| true));
+    }
+
+    #[test]
+    fn unavailable_codec_runtime_returns_typed_service_unavailable() {
+        let error = require_framewise_codec_runtime_with(false).unwrap_err();
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "VIDEO_UPSCALE_CODEC_RUNTIME_UNAVAILABLE");
     }
 
     fn ffmpeg_fixture_tools_available() -> bool {

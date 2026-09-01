@@ -197,6 +197,7 @@ const rawEntries = ref<HostGalleryImage[]>([]);
 /** Per-host organization: capabilities, collections, tags, trash listing. */
 const snapshots = ref<HostOrganizationSnapshot[]>([]);
 const galleryImageUpscaleByHost = ref<Record<string, boolean>>({});
+const framewiseVideoUpscaleByHost = ref<Record<string, boolean>>({});
 /** Copies moved to the trash locally (undo window elapsed) until a
  * SUCCESSFUL server listing confirms them (or they age out). */
 const pendingTrashed = ref<HostGalleryImage[]>([]);
@@ -460,6 +461,14 @@ function hostForEntry(entry: GalleryImage) {
   const id = (entry as { hostId?: string }).hostId ?? ORIGIN_HOST_ID;
   if (id === ORIGIN_HOST_ID) return originHost();
   return getHost(id);
+}
+function canUpscaleItem(entry: GalleryImage | null): boolean {
+  if (!entry) return false;
+  const kind = mediaKind(entry.format, entry.filename);
+  if (kind === "audio") return false;
+  if (kind !== "video") return true;
+  const host = hostForEntry(entry);
+  return !!host && framewiseVideoUpscaleByHost.value[host.id] === true;
 }
 const hostById = (id: string) =>
   id === ORIGIN_HOST_ID ? originHost() : getHost(id);
@@ -1506,17 +1515,22 @@ async function performRefresh() {
       fetchMergedGallery(hosts),
       fetchOrganization(hosts).catch(() => null),
       Promise.all(
-        hosts.map(
-          async (host) =>
-            [
-              host.id,
-              (await hostCapabilities(host)).video_upscale?.gallery_image ===
-                true,
-            ] as const,
-        ),
+        hosts.map(async (host) => {
+          const capability = (await hostCapabilities(host)).video_upscale;
+          return [
+            host.id,
+            capability?.gallery_image === true,
+            capability?.available === true,
+          ] as const;
+        }),
       ),
     ]);
-    galleryImageUpscaleByHost.value = Object.fromEntries(upscaleCapabilities);
+    galleryImageUpscaleByHost.value = Object.fromEntries(
+      upscaleCapabilities.map(([hostId, image]) => [hostId, image]),
+    );
+    framewiseVideoUpscaleByHost.value = Object.fromEntries(
+      upscaleCapabilities.map(([hostId, , video]) => [hostId, video]),
+    );
     if (organization) {
       snapshots.value = organization;
       // Drop a shadow copy only once its host's trash listing SUCCEEDED and
@@ -1988,7 +2002,7 @@ function closeUpscaleDialog() {
   upscaleJob.value = null;
 }
 async function onUpscale(item: GalleryImage) {
-  if (mediaKind(item.format, item.filename) === "audio") return;
+  if (!canUpscaleItem(item)) return;
   stopUpscalePoll();
   const epoch = ++upscaleEpoch;
   upscaleItem.value = item;
@@ -2227,7 +2241,7 @@ async function contextSource() {
 function contextUpscale() {
   const item = contextMenu.value?.item;
   closeContextMenu();
-  if (item) onUpscale(item);
+  if (canUpscaleItem(item ?? null)) onUpscale(item!);
 }
 async function contextDelete() {
   const item = contextMenu.value?.item;
@@ -2985,10 +2999,7 @@ onBeforeUnmount(() => {
           Use as source
         </button>
         <button
-          v-if="
-            mediaKind(contextMenu.item.format, contextMenu.item.filename) !==
-            'audio'
-          "
+          v-if="canUpscaleItem(contextMenu.item)"
           type="button"
           role="menuitem"
           data-test="context-upscale"
@@ -3223,6 +3234,7 @@ onBeforeUnmount(() => {
       :has-prev="selectedIndex > 0"
       :has-next="selectedIndex >= 0 && selectedIndex < filtered.length - 1"
       :muted="muted"
+      :upscale-enabled="canUpscaleItem(selected)"
       :is-sequence="isSequencePrint(selected)"
       :can-edit-sequence="canEditSequence(selected)"
       :can-organize="canOrganizeEntry(selected)"

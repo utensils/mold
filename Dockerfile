@@ -174,6 +174,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # because the builder stage has the dev package installed.
 # libcuda.so.1 (the NVIDIA driver) is injected at runtime by the NVIDIA
 # Container Toolkit on GPU hosts like RunPod — it is never in the image.
+# Container builds intentionally resolve ffmpeg/ffprobe from this fixed runtime
+# PATH. Nix builds instead embed exact store paths at compile time.
 # Same apt retry wrapper as the builder stage — the tini fetch in particular
 # has timed out on GHA before.
 RUN set -eux; \

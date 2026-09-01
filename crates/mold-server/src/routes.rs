@@ -1145,6 +1145,18 @@ pub(crate) async fn require_server_generation_request_activation(
     }
     if let Some(upscale_model) = request.upscale_model.as_deref() {
         require_server_model_activation(state, upscale_model).await?;
+        // Video post-processing is the same durable Framewise pipeline exposed
+        // by Library. Refuse before generation starts if the host cannot
+        // assemble the result, rather than rendering an expensive source clip
+        // that can only fail during settlement.
+        if request.frames.unwrap_or(1) > 1 {
+            let codec_available = tokio::task::spawn_blocking(
+                crate::video_upscale::framewise_codec_runtime_available,
+            )
+            .await
+            .unwrap_or(false);
+            crate::video_upscale::require_framewise_codec_runtime_with(codec_available)?;
+        }
     }
     Ok(())
 }
@@ -7348,6 +7360,12 @@ async fn server_capabilities(
     State(state): State<AppState>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
 ) -> Json<mold_core::ServerCapabilities> {
+    // Executable startup can briefly block. Keep the first probe off the
+    // async worker; subsequent calls read the cached result.
+    let framewise_codec_available =
+        tokio::task::spawn_blocking(crate::video_upscale::framewise_codec_runtime_available)
+            .await
+            .unwrap_or(false);
     let catalog_available = std::env::var("MOLD_CATALOG_DISABLE")
         .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
@@ -7391,10 +7409,8 @@ async fn server_capabilities(
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_none();
-    let framewise_capabilities = video_upscale_capabilities(
-        framewise_base_available,
-        crate::video_upscale::framewise_codec_runtime_available(),
-    );
+    let framewise_capabilities =
+        video_upscale_capabilities(framewise_base_available, framewise_codec_available);
     let gallery = mold_core::GalleryCapabilities {
         can_delete: true,
         trash: Some(mold_core::GalleryTrashCapabilities {
