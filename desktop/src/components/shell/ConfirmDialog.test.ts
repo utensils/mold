@@ -31,6 +31,27 @@ describe("ConfirmDialog", () => {
     );
   });
 
+  it("lets a long confirmation label grow vertically instead of clipping", () => {
+    mount(ConfirmDialog, {
+      props: {
+        open: true,
+        title: "Launch GPU instance?",
+        confirmLabel: "Launch — billing begins immediately",
+        cancelLabel: "Keep choosing instance settings",
+      },
+      attachTo: document.body,
+    });
+
+    const accept = document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement;
+    const cancel = document.querySelector("[data-test='confirm-cancel']") as HTMLButtonElement;
+    expect(accept.classList).toContain("min-h-8");
+    expect(accept.classList).toContain("py-1.5");
+    expect(accept.classList).not.toContain("h-8");
+    expect(cancel.classList).toContain("min-h-8");
+    expect(cancel.classList).toContain("py-1.5");
+    expect(cancel.classList).not.toContain("h-8");
+  });
+
   it("emits confirm / cancel", async () => {
     const wrapper = mount(ConfirmDialog, {
       props: { open: true, title: "Delete?" },

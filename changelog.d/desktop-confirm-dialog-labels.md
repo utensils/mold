@@ -1,0 +1,1 @@
+- Fixed long desktop confirmation labels clipping inside their action buttons.

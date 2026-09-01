@@ -72,7 +72,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
           <button
             type="button"
             data-test="confirm-cancel"
-            class="h-8 rounded-control px-3 text-body text-ink-2 hover:text-ink disabled:opacity-50"
+            class="min-h-8 rounded-control px-3 py-1.5 text-center text-body leading-tight text-ink-2 hover:text-ink disabled:opacity-50"
             :disabled="busy"
             @click="cancel"
           >
@@ -81,7 +81,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
           <button
             type="button"
             data-test="confirm-accept"
-            class="h-8 rounded-control px-3.5 text-body font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
+            class="min-h-8 rounded-control px-3.5 py-1.5 text-center text-body leading-tight font-semibold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
             :class="danger ? 'bg-stop' : 'bg-safelight'"
             :disabled="busy"
             @click="emit('confirm')"
