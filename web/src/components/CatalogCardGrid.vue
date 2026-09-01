@@ -142,10 +142,14 @@ async function startBatch(): Promise<void> {
   const results = await Promise.allSettled(
     target.items.map(async (item) => {
       try {
-        await installTargets.startDownloadOn(
+        // A declined license queued nothing. Returning the id anyway would
+        // drop the model from the selection and count it in the "downloads
+        // queued" toast, so carry the decision through the batch.
+        const started = await installTargets.startDownloadOn(
           { host: target.host, action: item.action },
           item.modelId,
         );
+        if (started.declined) return null;
       } catch (error) {
         if (!isAlreadyQueuedError(error)) throw error;
       }
@@ -157,6 +161,9 @@ async function startBatch(): Promise<void> {
   const failures: string[] = [];
   results.forEach((result, index) => {
     if (result.status === "fulfilled") {
+      // `null` is a decline: leave it selected and out of the count. It is
+      // neither a success nor a failure — the dialog was the interaction.
+      if (result.value === null) return;
       next.delete(result.value);
       succeeded += 1;
     } else {
