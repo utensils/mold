@@ -748,7 +748,12 @@ impl PromptExpander for LocalExpander {
 }
 
 fn local_expand_error_with_recovery(error: anyhow::Error) -> anyhow::Error {
-    if error.to_string().contains("expected exactly") {
+    // Both exact-count outcomes are a response-shape problem, not a missing
+    // model: the backend under-delivered, or it over-delivered an ambiguous
+    // completion for every attempt in the chunk's budget. Neither is recovered
+    // by pulling weights, so say what actually helps.
+    let message = error.to_string();
+    if message.contains("expected exactly") || message.contains("expansion backend returned") {
         anyhow::anyhow!("{error}. Retry expansion or reduce the batch size.")
     } else {
         error
@@ -1162,6 +1167,20 @@ mod exact_plan_tests {
         .to_string();
 
         assert!(message.contains("Retry expansion or reduce the batch size"));
+        assert!(!message.contains("mold pull"), "{message}");
+    }
+
+    #[test]
+    fn an_exhausted_overshoot_budget_also_carries_the_recovery_hint() {
+        let message = local_expand_error_with_recovery(anyhow::anyhow!(
+            "expansion backend returned 3 prompts when exactly 1 were requested, and did not return a usable count in 3 attempts"
+        ))
+        .to_string();
+
+        assert!(
+            message.contains("Retry expansion or reduce the batch size"),
+            "{message}"
+        );
         assert!(!message.contains("mold pull"), "{message}");
     }
 }
