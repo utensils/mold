@@ -73,6 +73,14 @@ function mountLightbox(
   });
 }
 
+describe("upscale capability", () => {
+  it("hides Framewise upscale when the video host cannot execute it", () => {
+    const video = { ...item, filename: "clip.mp4", format: "mp4" } as GalleryImage;
+    const wrapper = mountLightbox(video, true, { upscaleEnabled: false });
+    expect(wrapper.find("[data-test='lightbox-upscale']").exists()).toBe(false);
+  });
+});
+
 describe("Lightbox reuse", () => {
   it("hands the composer the full metadata so nothing is dropped", async () => {
     const metadata = {

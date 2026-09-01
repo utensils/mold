@@ -5142,6 +5142,16 @@ impl App {
                     && !self.upscale_in_progress
                     && self.gallery.entries.get(self.gallery.selected).is_some() =>
             {
+                let can_upscale = self
+                    .gallery
+                    .entries
+                    .get(self.gallery.selected)
+                    .is_some_and(|entry| self.can_upscale_entry(entry));
+                if !can_upscale {
+                    self.generate.error_message =
+                        Some("Framewise video upscale is unavailable on this Mold host".into());
+                    return;
+                }
                 let models = self.available_upscaler_models();
                 self.popup = Some(Popup::UpscaleModelSelector {
                     filter: String::new(),
@@ -6061,6 +6071,20 @@ impl App {
             return self.machines.capabilities.get(crate::hosts::LOCAL_HOST_ID);
         }
         None
+    }
+
+    /// Whether Library may offer its immediate upscale action for `entry`.
+    /// Images retain the local/legacy fallback. Videos require the durable
+    /// server pipeline and its explicit codec-backed capability.
+    pub(crate) fn can_upscale_entry(&self, entry: &GalleryEntry) -> bool {
+        if !crate::gallery_scan::is_video_filename(&entry.filename()) {
+            return true;
+        }
+        let origin = entry.primary_origin();
+        (origin.url.is_some() || self.server_url.is_some())
+            && self
+                .capabilities_for_origin(&origin)
+                .is_some_and(|caps| caps.video_upscale.available)
     }
 
     /// Whether a print held by `origin` is moved to a trash (recoverable)
@@ -17022,6 +17046,29 @@ mod tests {
         app.machines
             .apply_capabilities(crate::hosts::LOCAL_HOST_ID.into(), Some(caps));
         assert_eq!(app.removal_kind_for(&entry), RemovalKind::Trash);
+    }
+
+    #[test]
+    fn framewise_library_action_requires_the_selected_hosts_capability() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut app = make_settings_test_app();
+        app.server_url = Some("http://bender:7680".into());
+        let mut video = make_test_entry_with_name("clip.mp4");
+        video.origins = vec![GalleryOrigin::remote_from_url("http://bender:7680")];
+
+        assert!(!app.can_upscale_entry(&video));
+        let mut caps = mold_core::ServerCapabilities::default();
+        caps.video_upscale.available = true;
+        app.machines
+            .apply_capabilities(crate::hosts::LOCAL_HOST_ID.into(), Some(caps));
+        assert!(app.can_upscale_entry(&video));
+
+        let image = make_test_entry_with_name("still.png");
+        assert!(app.can_upscale_entry(&image));
     }
 
     #[tokio::test]

@@ -3135,11 +3135,15 @@ const generatedPreviewTarget = computed<ApiTarget>(() => {
   const host = generatedPreviewHost.value;
   return host ? mobileHostTarget(host) : { baseUrl: "", apiKey: null };
 });
+function canUpscalePrint(print: GalleryPrint | null): boolean {
+  if (!print || isAudioItem(print) || isMeshItem(print)) return false;
+  return !isVideoItem(print) || serverCapabilities[print.hostId]?.video_upscale?.available === true;
+}
 const generatedUpscalePrint = computed<GalleryPrint | null>(() => {
   const item = generatedPreviewItem.value;
   const host = generatedPreviewHost.value;
   if (!item || !host || isAudioItem(item) || isMeshItem(item)) return null;
-  return {
+  const print: GalleryPrint = {
     ...item,
     hostId: host.id,
     cacheKey: host.id,
@@ -3148,6 +3152,7 @@ const generatedUpscalePrint = computed<GalleryPrint | null>(() => {
     thumbnailUrl: resultUrl.value,
     thumbnailPending: false,
   };
+  return canUpscalePrint(print) ? print : null;
 });
 const resultPreviewError = computed(() => {
   const job = latestResultJob.value;
@@ -10145,7 +10150,7 @@ function closeViewerUpscale(): void {
   viewerUpscaleError.value = "";
 }
 async function openUpscaleForPrint(print: GalleryPrint | null): Promise<void> {
-  if (!print || isAudioItem(print) || isMeshItem(print)) return;
+  if (!print || !canUpscalePrint(print)) return;
   stopViewerUpscalePoll();
   const epoch = ++viewerUpscaleEpoch;
   viewerUpscaleItem.value = print;
@@ -10352,7 +10357,7 @@ const singleSelectedUpscalePrint = computed<GalleryPrint | null>(() => {
   const selected = selectedRepresentatives();
   if (selected.length !== 1) return null;
   const print = selected[0];
-  return print && !isAudioItem(print) && !isMeshItem(print) ? (print as GalleryPrint) : null;
+  return canUpscalePrint(print as GalleryPrint) ? (print as GalleryPrint) : null;
 });
 
 function openSelectedGalleryUpscale(): void {
@@ -10374,10 +10379,10 @@ function toggleGallerySelection(print: GalleryPrint): void {
 function rememberNativeGalleryContext(print: GalleryPrint): void {
   nativeGalleryContextKey = galleryPrintKey(print);
   if (isNativeIOSRuntime()) {
-    const upscaleLabel = isVideoItem(print)
-      ? "Framewise upscale…"
-      : isAudioItem(print) || isMeshItem(print)
-        ? null
+    const upscaleLabel = !canUpscalePrint(print)
+      ? null
+      : isVideoItem(print)
+        ? "Framewise upscale…"
         : "Upscale…";
     void invoke("extend_gallery_context_menu", { upscaleLabel }).catch(() => undefined);
   }
@@ -13460,6 +13465,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :has-next="selectedPrintIndex >= 0 && selectedPrintIndex < gallery.length - 1"
       :organization="selectedPrintOrganization ?? null"
       :organize-enabled="libraryOrganizeEnabled"
+      :upscale-enabled="canUpscalePrint(selectedPrint)"
       :trashed="selectedPrintTrashed"
       :organizing="organizationBusy"
       :organization-error="organizationError"

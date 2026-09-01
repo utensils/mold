@@ -602,6 +602,30 @@ describe("LibraryView source reuse", () => {
     wrapper.unmount();
   });
 
+  it("disables Framewise upscale when the local host reports it unavailable", async () => {
+    const video = {
+      ...prints[0]!,
+      filename: "unavailable-clip.mp4",
+      format: "mp4",
+    } as GalleryImage;
+    const { wrapper } = await mountView(
+      undefined,
+      (gallery) => {
+        gallery.buckets.local!.items = [video];
+      },
+      "/library",
+      true,
+    );
+    useHostsStore().capabilities.local = {
+      video_upscale: { available: false },
+    } as never;
+    await wrapper.get(".ms-lib-tile").trigger("contextmenu");
+    const upscale = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Framewise upscale",
+    );
+    expect(upscale).toMatchObject({ disabled: true });
+  });
+
   it("keeps a failed desktop Framewise submission visible in the dialog", async () => {
     createFramewiseUpscaleMock.mockRejectedValueOnce(
       new Error("Framewise upscale is unavailable on this machine"),

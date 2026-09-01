@@ -1145,8 +1145,49 @@ pub(crate) async fn require_server_generation_request_activation(
     }
     if let Some(upscale_model) = request.upscale_model.as_deref() {
         require_server_model_activation(state, upscale_model).await?;
+        // Video post-processing is the same durable Framewise pipeline exposed
+        // by Library. Refuse before generation starts if the host cannot
+        // assemble the result, rather than rendering an expensive source clip
+        // that can only fail during settlement.
+        if generation_request_produces_video(request, family) {
+            let codec_available = tokio::task::spawn_blocking(
+                crate::video_upscale::framewise_codec_runtime_available,
+            )
+            .await
+            .unwrap_or(false);
+            require_generation_framewise_runtime(request, family, codec_available)?;
+        }
     }
     Ok(())
+}
+
+fn require_generation_framewise_runtime(
+    request: &mold_core::GenerateRequest,
+    family: Option<&str>,
+    codec_available: bool,
+) -> Result<(), ApiError> {
+    if request.upscale_model.is_some() && generation_request_produces_video(request, family) {
+        crate::video_upscale::require_framewise_codec_runtime_with(codec_available)?;
+    }
+    Ok(())
+}
+
+fn generation_request_produces_video(
+    request: &mold_core::GenerateRequest,
+    family: Option<&str>,
+) -> bool {
+    family.is_some_and(|family| {
+        matches!(
+            mold_core::ExpandTask::for_generation(family, request),
+            mold_core::ExpandTask::TextToVideo
+                | mold_core::ExpandTask::ImageToVideo
+                | mold_core::ExpandTask::VideoToVideo
+                | mold_core::ExpandTask::Retake
+                | mold_core::ExpandTask::KeyframeInterpolation
+                | mold_core::ExpandTask::AudioDrivenVideo
+                | mold_core::ExpandTask::ReferenceToAudioVideo
+        )
+    })
 }
 
 pub(crate) struct PreparedGenerationRoute {
@@ -7348,6 +7389,12 @@ async fn server_capabilities(
     State(state): State<AppState>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
 ) -> Json<mold_core::ServerCapabilities> {
+    // Executable startup can briefly block. Keep the first probe off the
+    // async worker; subsequent calls read the cached result.
+    let framewise_codec_available =
+        tokio::task::spawn_blocking(crate::video_upscale::framewise_codec_runtime_available)
+            .await
+            .unwrap_or(false);
     let catalog_available = std::env::var("MOLD_CATALOG_DISABLE")
         .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
@@ -7384,6 +7431,15 @@ async fn server_capabilities(
     // needs somewhere to move bytes to. With the DB disabled, DELETE stays a
     // hard delete and the organization routes answer 501.
     let db_available = state.metadata_db.is_some();
+    let framewise_base_available = db_available
+        && !state.is_output_disabled(&config)
+        && state
+            .generation_unavailable_reason
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none();
+    let framewise_capabilities =
+        video_upscale_capabilities(framewise_base_available, framewise_codec_available);
     let gallery = mold_core::GalleryCapabilities {
         can_delete: true,
         trash: Some(mold_core::GalleryTrashCapabilities {
@@ -7428,34 +7484,7 @@ async fn server_capabilities(
                 .generation_admitted()
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
         },
-        video_upscale: mold_core::VideoUpscaleCapabilities {
-            available: db_available
-                && !state.is_output_disabled(&config)
-                && state
-                    .generation_unavailable_reason
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .is_none(),
-            gallery_image: db_available
-                && !state.is_output_disabled(&config)
-                && state
-                    .generation_unavailable_reason
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .is_none(),
-            contract_version: mold_core::VIDEO_UPSCALE_CONTRACT_VERSION,
-            source_library: true,
-            source_upload: false,
-            input_containers: ["mp4", "mov", "webm"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            output_container: "mp4".into(),
-            preserves_primary_audio_when_compatible: true,
-            supports_vfr: false,
-            supports_hdr: false,
-            disclosure: mold_core::VIDEO_UPSCALE_DISCLOSURE.into(),
-        },
+        video_upscale: framewise_capabilities,
         durable_media: readiness.advertised_media(),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             // The request-bound upload protocol derives its authority from an
@@ -7491,6 +7520,28 @@ async fn server_capabilities(
         },
         mesh: Some(mesh_capabilities()),
     })
+}
+
+fn video_upscale_capabilities(
+    base_available: bool,
+    codec_runtime_available: bool,
+) -> mold_core::VideoUpscaleCapabilities {
+    mold_core::VideoUpscaleCapabilities {
+        available: base_available && codec_runtime_available,
+        gallery_image: base_available,
+        contract_version: mold_core::VIDEO_UPSCALE_CONTRACT_VERSION,
+        source_library: true,
+        source_upload: false,
+        input_containers: ["mp4", "mov", "webm"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        output_container: "mp4".into(),
+        preserves_primary_audio_when_compatible: true,
+        supports_vfr: false,
+        supports_hdr: false,
+        disclosure: mold_core::VIDEO_UPSCALE_DISCLOSURE.into(),
+    }
 }
 
 /// What this build can do with 3-D artifacts.
@@ -10616,6 +10667,43 @@ mod tests {
     use crate::test_support::env_lock;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    #[test]
+    fn framewise_capability_requires_codec_runtime_without_disabling_image_upscale() {
+        let missing_codec = video_upscale_capabilities(true, false);
+        assert!(!missing_codec.available);
+        assert!(missing_codec.gallery_image);
+
+        let ready = video_upscale_capabilities(true, true);
+        assert!(ready.available);
+        assert!(ready.gallery_image);
+    }
+
+    #[test]
+    fn generation_framewise_gate_uses_video_family_defaults_not_explicit_frames() {
+        let request = |model: &str| {
+            serde_json::from_value::<mold_core::GenerateRequest>(serde_json::json!({
+                "prompt": "a ship",
+                "model": model,
+                "width": 512,
+                "height": 512,
+                "steps": 4,
+                "guidance": 1.0,
+                "batch_size": 1,
+                "upscale_model": "real-esrgan-x4plus:fp16"
+            }))
+            .unwrap()
+        };
+
+        let video = request("wan2.2-t2v:a14b");
+        assert!(video.frames.is_none());
+        let error = require_generation_framewise_runtime(&video, Some("wan"), false).unwrap_err();
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "VIDEO_UPSCALE_CODEC_RUNTIME_UNAVAILABLE");
+
+        let image = request("flux-schnell:q8");
+        require_generation_framewise_runtime(&image, Some("flux"), false).unwrap();
+    }
 
     #[test]
     fn event_stream_gap_has_explicit_resync_wire_contract() {

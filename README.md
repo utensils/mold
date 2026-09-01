@@ -66,6 +66,9 @@ mold serve
 
 Models download automatically on first use. Generated media is saved locally
 with prompt, model, seed, and generation metadata.
+Framewise video upscale also needs the host codec bridge: Nix packages and
+CUDA containers include it, while raw binary installs must provide `ffmpeg`
+and `ffprobe` on `PATH` before the server advertises that feature.
 
 ## What it supports
 

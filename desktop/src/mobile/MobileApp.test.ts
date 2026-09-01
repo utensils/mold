@@ -465,6 +465,7 @@ function serveStillModel(): void {
 }
 
 const durableQueueCapabilities = {
+  video_upscale: { available: true },
   queue: { heterogeneous_batch_max_outputs: 64 },
   durable_media: {
     protocol_version: 2,

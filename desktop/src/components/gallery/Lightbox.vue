@@ -64,6 +64,8 @@ const props = withDefaults(
     mesh?: boolean;
     /** Audio-only print: no raster to show, a transport instead. */
     audio?: boolean;
+    /** The origin host can actually execute this media's upscale workflow. */
+    upscaleEnabled?: boolean;
     source?: GallerySource;
     /** Origin host to fetch media from; null = the primary connection. */
     target?: ApiTarget | null;
@@ -98,6 +100,7 @@ const props = withDefaults(
   {
     mesh: false,
     audio: false,
+    upscaleEnabled: true,
     source: "host",
     target: null,
     cacheKey: null,
@@ -836,7 +839,7 @@ async function performVideoExport(options: VideoExportOptions) {
           </button>
         </div>
         <button
-          v-if="!audio && !trashed"
+          v-if="upscaleEnabled && !audio && !trashed"
           type="button"
           data-test="lightbox-upscale"
           class="border-ce mt-2.5 h-10 w-full rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"

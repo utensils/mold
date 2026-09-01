@@ -579,6 +579,8 @@
               MOLD_BUILD_DATE = gitDate;
               # The embedded engine serves the regular web SPA to browsers.
               MOLD_WEB_DIST = "${mold-web}";
+              MOLD_BUNDLED_FFMPEG = "${pkgs.ffmpeg}/bin/ffmpeg";
+              MOLD_BUNDLED_FFPROBE = "${pkgs.ffmpeg}/bin/ffprobe";
               CUDA_PATH = lib.optionalString isLinux "${cudaToolkit}";
               CUDA_COMPUTE_CAP = lib.optionalString isLinux computeCap;
               NIX_LDFLAGS = lib.optionalString isLinux "-L${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
@@ -708,6 +710,10 @@
               // {
                 inherit cargoArtifacts meta;
                 MOLD_WEB_DIST = "${mold-web}";
+                # The codec bridge stays process-isolated, but the packaged
+                # server does not depend on the caller's PATH.
+                MOLD_BUNDLED_FFMPEG = "${pkgs.ffmpeg}/bin/ffmpeg";
+                MOLD_BUNDLED_FFPROBE = "${pkgs.ffmpeg}/bin/ffprobe";
                 cargoExtraArgs = "-p mold-ai --features ${releaseFeaturesFor computeCap}";
                 postInstall =
                   if isLinux then

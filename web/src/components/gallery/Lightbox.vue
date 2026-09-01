@@ -46,32 +46,39 @@ import {
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
 
-const props = defineProps<{
-  item: GalleryImage | null;
-  // Position in the filtered list — surfaced as "n / N".
-  index: number;
-  total: number;
-  hasPrev: boolean;
-  hasNext: boolean;
-  // Global audio preference; native controls still let the user override.
-  muted: boolean;
-  models?: ModelInfoExtended[] | undefined;
-  /** Stitched from a sequence (`metadata.chain`): reuse loads a clip rail. */
-  isSequence?: boolean;
-  /** Its producing job is (without probing) still on its origin host. */
-  canEditSequence?: boolean;
-  /** Some copy of this print lives on a host with `gallery.organize`:
-   * title / favorite / tags / collections are editable. */
-  canOrganize?: boolean;
-  /** Some copy lives on a host with `gallery.trash`: Delete reads Trash. */
-  canTrash?: boolean;
-  /** Viewing the Trash scope: Restore / Delete forever replace Delete. */
-  inTrash?: boolean;
-  /** Merged collections with this print's membership state. */
-  collections?: CollectionPickerRow[];
-  /** Merged cross-host tag vocabulary for autocomplete. */
-  tagSuggestions?: TagCount[];
-}>();
+const props = withDefaults(
+  defineProps<{
+    item: GalleryImage | null;
+    // Position in the filtered list — surfaced as "n / N".
+    index: number;
+    total: number;
+    hasPrev: boolean;
+    hasNext: boolean;
+    // Global audio preference; native controls still let the user override.
+    muted: boolean;
+    /** The origin host can actually execute this media's upscale workflow. */
+    upscaleEnabled?: boolean;
+    models?: ModelInfoExtended[] | undefined;
+    /** Stitched from a sequence (`metadata.chain`): reuse loads a clip rail. */
+    isSequence?: boolean;
+    /** Its producing job is (without probing) still on its origin host. */
+    canEditSequence?: boolean;
+    /** Some copy of this print lives on a host with `gallery.organize`:
+     * title / favorite / tags / collections are editable. */
+    canOrganize?: boolean;
+    /** Some copy lives on a host with `gallery.trash`: Delete reads Trash. */
+    canTrash?: boolean;
+    /** Viewing the Trash scope: Restore / Delete forever replace Delete. */
+    inTrash?: boolean;
+    /** Merged collections with this print's membership state. */
+    collections?: CollectionPickerRow[];
+    /** Merged cross-host tag vocabulary for autocomplete. */
+    tagSuggestions?: TagCount[];
+  }>(),
+  {
+    upscaleEnabled: true,
+  },
+);
 
 const emit = defineEmits<{
   (e: "close"): void;
@@ -377,7 +384,7 @@ function onMediaContextMenu(event: MouseEvent) {
 }
 function onUpscale() {
   menuOpen.value = false;
-  if (props.item) emit("upscale", props.item);
+  if (props.item && props.upscaleEnabled !== false) emit("upscale", props.item);
 }
 function onDelete() {
   menuOpen.value = false;
@@ -583,7 +590,11 @@ async function performVideoExport(options: VideoExportOptions) {
                     </button>
                   </template>
                   <template v-else>
-                    <button role="menuitem" @click="onUpscale">
+                    <button
+                      v-if="upscaleEnabled !== false"
+                      role="menuitem"
+                      @click="onUpscale"
+                    >
                       {{
                         mediaKind(item.format, item.filename) === "video"
                           ? "Framewise upscale…"
@@ -869,7 +880,11 @@ async function performVideoExport(options: VideoExportOptions) {
                   </button>
                 </template>
                 <template v-else>
-                  <button role="menuitem" @click="onUpscale">
+                  <button
+                    v-if="upscaleEnabled !== false"
+                    role="menuitem"
+                    @click="onUpscale"
+                  >
                     {{ isVideoFile ? "Framewise upscale…" : "Upscale…" }}
                   </button>
                   <button

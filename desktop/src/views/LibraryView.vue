@@ -360,7 +360,7 @@ function closeUpscaleDialog() {
 }
 
 async function openUpscaleDialog(entry: MergedPrint) {
-  if (isAudio(entry.item) || !targetFor(entry)) return;
+  if (!canUpscaleEntry(entry) || !targetFor(entry)) return;
   stopUpscalePoll();
   const epoch = ++upscaleEpoch;
   upscaleEntry.value = entry;
@@ -381,6 +381,13 @@ async function openUpscaleDialog(entry: MergedPrint) {
       // Old hosts do not expose durable video-upscale history.
     }
   }
+}
+
+function canUpscaleEntry(entry: MergedPrint | null): boolean {
+  if (!entry || isAudio(entry.item) || isMesh(entry.item)) return false;
+  return (
+    !isVideo(entry.item) || hosts.capabilities[entry.sourceKey]?.video_upscale?.available === true
+  );
 }
 
 async function pollUpscaleJob() {
@@ -1203,7 +1210,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
         upscalingFilename.value === item.filename
           ? "Upscaling…"
           : libraryUpscaleLabel(isVideo(item) ? "video" : "image").replace("…", ""),
-      disabled: !targetFor(entry) || upscalingFilename.value !== null || isAudio(item),
+      disabled: !targetFor(entry) || upscalingFilename.value !== null || !canUpscaleEntry(entry),
       action: () => openUpscaleDialog(entry),
     },
     {
@@ -2788,6 +2795,7 @@ onUnmounted(() => {
       :can-organize="organizeAvailable && canOrganizeEntry(selectedEntry)"
       :can-trash="entryTrashCapable(selectedEntry)"
       :trashed="inTrash"
+      :upscale-enabled="canUpscaleEntry(selectedEntry)"
       :collections="gallery.mergedCollections"
       :collection-counts="gallery.collectionCounts"
       :tag-suggestions="gallery.mergedTags"
