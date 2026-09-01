@@ -18208,6 +18208,42 @@ mod tests {
         ));
     }
 
+    /// A catalog row can name a gated built-in — `hf:tencent/Hunyuan3D-2` and
+    /// `hunyuan3d:fp16` are the same weights reached two ways. The catalog
+    /// route enqueues by manifest name and never checked acceptance, so that
+    /// second way bypassed consent entirely and failed later in the worker.
+    #[test]
+    fn a_catalog_row_for_a_gated_built_in_is_refused_with_its_terms() {
+        let (home, _guard) = license_home();
+        let refusal = crate::catalog_api::catalog_license_refusal("tencent/Hunyuan3D-2")
+            .expect("a gated built-in must be refused through the catalog route too");
+        assert_eq!(refusal.status(), StatusCode::FORBIDDEN);
+        assert_eq!(refusal.code, mold_core::LICENSE_NOT_ACCEPTED);
+        assert_eq!(
+            refusal.license.as_ref().unwrap().id,
+            "tencent-hunyuan3d-2.0"
+        );
+
+        // …and stops once consent is on record for this root.
+        mold_core::license_acceptance::record_acceptance(
+            home.path(),
+            &mold_core::license_acceptance::TENCENT_HUNYUAN3D_2_0,
+        )
+        .unwrap();
+        assert!(crate::catalog_api::catalog_license_refusal("tencent/Hunyuan3D-2").is_none());
+    }
+
+    /// Guards against the catalog gate firing for everything.
+    #[test]
+    fn a_catalog_row_for_an_ungated_model_is_never_refused() {
+        let (_home, _guard) = license_home();
+        assert!(
+            crate::catalog_api::catalog_license_refusal("black-forest-labs/FLUX.1-schnell")
+                .is_none()
+        );
+        assert!(crate::catalog_api::catalog_license_refusal("not-a-repo/at-all").is_none());
+    }
+
     /// A refusal is the one download failure a client CAN resolve. Reporting
     /// it as a 500 with no payload told the user it was the server's fault and
     /// stripped the terms a UI needs to offer acceptance.

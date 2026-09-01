@@ -504,6 +504,31 @@ pub(crate) async fn enqueue_missing_companions(
     jobs
 }
 
+/// The structured refusal a gated catalog entry must answer with, if any.
+///
+/// A catalog row can name a gated built-in — `hf:tencent/Hunyuan3D-2` and
+/// `hunyuan3d:fp16` are the same weights reached two ways. This route enqueues
+/// by manifest name and never ran the acceptance check, so that second way
+/// bypassed consent entirely and failed later inside the worker: a queued
+/// toast, then a dead job, and no terms ever shown.
+///
+/// Refuses with the same 403 `/api/downloads` uses, so a client takes consent
+/// through `POST /api/licenses/accept` and retries. No request body is needed
+/// here, because acceptance now has a route of its own.
+pub(crate) fn catalog_license_refusal(source_id: &str) -> Option<crate::routes::ApiError> {
+    let manifest = mold_core::manifest::find_manifest(source_id)
+        .or_else(|| mold_core::manifest::find_manifest_by_hf_repo(source_id))?;
+    let mold_home = mold_core::Config::mold_dir()?;
+    let outstanding =
+        mold_core::license_acceptance::unaccepted_for_manifest(&manifest.name, &mold_home);
+    let refusal = outstanding.first()?;
+    let license = mold_core::license_acceptance::license_by_id(&refusal.id)?;
+    Some(crate::routes::ApiError::license_not_accepted(
+        &manifest.name,
+        license,
+    ))
+}
+
 pub async fn post_catalog_download(
     State(state): State<crate::state::AppState>,
     Path(id): Path<String>,
@@ -575,6 +600,19 @@ pub async fn post_catalog_download(
             catalog_download_unsupported_reason(&entry),
         )
             .into_response();
+    }
+
+    // A catalog row can name a gated built-in: `hf:tencent/Hunyuan3D-2` and
+    // `hunyuan3d:fp16` are the same weights reached two ways. This route
+    // enqueues by manifest name and never ran the acceptance check, so that
+    // second way bypassed consent entirely and failed later inside the worker
+    // — a queued toast, then a dead job, and no terms ever shown.
+    //
+    // Refuse with the same structured 403 `/api/downloads` uses. Clients take
+    // consent through `POST /api/licenses/accept` and retry this request; no
+    // request body is needed here because acceptance now has its own route.
+    if let Some(refusal) = catalog_license_refusal(&entry.source_id) {
+        return refusal.into_response();
     }
 
     // Validate the primary route and its credential before enqueueing any

@@ -82,9 +82,18 @@ export function useLicenseAcceptance() {
       for (const requirement of prompt.requirements) {
         if (prompt.intent === "record") {
           try {
-            await recordLicenseAcceptances(prompt.target, requirement.licenses);
+            // Without the signal a slow POST left the dialog busy and then
+            // resolved as accepted, so Cancel did nothing the user could see.
+            await recordLicenseAcceptances(
+              prompt.target,
+              requirement.licenses,
+              controller.signal,
+            );
             continue;
           } catch (cause) {
+            if (cause instanceof DOMException && cause.name === "AbortError") {
+              throw cause;
+            }
             // A host predating the standalone accept route can only record
             // consent as a side effect of a download, so take that path and
             // tell the caller the bundle is already on its way.

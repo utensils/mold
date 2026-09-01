@@ -1326,6 +1326,7 @@ fn render_license_settings(frame: &mut Frame, app: &App) {
         Line::from(format!("Acceptance is recorded on {host_label} only.")),
         Line::from(""),
     ];
+    let mut row_offsets: Vec<u16> = Vec::new();
     match state {
         crate::app::LicenseListingState::Loading => {
             text.push(Line::from("Checking licenses…"));
@@ -1341,6 +1342,12 @@ fn render_license_settings(frame: &mut Frame, app: &App) {
         }
         crate::app::LicenseListingState::Ready(rows) => {
             for (index, row) in rows.iter().enumerate() {
+                // Remember where each license starts so the selected one can
+                // be scrolled into view: three registered licences with
+                // wrapped summaries and two URLs each do not fit an 80x24
+                // terminal, and j/k that moves an invisible marker is worse
+                // than no navigation at all.
+                row_offsets.push(u16::try_from(text.len()).unwrap_or(u16::MAX));
                 let marker = if index == *selected { "▸ " } else { "  " };
                 let (state_label, state_style) = if row.accepted {
                     ("accepted", Style::default().fg(theme.success))
@@ -1378,8 +1385,31 @@ fn render_license_settings(frame: &mut Frame, app: &App) {
             )));
         }
     }
+    // Scroll so the selected license's first line is on screen. Wrapping
+    // makes the true rendered height larger than `text.len()`, so this is a
+    // floor, not an exact position — it can never scroll PAST the selection,
+    // which is the property that matters.
+    let inner_height = block.inner(area).height;
+    let total = u16::try_from(text.len()).unwrap_or(u16::MAX);
+    // Scroll to the END of the selected block, not merely its first line: a
+    // row whose heading is on screen but whose terms and "needed by" are cut
+    // off is still unreachable, and the footer below it never appears at all.
+    let scroll = row_offsets
+        .get(*selected)
+        .map(|_| {
+            row_offsets
+                .get(selected + 1)
+                .copied()
+                .unwrap_or(total)
+                .saturating_sub(inner_height)
+        })
+        .unwrap_or(0)
+        .min(total.saturating_sub(inner_height));
     frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        Paragraph::new(text)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         area,
     );
 }
@@ -1639,6 +1669,57 @@ mod tests {
         );
         assert!(rendered.contains("accepted"));
         assert!(!rendered.contains("review required"));
+    }
+
+    /// The layout invariant AGENTS.md asks for: navigating to the last
+    /// license must actually bring it on screen on a stock 80x24 terminal.
+    /// Three registered licences, each with a wrapped summary and two URLs,
+    /// do not fit — so a `selected` that moves without scrolling would leave
+    /// the later rows permanently unreachable.
+    #[test]
+    fn license_settings_scrolls_the_selected_row_into_view() {
+        let rows: Vec<_> = (0..4)
+            .map(|i| {
+                let mut row = license_status("future-license", false, vec!["future-bundle".into()]);
+                row.name = format!("Future terms {i}");
+                row
+            })
+            .collect();
+
+        let first = render_popup_to_string_sized(
+            crate::app::Popup::LicenseSettings {
+                host_label: "hal9000".into(),
+                state: crate::app::LicenseListingState::Ready(rows.clone()),
+                selected: 0,
+            },
+            80,
+            24,
+        );
+        assert!(first.contains("Future terms 0"));
+
+        let last = render_popup_to_string_sized(
+            crate::app::Popup::LicenseSettings {
+                host_label: "hal9000".into(),
+                state: crate::app::LicenseListingState::Ready(rows),
+                selected: 3,
+            },
+            80,
+            24,
+        );
+        // Not merely the heading: the whole block must be reachable, and the
+        // key hints below it too. At scroll 0 neither is on screen.
+        assert!(
+            !first.contains("Future terms 3"),
+            "the fixture must actually overflow, or this proves nothing:\n{first}"
+        );
+        assert!(
+            last.contains("Future terms 3"),
+            "selecting the last license must scroll it into view:\n{last}"
+        );
+        assert!(
+            last.contains("Esc"),
+            "the key hints must be reachable at the bottom of the list:\n{last}"
+        );
     }
 
     /// A host that cannot answer is reported against that host — never

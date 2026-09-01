@@ -54,11 +54,13 @@ export async function fetchLicenseListing(
 export async function recordLicenseAcceptances(
   target: ApiTarget,
   licenses: readonly LicenseTerms[],
+  signal?: AbortSignal,
 ): Promise<LicenseListing> {
   try {
     const response = await apiFetchTo(target, "/api/licenses/accept", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      ...(signal ? { signal } : {}),
       body: JSON.stringify({ accept_licenses: licenses.map(acceptanceFor) }),
     });
     return (await response.json()) as LicenseListing;
