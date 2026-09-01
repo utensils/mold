@@ -32,6 +32,15 @@ case "$url" in
     "default_steps": 1,
     "default_width": 1024,
     "default_height": 1024
+  },
+  {
+    "name": "hunyuan3d-mini-turbo:fp16",
+    "family": "hunyuan3d",
+    "downloaded": true,
+    "default_steps": 5,
+    "default_width": 1022,
+    "default_height": 1022,
+    "source_image": "required"
   }
 ]
 JSON
@@ -83,3 +92,37 @@ if [[ "$args" != *"ellipse 512,560"* || "$args" != *"arc 300,430 455,665"* || "$
 fi
 
 echo "regression matrix source image is teapot-shaped"
+
+# A mesh family has no output canvas: the manifest's width/height are the
+# conditioning size the source image is letterboxed to, not a raster the render
+# produces. The arm must therefore queue exactly one image-to-mesh case and
+# must not hand the CLI a canvas it would have to ignore.
+log="$tmp/run/source-image/results.jsonl"
+mapfile -t mesh_cmds < <(jq -r 'select(.status == "start" and .family == "hunyuan3d") | .cmd' "$log")
+if (( ${#mesh_cmds[@]} != 1 )); then
+  echo "expected exactly one queued hunyuan3d case, got ${#mesh_cmds[@]}" >&2
+  printf '%s\n' "${mesh_cmds[@]}" >&2
+  exit 1
+fi
+mesh_cmd="${mesh_cmds[0]}"
+for required in "--format glb" "--image" ".source.glb" "--steps 5"; do
+  if [[ "$mesh_cmd" != *"$required"* ]]; then
+    echo "hunyuan3d case is missing $required" >&2
+    echo "$mesh_cmd" >&2
+    exit 1
+  fi
+done
+for forbidden in "--width" "--height" "--frames" "--fps"; do
+  if [[ "$mesh_cmd" == *"$forbidden"* ]]; then
+    echo "hunyuan3d case must not pass $forbidden: a mesh has no canvas or timeline" >&2
+    echo "$mesh_cmd" >&2
+    exit 1
+  fi
+done
+mesh_output="$(jq -r 'select(.status == "ok" and .family == "hunyuan3d") | .output' "$log")"
+if [[ "$mesh_output" != *"hunyuan3d.hunyuan3d-mini-turbo"*".source.glb" ]]; then
+  echo "unexpected hunyuan3d output path: $mesh_output" >&2
+  exit 1
+fi
+
+echo "regression matrix queues one canvasless hunyuan3d mesh case"

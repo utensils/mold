@@ -140,13 +140,17 @@ the full multiscale refinement path.
 | **LTX-2**       | Yes              | Yes                           | Correctness-only |
 | Wan Video       | Yes              | Correctness-only              | Correctness-only |
 | MiniMax H3      | SM89 H3 builds   | Correctness-only, unqualified | No               |
-| Hunyuan3D       | Correctness-only | Correctness-only              | Correctness-only |
+| Hunyuan3D       | Correctness-only | Yes                           | Correctness-only |
 
-::: warning Hunyuan3D is not performance-qualified
-The shape path is dense matmuls and attention with no custom kernel, so it is
-portable by construction — but "Yes" in this table is a claim about MEASURED
-performance on real weights, and that campaign has not run. Correctness-only is
-the honest answer until it does.
+::: tip Hunyuan3D Metal qualification
+Metal is qualified on real weights: `hunyuan3d-mini-turbo:fp16` on an M4 Max at
+octree 192, 256 and 320, compared against ComfyUI on the same checkpoint, image
+and seed (`scripts/capture-hunyuan3d-metal-uat.sh` against
+`scripts/capture-hunyuan3d-comfy-metal-reference.sh`). The shape path is dense
+fp16 matmuls and attention with no custom kernel, so CUDA is portable by
+construction — but "Yes" in this table is a claim about MEASURED performance on
+real weights, and that campaign has not run on a CUDA card. Correctness-only is
+the honest answer there until it does.
 :::
 
 ::: tip LTX-2 Metal qualification

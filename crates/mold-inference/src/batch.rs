@@ -530,14 +530,19 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
     FamilyBatchCapability {
         family: "hunyuan3d",
         aliases: &["hunyuan-3d"],
-        // Nothing here is hardware-qualified yet. The whole shape path is
-        // dense f32/bf16 matmuls and attention with no custom kernel, so it
-        // is portable by construction — but `Supported` is a claim about
-        // measured performance on real weights, and the UAT has not run.
-        // `CorrectnessOnly` is the honest answer until it does.
+        // Metal is qualified on real weights: `hunyuan3d-mini-turbo:fp16` on
+        // an M4 Max, octree 192/256/320, compared against ComfyUI on the same
+        // checkpoint, image and seed (`scripts/capture-hunyuan3d-metal-uat.sh`
+        // against `scripts/capture-hunyuan3d-comfy-metal-reference.sh`;
+        // evidence under `$MOLD_HOME/output/verification/hunyuan3d/`). The
+        // whole shape path is dense fp16 matmuls and attention with no custom
+        // kernel, so CUDA is portable by construction — but `Supported` is a
+        // claim about MEASURED performance on real weights, and that campaign
+        // has not run on a CUDA card. `CorrectnessOnly` stays the honest
+        // answer there, and on the CPU.
         backends: BackendApplicability {
             cuda: BackendQualification::CorrectnessOnly,
-            metal: BackendQualification::CorrectnessOnly,
+            metal: BackendQualification::Supported,
             cpu: BackendQualification::CorrectnessOnly,
         },
         placement: ComponentPlacementCapability {

@@ -675,7 +675,7 @@ impl ShapeVae {
     pub fn decode_queries_cached(&self, queries: &Tensor, cross_kv: &Tensor) -> Result<Tensor> {
         let geo = &self.geo_decoder;
         // `self.query_proj(self.fourier_embedder(queries).to(latents.dtype))`
-        // — vae.py:889.
+        // — vae.py:888.
         let embedded = geo.fourier.forward(queries)?.to_dtype(cross_kv.dtype())?;
         let xs = geo.query_proj.forward(&embedded)?;
         let xs = geo.cross_attn_decoder.forward_with_kv(&xs, cross_kv)?;
@@ -693,12 +693,26 @@ impl ShapeVae {
     /// grid layout the mesher expects.
     ///
     /// `VanillaVolumeDecoder` views the concatenated logits as
-    /// `(B, R, R, R)` in `ij` order, i.e. axes `(x, y, z)` (`vae.py:454`), and
-    /// then `ShapeVAE.decode` returns `grid_logits.movedim(-2, -1)`
-    /// (`vae.py:973`), swapping the last two axes to `(x, z, y)`. That trailing
-    /// movedim is load-bearing — it is the only thing that makes the mesh come
-    /// out unmirrored — so it is reproduced here rather than left to the
-    /// caller. Result is `[B, R, R, R]` indexed `[b, x, z, y]`.
+    /// `(B, R, R, R)` in `ij` order, i.e. axes `(x, y, z)` (`vae.py:455`).
+    /// TWO upstream moves then sit between that tensor and the mesher, and
+    /// both are reproduced here because each one alone rotates the mesh:
+    ///
+    /// 1. `ShapeVAE.decode` returns `grid_logits.movedim(-2, -1)`
+    ///    (`vae.py:976`), swapping the last two axes to `(x, z, y)`.
+    /// 2. ComfyUI never calls `ShapeVAE.decode` directly: `VAEDecodeHunyuan3D`
+    ///    goes through the generic `comfy.sd.VAE.decode` wrapper, which ends
+    ///    every decode — image, video or voxel — with `movedim(1, -1)`
+    ///    (`comfy/sd.py:1277`, the channels-last step meant for pictures).
+    ///    On a `(B, x, z, y)` grid that moves `x` to the end: `(z, y, x)`.
+    ///
+    /// The mesher (`nodes_hunyuan3d.py:229-413`) therefore walks a `[z][y][x]`
+    /// grid, emits vertex columns in that order and finishes with
+    /// `torch.fliplr`, so its final vertices are `(x, y, z)` — the raw query
+    /// coordinates, with every transpose cancelled. Porting only the first
+    /// move (as this function once did) hands glTF a mesh whose axes are the
+    /// cyclic permutation `(y, z, x)` of the oracle's, which is how the first
+    /// real render came out lying on its side. Result is `[B, R, R, R]`
+    /// indexed `[b, z, y, x]`.
     pub fn reshape_grid_logits(logits: &Tensor, octree_resolution: usize) -> Result<Tensor> {
         let (b, n) = logits.dims2()?;
         let r = octree_resolution + 1;
@@ -710,7 +724,11 @@ impl ShapeVae {
         }
         logits
             .reshape((b, r, r, r))?
+            // `(x, y, z)` -> `(x, z, y)`: `ShapeVAE.decode`'s own movedim.
             .transpose(D::Minus2, D::Minus1)?
+            // `(x, z, y)` -> `(z, y, x)`: the VAE wrapper's channels-last
+            // movedim(1, -1).
+            .permute((0, 2, 3, 1))?
             .contiguous()
     }
 }
@@ -939,10 +957,34 @@ mod tests {
     }
 
     fn tiny_vae(device: &Device) -> (ShapeVaeConfig, ShapeVae) {
+        tiny_vae_on(device, DType::F32)
+    }
+
+    /// The weights are authored on the CPU in F32 and cast + moved by
+    /// `VarBuilder::from_tensors` as the model asks for them, so one
+    /// generator serves every device and dtype.
+    fn tiny_vae_on(device: &Device, dtype: DType) -> (ShapeVaeConfig, ShapeVae) {
         let cfg = tiny_config();
-        let vb = VarBuilder::from_tensors(synthetic_weights(&cfg, device), DType::F32, device);
+        let vb = VarBuilder::from_tensors(synthetic_weights(&cfg, &Device::Cpu), dtype, device);
         let vae = ShapeVae::new(&cfg, vb).expect("build tiny ShapeVae");
         (cfg, vae)
+    }
+
+    /// Latents in the shape the DiT emits, deterministic and small. Only the
+    /// accelerator forward tests use it, so a build without either GPU
+    /// feature would otherwise see it as dead code.
+    #[cfg(any(feature = "metal", feature = "cuda"))]
+    fn tiny_latents(cfg: &ShapeVaeConfig, device: &Device, dtype: DType) -> Tensor {
+        let mut rng = Lcg(0x0FF1_CE00_1234_5678);
+        let data: Vec<f32> = (0..cfg.embed_dim * cfg.num_latents)
+            .map(|_| rng.next_f32())
+            .collect();
+        Tensor::from_vec(data, (1, cfg.embed_dim, cfg.num_latents), &Device::Cpu)
+            .expect("latents")
+            .to_device(device)
+            .expect("move")
+            .to_dtype(dtype)
+            .expect("cast")
     }
 
     #[test]
@@ -1066,6 +1108,45 @@ mod tests {
         assert_eq!(grid.dims(), &[1, 4, 4, 4]);
     }
 
+    /// Pins both upstream moves at once. A logit tagged with its query index
+    /// as `100 x + 10 y + z` must land at `[b, z, y, x]`: the ShapeVAE's
+    /// `movedim(-2, -1)` (`vae.py:976`) followed by the VAE wrapper's
+    /// `movedim(1, -1)` (`comfy/sd.py:1277`). Reproducing only the first
+    /// leaves `x` in front and rotates every mesh.
+    #[test]
+    fn reshape_grid_logits_hands_the_mesher_upstreams_channels_last_grid() {
+        let r = 3usize;
+        let mut tagged = Vec::with_capacity(r * r * r);
+        for x in 0..r {
+            for y in 0..r {
+                for z in 0..r {
+                    tagged.push((100 * x + 10 * y + z) as f32);
+                }
+            }
+        }
+        let flat = Tensor::from_vec(tagged, (1, r * r * r), &Device::Cpu).expect("flat");
+        let grid = ShapeVae::reshape_grid_logits(&flat, r - 1).expect("reshape");
+        assert_eq!(grid.dims(), &[1, r, r, r]);
+        let values = grid
+            .flatten_all()
+            .expect("flat")
+            .to_vec1::<f32>()
+            .expect("vec");
+        for a0 in 0..r {
+            for a1 in 0..r {
+                for a2 in 0..r {
+                    let got = values[(a0 * r + a1) * r + a2];
+                    let (z, y, x) = (a0, a1, a2);
+                    assert_eq!(
+                        got,
+                        (100 * x + 10 * y + z) as f32,
+                        "grid[{a0}][{a1}][{a2}] must hold the logit of query (x={x}, y={y}, z={z})"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn decode_is_invariant_to_query_chunking() {
         let device = Device::Cpu;
@@ -1121,6 +1202,119 @@ mod tests {
             .expect("vec");
         for (a, b) in whole.iter().zip(uncached.iter()) {
             assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    /// The whole decode — `post_kl`, the self-attention stack, the Fourier
+    /// embedder, and the cross-attention — has to run on Metal in F16, which
+    /// is the dtype `super::backend::compute_dtype` picks for every
+    /// accelerator. The query grid is cast to the compute dtype too, exactly
+    /// as `comfy/ldm/hunyuan3d/vae.py:442` casts it to `latents.dtype`.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn tiny_vae_decode_runs_on_metal_in_f16() {
+        let Ok(metal) = Device::new_metal(0) else {
+            return;
+        };
+        let cpu = Device::Cpu;
+        let (cfg, reference) = tiny_vae_on(&cpu, DType::F32);
+        let (_, vae) = tiny_vae_on(&metal, DType::F16);
+
+        let want = {
+            let latents = tiny_latents(&cfg, &cpu, DType::F32);
+            let queries = query_grid(3, 1.01, &cpu, DType::F32)
+                .expect("grid")
+                .unsqueeze(0)
+                .expect("batch");
+            let prepared = reference.prepare_latents(&latents).expect("prepare");
+            reference
+                .decode_queries(&queries, &prepared)
+                .expect("cpu decode")
+                .flatten_all()
+                .expect("flat")
+                .to_vec1::<f32>()
+                .expect("vec")
+        };
+
+        let latents = tiny_latents(&cfg, &metal, DType::F16);
+        let queries = query_grid(3, 1.01, &metal, DType::F16)
+            .expect("grid")
+            .unsqueeze(0)
+            .expect("batch");
+        let prepared = vae.prepare_latents(&latents).expect("prepare");
+        let logits = vae
+            .decode_queries(&queries, &prepared)
+            .expect("metal decode");
+        assert_eq!(logits.dims(), &[1, query_grid_len(3)]);
+
+        let got = logits
+            .to_dtype(DType::F32)
+            .expect("widen")
+            .flatten_all()
+            .expect("flat")
+            .to_vec1::<f32>()
+            .expect("vec");
+        assert_eq!(got.len(), want.len());
+        for (index, (metal_value, cpu_value)) in got.iter().zip(&want).enumerate() {
+            assert!(metal_value.is_finite(), "point {index} is not finite");
+            assert!(
+                (metal_value - cpu_value).abs() < 5e-2,
+                "point {index}: metal F16 {metal_value} vs cpu F32 {cpu_value}"
+            );
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tiny_vae_decode_runs_on_cuda_in_f16() {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return;
+        };
+        let cpu = Device::Cpu;
+        let (cfg, reference) = tiny_vae_on(&cpu, DType::F32);
+        let (_, vae) = tiny_vae_on(&cuda, DType::F16);
+
+        let want = {
+            let latents = tiny_latents(&cfg, &cpu, DType::F32);
+            let queries = query_grid(3, 1.01, &cpu, DType::F32)
+                .expect("grid")
+                .unsqueeze(0)
+                .expect("batch");
+            let prepared = reference.prepare_latents(&latents).expect("prepare");
+            reference
+                .decode_queries(&queries, &prepared)
+                .expect("cpu decode")
+                .flatten_all()
+                .expect("flat")
+                .to_vec1::<f32>()
+                .expect("vec")
+        };
+
+        let latents = tiny_latents(&cfg, &cuda, DType::F16);
+        let queries = query_grid(3, 1.01, &cuda, DType::F16)
+            .expect("grid")
+            .unsqueeze(0)
+            .expect("batch");
+        let prepared = vae.prepare_latents(&latents).expect("prepare");
+        let logits = vae
+            .decode_queries(&queries, &prepared)
+            .expect("cuda decode");
+        assert_eq!(logits.dims(), &[1, query_grid_len(3)]);
+
+        let got = logits
+            .to_dtype(DType::F32)
+            .expect("widen")
+            .flatten_all()
+            .expect("flat")
+            .to_vec1::<f32>()
+            .expect("vec");
+        assert_eq!(got.len(), want.len());
+        for (index, (cuda_value, cpu_value)) in got.iter().zip(&want).enumerate() {
+            assert!(cuda_value.is_finite(), "point {index} is not finite");
+            assert!(
+                (cuda_value - cpu_value).abs() < 5e-2,
+                "point {index}: cuda F16 {cuda_value} vs cpu F32 {cpu_value}"
+            );
         }
     }
 

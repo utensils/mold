@@ -28,6 +28,26 @@ and a DINOv2-giant image encoder, which is why a "0.6B" model is still 3.6 GiB
 
 No quantized (GGUF or FP8) variants exist for this family upstream.
 
+## Measured on Apple Silicon
+
+`hunyuan3d-mini-turbo:fp16` on an M4 Max (48 GB), fp16, the default decode
+chunk, one seed, a background-removed armchair. ComfyUI is the same checkpoint
+and seed on the same machine through PyTorch MPS.
+
+| Octree | Wall  | Peak RSS | Mesh                     | ComfyUI wall |
+| ------ | ----- | -------- | ------------------------ | ------------ |
+| 192    | 77 s  | 7.2 GB   | 145k vertices, 317k tris | 44 s         |
+| 256    | 144 s | 7.2 GB   | 264k vertices, 590k tris | 79 s         |
+| 320    | 256 s | 7.2 GB   | 417k vertices, 930k tris | 136 s        |
+
+The geometry matches ComfyUI's to a normalised Chamfer distance of 0.011 on
+every rung, with bounding-box extents within 5 % and triangle counts within
+19 %; two mold seeds differ from each other by 0.0025 on the same scale. mold
+is slower than PyTorch here: the volume decode (over 90 % of the wall time) runs
+through candle's chunked math attention on Metal rather than a fused kernel,
+and the tile size has already been swept — 512-row tiles are the fastest. CUDA
+has not been measured yet.
+
 ## Getting good results
 
 Prompt quality is irrelevant here. Source image quality is everything.
@@ -67,6 +87,12 @@ mold run hunyuan3d-mini-turbo --image chair.png --output - | some-gltf-viewer
 | `--octree`         | 256     | Query-grid resolution. The detail knob; **cost is cubic**. |
 | `--mesh-threshold` | 0.6     | Iso-level. Lower recovers thin features and adds noise.    |
 | `--target-faces`   | none    | Decimate to approximately this triangle count.             |
+
+The threshold is a level on the same `[0, 1]` occupancy scale ComfyUI's
+`VoxelToMesh` node thresholds, so a value that works in ComfyUI works here
+unchanged. (Internally the VAE's raw logits are mapped through
+`(x + 1) / 2`, clamped, before the surface is extracted — 0.6 sits at raw
+logit 0.2.)
 
 `--octree` accepts 128, 192, 256, 320 or 384. It is an allowlist rather than a
 range because the shape VAE evaluates its occupancy field on `(n + 1)³` points

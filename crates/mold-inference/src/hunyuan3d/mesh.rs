@@ -16,7 +16,7 @@
 //! (`nodes_hunyuan3d.py:231-240`), so "row-major `[z][y][x]`" is the ComfyUI
 //! spelling of the same layout.
 //!
-//! What those axes *mean* is worth writing down, because two upstream
+//! What those axes *mean* is worth writing down, because THREE upstream
 //! transposes cancel out in a way that is easy to get backwards:
 //!
 //! 1. `VanillaVolumeDecoder.__call__` (`comfy/ldm/hunyuan3d/vae.py:427-458`)
@@ -24,16 +24,25 @@
 //!    flattens row-major, then reshapes the logits to `(B, N+1, N+1, N+1)`.
 //!    At that point the axes are `[qx][qy][qz]` — query-space x, y, z.
 //! 2. `ShapeVAE.decode` returns `grid_logits.movedim(-2, -1)`
-//!    (`comfy/ldm/hunyuan3d/vae.py:976`), which swaps the last two axes.
-//!    The tensor handed to the mesher is therefore `[qx][qz][qy]`.
+//!    (`comfy/ldm/hunyuan3d/vae.py:976`), which swaps the last two axes:
+//!    `[qx][qz][qy]`.
+//! 3. That call is reached through the generic `comfy.sd.VAE.decode` wrapper,
+//!    which finishes every decode with the channels-last `movedim(1, -1)`
+//!    meant for images (`comfy/sd.py:1277`). On the voxel grid it moves `qx`
+//!    to the end: the tensor `VoxelToMesh` actually receives is `[qz][qy][qx]`.
 //!
-//! So `dim0 = query x`, `dim1 = query z`, `dim2 = query y`. Both mesh functions
+//! So `dim0 = query z`, `dim1 = query y`, `dim2 = query x`. Both mesh functions
 //! then emit vertex columns in `(dim0, dim1, dim2)` order and finish with
-//! `torch.fliplr` (`nodes_hunyuan3d.py:223` and `:411`), which reverses the
-//! columns to `(dim2, dim1, dim0)` = `(query y, query z, query x)`. The net
-//! effect is the query grid's `+z` becoming glTF's `+Y` (glTF is Y-up) and the
-//! handedness working out for a right-handed viewer. We reproduce both steps
-//! verbatim; "simplifying" the double transpose away rotates every mesh.
+//! `torch.fliplr` (`nodes_hunyuan3d.py:226` and `:412`), which reverses the
+//! columns to `(dim2, dim1, dim0)` = `(query x, query y, query z)`: the final
+//! vertex IS the raw query coordinate, every transpose cancelled. glTF is
+//! Y-up, so the query grid's `+y` is "up" in every viewer, and the handedness
+//! works out for a right-handed one. `ShapeVae::reshape_grid_logits` owns
+//! moves 2 and 3, this module owns the flip, and each is reproduced verbatim;
+//! "simplifying" any of them away rotates every mesh. The first real render
+//! shipped with move 3 missing and came out as the cyclic permutation
+//! `(qy, qz, qx)` — a chair lying on its side — which is what the
+//! orientation test at the bottom of this file now pins.
 //!
 //! The grid is cubic in practice (`octree_resolution + 1` on every axis), so a
 //! transposition bug is invisible in the shapes and only shows up as a rotated
@@ -1383,6 +1392,110 @@ mod tests {
 
     fn noop() -> impl FnMut(u32, u32) -> anyhow::Result<()> {
         |_, _| Ok(())
+    }
+
+    /// A sphere displaced along ONE query axis must come out displaced along
+    /// the SAME glTF axis. The grid is laid out `[qz][qy][qx]` exactly as
+    /// `ShapeVae::reshape_grid_logits` hands it over (`comfy/sd.py:1277`
+    /// after `vae.py:976`), and the mesher's `fliplr` must bring the columns
+    /// back to `(x, y, z)`. With the wrapper's move missing, a `+x` offset
+    /// surfaced on glTF `+Z` and every mesh was rotated.
+    #[test]
+    fn a_displacement_along_query_x_lands_on_gltf_x() {
+        let n = 24usize;
+        let c = (n as f32 - 1.0) / 2.0;
+        let offset = 6.0f32;
+        let mut logits = Vec::with_capacity(n * n * n);
+        for qz in 0..n {
+            for qy in 0..n {
+                for qx in 0..n {
+                    let d = ((qx as f32 - c - offset).powi(2)
+                        + (qy as f32 - c).powi(2)
+                        + (qz as f32 - c).powi(2))
+                    .sqrt();
+                    logits.push(4.0 - d);
+                }
+            }
+        }
+        let grid = OccupancyGrid::new(logits, [n, n, n]).unwrap();
+        let mesh = extract(&grid, MeshAlgorithm::SurfaceNet, 0.0, &mut |_, _| Ok(())).unwrap();
+        assert!(!mesh.vertices.is_empty());
+        let count = mesh.vertices.len() as f32;
+        let centroid = mesh.vertices.iter().fold([0.0f32; 3], |acc, v| {
+            [
+                acc[0] + v[0] / count,
+                acc[1] + v[1] / count,
+                acc[2] + v[2] / count,
+            ]
+        });
+        // Normalised by `v_max = n`, so `offset` cells is `2 * offset / n`.
+        let expected = 2.0 * offset / n as f32;
+        assert!(
+            (centroid[0] - expected).abs() < 0.05,
+            "the +x displacement must appear on glTF x, centroid = {centroid:?}"
+        );
+        assert!(
+            centroid[1].abs() < 0.05 && centroid[2].abs() < 0.05,
+            "no displacement may leak onto y or z, centroid = {centroid:?}"
+        );
+    }
+
+    /// The same displacement, but starting from the DECODER's flat logit
+    /// order and going through `ShapeVae::reshape_grid_logits` before the
+    /// mesher — the two conventions composed, exactly as `decode_occupancy`
+    /// composes them. The test above pins the mesher's half and the
+    /// `reshape_grid_logits` test pins the reshape's half; this one refuses
+    /// a future change that flips both in the same direction and leaves each
+    /// half-test green.
+    #[test]
+    fn a_decoder_order_displacement_along_x_survives_reshape_and_extraction() {
+        use crate::hunyuan3d::shape_vae::ShapeVae;
+        use candle_core::{Device, Tensor};
+
+        let octree = 23usize;
+        let n = octree + 1;
+        let c = (n as f32 - 1.0) / 2.0;
+        let offset = 6.0f32;
+        // `query_grid` order: x slowest, z fastest (`vae.py:440-441`).
+        let mut flat = Vec::with_capacity(n * n * n);
+        for qx in 0..n {
+            for qy in 0..n {
+                for qz in 0..n {
+                    let d = ((qx as f32 - c - offset).powi(2)
+                        + (qy as f32 - c).powi(2)
+                        + (qz as f32 - c).powi(2))
+                    .sqrt();
+                    flat.push(4.0 - d);
+                }
+            }
+        }
+        let logits = Tensor::from_vec(flat, (1, n * n * n), &Device::Cpu).unwrap();
+        let ordered = ShapeVae::reshape_grid_logits(&logits, octree)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let grid = OccupancyGrid::new(ordered, [n, n, n]).unwrap();
+        let mesh = extract(&grid, MeshAlgorithm::SurfaceNet, 0.0, &mut |_, _| Ok(())).unwrap();
+        assert!(!mesh.vertices.is_empty());
+        let count = mesh.vertices.len() as f32;
+        let centroid = mesh.vertices.iter().fold([0.0f32; 3], |acc, v| {
+            [
+                acc[0] + v[0] / count,
+                acc[1] + v[1] / count,
+                acc[2] + v[2] / count,
+            ]
+        });
+        let expected = 2.0 * offset / n as f32;
+        assert!(
+            (centroid[0] - expected).abs() < 0.05,
+            "a +x query displacement must reach glTF x through the whole pipeline, centroid = {centroid:?}"
+        );
+        assert!(
+            centroid[1].abs() < 0.05 && centroid[2].abs() < 0.05,
+            "no displacement may leak onto y or z, centroid = {centroid:?}"
+        );
     }
 
     /// Signed-distance-ish logits for a sphere of `radius` (in cells) centred

@@ -1,0 +1,58 @@
+{
+  "1": {
+    "class_type": "ImageOnlyCheckpointLoader",
+    "inputs": { "ckpt_name": "__CKPT_NAME__" }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "__IMAGE_FILENAME__" }
+  },
+  "3": {
+    "class_type": "CLIPVisionEncode",
+    "inputs": { "clip_vision": ["1", 1], "image": ["2", 0], "crop": "center" }
+  },
+  "4": {
+    "class_type": "Hunyuan3Dv2Conditioning",
+    "inputs": { "clip_vision_output": ["3", 0] }
+  },
+  "5": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": { "model": ["1", 0], "shift": 1.0 }
+  },
+  "6": {
+    "class_type": "EmptyLatentHunyuan3Dv2",
+    "inputs": { "resolution": 3072, "batch_size": 1 }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["5", 0],
+      "seed": 25026,
+      "steps": 5,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "positive": ["4", 0],
+      "negative": ["4", 1],
+      "latent_image": ["6", 0],
+      "denoise": 1.0
+    }
+  },
+  "8": {
+    "class_type": "VAEDecodeHunyuan3D",
+    "inputs": {
+      "samples": ["7", 0],
+      "vae": ["1", 2],
+      "num_chunks": 8000,
+      "octree_resolution": 256
+    }
+  },
+  "9": {
+    "class_type": "VoxelToMesh",
+    "inputs": { "voxel": ["8", 0], "algorithm": "surface net", "threshold": 0.6 }
+  },
+  "10": {
+    "class_type": "SaveGLB",
+    "inputs": { "mesh": ["9", 0], "filename_prefix": "__FILENAME_PREFIX__" }
+  }
+}

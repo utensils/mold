@@ -28,7 +28,9 @@ mold run hunyuan3d --image chair.png --octree 320 -o chair.glb
 
 `--octree` (128 | 192 | 256 | 320 | 384, default 256) is the detail knob and
 its cost is CUBIC. `--mesh-threshold` (default 0.6) moves the extracted
-surface: lower recovers thin features and adds noise. Output is always binary
+surface: lower recovers thin features and adds noise; it is the same `[0, 1]`
+occupancy scale ComfyUI's `VoxelToMesh` thresholds, so a value tuned there
+carries over. Output is always binary
 glTF; OBJ exists only as a gallery export. `--frames`, `--fps`, masks,
 ControlNet and an explicit canvas are REFUSED for this family rather than
 ignored.

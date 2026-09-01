@@ -92,6 +92,25 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
     // and the named fp8 refusal. `Supported` waits on perf UAT.
     assert_eq!(wan.backends.metal, BackendQualification::CorrectnessOnly);
 
+    let hunyuan3d = capabilities
+        .iter()
+        .find(|capability| capability.family == "hunyuan3d")
+        .unwrap();
+    // Metal is the one qualified backend: `hunyuan3d-mini-turbo:fp16` on an
+    // M4 Max at octree 192/256/320 against ComfyUI on the same checkpoint,
+    // image and seed (`scripts/capture-hunyuan3d-metal-uat.sh`). CUDA is
+    // portable by construction but unmeasured, and the CPU never runs this
+    // family for memory reasons.
+    assert_eq!(hunyuan3d.backends.metal, BackendQualification::Supported);
+    assert_eq!(
+        hunyuan3d.backends.cuda,
+        BackendQualification::CorrectnessOnly
+    );
+    assert_eq!(
+        hunyuan3d.backends.cpu,
+        BackendQualification::CorrectnessOnly
+    );
+
     let qwen_edit = capabilities
         .iter()
         .find(|capability| capability.family == "qwen-image-edit")

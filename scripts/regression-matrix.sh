@@ -83,7 +83,7 @@ jq -r '
   [
     .[]
     | select(.downloaded == true)
-    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2","wan"))
+    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2","wan","hunyuan3d"))
     | select((.family != "ltx2") or (((.description // "") | ascii_downcase | contains("fp4") | not) and ((.description // "") | ascii_downcase | contains("nvfp4") | not)))
   ]
   | sort_by(.name)
@@ -99,7 +99,7 @@ jq -r '
   [
     .[]
     | select(.downloaded == true)
-    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2","wan"))
+    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2","wan","hunyuan3d"))
     | select((.family != "ltx2") or (((.description // "") | ascii_downcase | contains("fp4") | not) and ((.description // "") | ascii_downcase | contains("nvfp4") | not)))
   ]
   | sort_by(.name)
@@ -626,6 +626,18 @@ while IFS=$'\t' read -r model family default_steps default_width default_height 
       queue_case "$model" "$family" chain-audio-source "$chain_audio_source_out" "$TIMEOUT_VIDEO" \
         "$MOLD_BIN" run --host "$HOST" --script "$chain_audio_source_script" --output "$chain_audio_source_out"
     fi
+  elif [[ "$family" == hunyuan3d ]]; then
+    # A mesh request has NO canvas. The family's manifest records the
+    # conditioning resolution in `width`/`height` so catalog rows have an
+    # honest number, but that is the size the source image is letterboxed to,
+    # not an output canvas — passing it back as `--width`/`--height` would
+    # describe a raster the render never produces. The source image is the
+    # only conditioning this family has, so there is no bare base case either:
+    # one image-to-mesh case is the whole arm.
+    src_out="$RUN_DIR/${safe_model}.source.glb"
+    queue_case "$model" "$family" source "$src_out" "$TIMEOUT_IMAGE" \
+      "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
+      --output "$src_out" --format glb --steps "$steps" --image "$SOURCE_IMAGE"
   elif [[ "$family" != wan ]]; then
     # wan is handled by its own arm above. Without this guard it would ALSO
     # take the image-family cases, queueing a bare PNG base case that an
