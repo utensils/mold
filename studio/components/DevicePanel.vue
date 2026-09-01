@@ -295,7 +295,9 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="device.active_work_id" class="device-card__line">
           <span class="device-card__line-label">Running now</span>
-          <span class="device-card__line-value">{{ activeWorkLabel(device) }}</span>
+          <span class="device-card__line-value">{{
+            activeWorkLabel(device)
+          }}</span>
         </div>
         <ol
           v-if="planned(device).length"

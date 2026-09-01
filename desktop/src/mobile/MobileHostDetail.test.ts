@@ -400,9 +400,7 @@ describe("MobileHostDetail remote host data", () => {
     const view = await mountDetail();
 
     expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("1 total");
-    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-      "All 1 job loaded",
-    );
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe("All 1 job loaded");
     expect(view.get("[data-test='host-detail-planned-work']").text()).toContain(
       "activeChain stage · stage 1sequence-1GPU 2",
     );
@@ -1626,9 +1624,7 @@ describe("MobileHostDetail remote host data", () => {
     const view = await mountDetail();
 
     expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
-    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-      "Showing 1 of 7 jobs",
-    );
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe("Showing 1 of 7 jobs");
   });
 
   it("does not infer total backlog from an older host's loaded page or runtime window", async () => {
@@ -1677,9 +1673,7 @@ describe("MobileHostDetail remote host data", () => {
 
     const view = await mountDetail();
     expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("3 total");
-    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-      "Showing 2 of 3 jobs",
-    );
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe("Showing 2 of 3 jobs");
     expect(view.get("[data-test='host-detail-queue']").findAll("li")).toHaveLength(2);
 
     await view.get("[data-test='host-detail-queue-load-more']").trigger("click");

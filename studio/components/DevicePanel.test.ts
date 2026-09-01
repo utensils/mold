@@ -132,11 +132,18 @@ describe("DevicePanel", () => {
     });
 
     expect(wrapper.get(".device-card__line-label").text()).toBe("Running now");
-    expect(wrapper.get(".device-card__line-value").text()).toBe("Video generation");
+    expect(wrapper.get(".device-card__line-value").text()).toBe(
+      "Video generation",
+    );
     expect(
-      wrapper.get('[data-test="device-lane"]').findAll("li").map((row) => row.text()),
+      wrapper
+        .get('[data-test="device-lane"]')
+        .findAll("li")
+        .map((row) => row.text()),
     ).toHaveLength(1);
-    expect(wrapper.get('[data-test="device-lane"]').text()).toContain("Next · Generation");
+    expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
+      "Next · Generation",
+    );
     expect(wrapper.text()).not.toContain("active-internal-id");
     expect(wrapper.text()).not.toContain("queued-internal-id");
     expect(wrapper.find('[title="active-internal-id"]').exists()).toBe(false);
