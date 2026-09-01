@@ -113,7 +113,7 @@ describe("AdvancedSection device snapshots", () => {
         },
       },
     });
-    await vi.waitFor(() => expect(wrapper.text()).toContain("desktop-cpu-work"));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Prompt expansion"));
 
     expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain("Host utility");
     expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
@@ -209,17 +209,10 @@ describe("AdvancedSection device snapshots", () => {
         },
       },
     });
-    await vi.waitFor(() => expect(wrapper.text()).toContain("desktop-future-collision"));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Future utility"));
 
-    expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
-      "desktop-future-collision",
-    );
-    expect(wrapper.get('[data-test="device-lane"]').text()).toContain("desktop-typed-device");
-    expect(wrapper.get('[data-test="device-lane"]').text()).not.toContain(
-      "desktop-future-collision",
-    );
-    expect(wrapper.text().match(/desktop-future-collision/g)).toHaveLength(1);
-    expect(wrapper.text().match(/desktop-typed-device/g)).toHaveLength(1);
+    expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain("Future utility");
+    expect(wrapper.get('[data-test="device-lane"]').text()).toContain("Generation");
   });
 
   it("subscribes to the exact authenticated target and refetches on invalidation", async () => {

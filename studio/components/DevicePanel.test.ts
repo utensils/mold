@@ -90,6 +90,66 @@ describe("DevicePanel", () => {
     expect(wrapper.emitted("toggle")?.[0]).toEqual([device(0).id, false]);
   });
 
+  it("separates running work from the queued lane without exposing internal ids", () => {
+    const gpu = device(0, { active_work_id: "active-internal-id" });
+    const wrapper = mount(DevicePanel, {
+      props: {
+        devices: [gpu],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "active-internal-id",
+              parent_id: "active-parent",
+              work_kind: "video_generation",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              planned_device_id: gpu.id,
+              planned_lane_kind: "device",
+              lane_order: 0,
+              estimate_confidence: "high",
+            },
+            {
+              work_id: "queued-internal-id",
+              parent_id: "queued-parent",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 1,
+              bypass_count: 0,
+              planned_device_id: gpu.id,
+              planned_lane_kind: "device",
+              lane_order: 1,
+              estimate_confidence: "low",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.get(".device-card__line-label").text()).toBe("Running now");
+    expect(wrapper.get(".device-card__line-value").text()).toBe(
+      "Video generation",
+    );
+    expect(
+      wrapper
+        .get('[data-test="device-lane"]')
+        .findAll("li")
+        .map((row) => row.text()),
+    ).toHaveLength(1);
+    expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
+      "Next · Generation",
+    );
+    expect(wrapper.text()).not.toContain("active-internal-id");
+    expect(wrapper.text()).not.toContain("queued-internal-id");
+    expect(wrapper.find('[title="active-internal-id"]').exists()).toBe(false);
+    expect(wrapper.find('[title="queued-internal-id"]').exists()).toBe(false);
+  });
+
   it("disables every device with an in-flight mutation", () => {
     const wrapper = mount(DevicePanel, {
       props: {
@@ -257,10 +317,7 @@ describe("DevicePanel", () => {
       }
       expect(
         utility.findAll(".device-card__work").map((row) => row.text()),
-      ).toEqual([
-        "expand-parent-1 · Prompt expansion",
-        "future-parent-2 · Future utility",
-      ]);
+      ).toEqual(["Next · Prompt expansion", "After that · Future utility"]);
       wrapper.unmount();
     }
   });
@@ -295,7 +352,7 @@ describe("DevicePanel", () => {
     });
 
     expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
-      "future-lane-work",
+      "Next · Future utility",
     );
   });
 
@@ -343,16 +400,11 @@ describe("DevicePanel", () => {
     });
 
     expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
-      "future-collision",
+      "Future utility",
     );
     expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
-      "typed-device-work",
+      "Generation",
     );
-    expect(wrapper.get('[data-test="device-lane"]').text()).not.toContain(
-      "future-collision",
-    );
-    expect(wrapper.text().match(/future-collision/g)).toHaveLength(1);
-    expect(wrapper.text().match(/typed-device-work/g)).toHaveLength(1);
     expect(
       wrapper.get('[data-test="other-compute-lane"]').text(),
     ).not.toContain("HOST");
@@ -454,23 +506,23 @@ describe("DevicePanel", () => {
     const utility = wrapper.get('[data-test="cpu-utility-lane"]');
     const blocked = wrapper.get('[data-test="blocked-work"]');
 
-    expect(known.text()).toContain("known-device-work");
+    expect(known.text()).toContain("Next · Generation");
     expect(unknown.text()).toContain("Unassigned / unknown device");
-    expect(unknown.text()).toContain("missing-device-work");
-    expect(unknown.text()).toContain("future-lane-missing-device");
+    expect(unknown.text()).toContain("Generation");
+    expect(unknown.text()).toContain("Future utility");
     // Not yet placed on any lane (no lane kind, no device) while it waits on
     // a dependency: ordinary queued work, never an "unknown device" row.
     expect(wrapper.text()).not.toContain("unplaced-waiting-work");
-    expect(utility.text()).toContain("host-utility-work");
-    expect(blocked.text()).toContain("blocked-unassigned-work");
+    expect(utility.text()).toContain("Prompt expansion");
+    expect(blocked.text()).toContain("Generation · no capacity");
+    expect(blocked.text()).not.toContain("blocked-unassigned-work");
     for (const workId of [
       "known-device-work",
       "missing-device-work",
       "future-lane-missing-device",
       "host-utility-work",
-      "blocked-unassigned-work",
     ]) {
-      expect(wrapper.text().match(new RegExp(workId, "g"))).toHaveLength(1);
+      expect(wrapper.text()).not.toContain(workId);
     }
   });
 
@@ -513,7 +565,7 @@ describe("DevicePanel", () => {
 
     expect(wrapper.find('[data-test="cpu-utility-lane"]').exists()).toBe(false);
     expect(wrapper.get('[data-test="blocked-work"]').text()).toContain(
-      "blocked-cpu-work",
+      "Prompt expansion · host ram",
     );
   });
 
@@ -549,16 +601,20 @@ describe("DevicePanel", () => {
         },
       });
       expect(wrapper.get('[data-test="replan-countdown"]').text()).toContain(
-        "optimizing in 4s",
+        "Updating order in 4s",
       );
-      expect(wrapper.get('[data-test="device-lane"]').text()).toContain("~5s");
+      expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
+        "under a minute",
+      );
 
       await vi.advanceTimersByTimeAsync(1_100);
 
       expect(wrapper.get('[data-test="replan-countdown"]').text()).toContain(
-        "optimizing in 3s",
+        "Updating order in 3s",
       );
-      expect(wrapper.get('[data-test="device-lane"]').text()).toContain("~4s");
+      expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
+        "under a minute",
+      );
       wrapper.unmount();
     } finally {
       vi.useRealTimers();

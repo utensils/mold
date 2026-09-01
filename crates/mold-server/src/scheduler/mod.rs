@@ -1869,6 +1869,22 @@ impl Coordinator {
         self.clear_dispatch_retry();
     }
 
+    fn remember_warm_waits_and_is_held(&mut self, plan: &Plan) -> bool {
+        for wait in &plan.warm_waits {
+            if let Some(pending) = self.pending.get_mut(wait.work_id.as_str()) {
+                pending
+                    .warm_wait_started_ms
+                    .get_or_insert(wait.started_at_ms);
+            }
+            if let Some(pending) = self.pending_owner_work.get_mut(wait.work_id.as_str()) {
+                pending
+                    .warm_wait_started_ms
+                    .get_or_insert(wait.started_at_ms);
+            }
+        }
+        plan.immediate_leases.is_empty()
+    }
+
     fn enqueue(&mut self, mut job: GenerationJob, immediate: &mut bool) {
         if job.id.is_empty() {
             job.id = format!("runtime-generation-{}", self.synthetic_id);
@@ -5764,7 +5780,11 @@ impl Coordinator {
                 return None;
             }
             self.plan_version = plan.plan_version;
-            if plan.immediate_leases.is_empty() {
+            // A warm wait commonly produces no immediate lease. Persist its
+            // original start before that early return; otherwise each replan
+            // starts a fresh bounded wait and an idle cold device can be held
+            // forever. This is shared scheduler state for every model family.
+            if self.remember_warm_waits_and_is_held(&plan) {
                 self.clear_dispatch_retry();
                 log_typed_blocks(&plan);
                 return Some(plan.state_version);
@@ -6429,14 +6449,6 @@ impl Coordinator {
                     self.pending_owner_work.get_mut(update.work_id.as_str())
                 {
                     pending.bypass_count = update.new_count;
-                }
-            }
-            for wait in &plan.warm_waits {
-                if let Some(pending) = self.pending.get_mut(wait.work_id.as_str()) {
-                    pending.warm_wait_started_ms = Some(wait.started_at_ms);
-                }
-                if let Some(pending) = self.pending_owner_work.get_mut(wait.work_id.as_str()) {
-                    pending.warm_wait_started_ms = Some(wait.started_at_ms);
                 }
             }
             self.state_version = self.state_version.saturating_add(1);
@@ -9471,6 +9483,79 @@ mod tests {
         assert!(
             coordinator.dirty.deadline().is_none(),
             "an empty queue must not retry the elapsed debounce on every tick"
+        );
+    }
+
+    #[test]
+    fn the_no_lease_branch_keeps_a_generation_warm_waits_original_start() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let (generation, _result) = fake_generation("generation-wait");
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        coordinator.pending.insert(
+            "generation-wait".to_string(),
+            PendingGeneration {
+                job: generation,
+                ready_at_ms: 0,
+                queue_rank: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                preparation: PreparationState::Ready,
+                prepared_inputs: None,
+                retry_not_before_ms: None,
+                preparation_retry_attempts: 0,
+                preparation_refresh_observation: None,
+                unschedulable_since_ms: None,
+                unschedulable_reason: None,
+                announced_position: None,
+                capacity_park: None,
+                memory_block: None,
+                preparation_started_ms: None,
+                preparation_progress: Default::default(),
+            },
+        );
+        let mut plan = coordinator
+            .planner
+            .plan(&PlannerSnapshot::new(1, 1, 1_000, 8 << 30, vec![], vec![]))
+            .unwrap();
+        plan.warm_waits.push(mold_scheduler::WarmWait {
+            work_id: WorkId::new("generation-wait"),
+            warm_device_id: DeviceId::new("warm-device"),
+            started_at_ms: 1_000,
+            deadline_ms: 3_000,
+            predicted_warm_finish_ms: 2_000,
+            best_cold_finish_ms: 2_500,
+            declined_device_ids: vec![],
+        });
+
+        assert!(
+            coordinator.remember_warm_waits_and_is_held(&plan),
+            "the exact no-lease branch must persist the wait before returning"
+        );
+        assert_eq!(
+            coordinator.pending["generation-wait"].warm_wait_started_ms,
+            Some(1_000)
+        );
+
+        plan.warm_waits[0].started_at_ms = 2_000;
+        assert!(coordinator.remember_warm_waits_and_is_held(&plan));
+        assert_eq!(
+            coordinator.pending["generation-wait"].warm_wait_started_ms,
+            Some(1_000),
+            "a later no-lease replan must not restart the bounded wait"
         );
     }
 

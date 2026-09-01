@@ -400,6 +400,7 @@ describe("MobileHostDetail remote host data", () => {
     const view = await mountDetail();
 
     expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("1 total");
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe("All 1 job loaded");
     expect(view.get("[data-test='host-detail-planned-work']").text()).toContain(
       "activeChain stage · stage 1sequence-1GPU 2",
     );
@@ -495,13 +496,8 @@ describe("MobileHostDetail remote host data", () => {
 
     const view = await mountDetail();
 
-    expect(view.get('[data-test="other-compute-lane"]').text()).toContain(
-      "mobile-future-collision",
-    );
-    expect(view.get('[data-test="device-lane"]').text()).toContain("mobile-typed-device");
-    expect(view.get('[data-test="device-lane"]').text()).not.toContain("mobile-future-collision");
-    expect(view.text().match(/mobile-future-collision/g)).toHaveLength(1);
-    expect(view.text().match(/mobile-typed-device/g)).toHaveLength(1);
+    expect(view.get('[data-test="other-compute-lane"]').text()).toContain("Future utility");
+    expect(view.get('[data-test="device-lane"]').text()).toContain("Generation");
   });
 
   it("targets the exact remote and renders telemetry, queue, downloads, and installed models", async () => {
@@ -1628,9 +1624,7 @@ describe("MobileHostDetail remote host data", () => {
     const view = await mountDetail();
 
     expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
-    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-      "1 loaded · Runtime window 8",
-    );
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe("Showing 1 of 7 jobs");
   });
 
   it("does not infer total backlog from an older host's loaded page or runtime window", async () => {
@@ -1646,9 +1640,7 @@ describe("MobileHostDetail remote host data", () => {
     const view = await mountDetail();
 
     expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("1 loaded");
-    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-      "1 loaded · Runtime window 2",
-    );
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe("1 job loaded");
   });
 
   it("pages by host capacity and loads the durable queue tail on demand", async () => {
@@ -1681,9 +1673,7 @@ describe("MobileHostDetail remote host data", () => {
 
     const view = await mountDetail();
     expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("3 total");
-    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-      "2 loaded · Runtime window 2",
-    );
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe("Showing 2 of 3 jobs");
     expect(view.get("[data-test='host-detail-queue']").findAll("li")).toHaveLength(2);
 
     await view.get("[data-test='host-detail-queue-load-more']").trigger("click");
@@ -1710,7 +1700,7 @@ describe("MobileHostDetail remote host data", () => {
 
     expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
     expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-      "Queue page unavailable · Runtime window 8",
+      "Queue details unavailable",
     );
   });
 
@@ -1789,30 +1779,30 @@ describe("MobileHostDetail remote host data", () => {
         });
 
         const view = await mountDetail();
-        expect(view.text()).toContain("stale-cpu-work");
+        expect(view.text()).toContain("Post upscale");
         expect(view.find("[data-test='host-detail-queue']").exists()).toBe(true);
         expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
         expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-          "1 loaded · Runtime window 8",
+          "Showing 2 of 7 jobs",
         );
 
         await vi.advanceTimersByTimeAsync(5_000);
         await flushPromises();
 
-        expect(view.text()).not.toContain("stale-cpu-work");
+        expect(view.text()).not.toContain("Post upscale");
         expect(view.find("[data-test='host-detail-queue']").exists()).toBe(false);
         expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
         expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-          "Queue page unavailable · Runtime window 8",
+          "Queue details unavailable",
         );
 
         await vi.advanceTimersByTimeAsync(5_000);
         await flushPromises();
 
-        expect(view.text()).toContain("restored-cpu-work");
+        expect(view.text()).toContain("Post upscale");
         expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
         expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
-          "1 loaded · Runtime window 8",
+          "Showing 2 of 7 jobs",
         );
       } finally {
         vi.useRealTimers();

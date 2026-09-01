@@ -234,7 +234,7 @@ describe("MobileSettingsView", () => {
 
     expect(wrapper.text()).toContain("Compute devices");
     expect(wrapper.text()).toContain("Host utility");
-    expect(wrapper.text()).toContain("mobile-cpu-work");
+    expect(wrapper.text()).toContain("Post upscale");
   });
 
   it("keeps a queue-plan compute lane visible when device inventory is unavailable", async () => {
@@ -294,7 +294,7 @@ describe("MobileSettingsView", () => {
       expect(wrapper.find("[data-test='mobile-settings-devices']").exists()).toBe(true),
     );
 
-    expect(wrapper.get("[data-test='other-compute-lane']").text()).toContain("future-mobile-lane");
+    expect(wrapper.get("[data-test='other-compute-lane']").text()).toContain("Future utility");
   });
 
   it("opens the public privacy policy from About", async () => {
