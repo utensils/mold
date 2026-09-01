@@ -37,6 +37,7 @@ pub mod model_policy;
 pub mod organization;
 pub mod print_title;
 pub mod prompt_text;
+pub mod prompting;
 pub mod pulid_assets;
 pub mod queue_progress;
 pub mod queue_wait;
