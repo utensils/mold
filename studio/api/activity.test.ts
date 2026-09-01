@@ -38,6 +38,71 @@ describe("activeWorkPhaseLabel", () => {
     ).toBe("Streaming MiniMax H3 transformer blocks · 17/20");
   });
 
+  it("formats download byte progress for every shared activity surface", () => {
+    expect(
+      activeWorkPhaseLabel({
+        id: "download-1",
+        kind: "download",
+        phase: "downloading",
+        model: "ltx-2.5-22b-distilled:q3",
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        current: 3_627_980_783,
+        total: 31_375_569_558,
+        can_cancel: true,
+      }),
+    ).toBe("downloading · 3.6 GB / 31.4 GB");
+  });
+
+  it("formats weight-loading byte progress without changing step counts", () => {
+    expect(
+      activeWorkPhaseLabel({
+        id: "generation-1",
+        kind: "generation",
+        phase: "loading",
+        stage: "Loading transformer",
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        current: 2_539_086_011,
+        total: 12_923_897_280,
+        can_cancel: true,
+      }),
+    ).toBe("Loading transformer · 2.5 GB / 12.9 GB");
+  });
+
+  it("keeps sequence stage counts discrete while a stage is loading", () => {
+    expect(
+      activeWorkPhaseLabel({
+        id: "sequence-1",
+        kind: "sequence",
+        phase: "loading",
+        stage: "Loading clip 2",
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        current: 1,
+        total: 4,
+        can_cancel: true,
+      }),
+    ).toBe("Loading clip 2 · 1/4");
+  });
+
+  it("keeps ephemeral chain stage counts discrete while a stage is loading", () => {
+    expect(
+      activeWorkPhaseLabel({
+        id: "generation-1",
+        kind: "generation",
+        execution: "chain",
+        phase: "loading",
+        stage: "Loading clip 2",
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        current: 1,
+        total: 4,
+        can_cancel: true,
+      }),
+    ).toBe("Loading clip 2 · 1/4");
+  });
+
   it("names the component while preparation is still active", () => {
     expect(
       activeWorkPhaseLabel({
