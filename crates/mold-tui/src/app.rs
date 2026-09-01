@@ -8044,6 +8044,69 @@ impl App {
         self.generate.params.prepared_transform_snapshot = None;
     }
 
+    /// Generation facts the expander renders after the family guide.
+    fn prompt_transform_context(&self, family: &str) -> mold_core::ExpandContext {
+        let params = &self.generate.params;
+        let mut references = Vec::new();
+        for reference in &params.reference_paths {
+            references.push(mold_core::ExpandReference {
+                kind: match reference.kind {
+                    crate::h3_references::ReferenceKind::Image => {
+                        mold_core::GenerationReferenceKind::Image
+                    }
+                    crate::h3_references::ReferenceKind::Video => {
+                        mold_core::GenerationReferenceKind::Video
+                    }
+                    crate::h3_references::ReferenceKind::Audio => {
+                        mold_core::GenerationReferenceKind::Audio
+                    }
+                },
+                has_audio: false,
+                role: Some(mold_core::ExpandReferenceRole::Reference),
+            });
+        }
+        if params.source_image_path.is_some() {
+            let role = if mold_core::ExpandTask::for_family(family)
+                != mold_core::ExpandTask::TextToImage
+            {
+                mold_core::ExpandReferenceRole::FirstFrame
+            } else if family == "qwen-image-edit" {
+                mold_core::ExpandReferenceRole::Edit
+            } else {
+                mold_core::ExpandReferenceRole::Source
+            };
+            references.push(mold_core::ExpandReference::image(role));
+        }
+        if params.identity_image_path.is_some() {
+            references.push(mold_core::ExpandReference::image(
+                mold_core::ExpandReferenceRole::Identity,
+            ));
+        }
+        let video = mold_core::ExpandTask::for_family(family) != mold_core::ExpandTask::TextToImage;
+        mold_core::ExpandContext {
+            model: Some(params.model.clone()),
+            width: (params.width > 0).then_some(params.width),
+            height: (params.height > 0).then_some(params.height),
+            frames: (video && params.frames > 0).then_some(params.frames),
+            fps: (video && params.fps > 0).then_some(params.fps),
+            clip_frames: None,
+            negative_prompt_supported: None,
+            audio: params.enable_audio,
+            references,
+            loras: params
+                .lora_path
+                .as_deref()
+                .and_then(|path| {
+                    std::path::Path::new(path)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string)
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
     fn prompt_transform_task(&self) -> mold_core::ExpandTask {
         if !self.generate.params.reference_paths.is_empty() {
             return mold_core::ExpandTask::ReferenceToAudioVideo;
@@ -8183,6 +8246,7 @@ impl App {
             root_prompt: root.clone(),
             source_kind,
         };
+        let context = self.prompt_transform_context(&family);
         let request = mold_core::RemixRequest {
             source_prompt,
             root_prompt: root,
@@ -8196,6 +8260,7 @@ impl App {
             style: None,
             task: Some(task),
             dimensions: Vec::new(),
+            context: Some(context),
         };
 
         use crate::hosts::GenTarget;

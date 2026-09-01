@@ -4,52 +4,44 @@
 //! This module provides tailored system prompts for each model family.
 
 use crate::expand::FamilyOverride;
-use crate::{expand::remix_dimensions_for_position, ExpandTask, RemixDimension};
+use crate::prompting;
+use crate::{expand::remix_dimensions_for_position, ExpandContext, ExpandTask, RemixDimension};
 
-/// Return the word limit and prompt style notes for a given model family.
-pub(crate) fn family_config(family: &str) -> (u32, &'static str) {
-    match family.to_lowercase().as_str() {
-        "sd15" | "sd1.5" | "stable-diffusion-1.5" => (
-            50,
-            "SD 1.5 uses CLIP-L (77 tokens). Use comma-separated keyword phrases. \
-             Include quality tokens like 'masterpiece, best quality, detailed'. Keep under 50 words.",
-        ),
-        "sdxl" => (
-            60,
-            "SDXL uses dual CLIP (CLIP-L + CLIP-G, 77 tokens). Mix natural language with \
-             style/quality keywords. Include art style and quality descriptors. Keep under 60 words.",
-        ),
-        "wuerstchen" | "wuerstchen-v2" => (
-            50,
-            "Wuerstchen uses CLIP-G (77 tokens). Use short descriptive keyword phrases. \
-             Keep under 50 words.",
-        ),
-        "ltx2" | "ltx-2" | "ltx-video" => (
-            150,
-            "LTX uses a large text encoder that understands natural-language shot direction. \
-             Write literal chronological action and continuity. For conditioned tasks, describe \
-             only the requested change and never restate source-visible or source-audible details. \
-             Up to 150 words.",
-        ),
-        "wan" | "wan2.1" | "wan2.2" => (
-            120,
-            "Wan uses UMT5-XXL (512 tokens) and understands natural-language shot direction. \
-             Lead with the main subject and action, then scene, lighting, and camera movement, \
-             in chronological order. For conditioned tasks, describe only the requested change \
-             and never restate source-visible details. Up to 120 words.",
-        ),
-        "minimax-h3" | "minimax_h3" | "minimaxh3" => (
-            150,
-            "MiniMax H3 understands natural-language synchronized audio-video direction. Write a literal chronological target shot. Ordered references are semantic authority for identity, relationships, motion, and sound cues, not a pixel-aligned edit. Up to 150 words.",
-        ),
-        // All flow-matching models with T5/Qwen3 encoders support longer prompts
-        _ => (
-            150,
-            "This model uses a large text encoder (T5-XXL or Qwen3) that understands natural language well. \
-             Write descriptive, vivid natural language. Include composition, lighting, color palette, \
-             textures, atmosphere, and camera angle. Up to 150 words.",
-        ),
+/// Fallback notes for a family that has no guide (a future or catalog-only
+/// family). Every manifest family has a guide, so this is a wire-only path.
+const GENERIC_MODEL_NOTES: &str =
+    "This model uses a large text encoder that understands natural language well. \
+Write descriptive, vivid natural language. Include composition, lighting, color palette, \
+textures, atmosphere, and camera angle.";
+
+/// Word budget used when a family has no guide.
+const GENERIC_WORD_LIMIT: u32 = 150;
+
+/// Return the word limit and the prompting-guide excerpt for a model family.
+///
+/// The excerpt is the family's route in the prompting corpus
+/// ([`crate::prompting`]): shared practice, the family base, and the task or
+/// model leaves selected by `task` and `model`.
+pub fn family_config(family: &str) -> (u32, String) {
+    guide_config(family, None, ExpandTask::for_family(family))
+}
+
+fn guide_config(family: &str, model: Option<&str>, task: ExpandTask) -> (u32, String) {
+    match prompting::route(family, model, Some(task)) {
+        Ok(route) => {
+            let limit = route.word_limit();
+            (limit, guide_notes(&route, limit))
+        }
+        Err(_) => (GENERIC_WORD_LIMIT, GENERIC_MODEL_NOTES.to_string()),
     }
+}
+
+fn guide_notes(route: &prompting::PromptingRoute, word_limit: u32) -> String {
+    format!(
+        "MODEL PROMPTING GUIDE ({} family):\n{}",
+        route.family.family,
+        route.expansion_excerpt_with_limit(word_limit)
+    )
 }
 
 const SINGLE_SYSTEM_TEMPLATE: &str = "\
@@ -281,40 +273,48 @@ fn batch_template(task: ExpandTask) -> &'static str {
     }
 }
 
-/// Resolve the effective word limit and model notes for a family, applying
-/// any user-provided overrides on top of the built-in defaults.
-fn resolve_family_config(family: &str, overrides: Option<&FamilyOverride>) -> (u32, String) {
-    let (default_limit, default_notes) = family_config(family);
-    match overrides {
-        Some(ov) => (
-            ov.word_limit.unwrap_or(default_limit),
-            ov.style_notes
-                .clone()
-                .unwrap_or_else(|| default_notes.to_string()),
-        ),
-        None => (default_limit, default_notes.to_string()),
-    }
-}
-
+/// Resolve the effective word limit and model notes for a route, applying
+/// any user-provided overrides on top of the corpus defaults. A custom
+/// `style_notes` override replaces the guide excerpt wholesale; a custom
+/// `word_limit` re-renders the excerpt with that budget.
 fn resolve_task_family_config(
     family: &str,
+    model: Option<&str>,
     task: ExpandTask,
     overrides: Option<&FamilyOverride>,
 ) -> (u32, String) {
-    let (word_limit, mut notes) = resolve_family_config(family, overrides);
-    let has_custom_notes = overrides
-        .and_then(|value| value.style_notes.as_ref())
-        .is_some();
-    if task == ExpandTask::TextToAudio
-        && matches!(
-            family.trim().to_ascii_lowercase().as_str(),
-            "ltx2" | "ltx-2" | "ltx-video"
-        )
-        && !has_custom_notes
-    {
-        notes = "LTX audio generation understands natural-language sound direction. Write chronological audible events, timing, space, intensity, and continuity without visual or camera language. Up to 150 words.".to_string();
+    let route = prompting::route(family, model, Some(task)).ok();
+    let default_limit = route
+        .as_ref()
+        .map_or(GENERIC_WORD_LIMIT, prompting::PromptingRoute::word_limit);
+    let word_limit = overrides
+        .and_then(|value| value.word_limit)
+        .unwrap_or(default_limit);
+    if let Some(notes) = overrides.and_then(|value| value.style_notes.clone()) {
+        return (word_limit, notes);
     }
+    let notes = route.as_ref().map_or_else(
+        || GENERIC_MODEL_NOTES.to_string(),
+        |route| guide_notes(route, word_limit),
+    );
     (word_limit, notes)
+}
+
+/// Append the generation facts (identity, canvas, clip, references) after the
+/// guide so a custom template that omits a placeholder cannot drop them.
+fn append_generation_context(
+    system: &mut String,
+    family: &str,
+    task: ExpandTask,
+    context: Option<&ExpandContext>,
+) {
+    if let Some(context) = context {
+        let rendered = prompting::render_generation_context(family, task, context);
+        if !rendered.trim().is_empty() {
+            system.push_str("\n\nGENERATION CONTEXT:\n");
+            system.push_str(&rendered);
+        }
+    }
 }
 
 /// Append the style directive to a rendered system prompt. Audio-only tasks
@@ -357,10 +357,14 @@ pub fn build_single_messages(
         custom_template,
         family_override,
         style,
+        None,
     )
 }
 
 /// Build single expansion messages for an explicitly resolved task.
+///
+/// `context` carries the exact identity (which selects a per-checkpoint
+/// leaf) and the generation facts rendered after the guide.
 pub fn build_single_messages_for_task(
     prompt: &str,
     family: &str,
@@ -368,12 +372,16 @@ pub fn build_single_messages_for_task(
     custom_template: Option<&str>,
     family_override: Option<&FamilyOverride>,
     style: Option<&str>,
+    context: Option<&ExpandContext>,
 ) -> Vec<(String, String)> {
-    let (word_limit, model_notes) = resolve_task_family_config(family, task, family_override);
+    let model = context.and_then(|context| context.model.as_deref());
+    let (word_limit, model_notes) =
+        resolve_task_family_config(family, model, task, family_override);
     let template = custom_template.unwrap_or_else(|| single_template(task));
     let mut system = template
         .replace("{WORD_LIMIT}", &word_limit.to_string())
         .replace("{MODEL_NOTES}", &model_notes);
+    append_generation_context(&mut system, family, task, context);
     apply_style_directive(&mut system, style, task);
 
     vec![
@@ -426,6 +434,7 @@ pub fn build_batch_messages_with_context(
         custom_template,
         family_override,
         style,
+        None,
     )
 }
 
@@ -442,14 +451,18 @@ pub fn build_batch_messages_with_context_for_task(
     custom_template: Option<&str>,
     family_override: Option<&FamilyOverride>,
     style: Option<&str>,
+    context: Option<&ExpandContext>,
 ) -> Vec<(String, String)> {
-    let (word_limit, model_notes) = resolve_task_family_config(family, task, family_override);
+    let model = context.and_then(|context| context.model.as_deref());
+    let (word_limit, model_notes) =
+        resolve_task_family_config(family, model, task, family_override);
     let template = custom_template.unwrap_or_else(|| batch_template(task));
     let mut system = template
         .replace("{N}", &variations.to_string())
         .replace("{WORD_LIMIT}", &word_limit.to_string())
         .replace("{MODEL_NOTES}", &model_notes)
         .replace("{TASK_NOTES}", task_notes(task));
+    append_generation_context(&mut system, family, task, context);
     if let Some((start, total)) = logical_range {
         let end = start.saturating_add(variations).saturating_sub(1);
         system.push_str(&format!(
@@ -479,8 +492,11 @@ pub fn build_remix_messages_with_context_for_task(
     family_override: Option<&FamilyOverride>,
     style: Option<&str>,
     dimensions: &[RemixDimension],
+    context: Option<&ExpandContext>,
 ) -> Vec<(String, String)> {
-    let (word_limit, model_notes) = resolve_task_family_config(family, task, family_override);
+    let model = context.and_then(|context| context.model.as_deref());
+    let (word_limit, model_notes) =
+        resolve_task_family_config(family, model, task, family_override);
     let start = logical_range.map_or(1, |(start, _)| start);
     let dimension_plan = (0..variations)
         .map(|offset| {
@@ -500,6 +516,7 @@ pub fn build_remix_messages_with_context_for_task(
         .replace("{DIMENSION_PLAN}", &dimension_plan)
         .replace("{TASK_NOTES}", task_notes(task))
         .replace("{MODEL_NOTES}", &model_notes);
+    append_generation_context(&mut system, family, task, context);
     if let Some((_, total)) = logical_range {
         system.push_str(&format!(
             "\n\nLOGICAL SET: These are positions {start} through {} of {total}; avoid concepts likely used by earlier positions.",
@@ -539,72 +556,134 @@ mod tests {
     // ── family_config ────────────────────────────────────────────────────
 
     #[test]
-    fn family_config_sd15_variants() {
-        // All SD 1.5 aliases should resolve to the same config
-        for family in &["sd15", "sd1.5", "stable-diffusion-1.5"] {
+    fn family_config_reads_word_limits_from_the_prompting_registry() {
+        for (family, expected) in [("sd15", 50), ("sdxl", 60), ("wuerstchen", 50)] {
+            let guide = prompting::family_guide(family).unwrap();
             let (limit, notes) = family_config(family);
-            assert_eq!(limit, 50);
-            assert!(notes.contains("keyword"));
+            assert_eq!(limit, guide.word_limit, "{family}");
+            assert_eq!(limit, expected, "{family}");
+            assert!(
+                notes.starts_with(&format!("MODEL PROMPTING GUIDE ({family} family):")),
+                "{family}: {notes}"
+            );
         }
     }
 
     #[test]
-    fn family_config_sdxl() {
-        let (limit, notes) = family_config("sdxl");
-        assert_eq!(limit, 60);
-        assert!(notes.contains("CLIP-L + CLIP-G"));
-    }
-
-    #[test]
-    fn family_config_wuerstchen_variants() {
-        for family in &["wuerstchen", "wuerstchen-v2"] {
-            let (limit, _) = family_config(family);
-            assert_eq!(limit, 50);
+    fn family_config_accepts_every_registered_alias() {
+        for (alias, family) in [
+            ("sd1.5", "sd15"),
+            ("stable-diffusion-1.5", "sd15"),
+            ("wuerstchen-v2", "wuerstchen"),
+            ("ltx-2", "ltx2"),
+            ("SD15", "sd15"),
+            ("SDXL", "sdxl"),
+        ] {
+            let (limit, notes) = family_config(alias);
+            let guide = prompting::family_guide(family).unwrap();
+            assert_eq!(limit, guide.word_limit, "{alias}");
+            assert!(
+                notes.contains(&format!("({family} family)")),
+                "{alias}: {notes}"
+            );
         }
     }
 
     #[test]
-    fn family_config_flux_uses_long_default() {
-        let (limit, notes) = family_config("flux");
-        assert_eq!(limit, 150);
-        assert!(notes.contains("natural language"));
-    }
-
-    #[test]
-    fn family_config_sd3_uses_long_default() {
-        let (limit, _) = family_config("sd3");
-        assert_eq!(limit, 150);
-    }
-
-    #[test]
-    fn family_config_zimage_uses_long_default() {
-        let (limit, _) = family_config("z-image");
-        assert_eq!(limit, 150);
-    }
-
-    #[test]
-    fn family_config_ltx_reinforces_motion_without_competing_source_details() {
-        for family in ["ltx2", "ltx-2", "ltx-video"] {
-            let (limit, notes) = family_config(family);
-            assert_eq!(limit, 150);
-            assert!(notes.contains("chronological action"));
-            assert!(notes.contains("never restate source-visible"));
-            assert!(!notes.contains("Include composition"));
+    fn every_manifest_family_gets_its_own_guide_not_the_generic_notes() {
+        for guide in prompting::FAMILY_GUIDES {
+            let (_, notes) = family_config(guide.family);
+            assert!(!notes.contains(GENERIC_MODEL_NOTES), "{}", guide.family);
+            assert!(
+                notes.contains(&format!("({} family)", guide.family)),
+                "{}",
+                guide.family
+            );
         }
     }
 
     #[test]
-    fn family_config_unknown_uses_long_default() {
-        let (limit, _) = family_config("some-future-model");
-        assert_eq!(limit, 150);
+    fn family_config_unknown_uses_generic_notes() {
+        let (limit, notes) = family_config("some-future-model");
+        assert_eq!(limit, GENERIC_WORD_LIMIT);
+        assert_eq!(notes, GENERIC_MODEL_NOTES);
     }
 
     #[test]
-    fn family_config_case_insensitive() {
-        let (limit, _) = family_config("SD15");
-        assert_eq!(limit, 50);
-        let (limit, _) = family_config("SDXL");
-        assert_eq!(limit, 60);
+    fn text_to_audio_route_replaces_the_family_guide() {
+        let route = prompting::route("ltx2", None, Some(ExpandTask::TextToAudio)).unwrap();
+        assert!(route.task.is_some_and(|leaf| leaf.standalone));
+        let (limit, notes) = guide_config("ltx2", None, ExpandTask::TextToAudio);
+        assert_eq!(limit, route.word_limit());
+        let family_only = prompting::excerpt(route.family.contents, limit);
+        let first_family_line = family_only.lines().nth(2).unwrap_or("");
+        assert!(
+            first_family_line.is_empty() || !notes.contains(first_family_line),
+            "family prose leaked into the audio route: {first_family_line}"
+        );
+    }
+
+    #[test]
+    fn exact_model_identity_selects_the_identity_leaf() {
+        let context = ExpandContext {
+            model: Some("wan22-ti2v-5b:q8".into()),
+            ..ExpandContext::default()
+        };
+        let msgs = build_single_messages_for_task(
+            "the boat drifts",
+            "wan",
+            ExpandTask::ImageToVideo,
+            None,
+            None,
+            None,
+            Some(&context),
+        );
+        let route = prompting::route(
+            "wan",
+            Some("wan22-ti2v-5b:q8"),
+            Some(ExpandTask::ImageToVideo),
+        )
+        .unwrap();
+        assert_eq!(
+            route.task.map(|leaf| leaf.path),
+            Some("wan/image-conditioned.md")
+        );
+        assert!(msgs[0]
+            .1
+            .contains(&format!("under {} words", route.word_limit())));
+        assert!(msgs[0]
+            .1
+            .contains("GENERATION CONTEXT:\nTarget: video on wan22-ti2v-5b:q8"));
+    }
+
+    #[test]
+    fn generation_context_is_appended_even_with_a_custom_template() {
+        let context = ExpandContext {
+            frames: Some(81),
+            fps: Some(16),
+            ..ExpandContext::default()
+        };
+        let msgs = build_single_messages_for_task(
+            "a fox",
+            "wan",
+            ExpandTask::TextToVideo,
+            Some("Custom: {WORD_LIMIT}"),
+            None,
+            None,
+            Some(&context),
+        );
+        assert!(msgs[0].1.starts_with("Custom: "));
+        assert!(msgs[0].1.contains("81 frames at 16 fps (5.1 s)"));
+        let without = build_single_messages_for_task(
+            "a fox",
+            "wan",
+            ExpandTask::TextToVideo,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!without[0].1.contains("GENERATION CONTEXT"));
     }
 
     #[test]
@@ -613,6 +692,7 @@ mod tests {
             "a lighthouse in a storm",
             "ltx2",
             ExpandTask::TextToVideo,
+            None,
             None,
             None,
             None,
@@ -630,6 +710,7 @@ mod tests {
             "she turns toward the window",
             "ltx-video",
             ExpandTask::ImageToVideo,
+            None,
             None,
             None,
             None,
@@ -664,6 +745,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             );
             assert!(msgs[0].1.contains(expected), "{task} lost its task policy");
         }
@@ -676,6 +758,7 @@ mod tests {
             "ltx2",
             3,
             ExpandTask::KeyframeInterpolation,
+            None,
             None,
             None,
             None,
@@ -700,6 +783,7 @@ mod tests {
             None,
             Some("linocut"),
             &[RemixDimension::Camera, RemixDimension::Lighting],
+            None,
         );
         let system = &messages[0].1;
         assert!(system.contains("central subject"));
@@ -723,6 +807,7 @@ mod tests {
             None,
             None,
             &[RemixDimension::Movement],
+            None,
         );
         let system = &messages[0].1;
         assert!(system.contains("keyframes are fixed visual anchors"));
@@ -736,6 +821,7 @@ mod tests {
             "ltx2",
             3,
             ExpandTask::TextToAudio,
+            None,
             None,
             None,
             None,
@@ -758,6 +844,7 @@ mod tests {
             None,
             None,
             Some("noir"),
+            None,
         );
         let system = &msgs[0].1;
         assert!(system.contains("Express this sonic style — noir"));
@@ -771,6 +858,7 @@ mod tests {
             "match her mouth to the speech",
             "ltx2",
             ExpandTask::AudioDrivenVideo,
+            None,
             None,
             None,
             None,
@@ -797,7 +885,7 @@ mod tests {
         let msgs = build_single_messages("a cat", "sd15", None, None, None);
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0].1.contains("50 words"));
-        assert!(msgs[0].1.contains("keyword"));
+        assert!(msgs[0].1.contains("MODEL PROMPTING GUIDE (sd15 family)"));
     }
 
     #[test]
@@ -859,7 +947,9 @@ mod tests {
         let custom = "Custom system: limit {WORD_LIMIT}. Notes: {MODEL_NOTES}";
         let msgs = build_single_messages("a cat", "flux", Some(custom), None, None);
         assert!(msgs[0].1.contains("Custom system: limit 150"));
-        assert!(msgs[0].1.contains("natural language"));
+        assert!(msgs[0]
+            .1
+            .contains("Notes: MODEL PROMPTING GUIDE (flux family)"));
     }
 
     #[test]
@@ -878,8 +968,8 @@ mod tests {
         };
         let msgs = build_single_messages("a cat", "flux", None, Some(&ov), None);
         assert!(msgs[0].1.contains("200 words"));
-        // Should still use built-in style notes
-        assert!(msgs[0].1.contains("natural language"));
+        // Should still use the built-in guide
+        assert!(msgs[0].1.contains("MODEL PROMPTING GUIDE (flux family)"));
     }
 
     #[test]
@@ -920,9 +1010,10 @@ mod tests {
 
     #[test]
     fn resolve_family_config_defaults_preserved() {
-        let (limit, notes) = resolve_family_config("sd15", None);
+        let (limit, notes) =
+            resolve_task_family_config("sd15", None, ExpandTask::TextToImage, None);
         assert_eq!(limit, 50);
-        assert!(notes.contains("keyword"));
+        assert!(notes.contains("(sd15 family)"));
     }
 
     #[test]
@@ -931,10 +1022,36 @@ mod tests {
             word_limit: Some(100),
             style_notes: None,
         };
-        let (limit, notes) = resolve_family_config("sd15", Some(&ov));
+        let (limit, notes) =
+            resolve_task_family_config("sd15", None, ExpandTask::TextToImage, Some(&ov));
         assert_eq!(limit, 100);
-        // Notes should fall back to default
-        assert!(notes.contains("keyword"));
+        // Notes still come from the guide, re-rendered with the new budget.
+        assert!(notes.contains("(sd15 family)"));
+        assert!(!notes.contains("{{word_limit}}"));
+    }
+
+    #[test]
+    fn style_notes_override_replaces_the_guide_for_expand_and_remix() {
+        let ov = FamilyOverride {
+            word_limit: None,
+            style_notes: Some("House style only.".to_string()),
+        };
+        let (_, notes) =
+            resolve_task_family_config("sdxl", None, ExpandTask::TextToImage, Some(&ov));
+        assert_eq!(notes, "House style only.");
+        let remix = build_remix_messages_with_context_for_task(
+            "a cat",
+            "sdxl",
+            2,
+            ExpandTask::TextToImage,
+            None,
+            Some(&ov),
+            None,
+            &[RemixDimension::Lighting],
+            None,
+        );
+        assert!(remix[0].1.contains("House style only."));
+        assert!(!remix[0].1.contains("MODEL PROMPTING GUIDE"));
     }
 
     // ── style directive ──────────────────────────────────────────────────

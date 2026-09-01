@@ -16,7 +16,9 @@
 //! agent-only and never reach the expander; everything else is shared.
 
 use crate::generation_profile::canonical_family;
-use crate::ExpandTask;
+use crate::{
+    ExpandContext, ExpandReference, ExpandReferenceRole, ExpandTask, GenerationReferenceKind,
+};
 
 /// The always-read practice shared by every family.
 pub const SHARED_PATH: &str = "shared.md";
@@ -87,6 +89,9 @@ pub struct TaskLeaf {
     pub identity: IdentityMatch,
     /// Word budget override for this task.
     pub word_limit: Option<u32>,
+    /// The leaf replaces the family base in the expansion excerpt (an
+    /// audio-only task must not inherit the family's camera language).
+    pub standalone: bool,
 }
 
 /// A per-checkpoint quirk leaf added after the task leaf.
@@ -152,6 +157,9 @@ pub const FAMILY_GUIDES: &[FamilyGuide] = &[
 
 macro_rules! leaf {
     ($family:literal, $label:literal, $file:literal, $tasks:expr, $identity:expr, $limit:expr) => {
+        leaf!($family, $label, $file, $tasks, $identity, $limit, false)
+    };
+    ($family:literal, $label:literal, $file:literal, $tasks:expr, $identity:expr, $limit:expr, $standalone:expr) => {
         TaskLeaf {
             family: $family,
             label: $label,
@@ -160,6 +168,7 @@ macro_rules! leaf {
             tasks: $tasks,
             identity: $identity,
             word_limit: $limit,
+            standalone: $standalone,
         }
     };
 }
@@ -216,7 +225,8 @@ pub const TASK_LEAVES: &[TaskLeaf] = &[
         "ltx2/text-to-audio.md",
         &[ExpandTask::TextToAudio],
         IdentityMatch::Any,
-        Some(120)
+        Some(120),
+        true
     ),
 ];
 
@@ -401,7 +411,9 @@ impl PromptingRoute {
     /// override from `expand.families.<family>.word_limit`).
     pub fn expansion_excerpt_with_limit(&self, word_limit: u32) -> String {
         let mut parts = vec![excerpt(SHARED_MD, word_limit)];
-        parts.push(excerpt(self.family.contents, word_limit));
+        if !self.task.is_some_and(|leaf| leaf.standalone) {
+            parts.push(excerpt(self.family.contents, word_limit));
+        }
         if let Some(leaf) = self.task {
             parts.push(excerpt(leaf.contents, word_limit));
         }
@@ -538,6 +550,168 @@ fn collapse_blank_lines(text: &str) -> String {
         }
     }
     out
+}
+
+/// MiniMax H3 reference labels in presentation order. Mirrors the
+/// conditioner's own counter (`mold-candle` `minimax_h3::presentation`):
+/// independent `<Picture n>`, `<Video n>`, and `<Audio n>` counters in the
+/// supplied order, and a video that carries a soundtrack takes the next
+/// `<Audio n>` label before its own `<Video n>` label.
+pub fn h3_reference_labels(references: &[ExpandReference]) -> Vec<String> {
+    let (mut picture, mut video, mut audio) = (0u32, 0u32, 0u32);
+    let mut labels = Vec::new();
+    for reference in references {
+        if reference.has_audio && reference.kind == GenerationReferenceKind::Video {
+            audio += 1;
+            labels.push(format!("<Audio {audio}>"));
+        }
+        match reference.kind {
+            GenerationReferenceKind::Image => {
+                picture += 1;
+                labels.push(format!("<Picture {picture}>"));
+            }
+            GenerationReferenceKind::Video => {
+                video += 1;
+                labels.push(format!("<Video {video}>"));
+            }
+            GenerationReferenceKind::Audio => {
+                audio += 1;
+                labels.push(format!("<Audio {audio}>"));
+            }
+        }
+    }
+    labels
+}
+
+fn role_phrase(role: Option<ExpandReferenceRole>) -> &'static str {
+    match role {
+        Some(ExpandReferenceRole::FirstFrame) => "the opening frame",
+        Some(ExpandReferenceRole::LastFrame) => "the closing frame",
+        Some(ExpandReferenceRole::Keyframe) => "a keyframe anchor",
+        Some(ExpandReferenceRole::Source) => "the source to transform",
+        Some(ExpandReferenceRole::Identity) => "a face identity reference",
+        Some(ExpandReferenceRole::Edit) => "an edit reference",
+        Some(ExpandReferenceRole::Reference) | None => "a reference",
+    }
+}
+
+/// Render the generation facts as plain lines for the LLM. Labels follow the
+/// family's own addressing grammar: H3 uses `<Picture n>` labels, FLUX.2 and
+/// Qwen-Image-Edit use ordinals ("image 1"), everything else names the role.
+pub fn render_generation_context(
+    family: &str,
+    task: ExpandTask,
+    context: &ExpandContext,
+) -> String {
+    let family = family_guide(family).map_or(family, |guide| guide.family);
+    let mut lines = Vec::new();
+    let output = match task {
+        ExpandTask::TextToImage => "image",
+        ExpandTask::TextToAudio => "audio",
+        _ => "video",
+    };
+    let mut target = format!("Target: {output}");
+    if let Some(model) = context
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+    {
+        target.push_str(&format!(" on {model}"));
+    }
+    if let (Some(width), Some(height)) = (context.width, context.height) {
+        let orientation = if width > height {
+            "landscape"
+        } else if height > width {
+            "portrait"
+        } else {
+            "square"
+        };
+        target.push_str(&format!(", {width}x{height} {orientation}"));
+    }
+    if output != "image" {
+        if let Some(frames) = context.frames {
+            if frames <= 1 {
+                target.push_str(", a single still frame");
+            } else if let Some(fps) = context.fps.filter(|fps| *fps > 0) {
+                let seconds = f64::from(frames) / f64::from(fps);
+                target.push_str(&format!(", {frames} frames at {fps} fps ({seconds:.1} s)"));
+            } else {
+                target.push_str(&format!(", {frames} frames"));
+            }
+        }
+        if let Some(clip) = context
+            .clip_frames
+            .filter(|clip| *clip > 0 && context.frames.is_some_and(|frames| frames > *clip))
+        {
+            let clips = context
+                .frames
+                .map(|frames| frames.div_ceil(clip))
+                .unwrap_or(1);
+            target.push_str(&format!(
+                "; rendered as {clips} chained clips of {clip} frames, so describe one continuous shot whose motion can carry across seams"
+            ));
+        }
+        if context.audio == Some(true) {
+            target.push_str("; audio is generated with the video");
+        } else if context.audio == Some(false) {
+            target.push_str("; silent, no audio track");
+        }
+    }
+    target.push('.');
+    lines.push(target);
+    if !context.references.is_empty() {
+        let labels = if family == "minimax-h3" {
+            h3_reference_labels(&context.references)
+        } else {
+            Vec::new()
+        };
+        let mut described = Vec::new();
+        let mut label_index = 0usize;
+        for (index, reference) in context.references.iter().enumerate() {
+            let kind = match reference.kind {
+                GenerationReferenceKind::Image => "image",
+                GenerationReferenceKind::Video => "video",
+                GenerationReferenceKind::Audio => "audio",
+            };
+            let role = role_phrase(reference.role);
+            if family == "minimax-h3" {
+                let mut own = Vec::new();
+                if reference.has_audio && reference.kind == GenerationReferenceKind::Video {
+                    own.push(labels[label_index].clone());
+                    label_index += 1;
+                }
+                own.push(labels[label_index].clone());
+                label_index += 1;
+                described.push(format!("{} = {kind}, {role}", own.join(" and ")));
+            } else if matches!(family, "flux2" | "qwen-image-edit") {
+                described.push(format!("image {} = {role}", index + 1));
+            } else {
+                described.push(format!("{kind} {} = {role}", index + 1));
+            }
+        }
+        lines.push(format!(
+            "References, in order: {}. Refer to them with exactly these names and never describe their pixels from imagination.",
+            described.join("; ")
+        ));
+    }
+    match context.negative_prompt_supported {
+        Some(true) => lines.push(
+            "Negative prompt: supported; keep unwanted traits out of the positive prompt."
+                .to_string(),
+        ),
+        Some(false) => lines.push(
+            "Negative prompt: not honoured by this model; avoid things only by describing what should be there instead."
+                .to_string(),
+        ),
+        None => {}
+    }
+    if !context.loras.is_empty() {
+        lines.push(format!(
+            "LoRA adapters active: {}. Keep any trigger words the user wrote.",
+            context.loras.join(", ")
+        ));
+    }
+    lines.join("\n")
 }
 
 /// Count words the way the budget tests do.
@@ -788,5 +962,84 @@ mod tests {
             assert!(!text.contains("```bash"), "{:?}", route.paths());
             assert!(!text.contains("{{"), "{:?}", route.paths());
         }
+    }
+
+    #[test]
+    fn h3_labels_follow_the_conditioner_counter() {
+        let refs = vec![
+            ExpandReference {
+                kind: GenerationReferenceKind::Video,
+                has_audio: true,
+                role: None,
+            },
+            ExpandReference::image(ExpandReferenceRole::Reference),
+            ExpandReference {
+                kind: GenerationReferenceKind::Audio,
+                has_audio: false,
+                role: None,
+            },
+        ];
+        assert_eq!(
+            h3_reference_labels(&refs),
+            vec!["<Audio 1>", "<Video 1>", "<Picture 1>", "<Audio 2>"]
+        );
+        let text = render_generation_context(
+            "minimax-h3",
+            ExpandTask::ReferenceToAudioVideo,
+            &ExpandContext {
+                references: refs,
+                frames: Some(125),
+                fps: Some(24),
+                ..ExpandContext::default()
+            },
+        );
+        assert!(text.contains("<Audio 1> and <Video 1> = video"), "{text}");
+        assert!(text.contains("<Picture 1> = image"), "{text}");
+        assert!(text.contains("<Audio 2> = audio"), "{text}");
+        assert!(text.contains("125 frames at 24 fps (5.2 s)"), "{text}");
+    }
+
+    #[test]
+    fn generation_context_names_canvas_duration_chain_and_ordinals() {
+        let text = render_generation_context(
+            "wan",
+            ExpandTask::ImageToVideo,
+            &ExpandContext {
+                model: Some("wan22-ti2v-5b:q8".into()),
+                width: Some(1280),
+                height: Some(704),
+                frames: Some(100),
+                fps: Some(24),
+                clip_frames: Some(49),
+                negative_prompt_supported: Some(true),
+                audio: Some(false),
+                references: vec![ExpandReference::image(ExpandReferenceRole::FirstFrame)],
+                loras: vec!["paper-boat".into()],
+            },
+        );
+        assert!(
+            text.contains("Target: video on wan22-ti2v-5b:q8, 1280x704 landscape, 100 frames at 24 fps (4.2 s); rendered as 3 chained clips of 49 frames"),
+            "{text}"
+        );
+        assert!(text.contains("silent, no audio track"), "{text}");
+        assert!(text.contains("image 1 = the opening frame"), "{text}");
+        assert!(text.contains("Negative prompt: supported"), "{text}");
+        assert!(text.contains("LoRA adapters active: paper-boat"), "{text}");
+        let edit = render_generation_context(
+            "qwen-image-edit",
+            ExpandTask::TextToImage,
+            &ExpandContext {
+                references: vec![
+                    ExpandReference::image(ExpandReferenceRole::Edit),
+                    ExpandReference::image(ExpandReferenceRole::Edit),
+                ],
+                ..ExpandContext::default()
+            },
+        );
+        assert!(
+            edit.contains("image 1 = an edit reference; image 2 = an edit reference"),
+            "{edit}"
+        );
+        assert!(edit.starts_with("Target: image."), "{edit}");
     }
 }

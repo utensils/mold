@@ -708,6 +708,53 @@ pub fn format_expand_result(
     }
 }
 
+/// Format a remix result into embed data. Every variant names the dimension
+/// it varied so the reader can pick by intent, not by reading each prompt.
+pub fn format_remix_result(resp: &mold_core::RemixResponse, model_family: &str) -> EmbedData {
+    let mut parts = Vec::new();
+    for (i, variant) in resp.variants.iter().enumerate() {
+        let display = if variant.prompt.chars().count() > 800 {
+            let truncated: String = variant.prompt.chars().take(797).collect();
+            format!("{truncated}...")
+        } else {
+            variant.prompt.clone()
+        };
+        let labels = variant
+            .dimensions
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let heading = if labels.is_empty() {
+            format!("**Variation {}:**", i + 1)
+        } else {
+            format!("**Variation {} ({labels}):**", i + 1)
+        };
+        parts.push(format!("{heading}\n{display}"));
+    }
+    let joined = parts.join("\n\n");
+    let description = if joined.chars().count() > 4000 {
+        let truncated: String = joined.chars().take(3997).collect();
+        format!("{truncated}...")
+    } else {
+        joined
+    };
+    EmbedData {
+        title: "Prompt Remixed".to_string(),
+        description,
+        fields: vec![
+            ("Source".to_string(), resp.source_prompt.clone(), false),
+            ("Family".to_string(), model_family.to_uppercase(), true),
+            (
+                "Alternatives".to_string(),
+                resp.variants.len().to_string(),
+                true,
+            ),
+        ],
+        color: COLOR_SUCCESS,
+    }
+}
+
 /// Format a user's daily quota status into embed data.
 pub fn format_quota(used: u32, max: Option<u32>) -> EmbedData {
     match max {

@@ -1,5 +1,10 @@
 import { apiJson, apiJsonTo, type ApiTarget } from "./client";
-import type { ExpandRequest, ExpandResponse, ExpandTask } from "./types";
+import type {
+  ExpandContext,
+  ExpandRequest,
+  ExpandResponse,
+  ExpandTask,
+} from "./types";
 
 export interface ExpandPromptOptions {
   /** Steers the expansion style; omitted → the server's default family. */
@@ -14,6 +19,8 @@ export interface ExpandPromptOptions {
   style?: string;
   /** Resolved generation/conditioning policy. */
   task?: ExpandTask;
+  /** Identity, canvas, clip, and ordered references of the target print. */
+  context?: ExpandContext;
 }
 
 /**
@@ -34,6 +41,7 @@ export function expandPrompt(
   const style = opts.style?.trim();
   if (style) body.style = style;
   if (opts.task) body.task = opts.task;
+  if (opts.context) body.context = opts.context;
   const init = {
     method: "POST",
     headers: { "Content-Type": "application/json" },

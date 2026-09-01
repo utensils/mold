@@ -302,6 +302,7 @@ mod tests {
             variations: 1,
             style: None,
             task: None,
+            context: None,
         };
         let admitted: ExpandRequest = serde_json::from_slice(
             &serde_json::to_vec(&protect_expand_request_for_wire(&expand)).unwrap(),

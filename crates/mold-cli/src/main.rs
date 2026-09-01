@@ -1989,7 +1989,8 @@ Examples:
   mold expand \"a cat\" --model flux-schnell
   mold expand \"she turns\" --model ltx-2-19b-distilled:fp8 --task image-to-video
   mold expand \"cyberpunk city\" --variations 5
-  mold expand \"a cat\" --variations 3 --json")]
+  mold expand \"a cat\" --variations 3 --json
+  mold expand \"the balloon lifts off\" --model wan22-i2v-a14b:q5 --frames 81 --fps 16 --reference image:first-frame")]
     Expand {
         /// Text prompt to expand
         prompt: String,
@@ -2017,6 +2018,32 @@ Examples:
         /// Resolved conditioning policy for previewing without attached media
         #[arg(long, value_name = "TASK")]
         task: Option<String>,
+
+        /// Canvas width the prompt targets (context for the expander)
+        #[arg(long, value_name = "PX")]
+        width: Option<u32>,
+
+        /// Canvas height the prompt targets (context for the expander)
+        #[arg(long, value_name = "PX")]
+        height: Option<u32>,
+
+        /// Frame count the prompt targets (video families)
+        #[arg(long, value_name = "N")]
+        frames: Option<u32>,
+
+        /// Frames per second the prompt targets (video families)
+        #[arg(long, value_name = "N")]
+        fps: Option<u32>,
+
+        /// Frames per clip when the run auto-chains past one clip
+        #[arg(long, value_name = "N")]
+        clip_frames: Option<u32>,
+
+        /// Attached reference to describe, in order: image|video|audio[:role]
+        /// where role is first-frame, last-frame, keyframe, source, identity,
+        /// edit, or reference (repeatable)
+        #[arg(long, value_name = "KIND[:ROLE]")]
+        reference: Vec<String>,
     },
 
     /// Preview subject-preserving prompt alternatives without generating.
@@ -2059,6 +2086,32 @@ Examples:
         /// Locked style constraint retained in every alternative.
         #[arg(long)]
         style: Option<String>,
+
+        /// Canvas width the prompt targets (context for the expander)
+        #[arg(long, value_name = "PX")]
+        width: Option<u32>,
+
+        /// Canvas height the prompt targets (context for the expander)
+        #[arg(long, value_name = "PX")]
+        height: Option<u32>,
+
+        /// Frame count the prompt targets (video families)
+        #[arg(long, value_name = "N")]
+        frames: Option<u32>,
+
+        /// Frames per second the prompt targets (video families)
+        #[arg(long, value_name = "N")]
+        fps: Option<u32>,
+
+        /// Frames per clip when the run auto-chains past one clip
+        #[arg(long, value_name = "N")]
+        clip_frames: Option<u32>,
+
+        /// Attached reference to describe, in order: image|video|audio[:role]
+        /// where role is first-frame, last-frame, keyframe, source, identity,
+        /// edit, or reference (repeatable)
+        #[arg(long, value_name = "KIND[:ROLE]")]
+        reference: Vec<String>,
     },
 
     /// Unload the current model from the server to free GPU memory
@@ -2725,7 +2778,22 @@ async fn run() -> anyhow::Result<()> {
             backend,
             expand_model,
             task,
+            width,
+            height,
+            frames,
+            fps,
+            clip_frames,
+            reference,
         } => {
+            let context = commands::expand::context_from_flags(
+                model.as_deref(),
+                width,
+                height,
+                frames,
+                fps,
+                clip_frames,
+                &reference,
+            )?;
             commands::expand::run(
                 &prompt,
                 model.as_deref(),
@@ -2734,6 +2802,7 @@ async fn run() -> anyhow::Result<()> {
                 backend.as_deref(),
                 expand_model.as_deref(),
                 task.as_deref(),
+                context,
             )
             .await?;
         }
@@ -2749,7 +2818,22 @@ async fn run() -> anyhow::Result<()> {
             root_prompt,
             dimensions,
             style,
+            width,
+            height,
+            frames,
+            fps,
+            clip_frames,
+            reference,
         } => {
+            let context = commands::expand::context_from_flags(
+                model.as_deref(),
+                width,
+                height,
+                frames,
+                fps,
+                clip_frames,
+                &reference,
+            )?;
             commands::remix::run(
                 &source_prompt,
                 model.as_deref(),
@@ -2762,6 +2846,7 @@ async fn run() -> anyhow::Result<()> {
                 root_prompt.as_deref(),
                 &dimensions,
                 style.as_deref(),
+                context,
             )
             .await?;
         }

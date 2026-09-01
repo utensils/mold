@@ -184,7 +184,7 @@ describe("GenerateView expansion routing", () => {
 
     expect(expandPrompt).toHaveBeenCalledWith(
       "a lighthouse at dusk",
-      { variations: 3, modelFamily: "flux", task: "text-to-image" },
+      { variations: 3, modelFamily: "flux", task: "text-to-image", context: expect.any(Object) },
       { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
     );
     const batch = wrapper.findComponent(PreparedExpansionBatch).props("batch");

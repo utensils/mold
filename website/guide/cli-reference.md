@@ -272,14 +272,29 @@ Preview prompt expansion without generating.
 mold expand <PROMPT> [OPTIONS]
 ```
 
-| Flag                     | Description                    |
-| ------------------------ | ------------------------------ |
-| `-m, --model <MODEL>`    | Target model for style/context |
-| `--task <TASK>`          | Conditioning task to preview   |
-| `--variations <N>`       | Number of variations           |
-| `--json`                 | Output as JSON array           |
-| `--backend <URL>`        | Expansion backend override     |
-| `--expand-model <MODEL>` | LLM model override             |
+| Flag                        | Description                                                                                      |
+| --------------------------- | ------------------------------------------------------------------------------------------------ |
+| `-m, --model <MODEL>`       | Target model; selects the family guide and any per-checkpoint leaf                              |
+| `--task <TASK>`             | Conditioning task to preview                                                                     |
+| `--variations <N>`          | Number of variations                                                                             |
+| `--json`                    | Output as JSON array                                                                             |
+| `--backend <URL>`           | Expansion backend override                                                                       |
+| `--expand-model <MODEL>`    | LLM model override                                                                               |
+| `--width <PX>` / `--height` | Canvas the prompt targets                                                                        |
+| `--frames <N>` / `--fps`    | Clip length the prompt targets (video families); duration is derived as frames / fps            |
+| `--clip-frames <N>`         | Frames per clip when the run auto-chains                                                         |
+| `--reference <KIND[:ROLE]>` | Attached reference to name, in order: `image`, `video`, or `audio`, with an optional role such as `first-frame`, `last-frame`, `keyframe`, `source`, `identity`, `edit`, or `reference` (repeatable) |
+
+The expander always receives the target model's prompting guide from the
+[prompting corpus](/guide/prompting) and, when any of the context flags is
+given, a generation-context block naming the exact model, canvas, frame count,
+fps, duration, and references. `mold run --expand` builds that context from the
+run itself.
+
+```bash
+mold expand "the balloon lifts off" --model wan22-i2v-a14b:q5 \
+  --frames 81 --fps 16 --reference image:first-frame
+```
 
 ## `mold remix`
 
@@ -295,6 +310,9 @@ mold remix "she turns" --model ltx-2-19b-distilled:fp8 --task image-to-video
 
 Use `--source original|current|direct` and optional `--root-prompt` to describe
 where the selected source came from. `--style` is locked across every variant.
+Remix takes the same context flags as `mold expand` (`--width`, `--height`,
+`--frames`, `--fps`, `--clip-frames`, `--reference`) and applies the same
+prompting guide; custom `expand.system_prompt` templates never apply to Remix.
 
 ## `mold serve`
 
@@ -418,10 +436,17 @@ Start a stdio Model Context Protocol server that proxies to `mold serve`.
 mold mcp [--host URL]
 ```
 
-MCP exposes nine tools: generation, async generation with job status and
-retry, gallery listing and lookup, installed LoRA listing, model listing, and
-server status. It intentionally proxies the server
-surface instead of embedding local inference.
+MCP exposes twelve tools: `generate_image`, `generate_mesh`,
+`generate_image_async`, `generation_status`, `generation_retry`, `list_gallery`,
+`get_gallery_image`, `list_models`, `list_loras`, `server_status`,
+`expand_prompt`, and `remix_prompt`. The prompt-transform tools call
+`/api/expand` and `/api/remix` with the target model and an optional `context`
+object (canvas, frames, fps, references, LoRA names) so the host's rewrite
+follows the model's prompting guide. The same guides are published as
+`mold://prompting/<path>` resources, plus `mold://prompting/route/<model>` for
+the concatenated route of one built-in model, through `resources/list` and
+`resources/read`. It intentionally proxies the server surface instead of
+embedding local inference.
 
 ## `mold pull`, `mold list`, `mold info`
 
@@ -621,9 +646,13 @@ default. `--project` uses the current directory, while `--dir` selects another
 project root. Install requires explicit names, `--detected`, or `--all`.
 Mold renders the agent's supported frontmatter and metadata, then atomically
 swaps a complete bundle containing a concise router, safety and CLI references,
-tested examples, a shared prompting guide, one base guide per manifest family,
-and only the H3, Wan, and LTX-2 task-specific leaves their grammars require. All
-agent renderers install the same canonical prompting files byte-for-byte. A hashed
+tested examples, and the prompting corpus: a shared guide, one complete base
+guide per manifest family with that family's CLI examples, task leaves for the
+H3, Wan, and LTX-2 grammars, and model leaves for checkpoints with their own
+quirks. The corpus lives in `crates/mold-core/src/prompting/` and is the same
+text the prompt expander injects, so agents and `mold expand` follow one set of
+rules (see [Prompting Guides](/guide/prompting)). All agent renderers install
+the same canonical prompting files byte-for-byte. A hashed
 `.mold-skill.json` inventory lets later versions remove stale managed files
 while preserving user-added files; uninstall follows that same inventory.
 

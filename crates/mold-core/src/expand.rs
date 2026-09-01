@@ -13,7 +13,7 @@ use crate::expand_prompts::{
     build_batch_messages_with_context_for_task, build_remix_messages_with_context_for_task,
     build_single_messages_for_task,
 };
-use crate::{ExpandTask, PromptTransformOperation, RemixDimension};
+use crate::{ExpandContext, ExpandTask, PromptTransformOperation, RemixDimension};
 
 /// Maximum number of prompt variations for Discord (embed character limit).
 pub const DISCORD_MAX_VARIATIONS: usize = 5;
@@ -84,6 +84,9 @@ pub struct ExpandConfig {
     /// Optional visual style to weave into the expansion (per-request, set by
     /// the route handler from `ExpandRequest::style` — never from settings).
     pub style: Option<String>,
+    /// Exact identity, canvas, clip, and ordered references of the target
+    /// generation, rendered into the system prompt after the family guide.
+    pub context: Option<ExpandContext>,
 }
 
 impl Default for ExpandConfig {
@@ -102,6 +105,7 @@ impl Default for ExpandConfig {
             batch_prompt: None,
             family_overrides: HashMap::new(),
             style: None,
+            context: None,
         }
     }
 }
@@ -400,6 +404,7 @@ impl PromptExpander for ApiExpander {
                     family_override,
                     attempt_config.style.as_deref(),
                     &attempt_config.remix_dimensions,
+                    config.context.as_ref(),
                 )
             } else if attempt.total > 1 {
                 build_batch_messages_with_context_for_task(
@@ -411,6 +416,7 @@ impl PromptExpander for ApiExpander {
                     attempt_config.batch_prompt.as_deref(),
                     family_override,
                     attempt_config.style.as_deref(),
+                    config.context.as_ref(),
                 )
             } else {
                 build_single_messages_for_task(
@@ -420,6 +426,7 @@ impl PromptExpander for ApiExpander {
                     attempt_config.system_prompt.as_deref(),
                     family_override,
                     attempt_config.style.as_deref(),
+                    config.context.as_ref(),
                 )
             };
 
@@ -811,9 +818,10 @@ impl ExpandSettings {
             system_prompt: self.system_prompt.clone(),
             batch_prompt: self.batch_prompt.clone(),
             family_overrides: self.families.clone(),
-            // Style is per-request state; the route handler sets it from the
-            // incoming ExpandRequest, never from persisted settings.
+            // Style and context are per-request state; the route handler sets
+            // them from the incoming request, never from persisted settings.
             style: None,
+            context: None,
         }
     }
 

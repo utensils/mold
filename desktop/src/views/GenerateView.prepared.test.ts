@@ -194,7 +194,7 @@ describe("GenerateView prepared expansion batches", () => {
 
     expect(expandPrompt).toHaveBeenCalledWith(
       "a lighthouse at dusk",
-      { variations: 3, modelFamily: "flux", task: "text-to-image" },
+      { variations: 3, modelFamily: "flux", task: "text-to-image", context: expect.any(Object) },
       { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
     );
     expect(submit).not.toHaveBeenCalled();
@@ -366,7 +366,7 @@ describe("GenerateView prepared expansion batches", () => {
 
     expect(expandPrompt).toHaveBeenCalledWith(
       "a lighthouse at dusk",
-      { variations: 3, modelFamily: "flux", task: "text-to-image" },
+      { variations: 3, modelFamily: "flux", task: "text-to-image", context: expect.any(Object) },
       { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
     );
     expect(wrapper.findComponent(PreparedExpansionBatch).props("batch").route.hostId).toBe(
@@ -439,7 +439,7 @@ describe("GenerateView prepared expansion batches", () => {
 
     expect(expandPrompt).toHaveBeenCalledWith(
       "a lighthouse at dusk",
-      { variations: 8, modelFamily: "flux", task: "text-to-image" },
+      { variations: 8, modelFamily: "flux", task: "text-to-image", context: expect.any(Object) },
       { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
     );
     expect(
@@ -1062,7 +1062,7 @@ describe("GenerateView prepared expansion batches", () => {
     expect(expandPrompt).toHaveBeenNthCalledWith(
       2,
       "a lighthouse at dusk",
-      { variations: 1, modelFamily: "sdxl", task: "text-to-image" },
+      { variations: 1, modelFamily: "sdxl", task: "text-to-image", context: expect.any(Object) },
       { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
     );
     expect(submit).toHaveBeenCalledTimes(1);
@@ -1548,7 +1548,7 @@ describe("GenerateView prepared expansion batches", () => {
     await flushPromises();
     expect(expandPrompt).toHaveBeenLastCalledWith(
       "a lighthouse at dusk",
-      { variations: 1, modelFamily: "flux", task: "text-to-image" },
+      { variations: 1, modelFamily: "flux", task: "text-to-image", context: expect.any(Object) },
       { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
     );
     expect(useGenerateFormStore().form.prompt).toBe("storm light");

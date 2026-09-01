@@ -1066,6 +1066,11 @@ impl DependencyPreparer for PostUpscalePreparer {
                 .unwrap_or_else(|| "flux".to_string());
             let mut expand_config = settings.to_expand_config(&family, 1);
             expand_config.task = mold_core::ExpandTask::for_generation(&family, &request);
+            // The request reached the scheduler through the full generate
+            // route, so its frames, fps, and canvas are already materialized.
+            expand_config.context = Some(mold_core::ExpandContext::for_generation(
+                &family, &request, None,
+            ));
             let preferred_gpu = state
                 .gpu_pool
                 .resolve_explicit_placement_gpu(request.placement.as_ref())?;

@@ -2140,6 +2140,15 @@ curl -X POST http://localhost:7680/api/expand \
 | `variations`   | number | no       | Number of prompt variations to generate (default 1, max 10,000). The ceiling is a per-request safety bound on one reviewed set, not a limit on total prints — clients queue further prepared batches.                                                                                                                                                                                                 |
 | `style`        | string | no       | Visual style to absorb into the expansion (e.g. a style preset label). Passed to the LLM as a natural-language directive, never a literal suffix.                                                                                                                                                                                                                                                     |
 | `task`         | string | no       | Resolved generation/conditioning task, additive: `text-to-image` (default), `text-to-video`, `image-to-video`, `video-to-video`, `retake`, `keyframe-interpolation`, `audio-driven-video`, `reference-to-audio-video`, `text-to-audio`. When omitted, the server infers text-to-video for known video families and text-to-image otherwise. Carries only the semantic task; never source media bytes. |
+| `context`      | object | no       | Generation facts, additive: `model` (exact identity, selects a per-checkpoint guide), `width`, `height`, `frames`, `fps`, `clip_frames`, `negative_prompt_supported`, `audio`, `references` (ordered `{kind: image\|video\|audio, has_audio, role}` with roles `first-frame`, `last-frame`, `keyframe`, `source`, `identity`, `edit`, `reference`), and `loras` (adapter names). Duration is derived as frames / fps and is never sent. Structure only; media bytes stay on the generation request. |
+
+The system prompt the LLM receives is the target family's prompting guide from
+the [prompting corpus](/guide/prompting) (every section except `CLI` and
+`Sources`) followed by a generation-context block rendered from `context`. For
+MiniMax H3 the references are named `<Picture n>`, `<Video n>`, and `<Audio n>`
+in the conditioner's order, so the expansion can be valid Context-IR. Inline
+expansion (`expand: true` on `POST /api/generate`) derives the same context from
+the generation request and the resolved model profile.
 
 **Response:**
 
@@ -2176,7 +2185,8 @@ Dimensions are `composition`, `camera`, `lighting`, `setting`, `mood`,
 cannot also appear in `dimensions`. An omitted dimension list uses task-aware
 defaults. The response returns `variants[]` with both `prompt` and the exact
 `dimensions` label used for that alternative. Remix accepts the same additive
-`task` field as `/api/expand`, with the same semantics.
+`task` and `context` fields as `/api/expand`, with the same semantics, and
+applies the same prompting guide; custom expansion templates never apply.
 
 ## `/api/upscale`
 

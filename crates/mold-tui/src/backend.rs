@@ -38,6 +38,7 @@ pub async fn run_prompt_transform(
                     variations: request.variations,
                     style: request.style.clone(),
                     task: request.task,
+                    context: request.context.clone(),
                 })
                 .await
                 .map(|response| RemixResponse {

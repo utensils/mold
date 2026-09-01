@@ -1,7 +1,7 @@
 import type { HostRoute } from "../stores/hosts";
 import { resolveStyleId, stylePresetLabel } from "./stylePresets";
 import { createUuid } from "@studio/lib/id";
-import type { ExpandTask } from "@studio/lib/expandTask";
+import type { ExpandContext, ExpandTask } from "@studio/lib/expandTask";
 import type { RemixDimension, RemixSourceKind } from "@studio/lib/promptTransform";
 import type { PromptTransformProvenance } from "./api/types";
 
@@ -18,6 +18,8 @@ export interface PreparedExpansionInputs {
   family: string;
   /** Frozen conditioning policy used to create the reviewed rewrite. */
   task: ExpandTask;
+  /** Frozen generation facts sent with the rewrite (additive). */
+  context?: ExpandContext;
   requestedCount: number;
   /** Style-preset chip active when the expansion was requested (`null` = none).
    * Frozen with the batch — prepared work keeps the chip as its indicator. */

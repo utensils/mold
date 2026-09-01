@@ -381,6 +381,234 @@ impl std::str::FromStr for ExpandTask {
     }
 }
 
+/// What an attached reference contributes, so the expander can name it the
+/// way the target model expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExpandReferenceRole {
+    /// Opening frame of a video (`--image` on an I2V/TI2V route, `--first-frame`).
+    FirstFrame,
+    /// Closing frame of a first/last-frame interpolation (`--last-image`).
+    LastFrame,
+    /// One of several keyframe anchors.
+    Keyframe,
+    /// Source media that a transformation preserves (img2img, video-to-video).
+    Source,
+    /// Face identity reference (`--id-image`).
+    Identity,
+    /// Edit or style reference (Qwen-Image-Edit `--image`, FLUX.2 references).
+    Edit,
+    /// Ordered semantic reference (MiniMax H3 Ref2VA).
+    Reference,
+}
+
+/// One attached reference, in the order the generation request carries it.
+/// Only structure travels here: the bytes stay on the generation request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ExpandReference {
+    pub kind: GenerationReferenceKind,
+    /// A video reference that also carries a soundtrack. MiniMax H3 labels
+    /// such a reference `<Audio n>` before `<Video n>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_audio: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<ExpandReferenceRole>,
+}
+
+impl ExpandReference {
+    pub fn image(role: ExpandReferenceRole) -> Self {
+        Self {
+            kind: GenerationReferenceKind::Image,
+            has_audio: false,
+            role: Some(role),
+        }
+    }
+}
+
+/// Generation facts the expander needs beyond the family and task: the exact
+/// identity, the canvas, the clip length, and the ordered references.
+/// Additive on every wire request; an old client omits it and the server
+/// derives what it can. Duration is never sent: it is `frames / fps`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ExpandContext {
+    /// Exact model identity (for example `wan22-i2v-a14b:q5`), used to select
+    /// a per-checkpoint prompting leaf.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// Total frames requested (`1` renders a still on Wan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    /// Frames per clip when the request auto-chains beyond one clip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_frames: Option<u32>,
+    /// Whether the target honours a negative prompt at this recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt_supported: Option<bool>,
+    /// Whether audio is generated alongside the video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<ExpandReference>,
+    /// LoRA adapter names (file stems), so trigger words can be honoured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<String>,
+}
+
+impl ExpandContext {
+    /// Derive the context from an admitted generation request. The request is
+    /// the primary source; the resolved profile fills fields the request left
+    /// at their defaults (frames, fps, negative-prompt support).
+    pub fn for_generation(
+        family: &str,
+        req: &GenerateRequest,
+        profile: Option<&crate::generation_profile::GenerationProfileSet>,
+    ) -> Self {
+        let recipe = profile.and_then(|profile| profile.default_recipe());
+        let temporal = recipe.and_then(|recipe| recipe.temporal.as_ref());
+        let mut references = Vec::new();
+        if let Some(refs) = req.references.as_ref() {
+            for reference in refs {
+                references.push(ExpandReference {
+                    kind: reference.kind(),
+                    has_audio: matches!(
+                        reference,
+                        GenerationReference::Video {
+                            has_audio: true,
+                            ..
+                        }
+                    ),
+                    role: Some(ExpandReferenceRole::Reference),
+                });
+            }
+        }
+        let is_video_family = matches!(
+            crate::generation_profile::canonical_family(family),
+            "ltx2" | "ltx-video" | "wan" | "minimax-h3"
+        );
+        if let Some(keyframes) = req
+            .keyframes
+            .as_ref()
+            .filter(|keyframes| keyframes.len() > 1)
+        {
+            for _ in keyframes {
+                references.push(ExpandReference::image(ExpandReferenceRole::Keyframe));
+            }
+        } else if req.source_image.is_some() {
+            let role = if is_video_family {
+                ExpandReferenceRole::FirstFrame
+            } else if crate::generation_profile::canonical_family(family) == "qwen-image-edit" {
+                ExpandReferenceRole::Edit
+            } else {
+                ExpandReferenceRole::Source
+            };
+            references.push(ExpandReference::image(role));
+        }
+        if let Some(edit_images) = req.edit_images.as_ref() {
+            for _ in edit_images {
+                references.push(ExpandReference::image(ExpandReferenceRole::Edit));
+            }
+        }
+        let identity_count = req
+            .id_images
+            .as_ref()
+            .map_or(usize::from(req.id_image.is_some()), Vec::len);
+        for _ in 0..identity_count {
+            references.push(ExpandReference::image(ExpandReferenceRole::Identity));
+        }
+        let has_source_video = req.source_video.is_some()
+            || req
+                .source_video_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+            || req.extend_video.is_some()
+            || req
+                .extend_video_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty());
+        if has_source_video {
+            references.push(ExpandReference {
+                kind: GenerationReferenceKind::Video,
+                has_audio: false,
+                role: Some(ExpandReferenceRole::Source),
+            });
+        }
+        let has_audio_file = req.audio_file.is_some()
+            || req
+                .audio_file_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty());
+        if has_audio_file {
+            references.push(ExpandReference {
+                kind: GenerationReferenceKind::Audio,
+                has_audio: false,
+                role: Some(ExpandReferenceRole::Source),
+            });
+        }
+        let frames = req.frames.or_else(|| {
+            if is_video_family {
+                temporal.map(|temporal| temporal.frames.default)
+            } else {
+                None
+            }
+        });
+        let fps = req.fps.or_else(|| {
+            temporal.map(|temporal| match temporal.fps {
+                crate::generation_profile::FpsControl::Fixed { value } => value,
+                crate::generation_profile::FpsControl::Adjustable { default, .. } => default,
+            })
+        });
+        let negative_prompt_supported = recipe.map(|recipe| {
+            recipe.capabilities.negative_prompt.mode
+                != crate::generation_profile::ControlMode::Hidden
+        });
+        let mut loras = Vec::new();
+        if let Some(lora) = req.lora.as_ref() {
+            loras.push(lora_display_name(&lora.path));
+        }
+        if let Some(stack) = req.loras.as_ref() {
+            for lora in stack {
+                loras.push(lora_display_name(&lora.path));
+            }
+        }
+        Self {
+            model: Some(req.model.clone()),
+            width: (req.width > 0).then_some(req.width),
+            height: (req.height > 0).then_some(req.height),
+            frames,
+            fps,
+            clip_frames: None,
+            negative_prompt_supported,
+            audio: req.enable_audio,
+            references,
+            loras,
+        }
+    }
+
+    /// Seconds of media the request renders, when frames and fps are known.
+    pub fn duration_seconds(&self) -> Option<f64> {
+        match (self.frames, self.fps) {
+            (Some(frames), Some(fps)) if fps > 0 && frames > 1 => {
+                Some(f64::from(frames) / f64::from(fps))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn lora_display_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
 /// Which creative dimension a prompt remix is allowed to vary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -491,6 +719,10 @@ pub struct ExpandRequest {
     /// and the server infers text-to-video for known video families.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<ExpandTask>,
+    /// Generation facts (identity, canvas, frames, references). Additive:
+    /// older clients omit it and the guide is applied without them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ExpandContext>,
 }
 
 fn default_expand_model_family() -> String {
@@ -541,6 +773,9 @@ pub struct RemixRequest {
     /// Empty means the server's task-aware default set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimensions: Vec<RemixDimension>,
+    /// Generation facts (identity, canvas, frames, references). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ExpandContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -5242,6 +5477,7 @@ mod tests {
             variations: 4,
             style: Some("gritty film noir".to_string()),
             task: None,
+            context: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ExpandRequest = serde_json::from_str(&json).unwrap();
@@ -5258,12 +5494,62 @@ mod tests {
             variations: 1,
             style: None,
             task: None,
+            context: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // No style set — the field stays off the wire entirely.
         assert!(!json.contains("style"));
         let back: ExpandRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.style, None);
+    }
+
+    #[test]
+    fn expand_context_is_additive_and_derived_from_the_generation_request() {
+        let req = ExpandRequest {
+            prompt: "a cat".to_string(),
+            model_family: "wan".to_string(),
+            variations: 1,
+            style: None,
+            task: None,
+            context: None,
+        };
+        assert!(!serde_json::to_string(&req).unwrap().contains("context"));
+        let old_wire: ExpandRequest =
+            serde_json::from_str(r#"{"prompt":"a cat","model_family":"wan"}"#).unwrap();
+        assert_eq!(old_wire.context, None);
+        let new_wire: ExpandRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model_family":"wan","context":{"model":"wan22-i2v-a14b:q5","frames":81,"fps":16,"references":[{"kind":"image","role":"first-frame"}]}}"#,
+        )
+        .unwrap();
+        let context = new_wire.context.unwrap();
+        assert_eq!(context.model.as_deref(), Some("wan22-i2v-a14b:q5"));
+        assert_eq!(context.duration_seconds(), Some(81.0 / 16.0));
+        assert_eq!(
+            context.references,
+            vec![ExpandReference::image(ExpandReferenceRole::FirstFrame)]
+        );
+
+        let generate: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "wan22-i2v-a14b:q5",
+            "prompt": "the balloon lifts off",
+            "width": 832,
+            "height": 480,
+            "frames": 81,
+            "source_image": "AQID",
+            "loras": [{"path": "/adapters/paper-boat.safetensors", "scale": 0.8}]
+        }))
+        .unwrap();
+        let derived = ExpandContext::for_generation("wan", &generate, None);
+        assert_eq!(derived.model.as_deref(), Some("wan22-i2v-a14b:q5"));
+        assert_eq!((derived.width, derived.height), (Some(832), Some(480)));
+        assert_eq!(derived.frames, Some(81));
+        assert_eq!(derived.fps, None, "no profile, no fps default");
+        assert_eq!(
+            derived.references,
+            vec![ExpandReference::image(ExpandReferenceRole::FirstFrame)]
+        );
+        assert_eq!(derived.negative_prompt_supported, None);
+        assert_eq!(derived.loras, vec!["paper-boat".to_string()]);
     }
 
     #[test]

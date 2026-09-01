@@ -116,10 +116,14 @@ an entry like this:
 }
 ```
 
-The MCP server exposes synchronous `generate_image`, timeout-friendly
-`generate_image_async` / `generation_status` / `generation_retry`, gallery tools
-`list_gallery` / `get_gallery_image`, `list_models`, `list_loras`, and
-`server_status`. Generation tools accept a `loras` array using ids or paths
+The MCP server exposes synchronous `generate_image` and `generate_mesh`,
+timeout-friendly `generate_image_async` / `generation_status` /
+`generation_retry`, gallery tools `list_gallery` / `get_gallery_image`,
+`list_models`, `list_loras`, `server_status`, and the prompt-transform tools
+`expand_prompt` / `remix_prompt`, which apply the target model's prompting guide
+on the server. The guides themselves are readable as `mold://prompting/<path>`
+resources (`mold://prompting/route/<model>` returns one model's full route).
+Generation tools accept a `loras` array using ids or paths
 returned by `list_loras`; object entries can omit `scale` to use `1.0`. Use the
 async generation flow for cold model loads or slow generations so LM Studio does
 not need to keep one tool call open until the image is finished. Set

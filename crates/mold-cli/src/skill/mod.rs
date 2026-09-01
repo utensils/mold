@@ -1344,8 +1344,200 @@ mod tests {
                 EXAMPLES_MD.contains(&rendered),
                 "example fixture missing {rendered}"
             );
-            crate::Cli::try_parse_from(std::iter::once("mold").chain(argv.iter().copied()))
+            parse_on_large_stack(argv.iter().map(|arg| (*arg).to_string()).collect())
                 .unwrap_or_else(|error| panic!("invalid example {rendered}: {error}"));
         }
+    }
+
+    /// The full clap tree no longer fits the default test-thread stack, so
+    /// parse on a thread sized like the real `main`.
+    fn parse_on_large_stack(argv: Vec<String>) -> std::result::Result<(), String> {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                match crate::Cli::try_parse_from(
+                    std::iter::once("mold".to_string()).chain(argv.into_iter()),
+                ) {
+                    Ok(_) => Ok(()),
+                    // `mold --help` and `mold <cmd> --help` are documented on
+                    // purpose; clap reports them as errors that print help.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            clap::error::ErrorKind::DisplayHelp
+                                | clap::error::ErrorKind::DisplayVersion
+                        ) =>
+                    {
+                        Ok(())
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            })
+            .expect("spawn parse thread")
+            .join()
+            .expect("parse thread panicked")
+    }
+
+    /// Split one documented shell command into argv the way a POSIX shell
+    /// would for the subset the corpus uses: single and double quotes,
+    /// backslash escapes, `$(...)` kept as one word inside quotes, an
+    /// optional `KEY=VALUE` environment prefix, and a trailing `| pager`.
+    fn shell_words(command: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut in_word = false;
+        let mut quote: Option<char> = None;
+        let mut chars = command.chars().peekable();
+        while let Some(c) = chars.next() {
+            match quote {
+                Some('\'') => {
+                    if c == '\'' {
+                        quote = None;
+                    } else {
+                        current.push(c);
+                    }
+                }
+                Some('"') => match c {
+                    '"' => quote = None,
+                    '\\' => {
+                        if let Some(next) = chars.next() {
+                            current.push(next);
+                        }
+                    }
+                    _ => current.push(c),
+                },
+                _ => match c {
+                    '\'' | '"' => {
+                        quote = Some(c);
+                        in_word = true;
+                    }
+                    '\\' => {
+                        if let Some(next) = chars.next() {
+                            if next != '\n' {
+                                current.push(next);
+                                in_word = true;
+                            }
+                        }
+                    }
+                    '|' | '#' => break,
+                    c if c.is_whitespace() => {
+                        if in_word {
+                            words.push(std::mem::take(&mut current));
+                            in_word = false;
+                        }
+                    }
+                    _ => {
+                        current.push(c);
+                        in_word = true;
+                    }
+                },
+            }
+        }
+        if in_word {
+            words.push(current);
+        }
+        words
+    }
+
+    /// Every `mold ...` line in every fenced bash block of a markdown file.
+    fn documented_commands(markdown: &str) -> Vec<String> {
+        let mut commands = Vec::new();
+        let mut in_bash = false;
+        let mut pending = String::new();
+        for line in markdown.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                if in_bash {
+                    in_bash = false;
+                } else {
+                    let info = trimmed.trim_start_matches('`').trim().to_ascii_lowercase();
+                    in_bash = matches!(info.as_str(), "bash" | "sh" | "shell" | "console");
+                }
+                continue;
+            }
+            if !in_bash || trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(head) = trimmed.strip_suffix('\\') {
+                pending.push_str(head);
+                pending.push(' ');
+                continue;
+            }
+            pending.push_str(trimmed);
+            let command = std::mem::take(&mut pending);
+            // `cat x | mold ...` and `KEY=VALUE mold ...` prefixes.
+            let start = command.find("mold ").filter(|index| {
+                *index == 0 || command[..*index].ends_with(' ') || command[..*index].ends_with('|')
+            });
+            if let Some(start) = start {
+                commands.push(command[start..].to_string());
+            }
+        }
+        commands
+    }
+
+    #[test]
+    fn every_documented_bash_command_in_the_corpus_parses_with_the_cli() {
+        let bundle = render_bundle(RenderProfile::Portable).unwrap();
+        let mut seen = 0usize;
+        for (path, contents) in &bundle.files {
+            if !path.ends_with(".md") {
+                continue;
+            }
+            for command in documented_commands(contents) {
+                let argv = shell_words(&command);
+                assert_eq!(
+                    argv.first().map(String::as_str),
+                    Some("mold"),
+                    "{path}: {command}"
+                );
+                seen += 1;
+                parse_on_large_stack(argv[1..].to_vec())
+                    .unwrap_or_else(|error| panic!("{path}: invalid example `{command}`: {error}"));
+            }
+        }
+        assert!(
+            seen >= 20,
+            "expected the corpus to document CLI examples, found {seen}"
+        );
+    }
+
+    #[test]
+    fn shell_words_handles_the_corpus_quoting_forms() {
+        assert_eq!(
+            shell_words(r#"mold run flux-dev:q4 "a cat, \"quoted\"" --seed 1 | viu -"#),
+            vec![
+                "mold",
+                "run",
+                "flux-dev:q4",
+                "a cat, \"quoted\"",
+                "--seed",
+                "1"
+            ]
+        );
+        assert_eq!(
+            shell_words("mold run h3 \"$(cat h3-prompt.txt)\" --duration 5"),
+            vec![
+                "mold",
+                "run",
+                "h3",
+                "$(cat h3-prompt.txt)",
+                "--duration",
+                "5"
+            ]
+        );
+        assert_eq!(
+            shell_words("mold run 'it''s' -o out.png # comment"),
+            vec!["mold", "run", "its", "-o", "out.png"]
+        );
+        assert_eq!(
+            documented_commands(
+                "```bash\nMOLD_HOST=http://h mold server status\ncat p.png | mold run \"x\" \\\n  --image -\n```\n```text\nmold not-a-command\n```"
+            ),
+            vec![
+                "mold server status".to_string(),
+                "mold run \"x\"  --image -".to_string()
+            ]
+        );
     }
 }
