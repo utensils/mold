@@ -1953,7 +1953,7 @@ async function generateSequence() {
       );
       return;
     }
-    const accepted = await licenseAcceptance.request({
+    const { accepted } = await licenseAcceptance.request({
       hostLabel: hostRoute.label,
       target: hostRoute.target,
       requirements: licenseRequirements(feasibility.preview?.pending_downloads),
@@ -3777,7 +3777,7 @@ async function generate() {
       placementPreview = finalized.kind === "route" ? (finalized.preview ?? null) : null;
     }
     route = freezeModelFamily(route, draft.family)!;
-    const accepted = await licenseAcceptance.request({
+    const { accepted } = await licenseAcceptance.request({
       hostLabel: route.label,
       target: route.target,
       requirements: licenseRequirements(placementPreview?.pending_downloads),

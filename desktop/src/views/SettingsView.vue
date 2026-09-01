@@ -25,6 +25,7 @@ import {
   type SectionId,
 } from "../lib/settingsSchema";
 import { useConnectionStore } from "../stores/connection";
+import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useSettingsConfigStore } from "../stores/settingsConfig";
 
@@ -36,6 +37,24 @@ const pairingTarget = computed(() =>
   conn.baseUrl ? { baseUrl: conn.baseUrl, apiKey: conn.apiKey } : null,
 );
 const pairingBaseUrl = computed(() => conn.baseUrl ?? "http://127.0.0.1:7680");
+
+// Licence acceptance is recorded per Mold data root, so it belongs to the host
+// that will do the downloading. Generate-time consent already targets whatever
+// host the render was routed to; without a selector here, Settings was the one
+// place that could only ever speak for this device.
+const hostsStore = useHostsStore();
+const licenseHostId = ref("local");
+const licenseHosts = computed(() => hostsStore.all.filter((host) => host.baseUrl));
+const licenseHost = computed(
+  () =>
+    licenseHosts.value.find((host) => host.id === licenseHostId.value) ?? hostsStore.primaryHost,
+);
+const licenseTarget = computed(() =>
+  licenseHost.value?.baseUrl
+    ? { baseUrl: licenseHost.value.baseUrl, apiKey: licenseHost.value.apiKey }
+    : pairingTarget.value,
+);
+const licenseHostLabel = computed(() => licenseHost.value?.label ?? "This device");
 
 const query = ref("");
 /** Which "All settings" accordion is open (one at a time) when not searching. */
@@ -155,9 +174,22 @@ function toggle(id: SectionId): void {
           <section data-test="license-settings-region">
             <div class="edge-code mb-2.5 uppercase">Model licenses</div>
             <CardSurface>
+              <label
+                v-if="licenseHosts.length > 1"
+                class="mb-2.5 flex items-center gap-2 text-sm"
+                data-test="license-host-select"
+              >
+                <span class="text-ink-2">Machine</span>
+                <select v-model="licenseHostId" class="input">
+                  <option v-for="host in licenseHosts" :key="host.id" :value="host.id">
+                    {{ host.label }}
+                    {{ host.kind === "local" ? "(this device)" : `(${host.baseUrl})` }}
+                  </option>
+                </select>
+              </label>
               <LicenseSettingsPanel
-                :target="pairingTarget"
-                host-label="This device"
+                :target="licenseTarget"
+                :host-label="licenseHostLabel"
                 :open-external="openExternal"
               />
             </CardSurface>

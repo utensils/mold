@@ -147,6 +147,33 @@ impl ApiError {
         }
     }
 
+    /// Map a download refusal back to its structured HTTP shape.
+    ///
+    /// `model_manager::pull_model` is the auto-pull seam every caller outside
+    /// `/api/models/pull` reaches, and it holds only a `DownloadError`.
+    /// Collapsing a refusal into `internal(...)` returned 500 INTERNAL_ERROR
+    /// with no `license` payload — reporting the one download failure a client
+    /// CAN resolve as a server fault it cannot, and stripping the pinned
+    /// `(url, sha256)` a UI needs in order to offer acceptance.
+    pub fn from_download_error(model: &str, error: &mold_core::download::DownloadError) -> Self {
+        match error {
+            mold_core::download::DownloadError::LicenseNotAccepted { license_id, .. } => {
+                match mold_core::license_acceptance::license_by_id(license_id) {
+                    Some(license) => Self::license_not_accepted(model, license),
+                    // The gate resolved an id this build does not register,
+                    // which would mean the registry disagreed with itself.
+                    // Carry the refusal's own wording rather than invent terms.
+                    None => Self::with_code(
+                        error.to_string(),
+                        mold_core::LICENSE_NOT_ACCEPTED,
+                        StatusCode::FORBIDDEN,
+                    ),
+                }
+            }
+            other => Self::internal(format!("failed to pull model '{model}': {other}")),
+        }
+    }
+
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::with_code(msg, "MODEL_NOT_FOUND", StatusCode::NOT_FOUND)
     }
@@ -338,6 +365,7 @@ use crate::queue::clean_error_message;
         capabilities_ltx2_control_adapters,
         capabilities_ltx2_camera_controls,
         list_licenses_endpoint,
+        accept_licenses_endpoint,
         stream_events,
         crate::routes_chain::validate_chain,
         crate::routes_chain_jobs::create_chain_job,
@@ -813,6 +841,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/history", get(list_history).delete(delete_history))
         .route("/api/capabilities", get(server_capabilities))
         .route("/api/licenses", get(list_licenses_endpoint))
+        .route("/api/licenses/accept", post(accept_licenses_endpoint))
         .route("/api/discovery/peers", get(discovery_peers))
         .route(
             "/api/capabilities/chain-limits",
@@ -1074,6 +1103,38 @@ async fn require_server_model_acquisition(
 /// Unknown ids are a `400` and nothing is written; see
 /// [`mold_core::license_acceptance::record_acceptances`] for why they are
 /// rejected rather than ignored.
+/// Record pinned acceptances in this server's own root.
+///
+/// Shared by the download seam and by `POST /api/licenses/accept`, so consent
+/// means exactly one thing however it arrives. `record_acceptances` verifies
+/// every entry against the terms THIS build pins before writing any of them,
+/// which is why a mismatch late in the list writes nothing at all.
+fn record_license_acceptances(
+    mold_home: &std::path::Path,
+    accept_licenses: &[mold_core::LicenseAcceptance],
+) -> Result<(), ApiError> {
+    use mold_core::license_acceptance;
+
+    if accept_licenses.is_empty() {
+        return Ok(());
+    }
+    license_acceptance::record_acceptances(mold_home, accept_licenses)
+        .map(|_| ())
+        .map_err(|error| match error {
+            license_acceptance::RecordAcceptancesError::Unknown(unknown) => ApiError::with_code(
+                unknown.to_string(),
+                "UNKNOWN_LICENSE",
+                StatusCode::BAD_REQUEST,
+            ),
+            license_acceptance::RecordAcceptancesError::TermsMismatch(ours) => {
+                ApiError::license_terms_mismatch(ours)
+            }
+            license_acceptance::RecordAcceptancesError::Io(io) => {
+                ApiError::internal(format!("failed to record license acceptance: {io}"))
+            }
+        })
+}
+
 async fn apply_download_license_acceptances(
     state: &AppState,
     model: &str,
@@ -1085,25 +1146,7 @@ async fn apply_download_license_acceptances(
     let mold_home = mold_core::Config::mold_dir()
         .ok_or_else(|| ApiError::internal("could not resolve the Mold data directory"))?;
 
-    if !accept_licenses.is_empty() {
-        license_acceptance::record_acceptances(&mold_home, accept_licenses).map_err(|error| {
-            match error {
-                license_acceptance::RecordAcceptancesError::Unknown(unknown) => {
-                    ApiError::with_code(
-                        unknown.to_string(),
-                        "UNKNOWN_LICENSE",
-                        StatusCode::BAD_REQUEST,
-                    )
-                }
-                license_acceptance::RecordAcceptancesError::TermsMismatch(ours) => {
-                    ApiError::license_terms_mismatch(ours)
-                }
-                license_acceptance::RecordAcceptancesError::Io(io) => {
-                    ApiError::internal(format!("failed to record license acceptance: {io}"))
-                }
-            }
-        })?;
-    }
+    record_license_acceptances(&mold_home, accept_licenses)?;
 
     // Re-derive every term from the manifest rather than trusting the
     // accepted list: a request may name one license while the model needs
@@ -4501,7 +4544,105 @@ pub(crate) async fn placement_preview_for_request(
     }
 }
 
+/// Decorate every placement-preview outcome with the requested model's own
+/// outstanding licence terms.
+///
+/// Outstanding terms are a property of the MODEL the request named, not of the
+/// placement verdict: an uninstalled gated checkpoint answers `infeasible`, a
+/// durable-chain probe answers `unsupported`, and a partially installed one
+/// answers `planned`. All three must be able to ask for consent, so this rides
+/// the one seam every outcome passes through rather than the dozen `return`
+/// sites inside — a `return` added later inherits it for free.
 async fn placement_preview_for_request_authenticated(
+    state: &AppState,
+    mut request: GenerateRequest,
+    copies: u32,
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+) -> Result<mold_core::GenerationPlacementPreview, ApiError> {
+    // Canonicalize before naming the model: the inner body does the same and
+    // the call is idempotent.
+    mold_core::minimax_h3::canonicalize_request_model(&mut request);
+    let requested_model = request.model.clone();
+    let mut preview = placement_preview_outcome(state, request, copies, authenticated).await?;
+    if let Some(download) = requested_model_license_download(state, &requested_model).await {
+        // `PendingModelDownload` is `Eq`, so this suppresses an exact repeat
+        // without any policy. Deliberately NOT keyed on `install_model` alone:
+        // a dependency-ladder row may name the same bundle with no licences,
+        // and swallowing this row behind it would silence the prompt.
+        if !preview.pending_downloads.contains(&download) {
+            preview.pending_downloads.push(download);
+        }
+    }
+    Ok(preview)
+}
+
+/// The requested model's own outstanding terms, shaped as the pending download
+/// a client posts back to `/api/downloads`.
+///
+/// [`crate::variant_dependencies`] only ever names a COMPANION bundle (PuLID
+/// identity assets, shared encoders), so a gated MAIN checkpoint reached no
+/// client at all — every Hunyuan3D tier is one self-contained transformer file
+/// that is never a ladder dependency. This applies the same registry-driven
+/// contract to the model the request named, so no surface learns a model name
+/// or a licence id.
+pub(crate) async fn requested_model_license_download(
+    state: &AppState,
+    model: &str,
+) -> Option<mold_core::PendingModelDownload> {
+    // Resolves aliases and bare names to a canonical manifest.
+    let manifest = mold_core::manifest::find_manifest(model)?;
+    // No resolvable root means no acceptance record to read. The preview is
+    // advisory and fails OPEN here; the download seam
+    // (`mold_core::download::require_license_accepted`) is authoritative and
+    // fails CLOSED, so silence here can never let ungated bytes through.
+    let mold_home = mold_core::Config::mold_dir()?;
+    // Only files this install would actually FETCH are gated — the same rule
+    // `apply_download_license_acceptances` enforces at the download seam.
+    // Deriving both from one predicate is what stops a preview asking for
+    // consent the enqueue would not require, or staying silent about consent
+    // the enqueue will demand.
+    let missing: Vec<&mold_core::manifest::ModelFile> = {
+        let config = state.config.read().await;
+        manifest
+            .files
+            .iter()
+            .filter(|file| config.complete_manifest_file_path(manifest, file).is_none())
+            .collect()
+    };
+    let licenses = mold_core::license_acceptance::unaccepted_for_manifest_files(
+        &manifest.name,
+        missing.iter().map(|file| file.hf_filename.as_str()),
+        &mold_home,
+    );
+    if licenses.is_empty() {
+        return None;
+    }
+    // The repository the LICENCE covers, not merely the first absent file's.
+    // Guaranteed present: `licenses` is non-empty only because some missing
+    // file is gated.
+    let gated = missing.iter().find(|file| {
+        mold_core::license_acceptance::licenses_for_manifest_file(&manifest.name, &file.hf_filename)
+            .next()
+            .is_some()
+    })?;
+    Some(mold_core::PendingModelDownload {
+        // Deliberately not a component kind: this row is the bundle, not a
+        // slot in a pipeline. Same shape as the `ic-lora-control` rows.
+        kind: "model".to_string(),
+        // The bundle, not one of its files — a multi-file manifest with only
+        // its companion outstanding would otherwise name weights already on
+        // disk and quote their size.
+        name: manifest.name.clone(),
+        repo: gated.hf_repo.clone(),
+        // What `/api/downloads` will actually transfer: every absent file, not
+        // only the gated ones.
+        bytes: missing.iter().map(|file| file.size_bytes).sum(),
+        install_model: Some(manifest.name.clone()),
+        licenses,
+    })
+}
+
+async fn placement_preview_outcome(
     state: &AppState,
     mut request: GenerateRequest,
     copies: u32,
@@ -10363,6 +10504,46 @@ async fn scalar_docs() -> impl IntoResponse {
 async fn list_licenses_endpoint() -> Result<Json<mold_core::LicenseListing>, ApiError> {
     let mold_home = mold_core::Config::mold_dir()
         .ok_or_else(|| ApiError::internal("could not resolve the Mold data directory"))?;
+    Ok(Json(mold_core::LicenseListing {
+        licenses: mold_core::license_acceptance::license_statuses(&mold_home),
+    }))
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct AcceptLicensesBody {
+    /// The exact pinned terms the caller displayed, verified before writing.
+    #[serde(default)]
+    pub accept_licenses: Vec<mold_core::LicenseAcceptance>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/licenses/accept",
+    tag = "models",
+    request_body = AcceptLicensesBody,
+    responses(
+        (status = 200, description = "Refreshed license state for this server", body = mold_core::LicenseListing),
+        (status = 400, description = "Unknown license id"),
+        (status = 409, description = "This server pins different terms"),
+    ),
+)]
+/// Record acceptance of pinned third-party terms WITHOUT downloading anything.
+///
+/// Consent and acquisition are different acts. Before this route the only way
+/// to accept was `POST /api/downloads`, so agreeing to terms always started a
+/// multi-gigabyte transfer — a client that merely wanted to consent had to
+/// pull the weights, and a licence no installed manifest required could not be
+/// accepted at all. Acceptance is per Mold data root, so this records against
+/// THIS server: that is what lets a desktop or mobile client accept on behalf
+/// of the host it is pointed at.
+///
+/// Returns the refreshed listing so a caller needs no second round trip.
+async fn accept_licenses_endpoint(
+    Json(body): Json<AcceptLicensesBody>,
+) -> Result<Json<mold_core::LicenseListing>, ApiError> {
+    let mold_home = mold_core::Config::mold_dir()
+        .ok_or_else(|| ApiError::internal("could not resolve the Mold data directory"))?;
+    record_license_acceptances(&mold_home, &body.accept_licenses)?;
     Ok(Json(mold_core::LicenseListing {
         licenses: mold_core::license_acceptance::license_statuses(&mold_home),
     }))

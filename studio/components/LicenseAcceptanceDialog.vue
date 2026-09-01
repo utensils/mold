@@ -7,6 +7,11 @@ const props = defineProps<{
   openExternal?: ((url: string) => void | Promise<void>) | undefined;
 }>();
 const licenses = useLicenseAcceptance();
+// `intent: "record"` accepts the terms and downloads nothing — Settings' bare
+// "Accept terms" action, and the retry a model-install takes before
+// re-driving its OWN enqueue. Promising a download there would ask the user
+// to consent to an operation that will not happen.
+const recordOnly = computed(() => licenses.pending.value?.intent === "record");
 const percent = computed(() => {
   const progress = licenses.progress.value;
   if (!progress || progress.bytesTotal <= 0) return null;
@@ -14,6 +19,13 @@ const percent = computed(() => {
     100,
     Math.round((progress.bytesDone / progress.bytesTotal) * 100),
   );
+});
+
+const primaryLabel = computed(() => {
+  if (recordOnly.value) {
+    return licenses.busy.value ? "Recording…" : "Accept terms";
+  }
+  return licenses.busy.value ? "Downloading…" : "Accept terms and download";
 });
 
 function openTerms(event: MouseEvent, url: string) {
@@ -47,7 +59,8 @@ function openTerms(event: MouseEvent, url: string) {
         class="license-bundle"
       >
         <p class="license-model">
-          Required download: {{ requirement.installModel }}
+          {{ recordOnly ? "Required for" : "Required download" }}:
+          {{ requirement.installModel }}
         </p>
         <article
           v-for="term in requirement.licenses"
@@ -77,7 +90,7 @@ function openTerms(event: MouseEvent, url: string) {
         {{ licenses.error.value }}
       </p>
       <div
-        v-if="licenses.progress.value"
+        v-if="licenses.progress.value && !recordOnly"
         class="license-progress"
         aria-live="polite"
       >
@@ -97,7 +110,9 @@ function openTerms(event: MouseEvent, url: string) {
           class="license-secondary"
           @click="licenses.cancel()"
         >
-          {{ licenses.busy.value ? "Cancel download" : "Cancel" }}
+          {{
+            licenses.busy.value && !recordOnly ? "Cancel download" : "Cancel"
+          }}
         </button>
         <button
           type="button"
@@ -105,9 +120,7 @@ function openTerms(event: MouseEvent, url: string) {
           :disabled="licenses.busy.value"
           @click="licenses.accept()"
         >
-          {{
-            licenses.busy.value ? "Downloading…" : "Accept terms and download"
-          }}
+          {{ primaryLabel }}
         </button>
       </template>
     </ModalPanel>

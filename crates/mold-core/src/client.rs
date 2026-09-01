@@ -1144,6 +1144,27 @@ impl MoldClient {
         Ok(listing.licenses)
     }
 
+    /// Record acceptance of pinned terms on this server WITHOUT downloading.
+    ///
+    /// Acceptance is per Mold data root, so this writes on the host the client
+    /// is pointed at — that is what lets one machine accept on behalf of the
+    /// server it renders on. Returns the refreshed listing.
+    pub async fn accept_licenses(
+        &self,
+        acceptances: &[crate::types::LicenseAcceptance],
+    ) -> Result<Vec<crate::types::ThirdPartyLicenseStatus>> {
+        let listing: crate::types::LicenseListing = self
+            .client
+            .post(format!("{}/api/licenses/accept", self.base_url))
+            .json(&serde_json::json!({ "accept_licenses": acceptances }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(listing.licenses)
+    }
+
     /// Read-only dependency and device plan for an exact generation request.
     /// Newer clients use the additive pending-license metadata to pause for
     /// consent before admission starts any download.

@@ -91,7 +91,11 @@ async function installElsewhere(model: ModelInfoExtended) {
   });
   if (choice.kind === "cancelled") return;
   try {
-    await installTargets.startDownloadOn(choice.target, model.name);
+    const started = await installTargets.startDownloadOn(
+      choice.target,
+      model.name,
+    );
+    if (started.declined) return;
     toast("success", installTargets.queuedMessage(choice.target));
   } catch (error) {
     toast("error", error instanceof Error ? error.message : String(error));

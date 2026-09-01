@@ -10,6 +10,7 @@ import {
 } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { startCatalogDownload } from "../lib/api/catalog";
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../lib/downloads";
 import { notifyPulled, notifyPullFailed } from "../lib/notify";
 import type { NotificationAction } from "../lib/notificationAction";
@@ -498,10 +499,16 @@ export const useDownloadsStore = defineStore("downloads", {
     async createDownload(model: string) {
       const toasts = useToastStore();
       try {
-        await apiFetch("/api/downloads", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model }),
+        await runWithLicenseConsent({
+          hostLabel: "This device",
+          target: this.primaryTarget ?? currentTarget(),
+          installModel: model,
+          start: () =>
+            apiFetch("/api/downloads", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ model }),
+            }),
         });
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) {
@@ -525,7 +532,14 @@ export const useDownloadsStore = defineStore("downloads", {
       }
       const target = host?.target ?? this.primaryTarget ?? currentTarget();
       try {
-        await startCatalogDownload(job.model, target, !isPrimary);
+        // Consent is recorded per Mold data root, so it must be taken against
+        // the host this job actually ran on — never the primary.
+        await runWithLicenseConsent({
+          hostLabel: host?.label ?? "This device",
+          target,
+          installModel: job.model,
+          start: () => startCatalogDownload(job.model, target, !isPrimary),
+        });
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) {
           useToastStore().push(`${job.model} is already queued.`);

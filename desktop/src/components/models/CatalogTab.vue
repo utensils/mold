@@ -14,7 +14,8 @@ import { useHostModelsStore } from "../../stores/hostModels";
 import { modelRuntimeNoticeAcrossHosts } from "@studio/lib/modelRuntimeAvailability";
 import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
-import { ApiError, type ApiTarget } from "../../lib/api/client";
+import { ApiError, currentTarget, type ApiTarget } from "../../lib/api/client";
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { isVideoFamily } from "../../lib/capabilities";
 import { catalogIdentityKey, sortInstalledFirst } from "../../lib/catalog";
@@ -482,18 +483,29 @@ function retrySearch(): void {
 const sentinel = ref<HTMLElement | null>(null);
 useInfiniteScrollSentinel(sentinel, loading, hasMore, loadMore, MAX_AUTO_PAGES);
 
-async function queueOnHost(entry: CatalogEntry, host: HostView | null): Promise<void> {
+/** Returns false when the user declined the host's licence terms. */
+async function queueOnHost(entry: CatalogEntry, host: HostView | null): Promise<boolean> {
   const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
   // Attach the snapshot-first stream before enqueueing so a cached,
   // near-instant pull still produces a visible terminal event and refresh.
   await downloads.subscribe(host ?? undefined);
-  await startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false);
+  // A gated bundle is refused with the pinned terms attached. Take consent and
+  // re-drive this same enqueue, so the job lands in the downloads tray exactly
+  // as an ungated one does.
+  const outcome = await runWithLicenseConsent({
+    hostLabel: host?.label ?? "This device",
+    target: target ?? currentTarget(),
+    installModel: entry.id,
+    start: () => startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false),
+  });
+  return outcome.kind !== "declined";
 }
 
 async function pullTo(entry: CatalogEntry, host: HostView | null) {
   pulling.value.add(entry.id);
   try {
-    await queueOnHost(entry, host);
+    // A decline needs no toast: the modal WAS the interaction.
+    if (!(await queueOnHost(entry, host))) return;
     toasts.push(`Pulling ${entry.display_name ?? entry.name}${host ? ` on ${host.label}` : ""}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
@@ -518,7 +530,10 @@ async function startBatch(): Promise<void> {
       const entry = entriesById.get(item.modelId);
       if (!entry) throw new Error(`Model ${item.modelId} is no longer selected`);
       try {
-        await queueOnHost(entry, target.host);
+        // A declined license queued nothing. Returning the id anyway would
+        // drop the model from the selection and count it in the "downloads
+        // queued" toast, so carry the decision through the batch.
+        if (!(await queueOnHost(entry, target.host))) return null;
       } catch (error) {
         if (!isAlreadyQueuedError(error)) throw error;
       }
@@ -532,6 +547,9 @@ async function startBatch(): Promise<void> {
     const item = target.items[index]!;
     pulling.value.delete(item.modelId);
     if (result.status === "fulfilled") {
+      // `null` is a decline: leave it selected and out of the count. It is
+      // neither a success nor a failure — the dialog was the interaction.
+      if (result.value === null) return;
       next.delete(result.value);
       succeeded += 1;
     } else {

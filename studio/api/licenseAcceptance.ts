@@ -4,6 +4,7 @@ import {
   licenseFromErrorBody,
   type LicenseListing,
   type LicenseRequirement,
+  type LicenseTerms,
 } from "../lib/licenseAcceptance";
 
 interface CreateDownloadResponse {
@@ -38,6 +39,45 @@ export async function fetchLicenseListing(
   target: ApiTarget,
 ): Promise<LicenseListing> {
   return apiJsonTo<LicenseListing>(target, "/api/licenses");
+}
+
+/** Record acceptance on one host WITHOUT downloading the bundle.
+ *
+ * Consent and acquisition are different acts. `acceptAndDownload` below is the
+ * right call when the user asked for the weights; this one is for a client
+ * that will re-drive its OWN enqueue afterwards, so the job lands in that
+ * surface's normal downloads queue instead of behind the modal's progress bar.
+ *
+ * Throws `ApiError` 404/405 on a host predating the route, which callers use
+ * to fall back to `acceptAndDownload`.
+ */
+export async function recordLicenseAcceptances(
+  target: ApiTarget,
+  licenses: readonly LicenseTerms[],
+  signal?: AbortSignal,
+): Promise<LicenseListing> {
+  try {
+    const response = await apiFetchTo(target, "/api/licenses/accept", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      ...(signal ? { signal } : {}),
+      body: JSON.stringify({ accept_licenses: licenses.map(acceptanceFor) }),
+    });
+    return (await response.json()) as LicenseListing;
+  } catch (error) {
+    // Normalize a re-pinned-terms conflict exactly as acceptAndDownload does,
+    // so the composable's single mismatch handler covers both intents.
+    if (error instanceof ApiError) {
+      const current = licenseFromErrorBody(error.body);
+      if (current) {
+        throw new ApiError(error.message, error.status, {
+          ...(error.body as object),
+          license: current,
+        });
+      }
+    }
+    throw error;
+  }
 }
 
 function jobs(listing: DownloadsListing): DownloadJob[] {

@@ -22,6 +22,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
         Some(Popup::LicenseReview { .. }) => render_license_review(frame, app),
+        Some(Popup::LicenseSettings { .. }) => render_license_settings(frame, app),
         Some(Popup::SettingsInput { .. }) => render_settings_input(frame, app),
         Some(Popup::Info { message }) => render_info(frame, app, message.clone()),
         Some(Popup::UpscaleModelSelector { .. }) => render_upscale_model_selector(frame, app),
@@ -1299,6 +1300,120 @@ fn render_license_review(frame: &mut Frame, app: &App) {
     );
 }
 
+fn render_license_settings(frame: &mut Frame, app: &App) {
+    let Some(Popup::LicenseSettings {
+        host_label,
+        state,
+        selected,
+    }) = &app.popup
+    else {
+        return;
+    };
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 78, 76);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(" Model licenses ")
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+
+    // Name the machine, always: acceptance is per Mold data root, and a user
+    // reading "accepted" for the wrong host is the confusion this exists to
+    // prevent.
+    let mut text = vec![
+        Line::from(format!("Acceptance is recorded on {host_label} only.")),
+        Line::from(""),
+    ];
+    let mut row_offsets: Vec<u16> = Vec::new();
+    match state {
+        crate::app::LicenseListingState::Loading => {
+            text.push(Line::from("Checking licenses…"));
+        }
+        crate::app::LicenseListingState::Failed(message) => {
+            text.push(Line::from(Span::styled(
+                message.clone(),
+                Style::default().fg(theme.error),
+            )));
+        }
+        crate::app::LicenseListingState::Ready(rows) if rows.is_empty() => {
+            text.push(Line::from("This host has no third-party model licenses."));
+        }
+        crate::app::LicenseListingState::Ready(rows) => {
+            for (index, row) in rows.iter().enumerate() {
+                // Remember where each license starts so the selected one can
+                // be scrolled into view: three registered licences with
+                // wrapped summaries and two URLs each do not fit an 80x24
+                // terminal, and j/k that moves an invisible marker is worse
+                // than no navigation at all.
+                row_offsets.push(u16::try_from(text.len()).unwrap_or(u16::MAX));
+                let marker = if index == *selected { "▸ " } else { "  " };
+                let (state_label, state_style) = if row.accepted {
+                    ("accepted", Style::default().fg(theme.success))
+                } else {
+                    ("review required", Style::default().fg(theme.error))
+                };
+                text.push(Line::from(vec![
+                    Span::styled(
+                        format!("{marker}{}", row.name),
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(state_label.to_string(), state_style),
+                ]));
+                text.push(Line::from(format!("    {}", row.summary)));
+                text.push(Line::from(format!("    Pinned terms: {}", row.url)));
+                text.push(Line::from(format!("    Project terms: {}", row.canonical)));
+                if !row.required_by.is_empty() {
+                    text.push(Line::from(format!(
+                        "    needed by: {}",
+                        row.required_by.join(", ")
+                    )));
+                }
+                text.push(Line::from(""));
+            }
+            text.push(Line::from(vec![
+                Span::styled("j/k", theme.status_key()),
+                Span::styled(" Move  ", Style::default().fg(theme.text)),
+                Span::styled("Esc", theme.status_key()),
+                Span::styled(" Close", Style::default().fg(theme.text)),
+            ]));
+            text.push(Line::from(Span::styled(
+                "Accept from the Models screen: press p on a gated model.",
+                Style::default().fg(theme.text_dim),
+            )));
+        }
+    }
+    // Scroll so the selected license's first line is on screen. Wrapping
+    // makes the true rendered height larger than `text.len()`, so this is a
+    // floor, not an exact position — it can never scroll PAST the selection,
+    // which is the property that matters.
+    let inner_height = block.inner(area).height;
+    let total = u16::try_from(text.len()).unwrap_or(u16::MAX);
+    // Scroll to the END of the selected block, not merely its first line: a
+    // row whose heading is on screen but whose terms and "needed by" are cut
+    // off is still unreachable, and the footer below it never appears at all.
+    let scroll = row_offsets
+        .get(*selected)
+        .map(|_| {
+            row_offsets
+                .get(selected + 1)
+                .copied()
+                .unwrap_or(total)
+                .saturating_sub(inner_height)
+        })
+        .unwrap_or(0)
+        .min(total.saturating_sub(inner_height));
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
 fn render_info(frame: &mut Frame, app: &App, message: String) {
     let theme = &app.theme;
     let area = centered_rect(frame.area(), 55, 20);
@@ -1494,6 +1609,136 @@ mod tests {
         assert!(rendered.contains("Future model terms"));
         assert!(rendered.contains("https://example.test/pinned"));
         assert!(rendered.contains("Accept and download"));
+    }
+
+    fn license_status(
+        id: &str,
+        accepted: bool,
+        required_by: Vec<String>,
+    ) -> mold_core::types::ThirdPartyLicenseStatus {
+        mold_core::types::ThirdPartyLicenseStatus {
+            id: id.into(),
+            name: "Future model terms".into(),
+            url: "https://example.test/pinned".into(),
+            canonical: "https://example.test/project".into(),
+            sha256: "b".repeat(64),
+            summary: "Research only.".into(),
+            accepted,
+            required_by,
+        }
+    }
+
+    #[test]
+    fn license_settings_names_the_host_and_both_term_urls() {
+        let rendered = render_popup_to_string_sized(
+            crate::app::Popup::LicenseSettings {
+                host_label: "hal9000".into(),
+                state: crate::app::LicenseListingState::Ready(vec![license_status(
+                    "future-license",
+                    false,
+                    vec!["future-face-adapter".into()],
+                )]),
+                selected: 0,
+            },
+            96,
+            24,
+        );
+
+        assert!(rendered.contains("Acceptance is recorded on hal9000 only"));
+        assert!(rendered.contains("Future model terms"));
+        assert!(rendered.contains("review required"));
+        assert!(rendered.contains("https://example.test/pinned"));
+        assert!(rendered.contains("https://example.test/project"));
+        assert!(rendered.contains("future-face-adapter"));
+    }
+
+    #[test]
+    fn license_settings_distinguishes_accepted_from_required() {
+        let rendered = render_popup_to_string_sized(
+            crate::app::Popup::LicenseSettings {
+                host_label: "This device".into(),
+                state: crate::app::LicenseListingState::Ready(vec![license_status(
+                    "future-license",
+                    true,
+                    vec!["future-face-adapter".into()],
+                )]),
+                selected: 0,
+            },
+            96,
+            24,
+        );
+        assert!(rendered.contains("accepted"));
+        assert!(!rendered.contains("review required"));
+    }
+
+    /// The layout invariant AGENTS.md asks for: navigating to the last
+    /// license must actually bring it on screen on a stock 80x24 terminal.
+    /// Three registered licences, each with a wrapped summary and two URLs,
+    /// do not fit — so a `selected` that moves without scrolling would leave
+    /// the later rows permanently unreachable.
+    #[test]
+    fn license_settings_scrolls_the_selected_row_into_view() {
+        let rows: Vec<_> = (0..4)
+            .map(|i| {
+                let mut row = license_status("future-license", false, vec!["future-bundle".into()]);
+                row.name = format!("Future terms {i}");
+                row
+            })
+            .collect();
+
+        let first = render_popup_to_string_sized(
+            crate::app::Popup::LicenseSettings {
+                host_label: "hal9000".into(),
+                state: crate::app::LicenseListingState::Ready(rows.clone()),
+                selected: 0,
+            },
+            80,
+            24,
+        );
+        assert!(first.contains("Future terms 0"));
+
+        let last = render_popup_to_string_sized(
+            crate::app::Popup::LicenseSettings {
+                host_label: "hal9000".into(),
+                state: crate::app::LicenseListingState::Ready(rows),
+                selected: 3,
+            },
+            80,
+            24,
+        );
+        // Not merely the heading: the whole block must be reachable, and the
+        // key hints below it too. At scroll 0 neither is on screen.
+        assert!(
+            !first.contains("Future terms 3"),
+            "the fixture must actually overflow, or this proves nothing:\n{first}"
+        );
+        assert!(
+            last.contains("Future terms 3"),
+            "selecting the last license must scroll it into view:\n{last}"
+        );
+        assert!(
+            last.contains("Esc"),
+            "the key hints must be reachable at the bottom of the list:\n{last}"
+        );
+    }
+
+    /// A host that cannot answer is reported against that host — never
+    /// answered with this machine's own acceptances, which would report one
+    /// machine's consent under another machine's name.
+    #[test]
+    fn license_settings_reports_a_host_that_cannot_list_licenses() {
+        let rendered = render_popup_to_string_sized(
+            crate::app::Popup::LicenseSettings {
+                host_label: "hal9000".into(),
+                state: crate::app::LicenseListingState::Failed(
+                    "hal9000 did not report its licenses: connection refused".into(),
+                ),
+                selected: 0,
+            },
+            96,
+            24,
+        );
+        assert!(rendered.contains("did not report its licenses"));
     }
 
     /// Render one popup over a stand-in `App` and collapse the buffer into

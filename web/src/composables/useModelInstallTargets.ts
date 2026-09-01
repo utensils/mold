@@ -24,12 +24,24 @@ import {
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { hostModelDownload } from "../components/machines/hostClient";
 import { useCatalog } from "./useCatalog";
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { useHostRouting } from "./useHostRouting";
 import type { RoutableHost } from "../lib/hostRouting";
 
 export type InstallTarget = ModelInstallTarget<RoutableHost>;
 
 /** The open machine picker. `resolve` stays private to this module. */
+/** The result of starting an install.
+ *
+ * `declined` distinguishes "the user refused the host's license terms" from
+ * "queued, no job id" — collapsing both to `null` made every caller announce
+ * a download that never started.
+ */
+export interface StartedDownload {
+  declined: boolean;
+  jobId: string | null;
+}
+
 export interface PendingInstallChoice {
   modelId: string;
   /** What the dialog calls the model. */
@@ -83,11 +95,16 @@ export interface ModelInstallTargets {
   cancel: () => void;
   /** Starts the download and returns the server's job id when it reports one
    * (catalog ids do; a manifest-name POST does not), so a caller watching for
-   * that exact pull can be precise instead of matching by model name. */
+   * that exact pull can be precise instead of matching by model name.
+   *
+   * `null` means "queued, but this host reports no job id" — it does NOT mean
+   * nothing happened. A user who declines the host's license terms gets
+   * `declined`, which every caller must check before announcing a download
+   * that was never started. */
   startDownloadOn: (
     target: InstallTarget | null,
     modelId: string,
-  ) => Promise<string | null>;
+  ) => Promise<StartedDownload>;
   queuedMessage: (
     target: InstallTarget | null,
     fallbackAction?: ModelInstallAction,
@@ -143,19 +160,42 @@ export function useModelInstallTargets(): ModelInstallTargets {
   async function startDownloadOn(
     target: InstallTarget | null,
     modelId: string,
-  ): Promise<string | null> {
+  ): Promise<StartedDownload> {
     if (!target || target.host.id === ORIGIN_HOST_ID) {
       // Keep the origin on the catalog composable: it routes by id shape and
       // repaints the downloads centre immediately instead of waiting on the
       // SSE `enqueued` event.
-      return await cat.startDownload(modelId);
+      const outcome = await runWithLicenseConsent({
+        hostLabel: target?.host.label ?? "This machine",
+        // The SPA is served by the host it talks to, so the origin is "".
+        target: { baseUrl: "", apiKey: null },
+        installModel: modelId,
+        start: () => cat.startDownload(modelId),
+      });
+      if (outcome.kind === "declined") return { declined: true, jobId: null };
+      return {
+        declined: false,
+        jobId: outcome.kind === "ok" ? outcome.value : null,
+      };
     }
     const entry = getHost(target.host.id);
     if (!entry) {
       throw new Error(`${target.host.label} is no longer a connected machine`);
     }
-    const enqueued = await hostModelDownload(entry, modelId);
-    return enqueued?.primary_job_id ?? null;
+    // Consent is per Mold data root, so record it on the machine that will do
+    // the downloading — not on the browser's own origin.
+    const outcome = await runWithLicenseConsent({
+      hostLabel: target.host.label,
+      target: { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+      installModel: modelId,
+      start: () => hostModelDownload(entry, modelId),
+    });
+    if (outcome.kind === "declined") return { declined: true, jobId: null };
+    return {
+      declined: false,
+      jobId:
+        outcome.kind === "ok" ? (outcome.value?.primary_job_id ?? null) : null,
+    };
   }
 
   function queuedMessage(

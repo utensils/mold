@@ -104,6 +104,7 @@ an acceptance:
 
 ```bash
 mold licenses                      # read the terms
+mold licenses accept tencent-hunyuan3d-2.0   # agree without downloading
 mold pull hunyuan3d --accept-license tencent-hunyuan3d-2.0
 ```
 
@@ -117,3 +118,16 @@ Texture and PBR material generation, the 2.1 shape model, multi-view input and
 text-to-3D are tracked in
 [#1496](https://github.com/utensils/mold/issues/1496). Today's output is
 geometry only.
+
+## Accepting the licence from the apps
+
+The terms are not CLI-only. Selecting a Hunyuan3D model on web, desktop or
+mobile raises the shared licence dialog before anything downloads, as does
+installing it from the Models page. Acceptance is recorded per Mold data root,
+so it is stored on the host that will fetch the weights — on desktop, pick that
+machine in **Settings → Model licenses**, and on mobile it is whichever host you
+have selected.
+
+Texturing weights (`hunyuan3d-paint`) are covered by a _separate_ Tencent 2.1
+agreement and must be accepted on their own. They install today, but the PBR
+paint engine is not implemented yet, so they satisfy the gate without rendering.

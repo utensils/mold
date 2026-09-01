@@ -73,6 +73,24 @@ export function licenseRequirements(
   }));
 }
 
+/** The requirement implied by a host's refusal.
+ *
+ * The bundle name comes from the CALLER's own request, never from the payload:
+ * the server refuses by license, and only the caller knows what it asked to
+ * install. Keeps the UI registry-blind — it still names no model and no
+ * license id.
+ */
+export function licenseRequirementFromError(
+  body: unknown,
+  installModel: string,
+): LicenseRequirement | null {
+  const terms = licenseFromErrorBody(body);
+  if (!terms) return null;
+  const model = installModel.trim();
+  if (!model) return null;
+  return { installModel: model, licenses: [terms] };
+}
+
 export function licenseFromErrorBody(body: unknown): LicenseTerms | null {
   if (typeof body !== "object" || body === null || Array.isArray(body))
     return null;

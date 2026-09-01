@@ -102,6 +102,17 @@ pub enum BackgroundEvent {
     /// Generation or background task failed.
     Error(String),
     /// A background placement/download check paused for explicit consent.
+    /// A host answered `GET /api/licenses` for the review popup.
+    LicenseListingLoaded {
+        host_label: String,
+        licenses: Vec<mold_core::types::ThirdPartyLicenseStatus>,
+    },
+    /// That host could not be asked. Never answered with local state: the
+    /// question is always "accepted on WHICH machine?".
+    LicenseListingFailed {
+        host_label: String,
+        message: String,
+    },
     LicenseRequired {
         host_label: String,
         requirements: Vec<LicenseDownloadRequirement>,
@@ -1939,6 +1950,14 @@ pub struct SettingsState {
 }
 
 /// Active popup/overlay.
+/// What the license review popup currently knows.
+#[derive(Debug, Clone)]
+pub enum LicenseListingState {
+    Loading,
+    Ready(Vec<mold_core::types::ThirdPartyLicenseStatus>),
+    Failed(String),
+}
+
 pub enum Popup {
     Help,
     PromptSourceChoice {
@@ -2009,6 +2028,16 @@ pub enum Popup {
     Confirm {
         message: String,
         on_confirm: ConfirmAction,
+    },
+    /// Read-only listing of one host's third-party licenses.
+    ///
+    /// Deliberately holds no oneshot and settles nothing: accepting from here
+    /// re-enters the SAME pull-time consent flow, so the settings path and the
+    /// pull path can never disagree about what was shown.
+    LicenseSettings {
+        host_label: String,
+        state: LicenseListingState,
+        selected: usize,
     },
     LicenseReview {
         host_label: String,
@@ -4389,6 +4418,24 @@ impl App {
                     }
                     _ => self.close_popup(),
                 },
+                Some(Popup::LicenseSettings {
+                    state, selected, ..
+                }) => {
+                    let rows = match state {
+                        LicenseListingState::Ready(rows) => rows.len(),
+                        _ => 0,
+                    };
+                    match key.code {
+                        KeyCode::Char('j') | KeyCode::Down if *selected + 1 < rows => {
+                            *selected += 1;
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            *selected = selected.saturating_sub(1);
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') => self.close_popup(),
+                        _ => {}
+                    }
+                }
                 Some(Popup::LicenseReview { response, .. }) => match key.code {
                     KeyCode::Char('y') | KeyCode::Enter => {
                         let response = response.take();
@@ -5078,6 +5125,87 @@ impl App {
                     filter: String::new(),
                     selected: 0,
                     results: all,
+                });
+            }
+            Action::ReviewLicenses => {
+                let host_label = if self.should_poll_remote() {
+                    self.server_url.clone().unwrap_or_else(|| "server".into())
+                } else {
+                    "This device".to_string()
+                };
+                self.popup = Some(Popup::LicenseSettings {
+                    host_label: host_label.clone(),
+                    state: LicenseListingState::Loading,
+                    selected: 0,
+                });
+                let tx = self.bg_tx.clone();
+                let remote = self
+                    .should_poll_remote()
+                    .then(|| self.server_url.clone())
+                    .flatten();
+                // An authenticated host answers 401 to a bare client, which
+                // would make this popup useless on exactly the fleet hosts a
+                // user most needs to check. Resolve the connected server's
+                // saved key the way every other authenticated TUI request
+                // does.
+                let api_key = remote.as_deref().and_then(|url| {
+                    let machines = crate::hosts::MachinesState::load();
+                    let host_id = if crate::gallery_scan::is_loopback_url(url) {
+                        crate::hosts::LOCAL_HOST_ID.to_string()
+                    } else {
+                        machines
+                            .registry
+                            .hosts
+                            .iter()
+                            .find(|host| host.url == url)
+                            .map(|host| host.id.clone())
+                            .unwrap_or_else(|| crate::hosts::host_id_from_url(url))
+                    };
+                    crate::hosts::api_key_for(&host_id)
+                });
+                self.tokio_handle.spawn(async move {
+                    match remote {
+                        Some(url) => {
+                            let client = crate::hosts::client_for(&url, api_key.as_deref());
+                            match client.list_licenses().await {
+                                Ok(licenses) => {
+                                    let _ = tx.send(BackgroundEvent::LicenseListingLoaded {
+                                        host_label,
+                                        licenses,
+                                    });
+                                }
+                                Err(error) => {
+                                    // A host that cannot answer is never
+                                    // papered over with local state: the
+                                    // question is which machine accepted.
+                                    let _ = tx.send(BackgroundEvent::LicenseListingFailed {
+                                        message: format!(
+                                            "{host_label} did not report its licenses: {error}"
+                                        ),
+                                        host_label,
+                                    });
+                                }
+                            }
+                        }
+                        None => match mold_core::Config::mold_dir() {
+                            Some(home) => {
+                                let _ = tx.send(BackgroundEvent::LicenseListingLoaded {
+                                    host_label,
+                                    licenses: mold_core::license_acceptance::license_statuses(
+                                        &home,
+                                    ),
+                                });
+                            }
+                            None => {
+                                let _ = tx.send(BackgroundEvent::LicenseListingFailed {
+                                    host_label,
+                                    message:
+                                        "Could not resolve this machine's Mold data directory."
+                                            .to_string(),
+                                });
+                            }
+                        },
+                    }
                 });
             }
             Action::Unfocus if self.active_view == View::Create => {
@@ -8819,6 +8947,42 @@ impl App {
                     self.generate.error_message = Some(msg);
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
+                }
+                BackgroundEvent::LicenseListingLoaded {
+                    host_label,
+                    licenses,
+                } => {
+                    // Fence on the HOST, not merely on "a popup is open".
+                    // Closing a slow listing for one host and reopening
+                    // against another would otherwise paint the first host's
+                    // acceptances under the second one's heading — the exact
+                    // "accepted on which machine?" confusion this screen
+                    // exists to answer.
+                    if let Some(Popup::LicenseSettings {
+                        host_label: open_host,
+                        state,
+                        ..
+                    }) = self.popup.as_mut()
+                    {
+                        if *open_host == host_label {
+                            *state = LicenseListingState::Ready(licenses);
+                        }
+                    }
+                }
+                BackgroundEvent::LicenseListingFailed {
+                    host_label,
+                    message,
+                } => {
+                    if let Some(Popup::LicenseSettings {
+                        host_label: open_host,
+                        state,
+                        ..
+                    }) = self.popup.as_mut()
+                    {
+                        if *open_host == host_label {
+                            *state = LicenseListingState::Failed(message);
+                        }
+                    }
                 }
                 BackgroundEvent::LicenseRequired {
                     host_label,

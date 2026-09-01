@@ -561,6 +561,57 @@ mod tests {
     }
 
     #[test]
+    fn hunyuan3d_checkpoints_are_gated_and_each_release_carries_its_own_terms() {
+        // Hunyuan3D gates the WHOLE manifest by name, unlike antelopev2 which
+        // gates two files inside a bundle. Every shipped shape checkpoint is
+        // covered and the file name is irrelevant.
+        for manifest in [
+            "hunyuan3d:fp16",
+            "hunyuan3d-turbo:fp16",
+            "hunyuan3d-mini-turbo:fp16",
+        ] {
+            assert_eq!(
+                licenses_for_manifest_file(manifest, "model.fp16.safetensors").collect::<Vec<_>>(),
+                vec![&TENCENT_HUNYUAN3D_2_0],
+                "{manifest} must carry the 2.0 terms"
+            );
+        }
+        // The paint bundle is a separate document with its own release date,
+        // so it carries 2.1 and never 2.0.
+        assert_eq!(
+            licenses_for_manifest_file(
+                crate::manifest::HUNYUAN3D_PAINT_MANIFEST,
+                "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.fp16.safetensors"
+            )
+            .collect::<Vec<_>>(),
+            vec![&TENCENT_HUNYUAN3D_2_1]
+        );
+        // A model that merely ships a same-named file is not gated.
+        assert!(
+            licenses_for_manifest_file("flux-dev:q4", "model.fp16.safetensors")
+                .next()
+                .is_none()
+        );
+    }
+
+    /// A registered license must be reachable through the product, and the
+    /// only thing that makes it reachable is a manifest requiring it. With no
+    /// such manifest `GET /api/licenses` reports it with an empty
+    /// `required_by`, `LicenseSettingsPanel` renders zero acceptable rows for
+    /// it, and `mold licenses` prints a literal `<model>` placeholder — it can
+    /// be read on every surface and accepted on none.
+    #[test]
+    fn every_registered_license_is_required_by_some_manifest() {
+        for license in THIRD_PARTY_LICENSES {
+            assert!(
+                !manifests_requiring(license).is_empty(),
+                "license '{}' is registered but no manifest requires it, so no surface can accept it",
+                license.id
+            );
+        }
+    }
+
+    #[test]
     fn outstanding_terms_are_derived_from_the_manifest_registry() {
         let home = tempfile::tempdir().unwrap();
         let outstanding = unaccepted_for_manifest("pulid-flux", home.path());

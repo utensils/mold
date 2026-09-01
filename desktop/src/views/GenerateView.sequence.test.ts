@@ -7,7 +7,7 @@ const { routerPush, routerReplace, routeQuery, licenseRequest, placementDownload
     routerPush: vi.fn(),
     routerReplace: vi.fn(),
     routeQuery: { value: {} as Record<string, unknown> },
-    licenseRequest: vi.fn().mockResolvedValue(true),
+    licenseRequest: vi.fn().mockResolvedValue({ accepted: true, downloaded: false }),
     placementDownloads: { value: [] as unknown[] },
   }),
 );
@@ -56,6 +56,12 @@ vi.mock("@studio/api/generationPlacement", async (importOriginal) => {
 });
 vi.mock("@studio/composables/useLicenseAcceptance", () => ({
   useLicenseAcceptance: () => ({ request: licenseRequest }),
+  // The downloads store wraps its enqueue in this; the mock must keep the
+  // module's whole surface or every test in the file loses the store.
+  runWithLicenseConsent: async (options: { start: () => Promise<unknown> }) => ({
+    kind: "ok" as const,
+    value: await options.start(),
+  }),
 }));
 vi.mock("../lib/ipc", () => ({
   inTauri: () => false,
@@ -132,7 +138,7 @@ beforeEach(() => {
   routerPush.mockClear();
   routerReplace.mockClear();
   routeQuery.value = {};
-  licenseRequest.mockReset().mockResolvedValue(true);
+  licenseRequest.mockReset().mockResolvedValue({ accepted: true, downloaded: false });
   placementDownloads.value = [];
   installedPayload = [];
   apiJson.mockReset();
@@ -203,7 +209,9 @@ describe("GenerateView — sequence output", () => {
         ],
       },
     ];
-    licenseRequest.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    licenseRequest
+      .mockResolvedValueOnce({ accepted: false, downloaded: false })
+      .mockResolvedValueOnce({ accepted: true, downloaded: false });
     apiFetchTo.mockResolvedValue(Response.json({ job_id: "licensed-sequence" }));
 
     const wrapper = mountView();
