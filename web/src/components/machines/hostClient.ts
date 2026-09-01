@@ -286,7 +286,23 @@ export async function hostModelDownload(
     ...(catalog ? {} : { body: JSON.stringify({ model: id }) }),
   });
   if (!res.ok) {
-    const detail = await res.text().catch(() => "");
+    const raw = await res.text().catch(() => "");
+    // A license refusal answers JSON carrying the pinned terms. Parse it so
+    // the shared consent dialog can render them; fall back to the raw text for
+    // every other failure, which is all this ever used to carry.
+    let body: unknown = null;
+    try {
+      body = raw ? JSON.parse(raw) : null;
+    } catch {
+      body = null;
+    }
+    const detail =
+      body &&
+      typeof body === "object" &&
+      typeof (body as Record<string, unknown>).error === "string"
+        ? ((body as Record<string, unknown>).error as string)
+        : raw;
+    if (body) throw new ApiError(detail, res.status, body);
     throw new ApiHttpError(`POST ${path}`, res.status, detail);
   }
   return catalog ? ((await res.json()) as CatalogDownloadResponse) : null;

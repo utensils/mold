@@ -7050,7 +7050,7 @@ async function generate(): Promise<void> {
     return;
   }
 
-  const accepted = await licenseAcceptance.request({
+  const { accepted } = await licenseAcceptance.request({
     hostLabel: route.label,
     target: route.target,
     requirements: licenseRequirements(placement?.pending_downloads),

@@ -256,12 +256,21 @@ pub async fn preview_chain_job_placement(
     // authoritative. Keep the endpoint and copies=N wire contract available
     // for forward compatibility, while older clients may still send a raw
     // ChainRequest.
-    let _ = (state, req);
     let mut response = unavailable(
         "exact durable-chain placement requires frozen per-device stage plans".to_string(),
     );
     response.authoritative = false;
     response.outcome = "unsupported".to_string();
+    // Same registry contract as the ordinary preview: a chain naming a gated
+    // checkpoint must still be able to ask for consent, even though this route
+    // cannot price its placement. `unsupported` is the only outcome it emits,
+    // so this is the only place the terms can ride — and the pinned mobile
+    // route DOES read `pending_downloads` on `unsupported`.
+    if let Some(download) =
+        crate::routes::requested_model_license_download(&state, &req.model).await
+    {
+        response.pending_downloads.push(download);
+    }
     Json(response)
 }
 

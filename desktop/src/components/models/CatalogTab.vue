@@ -14,7 +14,8 @@ import { useHostModelsStore } from "../../stores/hostModels";
 import { modelRuntimeNoticeAcrossHosts } from "@studio/lib/modelRuntimeAvailability";
 import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
-import { ApiError, type ApiTarget } from "../../lib/api/client";
+import { ApiError, currentTarget, type ApiTarget } from "../../lib/api/client";
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { isVideoFamily } from "../../lib/capabilities";
 import { catalogIdentityKey, sortInstalledFirst } from "../../lib/catalog";
@@ -482,18 +483,30 @@ function retrySearch(): void {
 const sentinel = ref<HTMLElement | null>(null);
 useInfiniteScrollSentinel(sentinel, loading, hasMore, loadMore, MAX_AUTO_PAGES);
 
-async function queueOnHost(entry: CatalogEntry, host: HostView | null): Promise<void> {
+/** Returns false when the user declined the host's licence terms. */
+async function queueOnHost(entry: CatalogEntry, host: HostView | null): Promise<boolean> {
   const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
   // Attach the snapshot-first stream before enqueueing so a cached,
   // near-instant pull still produces a visible terminal event and refresh.
   await downloads.subscribe(host ?? undefined);
-  await startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false);
+  // A gated bundle is refused with the pinned terms attached. Take consent and
+  // re-drive this same enqueue, so the job lands in the downloads tray exactly
+  // as an ungated one does.
+  const outcome = await runWithLicenseConsent({
+    hostLabel: host?.label ?? "This device",
+    target: target ?? currentTarget(),
+    installModel: entry.id,
+    start: () =>
+      startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false),
+  });
+  return outcome.kind !== "declined";
 }
 
 async function pullTo(entry: CatalogEntry, host: HostView | null) {
   pulling.value.add(entry.id);
   try {
-    await queueOnHost(entry, host);
+    // A decline needs no toast: the modal WAS the interaction.
+    if (!(await queueOnHost(entry, host))) return;
     toasts.push(`Pulling ${entry.display_name ?? entry.name}${host ? ` on ${host.label}` : ""}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {

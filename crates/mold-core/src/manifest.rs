@@ -11,6 +11,13 @@ use std::sync::LazyLock;
 /// image encoder in one file, so it takes the same standalone-VAE exemption
 /// `ltx2` does.
 pub const HUNYUAN3D_FAMILY: &str = "hunyuan3d";
+/// The Hunyuan3D 2.1 PBR paint bundle: auxiliary, hidden, files-only.
+///
+/// Separate from [`HUNYUAN3D_FAMILY`] because it is a different upstream
+/// release under a DIFFERENT licence document (2.1, not 2.0), and because it
+/// textures a mesh rather than generating one.
+pub const HUNYUAN3D_PAINT_FAMILY: &str = "hunyuan3d-paint";
+pub const HUNYUAN3D_PAINT_MANIFEST: &str = "hunyuan3d-paint";
 
 /// The tier a surface picks when the caller names no 3-D model.
 ///
@@ -27,8 +34,13 @@ pub const UPSCALER_FAMILIES: &[&str] = &["upscaler"];
 
 /// Model families that are auxiliary (not standalone generators).
 /// ControlNet models are used via `--control-model`, not as the primary model.
-pub const AUXILIARY_FAMILIES: &[&str] =
-    &["controlnet", "ltx2-control", "ltx2-camera-control", "pulid"];
+pub const AUXILIARY_FAMILIES: &[&str] = &[
+    "controlnet",
+    "ltx2-control",
+    "ltx2-camera-control",
+    "pulid",
+    HUNYUAN3D_PAINT_FAMILY,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelComponent {
@@ -209,7 +221,7 @@ impl ModelManifest {
                 && !crate::ltx25_manifest::is_runtime_manifest(&self.name))
             || matches!(
                 self.family.as_str(),
-                "ltx2-control" | "ltx2-camera-control" | PULID_FAMILY
+                "ltx2-control" | "ltx2-camera-control" | PULID_FAMILY | HUNYUAN3D_PAINT_FAMILY
             )
     }
 
@@ -5010,6 +5022,145 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
             defaults: defaults(30, 5.0, 512),
             hidden: false,
         },
+        // The 2.1 PBR paint bundle. Auxiliary, hidden and files-only: it
+        // textures a mesh rather than generating one, so it is never a
+        // checkpoint, never a default model, and never resolves to a
+        // `ModelPaths`. Same shape as the PuLID bundles.
+        //
+        // NOTE: the paint ENGINE is not implemented. These weights install and
+        // satisfy the 2.1 licence gate, but nothing renders with them yet. The
+        // manifest exists now because the 2.1 terms are a SEPARATE document
+        // from the 2.0 shape terms, and a licence no manifest requires can be
+        // read on every surface and accepted on none.
+        //
+        // Upstream ships a diffusers layout. The three `unet/*.py` modules and
+        // `README.md` are deliberately NOT declared: mold never executes
+        // upstream Python, so shipping it would be dead weight at best.
+        ModelManifest {
+            name: HUNYUAN3D_PAINT_MANIFEST.to_string(),
+            family: HUNYUAN3D_PAINT_FAMILY.to_string(),
+            description:
+                "Hunyuan3D 2.1 PBR paint — albedo + metallic-roughness texturing weights (no engine yet)"
+                    .to_string(),
+            files: hunyuan3d_paint_files(),
+            defaults: hunyuan3d_paint_defaults(),
+            hidden: true,
+        },
+    ]
+}
+
+/// A files-only bundle runs nothing on its own, so every generation knob is a
+/// placeholder. Mirrors `pulid_bundle_defaults`.
+fn hunyuan3d_paint_defaults() -> ManifestDefaults {
+    ManifestDefaults {
+        steps: 1,
+        guidance: 0.0,
+        width: 512,
+        height: 512,
+        is_schnell: true,
+        scheduler: None,
+        negative_prompt: None,
+        frames: None,
+        fps: None,
+        source_image: None,
+    }
+}
+
+/// Sizes and digests are the HF LFS `size`/`oid` for each blob, read from
+/// `https://huggingface.co/api/models/tencent/Hunyuan3D-2.1/tree/main/hunyuan3d-paintpbr-v2-1`
+/// on 2026-09-01. Small config and tokenizer blobs are plain git objects with
+/// no LFS digest, so they pin size only.
+fn hunyuan3d_paint_files() -> Vec<ModelFile> {
+    const REPO: &str = "tencent/Hunyuan3D-2.1";
+    let file =
+        |name: &str, component: ModelComponent, size_bytes: u64, sha256: Option<&'static str>| {
+            ModelFile {
+                hf_repo: REPO.to_string(),
+                hf_filename: format!("hunyuan3d-paintpbr-v2-1/{name}"),
+                component,
+                size_bytes,
+                gated: false,
+                sha256,
+            }
+        };
+    vec![
+        file("model_index.json", ModelComponent::ModelConfig, 617, None),
+        // Multiview diffusion UNet — 12 input channels, 6 views at 512.
+        file(
+            "unet/diffusion_pytorch_model.bin",
+            ModelComponent::Transformer,
+            3_925_293_863,
+            Some("675a1b5cd0098b2002637c443946529c03c5cd54427f40245263350feb3dd5b8"),
+        ),
+        file("unet/config.json", ModelComponent::ModelConfig, 911, None),
+        file(
+            "vae/diffusion_pytorch_model.bin",
+            ModelComponent::Vae,
+            334_707_217,
+            Some("1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc"),
+        ),
+        file("vae/config.json", ModelComponent::ModelConfig, 553, None),
+        file(
+            "text_encoder/pytorch_model.bin",
+            ModelComponent::TextEncoder,
+            1_361_671_895,
+            Some("c3e254d7b61353497ea0be2c4013df4ea8f739ee88cffa0ba58cd085459ed565"),
+        ),
+        file(
+            "text_encoder/config.json",
+            ModelComponent::ModelConfig,
+            613,
+            None,
+        ),
+        // The reference vision tower the paint UNet cross-attends to.
+        file(
+            "image_encoder/model.safetensors",
+            ModelComponent::ClipEncoder,
+            1_264_217_240,
+            Some("ae616c24393dd1854372b0639e5541666f7521cbe219669255e865cb7f89466a"),
+        ),
+        file(
+            "image_encoder/config.json",
+            ModelComponent::ModelConfig,
+            554,
+            None,
+        ),
+        file(
+            "tokenizer/vocab.json",
+            ModelComponent::TextTokenizer,
+            1_059_962,
+            None,
+        ),
+        file(
+            "tokenizer/merges.txt",
+            ModelComponent::TextTokenizer,
+            524_619,
+            None,
+        ),
+        file(
+            "tokenizer/tokenizer_config.json",
+            ModelComponent::TextTokenizer,
+            807,
+            None,
+        ),
+        file(
+            "tokenizer/special_tokens_map.json",
+            ModelComponent::TextTokenizer,
+            460,
+            None,
+        ),
+        file(
+            "scheduler/scheduler_config.json",
+            ModelComponent::ModelConfig,
+            387,
+            None,
+        ),
+        file(
+            "feature_extractor/preprocessor_config.json",
+            ModelComponent::Processor,
+            342,
+            None,
+        ),
     ]
 }
 
@@ -8591,7 +8742,12 @@ mod tests {
         // `hunyuan3d-mini-turbo:fp16`, `hunyuan3d-turbo:fp16`,
         // `hunyuan3d:fp16`. One self-contained file each (DiT + shape VAE +
         // DINOv2-giant), so each contributes exactly one manifest.
-        assert_eq!(known_manifests().len(), 194);
+        // Licence-parity bump: +1 for the `hunyuan3d-paint` bundle, an
+        // auxiliary hidden files-only install (like the PuLID bundles) whose
+        // many files are ONE manifest. It exists so the Tencent 2.1 terms —
+        // a separate document from the 2.0 shape terms — are required by
+        // something and can therefore be accepted on every surface.
+        assert_eq!(known_manifests().len(), 195);
     }
 
     #[test]

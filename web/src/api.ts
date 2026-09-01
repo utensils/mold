@@ -31,7 +31,7 @@ import type {
   ChainValidationResponse,
 } from "@studio/lib/api/chainTypes";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
-import { conditionalApiJsonTo } from "@studio/api/client";
+import { ApiError, conditionalApiJsonTo } from "@studio/api/client";
 import {
   parseQueueListing,
   queueListingPath,
@@ -594,12 +594,16 @@ export async function postDownload(
     body: JSON.stringify({ model }),
     signal,
   });
-  if (res.status === 400) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `unknown model '${model}'`);
-  }
   if (!res.ok && res.status !== 409) {
-    throw new Error(`POST /api/downloads failed: ${res.status}`);
+    // Carry the parsed body, not just a status line: a license refusal is the
+    // one download failure the user can actually resolve, and its structured
+    // `license` payload is what the consent dialog renders.
+    const body = await res.json().catch(() => null);
+    const detail =
+      body && typeof body === "object" && typeof body.error === "string"
+        ? body.error
+        : `POST /api/downloads failed: ${res.status}`;
+    throw new ApiError(detail, res.status, body);
   }
   const json = (await res.json()) as CreateDownloadResponse;
   return {

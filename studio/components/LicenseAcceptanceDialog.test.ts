@@ -47,7 +47,7 @@ describe("LicenseAcceptanceDialog", () => {
     expect(openExternal).toHaveBeenCalledWith("https://example.test/pinned");
 
     await wrapper.get("button.license-secondary").trigger("click");
-    await expect(result).resolves.toBe(false);
+    await expect(result).resolves.toEqual({ accepted: false, downloaded: false });
     wrapper.unmount();
   });
 });

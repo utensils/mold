@@ -72,6 +72,108 @@ fn local_statuses() -> Result<Vec<mold_core::ThirdPartyLicenseStatus>> {
     Ok(mold_core::license_acceptance::license_statuses(&mold_home))
 }
 
+/// `mold licenses accept <ID>...` — agree to pinned terms without downloading.
+///
+/// Consent and acquisition are different acts. Before this existed the only
+/// way to accept was `mold pull <model> --accept-license <id>`, so agreeing to
+/// terms always started a multi-gigabyte transfer — and a licence that no
+/// installed manifest required could not be accepted at all.
+///
+/// Recorded on the machine that would run the pull, for the same reason `run`
+/// reads from there: acceptance is per Mold data root, and recording one
+/// machine's consent under another machine's name is the bug this module
+/// exists to prevent.
+pub async fn accept(ids: &[String], local: bool) -> Result<()> {
+    let ctx = CliContext::new(None);
+    let host = ctx.client().host().to_string();
+
+    // Show the terms the RECORDING machine pins, not merely the ones this
+    // build ships: consent must be given for the document the user read.
+    let server_terms = if local {
+        None
+    } else {
+        match ctx.client().list_licenses().await {
+            Ok(licenses) => Some(licenses),
+            Err(error) => match resolve_listing_failure(&error, &host) {
+                LicenseListingFailure::NoServer => None,
+                LicenseListingFailure::Unusable(message) => {
+                    eprintln!("{} {message}", theme::prefix_error());
+                    return Err(AlreadyReported.into());
+                }
+            },
+        }
+    };
+
+    let mut payload = Vec::with_capacity(ids.len());
+    for id in ids {
+        let terms = server_terms
+            .as_ref()
+            .and_then(|rows| rows.iter().find(|row| &row.id == id))
+            .map(|row| mold_core::types::LicenseAcceptance {
+                id: row.id.clone(),
+                url: row.url.clone(),
+                sha256: row.sha256.clone(),
+            })
+            .or_else(|| {
+                mold_core::license_acceptance::license_by_id(id)
+                    .map(mold_core::license_acceptance::acceptance_for)
+            });
+        let Some(terms) = terms else {
+            eprintln!(
+                "{} unknown license '{id}'. Run {} to list them.",
+                theme::prefix_error(),
+                "mold licenses".bold()
+            );
+            return Err(AlreadyReported.into());
+        };
+        status!("{} {}", theme::icon_info(), terms.id.bold());
+        status!("  terms: {}", terms.url);
+        payload.push(terms);
+    }
+
+    let recorded_on = if local || server_terms.is_none() {
+        if !local {
+            crate::ui::print_server_fallback(&host, "recording on this machine");
+        }
+        let mold_home = mold_core::Config::mold_dir()
+            .ok_or_else(|| anyhow::anyhow!("could not resolve the Mold data directory"))?;
+        mold_core::license_acceptance::record_acceptances(&mold_home, &payload).map_err(
+            |error| {
+                eprintln!("{} {error}", theme::prefix_error());
+                anyhow::Error::from(AlreadyReported)
+            },
+        )?;
+        LicenseSource::ThisMachine
+    } else {
+        match ctx.client().accept_licenses(&payload).await {
+            Ok(_) => LicenseSource::Server(host.clone()),
+            Err(error) => {
+                // An older host records consent only as a side effect of a
+                // pull, so name that path rather than silently writing here —
+                // a local write would record the wrong machine's agreement.
+                eprintln!("{} {host} did not accept: {error}", theme::prefix_error());
+                eprintln!(
+                    "  If it is an older build, accept as part of the pull instead: {}",
+                    format!(
+                        "mold pull <model> --accept-license {}",
+                        ids.join(" --accept-license ")
+                    )
+                    .bold()
+                );
+                return Err(AlreadyReported.into());
+            }
+        }
+    };
+
+    status!("");
+    status!(
+        "{} accepted on {}",
+        theme::icon_ok(),
+        recorded_on.label().bold()
+    );
+    Ok(())
+}
+
 pub async fn run(local: bool) -> Result<()> {
     let ctx = CliContext::new(None);
     let host = ctx.client().host().to_string();

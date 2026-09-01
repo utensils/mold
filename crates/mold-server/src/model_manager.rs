@@ -2088,8 +2088,15 @@ pub(crate) async fn pull_model(
             .map(|(config, _)| config),
     }
     .map_err(|e| {
-        tracing::error!("pull failed for {}: {e}", model);
-        ApiError::internal(format!("failed to pull model '{}': {e}", model))
+        // A refusal is a decision, not a fault: log it at warn and keep the
+        // structured payload so a client can offer acceptance.
+        match &e {
+            mold_core::download::DownloadError::LicenseNotAccepted { license_id, .. } => {
+                tracing::warn!(model, license = %license_id, "pull refused pending license acceptance");
+            }
+            other => tracing::error!("pull failed for {}: {other}", model),
+        }
+        ApiError::from_download_error(model, &e)
     })?;
 
     {

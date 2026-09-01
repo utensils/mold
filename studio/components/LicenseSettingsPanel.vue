@@ -61,12 +61,19 @@ async function load() {
   }
 }
 
-async function review(requirement: LicenseRequirement) {
+/** `intent: "record"` accepts the terms and stops there; `"download"` also
+ * fetches the bundle. Consent and acquisition are different acts, and a user
+ * who only wants to agree should not be made to transfer gigabytes to do it. */
+async function review(
+  requirement: LicenseRequirement,
+  intent: "download" | "record" = "download",
+) {
   if (!props.target) return;
-  const accepted = await prompt.request({
+  const { accepted } = await prompt.request({
     hostLabel: props.hostLabel,
     target: props.target,
     requirements: [requirement],
+    intent,
   });
   if (accepted) {
     message.value = `Required terms accepted on ${props.hostLabel}.`;
@@ -136,14 +143,18 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
       v-if="!loadError && requirements.length"
       class="license-settings__actions"
     >
-      <button
+      <div
         v-for="requirement in requirements"
         :key="requirement.installModel"
-        type="button"
-        @click="review(requirement)"
+        class="license-settings__action-pair"
       >
-        Review terms and download {{ requirement.installModel }}
-      </button>
+        <button type="button" @click="review(requirement, 'record')">
+          Accept terms for {{ requirement.installModel }}
+        </button>
+        <button type="button" @click="review(requirement, 'download')">
+          Review terms and download {{ requirement.installModel }}
+        </button>
+      </div>
     </div>
     <p
       v-if="!loading && !loadError && rows.length === 0"
@@ -167,6 +178,11 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
 .license-settings__row p {
   margin: 0;
   line-height: 1.5;
+}
+.license-settings__action-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .license-settings__row {
   display: flex;

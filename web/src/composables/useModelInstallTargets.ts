@@ -24,6 +24,7 @@ import {
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { hostModelDownload } from "../components/machines/hostClient";
 import { useCatalog } from "./useCatalog";
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { useHostRouting } from "./useHostRouting";
 import type { RoutableHost } from "../lib/hostRouting";
 
@@ -148,14 +149,29 @@ export function useModelInstallTargets(): ModelInstallTargets {
       // Keep the origin on the catalog composable: it routes by id shape and
       // repaints the downloads centre immediately instead of waiting on the
       // SSE `enqueued` event.
-      return await cat.startDownload(modelId);
+      const outcome = await runWithLicenseConsent({
+        hostLabel: target?.host.label ?? "This machine",
+        // The SPA is served by the host it talks to, so the origin is "".
+        target: { baseUrl: "", apiKey: null },
+        installModel: modelId,
+        start: () => cat.startDownload(modelId),
+      });
+      return outcome.kind === "ok" ? outcome.value : null;
     }
     const entry = getHost(target.host.id);
     if (!entry) {
       throw new Error(`${target.host.label} is no longer a connected machine`);
     }
-    const enqueued = await hostModelDownload(entry, modelId);
-    return enqueued?.primary_job_id ?? null;
+    // Consent is per Mold data root, so record it on the machine that will do
+    // the downloading — not on the browser's own origin.
+    const outcome = await runWithLicenseConsent({
+      hostLabel: target.host.label,
+      target: { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+      installModel: modelId,
+      start: () => hostModelDownload(entry, modelId),
+    });
+    if (outcome.kind !== "ok") return null;
+    return outcome.value?.primary_job_id ?? null;
   }
 
   function queuedMessage(

@@ -18003,6 +18003,230 @@ mod tests {
         );
     }
 
+    /// The terms this build pins for the Hunyuan3D 2.0 shape checkpoints.
+    fn hunyuan3d_terms() -> serde_json::Value {
+        let license = &mold_core::license_acceptance::TENCENT_HUNYUAN3D_2_0;
+        serde_json::json!({
+            "id": license.id,
+            "url": license.url,
+            "sha256": license.sha256,
+        })
+    }
+
+    fn placement_preview_request(model: &str) -> Request<Body> {
+        // The canvas is the model's own conditioning size, which is what a
+        // real client sends from the manifest defaults.
+        let request: serde_json::Value =
+            serde_json::from_str(&generate_body_for_model("a chair", model, 512, 512)).unwrap();
+        Request::builder()
+            .method("POST")
+            .uri("/api/generate/placement-preview")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "request": request, "copies": 1 }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    /// A gated MAIN checkpoint is never a dependency-ladder artifact, so
+    /// before this it reached no client at all: the preview refused it with
+    /// `missing_components` carrying no terms, and the pull offer POSTed
+    /// `/api/downloads` with no acceptances and got a 403 nobody rendered.
+    #[tokio::test]
+    async fn a_placement_preview_carries_the_requested_models_own_outstanding_terms() {
+        let (_home, _guard) = license_home();
+        let app = app_with_state(licensed_state());
+        let res = app
+            .oneshot(placement_preview_request("hunyuan3d:fp16"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = json_body(res).await;
+        let pending = body["pending_downloads"]
+            .as_array()
+            .expect("pending_downloads array");
+        let row = pending
+            .iter()
+            .find(|row| !row["licenses"].as_array().is_none_or(|l| l.is_empty()))
+            .expect("a row carrying outstanding terms");
+        // The bundle the client posts back, not one of its files.
+        assert_eq!(row["install_model"], "hunyuan3d:fp16");
+        assert_eq!(row["licenses"][0]["id"], "tencent-hunyuan3d-2.0");
+        assert_eq!(
+            row["licenses"][0]["url"],
+            mold_core::license_acceptance::TENCENT_HUNYUAN3D_2_0.url
+        );
+        // The territorial exclusion is the reason this is a gate and not a
+        // footnote, so it must survive to the surface that renders it.
+        assert!(row["licenses"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("European Union"));
+        assert!(row["bytes"].as_u64().unwrap() > 0);
+        assert!(!row["repo"].as_str().unwrap().is_empty());
+    }
+
+    /// The accept-then-retry loop must terminate: once recorded, the same
+    /// preview stops asking, or the dialog re-fires forever.
+    #[tokio::test]
+    async fn an_accepted_model_stops_carrying_terms_in_its_preview() {
+        let (home, _guard) = license_home();
+        mold_core::license_acceptance::record_acceptance(
+            home.path(),
+            &mold_core::license_acceptance::TENCENT_HUNYUAN3D_2_0,
+        )
+        .unwrap();
+        let app = app_with_state(licensed_state());
+        let res = app
+            .oneshot(placement_preview_request("hunyuan3d:fp16"))
+            .await
+            .unwrap();
+        let body = json_body(res).await;
+        for row in body["pending_downloads"].as_array().unwrap_or(&Vec::new()) {
+            assert!(
+                row["licenses"].as_array().is_none_or(|l| l.is_empty()),
+                "an accepted model must carry no outstanding terms: {row}"
+            );
+        }
+    }
+
+    /// Guards against the decoration firing for every model.
+    #[tokio::test]
+    async fn an_ungated_model_never_carries_terms_in_its_preview() {
+        let (_home, _guard) = license_home();
+        let app = app_with_state(licensed_state());
+        let res = app
+            .oneshot(placement_preview_request("flux-schnell:q4"))
+            .await
+            .unwrap();
+        let body = json_body(res).await;
+        for row in body["pending_downloads"].as_array().unwrap_or(&Vec::new()) {
+            assert!(
+                row["licenses"].as_array().is_none_or(|l| l.is_empty()),
+                "an ungated model must never be license-gated: {row}"
+            );
+        }
+    }
+
+    /// The preview seam and the download seam must agree: whatever the preview
+    /// asked consent for is exactly what the enqueue accepts.
+    #[tokio::test]
+    async fn accepting_the_previewed_terms_lets_the_same_model_enqueue() {
+        let (_home, _guard) = license_home();
+        let state = licensed_state();
+
+        let refused = app_with_state(state.clone())
+            .oneshot(download_request(
+                serde_json::json!({ "model": "hunyuan3d:fp16" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let body = json_body(refused).await;
+        assert_eq!(body["code"], mold_core::LICENSE_NOT_ACCEPTED);
+        assert_eq!(body["license"]["id"], "tencent-hunyuan3d-2.0");
+
+        let accepted = app_with_state(state.clone())
+            .oneshot(download_request(serde_json::json!({
+                "model": "hunyuan3d:fp16",
+                "accept_licenses": [hunyuan3d_terms()],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+    }
+
+    /// Consent and acquisition are different acts. Accepting must record
+    /// without starting a multi-gigabyte transfer.
+    #[tokio::test]
+    async fn post_api_licenses_accept_records_without_enqueueing_a_download() {
+        let (home, _guard) = license_home();
+        let app = app_with_state(licensed_state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/licenses/accept")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "accept_licenses": [hunyuan3d_terms()] }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // It wrote through, and answered with the refreshed state so a caller
+        // needs no second round trip.
+        assert!(mold_core::license_acceptance::is_accepted(
+            home.path(),
+            &mold_core::license_acceptance::TENCENT_HUNYUAN3D_2_0
+        ));
+        let body = json_body(res).await;
+        let row = body["licenses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "tencent-hunyuan3d-2.0")
+            .expect("the accepted license");
+        assert_eq!(row["accepted"], serde_json::Value::Bool(true));
+        assert!(
+            !row["required_by"].as_array().unwrap().is_empty(),
+            "a license nothing requires can be read on every surface and accepted on none"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_api_licenses_accept_rejects_terms_the_server_does_not_pin() {
+        let (home, _guard) = license_home();
+        let app = app_with_state(licensed_state());
+        let mut stale = hunyuan3d_terms();
+        stale["sha256"] =
+            serde_json::json!("0000000000000000000000000000000000000000000000000000000000000000");
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/licenses/accept")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "accept_licenses": [stale] }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(res).await["code"],
+            mold_core::LICENSE_TERMS_MISMATCH
+        );
+        assert!(!mold_core::license_acceptance::is_accepted(
+            home.path(),
+            &mold_core::license_acceptance::TENCENT_HUNYUAN3D_2_0
+        ));
+    }
+
+    /// A refusal is the one download failure a client CAN resolve. Reporting
+    /// it as a 500 with no payload told the user it was the server's fault and
+    /// stripped the terms a UI needs to offer acceptance.
+    #[test]
+    fn a_license_refusal_maps_to_a_structured_403_not_a_500() {
+        let license = &mold_core::license_acceptance::TENCENT_HUNYUAN3D_2_0;
+        let refusal = mold_core::download::DownloadError::LicenseNotAccepted {
+            license_id: license.id.to_string(),
+            message: mold_core::license_acceptance::acceptance_required_message(
+                "hunyuan3d:fp16",
+                license,
+            ),
+        };
+        let mapped = crate::routes::ApiError::from_download_error("hunyuan3d:fp16", &refusal);
+        assert_eq!(mapped.status(), StatusCode::FORBIDDEN);
+        assert_eq!(mapped.code, mold_core::LICENSE_NOT_ACCEPTED);
+        assert_eq!(mapped.license.as_ref().unwrap().url, license.url);
+    }
+
     #[tokio::test]
     async fn post_api_downloads_unknown_model_400() {
         let state = AppState::empty(

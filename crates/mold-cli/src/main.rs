@@ -199,6 +199,26 @@ impl MeshArgs {
     }
 }
 
+/// Subcommands of `mold licenses`.
+#[derive(Subcommand)]
+enum LicensesAction {
+    /// Record acceptance of pinned third-party terms WITHOUT downloading
+    ///
+    /// Consent and acquisition are different acts: this agrees to the terms so
+    /// a later pull is unblocked, rather than transferring gigabytes now.
+    /// Acceptance is recorded on the machine that would run the pull — the
+    /// server at MOLD_HOST when one answers, otherwise this machine.
+    Accept {
+        /// License id(s), as printed by `mold licenses`
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
+
+        /// Record in THIS machine's Mold data root instead of the server's
+        #[arg(long)]
+        local: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum ConfigAction {
     /// List all configuration values
@@ -1764,19 +1784,27 @@ Run 'mold list' to see all available models.")]
 
         /// Record acceptance of a third-party model license before pulling
         /// (e.g. `insightface-antelopev2`). Some auxiliary assets are
-        /// published under terms mold will not accept on your behalf.
-        #[arg(long, value_name = "ID")]
-        accept_license: Option<String>,
+        /// published under terms mold will not accept on your behalf. Repeat
+        /// the flag for a bundle covered by more than one agreement.
+        #[arg(long, value_name = "ID", action = clap::ArgAction::Append)]
+        accept_license: Vec<String>,
     },
 
     /// Show third-party model licenses and whether they have been accepted
     #[command(after_long_help = "\
 Acceptance is recorded per Mold data root, so this reports the machine that
 runs the pull: the server at MOLD_HOST when one answers, otherwise this
-machine. Accept a license as part of the pull it unblocks:
+machine. Accept terms without downloading anything:
+
+  mold licenses accept tencent-hunyuan3d-2.0
+
+or accept as part of the pull it unblocks:
 
   mold pull pulid-flux --accept-license insightface-antelopev2")]
     Licenses {
+        #[command(subcommand)]
+        action: Option<LicensesAction>,
+
         /// Read this machine's own acceptances instead of asking the server
         #[arg(long)]
         local: bool,
@@ -2817,7 +2845,7 @@ async fn run() -> anyhow::Result<()> {
             // whether the pull lands locally or on `MOLD_HOST`, and the
             // acceptance has to be written on whichever machine does the
             // downloading.
-            let accept_licenses: Vec<String> = accept_license.into_iter().collect();
+            let accept_licenses: Vec<String> = accept_license;
             let opts = mold_core::download::PullOptions { skip_verify };
             if model.starts_with("hf:") || model.starts_with("cv:") {
                 match resolve_catalog_id(&model).await? {
@@ -2832,9 +2860,17 @@ async fn run() -> anyhow::Result<()> {
                 commands::pull::run(&model, &opts, &accept_licenses).await?;
             }
         }
-        Commands::Licenses { local } => {
-            commands::licenses::run(local).await?;
-        }
+        Commands::Licenses { action, local } => match action {
+            Some(LicensesAction::Accept {
+                ids,
+                local: accept_local,
+            }) => {
+                commands::licenses::accept(&ids, accept_local).await?;
+            }
+            None => {
+                commands::licenses::run(local).await?;
+            }
+        },
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;
         }

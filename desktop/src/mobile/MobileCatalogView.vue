@@ -68,6 +68,7 @@ import type {
   ServerCapabilities,
 } from "../lib/api/types";
 import { mobileHostTarget, type MobileHost } from "./hosts";
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { MOBILE_AUTO_ROUTING_HINT, MOBILE_CAPABLE_ROUTING_HINT } from "./generateTarget";
 import {
   useMobileDownloadsStore,
@@ -911,7 +912,21 @@ async function pullTo(entry: MobileCatalogEntry, host: MobileHost): Promise<void
   closeTargetPicker();
   announce(`Connecting to downloads on ${host.name}…`);
   try {
-    const result = await mobileDownloads.startPull(entry, host);
+    // The host refuses a gated bundle with its pinned terms attached. Take
+    // consent against THAT host — this is the surface where "accept on behalf
+    // of the server" is the normal case, not the exception.
+    const consented = await runWithLicenseConsent({
+      hostLabel: host.name,
+      target: mobileHostTarget(host),
+      installModel: entry.id,
+      start: () => mobileDownloads.startPull(entry, host),
+    });
+    if (consented.kind === "declined") return;
+    if (consented.kind === "accepted") {
+      announce(`${hostActionLabel(entry, host)}ing ${entryTitle(entry)} on ${host.name}.`);
+      return;
+    }
+    const result = consented.value;
     if (result.kind === "conflict") {
       announce(`${entryTitle(entry)} is already queued on ${host.name}.`);
       return;

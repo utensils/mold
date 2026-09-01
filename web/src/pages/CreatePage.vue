@@ -2235,7 +2235,7 @@ async function onSubmitSequenceInner(
       );
     }
     route = feasibility.route;
-    const accepted = await licenseAcceptance.request({
+    const { accepted } = await licenseAcceptance.request({
       hostLabel: route.label,
       target: {
         baseUrl: route.target.baseUrl,
@@ -4138,7 +4138,7 @@ async function onSubmitInner(
     return;
   }
   route = finalizedRoute;
-  const accepted = await licenseAcceptance.request({
+  const { accepted } = await licenseAcceptance.request({
     hostLabel: route.label,
     target: {
       baseUrl: route.target.baseUrl,
