@@ -345,6 +345,67 @@ let upscaleEpoch = 0;
 const upscaleKind = computed(() =>
   upscaleEntry.value && isVideo(upscaleEntry.value.item) ? "video" : "image",
 );
+type UpscaleAuthority = {
+  sourceKey: string;
+  label: string;
+  filename: string;
+  target: ApiTarget;
+};
+const upscaleAuthority = ref<UpscaleAuthority | null>(null);
+
+/**
+ * A saved-local print is represented by the local row, but its merged print
+ * still carries the original host copy. Prefer the displayed copy when it can
+ * run the operation; otherwise fall back to a capable copy of the same print.
+ */
+function upscaleAuthoritiesFor(entry: MergedPrint | null): UpscaleAuthority[] {
+  if (!entry || isAudio(entry.item) || isMesh(entry.item)) return [];
+  // Host-chip projections intentionally carry only their displayed bucket.
+  // Recover the logical print here so upscale can still see alternate copies
+  // without widening delete/organize actions on the host-filtered tile.
+  const logical = entry.copies?.length
+    ? entry
+    : (gallery.mergedIndex.get(entry.item.filename) ?? entry);
+  const copies = logical.copies?.length
+    ? [...logical.copies]
+    : [{ sourceKey: entry.sourceKey, item: entry.item }];
+  copies.sort((left, right) => {
+    const leftPreferred = left.sourceKey === entry.sourceKey ? 0 : 1;
+    const rightPreferred = right.sourceKey === entry.sourceKey ? 0 : 1;
+    return leftPreferred - rightPreferred;
+  });
+  const authorities: UpscaleAuthority[] = [];
+  const seen = new Set<string>();
+  for (const copy of copies) {
+    if (seen.has(copy.sourceKey)) continue;
+    seen.add(copy.sourceKey);
+    const target = gallery.targetOf(copy.sourceKey);
+    if (!target) continue;
+    if (
+      isVideo(copy.item) &&
+      hosts.capabilities[copy.sourceKey]?.video_upscale?.available !== true
+    ) {
+      continue;
+    }
+    authorities.push({
+      sourceKey: copy.sourceKey,
+      label:
+        logical.availableOn.find((source) => source.key === copy.sourceKey)?.label ??
+        copy.sourceKey,
+      filename: copy.item.filename,
+      target,
+    });
+  }
+  return authorities;
+}
+
+const upscaleAuthorityFor = (entry: MergedPrint | null) => upscaleAuthoritiesFor(entry)[0] ?? null;
+const upscaleHostChoices = computed(() =>
+  upscaleAuthoritiesFor(upscaleEntry.value).map(({ sourceKey, label }) => ({
+    key: sourceKey,
+    label,
+  })),
+);
 
 function stopUpscalePoll() {
   if (upscalePoll) clearTimeout(upscalePoll);
@@ -355,24 +416,24 @@ function closeUpscaleDialog() {
   upscaleEpoch += 1;
   stopUpscalePoll();
   upscaleEntry.value = null;
+  upscaleAuthority.value = null;
   upscaleJob.value = null;
   upscaleError.value = "";
 }
 
 async function openUpscaleDialog(entry: MergedPrint) {
-  if (!canUpscaleEntry(entry) || !targetFor(entry)) return;
+  const authority = upscaleAuthorityFor(entry);
+  if (!authority) return;
   stopUpscalePoll();
   const epoch = ++upscaleEpoch;
   upscaleEntry.value = entry;
+  upscaleAuthority.value = authority;
   upscaleJob.value = null;
   upscaleError.value = "";
   upscaleModel.value = defaultUpscaler(models.upscalers);
   if (isVideo(entry.item)) {
     try {
-      const recovered = await findRecoverableFramewiseUpscale(
-        targetFor(entry)!,
-        entry.item.filename,
-      );
+      const recovered = await findRecoverableFramewiseUpscale(authority.target, authority.filename);
       if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
       upscaleJob.value = recovered;
       if (recovered) upscaleModel.value = recovered.model;
@@ -383,29 +444,53 @@ async function openUpscaleDialog(entry: MergedPrint) {
   }
 }
 
+async function selectUpscaleAuthority(sourceKey: string) {
+  const entry = upscaleEntry.value;
+  const authority = upscaleAuthoritiesFor(entry).find((choice) => choice.sourceKey === sourceKey);
+  if (!entry || !authority || authority.sourceKey === upscaleAuthority.value?.sourceKey) return;
+  stopUpscalePoll();
+  const epoch = ++upscaleEpoch;
+  upscaleAuthority.value = authority;
+  upscaleJob.value = null;
+  upscaleError.value = "";
+  if (!isVideo(entry.item)) return;
+  try {
+    const recovered = await findRecoverableFramewiseUpscale(authority.target, authority.filename);
+    if (
+      epoch !== upscaleEpoch ||
+      upscaleEntry.value !== entry ||
+      upscaleAuthority.value !== authority
+    ) {
+      return;
+    }
+    upscaleJob.value = recovered;
+    if (recovered) upscaleModel.value = recovered.model;
+    if (shouldPollFramewiseJob(recovered)) void pollUpscaleJob();
+  } catch {
+    // Old hosts do not expose durable video-upscale history.
+  }
+}
+
 function canUpscaleEntry(entry: MergedPrint | null): boolean {
-  if (!entry || isAudio(entry.item) || isMesh(entry.item)) return false;
-  return (
-    !isVideo(entry.item) || hosts.capabilities[entry.sourceKey]?.video_upscale?.available === true
-  );
+  return upscaleAuthorityFor(entry) !== null;
 }
 
 async function pollUpscaleJob() {
   const entry = upscaleEntry.value;
+  const authority = upscaleAuthority.value;
   const job = upscaleJob.value;
-  const target = entry && targetFor(entry);
-  if (!entry || !job || !target || !shouldPollFramewiseJob(job)) {
+  if (!entry || !authority || !job || !shouldPollFramewiseJob(job)) {
     return;
   }
   const epoch = upscaleEpoch;
   try {
-    const next = await getFramewiseUpscale(target, job.id);
+    const next = await getFramewiseUpscale(authority.target, job.id);
     if (epoch !== upscaleEpoch || upscaleEntry.value !== entry || upscaleJob.value?.id !== job.id)
       return;
     upscaleJob.value = next;
     if (next.state === "completed") {
       toasts.push(`Framewise upscale complete — ${next.output_filename}`);
-      void gallery.refreshHost(entry.sourceKey);
+      void gallery.refreshHost(authority.sourceKey);
     }
   } catch (error) {
     if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
@@ -419,15 +504,15 @@ async function pollUpscaleJob() {
 
 async function legacyStreamUpscale(entry: MergedPrint): Promise<string> {
   const { sseStream } = await import("../lib/api/sse");
-  const target = targetFor(entry);
-  if (!target) throw new Error("The print's source host is unavailable.");
+  const authority = upscaleAuthority.value;
+  if (!authority) throw new Error("The print's source host is unavailable.");
   const image = await fetchItemBase64(entry);
   return new Promise<string>((resolve, reject) => {
     const abort = new AbortController();
     let settled = false;
     void sseStream("/api/upscale/stream", {
       method: "POST",
-      target,
+      target: authority.target,
       body: {
         model: upscaleModel.value,
         image,
@@ -459,24 +544,32 @@ async function legacyStreamUpscale(entry: MergedPrint): Promise<string> {
 
 async function startUpscale() {
   const entry = upscaleEntry.value;
-  const target = entry && targetFor(entry);
-  if (!entry || !target || upscalingFilename.value) return;
+  const authority = upscaleAuthority.value;
+  if (!entry || !authority || upscalingFilename.value) return;
   const epoch = ++upscaleEpoch;
   stopUpscalePoll();
   upscaleError.value = "";
   upscalingFilename.value = entry.item.filename;
   try {
     if (isVideo(entry.item)) {
-      const created = await createFramewiseUpscale(target, entry.item.filename, upscaleModel.value);
+      const created = await createFramewiseUpscale(
+        authority.target,
+        authority.filename,
+        upscaleModel.value,
+      );
       if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
       upscaleJob.value = created;
       toasts.push(`Framewise upscale queued (${created.id}).`);
       void pollUpscaleJob();
     } else {
-      if (hosts.capabilities[entry.sourceKey]?.video_upscale?.gallery_image === true) {
-        const result = await upscaleLibraryImage(target, entry.item.filename, upscaleModel.value);
+      if (hosts.capabilities[authority.sourceKey]?.video_upscale?.gallery_image === true) {
+        const result = await upscaleLibraryImage(
+          authority.target,
+          authority.filename,
+          upscaleModel.value,
+        );
         toasts.push(`Upscaled — ${result.filename}`);
-        void gallery.refreshHost(entry.sourceKey);
+        void gallery.refreshHost(authority.sourceKey);
       } else {
         const upscaled = await legacyStreamUpscale(entry);
         const stem = entry.item.filename.replace(/\.[^.]+$/, "");
@@ -497,14 +590,14 @@ async function startUpscale() {
 
 async function transitionUpscale(action: "pause" | "resume" | "cancel") {
   const entry = upscaleEntry.value;
-  const target = entry && targetFor(entry);
+  const authority = upscaleAuthority.value;
   const job = upscaleJob.value;
-  if (!entry || !target || !job) return;
+  if (!entry || !authority || !job) return;
   stopUpscalePoll();
   const epoch = ++upscaleEpoch;
   upscaleError.value = "";
   try {
-    const transitioned = await transitionFramewiseUpscale(target, job.id, action);
+    const transitioned = await transitionFramewiseUpscale(authority.target, job.id, action);
     if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
     upscaleJob.value = transitioned;
     if (action === "resume") void pollUpscaleJob();
@@ -1210,7 +1303,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
         upscalingFilename.value === item.filename
           ? "Upscaling…"
           : libraryUpscaleLabel(isVideo(item) ? "video" : "image").replace("…", ""),
-      disabled: !targetFor(entry) || upscalingFilename.value !== null || !canUpscaleEntry(entry),
+      disabled: upscalingFilename.value !== null || !canUpscaleEntry(entry),
       action: () => openUpscaleDialog(entry),
     },
     {
@@ -2818,14 +2911,17 @@ onUnmounted(() => {
     <UpscaleDialog
       :open="!!upscaleEntry"
       :kind="upscaleKind"
-      :source-name="upscaleEntry?.item.filename ?? ''"
+      :source-name="upscaleAuthority?.filename ?? upscaleEntry?.item.filename ?? ''"
       :models="models.upscalers"
       v-model="upscaleModel"
+      :execution-hosts="upscaleHostChoices"
+      :execution-host-value="upscaleAuthority?.sourceKey ?? ''"
       :busy="upscalingFilename !== null"
       :job-state="upscaleJob?.state ?? null"
       :status="upscaleJob ? framewiseStatus(upscaleJob) : null"
       :progress="upscaleJob ? framewiseProgress(upscaleJob) : null"
       :error="upscaleError || null"
+      @update:execution-host-value="selectUpscaleAuthority"
       @confirm="startUpscale"
       @close="closeUpscaleDialog"
       @pause="transitionUpscale('pause')"

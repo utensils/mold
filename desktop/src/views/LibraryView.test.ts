@@ -588,6 +588,7 @@ describe("LibraryView source reuse", () => {
     expect(upscale).toMatchObject({ disabled: false });
     useContextMenuStore().activate(upscale!);
     await flushPromises();
+    expect(document.querySelector("[data-test='upscale-host']")).toBeNull();
     (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
     await flushPromises();
 
@@ -598,6 +599,56 @@ describe("LibraryView source reuse", () => {
     );
     expect(useToastStore().items.at(-1)?.message).toContain(
       "Framewise upscale queued (vup-desktop-1)",
+    );
+    wrapper.unmount();
+  });
+
+  it("lets the user choose between capable hosts for a multi-host image", async () => {
+    upscaleLibraryImageMock.mockResolvedValueOnce({
+      filename: "origin-still-upscaled.png",
+      model: "real-esrgan-x4plus:fp16",
+      scale_factor: 4,
+    });
+    const remoteImage = {
+      ...prints[0]!,
+      filename: "origin-still.png",
+      size_bytes: 4096,
+    } as GalleryImage;
+    const localImage = {
+      ...remoteImage,
+      filename: "origin-still~made-local.png",
+    } as GalleryImage;
+    const { wrapper } = await mountView(
+      remoteImage,
+      (gallery) => {
+        gallery.buckets.local!.items = [localImage];
+        useHostsStore().capabilities["plato-7680"] = {
+          video_upscale: { gallery_image: true },
+        } as never;
+      },
+      "/library",
+      true,
+    );
+
+    await wrapper.get(".ms-lib-tile").trigger("contextmenu");
+    const upscale = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Upscale",
+    );
+    useContextMenuStore().activate(upscale!);
+    await flushPromises();
+
+    const host = document.querySelector("[data-test='upscale-host']") as HTMLSelectElement;
+    expect([...host.options].map((option) => option.text)).toEqual(["This device", "plato"]);
+    host.value = "plato-7680";
+    host.dispatchEvent(new Event("change"));
+    await flushPromises();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(upscaleLibraryImageMock).toHaveBeenCalledWith(
+      { baseUrl: "http://plato:7680", apiKey: "secret" },
+      "origin-still.png",
+      "real-esrgan-x4plus:fp16",
     );
     wrapper.unmount();
   });
@@ -624,6 +675,132 @@ describe("LibraryView source reuse", () => {
       (entry) => !("separator" in entry) && entry.label === "Framewise upscale",
     );
     expect(upscale).toMatchObject({ disabled: true });
+  });
+
+  it("routes a saved-local video through its capable remote copy", async () => {
+    const remoteVideo = {
+      ...prints[0]!,
+      filename: "origin-clip.mp4",
+      format: "mp4",
+      size_bytes: 4096,
+    } as GalleryImage;
+    const localVideo = {
+      ...remoteVideo,
+      filename: "origin-clip~made-local.mp4",
+    } as GalleryImage;
+    const { wrapper } = await mountView(remoteVideo, (gallery) => {
+      gallery.buckets.local!.items = [localVideo];
+      useHostsStore().capabilities.local = {
+        video_upscale: { available: false },
+      } as never;
+      useHostsStore().capabilities["plato-7680"] = {
+        video_upscale: { available: true },
+      } as never;
+    });
+
+    await wrapper.get(".ms-lib-tile").trigger("contextmenu");
+    const upscale = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Framewise upscale",
+    );
+    expect(upscale).toMatchObject({ disabled: false });
+    useContextMenuStore().activate(upscale!);
+    await flushPromises();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
+      { baseUrl: "http://plato:7680", apiKey: "secret" },
+      "origin-clip.mp4",
+      "real-esrgan-x4plus:fp16",
+    );
+    wrapper.unmount();
+  });
+
+  it("retains remote upscale authority under the local host filter", async () => {
+    const remoteVideo = {
+      ...prints[0]!,
+      filename: "filtered-origin.mp4",
+      format: "mp4",
+      size_bytes: 4096,
+    } as GalleryImage;
+    const localVideo = {
+      ...remoteVideo,
+      filename: "filtered-origin~made-local.mp4",
+    } as GalleryImage;
+    const { wrapper } = await mountView(remoteVideo, (gallery) => {
+      gallery.buckets.local!.items = [localVideo];
+      gallery.filter = "local";
+      useHostsStore().capabilities.local = {
+        video_upscale: { available: false },
+      } as never;
+      useHostsStore().capabilities["plato-7680"] = {
+        video_upscale: { available: true },
+      } as never;
+    });
+
+    await wrapper.get(".ms-lib-tile").trigger("contextmenu");
+    const upscale = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Framewise upscale",
+    );
+    expect(upscale).toMatchObject({ disabled: false });
+    useContextMenuStore().activate(upscale!);
+    await flushPromises();
+    expect(document.querySelector("[data-test='upscale-host']")).toBeNull();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
+      { baseUrl: "http://plato:7680", apiKey: "secret" },
+      "filtered-origin.mp4",
+      "real-esrgan-x4plus:fp16",
+    );
+    wrapper.unmount();
+  });
+
+  it("lets the user choose between capable hosts for a multi-host video", async () => {
+    const remoteVideo = {
+      ...prints[0]!,
+      filename: "origin-clip.mp4",
+      format: "mp4",
+      size_bytes: 4096,
+    } as GalleryImage;
+    const localVideo = {
+      ...remoteVideo,
+      filename: "origin-clip~made-local.mp4",
+    } as GalleryImage;
+    const { wrapper } = await mountView(
+      remoteVideo,
+      (gallery) => {
+        gallery.buckets.local!.items = [localVideo];
+        useHostsStore().capabilities["plato-7680"] = {
+          video_upscale: { available: true },
+        } as never;
+      },
+      "/library",
+      true,
+    );
+
+    await wrapper.get(".ms-lib-tile").trigger("contextmenu");
+    const upscale = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Framewise upscale",
+    );
+    useContextMenuStore().activate(upscale!);
+    await flushPromises();
+
+    const host = document.querySelector("[data-test='upscale-host']") as HTMLSelectElement;
+    expect([...host.options].map((option) => option.text)).toEqual(["This device", "plato"]);
+    host.value = "plato-7680";
+    host.dispatchEvent(new Event("change"));
+    await flushPromises();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
+      { baseUrl: "http://plato:7680", apiKey: "secret" },
+      "origin-clip.mp4",
+      "real-esrgan-x4plus:fp16",
+    );
+    wrapper.unmount();
   });
 
   it("keeps a failed desktop Framewise submission visible in the dialog", async () => {
