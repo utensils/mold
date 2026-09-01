@@ -1027,6 +1027,32 @@ describe("MobileHostDetail remote host data", () => {
     );
   });
 
+  it("dismisses queue details with a natural downward swipe", async () => {
+    const view = await mountDetail();
+    await view.get("[data-test='host-detail-queue-open-job-queued']").trigger("click");
+    await flushPromises();
+
+    const panel = view.get(".mobile-library-sheet-panel").element;
+    const touch = (type: string, y: number, ended = false) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      const point = { identifier: 9, clientX: 120, clientY: y };
+      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
+      Object.defineProperty(event, "changedTouches", { value: [point] });
+      return event;
+    };
+
+    panel.dispatchEvent(touch("touchstart", 100));
+    const move = touch("touchmove", 240);
+    panel.dispatchEvent(move);
+    expect(move.defaultPrevented).toBe(true);
+    await flushPromises();
+    expect(view.get(".mobile-library-sheet-panel").attributes("style")).toContain("translateY");
+
+    panel.dispatchEvent(touch("touchend", 240, true));
+    await flushPromises();
+    expect(view.get("[data-test='host-detail-queue-sheet']").classes()).not.toContain("is-open");
+  });
+
   it("arms the sheet's cancel before it touches the host", async () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);

@@ -1532,6 +1532,7 @@ onBeforeUnmount(() => {
       :open="inspectedQueueModel !== null"
       title="Job details"
       :focus-first-control="false"
+      swipe-to-dismiss
       test-id="host-detail-queue-sheet"
       @close="inspectedQueueId = null"
     >

@@ -236,7 +236,11 @@ async function copyDetail(): Promise<void> {
 <style scoped>
 .qed {
   display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
+  box-sizing: border-box;
   flex-direction: column;
   color: var(--ink-2, currentColor);
   font-size: 12px;
@@ -246,6 +250,7 @@ async function copyDetail(): Promise<void> {
 }
 .qed__head {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
@@ -295,11 +300,13 @@ async function copyDetail(): Promise<void> {
 }
 .qed__body {
   display: flex;
+  min-width: 0;
   min-height: 0;
   flex: 1;
   flex-direction: column;
   gap: 12px;
   padding: 14px 16px;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 .qed__preview {
@@ -377,6 +384,7 @@ async function copyDetail(): Promise<void> {
 }
 .qed__foot {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 8px;
   padding: 12px 16px;
@@ -394,6 +402,7 @@ async function copyDetail(): Promise<void> {
 }
 .qed__actions {
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   gap: 8px;
 }
@@ -408,8 +417,13 @@ async function copyDetail(): Promise<void> {
   cursor: pointer;
 }
 .qed--compact .qed__actions button {
+  min-width: 0;
   min-height: 44px;
   font-size: 16px;
+}
+.qed--compact .qed__actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .qed__actions button:disabled {
   cursor: default;
