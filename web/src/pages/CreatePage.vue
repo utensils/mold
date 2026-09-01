@@ -525,7 +525,13 @@ async function pullExpansionModel(): Promise<void> {
   if (!pending || expansionPullBusy.value) return;
   expansionPullBusy.value = true;
   try {
-    await installTargets.startDownloadOn(pending.target, pending.model);
+    const started = await installTargets.startDownloadOn(
+      pending.target,
+      pending.model,
+    );
+    // Keep the pull offer standing when the user declined the terms — it is
+    // still the next thing they would want to do.
+    if (started.declined) return;
     toast("success", installTargets.queuedMessage(pending.target));
     expansionPull.value = null;
   } catch (error) {
@@ -3544,7 +3550,11 @@ async function armMissingModelPull(options: {
   if (signal?.aborted) return true;
   let jobId: string | null = null;
   try {
-    jobId = await installTargets.startDownloadOn(target, model);
+    const started = await installTargets.startDownloadOn(target, model);
+    // Declining the host's terms queues nothing, so there is no pull to watch
+    // and no error to report — the dialog was the whole interaction.
+    if (started.declined) return true;
+    jobId = started.jobId;
   } catch (error) {
     toast(
       "error",

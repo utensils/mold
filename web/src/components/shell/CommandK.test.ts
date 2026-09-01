@@ -54,7 +54,9 @@ const refreshMock = vi.hoisted(() => vi.fn(async () => {}));
 const fetchCatalogSearchMock = vi.hoisted(() =>
   vi.fn<(params: unknown) => Promise<FakeCatalogResponse>>(),
 );
-const startDownloadOnMock = vi.hoisted(() => vi.fn(async () => {}));
+const startDownloadOnMock = vi.hoisted(() =>
+  vi.fn(async () => ({ declined: false, jobId: null })),
+);
 const planForMock = vi.hoisted(() => vi.fn<() => FakeInstallPlan>());
 const toastMock = vi.hoisted(() => vi.fn());
 

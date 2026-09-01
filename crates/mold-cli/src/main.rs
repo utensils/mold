@@ -2865,7 +2865,14 @@ async fn run() -> anyhow::Result<()> {
                 ids,
                 local: accept_local,
             }) => {
-                commands::licenses::accept(&ids, accept_local).await?;
+                // `--local` is accepted on either side of the subcommand
+                // (`mold licenses --local accept X` and
+                // `mold licenses accept X --local` read identically to a
+                // user), and clap stores each in its own field. Honour
+                // whichever was given: silently ignoring the parent flag
+                // would record consent on MOLD_HOST after the user asked
+                // for this machine.
+                commands::licenses::accept(&ids, local || accept_local).await?;
             }
             None => {
                 commands::licenses::run(local).await?;
@@ -4292,6 +4299,68 @@ mod tests {
                 assert!(older_than.is_none());
             }
             _ => panic!("expected Clean"),
+        }
+    }
+
+    /// `--local` reads identically on either side of the subcommand, and
+    /// clap stores each in its own field. Honouring only one would record
+    /// consent on MOLD_HOST after the user asked for this machine.
+    #[test]
+    fn licenses_accept_honours_local_on_either_side() {
+        for args in [
+            vec!["licenses", "--local", "accept", "some-license"],
+            vec!["licenses", "accept", "some-license", "--local"],
+        ] {
+            let cli = parse(&args);
+            match cli.command {
+                Commands::Licenses { action, local } => {
+                    let Some(LicensesAction::Accept {
+                        ids,
+                        local: accept_local,
+                    }) = action
+                    else {
+                        panic!("expected the accept subcommand for {args:?}");
+                    };
+                    assert_eq!(ids, vec!["some-license".to_string()]);
+                    assert!(
+                        local || accept_local,
+                        "--local must survive on either side: {args:?}"
+                    );
+                }
+                _ => panic!("expected Licenses for {args:?}"),
+            }
+        }
+    }
+
+    /// A bundle covered by two agreements is one command, not two runs.
+    #[test]
+    fn accept_license_is_repeatable_on_pull() {
+        let cli = parse(&[
+            "pull",
+            "some-model",
+            "--accept-license",
+            "one",
+            "--accept-license",
+            "two",
+        ]);
+        match cli.command {
+            Commands::Pull { accept_license, .. } => {
+                assert_eq!(accept_license, vec!["one".to_string(), "two".to_string()]);
+            }
+            _ => panic!("expected Pull"),
+        }
+    }
+
+    /// The bare listing must keep working now that it has a subcommand.
+    #[test]
+    fn licenses_without_a_subcommand_still_lists() {
+        let cli = parse(&["licenses"]);
+        match cli.command {
+            Commands::Licenses { action, local } => {
+                assert!(action.is_none());
+                assert!(!local);
+            }
+            _ => panic!("expected Licenses"),
         }
     }
 

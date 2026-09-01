@@ -78,7 +78,12 @@ async function pullCard(entry: CatalogEntryWire) {
   });
   if (choice.kind === "cancelled") return;
   try {
-    await installTargets.startDownloadOn(choice.target, entry.id);
+    const started = await installTargets.startDownloadOn(
+      choice.target,
+      entry.id,
+    );
+    // Declined terms queue nothing; the dialog already told the user.
+    if (started.declined) return;
     toast("success", installTargets.queuedMessage(choice.target));
   } catch (error) {
     toast("error", error instanceof Error ? error.message : String(error));

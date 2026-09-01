@@ -393,7 +393,13 @@ async function runInstall(modelId: string, displayName: string) {
   });
   if (choice.kind === "cancelled") return false;
   try {
-    await installTargets.startDownloadOn(choice.target, modelId);
+    // A declined license is a user decision, not a failure: the modal was
+    // the interaction, so say nothing rather than claim a queued download.
+    const started = await installTargets.startDownloadOn(
+      choice.target,
+      modelId,
+    );
+    if (started.declined) return false;
     toast(
       "success",
       installTargets.queuedMessage(

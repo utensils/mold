@@ -107,7 +107,8 @@ const ctx: CommandContext = {
     const target = installTargets.planFor(modelId).targets[0] ?? null;
     void installTargets
       .startDownloadOn(target, modelId)
-      .then(() => {
+      .then((started) => {
+        if (started.declined) return;
         toast("success", installTargets.queuedMessage(target));
         window.dispatchEvent(new CustomEvent("mold:open-downloads"));
       })
