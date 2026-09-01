@@ -27,6 +27,7 @@ pub enum CommandId {
     ExpandPrompt,
     RetryHeldPrints,
     SearchHistory,
+    ReviewLicenses,
     OpenHelp,
     Quit,
     SetTheme(ThemePreset),
@@ -79,6 +80,12 @@ pub fn all_commands() -> Vec<PaletteCommand> {
             "Search prompt history".into(),
             "/",
         ),
+        cmd(
+            CommandId::ReviewLicenses,
+            "§",
+            "Review model licenses…".into(),
+            "",
+        ),
         cmd(CommandId::OpenHelp, "?", "Help — keybindings".into(), "?"),
         cmd(CommandId::Quit, "q", "Quit mold".into(), "q"),
     ];
@@ -128,6 +135,7 @@ pub fn command_action(id: CommandId) -> Action {
         CommandId::ExpandPrompt => Action::ExpandPrompt,
         CommandId::RetryHeldPrints => Action::RetryHeldPrints,
         CommandId::SearchHistory => Action::SearchHistory,
+        CommandId::ReviewLicenses => Action::ReviewLicenses,
         CommandId::OpenHelp => Action::ShowHelp,
         CommandId::Quit => Action::Quit,
         CommandId::SetTheme(preset) => Action::SetTheme(preset),
@@ -143,7 +151,7 @@ mod tests {
         let all = all_commands();
         let filtered = filter_commands("");
         assert_eq!(all.len(), filtered.len());
-        assert_eq!(all.len(), 14 + ThemePreset::ALL.len());
+        assert_eq!(all.len(), 15 + ThemePreset::ALL.len());
         for (a, b) in all.iter().zip(filtered.iter()) {
             assert_eq!(a.id, b.id);
         }

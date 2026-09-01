@@ -47,8 +47,7 @@ const licenseHostId = ref("local");
 const licenseHosts = computed(() => hostsStore.all.filter((host) => host.baseUrl));
 const licenseHost = computed(
   () =>
-    licenseHosts.value.find((host) => host.id === licenseHostId.value) ??
-    hostsStore.primaryHost,
+    licenseHosts.value.find((host) => host.id === licenseHostId.value) ?? hostsStore.primaryHost,
 );
 const licenseTarget = computed(() =>
   licenseHost.value?.baseUrl

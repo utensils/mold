@@ -69,9 +69,7 @@ describe("runWithLicenseConsent", () => {
   });
 
   it("declines without enqueueing anything", async () => {
-    const start = vi
-      .fn<() => Promise<string>>()
-      .mockRejectedValue(refusal());
+    const start = vi.fn<() => Promise<string>>().mockRejectedValue(refusal());
 
     const running = runWithLicenseConsent({
       hostLabel: "hal9000",

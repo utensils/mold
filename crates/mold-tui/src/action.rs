@@ -52,6 +52,8 @@ pub enum Action {
     HistoryNext,
     /// Open fuzzy search over prompt history.
     SearchHistory,
+    /// Open the read-only license review popup (command palette).
+    ReviewLicenses,
     /// Gallery: re-generate with same parameters.
     Regenerate,
     /// Gallery: load parameters into Create view for editing.

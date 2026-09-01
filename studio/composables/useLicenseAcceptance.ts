@@ -37,7 +37,9 @@ let settle: ((outcome: LicenseConsentOutcome) => void) | null = null;
 let controller: AbortController | null = null;
 
 export function useLicenseAcceptance() {
-  async function request(prompt: LicensePrompt): Promise<LicenseConsentOutcome> {
+  async function request(
+    prompt: LicensePrompt,
+  ): Promise<LicenseConsentOutcome> {
     if (prompt.requirements.length === 0)
       return { accepted: true, downloaded: false };
     if (pending.value)
@@ -137,9 +139,7 @@ export function useLicenseAcceptance() {
 }
 
 export type LicenseGatedOutcome<T> =
-  | { kind: "ok"; value: T }
-  | { kind: "accepted" }
-  | { kind: "declined" };
+  { kind: "ok"; value: T } | { kind: "accepted" } | { kind: "declined" };
 
 /** Serializes licence reviews across every surface.
  *

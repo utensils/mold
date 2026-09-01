@@ -496,8 +496,7 @@ async function queueOnHost(entry: CatalogEntry, host: HostView | null): Promise<
     hostLabel: host?.label ?? "This device",
     target: target ?? currentTarget(),
     installModel: entry.id,
-    start: () =>
-      startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false),
+    start: () => startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false),
   });
   return outcome.kind !== "declined";
 }

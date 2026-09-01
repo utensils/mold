@@ -102,6 +102,16 @@ pub enum BackgroundEvent {
     /// Generation or background task failed.
     Error(String),
     /// A background placement/download check paused for explicit consent.
+    /// A host answered `GET /api/licenses` for the review popup.
+    LicenseListingLoaded {
+        host_label: String,
+        licenses: Vec<mold_core::types::ThirdPartyLicenseStatus>,
+    },
+    /// That host could not be asked. Never answered with local state: the
+    /// question is always "accepted on WHICH machine?".
+    LicenseListingFailed {
+        message: String,
+    },
     LicenseRequired {
         host_label: String,
         requirements: Vec<LicenseDownloadRequirement>,
@@ -1939,6 +1949,14 @@ pub struct SettingsState {
 }
 
 /// Active popup/overlay.
+/// What the license review popup currently knows.
+#[derive(Debug, Clone)]
+pub enum LicenseListingState {
+    Loading,
+    Ready(Vec<mold_core::types::ThirdPartyLicenseStatus>),
+    Failed(String),
+}
+
 pub enum Popup {
     Help,
     PromptSourceChoice {
@@ -2009,6 +2027,16 @@ pub enum Popup {
     Confirm {
         message: String,
         on_confirm: ConfirmAction,
+    },
+    /// Read-only listing of one host's third-party licenses.
+    ///
+    /// Deliberately holds no oneshot and settles nothing: accepting from here
+    /// re-enters the SAME pull-time consent flow, so the settings path and the
+    /// pull path can never disagree about what was shown.
+    LicenseSettings {
+        host_label: String,
+        state: LicenseListingState,
+        selected: usize,
     },
     LicenseReview {
         host_label: String,
@@ -4389,6 +4417,24 @@ impl App {
                     }
                     _ => self.close_popup(),
                 },
+                Some(Popup::LicenseSettings {
+                    state, selected, ..
+                }) => {
+                    let rows = match state {
+                        LicenseListingState::Ready(rows) => rows.len(),
+                        _ => 0,
+                    };
+                    match key.code {
+                        KeyCode::Char('j') | KeyCode::Down if *selected + 1 < rows => {
+                            *selected += 1;
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            *selected = selected.saturating_sub(1);
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') => self.close_popup(),
+                        _ => {}
+                    }
+                }
                 Some(Popup::LicenseReview { response, .. }) => match key.code {
                     KeyCode::Char('y') | KeyCode::Enter => {
                         let response = response.take();
@@ -5078,6 +5124,65 @@ impl App {
                     filter: String::new(),
                     selected: 0,
                     results: all,
+                });
+            }
+            Action::ReviewLicenses => {
+                let host_label = if self.should_poll_remote() {
+                    self.server_url.clone().unwrap_or_else(|| "server".into())
+                } else {
+                    "This device".to_string()
+                };
+                self.popup = Some(Popup::LicenseSettings {
+                    host_label: host_label.clone(),
+                    state: LicenseListingState::Loading,
+                    selected: 0,
+                });
+                let tx = self.bg_tx.clone();
+                let remote = self
+                    .should_poll_remote()
+                    .then(|| self.server_url.clone())
+                    .flatten();
+                self.tokio_handle.spawn(async move {
+                    match remote {
+                        Some(url) => {
+                            let client = mold_core::MoldClient::new(&url);
+                            match client.list_licenses().await {
+                                Ok(licenses) => {
+                                    let _ = tx.send(BackgroundEvent::LicenseListingLoaded {
+                                        host_label,
+                                        licenses,
+                                    });
+                                }
+                                Err(error) => {
+                                    // A host that cannot answer is never
+                                    // papered over with local state: the
+                                    // question is which machine accepted.
+                                    let _ = tx.send(BackgroundEvent::LicenseListingFailed {
+                                        message: format!(
+                                            "{host_label} did not report its licenses: {error}"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                        None => match mold_core::Config::mold_dir() {
+                            Some(home) => {
+                                let _ = tx.send(BackgroundEvent::LicenseListingLoaded {
+                                    host_label,
+                                    licenses: mold_core::license_acceptance::license_statuses(
+                                        &home,
+                                    ),
+                                });
+                            }
+                            None => {
+                                let _ = tx.send(BackgroundEvent::LicenseListingFailed {
+                                    message:
+                                        "Could not resolve this machine's Mold data directory."
+                                            .to_string(),
+                                });
+                            }
+                        },
+                    }
                 });
             }
             Action::Unfocus if self.active_view == View::Create => {
@@ -8795,6 +8900,23 @@ impl App {
                     self.generate.error_message = Some(msg);
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
+                }
+                BackgroundEvent::LicenseListingLoaded {
+                    host_label,
+                    licenses,
+                } => {
+                    // Only repaint the popup the user is actually looking at:
+                    // a listing that arrives after they moved on must not
+                    // reopen it.
+                    if let Some(Popup::LicenseSettings { state, .. }) = self.popup.as_mut() {
+                        *state = LicenseListingState::Ready(licenses);
+                    }
+                    let _ = host_label;
+                }
+                BackgroundEvent::LicenseListingFailed { message } => {
+                    if let Some(Popup::LicenseSettings { state, .. }) = self.popup.as_mut() {
+                        *state = LicenseListingState::Failed(message);
+                    }
                 }
                 BackgroundEvent::LicenseRequired {
                     host_label,

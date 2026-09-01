@@ -546,6 +546,7 @@ Common subcommands are `doctor`, `availability`, `deploy`, `status`, `logs`,
 | `mold unload`                                                 | Unload the current server model                                                                   |
 | `mold update [--check] [--force] [--nightly] [--version TAG]` | Update a stable, nightly, or exact release binary                                                 |
 | `mold licenses [--local]`                                     | Show third-party model licenses and whether the machine that would run the pull has accepted them |
+| `mold licenses accept <ID>...`                                | Record acceptance of pinned terms WITHOUT downloading; `--local` records here instead of on the server |
 | `mold skill <COMMAND>`                                        | Manage Mold's embedded Agent Skill                                                                |
 | `mold version`                                                | Show version, build date, and git SHA                                                             |
 

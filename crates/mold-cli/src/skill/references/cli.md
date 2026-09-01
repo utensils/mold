@@ -61,6 +61,18 @@ mold trash list
 mold clean
 ```
 
+Some weights carry third-party terms mold will not accept on a user's behalf
+(PuLID's InsightFace models, every Hunyuan3D tier). `mold licenses` lists them
+and says which machine the answer is about — acceptance is recorded per Mold
+data root, so it belongs to the host that runs the pull, not necessarily this
+one. Never accept on the user's behalf: show the terms and let them choose.
+
+```bash
+mold licenses                                 # what is required, and on which host
+mold licenses accept <ID>                     # agree WITHOUT downloading
+mold pull <model> --accept-license <ID>       # agree and pull; repeat for several
+```
+
 `mold clean` is a dry run unless the user explicitly requests deletion and the
 CLI confirms the force flag. Trash purge, model removal, cloud-volume deletion,
 and pod termination are destructive; follow the safety reference.

@@ -87,6 +87,7 @@ clients, and custom integrations on one generation contract.
 | `DELETE` | `/api/downloads/:id`                             | key           | Cancel a queued or active download                                                                                                                                                                                                                                  |
 | `GET`    | `/api/downloads/stream`                          | key           | Download queue updates as SSE                                                                                                                                                                                                                                       |
 | `GET`    | `/api/licenses`                                  | key           | Third-party model licenses and whether this server has accepted them                                                                                                                                                                                                |
+| `POST`   | `/api/licenses/accept`                           | key           | Record acceptance of pinned terms on this server without downloading                                                                                                                                                                                                |
 | `GET`    | `/api/catalog/families`                          | key           | Live catalog family/kind metadata                                                                                                                                                                                                                                   |
 | `GET`    | `/api/catalog/search`                            | key           | Search the live HF/Civitai catalog; sort by downloads, recent additions, or rating                                                                                                                                                                                  |
 | `GET`    | `/api/catalog/installed`                         | key           | List installed catalog entries and LoRAs                                                                                                                                                                                                                            |
@@ -2027,6 +2028,24 @@ browsable project page and is presentation only. An acceptance is bound to the
 `(url, sha256)` pair, so `accepted` reads `false` again after a Mold release
 re-pins the license to a newer upstream revision. `accepted` describes only the
 server that answered; a multi-host client must ask each one.
+
+### Accepting without downloading
+
+`POST /api/licenses/accept` records consent on its own. Consent and acquisition
+are different acts: before this route existed the only way to accept was to
+start a download, so agreeing to terms always meant transferring the weights,
+and a license no installed manifest required could not be accepted at all.
+
+```bash
+curl -X POST http://localhost:7680/api/licenses/accept \
+  -H 'Content-Type: application/json' \
+  -d '{"accept_licenses":[{"id":"tencent-hunyuan3d-2.0","url":"...","sha256":"..."}]}'
+```
+
+It answers with the same body as `GET /api/licenses`, refreshed, so a client
+needs no second round trip. `400 UNKNOWN_LICENSE` for an id this server does
+not register; `409 LICENSE_TERMS_MISMATCH`, carrying the server's own terms,
+when the entry does not match what this server pins.
 
 ### Accepting a license
 
