@@ -29,7 +29,7 @@
 //! },
 //! ```
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, Transaction};
 
 use crate::path::canonical_dir_string;
@@ -1106,6 +1106,24 @@ fn canonicalize_existing_output_dirs(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Render a failed SQL migration as a one-line diagnosis.
+///
+/// rusqlite's `SqlInputError` displays as `{msg} in {sql} at offset {n}`,
+/// where `{sql}` is the *entire* statement it was preparing. For a migration
+/// that is a whole `CREATE TABLE` block, so a stuck DB dumped ~25 lines of
+/// DDL into the middle of an ordinary `mold run` (the warning in
+/// [`crate::global_db`] renders the full anyhow chain). Keep what identifies
+/// the problem — which migration, which version the DB is stuck at, what
+/// SQLite objected to — and drop the statement text, which is right here in
+/// this file.
+fn migration_failed(version: i64, from: i64, err: rusqlite::Error) -> anyhow::Error {
+    let detail = match &err {
+        rusqlite::Error::SqlInputError { msg, .. } => msg.clone(),
+        other => other.to_string(),
+    };
+    anyhow::anyhow!("migration v{version} failed (DB at v{from}): {detail}")
+}
+
 /// Apply every migration whose version is greater than the DB's current
 /// `user_version` pragma. Runs each migration in its own transaction —
 /// partial failures leave the DB at the previous version instead of a
@@ -1151,8 +1169,11 @@ pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
             );
         }
         match &m.kind {
-            MigrationKind::Sql(sql) => tx.execute_batch(sql)?,
-            MigrationKind::Rust(run) => run(&tx)?,
+            MigrationKind::Sql(sql) => tx
+                .execute_batch(sql)
+                .map_err(|e| migration_failed(m.version, current, e))?,
+            MigrationKind::Rust(run) => run(&tx)
+                .with_context(|| format!("migration v{} failed (DB at v{current})", m.version))?,
         }
         // `user_version` pragma doesn't bind parameters — safe because
         // `m.version` is compile-time constant from our own source.
@@ -1425,6 +1446,56 @@ mod tests {
             )
             .unwrap();
         n == 1
+    }
+
+    #[test]
+    fn sql_migration_failure_is_one_line_without_the_statement() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V34_VIDEO_UPSCALE_JOBS).unwrap();
+        let err = conn.execute_batch(V34_VIDEO_UPSCALE_JOBS).unwrap_err();
+
+        let rendered = format!("{:#}", migration_failed(34, 33, err));
+
+        assert!(rendered.contains("migration v34"), "{rendered}");
+        assert!(rendered.contains("DB at v33"), "{rendered}");
+        assert!(
+            rendered.contains("table video_upscale_jobs already exists"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("CREATE TABLE"),
+            "statement text leaked into the message: {rendered}"
+        );
+        assert_eq!(rendered.lines().count(), 1, "{rendered}");
+    }
+
+    /// A DB that already carries a table a later migration creates (running a
+    /// pre-renumber branch build stamps exactly this state) must fail with a
+    /// diagnosis, not a DDL dump.
+    #[test]
+    fn apply_pending_reports_a_conflicting_table_concisely() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS.iter().filter(|m| m.version <= 32) {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(run) => run(&tx).unwrap(),
+            }
+            tx.execute_batch(&format!("PRAGMA user_version = {};", migration.version))
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        conn.execute_batch(V34_VIDEO_UPSCALE_JOBS).unwrap();
+        conn.execute_batch("PRAGMA user_version = 33;").unwrap();
+
+        let err = apply_pending(&mut conn).unwrap_err();
+        let rendered = format!("{err:#}");
+
+        assert!(rendered.contains("migration v34"), "{rendered}");
+        assert!(
+            !rendered.contains("CREATE TABLE"),
+            "statement text leaked into the message: {rendered}"
+        );
     }
 
     #[test]

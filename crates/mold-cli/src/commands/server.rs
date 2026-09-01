@@ -262,52 +262,78 @@ pub async fn run_start(
     Ok(())
 }
 
-pub async fn run_status() -> Result<()> {
-    match read_pid_file() {
+/// Which server `mold server status` should report on.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StatusTarget {
+    /// Report on this machine's managed daemon — the PID file is authority,
+    /// so PID, port, logs and the stop hint are all meaningful.
+    LocalManaged,
+    /// Report on an explicitly named server over HTTP. There is no PID or log
+    /// path to print: those are facts about another machine's process.
+    Remote(String),
+}
+
+/// `--host` / `MOLD_HOST` names the server the user is asking about, but the
+/// PID file only ever describes *this* machine's daemon. Without this
+/// mapping, `MOLD_HOST=plato mold server status` answered "No server running"
+/// about a host it never contacted.
+///
+/// A loopback target keeps the local reading (same server, and the PID/logs/
+/// stop lines are worth having) — including when no daemon is managed, so the
+/// unmanaged-process scan still runs. A loopback target on a *different* port
+/// than the managed daemon is someone else's server: probe it over HTTP.
+pub(crate) fn status_target(host: Option<&str>, managed_port: Option<u16>) -> StatusTarget {
+    let Some(host) = host.map(str::trim).filter(|host| !host.is_empty()) else {
+        return StatusTarget::LocalManaged;
+    };
+    let url = mold_core::client::normalize_host(host);
+    let loopback_same_port = reqwest::Url::parse(&url).is_ok_and(|parsed| {
+        let is_loopback = matches!(
+            parsed.host_str(),
+            Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+        );
+        let same_port = managed_port.is_none_or(|port| parsed.port() == Some(port));
+        is_loopback && same_port
+    });
+    if loopback_same_port {
+        StatusTarget::LocalManaged
+    } else {
+        StatusTarget::Remote(url)
+    }
+}
+
+pub async fn run_status(host: Option<String>) -> Result<()> {
+    let managed = read_pid_file();
+    match status_target(host.as_deref(), managed.as_ref().map(|srv| srv.port)) {
+        StatusTarget::Remote(url) => run_status_remote(&url).await,
+        StatusTarget::LocalManaged => run_status_local(managed).await,
+    }
+}
+
+async fn run_status_remote(url: &str) -> Result<()> {
+    let client = mold_core::MoldClient::new(url);
+    match client.server_status().await {
+        Ok(status) => {
+            eprintln!("Server running at {url}");
+            print_status_details(&client, &status).await;
+            Ok(())
+        }
+        Err(_) => {
+            eprintln!("No server responding at {url}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_status_local(managed: Option<ManagedServer>) -> Result<()> {
+    match managed {
         Some(srv) => {
             let client = mold_core::MoldClient::new(&srv.base_url());
             match client.server_status().await {
                 Ok(status) => {
-                    let devices = client.devices().await.ok();
                     eprintln!("Server running (PID {})", srv.pid);
-                    eprintln!("  Version: {}", status.version);
                     eprintln!("  Port:    {}", srv.port);
-                    eprintln!("  Uptime:  {}s", status.uptime_secs);
-                    eprintln!(
-                        "  Models:  {}",
-                        if status.models_loaded.is_empty() {
-                            "none".to_string()
-                        } else {
-                            status.models_loaded.join(", ")
-                        }
-                    );
-                    if let Some(devices) =
-                        devices.as_ref().filter(|state| !state.devices.is_empty())
-                    {
-                        for device in &devices.devices {
-                            let ordinal = device
-                                .ordinal
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "—".into());
-                            let used = device.memory.used_bytes.unwrap_or(0) / 1024_u64.pow(2);
-                            let total = device.memory.total_bytes.unwrap_or(0) / 1024_u64.pow(2);
-                            let utilization = device
-                                .telemetry
-                                .utilization_percent
-                                .map(|value| format!("{value}%"))
-                                .unwrap_or_else(|| "—".into());
-                            eprintln!(
-                                "  GPU {ordinal}: {} [{}] {:?}/{:?}, VRAM {used}/{total}MB, util {utilization}",
-                                device.name, device.id, device.admin_state, device.health
-                            );
-                        }
-                    } else if let Some(gpu) = &status.gpu_info {
-                        eprintln!("  GPU:     {}", gpu.name);
-                        eprintln!("  VRAM:    {}/{}MB", gpu.vram_used_mb, gpu.vram_total_mb);
-                    }
-                    if status.busy {
-                        eprintln!("  Status:  busy (generating)");
-                    }
+                    print_status_details(&client, &status).await;
                 }
                 Err(_) => {
                     eprintln!(
@@ -339,6 +365,48 @@ pub async fn run_status() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The host-agnostic half of `mold server status`: everything the server
+/// itself reports. PID, port and log paths stay with the caller — they are
+/// local-daemon facts, and a remote host has none to give.
+async fn print_status_details(client: &mold_core::MoldClient, status: &mold_core::ServerStatus) {
+    let devices = client.devices().await.ok();
+    eprintln!("  Version: {}", status.version);
+    eprintln!("  Uptime:  {}s", status.uptime_secs);
+    eprintln!(
+        "  Models:  {}",
+        if status.models_loaded.is_empty() {
+            "none".to_string()
+        } else {
+            status.models_loaded.join(", ")
+        }
+    );
+    if let Some(devices) = devices.as_ref().filter(|state| !state.devices.is_empty()) {
+        for device in &devices.devices {
+            let ordinal = device
+                .ordinal
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "—".into());
+            let used = device.memory.used_bytes.unwrap_or(0) / 1024_u64.pow(2);
+            let total = device.memory.total_bytes.unwrap_or(0) / 1024_u64.pow(2);
+            let utilization = device
+                .telemetry
+                .utilization_percent
+                .map(|value| format!("{value}%"))
+                .unwrap_or_else(|| "—".into());
+            eprintln!(
+                "  GPU {ordinal}: {} [{}] {:?}/{:?}, VRAM {used}/{total}MB, util {utilization}",
+                device.name, device.id, device.admin_state, device.health
+            );
+        }
+    } else if let Some(gpu) = &status.gpu_info {
+        eprintln!("  GPU:     {}", gpu.name);
+        eprintln!("  VRAM:    {}/{}MB", gpu.vram_used_mb, gpu.vram_total_mb);
+    }
+    if status.busy {
+        eprintln!("  Status:  busy (generating)");
+    }
 }
 
 pub async fn run_stop() -> Result<()> {
@@ -530,6 +598,48 @@ async fn probe_latency_ms(base_url: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_host_reports_on_the_local_managed_daemon() {
+        assert_eq!(status_target(None, Some(7680)), StatusTarget::LocalManaged);
+        assert_eq!(status_target(Some("  "), None), StatusTarget::LocalManaged);
+    }
+
+    #[test]
+    fn an_explicit_remote_host_is_probed_over_http() {
+        assert_eq!(
+            status_target(Some("plato"), None),
+            StatusTarget::Remote("http://plato:7680".into())
+        );
+        assert_eq!(
+            status_target(Some("http://plato:7680"), Some(7680)),
+            StatusTarget::Remote("http://plato:7680".into())
+        );
+        assert_eq!(
+            status_target(Some("plato:8080"), None),
+            StatusTarget::Remote("http://plato:8080".into())
+        );
+    }
+
+    #[test]
+    fn a_loopback_host_keeps_the_local_pid_reading() {
+        assert_eq!(
+            status_target(Some("http://localhost:7680"), Some(7680)),
+            StatusTarget::LocalManaged
+        );
+        assert_eq!(
+            status_target(Some("127.0.0.1"), None),
+            StatusTarget::LocalManaged
+        );
+    }
+
+    #[test]
+    fn a_loopback_host_on_another_port_is_not_the_managed_daemon() {
+        assert_eq!(
+            status_target(Some("localhost:9999"), Some(7680)),
+            StatusTarget::Remote("http://localhost:9999".into())
+        );
+    }
 
     #[test]
     fn pid_file_roundtrip() {
