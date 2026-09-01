@@ -82,8 +82,10 @@ pub(crate) fn require_framewise_codec_runtime_with(available: bool) -> Result<()
     }
 }
 
-fn require_framewise_codec_runtime() -> Result<(), ApiError> {
-    require_framewise_codec_runtime_with(framewise_codec_runtime_available())
+async fn framewise_codec_runtime_available_async() -> bool {
+    tokio::task::spawn_blocking(framewise_codec_runtime_available)
+        .await
+        .unwrap_or(false)
 }
 
 fn now_ms() -> i64 {
@@ -406,13 +408,17 @@ async fn create_library_job(
         .map_err(ApiError::model_activation)?;
     let output_dir = state.config.read().await.effective_output_dir();
     match &request.source {
-        VideoUpscaleSource::Library { filename } => enqueue_gallery_video_job(
-            &output_dir,
-            db(state)?,
-            filename,
-            model,
-            request.tile_size,
-        ),
+        VideoUpscaleSource::Library { filename } => {
+            let codec_runtime_available = framewise_codec_runtime_available_async().await;
+            enqueue_gallery_video_job_with_codec_runtime(
+                &output_dir,
+                db(state)?,
+                filename,
+                model,
+                request.tile_size,
+                codec_runtime_available,
+            )
+        }
         VideoUpscaleSource::Upload { .. } => Err(ApiError::structured(
             "Video upload handles are not advertised by this first capability; import the video into Library first",
             "VIDEO_UPSCALE_UPLOAD_UNAVAILABLE", StatusCode::NOT_IMPLEMENTED, None, None)),
@@ -753,7 +759,7 @@ pub async fn resume_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<VideoUpscaleJob>, ApiError> {
-    require_framewise_codec_runtime()?;
+    require_framewise_codec_runtime_with(framewise_codec_runtime_available_async().await)?;
     let job = transition_job(
         &state,
         &id,
@@ -1469,6 +1475,27 @@ mod tests {
         let error = require_framewise_codec_runtime_with(false).unwrap_err();
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.code, "VIDEO_UPSCALE_CODEC_RUNTIME_UNAVAILABLE");
+    }
+
+    #[test]
+    fn enqueue_refuses_unavailable_codec_runtime_before_persisting() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+
+        let error = enqueue_gallery_video_job_with_codec_runtime(
+            temp.path(),
+            &db,
+            "source.mp4",
+            "real-esrgan-x4plus:fp16".into(),
+            None,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "VIDEO_UPSCALE_CODEC_RUNTIME_UNAVAILABLE");
+        assert!(jobs::list(&db).unwrap().is_empty());
+        assert!(!temp.path().join(".mold-video-upscale-jobs").exists());
     }
 
     fn ffmpeg_fixture_tools_available() -> bool {
