@@ -226,6 +226,76 @@ pub struct FeatureControlProfile {
     pub reason: Option<String>,
 }
 
+/// How a recipe treats `GenerateRequest.prompt`.
+///
+/// The profile is the SINGLE authority for this. Before it existed, each
+/// surface carried its own family allowlist, so a family with no text encoder
+/// at all still had to be typed into four clients before an empty prompt
+/// stopped being an error somewhere.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptRequirement {
+    /// An empty prompt is refused at admission. The default, and what an
+    /// older server's profile deserializes to.
+    #[default]
+    Required,
+    /// An empty prompt is admitted, but the text still conditions the render
+    /// when present.
+    Optional,
+    /// The recipe has no text encoder. The prompt is recorded as provenance
+    /// and changes nothing about the pixels or the geometry.
+    Ignored,
+}
+
+impl PromptRequirement {
+    /// Whether a request on this recipe must carry a non-empty prompt.
+    pub fn is_required(self) -> bool {
+        self == Self::Required
+    }
+}
+
+/// The prompt's complete admission contract for one recipe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+pub struct PromptCapabilitiesProfile {
+    pub mode: PromptRequirement,
+    /// Why the prompt is optional or ignored. Absent when it is required —
+    /// there is nothing to explain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl Default for PromptCapabilitiesProfile {
+    fn default() -> Self {
+        Self {
+            mode: PromptRequirement::Required,
+            reason: None,
+        }
+    }
+}
+
+/// The 3-D controls a mesh recipe accepts, and their reviewed bounds.
+///
+/// Present only on a mesh recipe. Its absence is what tells a client — and
+/// [`validate_request_against_recipe`] — that `GenerateRequest.mesh` has no
+/// meaning here, so an octree resolution sent to a raster model is refused
+/// rather than silently dropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+pub struct MeshCapabilitiesProfile {
+    /// Query-grid resolutions this recipe admits. An ALLOWLIST, because the
+    /// occupancy field is evaluated on `(n + 1)^3` points.
+    pub octree_resolutions: Vec<u32>,
+    pub octree_default: u32,
+    /// Iso-level the surface is extracted at.
+    pub threshold: FloatControl,
+    pub target_faces_min: u32,
+    pub target_faces_max: u32,
+    /// The PBR texture stage. `Hidden` in every build that ships without the
+    /// paint bundle, with the reason a client shows instead of the control.
+    pub texture: FeatureControlProfile,
+}
+
 /// A repeatable adapter input and its immutable stack limit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct AdapterControlProfile {
@@ -298,6 +368,25 @@ pub struct GenerationCapabilitiesProfile {
     pub wan_recipe: WanRecipeCapabilitiesProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schedulers: Vec<Scheduler>,
+    /// Whether this recipe requires, accepts, or ignores a prompt. The single
+    /// authority: server validation and every client read it rather than
+    /// carrying their own family list. Absent on an older server's profile,
+    /// which deserializes to `Required` — the answer that was true for every
+    /// recipe before this field existed.
+    #[serde(default)]
+    pub prompt: PromptCapabilitiesProfile,
+    /// Whether `GenerateRequest.strength` changes the render.
+    ///
+    /// `#[serde(default)]` is deliberately `false`: an older server that does
+    /// not send the field is not asserting that strength works, and a client
+    /// must fall back to its own legacy predicate rather than read a `true`
+    /// nobody wrote.
+    #[serde(default)]
+    pub supports_strength: bool,
+    /// 3-D controls. Present only on a mesh recipe; its absence means
+    /// `GenerateRequest.mesh` is refused here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshCapabilitiesProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
@@ -448,6 +537,117 @@ pub fn materialize_generation_profile_output_default(
     Ok(())
 }
 
+/// The prompt contract for a family, with or without visual conditioning.
+///
+/// The ONE authority behind both [`crate::validation::prompt_required_for`]
+/// and the `prompt` block every recipe advertises, so admission and every
+/// client necessarily agree. Three answers:
+///
+///   - `Ignored` for a mesh family: it has no text encoder anywhere in it, so
+///     a prompt is provenance and nothing else.
+///   - `Optional` for the LTX families with visual conditioning: an image or
+///     a clip already determines the render, and an unprompted continuation is
+///     a legitimate request rather than a mistake.
+///   - `Required` everywhere else.
+pub fn prompt_requirement_for_family(
+    family: Option<&str>,
+    has_visual_conditioning: bool,
+) -> PromptRequirement {
+    match family.map(canonical_family) {
+        Some(family) if family == crate::manifest::HUNYUAN3D_FAMILY => PromptRequirement::Ignored,
+        Some("ltx2" | "ltx-video") if has_visual_conditioning => PromptRequirement::Optional,
+        _ => PromptRequirement::Required,
+    }
+}
+
+/// The advertised sentence for a non-required prompt.
+fn prompt_reason(mode: PromptRequirement) -> Option<String> {
+    match mode {
+        PromptRequirement::Required => None,
+        PromptRequirement::Optional => Some(
+            "The source media conditions this render; a prompt refines it but is not required."
+                .to_string(),
+        ),
+        PromptRequirement::Ignored => {
+            Some("This model has no text encoder; the prompt is saved as a note.".to_string())
+        }
+    }
+}
+
+/// Validate an explicit output format against a recipe's advertised delivery.
+///
+/// Extracted from [`validate_request_against_recipe`] so durable admission can
+/// run this ONE check before a row is accepted. A format the recipe does not
+/// advertise is a client mistake that will never become valid, so it belongs
+/// at the door as a 422 rather than as a job that holds and then fails.
+pub fn validate_output_format_against_generation_profile(
+    recipe: &GenerationRecipeProfile,
+    output_format: OutputFormat,
+) -> Result<(), String> {
+    if recipe.capabilities.output.formats.contains(&output_format) {
+        return Ok(());
+    }
+    Err(format!(
+        "output format '{}' is not available for this recipe",
+        output_format.extension()
+    ))
+}
+
+/// Validate a request's `mesh` block against the recipe's advertised 3-D
+/// controls, and refuse the block outright on a recipe that has none.
+///
+/// The messages deliberately match `validation::validate_mesh_request`: the
+/// two doors are the same contract, and a caller must not be able to tell
+/// which one refused.
+pub fn validate_mesh_against_recipe(
+    recipe: &GenerationRecipeProfile,
+    request: &crate::GenerateRequest,
+) -> Result<(), String> {
+    let Some(options) = request.mesh.as_ref() else {
+        return Ok(());
+    };
+    let Some(mesh) = recipe.capabilities.mesh.as_ref() else {
+        return Err(
+            "mesh options are only supported by 3-D families; this model renders raster output"
+                .to_string(),
+        );
+    };
+    if let Some(resolution) = options.octree_resolution {
+        if !mesh.octree_resolutions.contains(&resolution) {
+            return Err(format!(
+                "mesh.octree_resolution ({resolution}) must be one of {:?}",
+                mesh.octree_resolutions
+            ));
+        }
+    }
+    if let Some(threshold) = options.threshold {
+        let threshold = f64::from(threshold);
+        if !threshold.is_finite() || !(mesh.threshold.min..=mesh.threshold.max).contains(&threshold)
+        {
+            return Err(format!(
+                "mesh.threshold ({threshold}) must be between {} and {}",
+                mesh.threshold.min, mesh.threshold.max
+            ));
+        }
+    }
+    if let Some(target) = options.target_faces {
+        if !(mesh.target_faces_min..=mesh.target_faces_max).contains(&target) {
+            return Err(format!(
+                "mesh.target_faces ({target}) must be between {} and {}",
+                mesh.target_faces_min, mesh.target_faces_max
+            ));
+        }
+    }
+    if options.texture == Some(true) && !matches!(mesh.texture.mode, ControlMode::Adjustable) {
+        return Err(mesh.texture.reason.clone().unwrap_or_else(|| {
+            "PBR texture generation is not available in this build; \
+             omit mesh.texture to render geometry only"
+                .to_string()
+        }));
+    }
+    Ok(())
+}
+
 /// Validate model-owned request fields against the exact resolved recipe.
 /// Family validation may still perform engine-specific structural checks, but
 /// it must not widen these advertised controls.
@@ -487,13 +687,9 @@ pub fn validate_request_against_recipe(
         }
     }
     if let Some(output_format) = request.output_format {
-        if !recipe.capabilities.output.formats.contains(&output_format) {
-            return Err(format!(
-                "output format '{}' is not available for this recipe",
-                output_format.extension()
-            ));
-        }
+        validate_output_format_against_generation_profile(recipe, output_format)?;
     }
+    validate_mesh_against_recipe(recipe, request)?;
 
     let resolution = &recipe.resolution;
     if resolution.domain != ResolutionDomain::None {
@@ -1235,12 +1431,34 @@ fn recipe(
     let audio_input_required = pipeline == Some(Ltx2PipelineMode::A2Vid);
     let audio_input_supported = family == "ltx2" && !audio_only;
     let mask_supported = !audio_only
+        && !mesh_only
         && !matches!(
             family,
             "ltx-video" | "ltx2" | "wan" | "qwen-image-edit" | "minimax-h3"
         )
         && !flux2_dev
         && input.source_image != Some(SourceImageCapability::Unsupported);
+    // Denoise strength describes how much of an existing latent survives. A
+    // family that never starts from one — audio-only, mesh, wan's pinned
+    // conditioning frames, the source-driven edit pipelines, and any recipe
+    // that takes no source image at all — does not read the field, so
+    // advertising it would offer a slider with no effect.
+    let supports_strength = !audio_only
+        && !mesh_only
+        && !wan
+        && family != "qwen-image-edit"
+        && family != "minimax-h3"
+        && !flux2_dev
+        && input.source_image != Some(SourceImageCapability::Unsupported);
+    // The advertised mode is the answer for a CONDITIONED request, because
+    // that is the only one that can differ from `Required`. A client resolves
+    // it against the request it is actually building — the same
+    // `prompt_requirement_for_family` call admission makes — so a recipe that
+    // can never carry conditioning advertises `Required` outright.
+    let prompt_mode = prompt_requirement_for_family(
+        Some(family),
+        !audio_only && input.source_image != Some(SourceImageCapability::Unsupported),
+    );
     let controlnet_supported = family == "sd15";
     // Identity conditioning is advertised only when this binary can actually
     // execute it AND the checkpoint is one of the qualified ones. Both halves
@@ -1251,14 +1469,17 @@ fn recipe(
         && crate::identity::identity_qualified_model_with_family(input.model, Some(family));
     let output = if mesh_only {
         OutputCapabilitiesProfile {
-            // GLB is the only STORED form. OBJ is offered as an export
-            // transcode from the gallery, not as a generation target, because
-            // an `.obj` alone carries neither materials nor textures.
+            // GLB is the only STORED form. OBJ, STL and PLY are offered as
+            // export transcodes from the gallery, never as generation
+            // targets: each of them loses something the stored glTF carries
+            // — materials and textures for OBJ, vertex identity and UVs for
+            // STL — so publishing one would publish an incomplete artifact.
             default_format: OutputFormat::Glb,
             formats: vec![OutputFormat::Glb],
             audio_requires_mp4: false,
             delivery_reason: Some(
-                "3-D delivery uses binary glTF; OBJ is available as a gallery export.".to_string(),
+                "3-D delivery uses binary glTF; OBJ, STL and PLY are available as gallery exports."
+                    .to_string(),
             ),
         }
     } else if audio_only {
@@ -1467,8 +1688,46 @@ fn recipe(
                 "wan" => vec![Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp],
                 _ => Vec::new(),
             },
+            prompt: PromptCapabilitiesProfile {
+                mode: prompt_mode,
+                reason: prompt_reason(prompt_mode),
+            },
+            supports_strength,
+            mesh: mesh_only.then(mesh_capabilities_profile),
         },
         provenance: provenance(family),
+    }
+}
+
+/// The 3-D control block, built from the SAME constants
+/// `validation::validate_mesh_request` enforces, so a client that stays inside
+/// the advertised bounds can never be refused by the door it was reading.
+fn mesh_capabilities_profile() -> MeshCapabilitiesProfile {
+    MeshCapabilitiesProfile {
+        octree_resolutions: validation::MESH_OCTREE_RESOLUTIONS.to_vec(),
+        octree_default: validation::MESH_DEFAULT_OCTREE_RESOLUTION,
+        threshold: FloatControl {
+            default: validation::MESH_DEFAULT_THRESHOLD,
+            min: 0.0,
+            max: 1.0,
+            step: validation::MESH_THRESHOLD_STEP,
+            mode: ControlMode::Adjustable,
+            note: None,
+        },
+        target_faces_min: validation::MESH_MIN_TARGET_FACES,
+        target_faces_max: validation::MESH_MAX_TARGET_FACES,
+        // Geometry only until the paint bundle ships. Advertised as `Hidden`
+        // with its reason rather than omitted, so a client shows why the
+        // control is missing instead of leaving a silent gap.
+        texture: FeatureControlProfile {
+            mode: ControlMode::Hidden,
+            required: false,
+            reason: Some(
+                "PBR texture generation is not available in this build; \
+                 omit mesh.texture to render geometry only"
+                    .to_string(),
+            ),
+        },
     }
 }
 
@@ -1922,6 +2181,186 @@ mod tests {
         .unwrap();
         validate_request_against_generation_profile(&profile, &request).unwrap();
         crate::validation::validate_generate_request_with_family(&request, Some("ltx2")).unwrap();
+    }
+
+    /// The mesh recipe is the whole contract in one place: no canvas, no
+    /// mask, no strength, a prompt that conditions nothing, and the 3-D
+    /// controls a client renders instead of a resolution picker.
+    #[test]
+    fn hunyuan3d_profile_is_canvasless_maskless_promptless_and_carries_mesh_controls() {
+        let mut mesh = input("hunyuan3d-mini-turbo:fp16", "hunyuan3d");
+        mesh.source_image = Some(SourceImageCapability::Required);
+        mesh.default_steps = 5;
+        let profile = resolve_generation_profile(mesh);
+        let recipe = profile.default_recipe().unwrap();
+        let caps = &recipe.capabilities;
+
+        assert_eq!(recipe.resolution.domain, ResolutionDomain::None);
+        assert_eq!((recipe.defaults.width, recipe.defaults.height), (0, 0));
+        assert_eq!(caps.mask.mode, ControlMode::Hidden);
+        assert!(!caps.supports_strength);
+        assert_eq!(caps.prompt.mode, PromptRequirement::Ignored);
+        assert!(caps
+            .prompt
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no text encoder")));
+        assert_eq!(caps.output.default_format, OutputFormat::Glb);
+        assert_eq!(caps.output.formats, vec![OutputFormat::Glb]);
+        assert_eq!(
+            caps.guidance,
+            crate::GuidanceCapabilities::ADJUSTABLE_NO_NEGATIVE
+        );
+        assert_eq!(caps.negative_prompt.mode, ControlMode::Hidden);
+
+        let mesh_caps = caps.mesh.as_ref().expect("a mesh recipe advertises mesh");
+        assert_eq!(
+            mesh_caps.octree_resolutions,
+            validation::MESH_OCTREE_RESOLUTIONS.to_vec()
+        );
+        assert_eq!(mesh_caps.octree_default, 256);
+        assert!((mesh_caps.threshold.default - 0.6).abs() < 1e-6);
+        assert_eq!(
+            (mesh_caps.threshold.min, mesh_caps.threshold.max),
+            (0.0, 1.0)
+        );
+        assert_eq!(mesh_caps.threshold.step, 0.01);
+        assert_eq!(
+            mesh_caps.target_faces_min,
+            validation::MESH_MIN_TARGET_FACES
+        );
+        assert_eq!(
+            mesh_caps.target_faces_max,
+            validation::MESH_MAX_TARGET_FACES
+        );
+        assert_eq!(mesh_caps.texture.mode, ControlMode::Hidden);
+    }
+
+    /// Every raster and video recipe stays exactly as it was: no mesh block,
+    /// a required prompt, and strength wherever an existing latent is read.
+    #[test]
+    fn only_a_mesh_recipe_carries_mesh_controls() {
+        for (model, family) in [
+            ("flux-dev:q8", "flux"),
+            ("sdxl:fp16", "sdxl"),
+            ("wan22-t2v-a14b:q4", "wan"),
+        ] {
+            let recipe_set = resolve_generation_profile(input(model, family));
+            let caps = &recipe_set.default_recipe().unwrap().capabilities;
+            assert!(caps.mesh.is_none(), "{model} must not advertise mesh");
+            assert_eq!(caps.prompt.mode, PromptRequirement::Required, "{model}");
+            assert_eq!(caps.supports_strength, family != "wan", "{model}");
+        }
+    }
+
+    /// A `mesh` block on a raster recipe is refused with the same sentence
+    /// family validation uses — the two doors are one contract.
+    #[test]
+    fn a_raster_recipe_refuses_a_mesh_block() {
+        let profile = resolve_generation_profile(input("flux-dev:q8", "flux"));
+        let mut request = crate::test_support::minimal_generate_request("flux-dev:q8");
+        request.steps = profile.default_recipe().unwrap().defaults.steps;
+        request.guidance = profile.default_recipe().unwrap().defaults.guidance;
+        request.width = 1024;
+        request.height = 1024;
+        request.mesh = Some(crate::types::MeshRequestOptions {
+            octree_resolution: Some(256),
+            ..Default::default()
+        });
+        let error = validate_request_against_generation_profile(&profile, &request).unwrap_err();
+        assert!(error.contains("only supported by 3-D families"), "{error}");
+    }
+
+    #[test]
+    fn a_mesh_recipe_validates_its_own_controls() {
+        let mut mesh = input("hunyuan3d-mini-turbo:fp16", "hunyuan3d");
+        mesh.source_image = Some(SourceImageCapability::Required);
+        mesh.default_steps = 5;
+        let profile = resolve_generation_profile(mesh);
+        let recipe = profile.default_recipe().unwrap();
+        let base = |options: crate::types::MeshRequestOptions| {
+            let mut request =
+                crate::test_support::minimal_generate_request("hunyuan3d-mini-turbo:fp16");
+            request.steps = recipe.defaults.steps;
+            request.guidance = recipe.defaults.guidance;
+            request.width = 0;
+            request.height = 0;
+            request.output_format = Some(OutputFormat::Glb);
+            request.mesh = Some(options);
+            request
+        };
+        validate_request_against_generation_profile(
+            &profile,
+            &base(crate::types::MeshRequestOptions {
+                octree_resolution: Some(256),
+                threshold: Some(0.6),
+                target_faces: Some(50_000),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let error = validate_request_against_generation_profile(
+            &profile,
+            &base(crate::types::MeshRequestOptions {
+                octree_resolution: Some(200),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(error.contains("mesh.octree_resolution"), "{error}");
+        let error = validate_request_against_generation_profile(
+            &profile,
+            &base(crate::types::MeshRequestOptions {
+                target_faces: Some(4),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(error.contains("mesh.target_faces"), "{error}");
+        let error = validate_request_against_generation_profile(
+            &profile,
+            &base(crate::types::MeshRequestOptions {
+                texture: Some(true),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("texture generation is not available"),
+            "{error}"
+        );
+    }
+
+    /// An unadvertised format is refused by the ONE extracted check durable
+    /// admission also runs, so the 422 wording cannot drift between doors.
+    #[test]
+    fn an_unadvertised_output_format_is_refused_by_the_shared_check() {
+        let profile = resolve_generation_profile(input("flux-dev:q8", "flux"));
+        let recipe = profile.default_recipe().unwrap();
+        let error = validate_output_format_against_generation_profile(recipe, OutputFormat::Gif)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "output format 'gif' is not available for this recipe"
+        );
+        validate_output_format_against_generation_profile(recipe, OutputFormat::Png).unwrap();
+    }
+
+    /// Old servers do not send the new blocks. Their JSON must still parse,
+    /// and must not claim a capability nobody wrote.
+    #[test]
+    fn an_older_profile_without_the_new_capability_blocks_still_parses() {
+        let profile = resolve_generation_profile(input("flux-dev:q8", "flux"));
+        let mut json = serde_json::to_value(&profile).unwrap();
+        let caps = json["recipes"][0]["capabilities"].as_object_mut().unwrap();
+        caps.remove("prompt");
+        caps.remove("supports_strength");
+        caps.remove("mesh");
+        let parsed: GenerationProfileSet = serde_json::from_value(json).unwrap();
+        let caps = &parsed.recipes[0].capabilities;
+        assert_eq!(caps.prompt.mode, PromptRequirement::Required);
+        assert!(!caps.supports_strength);
+        assert!(caps.mesh.is_none());
     }
 
     #[test]

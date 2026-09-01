@@ -1,4 +1,5 @@
-//! Binary glTF (GLB) and Wavefront OBJ writers for extracted meshes.
+//! Binary glTF (GLB), Wavefront OBJ, STL and PLY serialization for extracted
+//! meshes, plus the narrow GLB reader the gallery exports transcode from.
 //!
 //! Dependency-free by construction: the GLB container is 12 bytes of header
 //! plus two length-prefixed chunks, and everything else is `serde_json`. Ported
@@ -80,6 +81,8 @@ impl Default for GlbMaterial {
 // glTF constants, spelled out so the JSON below reads as glTF and not as magic.
 const COMPONENT_FLOAT: u32 = 5126;
 const COMPONENT_UNSIGNED_INT: u32 = 5125;
+const COMPONENT_UNSIGNED_SHORT: u32 = 5123;
+const COMPONENT_UNSIGNED_BYTE: u32 = 5121;
 const TARGET_ARRAY_BUFFER: u32 = 34962;
 const TARGET_ELEMENT_ARRAY_BUFFER: u32 = 34963;
 const MODE_TRIANGLES: u32 = 4;
@@ -417,6 +420,457 @@ pub fn write_glb(
     glb.extend_from_slice(&bin.data);
     debug_assert_eq!(glb.len(), total);
     Ok(glb)
+}
+
+/// Why a stored `.glb` cannot be read back for export.
+///
+/// Deliberately specific. An export refusal is a user-facing message about a
+/// file they can see in their gallery, so "not a GLB" and "a GLB this reader
+/// does not cover" have to be different sentences.
+#[derive(Debug, thiserror::Error)]
+pub enum GlbReadError {
+    #[error("not a binary glTF file: {0}")]
+    NotGlb(&'static str),
+    #[error("unsupported binary glTF: {0}")]
+    Unsupported(String),
+    #[error("malformed binary glTF: {0}")]
+    Malformed(String),
+}
+
+/// Parse a binary glTF file back into a [`Mesh`].
+///
+/// Scoped ON PURPOSE to what mold itself writes plus the small neighbourhood
+/// around it: ONE mesh, ONE triangle primitive, float `VEC3` positions, an
+/// optional float `NORMAL`/`TEXCOORD_0`, optional float `COLOR_0`, and
+/// `u16`/`u32` indices, all in the embedded BIN chunk. It is the input half of
+/// the gallery's OBJ/STL/PLY exports, not a general glTF importer: anything
+/// outside that envelope is refused by name rather than silently
+/// mis-converted, because a wrong answer here becomes a file the user opens in
+/// another program and believes.
+pub fn read_glb(bytes: &[u8]) -> Result<Mesh, GlbReadError> {
+    let (json, bin) = split_glb_chunks(bytes)?;
+
+    let primitive = json
+        .get("meshes")
+        .and_then(|meshes| meshes.get(0))
+        .and_then(|mesh| mesh.get("primitives"))
+        .and_then(|primitives| primitives.get(0))
+        .ok_or(GlbReadError::Unsupported(
+            "the file contains no mesh primitive".to_string(),
+        ))?;
+    if let Some(mode) = primitive.get("mode").and_then(serde_json::Value::as_u64) {
+        if mode != u64::from(MODE_TRIANGLES) {
+            return Err(GlbReadError::Unsupported(format!(
+                "primitive mode {mode} is not triangles"
+            )));
+        }
+    }
+    let attributes = primitive
+        .get("attributes")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(GlbReadError::Malformed(
+            "the primitive has no attributes".to_string(),
+        ))?;
+
+    let position_index = attributes
+        .get("POSITION")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(GlbReadError::Unsupported(
+            "the primitive has no POSITION attribute".to_string(),
+        ))?;
+    let vertices = read_vec3(&json, bin, position_index, "POSITION")?;
+    let normals = match attributes.get("NORMAL").and_then(serde_json::Value::as_u64) {
+        Some(index) => Some(read_vec3(&json, bin, index, "NORMAL")?),
+        None => None,
+    };
+    let vertex_colors = match attributes
+        .get("COLOR_0")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(index) => Some(read_vec3(&json, bin, index, "COLOR_0")?),
+        None => None,
+    };
+    let uvs = match attributes
+        .get("TEXCOORD_0")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(index) => Some(read_vec2(&json, bin, index, "TEXCOORD_0")?),
+        None => None,
+    };
+    let faces = match primitive.get("indices").and_then(serde_json::Value::as_u64) {
+        Some(index) => read_indices(&json, bin, index)?,
+        // An unindexed primitive is a legal glTF: consecutive triples.
+        None => (0..vertices.len() as u32 / 3)
+            .map(|triangle| [triangle * 3, triangle * 3 + 1, triangle * 3 + 2])
+            .collect(),
+    };
+
+    for attribute in [
+        ("NORMAL", normals.as_ref().map(Vec::len)),
+        ("COLOR_0", vertex_colors.as_ref().map(Vec::len)),
+    ]
+    .into_iter()
+    .filter_map(|(name, len)| len.map(|len| (name, len)))
+    .chain(uvs.as_ref().map(|uvs| ("TEXCOORD_0", uvs.len())))
+    {
+        if attribute.1 != vertices.len() {
+            return Err(GlbReadError::Malformed(format!(
+                "{} has {} entries but the mesh has {} vertices",
+                attribute.0,
+                attribute.1,
+                vertices.len()
+            )));
+        }
+    }
+    let mesh = Mesh {
+        vertices,
+        faces,
+        normals,
+        uvs,
+        vertex_colors,
+    };
+    mesh.validate()
+        .map_err(|error| GlbReadError::Malformed(error.to_string()))?;
+    Ok(mesh)
+}
+
+fn split_glb_chunks(bytes: &[u8]) -> Result<(serde_json::Value, &[u8]), GlbReadError> {
+    if bytes.len() < 12 {
+        return Err(GlbReadError::NotGlb("the file is shorter than a header"));
+    }
+    if &bytes[0..4] != GLB_MAGIC {
+        return Err(GlbReadError::NotGlb("the 'glTF' magic is missing"));
+    }
+    let u32_at = |offset: usize| -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
+    };
+    let version = u32_at(4);
+    if version != GLB_VERSION {
+        return Err(GlbReadError::Unsupported(format!(
+            "glTF container version {version} (only version {GLB_VERSION} is read)"
+        )));
+    }
+    let declared = u32_at(8) as usize;
+    if declared > bytes.len() {
+        return Err(GlbReadError::Malformed(format!(
+            "the header declares {declared} bytes but the file is {}",
+            bytes.len()
+        )));
+    }
+    let bytes = &bytes[..declared];
+
+    let mut json = None;
+    let mut bin: &[u8] = &[];
+    let mut cursor = 12usize;
+    while cursor + 8 <= bytes.len() {
+        let length = u32::from_le_bytes(
+            bytes[cursor..cursor + 4]
+                .try_into()
+                .expect("4 bytes of chunk length"),
+        ) as usize;
+        let kind = u32::from_le_bytes(
+            bytes[cursor + 4..cursor + 8]
+                .try_into()
+                .expect("4 bytes of chunk type"),
+        );
+        let start = cursor + 8;
+        let end = start
+            .checked_add(length)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| {
+                GlbReadError::Malformed(format!("a chunk claims {length} bytes past the file end"))
+            })?;
+        match kind {
+            CHUNK_JSON if json.is_none() => {
+                json = Some(serde_json::from_slice(&bytes[start..end]).map_err(|error| {
+                    GlbReadError::Malformed(format!("the JSON chunk does not parse: {error}"))
+                })?);
+            }
+            CHUNK_BIN if bin.is_empty() => bin = &bytes[start..end],
+            // Unknown chunk types are legal and must be skipped, per the spec.
+            _ => {}
+        }
+        cursor = end;
+    }
+    let json = json.ok_or(GlbReadError::Malformed(
+        "the file has no JSON chunk".to_string(),
+    ))?;
+    Ok((json, bin))
+}
+
+/// Resolve one accessor to its bytes, checking every constraint the reader
+/// depends on rather than trusting the offsets.
+fn accessor_bytes<'a>(
+    json: &serde_json::Value,
+    bin: &'a [u8],
+    accessor_index: u64,
+    expected_type: &str,
+    expected_components: usize,
+    component_size: usize,
+) -> Result<(&'a [u8], usize), GlbReadError> {
+    let accessor = json
+        .get("accessors")
+        .and_then(|accessors| accessors.get(accessor_index as usize))
+        .ok_or_else(|| GlbReadError::Malformed(format!("accessor {accessor_index} is missing")))?;
+    let kind = accessor
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if kind != expected_type {
+        return Err(GlbReadError::Unsupported(format!(
+            "accessor {accessor_index} is {kind}, expected {expected_type}"
+        )));
+    }
+    if accessor.get("sparse").is_some() {
+        return Err(GlbReadError::Unsupported(
+            "sparse accessors are not read".to_string(),
+        ));
+    }
+    if accessor
+        .get("normalized")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err(GlbReadError::Unsupported(
+            "normalized accessors are not read".to_string(),
+        ));
+    }
+    let count = accessor
+        .get("count")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| GlbReadError::Malformed(format!("accessor {accessor_index} has no count")))?
+        as usize;
+    let view_index = accessor
+        .get("bufferView")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(GlbReadError::Unsupported(
+            "an accessor with no bufferView is not read".to_string(),
+        ))?;
+    let view = json
+        .get("bufferViews")
+        .and_then(|views| views.get(view_index as usize))
+        .ok_or_else(|| GlbReadError::Malformed(format!("bufferView {view_index} is missing")))?;
+    if view.get("buffer").and_then(serde_json::Value::as_u64) != Some(0) {
+        return Err(GlbReadError::Unsupported(
+            "only the embedded binary buffer is read".to_string(),
+        ));
+    }
+    let stride = view
+        .get("byteStride")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    let element = expected_components * component_size;
+    if stride != 0 && stride != element {
+        return Err(GlbReadError::Unsupported(format!(
+            "interleaved buffer views are not read (byteStride {stride})"
+        )));
+    }
+    let offset = view
+        .get("byteOffset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize
+        + accessor
+            .get("byteOffset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+    let end = offset
+        .checked_add(count * element)
+        .filter(|end| *end <= bin.len())
+        .ok_or(GlbReadError::Malformed(
+            "an accessor reads past the end of the binary chunk".to_string(),
+        ))?;
+    Ok((&bin[offset..end], count))
+}
+
+fn component_type(json: &serde_json::Value, accessor_index: u64) -> u32 {
+    json.get("accessors")
+        .and_then(|accessors| accessors.get(accessor_index as usize))
+        .and_then(|accessor| accessor.get("componentType"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32
+}
+
+fn read_f32(bytes: &[u8], index: usize) -> f32 {
+    let start = index * 4;
+    f32::from_le_bytes(bytes[start..start + 4].try_into().expect("4 bytes of f32"))
+}
+
+fn read_vec3(
+    json: &serde_json::Value,
+    bin: &[u8],
+    accessor_index: u64,
+    name: &str,
+) -> Result<Vec<[f32; 3]>, GlbReadError> {
+    if component_type(json, accessor_index) != COMPONENT_FLOAT {
+        return Err(GlbReadError::Unsupported(format!(
+            "{name} is not stored as float"
+        )));
+    }
+    let (bytes, count) = accessor_bytes(json, bin, accessor_index, "VEC3", 3, 4)?;
+    Ok((0..count)
+        .map(|i| {
+            [
+                read_f32(bytes, i * 3),
+                read_f32(bytes, i * 3 + 1),
+                read_f32(bytes, i * 3 + 2),
+            ]
+        })
+        .collect())
+}
+
+fn read_vec2(
+    json: &serde_json::Value,
+    bin: &[u8],
+    accessor_index: u64,
+    name: &str,
+) -> Result<Vec<[f32; 2]>, GlbReadError> {
+    if component_type(json, accessor_index) != COMPONENT_FLOAT {
+        return Err(GlbReadError::Unsupported(format!(
+            "{name} is not stored as float"
+        )));
+    }
+    let (bytes, count) = accessor_bytes(json, bin, accessor_index, "VEC2", 2, 4)?;
+    Ok((0..count)
+        .map(|i| [read_f32(bytes, i * 2), read_f32(bytes, i * 2 + 1)])
+        .collect())
+}
+
+fn read_indices(
+    json: &serde_json::Value,
+    bin: &[u8],
+    accessor_index: u64,
+) -> Result<Vec<[u32; 3]>, GlbReadError> {
+    let component = component_type(json, accessor_index);
+    let size = match component {
+        COMPONENT_UNSIGNED_INT => 4,
+        COMPONENT_UNSIGNED_SHORT => 2,
+        COMPONENT_UNSIGNED_BYTE => 1,
+        other => {
+            return Err(GlbReadError::Unsupported(format!(
+                "index component type {other} is not read (expected unsigned byte, short, or int)"
+            )))
+        }
+    };
+    let (bytes, count) = accessor_bytes(json, bin, accessor_index, "SCALAR", 1, size)?;
+    if !count.is_multiple_of(3) {
+        return Err(GlbReadError::Malformed(format!(
+            "the index count ({count}) is not a whole number of triangles"
+        )));
+    }
+    let at = |i: usize| -> u32 {
+        match size {
+            4 => u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("4 bytes")),
+            2 => u32::from(u16::from_le_bytes(
+                bytes[i * 2..i * 2 + 2].try_into().expect("2 bytes"),
+            )),
+            _ => u32::from(bytes[i]),
+        }
+    };
+    Ok((0..count / 3)
+        .map(|triangle| [at(triangle * 3), at(triangle * 3 + 1), at(triangle * 3 + 2)])
+        .collect())
+}
+
+/// Serialize `mesh` as binary STL.
+///
+/// STL has no vertex identity, no UVs and no colour — every triangle carries
+/// its three positions and one facet normal — so this is the LOSSIEST of the
+/// exports and exists because it is what 3-D printers and CAD tools read. The
+/// facet normal is recomputed from the triangle's own winding rather than
+/// averaged from the vertex normals, which is what the format means by it; a
+/// degenerate triangle gets a zero normal, the conventional "ask the viewer to
+/// derive it" value.
+pub fn write_stl(mesh: &Mesh) -> Vec<u8> {
+    let mut out = Vec::with_capacity(84 + mesh.faces.len() * 50);
+    // The 80-byte header is free-form and must NOT begin with "solid", which
+    // is how readers detect the ASCII dialect.
+    let mut header = [0u8; 80];
+    let banner = b"mold";
+    header[..banner.len()].copy_from_slice(banner);
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&(mesh.faces.len() as u32).to_le_bytes());
+    for face in &mesh.faces {
+        let vertices = face.map(|index| mesh.vertices[index as usize]);
+        let normal = facet_normal(&vertices);
+        for value in normal {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for vertex in vertices {
+            for value in vertex {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        // Attribute byte count. Zero everywhere outside the unofficial
+        // per-face colour extensions.
+        out.extend_from_slice(&0u16.to_le_bytes());
+    }
+    out
+}
+
+/// The unit normal of one triangle, or zero for a degenerate one.
+fn facet_normal(triangle: &[[f32; 3]; 3]) -> [f32; 3] {
+    let [a, b, c] = triangle;
+    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let normal = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    if length.is_finite() && length > 0.0 {
+        [normal[0] / length, normal[1] / length, normal[2] / length]
+    } else {
+        [0.0, 0.0, 0.0]
+    }
+}
+
+/// Serialize `mesh` as binary little-endian PLY.
+///
+/// Keeps shared vertices, unlike STL, and carries per-vertex normals when the
+/// mesh has them. The header is ASCII and the payload is packed little-endian
+/// with no padding, which is what every PLY reader expects from
+/// `format binary_little_endian 1.0`.
+pub fn write_ply(mesh: &Mesh) -> Vec<u8> {
+    let normals = mesh
+        .normals
+        .as_ref()
+        .filter(|normals| normals.len() == mesh.vertices.len());
+    let mut header = String::new();
+    header.push_str("ply\nformat binary_little_endian 1.0\ncomment generated by mold\n");
+    header.push_str(&format!("element vertex {}\n", mesh.vertices.len()));
+    header.push_str("property float x\nproperty float y\nproperty float z\n");
+    if normals.is_some() {
+        header.push_str("property float nx\nproperty float ny\nproperty float nz\n");
+    }
+    header.push_str(&format!("element face {}\n", mesh.faces.len()));
+    header.push_str("property list uchar int vertex_indices\nend_header\n");
+
+    let vertex_stride = if normals.is_some() { 24 } else { 12 };
+    let mut out = Vec::with_capacity(
+        header.len() + mesh.vertices.len() * vertex_stride + mesh.faces.len() * 13,
+    );
+    out.extend_from_slice(header.as_bytes());
+    for (index, vertex) in mesh.vertices.iter().enumerate() {
+        for value in vertex {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        if let Some(normals) = normals {
+            for value in &normals[index] {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    for face in &mesh.faces {
+        out.push(3);
+        for index in face {
+            // `property list uchar int` — a SIGNED 32-bit index, which is what
+            // every reader expects here even though an index is never
+            // negative.
+            out.extend_from_slice(&(*index as i32).to_le_bytes());
+        }
+    }
+    out
 }
 
 /// Material name emitted by [`write_mtl`] and referenced by
@@ -830,5 +1284,258 @@ mod tests {
 
         let textured = write_mtl(&GlbMaterial::default(), Some("basecolor.png"));
         assert!(textured.contains("map_Kd basecolor.png"));
+    }
+
+    /// Two triangles sharing an edge: small enough to write the expected
+    /// bytes out by hand, big enough to exercise shared vertices.
+    fn two_triangle_mesh() -> Mesh {
+        Mesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            normals: Some(vec![[0.0, 0.0, 1.0]; 4]),
+            uvs: None,
+            vertex_colors: None,
+        }
+    }
+
+    /// Rebuild a GLB container around an edited JSON chunk, so a test can
+    /// hand `read_glb` a layout the writer would never produce.
+    fn rebuild_glb(json: &serde_json::Value, bin: &[u8]) -> Vec<u8> {
+        let mut json_bytes = serde_json::to_vec(json).unwrap();
+        json_bytes.extend(std::iter::repeat_n(b' ', (4 - (json_bytes.len() % 4)) % 4));
+        let mut bin = bin.to_vec();
+        bin.extend(std::iter::repeat_n(0u8, (4 - (bin.len() % 4)) % 4));
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
+        out.extend_from_slice(&json_bytes);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x004E_4942u32.to_le_bytes());
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    /// The export path is `write_glb` -> stored file -> `read_glb` -> writer,
+    /// so the reader has to recover exactly what the writer put in.
+    #[test]
+    fn glb_round_trips_through_read_glb() {
+        let mut mesh = two_triangle_mesh();
+        mesh.uvs = Some(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        mesh.vertex_colors = Some(vec![[0.25, 0.5, 0.75]; 4]);
+        let bytes = write_glb(&mesh, &GlbMaterial::default(), None).unwrap();
+        let parsed = read_glb(&bytes).unwrap();
+        assert_eq!(parsed, mesh);
+    }
+
+    /// A real extracted mesh, not a hand-built one: the writer is fed the
+    /// surface-net output and the reader must recover every vertex.
+    #[test]
+    fn an_extracted_surface_round_trips_through_read_glb() {
+        let mut values = vec![0.0f32; 6 * 6 * 6];
+        for z in 1..5 {
+            for y in 1..5 {
+                for x in 1..5 {
+                    values[(z * 6 + y) * 6 + x] = 1.0;
+                }
+            }
+        }
+        let grid = OccupancyGrid::new(values, [6, 6, 6]).unwrap();
+        let mesh = extract(&grid, MeshAlgorithm::SurfaceNet, 0.5, &mut |_, _| Ok(())).unwrap();
+        assert!(mesh.face_count() > 0);
+        let bytes = write_glb(&mesh, &GlbMaterial::default(), None).unwrap();
+        let parsed = read_glb(&bytes).unwrap();
+        assert_eq!(parsed.vertices, mesh.vertices);
+        assert_eq!(parsed.faces, mesh.faces);
+    }
+
+    /// Every refusal is by NAME. An export error is shown to a user looking
+    /// at a file in their own gallery, so "not a GLB" and "a GLB shape this
+    /// reader does not cover" must not collapse into one message.
+    #[test]
+    fn read_glb_refuses_foreign_layouts() {
+        assert!(matches!(
+            read_glb(b"not a glb at all"),
+            Err(GlbReadError::NotGlb(_))
+        ));
+        assert!(matches!(read_glb(&[]), Err(GlbReadError::NotGlb(_))));
+
+        let mesh = two_triangle_mesh();
+        let good = write_glb(&mesh, &GlbMaterial::default(), None).unwrap();
+
+        let mut wrong_version = good.clone();
+        wrong_version[4..8].copy_from_slice(&3u32.to_le_bytes());
+        assert!(matches!(
+            read_glb(&wrong_version),
+            Err(GlbReadError::Unsupported(_))
+        ));
+
+        let mut truncated = good.clone();
+        truncated.truncate(good.len() - 8);
+        assert!(read_glb(&truncated).is_err());
+
+        let parsed = parse_glb(&good);
+        for mutate in [
+            (|json: &mut serde_json::Value| {
+                json["meshes"][0]["primitives"][0]["mode"] = serde_json::json!(1);
+            }) as fn(&mut serde_json::Value),
+            |json: &mut serde_json::Value| {
+                json["meshes"][0]["primitives"][0]["attributes"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("POSITION");
+            },
+            |json: &mut serde_json::Value| {
+                json["accessors"][0]["componentType"] = serde_json::json!(5120);
+            },
+            |json: &mut serde_json::Value| {
+                json["bufferViews"][0]["byteStride"] = serde_json::json!(16);
+            },
+        ] {
+            let mut json = parsed.json.clone();
+            mutate(&mut json);
+            let rebuilt = rebuild_glb(&json, &parsed.bin);
+            assert!(
+                matches!(read_glb(&rebuilt), Err(GlbReadError::Unsupported(_))),
+                "a foreign layout must be refused as unsupported"
+            );
+        }
+    }
+
+    /// `u16` indices are what most exporters emit for a small mesh, so the
+    /// reader takes them even though mold itself always writes `u32`.
+    #[test]
+    fn read_glb_accepts_short_indices() {
+        let mesh = two_triangle_mesh();
+        let good = write_glb(&mesh, &GlbMaterial::default(), None).unwrap();
+        let parsed = parse_glb(&good);
+        let mut json = parsed.json.clone();
+        json["accessors"][1]["componentType"] = serde_json::json!(5123);
+        let mut bin = parsed.bin.clone();
+        let offset = json["bufferViews"][1]["byteOffset"].as_u64().unwrap() as usize;
+        let mut shorts = Vec::new();
+        for face in &mesh.faces {
+            for index in face {
+                shorts.extend_from_slice(&(*index as u16).to_le_bytes());
+            }
+        }
+        json["bufferViews"][1]["byteLength"] = serde_json::json!(shorts.len());
+        bin[offset..offset + shorts.len()].copy_from_slice(&shorts);
+        let rebuilt = rebuild_glb(&json, &bin);
+        assert_eq!(read_glb(&rebuilt).unwrap().faces, mesh.faces);
+    }
+
+    /// Binary STL is a fixed 84 + 50n layout, so the whole file is pinned
+    /// byte for byte rather than sampled.
+    #[test]
+    fn write_stl_emits_the_exact_binary_layout() {
+        let stl = write_stl(&two_triangle_mesh());
+        assert_eq!(stl.len(), 84 + 2 * 50);
+        assert_eq!(&stl[..4], b"mold");
+        // The header must NOT start with "solid" — that is how a reader
+        // detects the ASCII dialect.
+        assert!(!stl.starts_with(b"solid"));
+        assert!(stl[4..80].iter().all(|byte| *byte == 0));
+        assert_eq!(u32::from_le_bytes(stl[80..84].try_into().unwrap()), 2);
+
+        let mut expected = Vec::new();
+        for triangle in [
+            [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            [[0.0f32, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+        ] {
+            // Both faces wind counter-clockwise in the z = 0 plane, so the
+            // facet normal is +z.
+            for value in [0.0f32, 0.0, 1.0] {
+                expected.extend_from_slice(&value.to_le_bytes());
+            }
+            for vertex in triangle {
+                for value in vertex {
+                    expected.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            expected.extend_from_slice(&0u16.to_le_bytes());
+        }
+        assert_eq!(&stl[84..], &expected[..]);
+    }
+
+    #[test]
+    fn write_stl_gives_a_degenerate_triangle_a_zero_normal() {
+        let mesh = Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            faces: vec![[0, 1, 2]],
+            normals: None,
+            uvs: None,
+            vertex_colors: None,
+        };
+        let stl = write_stl(&mesh);
+        for lane in 0..3 {
+            let start = 84 + lane * 4;
+            assert_eq!(
+                f32::from_le_bytes(stl[start..start + 4].try_into().unwrap()),
+                0.0
+            );
+        }
+    }
+
+    fn ply_header_len(ply: &[u8]) -> usize {
+        let terminator = b"end_header\n";
+        ply.windows(terminator.len())
+            .position(|window| window == terminator)
+            .expect("the header terminator is present")
+            + terminator.len()
+    }
+
+    #[test]
+    fn write_ply_emits_the_exact_binary_layout() {
+        let ply = write_ply(&two_triangle_mesh());
+        let split = ply_header_len(&ply);
+        let header = std::str::from_utf8(&ply[..split]).unwrap();
+        assert_eq!(
+            header,
+            "ply\nformat binary_little_endian 1.0\ncomment generated by mold\n\
+             element vertex 4\nproperty float x\nproperty float y\nproperty float z\n\
+             property float nx\nproperty float ny\nproperty float nz\n\
+             element face 2\nproperty list uchar int vertex_indices\nend_header\n"
+        );
+
+        let mut expected = Vec::new();
+        for (vertex, normal) in [
+            ([0.0f32, 0.0, 0.0], [0.0f32, 0.0, 1.0]),
+            ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            ([1.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+        ] {
+            for value in vertex.iter().chain(normal.iter()) {
+                expected.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        for face in [[0i32, 1, 2], [0, 2, 3]] {
+            expected.push(3);
+            for index in face {
+                expected.extend_from_slice(&index.to_le_bytes());
+            }
+        }
+        assert_eq!(&ply[split..], &expected[..]);
+    }
+
+    /// Without normals the vertex record is three floats, and the header
+    /// must not promise properties the payload does not carry.
+    #[test]
+    fn write_ply_omits_normals_it_does_not_have() {
+        let mut mesh = two_triangle_mesh();
+        mesh.normals = None;
+        let ply = write_ply(&mesh);
+        let split = ply_header_len(&ply);
+        let header = std::str::from_utf8(&ply[..split]).unwrap();
+        assert!(!header.contains("property float nx"), "{header}");
+        assert_eq!(ply.len(), split + 4 * 12 + 2 * 13);
     }
 }

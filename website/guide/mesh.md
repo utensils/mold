@@ -22,8 +22,16 @@ acceptance. See [Licence](/models/hunyuan3d#licence).
 
 There is **no text encoder in this family**. The image is the entire
 conditioning, and the prompt — if you pass one — is recorded as provenance and
-never read. So the usual prompt-engineering advice does not apply, and the
-image advice matters more than usual:
+never read. **You do not need to write one**: every surface reads the prompt
+requirement off the model's own generation profile, so an empty prompt is
+admitted here and refused everywhere it still means something.
+
+```bash
+mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb   # no prompt
+```
+
+The usual prompt-engineering advice does not apply, and the image advice
+matters more than usual:
 
 - One object, centred, filling most of the frame.
 - A plain or removed background. An image with an alpha channel is the best
@@ -67,9 +75,39 @@ The stored artifact is always binary glTF (`.glb`) — one self-contained file
 with geometry, normals and materials embedded. That is what makes a mesh a
 single library row, with no special-case handling anywhere downstream.
 
-OBJ is available as a gallery **export**, never as a generation target: an
-`.obj` on its own carries neither materials nor textures, so mold does not
-publish one as though it were complete.
+You do not have to ask for it. A 3-D model has exactly one deliverable
+container, so a request naming `png` is **pinned** to `glb` rather than
+refused — an older client that always sends a raster format still gets its
+mesh. `-o` is the one place that is an error instead: a filename ending in
+`.png`, `.mp4` or `.wav` names a file this render will not write, and mold says
+so before a weight is read rather than after a two-minute render.
+
+## Export as OBJ, STL or PLY
+
+Everything except GLB is an **export**: a transcode of geometry that already
+exists, never a generation target, because each container loses something the
+stored glTF carries.
+
+```bash
+mold library export chair.glb --format stl               # writes chair.stl
+mold library export chair.glb --format obj -o ~/chair.obj
+mold library export chair.glb --format ply --output -    # to stdout
+```
+
+| Format | Carries                                             | Reach for it when                      |
+| ------ | --------------------------------------------------- | -------------------------------------- |
+| `glb`  | Geometry, normals, UVs, materials, embedded texture | Anything. This is the stored file.     |
+| `obj`  | Positions, normals, UVs. No materials.              | Blender, MeshLab, most DCC importers.  |
+| `stl`  | Triangles and one normal each. No UVs, no colour.   | 3-D printing and CAD.                  |
+| `ply`  | Positions and per-vertex normals, vertices shared.  | Point-and-mesh tooling, research code. |
+
+The gallery file is never renamed or replaced — an export writes a copy where
+you asked for it. The same conversions are available on every surface: the API
+(`POST /api/gallery/export/:filename`) and the `export_mesh` MCP tool. A host
+advertises what it can convert on `/api/capabilities.mesh.export_formats`.
+
+USDZ is tracked separately; it is the format Apple's AR Quick Look wants and it
+carries textures, so it belongs with the texturing work rather than here.
 
 ## Piping
 

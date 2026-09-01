@@ -205,6 +205,7 @@ mold library title <FILENAME> --clear
 mold library favorite <FILENAME>...
 mold library unfavorite <FILENAME>...
 mold library trash <FILENAME>...
+mold library export <FILENAME.glb> --format glb|obj|stl|ply [-o PATH | --output -]
 
 mold library tag list [--json]
 mold library tag add <FILENAME>... --tag <TAG> [--tag <TAG>]...
@@ -220,6 +221,14 @@ mold library collection delete <NAME-OR-SLUG> [--yes]
 mold library collection add <NAME-OR-SLUG> <FILENAME>...
 mold library collection remove <NAME-OR-SLUG> <FILENAME>...
 ```
+
+`export` converts one stored 3-D print into a container other tools read: OBJ
+for Blender and MeshLab, STL for 3-D printing and CAD, PLY for point-and-mesh
+tooling. It is a download — the gallery keeps its `.glb`, which is the only
+form carrying geometry, UVs, normals and textures in one file — and it defaults
+to writing the print's stem with the new extension in the current directory.
+`--output -` writes to stdout. A host that does not advertise the format under
+`capabilities.mesh.export_formats` is refused by name.
 
 Repeat `--tag` for every tag; one flag consumes exactly one value. Multiple
 `--tag` filters use AND semantics. Listing filters first, orders by

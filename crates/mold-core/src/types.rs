@@ -1955,6 +1955,12 @@ impl GenerateRequest {
         if self.output_format.is_some() {
             return self;
         }
+        // A mesh family stores binary glTF and nothing else, whatever else the
+        // request looks like.
+        if family == Some(crate::manifest::HUNYUAN3D_FAMILY) {
+            self.output_format = Some(OutputFormat::Glb);
+            return self;
+        }
         // An audio-only pipeline has no frames to encode, so the family
         // default (mp4) would be rejected by the validator. Resolve it to the
         // one container that can hold the artifact it actually produces.
@@ -1967,6 +1973,25 @@ impl GenerateRequest {
             Some(family) if family_output_defaults_to_mp4(family) => OutputFormat::Mp4,
             _ => OutputFormat::Png,
         });
+        self
+    }
+
+    /// Coerce an explicit output format a family cannot produce at all.
+    ///
+    /// Only the mesh family has one today, and this is deliberately NOT the
+    /// same rule as [`Self::normalise_output_format`]: a 3-D render emits
+    /// binary glTF, so `png` on a mesh model is not a default the request can
+    /// outrank — it names an artifact the engine has no way to make. The CLI
+    /// already resolved it this way (`default_output_format`), and this is
+    /// what makes the server agree, so an older client that always sends
+    /// `png` renders instead of being refused.
+    ///
+    /// Every other family is untouched: an unavailable format there is a real
+    /// client mistake and stays a 422 from the recipe's own delivery list.
+    pub fn pin_output_format_for_family(&mut self, family: Option<&str>) -> &mut Self {
+        if family == Some(crate::manifest::HUNYUAN3D_FAMILY) {
+            self.output_format = Some(OutputFormat::Glb);
+        }
         self
     }
 }
@@ -2164,6 +2189,12 @@ impl GuidanceCapabilities {
             "flux2" | "flux.2" | "flux-2" if crate::validation::is_flux2_base_model(model) => {
                 Self::ADJUSTABLE_CFG
             }
+            // A mesh family has no text encoder at all, so it has no
+            // unconditional branch and no negative prompt to encode — but its
+            // guidance-embedded DiT does read the scale. Without this arm
+            // `/api/models` advertised a negative-prompt field the engine
+            // cannot use.
+            family if family == crate::manifest::HUNYUAN3D_FAMILY => Self::ADJUSTABLE_NO_NEGATIVE,
             "flux" | "flux2" | "flux.2" | "flux-2" | "z-image" | "qwen-image" | "qwen_image" => {
                 Self::ADJUSTABLE_NO_NEGATIVE
             }
@@ -5353,6 +5384,86 @@ mod tests {
         ] {
             assert!(!format.is_audio(), "{format:?} must not be audio");
         }
+    }
+
+    /// A 3-D render produces binary glTF and nothing else, so an omitted
+    /// format resolves to GLB and an explicit raster/video/audio format is
+    /// COERCED rather than refused — an older client that always sends `png`
+    /// must still get its mesh.
+    #[test]
+    fn a_mesh_family_pins_its_output_format_to_glb() {
+        let json = r#"{"prompt":"","model":"hunyuan3d-mini-turbo:fp16","width":0,"height":0,"steps":5,"batch_size":1}"#;
+        let mut omitted: GenerateRequest = serde_json::from_str(json).unwrap();
+        omitted.normalise_output_format(Some(crate::manifest::HUNYUAN3D_FAMILY));
+        assert_eq!(omitted.resolved_output_format(), OutputFormat::Glb);
+
+        for format in [
+            OutputFormat::Png,
+            OutputFormat::Jpeg,
+            OutputFormat::Webp,
+            OutputFormat::Mp4,
+            OutputFormat::Wav,
+            OutputFormat::Obj,
+        ] {
+            let mut explicit: GenerateRequest = serde_json::from_str(json).unwrap();
+            explicit.output_format = Some(format);
+            explicit.pin_output_format_for_family(Some(crate::manifest::HUNYUAN3D_FAMILY));
+            assert_eq!(
+                explicit.resolved_output_format(),
+                OutputFormat::Glb,
+                "{format:?} must be pinned to glb"
+            );
+        }
+    }
+
+    /// The pin is a mesh-only rule. Everywhere else an unavailable format is
+    /// a real client mistake and must stay a refusal, not a silent rewrite.
+    #[test]
+    fn pinning_never_rewrites_a_non_mesh_request() {
+        let json = r#"{"prompt":"a cat","model":"flux-dev:q8","width":1024,"height":1024,"steps":20,"batch_size":1}"#;
+        for family in [Some("flux"), Some("ltx2"), Some("wan"), None] {
+            let mut req: GenerateRequest = serde_json::from_str(json).unwrap();
+            req.output_format = Some(OutputFormat::Gif);
+            req.pin_output_format_for_family(family);
+            assert_eq!(
+                req.resolved_output_format(),
+                OutputFormat::Gif,
+                "{family:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mesh_family_advertises_adjustable_guidance_with_no_negative_prompt() {
+        assert_eq!(
+            GuidanceCapabilities::for_recipe(
+                crate::manifest::HUNYUAN3D_FAMILY,
+                "hunyuan3d-mini-turbo:fp16",
+                None
+            ),
+            GuidanceCapabilities::ADJUSTABLE_NO_NEGATIVE
+        );
+    }
+
+    /// The export enum is a delivery contract, and `glb`/`obj` keep the exact
+    /// wire spellings the old `Vec<OutputFormat>` field used.
+    #[test]
+    fn mesh_export_formats_round_trip_on_the_wire() {
+        for (format, wire, extension) in [
+            (MeshExportFormat::Glb, "\"glb\"", "glb"),
+            (MeshExportFormat::Obj, "\"obj\"", "obj"),
+            (MeshExportFormat::Stl, "\"stl\"", "stl"),
+            (MeshExportFormat::Ply, "\"ply\"", "ply"),
+        ] {
+            assert_eq!(serde_json::to_string(&format).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<MeshExportFormat>(wire).unwrap(),
+                format
+            );
+            assert_eq!(format.extension(), extension);
+            assert_eq!(extension.parse::<MeshExportFormat>().unwrap(), format);
+        }
+        assert!("fbx".parse::<MeshExportFormat>().is_err());
     }
 
     #[test]
@@ -10386,13 +10497,91 @@ pub struct MeshCapabilities {
     /// Formats this host will STORE. GLB only today.
     pub formats: Vec<OutputFormat>,
     /// Formats `POST /api/gallery/export/:filename` can transcode a stored
-    /// mesh into. Separate from `formats` because OBJ is exportable but never
-    /// storable — it carries neither materials nor textures on its own.
-    pub export_formats: Vec<OutputFormat>,
+    /// mesh into. Separate from `formats` because OBJ, STL and PLY are
+    /// exportable but never storable — none of them carries materials and
+    /// textures the way the stored GLB does.
+    ///
+    /// Typed as [`MeshExportFormat`] rather than [`OutputFormat`] so an
+    /// export-only container can never be named as a generation target. The
+    /// wire spellings of `glb` and `obj` are unchanged, so an older client
+    /// reading this list keeps working.
+    pub export_formats: Vec<MeshExportFormat>,
     /// Whether generated PBR textures are available. False means geometry
     /// only, which is a materially different product and must not be
     /// discovered by a user after waiting for a render.
     pub textures: bool,
+}
+
+/// A container `POST /api/gallery/export/:filename` can transcode a stored
+/// `.glb` into.
+///
+/// Deliberately its own enum rather than more [`OutputFormat`] variants: these
+/// are DELIVERY containers for geometry that already exists, and a request can
+/// never name one as a generation target. The stored artifact stays GLB — the
+/// one form that carries geometry, UVs, normals and any textures in a single
+/// file — and everything else here loses something on the way out, which is
+/// exactly why it is an export and not a save.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshExportFormat {
+    /// The stored form, served back unchanged.
+    Glb,
+    /// Wavefront OBJ: positions, UVs and normals as text. No materials.
+    Obj,
+    /// Binary STL: triangle soup with a per-face normal. No UVs, no vertex
+    /// identity, no colour — the format 3-D printers and CAD tools want.
+    Stl,
+    /// Binary little-endian PLY: positions plus per-vertex normals when the
+    /// mesh has them. Vertices stay shared, unlike STL.
+    Ply,
+}
+
+impl MeshExportFormat {
+    /// The file extension an exported download is named with.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Glb => "glb",
+            Self::Obj => "obj",
+            Self::Stl => "stl",
+            Self::Ply => "ply",
+        }
+    }
+
+    /// The MIME type the export response carries.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Glb => "model/gltf-binary",
+            Self::Obj => "model/obj",
+            Self::Stl => "model/stl",
+            // PLY has no registered media type; this is the spelling every
+            // viewer and toolchain uses.
+            Self::Ply => "application/x-ply",
+        }
+    }
+}
+
+impl std::fmt::Display for MeshExportFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.extension())
+    }
+}
+
+impl std::str::FromStr for MeshExportFormat {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "glb" => Ok(Self::Glb),
+            "obj" => Ok(Self::Obj),
+            "stl" => Ok(Self::Stl),
+            "ply" => Ok(Self::Ply),
+            other => Err(format!(
+                "unknown mesh export format '{other}' (expected glb, obj, stl, or ply)"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

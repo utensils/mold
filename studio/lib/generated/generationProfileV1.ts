@@ -73,6 +73,31 @@ supports_negative_prompt: boolean,
  */
 fixed_scale?: number | null, };
 
+export type PromptRequirement = "required" | "optional" | "ignored";
+
+export type PromptCapabilitiesProfile = { mode: PromptRequirement,
+/**
+ * Why the prompt is optional or ignored. Absent when it is required —
+ * there is nothing to explain.
+ */
+reason?: string | null, };
+
+export type MeshCapabilitiesProfile = {
+/**
+ * Query-grid resolutions this recipe admits. An ALLOWLIST, because the
+ * occupancy field is evaluated on `(n + 1)^3` points.
+ */
+octree_resolutions: Array<number>, octree_default: number,
+/**
+ * Iso-level the surface is extracted at.
+ */
+threshold: FloatControl, target_faces_min: number, target_faces_max: number,
+/**
+ * The PBR texture stage. `Hidden` in every build that ships without the
+ * paint bundle, with the reason a client shows instead of the control.
+ */
+texture: FeatureControlProfile, };
+
 export type SourceImageCapability = "unsupported" | "optional" | "required";
 
 export type Scheduler = "ddim" | "euler-ancestral" | "uni-pc" | "edm-dpm-pp-2m" | "euler" | "dpm-pp";
@@ -83,7 +108,29 @@ export type GenerationCapabilitiesProfile = { guidance: GuidanceCapabilities, ne
  * an identity-qualified checkpoint on a binary that links the identity
  * adapter, so a client never offers a control this server would refuse.
  */
-supports_identity: boolean, supports_sequence: boolean, supports_extend: boolean, supports_audio: boolean, source_video: FeatureControlProfile, mask: FeatureControlProfile, keyframes: FeatureControlProfile, audio: FeatureControlProfile, lora: AdapterControlProfile, controlnet: AdapterControlProfile, output: OutputCapabilitiesProfile, wan_recipe: WanRecipeCapabilitiesProfile, schedulers?: Array<Scheduler>, };
+supports_identity: boolean, supports_sequence: boolean, supports_extend: boolean, supports_audio: boolean, source_video: FeatureControlProfile, mask: FeatureControlProfile, keyframes: FeatureControlProfile, audio: FeatureControlProfile, lora: AdapterControlProfile, controlnet: AdapterControlProfile, output: OutputCapabilitiesProfile, wan_recipe: WanRecipeCapabilitiesProfile, schedulers?: Array<Scheduler>,
+/**
+ * Whether this recipe requires, accepts, or ignores a prompt. The single
+ * authority: server validation and every client read it rather than
+ * carrying their own family list. Absent on an older server's profile,
+ * which deserializes to `Required` — the answer that was true for every
+ * recipe before this field existed.
+ */
+prompt: PromptCapabilitiesProfile,
+/**
+ * Whether `GenerateRequest.strength` changes the render.
+ *
+ * `#[serde(default)]` is deliberately `false`: an older server that does
+ * not send the field is not asserting that strength works, and a client
+ * must fall back to its own legacy predicate rather than read a `true`
+ * nobody wrote.
+ */
+supports_strength: boolean,
+/**
+ * 3-D controls. Present only on a mesh recipe; its absence means
+ * `GenerateRequest.mesh` is refused here.
+ */
+mesh?: MeshCapabilitiesProfile | null, };
 
 export type GenerationRecipeProfile = { id: string, label: string, request_selector: RecipeSelector, defaults: GenerationDefaultsProfile, resolution: ResolutionProfile, steps: IntegerControl, guidance: FloatControl, temporal?: TemporalProfile | null, capabilities: GenerationCapabilitiesProfile, provenance?: Array<ProfileProvenance>, };
 

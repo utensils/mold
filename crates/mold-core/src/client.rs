@@ -1908,6 +1908,32 @@ impl MoldClient {
     /// Move one print to the host's trash (`DELETE /api/gallery/image/:name`
     /// without `permanent`). On older servers without a trash this deletes
     /// outright — check `capabilities.gallery.trash` first when that matters.
+    /// Transcode one stored gallery mesh into an export container
+    /// (`POST /api/gallery/export/:filename`) and return the bytes.
+    ///
+    /// Downloads only: the gallery keeps its `.glb`, and the caller decides
+    /// where the converted file lands. Every refusal comes back as the
+    /// server's own sentence, because a foreign `.glb` in a user's output
+    /// directory is something only that message can explain.
+    pub async fn export_gallery_mesh(
+        &self,
+        filename: &str,
+        format: crate::MeshExportFormat,
+    ) -> Result<Vec<u8>> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/gallery/export/{}",
+                self.base_url,
+                encode_path_segment(filename)
+            ))
+            .json(&serde_json::json!({ "format": format.extension() }))
+            .send()
+            .await?;
+        let resp = error_for_status_with_body(resp).await?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     pub async fn trash_gallery_image(&self, filename: &str) -> Result<()> {
         let resp = self
             .client

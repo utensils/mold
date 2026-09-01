@@ -7,6 +7,10 @@ The source image is the only conditioning, so a prompt is recorded as
 provenance and never read, and a request without an image is refused rather
 than answered from an empty prompt.
 
+**No prompt is needed anywhere.** The model's generation profile says so, and
+every surface reads it, so `mold run hunyuan3d-mini-turbo --image chair.png` is
+a complete request from the CLI, the API, the TUI, Discord and the apps alike.
+
 - **Developer**:
   [Tencent Hunyuan](https://github.com/Tencent-Hunyuan/Hunyuan3D-2)
 - **License**: Tencent Hunyuan 3D 2.0 Community License — see
@@ -107,9 +111,32 @@ exactly like an image or a clip. It gets a rendered poster tile in the gallery,
 and it lists, downloads, trashes, restores and reuses its settings like
 anything else.
 
-OBJ is available as a gallery **export**, never as a stored format — an `.obj`
-alone carries neither materials nor textures, so mold does not publish one as
-if it were complete.
+A 3-D model has exactly one deliverable container, so a request naming a raster
+format is **pinned** to `glb` rather than refused. `-o` is the exception: a
+filename ending in `.png` or `.mp4` names a file this render will not write, so
+it is refused before any weight is read.
+
+### Export as OBJ, STL or PLY
+
+Everything except GLB is an **export** — a transcode of a mesh that already
+exists, never a stored format — because each of them loses something the glTF
+carries.
+
+```bash
+mold library export chair.glb --format stl
+mold library export chair.glb --format obj -o ~/chair.obj
+```
+
+| Format | Carries                                             | Reach for it when                      |
+| ------ | --------------------------------------------------- | -------------------------------------- |
+| `glb`  | Geometry, normals, UVs, materials, embedded texture | Anything. This is the stored file.     |
+| `obj`  | Positions, normals, UVs. No materials.              | Blender, MeshLab, most DCC importers.  |
+| `stl`  | Triangles and one normal each. No UVs, no colour.   | 3-D printing and CAD.                  |
+| `ply`  | Positions and per-vertex normals, vertices shared.  | Point-and-mesh tooling, research code. |
+
+The gallery file is never renamed or replaced. The same conversions are on
+`POST /api/gallery/export/:filename` and the `export_mesh` MCP tool, and a host
+advertises what it can convert on `/api/capabilities.mesh.export_formats`.
 
 ## Licence
 

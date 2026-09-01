@@ -445,6 +445,7 @@ impl McpServer {
         let result = match name {
             "generate_image" => self.tool_generate_image(arguments).await,
             "generate_mesh" => self.tool_generate_mesh(arguments).await,
+            "export_mesh" => self.tool_export_mesh(arguments).await,
             "generate_image_async" => self.tool_generate_image_async(arguments).await,
             "generation_status" => self.tool_generation_status(arguments).await,
             "generation_retry" => self.tool_generation_retry(arguments).await,
@@ -804,6 +805,56 @@ impl McpServer {
             "structuredContent": {
                 "image": gallery_summary_json(&selected),
                 "thumbnail": returned_thumbnail
+            }
+        }))
+    }
+
+    /// Transcode one stored `.glb` and hand the bytes back as a resource.
+    ///
+    /// Deliberately NOT a generation tool: the geometry already exists, and
+    /// every container here loses something the stored glTF carries. The
+    /// gallery file is untouched.
+    async fn tool_export_mesh(&self, arguments: Value) -> std::result::Result<Value, String> {
+        let args: ExportMeshArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        if !std::path::Path::new(&args.filename)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+        {
+            return Err(format!(
+                "only stored .glb prints can be exported; '{}' is not one",
+                args.filename
+            ));
+        }
+        let format: mold_core::MeshExportFormat = args.format.parse()?;
+        let bytes = self
+            .client
+            .export_gallery_mesh(&args.filename, format)
+            .await
+            .map_err(|e| format!("failed to export mesh: {e}"))?;
+        Ok(json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!(
+                        "Exported {} as {format} ({} bytes)",
+                        args.filename,
+                        bytes.len()
+                    )
+                },
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": format!("mold://gallery/{}", args.filename),
+                        "mimeType": format.content_type(),
+                        "blob": general_purpose::STANDARD.encode(&bytes)
+                    }
+                }
+            ],
+            "structuredContent": {
+                "filename": args.filename,
+                "format": format.extension(),
+                "bytes": bytes.len()
             }
         }))
     }
@@ -1176,6 +1227,14 @@ impl ListGalleryArgs {
             sort_order: self.sort_order.clone(),
         }
     }
+}
+
+/// Arguments for `export_mesh`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportMeshArgs {
+    filename: String,
+    format: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -2999,6 +3058,26 @@ fn builtin_tool_definitions() -> Value {
                     }
                 },
                 "required": ["image"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "export_mesh",
+            "description": "Export one stored 3-D print as OBJ, STL, or PLY. The gallery keeps its GLB; this returns a converted copy. Each container loses something the stored glTF carries — OBJ has no materials, STL has no shared vertices or UVs — which is why none of them is a generation target.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Gallery filename of the stored mesh. Must end in .glb."
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["glb", "obj", "stl", "ply"],
+                        "description": "Container to export as. 'glb' returns the stored bytes unchanged."
+                    }
+                },
+                "required": ["filename", "format"],
                 "additionalProperties": false
             }
         },

@@ -6,9 +6,9 @@ use mold_core::generation_profile::{
     resolution_qualification_record, AdapterControlProfile, AspectGroup, ControlMode,
     FeatureControlProfile, FloatControl, FpsControl, GenerationCapabilitiesProfile,
     GenerationDefaultsProfile, GenerationProfileSet, GenerationRecipeProfile, IntegerControl,
-    OffBucketPolicy, OutputCapabilitiesProfile, ProfileProvenance, ProvenanceKind, RecipeSelector,
-    ResolutionDomain, ResolutionPreset, ResolutionProfile, TemporalProfile,
-    WanRecipeCapabilitiesProfile,
+    MeshCapabilitiesProfile, OffBucketPolicy, OutputCapabilitiesProfile, ProfileProvenance,
+    PromptCapabilitiesProfile, PromptRequirement, ProvenanceKind, RecipeSelector, ResolutionDomain,
+    ResolutionPreset, ResolutionProfile, TemporalProfile, WanRecipeCapabilitiesProfile,
 };
 use mold_core::manifest::known_manifests;
 use mold_core::{
@@ -112,6 +112,9 @@ fn render_typescript_contract() -> String {
     declaration!(OutputCapabilitiesProfile);
     declaration!(WanRecipeCapabilitiesProfile);
     declaration!(GuidanceCapabilities);
+    declaration!(PromptRequirement);
+    declaration!(PromptCapabilitiesProfile);
+    declaration!(MeshCapabilitiesProfile);
     declaration!(SourceImageCapability);
     declaration!(Scheduler);
     declaration!(GenerationCapabilitiesProfile);

@@ -71,6 +71,11 @@ async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {
         LibraryAction::Tag { action } => library_tag(client, action).await,
         LibraryAction::Collection { action } => library_collection(client, action).await,
         LibraryAction::Trash { filenames } => library_trash(client, &filenames).await,
+        LibraryAction::Export {
+            filename,
+            format,
+            output,
+        } => library_export(client, &filename, format, output.as_deref()).await,
         LibraryAction::Grid { .. } => unreachable!("grid handled before creating a client"),
     }
 }
@@ -437,6 +442,90 @@ async fn library_trash(client: &MoldClient, filenames: &[String]) -> Result<()> 
     for filename in filenames {
         println!("{} {}", "trashed".green(), filename);
     }
+    Ok(())
+}
+
+/// `mold library export <file> --format obj|stl|ply` — transcode one stored
+/// mesh and write the result locally.
+///
+/// HTTP to `$MOLD_HOST` with no local fallback, like every other non-grid
+/// `mold library` command: the print lives on the serving host, and reading
+/// its output directory directly would answer for the wrong machine.
+///
+/// The gallery file is never renamed or replaced. Exporting is a download.
+async fn library_export(
+    client: &MoldClient,
+    filename: &str,
+    format: mold_core::MeshExportFormat,
+    output: Option<&str>,
+) -> Result<()> {
+    if !std::path::Path::new(filename)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+    {
+        bail!("only stored .glb prints can be exported; '{filename}' is not one");
+    }
+    let capabilities = client
+        .capabilities()
+        .await
+        .with_context(|| format!("could not read Library capabilities on {}", client.host()))?;
+    // Absence reads as NO, which is the right answer for every host built
+    // before mesh delivery existed — it has neither the file nor the route.
+    let advertised = capabilities
+        .mesh
+        .as_ref()
+        .map(|mesh| mesh.export_formats.as_slice())
+        .unwrap_or_default();
+    if !advertised.contains(&format) {
+        bail!(
+            "{} does not export meshes as {format}{}",
+            client.host(),
+            if advertised.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (this host offers {})",
+                    advertised
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        );
+    }
+
+    let bytes = client
+        .export_gallery_mesh(filename, format)
+        .await
+        .with_context(|| format!("could not export {filename} as {format}"))?;
+
+    let destination = output.map(str::to_string).unwrap_or_else(|| {
+        format!(
+            "{}.{}",
+            std::path::Path::new(filename)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("mold-mesh"),
+            format.extension()
+        )
+    });
+    if destination == "-" {
+        io::stdout()
+            .write_all(&bytes)
+            .context("could not write the exported mesh to stdout")?;
+        io::stdout().flush().ok();
+        return Ok(());
+    }
+    std::fs::write(&destination, &bytes)
+        .with_context(|| format!("could not write {destination}"))?;
+    // Same channel every other `mold library` mutation reports on, and it
+    // stays out of the way when the bytes went to stdout.
+    println!(
+        "{} {destination} ({} bytes)",
+        "exported".green(),
+        bytes.len()
+    );
     Ok(())
 }
 

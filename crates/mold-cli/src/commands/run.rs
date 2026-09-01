@@ -113,8 +113,15 @@ fn resolve_family(model_name: &str, config: &Config) -> String {
 /// keyframes, source video, or an extend) may run unprompted — LTX-2's text
 /// encoder pads to a fixed-width context, so `""` is a trained input rather
 /// than a degenerate one. Expect near-static, micro-motion output; it saves no
-/// VRAM, since the prompt-context tensor is a fixed size either way. Every
-/// other case still needs a prompt.
+/// VRAM, since the prompt-context tensor is a fixed size either way.
+///
+/// A 3-D family runs unprompted whatever it carries: it has no text encoder
+/// at all, so the prompt is recorded as provenance and conditions nothing.
+/// Every other case still needs a prompt.
+///
+/// The rule itself is `mold_core`'s, shared with the server's own admission
+/// and with the `prompt` block every recipe advertises, so the CLI cannot
+/// refuse a request this host would accept.
 fn require_prompt(
     prompt: Option<String>,
     family: &str,
@@ -2981,6 +2988,30 @@ mod tests {
         assert_eq!(
             require_prompt(Some("a turtle".to_string()), "ltx2", true).unwrap(),
             "a turtle"
+        );
+    }
+
+    /// `mold run hunyuan3d-mini-turbo --image cutout.png -o chair.glb` must
+    /// work with no prompt at all: the family has no text encoder, so a
+    /// prompt conditions nothing and refusing one is refusing the only way
+    /// this model is used.
+    #[test]
+    fn a_mesh_family_never_needs_a_prompt() {
+        for conditioned in [true, false] {
+            assert_eq!(
+                require_prompt(None, mold_core::manifest::HUNYUAN3D_FAMILY, conditioned).unwrap(),
+                ""
+            );
+        }
+        // A prompt is still accepted and recorded as provenance.
+        assert_eq!(
+            require_prompt(
+                Some("a wingback armchair".to_string()),
+                mold_core::manifest::HUNYUAN3D_FAMILY,
+                true
+            )
+            .unwrap(),
+            "a wingback armchair"
         );
     }
 

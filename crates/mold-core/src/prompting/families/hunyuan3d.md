@@ -45,7 +45,11 @@ ground and every other prop cropped away.
 
 - Frames, fps, masks, ControlNet, and an explicit canvas are refused for this
   family rather than ignored.
-- Output is always binary glTF; OBJ exists only as a gallery export.
+- Output is always binary glTF, so `-o` must name a `.glb` file or `-` for
+  stdout; a raster, video, or audio extension is refused before any weight is
+  read. An explicit `png` in a request is coerced to `glb`, not refused.
+- OBJ, STL, and PLY exist only as gallery exports of the stored glTF, never as
+  generation targets, because each loses something the glTF carries.
 - Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not
   supported, so today's result is geometry only.
 - Detail is bought with the octree resolution and its cost is cubic.
@@ -61,6 +65,9 @@ mold run hunyuan3d --image chair.png --octree 320 -o chair.glb
 
 # Recover thin features by lowering the surface threshold
 mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
+
+# Export a saved mesh from the gallery as STL, OBJ, or PLY
+mold library export chair.glb --format stl -o chair.stl
 ```
 
 `--octree` (128 | 192 | 256 | 320 | 384, default 256) is the detail knob and

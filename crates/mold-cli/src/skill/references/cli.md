@@ -96,8 +96,15 @@ job; retry only when the status explicitly marks it retryable.
 
 `generate_mesh` is the one MCP generate tool whose schema requires `image`
 rather than `prompt`: the 3-D family has no text encoder, so there is nothing
-for a prompt to do. It returns a rendered poster plus mesh statistics; the
-glTF itself lands in the gallery and is fetched by filename.
+for a prompt to do. `mold run hunyuan3d-mini-turbo --image chair.png` is
+likewise a complete CLI request with no prompt at all. It returns a rendered
+poster plus mesh statistics; the glTF itself lands in the gallery and is
+fetched by filename.
+
+`export_mesh` converts one stored `.glb` into `obj`, `stl`, or `ply`; the CLI
+equivalent is `mold library export <file> --format stl`. Both are transcodes of
+geometry that already exists — the gallery file is never renamed or replaced —
+and `-o` on a 3-D render must still name a `.glb`.
 
 For published CUDA images, use Mold's live distribution resolver rather than
 guessing an architecture tag. Its current contract includes B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported. B200 support

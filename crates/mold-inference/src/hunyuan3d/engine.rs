@@ -50,7 +50,11 @@ const VAE_PREFIX: &str = "vae";
 const VISION_PREFIX: &str = "conditioner.main_image_encoder.model";
 
 /// Default query-grid resolution. Upstream's `VAEDecodeHunyuan3D` default.
-pub const DEFAULT_OCTREE_RESOLUTION: usize = 256;
+///
+/// Taken from the core constant the generation profile advertises, so the
+/// number a client sees pre-selected is the number an omitted field renders.
+pub const DEFAULT_OCTREE_RESOLUTION: usize =
+    mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION as usize;
 /// Default surface-net iso-level. Upstream's `VoxelToMesh` default — note it
 /// is 0.6, not the 0.5 a reader might assume for a binary occupancy field.
 ///
@@ -60,7 +64,10 @@ pub const DEFAULT_OCTREE_RESOLUTION: usize = 256;
 /// image post-process `(x + 1) / 2` clamped to `[0, 1]`. On raw logits 0.6
 /// means 0.2. Thresholding the raw logits at 0.6 instead — what the first cut
 /// did — shrinks every surface inward and drops half the triangles.
-pub const DEFAULT_THRESHOLD: f32 = 0.6;
+///
+/// Same authority as [`DEFAULT_OCTREE_RESOLUTION`]: the profile advertises
+/// `mold_core::validation::MESH_DEFAULT_THRESHOLD` and this renders it.
+pub const DEFAULT_THRESHOLD: f32 = mold_core::validation::MESH_DEFAULT_THRESHOLD as f32;
 /// Half-width of the query cube. `VanillaVolumeDecoder`'s `bounds` default.
 const QUERY_BOUNDS: f32 = 1.01;
 /// Query points per decode chunk on CUDA and the CPU. Upstream's `num_chunks`
@@ -240,10 +247,7 @@ impl Hunyuan3dEngine {
             loaded.dtype,
         )?;
         let cond = loaded.vision.forward(&pixels)?;
-        self.base
-            .progress
-            .stage_done("Encoding image", phase_started.elapsed());
-        self.base.progress.phase_done(
+        self.base.progress.stage_complete(
             ProgressPhase::PromptEncode,
             "Encoding image",
             phase_started.elapsed(),
@@ -257,7 +261,15 @@ impl Hunyuan3dEngine {
             loaded.dit.config().guidance_embed,
         );
         let seed = req.seed.unwrap_or_else(rand_seed);
+        // Named as its own stage. Without it the log jumped from a 0.1 s
+        // encode straight to the volume decode, so the whole denoise read as
+        // decode time and no report could attribute it.
+        self.base.progress.stage_start("Sampling");
+        let sample_started = std::time::Instant::now();
         let latents = self.sample(loaded, &cond, &plan, seed)?;
+        self.base
+            .progress
+            .stage_done("Sampling", sample_started.elapsed());
 
         // ── Occupancy field ─────────────────────────────────────────────
         let grid = self.decode_occupancy(loaded, &latents, octree)?;
@@ -426,10 +438,7 @@ impl Hunyuan3dEngine {
             }
         }
 
-        self.base
-            .progress
-            .stage_done("Decoding volume", phase_started.elapsed());
-        self.base.progress.phase_done(
+        self.base.progress.stage_complete(
             ProgressPhase::Vae,
             "Decoding volume",
             phase_started.elapsed(),
@@ -483,10 +492,7 @@ impl Hunyuan3dEngine {
             // Decimation invalidates the old normals.
             super::mesh::compute_smooth_normals(&mut mesh);
         }
-        self.base
-            .progress
-            .stage_done("Extracting surface", phase_started.elapsed());
-        self.base.progress.phase_done(
+        self.base.progress.stage_complete(
             ProgressPhase::VisualDecode,
             "Extracting surface",
             phase_started.elapsed(),

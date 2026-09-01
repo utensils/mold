@@ -89,6 +89,8 @@ function profileModel(): GenerationProfileModel {
         supports_first_last_frame: false,
       },
       schedulers: [],
+      prompt: { mode: "required" },
+      supports_strength: false,
     },
     provenance: [],
   });

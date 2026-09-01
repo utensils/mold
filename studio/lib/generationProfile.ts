@@ -645,6 +645,13 @@ function legacyRecipe(
         supports_first_last_frame: false,
       },
       schedulers: [],
+      // A legacy host advertises none of these, so the adapter answers what
+      // was true of every recipe before they existed. It deliberately does
+      // NOT try to reconstruct them from the family name: this object is
+      // this client talking, and a caller must be able to tell a host's
+      // answer from a fallback.
+      prompt: { mode: "required" },
+      supports_strength: false,
     },
   };
 }

@@ -80,8 +80,9 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   identity photos, prompt expansion, and upscaling.
 - **Video and audio:** text/image-to-video, sequences, clip continuation,
   lip dub, text-to-audio, and MP4 output with generated audio.
-- **3D:** image-to-mesh with Hunyuan3D, published to the Library as binary
-  glTF with a rendered poster tile.
+- **3D:** image-to-mesh with Hunyuan3D, no prompt required, published to the
+  Library as binary glTF with a rendered poster tile and exportable as OBJ,
+  STL, or PLY.
 - **Multiple machines:** connect local, LAN, Tailscale, and RunPod hosts, then
   route work and browse one combined Library.
 - **Organization:** title, favorite, tag, collect, restore, and manage prints
