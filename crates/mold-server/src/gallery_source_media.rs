@@ -22,6 +22,8 @@ const MAX_SOURCE_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const REUSE_SESSION_TTL_SECS: u64 = 2 * 60;
 const MAX_REUSE_SESSION_MEMBERS: usize = 64;
 pub(crate) const REUSE_SESSION_HEADER: &str = "x-mold-retained-media-session";
+/// Bound subject for a reuse session minted on a host with no API keys.
+const ANONYMOUS_REUSE_SUBJECT: &str = "mold.retained-media.anonymous-subject.v1";
 
 pub(crate) fn validate_reuse_batch_cardinality(
     headers: &HeaderMap,
@@ -40,8 +42,65 @@ pub(crate) fn validate_reuse_batch_cardinality(
     Ok(true)
 }
 
-fn private_auth_enabled(auth: Option<&Extension<crate::auth::AuthState>>) -> bool {
-    auth.is_some_and(|Extension(state)| state.is_some())
+/// Whether this CALLER may read the host's retained private media.
+///
+/// This asks about the caller's authorization, never about the operator's
+/// configuration. `AuthState` is `None` whenever `MOLD_API_KEY` is unset, and
+/// the earlier `auth.is_some_and(|Extension(s)| s.is_some())` read that as a
+/// refusal — so on a default, keyless server every retained-media route
+/// answered `unavailable_auth` for prints it never looked at, and the whole
+/// feature was dead. A keyless host is open BY POLICY: `require_api_key` passes
+/// every request through it, and `DELETE /api/gallery/image/:filename` plus
+/// device lifecycle are already open there (`auth.rs`'s
+/// `device_patch_is_open_when_server_auth_is_disabled`). Retained source media
+/// is not more sensitive than the print bytes and full metadata that same host
+/// already serves unauthenticated, so it must not be the one route that refuses.
+fn private_media_authorized(
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+) -> bool {
+    match auth {
+        // Enforced: `require_api_key` already rejected unauthenticated callers,
+        // so the marker's absence here means a route reached without one.
+        Some(Extension(Some(_))) => authenticated.is_some(),
+        // Disabled: open by policy, exactly like every other privileged route.
+        _ => true,
+    }
+}
+
+/// Subject a reuse session is bound to.
+///
+/// An open host has no credential, so it binds one stable anonymous subject —
+/// create and hydrate MUST agree or a handle minted there could never be
+/// redeemed. The handle's real safety properties are unchanged either way: one
+/// use, a 120 s TTL, and binding to `instance_id` + `request_sha256` +
+/// `archive_identity_sha256`, which is what stops a DIFFERENT request consuming
+/// it. The constant is domain-separated so it can never collide with a real
+/// `ApiKeySet::durable_identity` digest.
+fn reuse_credential_identity(
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+) -> String {
+    match authenticated {
+        Some(Extension(marker)) => marker.durable_identity.clone(),
+        None => ANONYMOUS_REUSE_SUBJECT.to_string(),
+    }
+}
+
+/// How a resolved lookup answers the inventory question.
+///
+/// `members.is_empty()` alone is NOT damage: `downloadable_role` deliberately
+/// filters provenance-text roles, so an H3 print retaining only
+/// `source_image_name` resolves cleanly with nothing to hand back. Reporting
+/// that as `missing_or_corrupt` told the user their media was damaged when it
+/// was never downloadable by design.
+fn availability_of(resolved: &ResolvedGalleryMedia) -> Availability {
+    if resolved.corrupt {
+        Availability::UnavailableMissingOrCorrupt
+    } else if resolved.legacy || resolved.members.is_empty() {
+        Availability::UnavailableLegacy
+    } else {
+        Availability::Available
+    }
 }
 
 fn downloadable_role(role: &str) -> bool {
@@ -370,7 +429,7 @@ pub(crate) async fn create_reuse_session(
     AxumPath(filename): AxumPath<String>,
     Json(mut body): Json<CreateReuseSessionRequest>,
 ) -> Result<Response, ApiError> {
-    if !private_auth_enabled(auth.as_ref()) || authenticated.is_none() {
+    if !private_media_authorized(auth.as_ref(), authenticated.as_ref()) {
         return Err(ApiError::with_code(
             "retained-media reuse sessions require API-key authentication",
             "RETAINED_MEDIA_REUSE_AUTH_REQUIRED",
@@ -399,11 +458,7 @@ pub(crate) async fn create_reuse_session(
     let (session_handle, token_hash) = issue_session_token()?;
     let now = unix_timestamp();
     let expires_at = now.saturating_add(REUSE_SESSION_TTL_SECS);
-    let credential_identity = authenticated
-        .as_ref()
-        .expect("checked above")
-        .durable_identity
-        .clone();
+    let credential_identity = reuse_credential_identity(authenticated.as_ref());
     let session = ReuseSession {
         instance_id: state.instance_id.as_ref().clone(),
         credential_identity,
@@ -442,20 +497,14 @@ pub(crate) async fn hydrate_reuse_session(
     let Some(handle) = headers.get(REUSE_SESSION_HEADER) else {
         return Ok(());
     };
-    if !private_auth_enabled(auth) {
+    if !private_media_authorized(auth, authenticated) {
         return Err(ApiError::with_code(
             "retained-media reuse sessions require API-key authentication",
             "RETAINED_MEDIA_REUSE_AUTH_REQUIRED",
             StatusCode::UNAUTHORIZED,
         ));
     }
-    let authenticated = authenticated.ok_or_else(|| {
-        ApiError::with_code(
-            "retained-media reuse session has no authenticated credential",
-            "RETAINED_MEDIA_REUSE_AUTH_REQUIRED",
-            StatusCode::UNAUTHORIZED,
-        )
-    })?;
+    let credential_identity = reuse_credential_identity(authenticated);
     let handle = handle.to_str().map_err(|_| {
         ApiError::with_code(
             "retained-media reuse session handle is malformed",
@@ -470,7 +519,7 @@ pub(crate) async fn hydrate_reuse_session(
         &token_hash,
         now,
         state.instance_id.as_str(),
-        &authenticated.durable_identity,
+        &credential_identity,
         &request_digest,
     )?;
 
@@ -678,9 +727,10 @@ fn hydrate_selected_members(
 pub(crate) async fn inventory(
     State(state): State<AppState>,
     auth: Option<Extension<crate::auth::AuthState>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     AxumPath(filename): AxumPath<String>,
 ) -> Result<Json<Inventory>, ApiError> {
-    if !private_auth_enabled(auth.as_ref()) {
+    if !private_media_authorized(auth.as_ref(), authenticated.as_ref()) {
         return Ok(Json(Inventory {
             availability: Availability::UnavailableAuth,
             members: Vec::new(),
@@ -697,21 +747,19 @@ pub(crate) async fn inventory(
             availability: Availability::UnavailableLegacy,
             members: Vec::new(),
         },
-        Some(resolved) if resolved.legacy => Inventory {
-            availability: Availability::UnavailableLegacy,
-            members: Vec::new(),
-        },
-        Some(resolved) if resolved.corrupt || resolved.members.is_empty() => Inventory {
-            availability: Availability::UnavailableMissingOrCorrupt,
-            members: Vec::new(),
-        },
-        Some(resolved) => Inventory {
-            availability: Availability::Available,
-            members: resolved
-                .members
-                .into_iter()
-                .map(|member| member.member)
-                .collect(),
+        Some(resolved) => match availability_of(&resolved) {
+            Availability::Available => Inventory {
+                availability: Availability::Available,
+                members: resolved
+                    .members
+                    .into_iter()
+                    .map(|member| member.member)
+                    .collect(),
+            },
+            availability => Inventory {
+                availability,
+                members: Vec::new(),
+            },
         },
     }))
 }
@@ -733,9 +781,10 @@ pub(crate) async fn inventory(
 pub(crate) async fn download(
     State(state): State<AppState>,
     auth: Option<Extension<crate::auth::AuthState>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     AxumPath((filename, requested_member)): AxumPath<(String, String)>,
 ) -> Result<Response, ApiError> {
-    if !private_auth_enabled(auth.as_ref()) {
+    if !private_media_authorized(auth.as_ref(), authenticated.as_ref()) {
         return Err(ApiError::with_code(
             "retained source media requires API-key authentication",
             "RETAINED_SOURCE_MEDIA_AUTH_REQUIRED",
@@ -991,6 +1040,85 @@ mod tests {
                 .unwrap()
                 .code,
             "RETAINED_MEDIA_REUSE_INVALID"
+        );
+    }
+
+    // ── Caller authorization ────────────────────────────────────────────────
+    // The predicate answers "may THIS CALLER read the host's retained private
+    // media", never "did the operator configure API keys". Conflating the two
+    // made every retained-media route dead on a default (keyless) server.
+
+    fn keyed_auth() -> Extension<crate::auth::AuthState> {
+        Extension(Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(
+            std::collections::HashSet::from(["operator-key".to_string()]),
+        ))))
+    }
+
+    fn authenticated_marker() -> Extension<crate::auth::ApiKeyAuthenticated> {
+        Extension(crate::auth::ApiKeyAuthenticated {
+            identity: "key:00000000".to_string(),
+            durable_identity: "0".repeat(64),
+        })
+    }
+
+    #[test]
+    fn an_open_host_authorizes_every_caller() {
+        // `MOLD_API_KEY` unset: `require_api_key` passes every request through
+        // and `DELETE /api/gallery/image/:filename` is already open, so
+        // retained media must not be the one route that refuses.
+        assert!(private_media_authorized(Some(&Extension(None)), None));
+        assert!(private_media_authorized(None, None));
+    }
+
+    #[test]
+    fn a_keyed_host_authorizes_only_an_authenticated_caller() {
+        let keyed = keyed_auth();
+        let marker = authenticated_marker();
+        assert!(private_media_authorized(Some(&keyed), Some(&marker)));
+        assert!(!private_media_authorized(Some(&keyed), None));
+    }
+
+    #[test]
+    fn an_open_host_binds_reuse_sessions_to_one_stable_anonymous_subject() {
+        // Create and hydrate must agree, or a handle minted on an open host
+        // could never be redeemed on that same host.
+        assert_eq!(
+            reuse_credential_identity(None),
+            reuse_credential_identity(None)
+        );
+        let marker = authenticated_marker();
+        assert_ne!(
+            reuse_credential_identity(Some(&marker)),
+            reuse_credential_identity(None),
+            "an authenticated caller must never share the anonymous subject"
+        );
+        assert_eq!(
+            reuse_credential_identity(Some(&marker)),
+            "0".repeat(64),
+            "an authenticated caller keeps its own durable identity"
+        );
+    }
+
+    #[test]
+    fn a_clean_manifest_with_no_downloadable_roles_is_not_corruption() {
+        // H3 retains `source_image_name`, which `downloadable_role` filters out
+        // by design. An empty member list after a CLEAN resolve means "nothing
+        // to restore", never "missing or damaged".
+        let clean = ResolvedGalleryMedia {
+            archive_identity_sha256: "a".repeat(64),
+            members: Vec::new(),
+            legacy: false,
+            corrupt: false,
+        };
+        assert_eq!(availability_of(&clean), Availability::UnavailableLegacy);
+
+        let damaged = ResolvedGalleryMedia {
+            corrupt: true,
+            ..clean
+        };
+        assert_eq!(
+            availability_of(&damaged),
+            Availability::UnavailableMissingOrCorrupt
         );
     }
 }

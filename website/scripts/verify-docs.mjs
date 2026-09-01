@@ -241,6 +241,12 @@ const ignoredEnvVars = new Set([
   // the web SPA bundle for rust-embed. Not user-facing runtime config.
   'MOLD_EMBED_WEB_DIR',
   'MOLD_WEB_DIST',
+  // Build-time only -- `option_env!` paths that flake.nix bakes into the
+  // Nix-built binary so Framewise upscale finds its bundled ffmpeg/ffprobe
+  // (#1506). Not a runtime knob: a cargo build reads them at compile time
+  // and falls back to PATH lookup.
+  'MOLD_BUNDLED_FFMPEG',
+  'MOLD_BUNDLED_FFPROBE',
   // Debug / dev / test-only -- intentionally not user-facing.
   // `MOLD_FLUX2_DUMP_LATENT` is a developer probe that dumps pre-VAE
   // latents to a path; `MOLD_NVFP4_PROBE_PATH` gates the NVFP4 single-file

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import AuthedMedia from "./AuthedMedia.vue";
@@ -13,7 +12,6 @@ import {
   type GallerySource,
 } from "../../lib/gallery/media";
 import { ipc } from "../../lib/ipc";
-import { useComposerStore } from "../../stores/composer";
 import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
@@ -123,6 +121,9 @@ const emit = defineEmits<{
   next: [];
   delete: [];
   useSource: [];
+  /** One-shot reuse. The OWNER runs it: retained private source media is
+   *  attached there, and doing it here would drop it. */
+  reuse: [];
   reuseSequence: [];
   editSequence: [];
   /** Title edited in the aside (`null` clears it). */
@@ -136,8 +137,6 @@ const emit = defineEmits<{
   upscale: [];
 }>();
 
-const router = useRouter();
-const composer = useComposerStore();
 const toasts = useToastStore();
 const ui = useUiStore();
 const contextMenu = useContextMenuStore();
@@ -293,12 +292,13 @@ function primaryAction() {
     else emit("reuseSequence");
     return;
   }
-  // Ship the full metadata — `applyPrefillToForm` restores every serialized
-  // knob (negative prompt, LoRA stack, scheduler, strength, video params, …)
-  // and prefers the pre-upscale generation canvas over the raster size.
-  composer.set({ metadata: meta.value });
-  emit("close");
-  void router.push("/create");
+  // Hand the one-shot back to the owner rather than prefilling here. This used
+  // to call `composer.set` directly, which INVALIDATES retained-source
+  // authority — so the most visible reuse control silently dropped a print's
+  // private source media while the right-click item kept it. Owners route this
+  // through the same `reuseSettings` the context menu uses, which ships the
+  // full metadata AND the retained inventory.
+  emit("reuse");
 }
 
 async function copy(text: string) {

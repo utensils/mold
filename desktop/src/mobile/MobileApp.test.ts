@@ -8560,6 +8560,87 @@ describe("MobileApp gallery", () => {
     expect(wrapper.get("[data-test='mobile-host-health']").text()).toBe("reconnecting…");
   });
 
+  it("never tells a keyless host's text-to-image print to connect an API key", async () => {
+    // The reported bug: `mold run` on an open (keyless) remote host, then Reuse
+    // settings. The phone used to SYNTHESIZE `unavailable_auth` whenever it
+    // held no key for the host — but a keyless host is open by design, and a
+    // text-to-image print has no private source media to restore anyway. The
+    // host is asked (it is the authority), the shared probe reports a real 401
+    // itself, and an unavailable answer for a print that shipped no bytes is
+    // not disclosed.
+    invoke.mockImplementation(() => Promise.resolve(null));
+    apiFetchTo.mockImplementation((_callTarget: unknown, path: string) => {
+      if (String(path).startsWith("/api/gallery/source-media/")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ availability: "unavailable_legacy", members: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return Promise.reject(new Error("offline"));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer']").exists()).toBe(false),
+    );
+
+    const summary = wrapper.get("[data-test='mobile-generation-summary']").text();
+    expect(summary).toContain("Prompt settings restored");
+    expect(summary).not.toContain("API key");
+    expect(summary).not.toContain("Reattach");
+    expect(
+      apiFetchTo.mock.calls.some(([, path]) =>
+        String(path).startsWith("/api/gallery/source-media/"),
+      ),
+    ).toBe(true);
+  });
+
+  it("asks the host about a conditioned print and surfaces its own auth answer", async () => {
+    const conditioned = {
+      ...print,
+      metadata: { ...print.metadata, source_image_sha256: "a".repeat(64) },
+    };
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([conditioned]);
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return durableApiFallback(path, init, callTarget);
+    });
+    apiFetchTo.mockImplementation((_callTarget: unknown, path: string) => {
+      if (String(path).startsWith("/api/gallery/source-media/")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ availability: "unavailable_auth", members: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return Promise.reject(new Error("offline"));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer']").exists()).toBe(false),
+    );
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "Connect this machine with an API key",
+    );
+  });
+
   it("finishes Reuse from a media-bearing draft without self-cancelling", async () => {
     const conditioned = {
       ...print,

@@ -59,6 +59,11 @@ const { pushMock, replaceMock } = vi.hoisted(() => ({
   replaceMock: vi.fn(),
 }));
 const restoreSourceMock = vi.hoisted(() => vi.fn());
+const retainedInventoryMock = vi.hoisted(() => vi.fn());
+vi.mock("@studio/api/gallerySourceMedia", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/gallerySourceMedia")>()),
+  retainedSourceMediaInventory: retainedInventoryMock,
+}));
 const createFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
 const getFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
 const transitionFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
@@ -260,6 +265,9 @@ describe("LibraryPage", () => {
     for (const fn of Object.values(orgApi)) fn.mockClear();
     fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
     restoreSourceMock.mockReset().mockResolvedValue(null);
+    retainedInventoryMock
+      .mockReset()
+      .mockResolvedValue({ availability: "available", members: [] });
     createFramewiseUpscaleMock.mockReset().mockResolvedValue({
       id: "vup-gallery-1",
       state: "queued",
@@ -502,6 +510,57 @@ describe("LibraryPage", () => {
 
     expect(useGenerateForm().state.value.prompt).toBe("a wandering cat");
     expect(pushMock).toHaveBeenCalledWith({ name: "create" });
+  });
+
+  it("reuse stays quiet about an unavailable answer for a print that shipped none", async () => {
+    // The reported bug: a text-to-image print from a keyless remote host. Its
+    // archive entry resolves with no pins, which the server can only report
+    // as `unavailable_legacy` — and a keyless host used to answer
+    // `unavailable_auth` before even looking. The host is still asked (it is
+    // the authority on what it retained); the answer is just not toasted.
+    retainedInventoryMock.mockResolvedValue({
+      availability: "unavailable_legacy",
+      members: [],
+    });
+    const wrapper = await mounted();
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-reuse']").trigger("click");
+    await flushPromises();
+
+    expect(retainedInventoryMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ apiKey: null }),
+    );
+    expect(
+      useNotifications().toasts.some((toast) => toast.kind === "error"),
+    ).toBe(false);
+    expect(pushMock).toHaveBeenCalledWith({ name: "create" });
+  });
+
+  it("reuse asks the owning host about a conditioned print and relays its auth answer", async () => {
+    // The one case the "connect this machine with an API key" sentence is
+    // about: a host that enforces keys, reached with none.
+    const sourcePrint = {
+      ...cat,
+      metadata: { ...cat.metadata, source_image_sha256: "a".repeat(64) },
+    };
+    listGalleryMock.mockResolvedValue([sourcePrint]);
+    retainedInventoryMock.mockResolvedValue({
+      availability: "unavailable_auth",
+      members: [],
+    });
+    const wrapper = await mounted();
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-reuse']").trigger("click");
+    await flushPromises();
+
+    expect(retainedInventoryMock).toHaveBeenCalledWith(
+      "cat.png",
+      expect.objectContaining({ apiKey: null }),
+    );
+    expect(useNotifications().toasts.at(-1)?.text).toContain("API key");
   });
 
   it("reuse restores the selected model's family defaults", async () => {

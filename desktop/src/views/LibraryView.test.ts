@@ -8,6 +8,11 @@ const { apiFetchTo, localGalleryDelete, localGalleryList } = vi.hoisted(() => ({
   localGalleryDelete: vi.fn().mockResolvedValue(undefined),
   localGalleryList: vi.fn(),
 }));
+const retainedInventoryMock = vi.hoisted(() => vi.fn());
+vi.mock("@studio/api/gallerySourceMedia", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@studio/api/gallerySourceMedia")>();
+  return { ...actual, retainedSourceMediaInventory: retainedInventoryMock };
+});
 const createFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
 const getFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
 const transitionFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
@@ -61,6 +66,7 @@ vi.mock("../lib/ipc", () => ({
 import LibraryView from "./LibraryView.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
+import { useComposerStore } from "../stores/composer";
 import { useGalleryStore } from "../stores/gallery";
 import { useHostsStore } from "../stores/hosts";
 import { useGenerateFormStore } from "../stores/generateForm";
@@ -181,6 +187,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   apiFetchTo.mockResolvedValue(new Response());
+  retainedInventoryMock.mockResolvedValue({ availability: "available", members: [] });
   createFramewiseUpscaleMock.mockResolvedValue({
     id: "vup-desktop-1",
     state: "queued",
@@ -834,6 +841,161 @@ describe("LibraryView source reuse", () => {
     expect(document.querySelector("[data-test='upscale-error']")?.textContent).toContain(
       "Framewise upscale is unavailable on this machine",
     );
+    wrapper.unmount();
+  });
+});
+
+describe("LibraryView Reuse settings retained source media", () => {
+  const plato = { baseUrl: "http://plato:7680", apiKey: "secret" };
+
+  async function reuseFromContextMenu(wrapper: ReturnType<typeof mount>) {
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+    expect(tile).toBeDefined();
+    await tile!.trigger("contextmenu");
+    const menu = useContextMenuStore();
+    const entry = menu.entries.find(
+      (candidate) => !("separator" in candidate) && candidate.label === "Reuse settings",
+    )!;
+    expect(entry).toBeDefined();
+    menu.activate(entry);
+    await flushPromises();
+  }
+
+  it("stays quiet about an unavailable answer for a print that shipped no bytes", async () => {
+    // The reported bug: a text-to-image print rendered by the CLI on plato.
+    // Its archive entry resolves with no pins, which the server can only call
+    // `unavailable_legacy` — and on a keyless host it used to answer
+    // `unavailable_auth` before even looking. The host is still asked (it is
+    // the only authority on what it retained, and the metadata under-reports
+    // inline video/audio bytes), but neither answer is a toast this print
+    // deserves.
+    const t2i: GalleryImage = {
+      ...prints[0]!,
+      filename: "mold-flux2-dev-q8-1788282033839~thermalnuclear-explosion.png",
+      timestamp: 3,
+      metadata: { ...prints[0]!.metadata, seed: 9 },
+    };
+    const inventory = { availability: "unavailable_legacy" as const, members: [] };
+    retainedInventoryMock.mockResolvedValueOnce(inventory);
+    const { wrapper, router } = await mountView(t2i);
+    const toastsBefore = useToastStore().items.length;
+
+    await reuseFromContextMenu(wrapper);
+
+    expect(retainedInventoryMock).toHaveBeenCalledWith(t2i.filename, plato);
+    expect(useToastStore().items.length).toBe(toastsBefore);
+    expect(useComposerStore().prefill).toEqual({ metadata: t2i.metadata });
+    expect(useComposerStore().retainedSource?.inventory).toEqual(inventory);
+    expect(router.currentRoute.value.path).toBe("/create");
+    wrapper.unmount();
+  });
+
+  it("still restores retained media the metadata could not name", async () => {
+    // An inline source video leaves no `OutputMetadata` marker at all, yet the
+    // host retains it. Skipping the probe on missing markers would have lost it.
+    const v2v: GalleryImage = {
+      ...prints[0]!,
+      filename: "remote-v2v.mp4",
+      format: "mp4",
+      timestamp: 3,
+      metadata: { ...prints[0]!.metadata, seed: 9 },
+    };
+    const inventory = {
+      availability: "available" as const,
+      members: [
+        {
+          member_id: "v".repeat(64),
+          role: "source_video",
+          display_name: "clip.mp4",
+          size_bytes: 9,
+        },
+      ],
+    };
+    retainedInventoryMock.mockResolvedValueOnce(inventory);
+    const { wrapper } = await mountView(v2v);
+
+    await reuseFromContextMenu(wrapper);
+
+    expect(useComposerStore().retainedSource).toEqual({
+      filename: "remote-v2v.mp4",
+      origin: plato,
+      inventory,
+    });
+    wrapper.unmount();
+  });
+
+  it("attaches the origin host's retained inventory for an img2img print", async () => {
+    const img2img: GalleryImage = {
+      ...prints[0]!,
+      filename: "remote-img2img.png",
+      timestamp: 3,
+      metadata: { ...prints[0]!.metadata, seed: 9, source_image_sha256: "a".repeat(64) },
+    };
+    const inventory = {
+      availability: "available" as const,
+      members: [
+        { member_id: "m".repeat(64), role: "source_image", display_name: "cat.png", size_bytes: 3 },
+      ],
+    };
+    retainedInventoryMock.mockResolvedValueOnce(inventory);
+    const { wrapper } = await mountView(img2img);
+
+    await reuseFromContextMenu(wrapper);
+
+    expect(retainedInventoryMock).toHaveBeenCalledWith("remote-img2img.png", plato);
+    expect(useComposerStore().retainedSource).toEqual({
+      filename: "remote-img2img.png",
+      origin: plato,
+      inventory,
+    });
+    wrapper.unmount();
+  });
+
+  it("discloses the auth state when the origin host refuses the probe", async () => {
+    // The one case the "connect this machine with an API key" sentence is
+    // about: a host that enforces keys, reached with none. The shared probe
+    // maps that 401 to `unavailable_auth`; the view must surface it rather
+    // than swallow it.
+    const img2img: GalleryImage = {
+      ...prints[0]!,
+      filename: "remote-img2img.png",
+      timestamp: 3,
+      metadata: { ...prints[0]!.metadata, seed: 9, source_image_sha256: "a".repeat(64) },
+    };
+    retainedInventoryMock.mockResolvedValueOnce({ availability: "unavailable_auth", members: [] });
+    const { wrapper } = await mountView(img2img);
+
+    await reuseFromContextMenu(wrapper);
+
+    expect(useToastStore().items.at(-1)?.message).toContain("API key");
+    wrapper.unmount();
+  });
+
+  it("gives the Lightbox's primary button the same retained authority as the menu", async () => {
+    // It used to prefill through `composer.set`, which invalidates retained
+    // authority — the most visible reuse control silently dropped the
+    // print's private source media while the right-click item kept it.
+    const img2img: GalleryImage = {
+      ...prints[0]!,
+      filename: "remote-img2img.png",
+      timestamp: 3,
+      metadata: { ...prints[0]!.metadata, seed: 9, source_image_sha256: "a".repeat(64) },
+    };
+    const { wrapper, router } = await mountView(
+      img2img,
+      undefined,
+      "/library?print=remote-img2img.png",
+    );
+    const lightbox = wrapper.getComponent({ name: "Lightbox" });
+    expect(lightbox.props("item").filename).toBe("remote-img2img.png");
+
+    await lightbox.get("[data-test='lightbox-primary-action']").trigger("click");
+    await flushPromises();
+
+    expect(retainedInventoryMock).toHaveBeenCalledWith("remote-img2img.png", plato);
+    expect(useComposerStore().prefill).toEqual({ metadata: img2img.metadata });
+    expect(useComposerStore().retainedSource?.filename).toBe("remote-img2img.png");
+    expect(router.currentRoute.value.path).toBe("/create");
     wrapper.unmount();
   });
 });
