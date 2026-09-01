@@ -583,7 +583,13 @@ async function performVideoExport(options: VideoExportOptions) {
                     </button>
                   </template>
                   <template v-else>
-                    <button role="menuitem" @click="onUpscale">Upscale…</button>
+                    <button role="menuitem" @click="onUpscale">
+                      {{
+                        mediaKind(item.format, item.filename) === "video"
+                          ? "Framewise upscale…"
+                          : "Upscale…"
+                      }}
+                    </button>
                     <button
                       role="menuitem"
                       class="lb__menu-danger"
@@ -863,7 +869,9 @@ async function performVideoExport(options: VideoExportOptions) {
                   </button>
                 </template>
                 <template v-else>
-                  <button role="menuitem" @click="onUpscale">Upscale…</button>
+                  <button role="menuitem" @click="onUpscale">
+                    {{ isVideoFile ? "Framewise upscale…" : "Upscale…" }}
+                  </button>
                   <button
                     role="menuitem"
                     class="lb__menu-danger"

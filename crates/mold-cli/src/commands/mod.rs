@@ -34,3 +34,4 @@ pub mod trash;
 pub mod unload;
 pub mod update;
 pub mod upscale;
+pub mod video_upscale;

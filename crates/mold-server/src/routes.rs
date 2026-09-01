@@ -755,6 +755,30 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/upscale", post(upscale))
         .route("/api/upscale/stream", post(upscale_stream))
+        .route(
+            "/api/gallery/upscale",
+            post(crate::video_upscale::upscale_gallery_image),
+        )
+        .route(
+            "/api/video-upscale-jobs",
+            get(crate::video_upscale::list_jobs).post(crate::video_upscale::create_job),
+        )
+        .route(
+            "/api/video-upscale-jobs/:id",
+            get(crate::video_upscale::get_job).delete(crate::video_upscale::cancel_job),
+        )
+        .route(
+            "/api/video-upscale-jobs/:id/events",
+            get(crate::video_upscale::job_events),
+        )
+        .route(
+            "/api/video-upscale-jobs/:id/pause",
+            post(crate::video_upscale::pause_job),
+        )
+        .route(
+            "/api/video-upscale-jobs/:id/resume",
+            post(crate::video_upscale::resume_job),
+        )
         .route("/api/resources", get(get_resources))
         .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/events", get(stream_events))
@@ -2184,7 +2208,7 @@ pub(crate) fn release_host_memory_after_unload(state: &AppState) {
     );
 }
 
-async fn schedule_standalone_upscale(
+pub(crate) async fn schedule_standalone_upscale(
     state: &AppState,
     model: String,
     weights_path: std::path::PathBuf,
@@ -3804,11 +3828,7 @@ async fn upscale(
     // Auto-pull upscaler model if not downloaded
     let needs_pull = {
         let config = state.config.read().await;
-        config
-            .models
-            .get(&model_name)
-            .and_then(|c| c.transformer.as_ref())
-            .is_none()
+        model_manager::upscaler_model_needs_pull(&config, &model_name)
     };
     if needs_pull {
         if mold_core::manifest::find_manifest(&model_name).is_none() {
@@ -3890,11 +3910,7 @@ async fn upscale_stream(
     // Check if model needs pulling before spawning the SSE stream
     let needs_pull = {
         let config = state.config.read().await;
-        config
-            .models
-            .get(&model_name)
-            .and_then(|c| c.transformer.as_ref())
-            .is_none()
+        model_manager::upscaler_model_needs_pull(&config, &model_name)
     };
 
     // Validate the model exists in the manifest if we need to pull
@@ -7411,6 +7427,34 @@ async fn server_capabilities(
             heterogeneous_batch_max_outputs: readiness
                 .generation_admitted()
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
+        },
+        video_upscale: mold_core::VideoUpscaleCapabilities {
+            available: db_available
+                && !state.is_output_disabled(&config)
+                && state
+                    .generation_unavailable_reason
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_none(),
+            gallery_image: db_available
+                && !state.is_output_disabled(&config)
+                && state
+                    .generation_unavailable_reason
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_none(),
+            contract_version: mold_core::VIDEO_UPSCALE_CONTRACT_VERSION,
+            source_library: true,
+            source_upload: false,
+            input_containers: ["mp4", "mov", "webm"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            output_container: "mp4".into(),
+            preserves_primary_audio_when_compatible: true,
+            supports_vfr: false,
+            supports_hdr: false,
+            disclosure: mold_core::VIDEO_UPSCALE_DISCLOSURE.into(),
         },
         durable_media: readiness.advertised_media(),
         reference_uploads: mold_core::ReferenceUploadCapabilities {

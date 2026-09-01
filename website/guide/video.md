@@ -304,3 +304,20 @@ for LTX-2, 25 for LTX-Video) so clients do not have to hardcode one.
 A family with no chain path reports `false` with a
 `sequence_unsupported_reason`. `GET /api/models` carries the matching per-model
 `default_frames`, `default_fps`, `max_frames`, and `frame_step` fields.
+
+## Framewise upscale
+
+From Library, choose **Framewise upscale**, or run:
+
+```bash
+mold video-upscale create clip.mp4 --wait
+```
+
+This is spatial super-resolution with native Real-ESRGAN applied independently
+to each frame. It is durable, checkpointed, pausable, resumable, cancellable,
+and publishes a new gallery MP4 without replacing the source. It preserves and
+verifies constant FPS, frame count, duration, and a codec-compatible primary
+audio track. Temporal flicker may remain.
+
+The MVP rejects rather than discards VFR timing, HDR/high-bit-depth video,
+subtitles, chapters, multiple audio tracks, and incompatible audio codecs.

@@ -4791,7 +4791,16 @@ fn finish_generation_success(
     metadata.job_id = Some(job.id.clone());
     if let Some(video) = response.video.as_ref() {
         metadata.apply_video_output(video);
+        metadata.upscale_model = None;
     }
+    let video_upscale_model = response.video.as_ref().and_then(|_| {
+        job.request
+            .upscale_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(mold_core::manifest::resolve_model_name)
+    });
     let mut saved_names = crate::queue::SavedOutputNames::default();
     if let Some(ref dir) = job.output_dir {
         let _gallery_writer = job.gallery_publication_gate.blocking_write();
@@ -4859,6 +4868,28 @@ fn finish_generation_success(
                 events,
                 &job.gallery_publication_gate,
             );
+        }
+    }
+
+    // Persist the requested video follow-up before reporting generation
+    // success. Enqueue is deliberately metadata-only; the dispatcher performs
+    // the large source copy and probe away from this dedicated GPU owner.
+    if let (Some(model), Some(filename), Some(output_dir), Some(database)) = (
+        video_upscale_model,
+        saved_names.output.as_deref(),
+        job.output_dir.as_deref(),
+        job.metadata_db.as_ref().as_ref(),
+    ) {
+        if let Err(error) = crate::video_upscale::enqueue_gallery_video_job(
+            output_dir, database, filename, model, None,
+        ) {
+            let message = format!(
+                "video was published, but its requested Framewise upscale could not be queued: {}",
+                error.error
+            );
+            tracing::error!(job_id = %job.id, %message);
+            durable_generation_settlement::fail_blocking(job, DurableDisposition::Retain, message);
+            return;
         }
     }
 

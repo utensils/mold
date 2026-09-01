@@ -574,11 +574,11 @@ describe("buildRequest — post-generate upscale", () => {
     expect(buildRequest(form).upscale_model).toBe("real-esrgan-x4plus");
   });
 
-  it("never ships upscale_model for video families", () => {
+  it("ships upscale_model for durable Framewise video post-processing", () => {
     const form = ltx2Form();
     form.prompt = "a ship";
     form.upscaleModel = "real-esrgan-x4plus";
-    expect(buildRequest(form).upscale_model).toBeUndefined();
+    expect(buildRequest(form).upscale_model).toBe("real-esrgan-x4plus");
   });
 });
 

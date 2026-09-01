@@ -138,6 +138,16 @@ curl -X POST http://localhost:7680/api/upscale \
   -d '{"model": "real-esrgan-x4plus:fp16", "image": "<base64>"}'
 ```
 
+The web, desktop, and mobile Library surfaces expose the same operation from
+both the tile context menu and full-media/info view. Existing images publish a
+new Library image through `POST /api/gallery/upscale`; upscaler weights download
+automatically on first use.
+
+For video generation, the same Advanced upscaler picker publishes the original
+clip first and then queues a durable Framewise job. It continues without the UI
+remaining open and can be paused, resumed, or cancelled. See
+[Framewise video upscale](/guide/video#framewise-upscale) for media limits.
+
 ## Environment Variables
 
 | Variable                 | Default                   | Description            |

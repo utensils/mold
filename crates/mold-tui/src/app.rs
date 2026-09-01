@@ -160,6 +160,8 @@ pub enum BackgroundEvent {
         original_height: u32,
         upscale_time_ms: u64,
     },
+    /// Durable Framewise video-upscale state from the owning host.
+    FramewiseUpscaleStatus(mold_core::VideoUpscaleJob),
     /// Upscale failed.
     UpscaleFailed(String),
     /// Periodic server status update (remote resource info).
@@ -1242,7 +1244,6 @@ pub(crate) fn normalize_generate_params_for_family(params: &mut GenerateParams, 
     params.spatial_upscale = None;
     params.temporal_upscale = None;
     params.guidance_overrides = Ltx2GuidanceOverrides::default();
-    params.upscale_model = None;
 }
 
 /// What the Negative editor shows on cold start (#787 round 2). `App::new`
@@ -2206,6 +2207,31 @@ fn wait_for_server_health(url: &str, timeout_secs: u64) -> bool {
     false
 }
 
+fn recoverable_framewise_upscale(
+    jobs: &[mold_core::VideoUpscaleJob],
+    filename: &str,
+    model: &str,
+) -> Option<mold_core::VideoUpscaleJob> {
+    jobs.iter()
+        .filter(|job| {
+            job.model == model
+                && matches!(
+                    job.state,
+                    mold_core::VideoUpscaleJobState::Queued
+                        | mold_core::VideoUpscaleJobState::Running
+                        | mold_core::VideoUpscaleJobState::Finalizing
+                        | mold_core::VideoUpscaleJobState::Paused
+                )
+                && matches!(
+                    &job.source,
+                    mold_core::VideoUpscaleSource::Library { filename: source }
+                        if source == filename
+                )
+        })
+        .max_by_key(|job| job.updated_at_ms)
+        .cloned()
+}
+
 impl App {
     pub fn new(host: Option<String>, local: bool, picker: Picker) -> Result<Self> {
         Self::new_with_launch_policy(
@@ -3015,6 +3041,72 @@ impl App {
         let server_host_id = route.url.as_ref().map(|_| route.host_id.clone());
         let config = self.config.clone();
         let source_path = entry.path.clone();
+
+        if crate::gallery_scan::is_video_filename(&entry.filename()) {
+            let filename = entry.filename();
+            let handle = self.tokio_handle.spawn(async move {
+                let Some(url) = server_url else {
+                    let _ = tx.send(BackgroundEvent::UpscaleFailed(
+                        "Framewise video upscale requires a running Mold server".into(),
+                    ));
+                    return;
+                };
+                let api_key = server_host_id
+                    .as_deref()
+                    .and_then(crate::hosts::api_key_for);
+                let client = crate::hosts::client_for(&url, api_key.as_deref());
+                let request = mold_core::CreateVideoUpscaleJobRequest {
+                    source: mold_core::VideoUpscaleSource::Library {
+                        filename: filename.clone(),
+                    },
+                    model: model_name,
+                    tile_size: None,
+                };
+                let recoverable = match client.list_video_upscale_jobs().await {
+                    Ok(jobs) => recoverable_framewise_upscale(&jobs, &filename, &request.model),
+                    Err(error) => {
+                        let _ = tx.send(BackgroundEvent::UpscaleFailed(error.to_string()));
+                        return;
+                    }
+                };
+                let mut job = match recoverable {
+                    Some(job) if job.state == mold_core::VideoUpscaleJobState::Paused => {
+                        match client.transition_video_upscale_job(&job.id, "resume").await {
+                            Ok(job) => job,
+                            Err(error) => {
+                                let _ = tx.send(BackgroundEvent::UpscaleFailed(error.to_string()));
+                                return;
+                            }
+                        }
+                    }
+                    Some(job) => job,
+                    None => match client.create_video_upscale_job(&request).await {
+                        Ok(job) => job,
+                        Err(error) => {
+                            let _ = tx.send(BackgroundEvent::UpscaleFailed(error.to_string()));
+                            return;
+                        }
+                    },
+                };
+                let id = job.id.clone();
+                let _ = tx.send(BackgroundEvent::FramewiseUpscaleStatus(job.clone()));
+                while !job.state.is_terminal() {
+                    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                    match client.get_video_upscale_job(&id).await {
+                        Ok(next) => {
+                            job = next;
+                            let _ = tx.send(BackgroundEvent::FramewiseUpscaleStatus(job.clone()));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(BackgroundEvent::UpscaleFailed(error.to_string()));
+                            return;
+                        }
+                    }
+                }
+            });
+            self.upscale_task = Some(handle);
+            return;
+        }
 
         let handle = self.tokio_handle.spawn(async move {
             // Read image bytes
@@ -9096,6 +9188,51 @@ impl App {
                         .await
                         .ok();
                     });
+                }
+                BackgroundEvent::FramewiseUpscaleStatus(job) => {
+                    self.upscale_tile_progress = (job.total_frames > 0)
+                        .then_some((job.completed_frames as usize, job.total_frames as usize));
+                    self.upscale_progress.current_stage = Some(match job.state {
+                        mold_core::VideoUpscaleJobState::Queued => {
+                            "Framewise upscale queued".into()
+                        }
+                        mold_core::VideoUpscaleJobState::Running => format!(
+                            "Framewise upscale {}/{} frames",
+                            job.completed_frames, job.total_frames
+                        ),
+                        mold_core::VideoUpscaleJobState::Finalizing => {
+                            "Finalizing Framewise upscale".into()
+                        }
+                        mold_core::VideoUpscaleJobState::Paused => {
+                            "Framewise upscale paused".into()
+                        }
+                        mold_core::VideoUpscaleJobState::Completed => {
+                            "Framewise upscale complete".into()
+                        }
+                        mold_core::VideoUpscaleJobState::Failed => job
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Framewise upscale failed".into()),
+                        mold_core::VideoUpscaleJobState::Cancelled => {
+                            "Framewise upscale cancelled".into()
+                        }
+                    });
+                    if job.state.is_terminal() {
+                        self.upscale_in_progress = false;
+                        self.upscale_task = None;
+                        if job.state == mold_core::VideoUpscaleJobState::Completed {
+                            self.generate.progress.push_log(ProgressLogEntry {
+                                message: format!(
+                                    "Framewise upscale complete: {}",
+                                    job.output_filename
+                                        .as_deref()
+                                        .unwrap_or("new Library video")
+                                ),
+                                style: ProgressStyle::Done,
+                            });
+                            self.spawn_gallery_scan();
+                        }
+                    }
                 }
                 BackgroundEvent::UpscaleFailed(msg) => {
                     self.upscale_in_progress = false;
@@ -15354,6 +15491,56 @@ mod tests {
         // There should be 7 upscaler models in the manifest
         assert_eq!(models.len(), 7);
         assert!(models.iter().all(|n| !n.is_empty()));
+    }
+
+    #[test]
+    fn framewise_picker_recovers_latest_paused_job_for_the_selected_video() {
+        let job = |id: &str, filename: &str, state, updated_at_ms| mold_core::VideoUpscaleJob {
+            contract_version: mold_core::VIDEO_UPSCALE_CONTRACT_VERSION,
+            id: id.into(),
+            state,
+            source: mold_core::VideoUpscaleSource::Library {
+                filename: filename.into(),
+            },
+            model: "real-esrgan-x4plus:fp16".into(),
+            scale_factor: 4,
+            tile_size: None,
+            completed_frames: 0,
+            total_frames: 0,
+            source_facts: None,
+            output_facts: None,
+            output_filename: None,
+            error: None,
+            created_at_ms: 1,
+            updated_at_ms,
+            disclosure: mold_core::VIDEO_UPSCALE_DISCLOSURE.into(),
+        };
+        let jobs = vec![
+            job(
+                "older",
+                "clip.mp4",
+                mold_core::VideoUpscaleJobState::Running,
+                2,
+            ),
+            job(
+                "recovered",
+                "clip.mp4",
+                mold_core::VideoUpscaleJobState::Paused,
+                3,
+            ),
+            job(
+                "other",
+                "other.mp4",
+                mold_core::VideoUpscaleJobState::Paused,
+                4,
+            ),
+        ];
+        assert_eq!(
+            recoverable_framewise_upscale(&jobs, "clip.mp4", "real-esrgan-x4plus:fp16")
+                .unwrap()
+                .id,
+            "recovered"
+        );
     }
 
     #[test]

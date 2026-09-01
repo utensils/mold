@@ -2435,7 +2435,6 @@ fn validate_request_contract_with_authorities(
         || req.ic_lora_control.is_some()
         || req.hdr_exr_dir.is_some()
         || req.hdr_exr_full_float
-        || req.upscale_model.is_some()
         || req.spatial_upscale.is_some()
         || req.temporal_upscale.is_some()
         || req.guidance_overrides.is_some()
@@ -2443,7 +2442,7 @@ fn validate_request_contract_with_authorities(
     {
         return Err(violation(
             "MINIMAX_H3_FOREIGN_PIPELINE_FIELD",
-            "MiniMax H3 does not accept mask, ControlNet, CFG+, LoRA, LTX-2 pipeline, HDR, post/upscale-stage, extend-overlap, or guidance-override fields",
+            "MiniMax H3 does not accept mask, ControlNet, CFG+, LoRA, LTX-2 pipeline, HDR, latent upscale-stage, extend-overlap, or guidance-override fields",
         ));
     }
     if req.source_image.is_none() && !media.source_image && req.source_image_name.is_some() {
@@ -3806,14 +3805,8 @@ mod tests {
 
         req.strength = 1.0;
         req.upscale_model = Some("real-esrgan-x4plus:fp16".into());
-        assert_eq!(
-            validate_request_contract(&req, Task::Fl2va)
-                .unwrap_err()
-                .code,
-            "MINIMAX_H3_FOREIGN_PIPELINE_FIELD"
-        );
+        assert!(validate_request_contract(&req, Task::Fl2va).is_ok());
 
-        req.upscale_model = None;
         req.control_scale = 0.5;
         assert_eq!(
             validate_request_contract(&req, Task::Fl2va)

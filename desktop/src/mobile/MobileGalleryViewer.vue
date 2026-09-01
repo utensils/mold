@@ -74,6 +74,8 @@ const props = withDefaults(
     organizationError?: string;
     tagSuggestions?: TagCount[];
     collections?: MobileCollectionCard[];
+    /** The owning host can accept an upscale request for this saved print. */
+    upscaleEnabled?: boolean;
   }>(),
   {
     reusing: false,
@@ -94,6 +96,7 @@ const props = withDefaults(
     organizationError: "",
     tagSuggestions: () => [],
     collections: () => [],
+    upscaleEnabled: true,
   },
 );
 
@@ -103,6 +106,7 @@ const emit = defineEmits<{
   previous: [];
   next: [];
   "use-source": [];
+  upscale: [];
   rename: [title: string | null];
   favorite: [favorite: boolean];
   tags: [change: { add?: string[]; remove?: string[] }];
@@ -801,6 +805,15 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="gallery-viewer-actions">
+        <button
+          v-if="upscaleEnabled && !audio && !mesh && !trashed"
+          class="secondary-button gallery-viewer-upscale"
+          type="button"
+          data-test="gallery-viewer-upscale"
+          @click="emit('upscale')"
+        >
+          {{ video ? "Framewise upscale…" : "Upscale…" }}
+        </button>
         <button
           v-if="canSaveVideo"
           class="secondary-button gallery-viewer-save"

@@ -70,5 +70,11 @@ photo from the device stash; if the bytes are gone, Create reports that miss
 inline instead of silently using another face. Saved metadata never contains
 the photo bytes.
 
+Library selection and the full-media viewer offer **Upscale…** for images and
+**Framewise upscale…** for videos. Video generation exposes the same upscaler
+picker, and the completed-media viewer can queue it after the original is
+published. Real-ESRGAN weights download on first use; durable video jobs can be
+paused, resumed, or cancelled, and temporal flicker may remain.
+
 See [Identity Photos (PuLID)](/guide/generating#identity-photos-pulid) for model
 requirements, limits, and the one-time InsightFace license acceptance.

@@ -299,6 +299,7 @@ describe("AdvancedDrawer section ordering contract", () => {
     expect(sectionIds(factory("ltx2", {}, gpus))).toEqual([
       "negative",
       "lora",
+      "upscale",
       "output",
       "video",
       "placement",
@@ -388,11 +389,9 @@ describe("AdvancedDrawer capability matrix", () => {
     expect(sections("ltx2").video).toBe(true);
   });
 
-  it("offers post-generate upscale for stills but not for video", () => {
-    // The server skips the post-upscaler whenever the response is a video
-    // (queue.rs), so the section must not pretend otherwise.
+  it("offers post-generate upscale for stills and Framewise video output", () => {
     expect(sections("flux").upscale).toBe(true);
-    expect(sections("ltx2").upscale).toBe(false);
+    expect(sections("ltx2").upscale).toBe(true);
   });
 
   it("shows GPU placement only when GPUs are reported", () => {

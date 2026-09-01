@@ -171,7 +171,7 @@ pub(crate) fn titled_output_filename(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn save_image_to_dir_with_suffix(
+pub(crate) fn save_image_to_dir_with_suffix(
     dir: &std::path::Path,
     img: &mold_core::ImageData,
     model: &str,
@@ -771,6 +771,124 @@ pub(crate) fn save_video_to_dir_named(
     Ok(filename.to_string())
 }
 
+/// Publish an already-encoded video without materializing the whole file in
+/// memory. The staged file must share the gallery filesystem; framewise video
+/// jobs deliberately stage beneath the output directory to guarantee that.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_video_path_to_dir_named(
+    dir: &std::path::Path,
+    filename: &str,
+    staged: &std::path::Path,
+    format: OutputFormat,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+) -> anyhow::Result<String> {
+    let filename_path = std::path::Path::new(filename);
+    anyhow::ensure!(
+        filename_path.components().count() == 1
+            && matches!(
+                filename_path.components().next(),
+                Some(std::path::Component::Normal(_))
+            ),
+        "gallery filename must be one normal path component"
+    );
+    std::fs::create_dir_all(dir)?;
+    let authority = crate::batch_transaction::acquire_gallery_bookkeeping_lock(dir)?;
+    let path = dir.join(filename);
+    let created = match std::fs::hard_link(staged, &path) {
+        Ok(()) => {
+            crate::batch_transaction::sync_ordinary_gallery_directory(dir)?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            fn digest(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
+                use std::io::Read as _;
+                let mut file = std::fs::File::open(path)?;
+                let mut hash = Sha256::new();
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let read = file.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..read]);
+                }
+                Ok(hash.finalize().into())
+            }
+            anyhow::ensure!(
+                digest(&path)? == digest(staged)?,
+                "gallery replay target '{}' exists with different bytes",
+                path.display()
+            );
+            false
+        }
+        Err(error) => return Err(error).context("linking staged video into gallery"),
+    };
+    let params = mold_db::persist::OutputRecordParams {
+        format,
+        metadata,
+        source: RecordSource::Server,
+        generation_time_ms,
+        backend: Some(mold_inference::compiled_backend_label()),
+    };
+    let index = gallery_gate.committed_archive_index_while_locked(dir, &authority)?;
+    let record = if let Some(existing) = index.get(filename) {
+        anyhow::ensure!(
+            existing.record().format == format
+                && existing.record().metadata == *metadata
+                && !existing.record().metadata_synthetic,
+            "gallery replay target '{}' exists with different archived metadata",
+            path.display()
+        );
+        existing.record().clone()
+    } else {
+        let record = mold_db::persist::build_saved_output_record(dir, filename, &path, &params);
+        match crate::batch_transaction::archive_ordinary_gallery_record(
+            dir,
+            &path,
+            record,
+            gallery_gate,
+            &authority,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                if created {
+                    let _ = std::fs::remove_file(&path);
+                    let _ = crate::batch_transaction::sync_ordinary_gallery_directory(dir);
+                }
+                return Err(error).context("archiving framewise upscale publication");
+            }
+        }
+    };
+    drop(authority);
+    let seeded = db
+        .map(|db| {
+            db.upsert_reporting_organization(&record)
+                .context("recording framewise upscale gallery metadata")
+        })
+        .transpose()?
+        .map(|(_, seeded)| seeded);
+    if let Some(events) = events {
+        let seeded_filing = seeded.as_ref().is_some_and(|seeded| !seeded.is_empty());
+        let image_row = Some(Box::new(gallery_image_with_filing(
+            &record,
+            seeded.as_ref(),
+        )));
+        let announced = image_row.clone();
+        events.publish(mold_core::ServerEvent::GalleryAdded {
+            filename: filename.to_string(),
+            image: image_row,
+        });
+        if seeded_filing {
+            announce_seeded_filing(events, filename, announced);
+        }
+    }
+    Ok(filename.to_string())
+}
+
 fn write_gallery_bytes_no_replace(
     dir: &std::path::Path,
     desired: &str,
@@ -1031,7 +1149,7 @@ fn post_upscale_model_to_pull(
         return Ok(None);
     };
     let model_name = mold_core::manifest::resolve_model_name(requested);
-    if model_manager::configured_upscaler_weights_exist(config, &model_name) {
+    if !model_manager::upscaler_model_needs_pull(config, &model_name) {
         return Ok(None);
     }
     if mold_core::manifest::find_manifest(&model_name).is_none() {
@@ -2394,7 +2512,13 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             metadata.job_id = Some(job.id.clone());
             if let Some(video) = response.video.as_ref() {
                 metadata.apply_video_output(video);
+                // The source print is not itself upscaled. Its requested
+                // model becomes authority for the durable follow-up below.
+                metadata.upscale_model = None;
             }
+            let video_upscale_model = response.video.as_ref().and_then(|_| {
+                requested_post_upscale_model(&request).map(mold_core::manifest::resolve_model_name)
+            });
             let mut saved_names = SavedOutputNames::default();
             if let Some(ref dir) = job.output_dir {
                 let _gallery_writer = state.gallery_publication_gate.write().await;
@@ -2496,13 +2620,36 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 saved_names = save_task.await.unwrap_or_default();
             }
 
+            drop(request);
+            // Persist the requested video follow-up before reporting the
+            // generation successful. Preparation itself runs on the blocking
+            // pool from the Framewise dispatcher.
+            if let (Some(model), Some(filename)) = (video_upscale_model, saved_names.output.clone())
+            {
+                if let Err(error) =
+                    crate::video_upscale::create_generated_video_job(state, filename, model).await
+                {
+                    let message = format!(
+                        "video was published, but its requested Framewise upscale could not be queued: {}",
+                        error.error
+                    );
+                    tracing::error!(job_id = %job.id, %message);
+                    durable_generation_settlement::fail_async(
+                        job,
+                        DurableDisposition::Retain,
+                        message,
+                    )
+                    .await;
+                    return;
+                }
+            }
+
             // Settle the durable row on what actually reached the gallery,
             // mirroring the GPU worker. Left to the ticket's ordinary drop,
             // a render finishing during shutdown would keep its row behind the
             // retention fence and replay into a duplicate print; and a failed
             // publication would delete the row, losing a replayed job outright
             // since the gallery file is its only delivery.
-            drop(request);
             let job_id = job.id.clone();
             let output_dir = job.output_dir.clone();
             let gallery_gate = state.gallery_publication_gate.clone();

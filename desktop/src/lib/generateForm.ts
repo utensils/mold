@@ -1082,8 +1082,11 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
 
   if (caps.supportsLora && loras.length) req.loras = loras;
 
-  // Post-generate upscale is image-only (the server skips it for video).
-  if (!caps.supportsVideo && form.upscaleModel) req.upscale_model = form.upscaleModel;
+  // Video requests use this same model selection to queue a durable
+  // Framewise upscale after the source clip is published.
+  if ((!caps.supportsAudio || caps.supportsVideo) && form.upscaleModel) {
+    req.upscale_model = form.upscaleModel;
+  }
 
   if (caps.supportsVideo) {
     if (!(form.predictDuration && form.durationPredictionSupported)) {

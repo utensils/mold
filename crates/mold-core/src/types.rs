@@ -1508,7 +1508,8 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
     /// Upscaler model to apply after generation (e.g. "real-esrgan-x4plus:fp16").
-    /// When set, each generated image is upscaled before being returned.
+    /// Images are upscaled before return; videos queue a durable Framewise
+    /// upscale after the original clip reaches the Library.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upscale_model: Option<String>,
     /// Request a GIF preview alongside the primary video output.
@@ -10038,6 +10039,9 @@ pub struct ServerCapabilities {
     /// of their responses working (can_pause = can_cancel_all = false).
     #[serde(default)]
     pub queue: QueueCapabilities,
+    /// Durable native per-frame Real-ESRGAN video processing.
+    #[serde(default)]
+    pub video_upscale: VideoUpscaleCapabilities,
     /// Restart-safe encrypted request-media support for the durable queue.
     /// Absence means unavailable; servers must keep this dark until the full
     /// admission, reconciliation, hydration, and cleanup lifecycle is live.
@@ -10102,6 +10106,24 @@ pub struct MeshCapabilities {
     /// only, which is a materially different product and must not be
     /// discovered by a user after waiting for a render.
     pub textures: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoUpscaleCapabilities {
+    pub available: bool,
+    /// Server-side Gallery image publication endpoint. Absent/false on older
+    /// hosts, whose clients must retain the legacy upscale-stream fallback.
+    #[serde(default)]
+    pub gallery_image: bool,
+    pub contract_version: u32,
+    pub source_library: bool,
+    pub source_upload: bool,
+    pub input_containers: Vec<String>,
+    pub output_container: String,
+    pub preserves_primary_audio_when_compatible: bool,
+    pub supports_vfr: bool,
+    pub supports_hdr: bool,
+    pub disclosure: String,
 }
 
 /// Why a host cannot admit a particular set of requests.

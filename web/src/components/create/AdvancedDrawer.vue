@@ -250,10 +250,11 @@ const showScheduler = computed(
 );
 const showPlacement = computed(() => props.placementGpus.length > 0);
 
-// Post-generate upscale applies to stills only — the server skips the
-// upscaler whenever the response is a video (`queue.rs`), so video families
-// never see the section.
-const showUpscale = computed(() => !caps.value.supportsVideo);
+// Native upscalers apply directly to stills and queue a durable Framewise
+// upscale after video publication. Audio-only families have no raster frames.
+const showUpscale = computed(
+  () => !caps.value.supportsAudio || caps.value.supportsVideo,
+);
 
 // The Scheduler type permits parameterized object variants; the drawer only
 // surfaces the named string schedulers.

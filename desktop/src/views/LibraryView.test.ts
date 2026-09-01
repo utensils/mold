@@ -8,6 +8,17 @@ const { apiFetchTo, localGalleryDelete, localGalleryList } = vi.hoisted(() => ({
   localGalleryDelete: vi.fn().mockResolvedValue(undefined),
   localGalleryList: vi.fn(),
 }));
+const createFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+const getFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+const transitionFramewiseUpscaleMock = vi.hoisted(() => vi.fn());
+const upscaleLibraryImageMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@studio/api/videoUpscale", () => ({
+  createFramewiseUpscale: createFramewiseUpscaleMock,
+  getFramewiseUpscale: getFramewiseUpscaleMock,
+  transitionFramewiseUpscale: transitionFramewiseUpscaleMock,
+  upscaleLibraryImage: upscaleLibraryImageMock,
+}));
 
 vi.mock("@tanstack/vue-virtual", () => ({
   useVirtualizer: (options: { value: { count: number } }) => ({
@@ -98,6 +109,7 @@ async function mountView(
   remotePrint?: GalleryImage,
   seed?: (gallery: ReturnType<typeof useGalleryStore>) => void,
   route = "/library",
+  localServer = false,
 ) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -111,8 +123,10 @@ async function mountView(
   const pinia = createPinia();
   setActivePinia(pinia);
   const connection = useConnectionStore();
-  connection.info = null;
-  connection.status = "error";
+  connection.info = localServer
+    ? { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" }
+    : null;
+  connection.status = localServer ? "ready" : "error";
   const gallery = useGalleryStore();
   gallery.buckets.local = {
     items: [...prints],
@@ -138,9 +152,14 @@ async function mountView(
     };
   }
   seed?.(gallery);
+  if (localServer) {
+    useHostsStore().capabilities.local = {
+      video_upscale: { available: true },
+    } as never;
+  }
   localGalleryList.mockResolvedValue({
     images: [...(gallery.buckets.local?.items ?? prints)],
-    target: null,
+    target: localServer ? { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" } : null,
   });
 
   const wrapper = mount(LibraryView, {
@@ -162,6 +181,22 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   apiFetchTo.mockResolvedValue(new Response());
+  createFramewiseUpscaleMock.mockResolvedValue({
+    id: "vup-desktop-1",
+    state: "queued",
+    completed_frames: 0,
+    total_frames: 1,
+    disclosure:
+      "Framewise upscale processes each frame independently; temporal flicker may remain.",
+  });
+  getFramewiseUpscaleMock.mockResolvedValue({
+    id: "vup-desktop-1",
+    state: "failed",
+    completed_frames: 0,
+    total_frames: 1,
+    error: "test stop",
+    disclosure: "Framewise upscale",
+  });
 });
 
 describe("LibraryView session scroll", () => {
@@ -528,6 +563,42 @@ describe("LibraryView source reuse", () => {
     });
     expect(router.currentRoute.value.path).toBe("/create");
     expect(useToastStore().items.at(-1)?.message).toBe("Loaded as source video");
+    wrapper.unmount();
+  });
+
+  it("queues an existing local Library video from its context menu", async () => {
+    const video = {
+      ...prints[0]!,
+      filename: "existing-clip.mp4",
+      format: "mp4",
+    } as GalleryImage;
+    const { wrapper } = await mountView(
+      undefined,
+      (gallery) => {
+        gallery.buckets.local!.items = [video];
+      },
+      "/library",
+      true,
+    );
+
+    await wrapper.get(".ms-lib-tile").trigger("contextmenu");
+    const upscale = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Framewise upscale",
+    );
+    expect(upscale).toMatchObject({ disabled: false });
+    useContextMenuStore().activate(upscale!);
+    await flushPromises();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      "existing-clip.mp4",
+      "real-esrgan-x4plus:fp16",
+    );
+    expect(useToastStore().items.at(-1)?.message).toContain(
+      "Framewise upscale queued (vup-desktop-1)",
+    );
     wrapper.unmount();
   });
 });

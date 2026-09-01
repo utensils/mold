@@ -88,6 +88,7 @@ mod signals;
 pub mod state;
 pub mod thumbnails;
 pub mod variant_dependencies;
+pub mod video_upscale;
 mod wan_admission;
 pub mod web_ui;
 // The arcstats parser and credit policy are pure and unit-tested on every
@@ -1256,6 +1257,12 @@ pub async fn run_server(
 
     // The /metrics endpoint is mounted outside the auth/rate-limit stack so it
     // is always accessible for monitoring scrapers (Prometheus, Grafana Agent, etc.).
+    // Recovery belongs to the server lifecycle, not router construction.
+    // Tests and in-process callers may construct a router while deliberately
+    // holding SQLite; doing recovery there would synchronously deadlock before
+    // the request future could be spawned. Keep the dispatcher handle so the
+    // server can prove it no longer owns background polling at shutdown.
+    let video_upscale_dispatcher = video_upscale::recover_at_startup(&state);
     #[allow(unused_mut)]
     let mut app = routes::create_router(state)
         .merge(web_ui::router())
@@ -1388,6 +1395,9 @@ pub async fn run_server(
     downloads_shutdown.cancel();
     downloads_driver.abort();
     let _ = downloads_driver.await;
+    if let Some(runtime) = video_upscale_dispatcher {
+        runtime.shutdown().await;
+    }
     if let Some(handle) = idle_evict_handle {
         handle.abort();
         let _ = handle.await;

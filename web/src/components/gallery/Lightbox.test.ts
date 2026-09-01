@@ -210,6 +210,16 @@ describe("Lightbox (desktop two-pane)", () => {
     );
   });
 
+  it("labels and emits Framewise upscale for an existing video", async () => {
+    const video = { ...item, filename: "existing-clip.mp4", format: "mp4" };
+    const wrapper = mountWide({ item: video });
+    await wrapper.find(".lb__morebtn").trigger("click");
+    const upscale = wrapper.findAll(".lb__menu button")[0]!;
+    expect(upscale.text()).toBe("Framewise upscale…");
+    await upscale.trigger("click");
+    expect(wrapper.emitted("upscale")?.[0]?.[0]).toEqual(video);
+  });
+
   it("disables navigation at the ends", () => {
     const wrapper = mountWide({ hasPrev: false, hasNext: false });
     expect(

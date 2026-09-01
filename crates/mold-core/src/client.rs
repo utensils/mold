@@ -2261,6 +2261,62 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Admit a durable Framewise upscale job. Source media remains server-side.
+    pub async fn create_video_upscale_job(
+        &self,
+        req: &crate::CreateVideoUpscaleJobRequest,
+    ) -> Result<crate::VideoUpscaleJob> {
+        Ok(self
+            .client
+            .post(format!("{}/api/video-upscale-jobs", self.base_url))
+            .json(req)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn list_video_upscale_jobs(&self) -> Result<Vec<crate::VideoUpscaleJob>> {
+        Ok(self
+            .client
+            .get(format!("{}/api/video-upscale-jobs", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn get_video_upscale_job(&self, id: &str) -> Result<crate::VideoUpscaleJob> {
+        Ok(self
+            .client
+            .get(format!("{}/api/video-upscale-jobs/{id}", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn transition_video_upscale_job(
+        &self,
+        id: &str,
+        action: &str,
+    ) -> Result<crate::VideoUpscaleJob> {
+        let request = match action {
+            "cancel" => self
+                .client
+                .delete(format!("{}/api/video-upscale-jobs/{id}", self.base_url)),
+            "pause" | "resume" => self.client.post(format!(
+                "{}/api/video-upscale-jobs/{id}/{action}",
+                self.base_url
+            )),
+            _ => anyhow::bail!("unknown framewise upscale action {action:?}"),
+        };
+        Ok(request.send().await?.error_for_status()?.json().await?)
+    }
+
     /// Upscale an image via SSE streaming -- progress events are sent to `progress_tx`,
     /// returns the final `UpscaleResponse` on success.
     pub async fn upscale_stream(

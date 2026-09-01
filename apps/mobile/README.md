@@ -199,9 +199,12 @@ pushed screen opened from the header.
   as a new draft (raising any clip duration the selected model's motion tail no
   longer allows, and saying so); iPhone is reuse-only — **Edit sequence** stays
   a desktop/web action until mobile has a chain-detail recovery route.
-  Generated stills open the same viewer on tap. Press and hold a Library image
+  Generated media opens the same viewer on tap. Press and hold a Library image
   to keep the native iOS Share, Save to Photos, Copy, Copy Subject, and Look Up
-  menu, plus **Select** to enter multi-select with that print selected.
+  menu, plus **Upscale…** (or **Framewise upscale…** for video) and **Select**.
+  Android and iOS selection mode exposes the same Upscale action when exactly
+  one image or video is selected. The just-generated media viewer is wired to
+  the same flow once the owning host has published the print.
   Pinch the grid to resize thumbnails between two and five across — the iPhone
   counterpart to the web/desktop thumbnail-size slider. The choice persists at
   `mold.mobile.galleryColumns.v1`, separately from the shared pixel-target key
@@ -226,7 +229,10 @@ pushed screen opened from the header.
   reachable saved hosts; a host failure leaves that copy visible and reports
   the partial cleanup.
   Persistent New badges match desktop Library visits, and post-generation
-  upscaled images carry the shared Upscaled badge.
+  upscaled images carry the shared Upscaled badge. The full-media viewer also
+  offers **Upscale…** for images and **Framewise upscale…** for videos through
+  the shared model/progress dialog, including first-use model download and
+  pause/resume/cancel for durable video jobs.
   Library organization (V3) rides each host's advertised
   `capabilities.gallery`: when a connected host advertises `organize` or
   `trash`, a 44pt **Prints | Collections | Trash** scope row (with counts)

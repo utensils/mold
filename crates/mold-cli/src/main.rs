@@ -772,6 +772,53 @@ pub enum QueueAction {
     Sweep,
 }
 
+#[derive(Subcommand)]
+enum VideoUpscaleAction {
+    /// Create a durable Framewise upscale from one Library video
+    Create {
+        #[arg(value_name = "LIBRARY-FILENAME")]
+        source: String,
+        #[arg(short, long, default_value = "real-esrgan-x4plus:fp16")]
+        model: String,
+        #[arg(long, env = "MOLD_UPSCALE_TILE_SIZE")]
+        tile_size: Option<u32>,
+        #[arg(long, env = "MOLD_HOST")]
+        host: Option<String>,
+        /// Follow the job through terminal publication
+        #[arg(long)]
+        wait: bool,
+    },
+    /// List durable Framewise upscale jobs
+    List {
+        #[arg(long, env = "MOLD_HOST")]
+        host: Option<String>,
+    },
+    /// Print one job as JSON
+    Status {
+        id: String,
+        #[arg(long, env = "MOLD_HOST")]
+        host: Option<String>,
+    },
+    /// Pause after the current frame boundary
+    Pause {
+        id: String,
+        #[arg(long, env = "MOLD_HOST")]
+        host: Option<String>,
+    },
+    /// Resume from the last completed frame checkpoint
+    Resume {
+        id: String,
+        #[arg(long, env = "MOLD_HOST")]
+        host: Option<String>,
+    },
+    /// Cancel without replacing or publishing source media
+    Cancel {
+        id: String,
+        #[arg(long, env = "MOLD_HOST")]
+        host: Option<String>,
+    },
+}
+
 #[derive(clap::Subcommand)]
 pub enum TrashAction {
     /// List trashed prints with their purge countdowns
@@ -2109,6 +2156,12 @@ Examples:
         preview: bool,
     },
 
+    /// Durable per-frame Real-ESRGAN video upscale; temporal flicker may remain
+    VideoUpscale {
+        #[command(subcommand)]
+        action: VideoUpscaleAction,
+    },
+
     Completions {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
         #[arg(add = ArgValueCandidates::new(complete_shell))]
@@ -3042,6 +3095,28 @@ async fn run() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Commands::VideoUpscale { action } => match action {
+            VideoUpscaleAction::Create {
+                source,
+                model,
+                tile_size,
+                host,
+                wait,
+            } => commands::video_upscale::create(source, model, tile_size, host, wait).await?,
+            VideoUpscaleAction::List { host } => commands::video_upscale::list(host).await?,
+            VideoUpscaleAction::Status { id, host } => {
+                commands::video_upscale::status(id, host).await?
+            }
+            VideoUpscaleAction::Pause { id, host } => {
+                commands::video_upscale::transition(id, "pause", host).await?
+            }
+            VideoUpscaleAction::Resume { id, host } => {
+                commands::video_upscale::transition(id, "resume", host).await?
+            }
+            VideoUpscaleAction::Cancel { id, host } => {
+                commands::video_upscale::transition(id, "cancel", host).await?
+            }
+        },
         Commands::Completions { shell } => {
             generate_completions(&shell)?;
         }

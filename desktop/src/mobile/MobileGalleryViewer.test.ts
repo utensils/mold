@@ -157,6 +157,23 @@ describe("MobileGalleryViewer", () => {
     expect(view.emitted("reuse")).toHaveLength(1);
   });
 
+  it("offers upscale for both stills and videos from the full-media viewer", async () => {
+    const view = mountViewer();
+    await flushPromises();
+
+    const stillUpscale = view.get("[data-test='gallery-viewer-upscale']");
+    expect(stillUpscale.text()).toBe("Upscale…");
+    await stillUpscale.trigger("click");
+    expect(view.emitted("upscale")).toHaveLength(1);
+
+    await view.setProps({ item: { ...image, filename: "clip.mp4", format: "mp4" } });
+    await flushPromises();
+    const videoUpscale = view.get("[data-test='gallery-viewer-upscale']");
+    expect(videoUpscale.text()).toBe("Framewise upscale…");
+    await videoUpscale.trigger("click");
+    expect(view.emitted("upscale")).toHaveLength(2);
+  });
+
   it("always allows dismissal while settings are loading", async () => {
     const view = mountViewer();
     await view.setProps({ reusing: true });
