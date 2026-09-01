@@ -58,6 +58,14 @@ pub(crate) struct WanShapeHint {
     /// (`crates/mold-inference/src/wan/pipeline.rs`), so a plain T2V request on
     /// a TI2V checkpoint runs the scalar path and must not be charged for it.
     pub(crate) latent_inpaint: bool,
+    /// Denoise steps the request asks for.
+    ///
+    /// Carried because it is half of what decides whether the step cache
+    /// engages, and so whether its retained tensors are charged (#1482). The
+    /// other half is the distill adapter, which lives on the checkpoint rather
+    /// than the request and is therefore an argument to
+    /// [`wan_activation_bytes`] instead of a field here.
+    pub(crate) steps: u32,
 }
 
 /// Frames the engine renders when the request omits them.
@@ -91,6 +99,7 @@ impl WanShapeHint {
             // is where the VAE generation is known; 0 marks "request omitted".
             frames: req.frames.unwrap_or(0),
             cfg: req.guidance > 1.0,
+            steps: req.steps,
             latent_inpaint: req.source_image.is_some()
                 || req
                     .keyframes
@@ -184,7 +193,11 @@ impl WanShapeHint {
 /// That is the expected shape of the result: slicing removed buffers the
 /// derived formula was already counting, rather than changing how much candle
 /// holds beyond what a hand-count sees.
-pub(crate) fn wan_activation_bytes(shape: WanShapeHint, geometry: WanActivationGeometry) -> u64 {
+pub(crate) fn wan_activation_bytes(
+    shape: WanShapeHint,
+    geometry: WanActivationGeometry,
+    distilled: bool,
+) -> u64 {
     // The checkpoint says whether per-token timesteps are *possible*; the
     // request says whether they happen.
     let geometry = WanActivationGeometry {
@@ -205,7 +218,17 @@ pub(crate) fn wan_activation_bytes(shape: WanShapeHint, geometry: WanActivationG
         frames,
         geometry,
         shape.cfg,
+        shape.steps,
+        distilled,
     )
+}
+
+/// Whether the checkpoint ships a distill adapter, for the step-cache charge.
+///
+/// Delegates to the engine's own predicate so admission and the denoise loop
+/// cannot disagree about whether the cache engages.
+pub(crate) fn wan_distill_is_active(paths: &ModelPaths) -> bool {
+    mold_inference::wan_distill_is_active(paths)
 }
 
 /// Shared UMT5-XXL fp16 encoder.
@@ -374,16 +397,110 @@ mod tests {
         );
     }
 
+    /// With the step cache engaged, CFG costs more than the bare CFG term:
+    /// the second trajectory keeps its own `previous_first_block` and `tail`
+    /// across the whole denoise.
+    ///
+    /// Pinned through admission's own entry point, because this is the arm
+    /// that decides whether a shape is feasible -- the engine-side arithmetic
+    /// is pinned in `device::the_step_cache_charge_is_exact_and_lands_after_the_slope`.
+    #[test]
+    fn cfg_charges_the_other_trajectorys_cache_when_it_engages() {
+        let geometry = WanActivationGeometry::a14b();
+        let hint = |guidance: f64| WanShapeHint::from_request(&request(832, 480, 53, guidance));
+
+        let bare_delta = wan_activation_bytes(hint(3.5), geometry, true)
+            - wan_activation_bytes(hint(1.0), geometry, true);
+        assert_eq!(bare_delta, mold_inference::device::WAN_CFG_RESIDENT_BYTES);
+
+        // Explicit threshold rather than the process env: `off` is the
+        // documented escape hatch, and a developer with it exported must not
+        // silently turn this into a vacuous assertion.
+        let charge = |cfg: bool| {
+            mold_inference::device::wan_step_cache_bytes_for(
+                832,
+                480,
+                53,
+                geometry,
+                cfg,
+                20,
+                false,
+                Some(0.10),
+            )
+        };
+        assert!(
+            charge(true) > charge(false),
+            "an engaged cache must make CFG cost more, not the same: {} against {}",
+            charge(true),
+            charge(false)
+        );
+    }
+
+    /// The 5B quality tier is the one shape the default flip actually moves in
+    /// production, so pin what it costs rather than only pricing it cache-off.
+    #[test]
+    fn the_five_b_quality_tier_is_priced_under_the_real_default() {
+        let geometry = WanActivationGeometry::ti2v_5b();
+        let hint = WanShapeHint::from_request(&request(1280, 704, 121, 5.0));
+
+        let cache_off = wan_activation_bytes(hint, geometry, MEASURED_WITH_CACHE_OFF);
+        let charged = cache_off
+            + mold_inference::device::wan_step_cache_bytes_for(
+                1280,
+                704,
+                121,
+                geometry,
+                true,
+                20,
+                false,
+                Some(0.10),
+            );
+
+        const MEASURED: u64 = 18_794 * 1024 * 1024;
+        let ceiling = MEASURED / 100 * 115;
+        // QuantStack Q8_0 5B transformer + the 2.2 VAE, matching the weights
+        // column of this shape's row in `every_measured_point_lands_within_fifteen_percent`.
+        let weights = 5_400_179_040u64 + 500_000_000;
+        let predicted = weights.max(WAN_UMT5_FP16_BYTES) + charged;
+
+        assert!(
+            charged > cache_off,
+            "the default engages the cache on this tier, so it must cost more"
+        );
+        assert!(
+            predicted <= ceiling,
+            "pricing the 5B quality tier under the real default must stay inside \
+             the band its measurement is held to: {predicted} against {ceiling}"
+        );
+    }
+
+    /// Every measured point in this module was captured with the step cache
+    /// OFF, so each is priced with the charge suppressed.
+    ///
+    /// `true` is the mechanism, not the reason. Three of the four points are
+    /// `wan22-t2v-a14b:q5`, a 4-step Lightning distill tier that genuinely
+    /// refuses the cache. The fourth -- "TI2V-5B q8 121f CFG on" -- is
+    /// `wan22-ti2v-5b:q8`, a NON-distilled 20-step quality tier that DOES
+    /// engage the cache under the default; it is priced cache-off here because
+    /// that is how it was measured, and
+    /// `the_five_b_quality_tier_is_priced_under_the_real_default` pins what it
+    /// actually costs in production.
+    const MEASURED_WITH_CACHE_OFF: bool = true;
+
     #[test]
     fn frames_move_the_estimate() {
         let geometry = WanActivationGeometry::a14b();
+        // Not distilled, and the fixture runs 20 steps, so this also covers
+        // the shape scaling with the step cache engaged.
         let short = wan_activation_bytes(
             WanShapeHint::from_request(&request(832, 480, 17, 1.0)),
             geometry,
+            false,
         );
         let long = wan_activation_bytes(
             WanShapeHint::from_request(&request(832, 480, 81, 1.0)),
             geometry,
+            false,
         );
         assert!(
             long > short,
@@ -396,13 +513,18 @@ mod tests {
         // Measured: +512 MiB on the 1.3B reference shape, against a working
         // set of ~2 GB. A multiplier would reject shapes that demonstrably run.
         let geometry = WanActivationGeometry::a14b();
+        // Cache off, so this isolates the CFG term itself. Its interaction
+        // with the cache -- CFG retains the other trajectory's pair too -- is
+        // pinned separately below.
         let without = wan_activation_bytes(
             WanShapeHint::from_request(&request(832, 480, 53, 1.0)),
             geometry,
+            MEASURED_WITH_CACHE_OFF,
         );
         let with = wan_activation_bytes(
             WanShapeHint::from_request(&request(832, 480, 53, 3.5)),
             geometry,
+            MEASURED_WITH_CACHE_OFF,
         );
         assert_eq!(
             with - without,
@@ -508,6 +630,7 @@ mod tests {
                         point.guidance,
                     )),
                     point.geometry,
+                    MEASURED_WITH_CACHE_OFF,
                 );
             let low = measured * 85 / 100;
             let high = measured * 115 / 100;
@@ -541,6 +664,7 @@ mod tests {
                 + wan_activation_bytes(
                     WanShapeHint::from_request(&request(832, 480, frames, 3.5)),
                     geometry,
+                    MEASURED_WITH_CACHE_OFF,
                 )
         };
         assert!(
@@ -619,17 +743,19 @@ mod tests {
         let hint = WanShapeHint::from_request(&omitted);
 
         // 2.1 fills 81, 2.2 fills 121 — not one latent frame.
-        let a14b = wan_activation_bytes(hint, WanActivationGeometry::a14b());
+        let a14b = wan_activation_bytes(hint, WanActivationGeometry::a14b(), false);
         let explicit_81 = wan_activation_bytes(
             WanShapeHint::from_request(&request(832, 480, 81, 3.5)),
             WanActivationGeometry::a14b(),
+            false,
         );
         assert_eq!(a14b, explicit_81);
 
-        let ti2v = wan_activation_bytes(hint, WanActivationGeometry::ti2v_5b());
+        let ti2v = wan_activation_bytes(hint, WanActivationGeometry::ti2v_5b(), false);
         let explicit_121 = wan_activation_bytes(
             WanShapeHint::from_request(&request(832, 480, 121, 3.5)),
             WanActivationGeometry::ti2v_5b(),
+            false,
         );
         assert_eq!(ti2v, explicit_121);
 
@@ -638,6 +764,7 @@ mod tests {
         let single = wan_activation_bytes(
             WanShapeHint::from_request(&request(832, 480, 1, 3.5)),
             WanActivationGeometry::a14b(),
+            false,
         );
         assert!(single < a14b);
     }

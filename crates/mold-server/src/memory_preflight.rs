@@ -1521,11 +1521,16 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     let wan_geometry = hint
         .filter(|h| h.family == ActivationFamily::WanVideo)
         .and_then(|_| crate::wan_admission::checkpoint_geometry_cached(paths));
+    // Derived here, beside the geometry, because this is where `paths` is in
+    // scope. A distill adapter refuses the step cache, so it decides whether
+    // the cache's retained tensors are charged (#1482).
+    let wan_distilled = crate::wan_admission::wan_distill_is_active(paths);
     let activation = request_sensitive_activation_memory_with_wan_geometry(
         req,
         hint,
         qwen_quantized,
         wan_geometry,
+        wan_distilled,
         projection,
     );
     let conservative_block_offload = server_offload_enabled_for_paths_with_request(
@@ -1605,6 +1610,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 hint,
                 qwen_quantized,
                 wan_geometry,
+                wan_distilled,
                 projection,
             );
             (base_peak.saturating_add(activation), activation)
@@ -1730,7 +1736,14 @@ fn request_sensitive_activation_memory(
     hint: Option<ActivationHint>,
     qwen_quantized: bool,
 ) -> u64 {
-    request_sensitive_activation_memory_with_wan_geometry(req, hint, qwen_quantized, None, None)
+    request_sensitive_activation_memory_with_wan_geometry(
+        req,
+        hint,
+        qwen_quantized,
+        None,
+        false,
+        None,
+    )
 }
 
 /// As [`request_sensitive_activation_memory`], with the wan checkpoint's real
@@ -1784,11 +1797,13 @@ fn wan_transformer_can_park(paths: &ModelPaths) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn request_sensitive_activation_memory_with_wan_geometry(
     req: &GenerateRequest,
     hint: Option<ActivationHint>,
     qwen_quantized: bool,
     wan_geometry: Option<mold_inference::device::WanActivationGeometry>,
+    wan_distilled: bool,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> u64 {
     let batch = u64::from(req.batch_size.max(1));
@@ -1816,6 +1831,7 @@ fn request_sensitive_activation_memory_with_wan_geometry(
         crate::wan_admission::wan_activation_bytes(
             crate::wan_admission::WanShapeHint::from_request_with_projection(req, projection),
             wan_geometry.unwrap_or_else(mold_inference::device::WanActivationGeometry::a14b),
+            wan_distilled,
         )
     } else if hint.is_some_and(|h| h.family == ActivationFamily::Hunyuan3dShape) {
         // A mesh has no canvas, so the pixel-area estimate would price every
@@ -1994,13 +2010,14 @@ mod fail_closed_tests {
         let hint = Some(hint(ActivationFamily::Flux2Dit));
         assert_eq!(
             request_sensitive_activation_memory_with_wan_geometry(
-                &hydrated, hint, false, None, None,
+                &hydrated, hint, false, None, false, None,
             ),
             request_sensitive_activation_memory_with_wan_geometry(
                 &sanitized,
                 hint,
                 false,
                 None,
+                false,
                 Some(&projection),
             )
         );
@@ -2020,13 +2037,14 @@ mod fail_closed_tests {
         unreadable.edit_images = vec![ProjectedImageDimensions::UnreadableHeader];
         assert_eq!(
             request_sensitive_activation_memory_with_wan_geometry(
-                &hydrated, hint, false, None, None,
+                &hydrated, hint, false, None, false, None,
             ),
             request_sensitive_activation_memory_with_wan_geometry(
                 &sanitized,
                 hint,
                 false,
                 None,
+                false,
                 Some(&unreadable),
             )
         );
