@@ -380,7 +380,13 @@ and the stop hint are omitted: those describe a local process, and Mold never
 answers a question about a selected remote host with this machine's state. An
 unreachable host is an error (exit 1), not "No server running".
 
-A loopback host on the managed daemon's own port keeps the local reading.
+Only the managed daemon's own address keeps the PID reading. A loopback host
+on any other port is a server you named explicitly, so it is probed over HTTP
+too — if nothing answers there, Mold also lists any unmanaged `mold serve`
+processes on this machine, since that is the usual explanation.
+
+An API key from `MOLD_API_KEY` is sent with the status read, so a server with
+authentication enabled reports normally instead of looking unreachable.
 
 ## `mold server discover`
 

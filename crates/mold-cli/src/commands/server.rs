@@ -270,7 +270,14 @@ pub(crate) enum StatusTarget {
     LocalManaged,
     /// Report on an explicitly named server over HTTP. There is no PID or log
     /// path to print: those are facts about another machine's process.
-    Remote(String),
+    Remote {
+        url: String,
+        /// The URL names this machine, so when nothing answers there the
+        /// local process scan can still explain why — an unmanaged `mold
+        /// serve` is the usual reason. Never set for another host: that would
+        /// answer a question about `plato` with facts about this laptop.
+        local_fallback: bool,
+    },
 }
 
 /// `--host` / `MOLD_HOST` names the server the user is asking about, but the
@@ -278,57 +285,92 @@ pub(crate) enum StatusTarget {
 /// mapping, `MOLD_HOST=plato mold server status` answered "No server running"
 /// about a host it never contacted.
 ///
-/// A loopback target keeps the local reading (same server, and the PID/logs/
-/// stop lines are worth having) — including when no daemon is managed, so the
-/// unmanaged-process scan still runs. A loopback target on a *different* port
-/// than the managed daemon is someone else's server: probe it over HTTP.
+/// Only the managed daemon's own address keeps the PID reading: a loopback
+/// host on any other port is a server the user selected explicitly, and
+/// answering it from the PID file (or from a process scan) reports on
+/// something they did not ask about. Such a target is still *this* machine,
+/// so an unreachable one may fall back to the local process scan.
 pub(crate) fn status_target(host: Option<&str>, managed_port: Option<u16>) -> StatusTarget {
     let Some(host) = host.map(str::trim).filter(|host| !host.is_empty()) else {
         return StatusTarget::LocalManaged;
     };
     let url = mold_core::client::normalize_host(host);
-    let loopback_same_port = reqwest::Url::parse(&url).is_ok_and(|parsed| {
-        let is_loopback = matches!(
-            parsed.host_str(),
-            Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
-        );
-        let same_port = managed_port.is_none_or(|port| parsed.port() == Some(port));
-        is_loopback && same_port
-    });
-    if loopback_same_port {
+    let loopback = crate::control::is_loopback_host(&url);
+    let selected_port = reqwest::Url::parse(&url)
+        .ok()
+        .and_then(|parsed| parsed.port());
+    if loopback && managed_port.is_some() && selected_port == managed_port {
         StatusTarget::LocalManaged
     } else {
-        StatusTarget::Remote(url)
+        StatusTarget::Remote {
+            url,
+            local_fallback: loopback,
+        }
     }
 }
 
 pub async fn run_status(host: Option<String>) -> Result<()> {
     let managed = read_pid_file();
     match status_target(host.as_deref(), managed.as_ref().map(|srv| srv.port)) {
-        StatusTarget::Remote(url) => run_status_remote(&url).await,
+        StatusTarget::Remote {
+            url,
+            local_fallback,
+        } => {
+            if !report_remote_status(&url).await {
+                eprintln!("No server responding at {url}");
+                if local_fallback {
+                    report_unmanaged_processes();
+                }
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         StatusTarget::LocalManaged => run_status_local(managed).await,
     }
 }
 
-async fn run_status_remote(url: &str) -> Result<()> {
-    let client = mold_core::MoldClient::new(url);
-    match client.server_status().await {
-        Ok(status) => {
-            eprintln!("Server running at {url}");
-            print_status_details(&client, &status).await;
-            Ok(())
-        }
-        Err(_) => {
-            eprintln!("No server responding at {url}");
-            std::process::exit(1);
-        }
+/// Read one server's status over HTTP and print it. Returns whether the
+/// server answered — the caller owns the failure message and the exit code,
+/// so this stays testable.
+async fn report_remote_status(url: &str) -> bool {
+    // `client_for_host` is the CLI's one authenticated construction path: a
+    // server with an API key answers `/api/status` with 401 to an anonymous
+    // client, which would read here as "nothing is running".
+    let client = crate::control::client_for_host(Some(url));
+    let Ok(status) = client.server_status().await else {
+        return false;
+    };
+    eprintln!("Server running at {url}");
+    print_status_details(&client, &status).await;
+    true
+}
+
+/// Print any `mold serve` processes on this machine that `mold server start`
+/// is not managing. Returns whether it printed any — an unmanaged server is
+/// the usual reason a local port answers (or fails to) unexpectedly.
+fn report_unmanaged_processes() -> bool {
+    let procs = procinfo::find_mold_processes();
+    let serve_procs: Vec<_> = procs.iter().filter(|p| p.subcommand == "serve").collect();
+    if serve_procs.is_empty() {
+        return false;
     }
+    eprintln!("No managed server found, but detected unmanaged mold processes:");
+    for p in &serve_procs {
+        eprintln!(
+            "  PID {} — mold serve {} ({:.0}s)",
+            p.pid,
+            p.args.join(" "),
+            p.run_time_secs
+        );
+    }
+    eprintln!("\nThese were not started with 'mold server start'.");
+    true
 }
 
 async fn run_status_local(managed: Option<ManagedServer>) -> Result<()> {
     match managed {
         Some(srv) => {
-            let client = mold_core::MoldClient::new(&srv.base_url());
+            let client = crate::control::client_for_host(Some(&srv.base_url()));
             match client.server_status().await {
                 Ok(status) => {
                     eprintln!("Server running (PID {})", srv.pid);
@@ -344,22 +386,8 @@ async fn run_status_local(managed: Option<ManagedServer>) -> Result<()> {
             }
         }
         None => {
-            // Check for unmanaged mold processes
-            let procs = procinfo::find_mold_processes();
-            let serve_procs: Vec<_> = procs.iter().filter(|p| p.subcommand == "serve").collect();
-            if serve_procs.is_empty() {
+            if !report_unmanaged_processes() {
                 eprintln!("No server running");
-            } else {
-                eprintln!("No managed server found, but detected unmanaged mold processes:");
-                for p in &serve_procs {
-                    eprintln!(
-                        "  PID {} — mold serve {} ({:.0}s)",
-                        p.pid,
-                        p.args.join(" "),
-                        p.run_time_secs
-                    );
-                }
-                eprintln!("\nThese were not started with 'mold server start'.");
             }
             std::process::exit(1);
         }
@@ -605,40 +633,115 @@ mod tests {
         assert_eq!(status_target(Some("  "), None), StatusTarget::LocalManaged);
     }
 
+    fn remote(url: &str, local_fallback: bool) -> StatusTarget {
+        StatusTarget::Remote {
+            url: url.into(),
+            local_fallback,
+        }
+    }
+
     #[test]
     fn an_explicit_remote_host_is_probed_over_http() {
         assert_eq!(
             status_target(Some("plato"), None),
-            StatusTarget::Remote("http://plato:7680".into())
+            remote("http://plato:7680", false)
         );
         assert_eq!(
             status_target(Some("http://plato:7680"), Some(7680)),
-            StatusTarget::Remote("http://plato:7680".into())
+            remote("http://plato:7680", false)
         );
         assert_eq!(
             status_target(Some("plato:8080"), None),
-            StatusTarget::Remote("http://plato:8080".into())
+            remote("http://plato:8080", false)
         );
     }
 
     #[test]
-    fn a_loopback_host_keeps_the_local_pid_reading() {
+    fn the_managed_daemons_own_address_keeps_the_local_pid_reading() {
         assert_eq!(
             status_target(Some("http://localhost:7680"), Some(7680)),
             StatusTarget::LocalManaged
         );
         assert_eq!(
-            status_target(Some("127.0.0.1"), None),
+            status_target(Some("127.0.0.1"), Some(7680)),
             StatusTarget::LocalManaged
         );
     }
 
+    /// A loopback port the managed daemon does not own — or one selected when
+    /// no daemon is managed at all — is a server the user named explicitly.
+    /// Probe it; only the fallback when it does not answer is local.
     #[test]
-    fn a_loopback_host_on_another_port_is_not_the_managed_daemon() {
+    fn a_loopback_host_that_is_not_the_managed_daemon_is_still_probed() {
         assert_eq!(
             status_target(Some("localhost:9999"), Some(7680)),
-            StatusTarget::Remote("http://localhost:9999".into())
+            remote("http://localhost:9999", true)
         );
+        assert_eq!(
+            status_target(Some("localhost:9999"), None),
+            remote("http://localhost:9999", true)
+        );
+        assert_eq!(
+            status_target(Some("127.0.0.1"), None),
+            remote("http://127.0.0.1:7680", true)
+        );
+    }
+
+    /// A server with an API key answers `/api/status` with 401 to an
+    /// anonymous client. Building the status client without the configured
+    /// key therefore reported a healthy authenticated server as unreachable.
+    /// Synchronous with an explicit runtime: `ENV_LOCK` is a std mutex, and
+    /// holding its guard across an `.await` is what `clippy::await_holding_lock`
+    /// forbids. The env must stay set for the whole probe, so the runtime lives
+    /// inside the lock instead.
+    #[test]
+    fn a_remote_status_read_sends_the_configured_api_key() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (authenticated, anonymous) = runtime.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/status"))
+                .and(header("x-api-key", "sekrit"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "version": "0.26.0",
+                    "uptime_secs": 12,
+                    "models_loaded": [],
+                    "busy": false,
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/status"))
+                .respond_with(ResponseTemplate::new(401))
+                .mount(&server)
+                .await;
+
+            let previous = std::env::var("MOLD_API_KEY").ok();
+            std::env::set_var("MOLD_API_KEY", "sekrit");
+            let authenticated = report_remote_status(&server.uri()).await;
+            std::env::remove_var("MOLD_API_KEY");
+            let anonymous = report_remote_status(&server.uri()).await;
+            match previous {
+                Some(value) => std::env::set_var("MOLD_API_KEY", value),
+                None => std::env::remove_var("MOLD_API_KEY"),
+            }
+            (authenticated, anonymous)
+        });
+
+        assert!(
+            authenticated,
+            "the configured API key must reach /api/status"
+        );
+        assert!(!anonymous, "a 401 is not a running server");
     }
 
     #[test]
