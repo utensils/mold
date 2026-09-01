@@ -1581,14 +1581,18 @@ pub async fn run(
             crate::output::colorize_description(desc)
         );
     }
-    // Show truncated prompt so the user can confirm their input
-    let display_prompt = if prompt.chars().count() > 60 {
-        let truncated: String = prompt.chars().take(57).collect();
-        format!("{truncated}...")
-    } else {
-        prompt.to_string()
-    };
-    status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
+    // Show truncated prompt so the user can confirm their input. A family
+    // whose profile ignores the prompt runs with none, and echoing `""` would
+    // read as a mistake, so an empty prompt prints nothing.
+    if !prompt.is_empty() {
+        let display_prompt = if prompt.chars().count() > 60 {
+            let truncated: String = prompt.chars().take(57).collect();
+            format!("{truncated}...")
+        } else {
+            prompt.to_string()
+        };
+        status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
+    }
     if !guidance_caps.adjustable {
         status!(
             "{} Distilled recipe fixes CFG at 1.0 and does not use negative-prompt guidance; choose a Dev checkpoint with Auto or a guided pipeline to adjust it",
