@@ -1233,9 +1233,16 @@ fn is_ltx2_frame_count(n: u32) -> bool {
 ///   frames (the leading `motion_tail_frames` are dropped at stitch time
 ///   because they duplicate the prior stage's latent tail).
 ///
-/// Returns enough stages so the stitched total reaches at least
-/// `total_frames`; over-production is trimmed from the tail at stitch time
-/// per the signed-off decision 2026-04-20.
+/// The LAST stage is exact-fitted to the request (#1509): nothing trims the
+/// stitched video afterwards, so a full-clip last stage renders — and the
+/// user pays GPU time for — up to a whole clip of frames nobody asked for
+/// (`--frames 145` on a 121-frame clip rendered 241). The lattice closes by
+/// construction for canonical inputs (`total ≡ clip ≡ tail ≡ 1` on the
+/// family's `step·k+1` grid), so the fit is exact there; when it cannot
+/// close (a zero motion tail, an off-grid total) the last stage takes the
+/// smallest on-grid length that still covers the request, bounding the
+/// overshoot by the grid step instead of a clip. Callers disclose any
+/// residual difference via [`ChainRequest::estimated_total_frames`].
 fn build_auto_expand_stages(
     prompt: &str,
     total_frames: u32,
@@ -1244,7 +1251,7 @@ fn build_auto_expand_stages(
     source_image: Option<Vec<u8>>,
     family: Option<&str>,
 ) -> Result<Vec<ChainStage>> {
-    let (stage_count, per_stage_frames) = if total_frames <= clip_frames {
+    let (stage_count, last_stage_frames) = if total_frames <= clip_frames {
         // Single stage: match the user's requested length exactly so we
         // don't render 97 frames and throw most of them away. The frame
         // count will still be validated as 8k+1 by the caller.
@@ -1255,7 +1262,20 @@ fn build_auto_expand_stages(
         // motion_tail_frames < clip_frames.
         let remainder = total_frames - clip_frames;
         let count = 1 + remainder.div_ceil(effective);
-        (count, clip_frames)
+        // Exact-fit the last stage. Every earlier stage is a full clip, so
+        // the last must deliver `total - delivered_before_last` new frames
+        // on top of the `motion_tail_frames` it re-renders for the seam.
+        let delivered_before_last = clip_frames + (count - 2) * effective;
+        let needed = motion_tail_frames + (total_frames - delivered_before_last);
+        // Snap up to the family's `step·k+1` frame grid. For canonical
+        // inputs `needed` is already on it and the snap is the identity;
+        // `needed <= clip_frames` and the round-up never passes the next
+        // grid point, so the last stage never exceeds the clip envelope.
+        let step = family
+            .and_then(crate::validation::frame_step_for_family)
+            .unwrap_or(8);
+        let last = needed + (step + 1 - needed % step) % step;
+        (count, last)
     };
 
     let count_usize = stage_count as usize;
@@ -1284,9 +1304,14 @@ fn build_auto_expand_stages(
         } else {
             source_image.clone()
         };
+        let frames = if idx + 1 == stage_count {
+            last_stage_frames
+        } else {
+            clip_frames
+        };
         stages.push(ChainStage {
             prompt: prompt.to_string(),
-            frames: per_stage_frames,
+            frames,
             source_image: stage_source,
             negative_prompt: None,
             seed_offset: None,
@@ -1532,20 +1557,27 @@ mod tests {
     #[test]
     fn normalise_splits_single_prompt_into_stages() {
         // total=400, clip=97, tail=9 → effective=88, remainder=303,
-        // N = 1 + ceil(303/88) = 1 + 4 = 5 stages of 97 frames each.
-        // Stitched = 97 + 4*88 = 449, which will be trimmed to 400 at
-        // stitch time (per the signed-off "trim from tail" decision).
+        // N = 1 + ceil(303/88) = 1 + 4 = 5 stages. The last stage is
+        // exact-fitted (#1509): the first four deliver 97 + 3*88 = 361, so
+        // it needs 9 + 39 = 48 frames — off the 8k+1 grid, so it rounds up
+        // to 49 and the stitched total is 401, one frame over the (equally
+        // off-grid) request instead of a full clip's 48.
         let normalised = auto_expand_request("a cat walking", 400, 97, 9, None)
             .normalise()
             .expect("normalise should succeed");
 
         assert_eq!(
-            normalised.stages.len(),
-            5,
-            "400/97 with a 9-frame motion tail should expand to 5 stages",
+            normalised
+                .stages
+                .iter()
+                .map(|stage| stage.frames)
+                .collect::<Vec<_>>(),
+            vec![97, 97, 97, 97, 49],
+            "400/97 with a 9-frame motion tail should expand to 5 stages \
+             with an exact-fitted last stage",
         );
+        assert_eq!(normalised.estimated_total_frames(), 401);
         for stage in &normalised.stages {
-            assert_eq!(stage.frames, 97);
             assert_eq!(stage.prompt, "a cat walking");
             assert!(stage.seed_offset.is_none());
         }
@@ -1554,6 +1586,95 @@ mod tests {
         assert!(normalised.total_frames.is_none());
         assert!(normalised.clip_frames.is_none());
         assert!(normalised.source_image.is_none());
+    }
+
+    /// #1509: an auto-expanded chain delivers the requested total EXACTLY
+    /// when the lattice closes — the last stage shrinks instead of rendering
+    /// a full clip of undisclosed extra frames.
+    #[test]
+    fn auto_expand_exact_fits_the_last_stage_to_the_requested_total() {
+        // LTX: total=145, clip=97, tail=17 → the last stage needs
+        // 17 + (145 - 97) = 65 (8k+1 ✓), so the chain is [97, 65] and the
+        // stitch is 97 + 48 = 145 — not the [97, 97] → 177 it used to be.
+        let normalised = auto_expand_request("a cat walking", 145, 97, 17, None)
+            .normalise()
+            .expect("normalise should succeed");
+        assert_eq!(
+            normalised
+                .stages
+                .iter()
+                .map(|stage| stage.frames)
+                .collect::<Vec<_>>(),
+            vec![97, 65],
+        );
+        assert_eq!(normalised.estimated_total_frames(), 145);
+    }
+
+    /// The issue's own repro (#1509): wan22-ti2v-5b at `--frames 145`
+    /// rendered 241 frames because both stages took the full 121-frame clip.
+    /// Wan's lattice closes on its `4k+1` grid with the 1-frame handoff, so
+    /// the fit must be exact there too.
+    #[test]
+    fn auto_expand_exact_fits_wan_totals_on_the_4k1_grid() {
+        let mut request = auto_expand_request("waves on a beach", 145, 121, 1, None);
+        request.model = "hf:opaque-wan-i2v".into();
+        request.width = 832;
+        request.height = 480;
+        let normalised = request
+            .normalise_with_family(Some("wan"))
+            .expect("wan auto-expand should succeed");
+        assert_eq!(
+            normalised
+                .stages
+                .iter()
+                .map(|stage| stage.frames)
+                .collect::<Vec<_>>(),
+            vec![121, 25],
+        );
+        assert_eq!(normalised.estimated_total_frames(), 145);
+
+        // Multi-continuation: 201 @ clip 73 / tail 1 → [73, 73, 57],
+        // 73 + 72 + 56 = 201 (was [73, 73, 73] → 219, +9%).
+        let mut request = auto_expand_request("waves on a beach", 201, 73, 1, None);
+        request.model = "hf:opaque-wan-i2v".into();
+        request.width = 832;
+        request.height = 480;
+        let normalised = request
+            .normalise_with_family(Some("wan"))
+            .expect("wan auto-expand should succeed");
+        assert_eq!(
+            normalised
+                .stages
+                .iter()
+                .map(|stage| stage.frames)
+                .collect::<Vec<_>>(),
+            vec![73, 73, 57],
+        );
+        assert_eq!(normalised.estimated_total_frames(), 201);
+    }
+
+    /// A layout the lattice cannot close (a zero motion tail makes every
+    /// stitched total ≡ stage-count (mod 8), so most totals are unreachable)
+    /// still shrinks the last stage to the smallest on-grid clip covering
+    /// the request: the overshoot is bounded by the grid step, not by a
+    /// whole clip.
+    #[test]
+    fn auto_expand_bounds_overshoot_by_the_grid_step_when_the_lattice_cannot_close() {
+        // tail 0: the last stage needs 150 - 97 = 53 frames, which is off
+        // the 8k+1 grid; it rounds up to 57 → [97, 57] delivering 154.
+        // Four extra frames, not the 44 of a full 97-frame stage.
+        let normalised = auto_expand_request("x", 150, 97, 0, None)
+            .normalise()
+            .expect("normalise should succeed");
+        assert_eq!(
+            normalised
+                .stages
+                .iter()
+                .map(|stage| stage.frames)
+                .collect::<Vec<_>>(),
+            vec![97, 57],
+        );
+        assert_eq!(normalised.estimated_total_frames(), 154);
     }
 
     #[test]

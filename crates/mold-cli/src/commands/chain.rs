@@ -289,12 +289,18 @@ pub struct ChainInputs {
 /// the HDR sidecar path that requires this, no stage rendering past the end
 /// of the reference video.
 ///
+/// Since #1509 `ChainRequest::normalise` already exact-fits the auto-expanded
+/// last stage, so on the canonical inputs this pass is an idempotent no-op
+/// that re-derives the same value. It stays on the HDR path as the hard
+/// guarantee: where normalise rounds a non-closing lattice UP to the grid
+/// (bounded overshoot, fine for an ordinary render), the sidecar cannot
+/// tolerate any overshoot at all, so those inputs are refused here with the
+/// arithmetic in the message rather than silently re-shaped.
+///
 /// The 8k+1 lattice closes by construction for canonical inputs: `total ≡ 1`,
 /// stage 0 delivers `clip ≡ 1`, each full continuation delivers
 /// `clip − tail ≡ 0`, and `tail ≡ 1 (mod 8)`, so the remainder-plus-tail last
-/// stage is `≡ 1 (mod 8)`. Inputs where the lattice does not close (a
-/// zero motion tail, an off-grid total) are refused with the arithmetic in
-/// the message rather than silently re-shaped.
+/// stage is `≡ 1 (mod 8)`.
 pub(crate) fn exact_fit_last_stage_for_sidecar(
     req: &mut ChainRequest,
     total_frames: u32,
@@ -2421,10 +2427,11 @@ mod tests {
         assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
     }
 
-    /// 121 total @ clip 97 / tail 17: auto-expand plans [97, 97] and
-    /// overshoots to 177; the sidecar path shrinks the last stage to 41 so
-    /// the stitch delivers exactly 121 — `97 + (41 − 17) = 121` — and no
-    /// stage renders past the reference video's end.
+    /// 121 total @ clip 97 / tail 17: auto-expand exact-fits the last stage
+    /// at normalise time (#1509), so the plan is already [97, 41] —
+    /// `97 + (41 − 17) = 121` — and the sidecar pass is an idempotent
+    /// no-op that re-derives the same value, guaranteeing no stage renders
+    /// past the reference video's end.
     #[test]
     fn exact_fit_shrinks_the_last_stage_to_the_requested_total() {
         let mut req = ChainRequest {
@@ -2460,7 +2467,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             req.stages.iter().map(|s| s.frames).collect::<Vec<_>>(),
-            vec![97, 97],
+            vec![97, 41],
         );
 
         exact_fit_last_stage_for_sidecar(&mut req, 121).unwrap();

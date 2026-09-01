@@ -1237,9 +1237,10 @@ mold run wan22-t2v-a14b:fp8 "storm waves crash over the lighthouse"
 mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 # Q8_0 5B reaches smaller cards
 mold run wan22-ti2v-5b:q8 "waves on a black sand beach" --width 1280 --height 704
-# Sequences: past the per-clip envelope this auto-chains and stitches one MP4.
+# Sequences: past the per-clip envelope this auto-chains and stitches one MP4
+# delivering exactly the requested total (keep --frames on the 4k+1 grid).
 # The seam continues only on an image-conditioned checkpoint; clips are 4k+1.
-mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" --frames 100 --clip-frames 49
+mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" --frames 97 --clip-frames 49
 # Single-frame text-to-image: --frames 1 renders a still (png default, jpeg allowed)
 mold run wan22-t2v-a14b:q5 "a lighthouse at dusk, volumetric fog" --frames 1 -o still.png
 # Recipe controls: flow shift, sample solver, per-expert distill strength

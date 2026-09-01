@@ -1354,7 +1354,21 @@ pub async fn run(
 
                 // Expand the single-prompt inputs into a canonical
                 // ChainRequest and normalise before handing off to run_chain.
+                // Normalise exact-fits the last stage to `total_frames`
+                // (#1509); the totals can still differ when the lattice
+                // cannot close (a zero motion tail, an off-grid total), and
+                // a request that cannot be honoured exactly must be
+                // disclosed, never silently over-rendered.
                 let mut chain_req = inputs.to_chain_request().normalise()?;
+                let stitched_total = chain_req.estimated_total_frames();
+                if stitched_total != total_frames {
+                    status!(
+                        "{} --frames {total_frames} is not exactly renderable as a chain of \
+                         {}-frame clips (motion tail {mt}); rendering {stitched_total} frames",
+                        theme::icon_warn(),
+                        cf,
+                    );
+                }
                 if hdr_chain.is_some() {
                     // The EXR sequence and the reference slices both follow
                     // the stitched timeline, so the chain must deliver
