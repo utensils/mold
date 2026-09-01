@@ -930,11 +930,17 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     lines.push(Line::from(""));
 
-    // Keybinding hints
+    // Keybinding hints. A 3-D print offers Export in place of Upscale: a
+    // raster upscaler has nothing to read in a `.glb`.
+    let is_mesh = crate::gallery_scan::is_mesh_filename(&entry.filename());
     let hints: &[(&str, &str)] = &[
         ("e", "Edit"),
         ("r", "Regenerate"),
-        ("u", "Upscale"),
+        if is_mesh {
+            ("x", "Export")
+        } else {
+            ("u", "Upscale")
+        },
         ("d", removal),
         ("o/Enter", "Open"),
         ("Esc", "Back"),

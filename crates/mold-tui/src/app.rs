@@ -175,6 +175,11 @@ pub enum BackgroundEvent {
     FramewiseUpscaleStatus(mold_core::VideoUpscaleJob),
     /// Upscale failed.
     UpscaleFailed(String),
+    /// A Library mesh export finished; carries the file it wrote.
+    MeshExportComplete(std::path::PathBuf),
+    /// A Library mesh export failed, with the host's or the writer's own
+    /// sentence.
+    MeshExportFailed(String),
     /// Periodic server status update (remote resource info).
     /// `None` means the server became unreachable — clear stale status.
     ServerStatusUpdate(Option<Box<ServerStatus>>),
@@ -534,6 +539,14 @@ pub enum ParamField {
     ControlImage,
     ControlModel,
     ControlScale,
+    // Advanced — 3-D mesh (`GenerateRequest.mesh`; shown only while the
+    // recipe's profile carries a `mesh` block)
+    /// Query-grid resolution, cycled through the profile's allowlist.
+    Octree,
+    /// Iso-level the surface is extracted at.
+    MeshThreshold,
+    /// Decimation target; off keeps the raw surface.
+    TargetFaces,
     // Advanced — Identity (PuLID)
     IdentityImage,
     IdentityWeight,
@@ -606,6 +619,9 @@ impl ParamField {
             Self::Tags => "Tags",
             Self::Collection => "Collection",
             Self::ControlScale => "Scale",
+            Self::Octree => "Octree",
+            Self::MeshThreshold => "Iso threshold",
+            Self::TargetFaces => "Target faces",
             // These three live inside the "Identity photo" section, so they
             // are named for their role there — `LABEL_W` is 16 columns and a
             // repeated "Identity " prefix would not fit any of them.
@@ -800,6 +816,13 @@ pub struct GenerateParams {
     /// and the request that is submitted can never disagree; Settings
     /// refreshes it when the preference is toggled.
     pub auto_tag_title: bool,
+    // 3-D mesh controls (`GenerateRequest.mesh`). Every field is
+    // absent-until-touched: an untouched form ships no `mesh` block at all,
+    // and a touched value is shipped exactly as the row shows it. The rows
+    // exist only while `ModelCapabilities.mesh` (the recipe's profile block)
+    // is present, and a model switch to a recipe without one clears them, so
+    // a stale octree can never reach a raster model's admission.
+    pub mesh: mold_core::MeshRequestOptions,
 }
 
 /// Immutable, lightweight provenance captured for one submitted generation.
@@ -927,6 +950,7 @@ impl GenerateParams {
             tags: Vec::new(),
             collection: None,
             auto_tag_title: config.generate.auto_tag_title,
+            mesh: mold_core::MeshRequestOptions::default(),
         }
     }
 
@@ -1012,6 +1036,24 @@ impl GenerateParams {
                 count => format!("{count} ordered files"),
             },
             ParamField::Strength => format!("{:.2}", self.strength),
+            // The three mesh rows read "default" while untouched: the
+            // profile's own default is what the renderer (`param_form`)
+            // substitutes, because the parameter bag does not carry it.
+            ParamField::Octree => self
+                .mesh
+                .octree_resolution
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "default".to_string()),
+            ParamField::MeshThreshold => self
+                .mesh
+                .threshold
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "default".to_string()),
+            ParamField::TargetFaces => self
+                .mesh
+                .target_faces
+                .map(crate::ui::preview::format_thousands)
+                .unwrap_or_else(|| "off \u{00b7} raw surface".to_string()),
             ParamField::MaskImage => self
                 .mask_image_path
                 .as_deref()
@@ -1228,6 +1270,26 @@ fn tui_max_video_frames(grid: TuiVideoGrid, fps: u32) -> u32 {
 /// request-authority boundary that prevents stale state from weakening H3's
 /// synchronized AV contract. It does not activate the compliance-gated family.
 pub(crate) fn normalize_generate_params_for_family(params: &mut GenerateParams, family: &str) {
+    if family == mold_core::manifest::HUNYUAN3D_FAMILY {
+        // A 3-D render emits binary glTF and nothing else, so the format is
+        // pinned rather than chosen — the same rule as
+        // `GenerateRequest::pin_output_format_for_family` on the server, so
+        // the form and admission can never disagree. The source image is
+        // the family's ONLY conditioning and is kept; a mask, a ControlNet
+        // and a LoRA name things a mesh does not have, and the server
+        // refuses them rather than ignoring them, so stale values from a
+        // previous raster model are cleared here instead of earning a 422.
+        params.format = OutputFormat::Glb;
+        params.mask_image_path = None;
+        params.control_image_path = None;
+        params.control_model = None;
+        params.control_scale = 1.0;
+        params.lora_path = None;
+        params.lora_scale = 1.0;
+        params.scheduler = None;
+        params.upscale_model = None;
+        return;
+    }
     if !mold_core::minimax_h3::is_family(family) {
         return;
     }
@@ -1255,6 +1317,131 @@ pub(crate) fn normalize_generate_params_for_family(params: &mut GenerateParams, 
     params.spatial_upscale = None;
     params.temporal_upscale = None;
     params.guidance_overrides = Ltx2GuidanceOverrides::default();
+}
+
+/// ◀▶ on the Octree row: walk the profile's allowlist from the current
+/// value (the default while untouched). Never leaves the list, and never
+/// returns to "untouched" — once the user has chosen, the request says so.
+pub(crate) fn next_octree_resolution(
+    allowed: &[u32],
+    default: u32,
+    current: Option<u32>,
+    delta: i32,
+) -> Option<u32> {
+    if allowed.is_empty() {
+        return current;
+    }
+    let anchor = current.unwrap_or(default);
+    let index = allowed
+        .iter()
+        .position(|&value| value == anchor)
+        .map(|index| index as i32)
+        .unwrap_or(0);
+    let next = (index + delta).clamp(0, allowed.len() as i32 - 1) as usize;
+    Some(allowed[next])
+}
+
+/// ◀▶ on the Iso threshold row: five profile steps per press (the profile
+/// step is 0.01, which is too fine for a keyboard) inside the profile's own
+/// range, rounded to two decimals so repeated presses do not accumulate
+/// binary drift into the recorded provenance.
+pub(crate) fn next_mesh_threshold(
+    control: &mold_core::FloatControl,
+    current: Option<f32>,
+    delta: i32,
+) -> f32 {
+    let anchor = current.map_or(control.default, f64::from);
+    let step = control.step * 5.0;
+    let next = ((anchor + f64::from(delta) * step) * 100.0).round() / 100.0;
+    next.clamp(control.min, control.max) as f32
+}
+
+/// ◀▶ on the Target faces row: 10 000 triangles per press inside the
+/// profile's bounds. Stepping below the minimum turns decimation OFF (`None`
+/// keeps the raw surface), and stepping up from off starts at the minimum.
+pub(crate) fn next_target_faces(
+    min: u32,
+    max: u32,
+    current: Option<u32>,
+    delta: i32,
+) -> Option<u32> {
+    const STEP: i64 = 10_000;
+    match current {
+        None if delta > 0 => Some(min.max(1)),
+        None => None,
+        Some(value) => {
+            let next = i64::from(value) + i64::from(delta) * STEP;
+            if next < i64::from(min) {
+                // A single press from the minimum turns decimation off
+                // rather than pinning the row at a floor it cannot leave.
+                if value <= min {
+                    None
+                } else {
+                    Some(min)
+                }
+            } else {
+                Some(next.min(i64::from(max)) as u32)
+            }
+        }
+    }
+}
+
+/// Every export container the in-process writer offers for a LOCAL `.glb`.
+/// GLB itself is the stored form, not an export, so it is never listed.
+pub(crate) const LOCAL_MESH_EXPORT_FORMATS: [mold_core::MeshExportFormat; 3] = [
+    mold_core::MeshExportFormat::Obj,
+    mold_core::MeshExportFormat::Stl,
+    mold_core::MeshExportFormat::Ply,
+];
+
+/// The containers the export picker lists: the owning host's advertised
+/// `capabilities.mesh.export_formats` minus GLB, or the local writer's set
+/// when there is no host (a local print) or the host has not been polled.
+pub(crate) fn mesh_export_formats_for(
+    advertised: Option<&[mold_core::MeshExportFormat]>,
+) -> Vec<mold_core::MeshExportFormat> {
+    match advertised {
+        Some(list) => list
+            .iter()
+            .copied()
+            .filter(|format| *format != mold_core::MeshExportFormat::Glb)
+            .collect(),
+        None => LOCAL_MESH_EXPORT_FORMATS.to_vec(),
+    }
+}
+
+/// Where an export lands: `<output_dir>/<stem>.<ext>`, beside the TUI's
+/// other saves and named after the print, so `chair.glb` exports as
+/// `chair.stl` exactly as `mold library export` names it.
+pub(crate) fn mesh_export_target_path(
+    output_dir: &std::path::Path,
+    filename: &str,
+    format: mold_core::MeshExportFormat,
+) -> std::path::PathBuf {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| filename.to_string());
+    output_dir.join(format!("{stem}.{}", format.extension()))
+}
+
+/// Transcode local `.glb` bytes with the same writer the server's export
+/// route uses, so a local print exports byte-for-byte as a served one would.
+pub(crate) fn export_local_mesh(
+    glb: &[u8],
+    format: mold_core::MeshExportFormat,
+) -> Result<Vec<u8>, String> {
+    use mold_inference::hunyuan3d::glb;
+    if format == mold_core::MeshExportFormat::Glb {
+        return Ok(glb.to_vec());
+    }
+    let mesh = glb::read_glb(glb).map_err(|e| e.to_string())?;
+    Ok(match format {
+        mold_core::MeshExportFormat::Glb => unreachable!("returned above"),
+        mold_core::MeshExportFormat::Obj => glb::write_obj(&mesh).into_bytes(),
+        mold_core::MeshExportFormat::Stl => glb::write_stl(&mesh),
+        mold_core::MeshExportFormat::Ply => glb::write_ply(&mesh),
+    })
 }
 
 /// What the Negative editor shows on cold start (#787 round 2). `App::new`
@@ -1372,6 +1559,10 @@ pub struct GenerateState {
     pub held_batch: Option<HeldBatch>,
     /// Monotonic fence for async Expand/Remix results.
     pub prompt_transform_token: u64,
+    /// `tris · verts · bounds` of the most recent finished 3-D print, for
+    /// the Preview caption. `None` after a raster or video completion, so a
+    /// mesh summary never captions a picture.
+    pub last_mesh_summary: Option<String>,
 }
 
 /// One held child this client can retry.
@@ -2060,6 +2251,15 @@ pub enum Popup {
         filtered: Vec<String>,
         purpose: UpscalePickerPurpose,
     },
+    /// Library `x`: pick the container a stored `.glb` is exported as. The
+    /// list is the owning host's advertised `capabilities.mesh.export_formats`
+    /// (GLB itself excluded — it is the stored file), or every transcode the
+    /// in-process writer offers for a local print.
+    MeshExportPicker {
+        filename: String,
+        formats: Vec<mold_core::MeshExportFormat>,
+        selected: usize,
+    },
 }
 
 /// What selecting an entry in [`Popup::UpscaleModelSelector`] does.
@@ -2445,6 +2645,16 @@ impl App {
                 .find(|model| model.name == params.model)
                 .and_then(|model| model.supports_identity),
         );
+        crate::model_info::apply_recipe_capabilities(
+            &mut capabilities,
+            selected_catalog_entry
+                .and_then(|entry| entry.generation_profile.as_ref())
+                .and_then(|profile| profile.recipe_for_pipeline(params.pipeline))
+                .map(|recipe| &recipe.capabilities),
+        );
+        if capabilities.mesh.is_none() {
+            params.mesh = mold_core::MeshRequestOptions::default();
+        }
         capabilities.supports_duration_prediction = selected_catalog_entry.is_some_and(|entry| {
             entry.supports_duration_prediction == Some(true) && entry.runtime_ready != Some(false)
         });
@@ -2564,6 +2774,7 @@ impl App {
                 last_output_path: None,
                 held_batch: None,
                 prompt_transform_token: 0,
+                last_mesh_summary: None,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -2909,6 +3120,14 @@ impl App {
                 .find(|entry| entry.name == model)
                 .and_then(|entry| entry.supports_identity),
         );
+        // The resolved recipe profile is layered last: it is the single
+        // authority for the 3-D rows and, on a mesh recipe, for the
+        // strength / mask / negative gates.
+        let recipe = self.active_generation_recipe();
+        crate::model_info::apply_recipe_capabilities(
+            &mut self.generate.capabilities,
+            recipe.as_ref().map(|recipe| &recipe.capabilities),
+        );
         self.generate.capabilities.supports_duration_prediction = self
             .models
             .catalog
@@ -2920,6 +3139,12 @@ impl App {
             });
         self.generate.params.duration_prediction_supported =
             self.generate.capabilities.supports_duration_prediction;
+        // The mesh rows are gone, so a carried-in octree or iso-level has no
+        // editor left to clear it — and a raster recipe refuses the block
+        // outright rather than ignoring it.
+        if self.generate.capabilities.mesh.is_none() {
+            self.generate.params.mesh = mold_core::MeshRequestOptions::default();
+        }
         if !self.generate.params.duration_prediction_supported {
             self.generate.params.predict_duration = false;
         }
@@ -3680,6 +3905,28 @@ impl App {
             .as_ref()?
             .recipe_for_pipeline(self.generate.params.pipeline)
             .cloned()
+    }
+
+    /// Whether Generate needs a non-empty prompt right now.
+    ///
+    /// The selected recipe's profile answers first (`capabilities.prompt`):
+    /// `Ignored` admits an empty prompt outright, `Optional` admits one only
+    /// with the source image that makes it optional (the advertised mode
+    /// describes the CONDITIONED request), and `Required` is required. A
+    /// family-only catalog with no profile falls back to the same core
+    /// function the profile was emitted from, so the two can never disagree
+    /// and neither carries a family allowlist.
+    fn prompt_required_now(&self) -> bool {
+        let has_source = self.generate.params.source_image_path.is_some();
+        match self
+            .active_generation_recipe()
+            .map(|recipe| recipe.capabilities.prompt.mode)
+        {
+            Some(mold_core::PromptRequirement::Ignored) => false,
+            Some(mold_core::PromptRequirement::Optional) => !has_source,
+            Some(mold_core::PromptRequirement::Required) => true,
+            None => prompt_required_for_params(&self.generate.params, &self.config),
+        }
     }
 
     /// Handle a raw crossterm event.
@@ -4452,6 +4699,28 @@ impl App {
                     // Dismiss info popup on any key
                     self.close_popup();
                 }
+                Some(Popup::MeshExportPicker {
+                    filename,
+                    formats,
+                    selected,
+                }) => match key.code {
+                    KeyCode::Char('j') | KeyCode::Down if *selected + 1 < formats.len() => {
+                        *selected += 1;
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        *selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Enter => {
+                        let filename = filename.clone();
+                        let format = formats.get(*selected).copied();
+                        self.close_popup();
+                        if let Some(format) = format {
+                            self.spawn_mesh_export(&filename, format);
+                        }
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => self.close_popup(),
+                    _ => {}
+                },
                 Some(Popup::SettingsInput { key: sk, input, .. }) => match key.code {
                     KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
@@ -5288,6 +5557,9 @@ impl App {
                     purpose: UpscalePickerPurpose::RunNow,
                 });
             }
+            Action::ExportMesh if self.active_view == View::Library => {
+                self.open_mesh_export_picker();
+            }
             Action::RemoveModel if self.active_view == View::Models => {
                 if let Some(model) = self.models.catalog.get(self.models.selected) {
                     if !model.downloaded {
@@ -5644,6 +5916,8 @@ impl App {
         };
         let guidance_adjustable = self.generate.guidance_adjustable();
         let audio_required = self.generate.capabilities.audio_required;
+        let mesh_profile = self.generate.capabilities.mesh.clone();
+        let mesh_pinned = mesh_profile.is_some();
         let p = &mut self.generate.params;
         match field {
             ParamField::Size => {
@@ -5710,6 +5984,39 @@ impl App {
             }
             ParamField::Strength => {
                 p.strength = (p.strength + delta as f64 * 0.05).clamp(0.0, 1.0);
+            }
+            // The three mesh rows walk the PROFILE's bounds, never a local
+            // copy: the allowlist, the iso range and step, and the face
+            // bounds all come from `capabilities.mesh`, which is the block
+            // `validate_request_against_recipe` checks the request against.
+            ParamField::Octree => {
+                if let Some(profile) = mesh_profile.as_ref() {
+                    p.mesh.octree_resolution = next_octree_resolution(
+                        &profile.octree_resolutions,
+                        profile.octree_default,
+                        p.mesh.octree_resolution,
+                        delta,
+                    );
+                }
+            }
+            ParamField::MeshThreshold => {
+                if let Some(profile) = mesh_profile.as_ref() {
+                    p.mesh.threshold = Some(next_mesh_threshold(
+                        &profile.threshold,
+                        p.mesh.threshold,
+                        delta,
+                    ));
+                }
+            }
+            ParamField::TargetFaces => {
+                if let Some(profile) = mesh_profile.as_ref() {
+                    p.mesh.target_faces = next_target_faces(
+                        profile.target_faces_min,
+                        profile.target_faces_max,
+                        p.mesh.target_faces,
+                        delta,
+                    );
+                }
             }
             ParamField::IdentityWeight => {
                 // The range is `mold_core::identity`'s, never a local copy.
@@ -5846,6 +6153,12 @@ impl App {
                 if audio_required {
                     p.format = OutputFormat::Mp4;
                     p.enable_audio = Some(true);
+                } else if mesh_pinned {
+                    // A mesh recipe has exactly one deliverable container.
+                    // The row stays so the user can see what the print will
+                    // be, but ◀▶ cannot walk it onto a raster format the
+                    // server would only pin straight back to GLB.
+                    p.format = OutputFormat::Glb;
                 } else {
                     p.format = match p.format {
                         OutputFormat::Png => OutputFormat::Jpeg,
@@ -5924,6 +6237,41 @@ impl App {
                 let filename = entry.filename();
                 let is_video = crate::gallery_scan::is_video_filename(&filename);
 
+                // A mesh is never handed to `image::open`: there is no
+                // raster inside a `.glb`, and downloading it only to fail
+                // the decode would leave the pane blank after a multi-
+                // megabyte round trip. The poster the server rendered at
+                // save time IS the preview; it is served by the thumbnail
+                // route and cached under the same key the grid uses.
+                if crate::gallery_scan::is_mesh_filename(&filename) {
+                    let poster = crate::thumbnails::thumbnail_path(&entry.path);
+                    if let Ok(img) = image::open(&poster) {
+                        let protocol = self.picker.new_resize_protocol(img.clone());
+                        self.gallery.preview_image = Some(img);
+                        self.gallery.image_state = Some(protocol);
+                        self.gallery.animation = None;
+                        return;
+                    }
+                    let tx = self.bg_tx.clone();
+                    let fetch_url = url.clone();
+                    let fetch_name = filename.clone();
+                    self.tokio_handle.spawn(async move {
+                        if let Some(data) = crate::gallery_scan::fetch_and_cache_mesh_poster(
+                            &fetch_url,
+                            &host_id,
+                            &fetch_name,
+                        )
+                        .await
+                        {
+                            let _ = tx.send(BackgroundEvent::GalleryPreviewReady(data));
+                        }
+                    });
+                    self.gallery.preview_image = None;
+                    self.gallery.image_state = None;
+                    self.gallery.animation = None;
+                    return;
+                }
+
                 // For video entries, prefer the cached animated GIF preview
                 // so the detail pane animates instead of sitting on a frozen
                 // first-frame thumbnail. When the preview isn't locally
@@ -5997,6 +6345,23 @@ impl App {
                 self.gallery.image_state = None;
                 self.gallery.animation = None;
             } else if entry.path.exists() && entry.path.is_file() {
+                // A local mesh: only its cached poster is a picture. Without
+                // one the pane stays empty rather than feeding glTF bytes to
+                // a raster decoder.
+                if crate::gallery_scan::is_mesh_filename(&entry.filename()) {
+                    let poster = crate::thumbnails::thumbnail_path(&entry.path);
+                    if let Ok(img) = image::open(&poster) {
+                        let protocol = self.picker.new_resize_protocol(img.clone());
+                        self.gallery.preview_image = Some(img);
+                        self.gallery.image_state = Some(protocol);
+                        self.gallery.animation = None;
+                        return;
+                    }
+                    self.gallery.preview_image = None;
+                    self.gallery.image_state = None;
+                    self.gallery.animation = None;
+                    return;
+                }
                 // For video files, prefer the cached GIF preview (animated)
                 let gif_path = crate::thumbnails::preview_gif_path(&entry.path);
                 let load_path = if gif_path.is_file() {
@@ -6114,6 +6479,12 @@ impl App {
             self.generate.params.strength = strength;
         }
         self.generate.params.scheduler = meta.scheduler;
+        // The mesh rows restore the recipe's defaults: the server records no
+        // octree / iso-level / face-target provenance in `OutputMetadata`
+        // yet, so there is nothing truthful to restore, and carrying the
+        // previous form's values into a reuse would attribute them to a
+        // print they never shaped.
+        self.generate.params.mesh = mold_core::MeshRequestOptions::default();
         if let Some(ref lora) = meta.lora {
             self.generate.params.lora_path = Some(lora.clone());
             self.generate.params.lora_scale = meta.lora_scale.unwrap_or(1.0);
@@ -6256,6 +6627,104 @@ impl App {
     /// move, server `DELETE` which current servers treat as trash), a
     /// hard delete otherwise — plus the TUI's own thumbnail/preview cache
     /// entries either way.
+    /// Library `x`: offer the export containers for the selected 3-D print.
+    ///
+    /// A remote print offers what its OWNING host advertises
+    /// (`capabilities.mesh.export_formats`, the stored GLB excluded); a local
+    /// print offers every transcode the in-process writer has. Anything but
+    /// a `.glb` is refused by name rather than silently ignored.
+    fn open_mesh_export_picker(&mut self) {
+        let Some(entry) = self.gallery.entries.get(self.gallery.selected) else {
+            return;
+        };
+        let filename = entry.filename();
+        if !crate::gallery_scan::is_mesh_filename(&filename) {
+            self.generate.error_message =
+                Some("Export converts 3-D prints (.glb) only; press o to open this file".into());
+            return;
+        }
+        let origin = entry.primary_origin();
+        let advertised = if origin.url.is_some() {
+            self.capabilities_for_origin(&origin)
+                .and_then(|caps| caps.mesh.as_ref())
+                .map(|mesh| mesh.export_formats.as_slice())
+        } else {
+            None
+        };
+        let formats = mesh_export_formats_for(advertised);
+        if formats.is_empty() {
+            self.generate.error_message =
+                Some("This machine advertises no mesh export formats".into());
+            return;
+        }
+        self.popup = Some(Popup::MeshExportPicker {
+            filename,
+            formats,
+            selected: 0,
+        });
+    }
+
+    /// Transcode the selected `.glb` into `format` and write it beside the
+    /// TUI's other saves. Remote prints are converted by their owning host
+    /// (`POST /api/gallery/export/:filename`, with that host's API key);
+    /// local prints by the same writer the server uses. The gallery file is
+    /// never renamed or replaced.
+    fn spawn_mesh_export(&mut self, filename: &str, format: mold_core::MeshExportFormat) {
+        let Some(entry) = self
+            .gallery
+            .entries
+            .iter()
+            .find(|entry| entry.filename() == filename)
+            .cloned()
+        else {
+            return;
+        };
+        if self.config.is_output_disabled() {
+            self.generate.error_message =
+                Some("Export needs an output directory; output is disabled".into());
+            return;
+        }
+        let target = mesh_export_target_path(&self.config.effective_output_dir(), filename, format);
+        let origin = entry.primary_origin();
+        let local_path = entry.path.clone();
+        let filename = filename.to_string();
+        let tx = self.bg_tx.clone();
+        self.tokio_handle.spawn(async move {
+            let bytes: Result<Vec<u8>, String> = match origin.url {
+                Some(url) => {
+                    let api_key = crate::hosts::api_key_for(&origin.host_id);
+                    let client = crate::hosts::client_for(&url, api_key.as_deref());
+                    client
+                        .export_gallery_mesh(&filename, format)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                None => tokio::task::spawn_blocking(move || {
+                    let glb = std::fs::read(&local_path).map_err(|e| e.to_string())?;
+                    export_local_mesh(&glb, format)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string())),
+            };
+            let outcome = match bytes {
+                Ok(bytes) => {
+                    if let Some(parent) = target.parent() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
+                    }
+                    tokio::fs::write(&target, &bytes)
+                        .await
+                        .map(|_| target)
+                        .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(match outcome {
+                Ok(path) => BackgroundEvent::MeshExportComplete(path),
+                Err(message) => BackgroundEvent::MeshExportFailed(message),
+            });
+        });
+    }
+
     fn delete_selected_gallery_image(&mut self) {
         if self.gallery.entries.is_empty() {
             return;
@@ -6796,6 +7265,10 @@ impl App {
         self.generate.params.title = None;
         self.generate.params.tags.clear();
         self.generate.params.collection = None;
+        // Back to the recipe's own octree, iso-level and raw surface. The
+        // GLB pin is re-applied by the family normalizer inside the sync
+        // below, so the `Png` reset above never survives on a mesh recipe.
+        self.generate.params.mesh = mold_core::MeshRequestOptions::default();
         self.sync_generate_capabilities();
         // #787 round 2: Reset Defaults is an explicit "give me the model's
         // defaults", not a model switch — the sync above deliberately
@@ -7757,8 +8230,7 @@ impl App {
         // selected family's request authority immediately before freezing it.
         self.sync_generate_capabilities();
         let prompt_text = self.generate.prompt.lines().join("\n").trim().to_string();
-        if prompt_text.is_empty() && prompt_required_for_params(&self.generate.params, &self.config)
-        {
+        if prompt_text.is_empty() && self.prompt_required_now() {
             self.generate.error_message = Some("Prompt is empty".to_string());
             return;
         }
@@ -7942,6 +8414,7 @@ impl App {
         self.generate.preview_image = None;
         self.generate.image_state = None;
         self.generate.animation = None;
+        self.generate.last_mesh_summary = None;
 
         // #787 tri-state: editor text equal to the advertised default stays
         // absent on the wire (the server/engine re-applies it; older servers
@@ -8630,6 +9103,47 @@ impl App {
                         }
                     }
 
+                    // Handle mesh output: save the `.glb`, cache its poster
+                    // beside it under the same thumbnail key a gallery scan
+                    // will look up (`thumbnails::thumbnail_path`), and show
+                    // the poster — a raster decoder cannot read glTF, and the
+                    // Preview panel has no 3-D renderer, so the poster is the
+                    // only picture there is, exactly as it is in the grids.
+                    self.generate.last_mesh_summary = None;
+                    if let Some(ref mesh) = response.mesh {
+                        let ext = mesh.format.extension();
+                        let filename = mold_core::default_output_filename_titled(
+                            &actual_model,
+                            ts_secs,
+                            ext,
+                            1,
+                            0,
+                            title_slug.as_deref(),
+                        );
+                        if let Some(ref dir) = output_dir {
+                            let path = dir.join(&filename);
+                            if std::fs::write(&path, &mesh.data).is_ok() {
+                                saved_path = path.clone();
+                                if !mesh.poster.is_empty() {
+                                    crate::thumbnails::save_thumbnail_bytes(&mesh.poster, &path)
+                                        .ok();
+                                }
+                            }
+                        }
+                        if let Ok(img) = image::load_from_memory(&mesh.poster) {
+                            let protocol = self.picker.new_resize_protocol(img.clone());
+                            self.generate.preview_image = Some(img);
+                            self.generate.image_state = Some(protocol);
+                            self.generate.animation = None;
+                        }
+                        self.generate.last_mesh_summary = Some(crate::ui::preview::mesh_summary(
+                            mesh.vertex_count,
+                            mesh.face_count,
+                            mesh.bounds_min,
+                            mesh.bounds_max,
+                        ));
+                    }
+
                     let saved_name = saved_path
                         .file_name()
                         .map(|f| f.to_string_lossy().to_string())
@@ -8702,6 +9216,10 @@ impl App {
                         (img.width, img.height)
                     } else if let Some(ref video) = response.video {
                         (video.width, video.height)
+                    } else if let Some(ref mesh) = response.mesh {
+                        // A mesh has no raster size; the row records the
+                        // poster's, exactly as the server's gallery does.
+                        (mesh.poster_width, mesh.poster_height)
                     } else {
                         (submitted_params.width, submitted_params.height)
                     };
@@ -8723,7 +9241,9 @@ impl App {
                         self.spawn_gallery_scan();
                     }
 
-                    if (!response.images.is_empty() || response.video.is_some())
+                    if (!response.images.is_empty()
+                        || response.video.is_some()
+                        || response.mesh.is_some())
                         && !saved_path.as_os_str().is_empty()
                     {
                         // The filing this print was submitted under. The
@@ -8850,6 +9370,7 @@ impl App {
                                 .video
                                 .as_ref()
                                 .map(|video| video.format)
+                                .or_else(|| response.mesh.as_ref().map(|mesh| mesh.format))
                                 .or_else(|| response.images.first().map(|image| image.format))
                                 .unwrap_or(submitted_params.format);
                             mold_db::persist::record_saved_output(
@@ -8888,14 +9409,18 @@ impl App {
                         self.gallery.thumb_fixed_cache.insert(0, None);
                         self.gallery.refresh_filter();
 
-                        // Generate thumbnail in background
-                        self.tokio_handle.spawn(async move {
-                            tokio::task::spawn_blocking(move || {
-                                crate::thumbnails::generate_thumbnail(&saved_path).ok();
-                            })
-                            .await
-                            .ok();
-                        });
+                        // Generate thumbnail in background. A mesh already
+                        // has its poster cached above, and a raster decoder
+                        // could not read the `.glb` anyway.
+                        if response.mesh.is_none() {
+                            self.tokio_handle.spawn(async move {
+                                tokio::task::spawn_blocking(move || {
+                                    crate::thumbnails::generate_thumbnail(&saved_path).ok();
+                                })
+                                .await
+                                .ok();
+                            });
+                        }
                     }
                 }
                 BackgroundEvent::DurableGenerationBatchComplete {
@@ -9589,6 +10114,25 @@ impl App {
                             connect_advance(form, ConnectInput::TestErr(&e));
                         }
                     }
+                }
+                BackgroundEvent::MeshExportComplete(path) => {
+                    // The Library has no timeline strip, so the path is
+                    // shown where the user is looking: a dismiss-on-any-key
+                    // popup, the TUI's toast. The Create timeline gets the
+                    // same line so the export is in the session record.
+                    self.generate.progress.push_log(ProgressLogEntry {
+                        message: format!("Exported {}", path.display()),
+                        style: ProgressStyle::Done,
+                    });
+                    self.popup = Some(Popup::Info {
+                        message: format!("Exported to\n{}", path.display()),
+                    });
+                }
+                BackgroundEvent::MeshExportFailed(message) => {
+                    self.generate.error_message = Some(format!("Export failed: {message}"));
+                    self.popup = Some(Popup::Info {
+                        message: format!("Export failed: {message}"),
+                    });
                 }
                 BackgroundEvent::CatalogRefreshed(models) => {
                     self.models.catalog = models;
@@ -11200,6 +11744,7 @@ mod tests {
                 last_output_path: None,
                 held_batch: None,
                 prompt_transform_token: 0,
+                last_mesh_summary: None,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -14176,6 +14721,407 @@ mod tests {
         assert_eq!(params.source_image_path, None);
     }
 
+    // ── 3-D mesh family (Hunyuan3D) ─────────────────────────────────────
+
+    /// The family normalizer pins GLB and clears every raster-only input a
+    /// mesh recipe refuses, while keeping the source image — the family's
+    /// only conditioning.
+    #[test]
+    fn mesh_family_normalizer_pins_glb_clears_mask_and_keeps_the_source() {
+        let mut params = GenerateParams::from_config(&Config::default());
+        params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.into();
+        params.format = OutputFormat::Png;
+        params.source_image_path = Some("chair.png".into());
+        params.mask_image_path = Some("stale-mask.png".into());
+        params.control_image_path = Some("stale-control.png".into());
+        params.control_model = Some("canny".into());
+        params.lora_path = Some("stale.safetensors".into());
+        params.mesh.octree_resolution = Some(320);
+
+        normalize_generate_params_for_family(&mut params, mold_core::manifest::HUNYUAN3D_FAMILY);
+
+        assert_eq!(params.format, OutputFormat::Glb);
+        assert_eq!(params.source_image_path.as_deref(), Some("chair.png"));
+        assert_eq!(params.mask_image_path, None);
+        assert_eq!(params.control_image_path, None);
+        assert_eq!(params.control_model, None);
+        assert_eq!(params.lora_path, None);
+        assert_eq!(
+            params.mesh.octree_resolution,
+            Some(320),
+            "the mesh knobs are the family's own and survive"
+        );
+
+        // A raster family is untouched by the mesh arm.
+        let mut raster = GenerateParams::from_config(&Config::default());
+        raster.format = OutputFormat::Jpeg;
+        raster.mask_image_path = Some("mask.png".into());
+        normalize_generate_params_for_family(&mut raster, "sd15");
+        assert_eq!(raster.format, OutputFormat::Jpeg);
+        assert_eq!(raster.mask_image_path.as_deref(), Some("mask.png"));
+    }
+
+    /// The ◀▶ helpers walk the PROFILE's bounds and never leave them.
+    #[test]
+    fn mesh_row_adjusters_stay_inside_the_profile_bounds() {
+        let allowed = mold_core::validation::MESH_OCTREE_RESOLUTIONS;
+        let default = mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION;
+        // Untouched starts from the default and steps along the allowlist.
+        assert_eq!(next_octree_resolution(allowed, default, None, 1), Some(320));
+        assert_eq!(
+            next_octree_resolution(allowed, default, None, -1),
+            Some(192)
+        );
+        assert_eq!(
+            next_octree_resolution(allowed, default, Some(384), 1),
+            Some(384),
+            "the top rung is a wall, not a wrap"
+        );
+        assert_eq!(
+            next_octree_resolution(allowed, default, Some(128), -1),
+            Some(128)
+        );
+        // A value off the list (older session) re-anchors at the first rung.
+        assert_eq!(
+            next_octree_resolution(allowed, default, Some(200), 1),
+            Some(192)
+        );
+
+        let control = mold_core::FloatControl {
+            default: mold_core::validation::MESH_DEFAULT_THRESHOLD,
+            min: 0.0,
+            max: 1.0,
+            step: mold_core::validation::MESH_THRESHOLD_STEP,
+            mode: mold_core::ControlMode::Adjustable,
+            note: None,
+        };
+        assert!((next_mesh_threshold(&control, None, -1) - 0.55).abs() < 1e-6);
+        assert!((next_mesh_threshold(&control, Some(0.98), 1) - 1.0).abs() < 1e-6);
+        assert!((next_mesh_threshold(&control, Some(0.02), -1)).abs() < 1e-6);
+
+        let (min, max) = (
+            mold_core::validation::MESH_MIN_TARGET_FACES,
+            mold_core::validation::MESH_MAX_TARGET_FACES,
+        );
+        assert_eq!(next_target_faces(min, max, None, 1), Some(min));
+        assert_eq!(next_target_faces(min, max, None, -1), None);
+        assert_eq!(
+            next_target_faces(min, max, Some(min), -1),
+            None,
+            "back to off"
+        );
+        assert_eq!(
+            next_target_faces(min, max, Some(min), 1),
+            Some(min + 10_000)
+        );
+        assert_eq!(next_target_faces(min, max, Some(max), 1), Some(max));
+        assert_eq!(next_target_faces(min, max, Some(15_000), -1), Some(5_000));
+    }
+
+    /// With the recipe's profile loaded, the Format row cannot leave GLB,
+    /// Reset to model defaults lands on GLB, and the mesh knobs go back to
+    /// the recipe's defaults. The GLB pin comes from the family normalizer,
+    /// the rows from the profile block.
+    #[tokio::test]
+    async fn mesh_recipe_pins_the_format_row_and_reset_keeps_it() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.generate.params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        app.sync_generate_capabilities();
+
+        assert!(
+            app.generate.capabilities.mesh.is_some(),
+            "the built-in profile carries the mesh block"
+        );
+        assert!(!app.generate.capabilities.supports_strength);
+        assert!(!app.generate.capabilities.supports_mask);
+        assert!(!app.generate.capabilities.supports_negative_prompt);
+        assert_eq!(app.generate.params.format, OutputFormat::Glb);
+        assert!(app
+            .generate
+            .rows
+            .contains(&crate::ui::create_form::CreateRow::AdvancedHeader));
+        app.generate.advanced.open = true;
+        app.refresh_create_rows();
+        assert!(app
+            .generate
+            .rows
+            .contains(&crate::ui::create_form::CreateRow::Section(
+                crate::ui::create_form::AdvSection::Mesh
+            )));
+
+        for _ in 0..8 {
+            app.adjust_field(ParamField::Format, 1);
+            assert_eq!(app.generate.params.format, OutputFormat::Glb);
+        }
+        app.adjust_field(ParamField::Format, -1);
+        assert_eq!(app.generate.params.format, OutputFormat::Glb);
+
+        app.adjust_field(ParamField::Octree, 1);
+        assert_eq!(app.generate.params.mesh.octree_resolution, Some(320));
+        app.adjust_field(ParamField::MeshThreshold, -1);
+        assert_eq!(app.generate.params.mesh.threshold, Some(0.55));
+        app.adjust_field(ParamField::TargetFaces, 1);
+        assert_eq!(
+            app.generate.params.mesh.target_faces,
+            Some(mold_core::validation::MESH_MIN_TARGET_FACES)
+        );
+
+        app.reset_params_to_model_defaults();
+        assert_eq!(app.generate.params.format, OutputFormat::Glb);
+        assert_eq!(
+            app.generate.params.mesh,
+            mold_core::MeshRequestOptions::default()
+        );
+
+        // Switching to a raster recipe drops the block and un-pins the row.
+        app.generate.params.model = "flux2-klein:q8".to_string();
+        app.generate.params.mesh.octree_resolution = Some(384);
+        app.sync_generate_capabilities();
+        assert!(app.generate.capabilities.mesh.is_none());
+        assert_eq!(
+            app.generate.params.mesh,
+            mold_core::MeshRequestOptions::default(),
+            "a raster recipe refuses the block, so it is cleared"
+        );
+    }
+
+    /// A recipe whose profile says `prompt.mode == ignored` admits an empty
+    /// prompt at Generate. The refusal, when any, must be about something
+    /// else (here: the missing source image).
+    #[tokio::test]
+    async fn mesh_recipe_admits_an_empty_prompt() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.generate.params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        app.sync_generate_capabilities();
+        app.generate.prompt = TextArea::default();
+
+        assert!(!app.prompt_required_now());
+        app.start_generation();
+        assert_ne!(
+            app.generate.error_message.as_deref(),
+            Some("Prompt is empty"),
+            "{:?}",
+            app.generate.error_message
+        );
+
+        // The same gate still refuses an empty prompt on a text model.
+        app.generate.params.model = "flux2-klein:q8".to_string();
+        app.sync_generate_capabilities();
+        assert!(app.prompt_required_now());
+        app.start_generation();
+        assert_eq!(
+            app.generate.error_message.as_deref(),
+            Some("Prompt is empty")
+        );
+    }
+
+    fn tiny_png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(width, height, |_, _| image::Rgb([200, 120, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    /// A finished mesh saves its `.glb`, caches the poster under the same
+    /// thumbnail key a gallery scan looks up, shows the poster in the
+    /// Preview, captions with the statistics, and files a GLB gallery row.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn generation_complete_saves_the_glb_and_its_poster() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.active_view = View::Create;
+            app.generate.generating = true;
+            app.generate.batch_remaining = 1;
+            app.generate.params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+            app.generate.params.format = OutputFormat::Glb;
+            app.generate.params.source_image_path = Some("chair.png".into());
+
+            let poster = tiny_png(32, 24);
+            let response = GenerateResponse {
+                request_warnings: Vec::new(),
+                audio: None,
+                images: vec![],
+                video: None,
+                mesh: Some(mold_core::MeshData {
+                    data: b"glTF-bytes".to_vec(),
+                    format: OutputFormat::Glb,
+                    vertex_count: 24_576,
+                    face_count: 49_152,
+                    bounds_min: [-0.5, -0.4, -0.3],
+                    bounds_max: [0.5, 0.4, 0.3],
+                    textured: false,
+                    poster: poster.clone(),
+                    poster_width: 32,
+                    poster_height: 24,
+                }),
+                generation_time_ms: 4_000,
+                model: mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string(),
+                seed_used: 9,
+                gpu: None,
+            };
+            let metadata_snapshot = generation_metadata_snapshot(&app);
+            app.bg_tx
+                .send(BackgroundEvent::GenerationComplete {
+                    response: Box::new(response),
+                    from_local: true,
+                    metadata_snapshot,
+                })
+                .unwrap();
+            app.process_background_events();
+
+            let saved = app
+                .generate
+                .last_output_path
+                .clone()
+                .expect("a local mesh render is saved");
+            assert_eq!(saved.extension().and_then(|e| e.to_str()), Some("glb"));
+            assert_eq!(std::fs::read(&saved).unwrap(), b"glTF-bytes");
+            let cached_poster = crate::thumbnails::thumbnail_path(&saved);
+            assert_eq!(
+                std::fs::read(&cached_poster).unwrap(),
+                poster,
+                "the poster is cached under the gallery's thumbnail key"
+            );
+            assert!(
+                app.generate.preview_image.is_some(),
+                "the poster is the preview"
+            );
+            assert_eq!(
+                app.generate.last_mesh_summary.as_deref(),
+                Some("49,152 tris \u{00b7} 24,576 verts \u{00b7} 1.00\u{00d7}0.80\u{00d7}0.60")
+            );
+            assert_eq!(app.gallery.entries.len(), 1);
+            let meta = &app.gallery.entries[0].metadata;
+            assert_eq!(meta.output_format, Some(OutputFormat::Glb));
+            assert_eq!(
+                (meta.width, meta.height),
+                (32, 24),
+                "poster size, as the server records"
+            );
+            assert!(
+                app.generate
+                    .progress
+                    .log
+                    .iter()
+                    .any(|entry| entry.message.starts_with("Saved ")
+                        && entry.message.contains(".glb"))
+            );
+
+            // The Library detail pane shows the cached poster and never opens
+            // the `.glb` itself; without a poster it stays empty.
+            app.gallery.selected = 0;
+            app.load_gallery_preview();
+            assert!(app.gallery.preview_image.is_some());
+            std::fs::remove_file(&cached_poster).unwrap();
+            app.load_gallery_preview();
+            assert!(app.gallery.preview_image.is_none());
+        });
+    }
+
+    /// The export picker lists what the host advertises minus the stored
+    /// form, the target is named after the print, and a local transcode
+    /// goes through the same writer the server's export route uses.
+    #[test]
+    fn mesh_export_helpers_name_the_target_and_transcode_locally() {
+        use mold_core::MeshExportFormat::{Glb, Obj, Ply, Stl};
+        assert_eq!(mesh_export_formats_for(None), vec![Obj, Stl, Ply]);
+        assert_eq!(
+            mesh_export_formats_for(Some(&[Glb, Obj, Stl, Ply])),
+            vec![Obj, Stl, Ply],
+            "the stored GLB is never an export"
+        );
+        assert_eq!(mesh_export_formats_for(Some(&[Glb])), Vec::<_>::new());
+
+        let target =
+            mesh_export_target_path(std::path::Path::new("/out"), "mold-hunyuan3d-1.glb", Stl);
+        assert_eq!(
+            target,
+            std::path::PathBuf::from("/out/mold-hunyuan3d-1.stl")
+        );
+
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![[0, 1, 2]],
+            normals: None,
+            uvs: None,
+            vertex_colors: None,
+        };
+        let glb = mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial::default(),
+            None,
+        )
+        .unwrap();
+        let stl = export_local_mesh(&glb, Stl).unwrap();
+        assert_eq!(stl.len(), 80 + 4 + 50, "one binary STL triangle");
+        let obj = String::from_utf8(export_local_mesh(&glb, Obj).unwrap()).unwrap();
+        assert!(obj.contains("v 1"), "{obj}");
+        assert!(obj.contains("f 1 2 3") || obj.contains("f 1/"), "{obj}");
+        assert!(!export_local_mesh(&glb, Ply).unwrap().is_empty());
+        assert_eq!(export_local_mesh(&glb, Glb).unwrap(), glb);
+        assert!(export_local_mesh(b"not a glb", Stl).is_err());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn library_x_opens_the_export_picker_only_for_a_mesh() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Library;
+        // Only the path matters for this gate; the metadata literal is
+        // large, so it is deserialized from its required fields.
+        let entry = |name: &str| GalleryEntry {
+            path: std::path::PathBuf::from(name),
+            metadata: serde_json::from_value(serde_json::json!({
+                "prompt": "",
+                "model": mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
+                "seed": 1,
+                "steps": 5,
+                "guidance": 5.0,
+                "width": 512,
+                "height": 512,
+                "version": "test"
+            }))
+            .expect("metadata deserializes with defaults"),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+            title: None,
+            origins: vec![GalleryOrigin::local()],
+        };
+        app.gallery.entries = vec![entry("chair.glb"), entry("still.png")];
+        app.gallery.thumbnail_states = vec![None, None];
+        app.gallery.thumb_dimensions = vec![None, None];
+        app.gallery.thumb_fixed_cache = vec![None, None];
+        app.gallery.refresh_filter();
+
+        app.gallery.selected = 0;
+        app.dispatch_action(Action::ExportMesh);
+        match &app.popup {
+            Some(Popup::MeshExportPicker {
+                filename, formats, ..
+            }) => {
+                assert_eq!(filename, "chair.glb");
+                assert_eq!(formats, &LOCAL_MESH_EXPORT_FORMATS.to_vec());
+            }
+            other => panic!("expected the export picker, got {}", other.is_some()),
+        }
+        app.popup = None;
+
+        app.gallery.selected = 1;
+        app.dispatch_action(Action::ExportMesh);
+        assert!(app.popup.is_none(), "a still has nothing to export");
+        assert!(app
+            .generate
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains(".glb")));
+    }
+
     #[tokio::test]
     #[serial_test::serial(mold_env)]
     async fn h3_switch_away_and_back_cannot_restore_invalid_preferences() {
@@ -15569,6 +16515,7 @@ mod tests {
             last_output_path: None,
             held_batch: None,
             prompt_transform_token: 0,
+            last_mesh_summary: None,
         };
 
         // Simulate receiving first image — still 2 more to go
@@ -15636,6 +16583,7 @@ mod tests {
             last_output_path: None,
             held_batch: None,
             prompt_transform_token: 0,
+            last_mesh_summary: None,
         };
 
         // Simulate error mid-batch
@@ -15684,6 +16632,7 @@ mod tests {
             last_output_path: None,
             held_batch: None,
             prompt_transform_token: 0,
+            last_mesh_summary: None,
         };
 
         // Simulate setting batch to 4 and starting generation

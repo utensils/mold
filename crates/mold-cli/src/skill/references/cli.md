@@ -99,7 +99,10 @@ rather than `prompt`: the 3-D family has no text encoder, so there is nothing
 for a prompt to do. `mold run hunyuan3d-mini-turbo --image chair.png` is
 likewise a complete CLI request with no prompt at all. It returns a rendered
 poster plus mesh statistics; the glTF itself lands in the gallery and is
-fetched by filename.
+fetched by filename. Its optional `octree` (the advertised allowlist; cost is
+cubic), `threshold` (0–1 iso-level, ComfyUI `VoxelToMesh` scale), and
+`target_faces` mirror `--octree`, `--mesh-threshold`, and `--target-faces`;
+omit them for the recipe's defaults.
 
 `export_mesh` converts one stored `.glb` into `obj`, `stl`, or `ply`; the CLI
 equivalent is `mold library export <file> --format stl`. Both are transcodes of

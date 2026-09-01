@@ -96,6 +96,39 @@ pub async fn run_generation(ctx: Context<'_>, req: GenerateRequest) -> Result<()
 /// the GIF preview the server always bundles so users still see *something* in
 /// their channel.
 pub fn select_attachment(resp: &mold_core::GenerateResponse, seed: u64) -> Option<DiscordPayload> {
+    // A mesh is probed FIRST, for the same reason audio is probed before
+    // video: a mesh response carries no images and no video, so any wider
+    // probe would classify it as an empty response. Discord cannot render
+    // glTF inline, so the poster the server rendered at save time is the
+    // picture in the channel and the `.glb` rides beside it as a download.
+    if let Some(mesh) = resp.mesh.as_ref() {
+        let too_big = mesh.data.len() > MAX_ATTACHMENT_BYTES;
+        let poster = (!mesh.poster.is_empty()).then(|| DiscordEmbedImage {
+            filename: format!("mold-{seed}-poster.png"),
+            data: mesh.poster.clone(),
+        });
+        if too_big {
+            // The geometry cannot be posted; the poster still can, and the
+            // note says where the mesh itself lives.
+            let poster = poster?;
+            return Some(DiscordPayload {
+                filename: poster.filename.clone(),
+                data: poster.data.clone(),
+                note: Some(format!(
+                    "Mesh {} exceeded Discord's upload limit ({:.1} MiB); showing the poster. Fetch the .glb from the gallery.",
+                    mesh.format.extension().to_ascii_uppercase(),
+                    mesh.data.len() as f64 / (1024.0 * 1024.0)
+                )),
+                embed_image: None,
+            });
+        }
+        return Some(DiscordPayload {
+            filename: format!("mold-{seed}.{}", mesh.format.extension()),
+            data: mesh.data.clone(),
+            note: None,
+            embed_image: poster,
+        });
+    }
     if let Some(audio) = resp.audio.as_ref() {
         // Discord renders a `.wav` attachment with its own inline player, so
         // the waveform PNG stays out of the channel — it exists for gallery
@@ -104,6 +137,7 @@ pub fn select_attachment(resp: &mold_core::GenerateResponse, seed: u64) -> Optio
             filename: format!("mold-{seed}.{}", audio.format.extension()),
             data: audio.data.clone(),
             note: None,
+            embed_image: None,
         });
     }
     if let Some(video) = resp.video.as_ref() {
@@ -118,12 +152,14 @@ pub fn select_attachment(resp: &mold_core::GenerateResponse, seed: u64) -> Optio
                     video.format.extension().to_ascii_uppercase(),
                     video.data.len() as f64 / (1024.0 * 1024.0)
                 )),
+                embed_image: None,
             });
         }
         return Some(DiscordPayload {
             filename: format!("mold-{seed}.{}", video.format.extension()),
             data: video.data.clone(),
             note: None,
+            embed_image: None,
         });
     }
 
@@ -136,6 +172,7 @@ pub fn select_attachment(resp: &mold_core::GenerateResponse, seed: u64) -> Optio
             filename: format!("mold-{seed}.{ext}"),
             data: image.data.clone(),
             note: None,
+            embed_image: None,
         }
     })
 }
@@ -147,6 +184,18 @@ pub struct DiscordPayload {
     pub data: Vec<u8>,
     /// Optional user-visible note (e.g. "primary output was too large, here's the preview").
     pub note: Option<String>,
+    /// A second, image-shaped attachment that takes the embed's image slot
+    /// when the primary cannot (a mesh's poster beside its `.glb`). `None`
+    /// means the primary itself is embedded, or is left as a bare
+    /// attachment when it is an MP4.
+    pub embed_image: Option<DiscordEmbedImage>,
+}
+
+/// The raster companion of a non-raster primary attachment.
+#[derive(Debug, Clone)]
+pub struct DiscordEmbedImage {
+    pub filename: String,
+    pub data: Vec<u8>,
 }
 
 /// Whether a Discord attachment filename is an MP4. Used to decide between
@@ -180,13 +229,23 @@ async fn send_result_edit(
             embed = embed.footer(poise::serenity_prelude::CreateEmbedFooter::new(note));
         }
         let attachment = CreateAttachment::bytes(payload.data.clone(), payload.filename.clone());
-        // Only reference the attachment as the embed's image for image-shaped
-        // formats. MP4 attachments get left off the embed so Discord renders
-        // them as a separate inline video player block below — setting
-        // `image.url = attachment://mold-*.mp4` on an embed forces Discord's
-        // CDN to serve a WebP preview in the embed's image slot, which shows
-        // up as a static first frame instead of a playable video.
-        if !is_mp4_filename(&payload.filename) {
+        if let Some(poster) = payload.embed_image.as_ref() {
+            // A non-raster primary (the `.glb`) rides as a plain download and
+            // its poster takes the embed's image slot, so the channel shows a
+            // picture and offers the geometry beside it.
+            embed = embed.attachment(&poster.filename);
+            reply = reply.attachment(CreateAttachment::bytes(
+                poster.data.clone(),
+                poster.filename.clone(),
+            ));
+        } else if !is_mp4_filename(&payload.filename) {
+            // Only reference the attachment as the embed's image for
+            // image-shaped formats. MP4 attachments get left off the embed so
+            // Discord renders them as a separate inline video player block
+            // below — setting `image.url = attachment://mold-*.mp4` on an
+            // embed forces Discord's CDN to serve a WebP preview in the
+            // embed's image slot, which shows up as a static first frame
+            // instead of a playable video.
             embed = embed.attachment(&payload.filename);
         }
         reply = reply.attachment(attachment);
@@ -242,6 +301,75 @@ mod tests {
             seed_used: 7,
             gpu: None,
         }
+    }
+
+    fn mesh_response(glb: Vec<u8>, poster: Vec<u8>) -> GenerateResponse {
+        GenerateResponse {
+            mesh: Some(mold_core::MeshData {
+                data: glb,
+                format: OutputFormat::Glb,
+                vertex_count: 24_576,
+                face_count: 49_152,
+                bounds_min: [-0.5, -0.4, -0.3],
+                bounds_max: [0.5, 0.4, 0.3],
+                textured: false,
+                poster,
+                poster_width: 512,
+                poster_height: 512,
+            }),
+            request_warnings: Vec::new(),
+            audio: None,
+            // A stray image beside the mesh must not win: the mesh is probed
+            // first, as audio is probed before video.
+            images: vec![ImageData {
+                data: vec![1, 2, 3],
+                format: OutputFormat::Png,
+                width: 8,
+                height: 8,
+                index: 0,
+            }],
+            video: None,
+            generation_time_ms: 4_000,
+            model: mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string(),
+            seed_used: 9,
+            gpu: None,
+        }
+    }
+
+    /// A mesh is probed before every other slot: the `.glb` is the primary
+    /// attachment and its poster is the picture the embed shows.
+    #[test]
+    fn select_attachment_probes_mesh_first_and_pairs_the_poster() {
+        let resp = mesh_response(b"glTF".to_vec(), b"\x89PNG".to_vec());
+        let payload = select_attachment(&resp, 9).expect("payload");
+        assert_eq!(payload.filename, "mold-9.glb");
+        assert_eq!(payload.data, b"glTF");
+        assert!(payload.note.is_none());
+        let poster = payload.embed_image.expect("the poster is embedded");
+        assert_eq!(poster.filename, "mold-9-poster.png");
+        assert_eq!(poster.data, b"\x89PNG");
+
+        // Without a poster the `.glb` still posts, un-embedded.
+        let bare = select_attachment(&mesh_response(b"glTF".to_vec(), vec![]), 9).unwrap();
+        assert_eq!(bare.filename, "mold-9.glb");
+        assert!(bare.embed_image.is_none());
+    }
+
+    /// An oversized mesh posts its poster with a note instead of failing the
+    /// upload; with no poster there is nothing safe to post.
+    #[test]
+    fn select_attachment_falls_back_to_the_poster_when_the_mesh_is_too_large() {
+        let huge = vec![0u8; MAX_ATTACHMENT_BYTES + 1];
+        let payload =
+            select_attachment(&mesh_response(huge.clone(), b"\x89PNG".to_vec()), 9).unwrap();
+        assert_eq!(payload.filename, "mold-9-poster.png");
+        assert_eq!(payload.data, b"\x89PNG");
+        assert!(payload.embed_image.is_none());
+        assert!(payload
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("exceeded") && note.contains("gallery")));
+        assert!(select_attachment(&mesh_response(huge, vec![]), 9).is_none());
     }
 
     #[test]

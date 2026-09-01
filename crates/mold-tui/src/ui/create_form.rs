@@ -31,6 +31,10 @@ pub enum AdvSection {
     Sampling,
     Negative,
     Source,
+    /// The 3-D controls (`GenerateRequest.mesh`), present only while the
+    /// selected recipe's profile carries a `mesh` block. Sits right after
+    /// Source because the source image is that family's only conditioning.
+    Mesh,
     Identity,
     Lora,
     Upscale,
@@ -45,6 +49,7 @@ impl AdvSection {
             Self::Sampling => "Scheduler & sampling",
             Self::Negative => "Negative prompt",
             Self::Source => "Source image",
+            Self::Mesh => "3-D mesh",
             Self::Identity => "Identity photo",
             Self::Lora => "LoRA",
             Self::Upscale => "Upscale after generate",
@@ -60,6 +65,7 @@ impl AdvSection {
             Self::Sampling => "sampling",
             Self::Negative => "negative",
             Self::Source => "source",
+            Self::Mesh => "mesh",
             Self::Identity => "identity",
             Self::Lora => "lora",
             Self::Upscale => "upscale",
@@ -74,6 +80,7 @@ impl AdvSection {
             "sampling" => Some(Self::Sampling),
             "negative" => Some(Self::Negative),
             "source" => Some(Self::Source),
+            "mesh" => Some(Self::Mesh),
             "identity" => Some(Self::Identity),
             "lora" => Some(Self::Lora),
             "upscale" => Some(Self::Upscale),
@@ -163,6 +170,10 @@ pub fn advanced_sections(caps: &ModelCapabilities) -> Vec<AdvSection> {
     {
         sections.push(AdvSection::Source);
     }
+    // Gated on the recipe's profile block alone — never on the family name.
+    if caps.mesh.is_some() {
+        sections.push(AdvSection::Mesh);
+    }
     // Identity sits beside Source because it is the other conditioning
     // reference, and above LoRA because `mold_core::identity` refuses the
     // two together — the neighbouring rows say so without a warning.
@@ -219,6 +230,11 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             }
             fields
         }
+        AdvSection::Mesh => vec![
+            ParamField::Octree,
+            ParamField::MeshThreshold,
+            ParamField::TargetFaces,
+        ],
         AdvSection::Identity => vec![
             ParamField::IdentityImage,
             ParamField::IdentityWeight,
@@ -337,6 +353,26 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
             .or(params.control_image_path.as_deref())
             .map(file_name_of)
             .unwrap_or_else(|| "off".into()),
+        AdvSection::Mesh => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(octree) = params.mesh.octree_resolution {
+                parts.push(format!("octree {octree}"));
+            }
+            if let Some(threshold) = params.mesh.threshold {
+                parts.push(format!("iso {threshold:.2}"));
+            }
+            if let Some(faces) = params.mesh.target_faces {
+                parts.push(format!(
+                    "{} faces",
+                    crate::ui::preview::format_thousands(faces)
+                ));
+            }
+            if parts.is_empty() {
+                "default".into()
+            } else {
+                parts.join(" \u{00b7} ")
+            }
+        }
         AdvSection::Identity => params
             .identity_image_path
             .as_deref()
@@ -456,6 +492,11 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
     if params.lora_path.is_some() {
         count += 1;
     }
+    // Each mesh knob is absent-until-touched, so `Some` IS "differs from
+    // the recipe default".
+    count += usize::from(params.mesh.octree_resolution.is_some())
+        + usize::from(params.mesh.threshold.is_some())
+        + usize::from(params.mesh.target_faces.is_some());
     if params.upscale_model.is_some() {
         count += 1;
     }
@@ -1085,6 +1126,63 @@ mod tests {
         assert!(!fields.contains(&ParamField::Pipeline));
         assert!(!fields.contains(&ParamField::SpatialUpscale));
         assert!(!fields.contains(&ParamField::TemporalUpscale));
+    }
+
+    /// The 3-D section exists only for a recipe whose PROFILE carries the
+    /// mesh block — the family arm alone (no profile) never grows it — and
+    /// each knob is absent-until-touched in the summary and the badge.
+    #[test]
+    fn mesh_section_follows_the_profile_block_and_its_knobs_are_absent_until_touched() {
+        let family_only = capabilities_for_family("hunyuan3d");
+        assert!(family_only.mesh.is_none());
+        let rows = visible_rows(&family_only, &open_state(None));
+        assert!(
+            !rows.contains(&CreateRow::Section(AdvSection::Mesh)),
+            "a family-only catalog offers no mesh rows: {rows:?}"
+        );
+
+        let catalog = mold_core::build_model_catalog(&Config::default(), None, false);
+        let recipe = catalog
+            .iter()
+            .find(|entry| entry.name == mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL)
+            .and_then(|entry| entry.generation_profile.as_ref())
+            .and_then(|profile| profile.default_recipe())
+            .map(|recipe| recipe.capabilities.clone())
+            .expect("built-in Hunyuan3D profile");
+        let mut caps = capabilities_for_family("hunyuan3d");
+        crate::model_info::apply_recipe_capabilities(&mut caps, Some(&recipe));
+        let rows = visible_rows(&caps, &open_state(Some(AdvSection::Mesh)));
+        let sec_idx = rows
+            .iter()
+            .position(|r| *r == CreateRow::Section(AdvSection::Mesh))
+            .expect("mesh section");
+        assert_eq!(
+            &rows[sec_idx + 1..sec_idx + 4],
+            &[
+                CreateRow::SectionField(AdvSection::Mesh, ParamField::Octree),
+                CreateRow::SectionField(AdvSection::Mesh, ParamField::MeshThreshold),
+                CreateRow::SectionField(AdvSection::Mesh, ParamField::TargetFaces),
+            ]
+        );
+        // The profile hides strength, mask and negative on this recipe.
+        assert!(!section_fields(AdvSection::Source, &caps).contains(&ParamField::Strength));
+        assert!(!section_fields(AdvSection::Source, &caps).contains(&ParamField::MaskImage));
+        assert!(!rows.contains(&CreateRow::Section(AdvSection::Negative)));
+        assert!(section_fields(AdvSection::Source, &caps).contains(&ParamField::SourceImage));
+
+        let mut params = fresh_params();
+        assert_eq!(section_summary(AdvSection::Mesh, &params, true), "default");
+        assert_eq!(advanced_active_count(&params, true), 0);
+        params.mesh.octree_resolution = Some(320);
+        params.mesh.threshold = Some(0.55);
+        params.mesh.target_faces = Some(50_000);
+        assert_eq!(
+            section_summary(AdvSection::Mesh, &params, true),
+            "octree 320 \u{00b7} iso 0.55 \u{00b7} 50,000 faces"
+        );
+        assert_eq!(advanced_active_count(&params, true), 3);
+        assert_eq!(AdvSection::from_slug("mesh"), Some(AdvSection::Mesh));
+        assert_eq!(AdvSection::Mesh.slug(), "mesh");
     }
 
     #[test]

@@ -116,7 +116,8 @@ an entry like this:
 }
 ```
 
-The MCP server exposes synchronous `generate_image` and `generate_mesh`,
+The MCP server exposes synchronous `generate_image` and `generate_mesh` (plus
+`export_mesh`, which transcodes a stored `.glb` into OBJ, STL, or PLY),
 timeout-friendly `generate_image_async` / `generation_status` /
 `generation_retry`, gallery tools `list_gallery` / `get_gallery_image`,
 `list_models`, `list_loras`, `server_status`, and the prompt-transform tools

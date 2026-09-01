@@ -124,6 +124,55 @@ pub async fn fetch_and_cache_preview(
     Some(data)
 }
 
+/// Whether `filename` is a stored 3-D print. GLB is the only stored mesh
+/// container (OBJ, STL and PLY exist as export transcodes, never as gallery
+/// files), so this is deliberately narrower than the server's own
+/// `thumbnails::is_mesh_filename`. A mesh is NEVER handed to `image::open`:
+/// its preview is the poster PNG rendered at save time.
+pub fn is_mesh_filename(filename: &str) -> bool {
+    Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("glb"))
+}
+
+/// Fetch the poster PNG of a mesh gallery entry from a host and persist it
+/// under the TUI's thumbnail key for that filename.
+///
+/// The poster is served by `/api/gallery/thumbnail/:filename`, which for a
+/// `.glb` reads the sidecar the server wrote at save time
+/// (`media_paths::mesh_poster_thumbnail_paths`). The cache key is the plain
+/// filename, as every thumbnail's is, so the grid and the detail pane share
+/// one download. Returns `None` on a failed request; a response that is not
+/// a raster (the server's SVG placeholder for a print with no poster) is
+/// returned but not cached, so a poster written later is still picked up.
+pub async fn fetch_and_cache_mesh_poster(
+    server_url: &str,
+    host_id: &str,
+    filename: &str,
+) -> Option<Vec<u8>> {
+    let cached = crate::thumbnails::thumbnail_path(Path::new(filename));
+    if let Ok(data) = std::fs::read(&cached) {
+        if !data.is_empty() {
+            return Some(data);
+        }
+    }
+
+    let api_key = crate::hosts::api_key_for(host_id);
+    let client = crate::hosts::client_for(server_url, api_key.as_deref());
+    let data = client.get_gallery_thumbnail(filename).await.ok()?;
+    if looks_like_raster(&data) {
+        let _ = crate::thumbnails::save_thumbnail_bytes(&data, Path::new(filename));
+    }
+    Some(data)
+}
+
+/// PNG or JPEG magic — what a poster is, as opposed to the SVG placeholder
+/// the thumbnail route answers with when a mesh has no poster yet.
+fn looks_like_raster(data: &[u8]) -> bool {
+    data.starts_with(b"\x89PNG\r\n\x1a\n") || data.starts_with(&[0xFF, 0xD8, 0xFF])
+}
+
 /// Whether `filename`'s extension looks like one of the video formats mold
 /// can emit. Used by the TUI to decide whether to try the GIF preview
 /// endpoint before falling back to the raw file.
@@ -1146,6 +1195,33 @@ mod tests {
         assert!(merged.entries.is_empty());
         assert_eq!(merged.offline_hosts, 0, "this-machine is not a remote host");
         assert!(!merged.local_trash_available);
+    }
+
+    /// GLB is the only stored mesh container. OBJ/STL/PLY are exports and
+    /// never gallery files, so they must not be classified as prints whose
+    /// preview is a poster.
+    #[test]
+    fn is_mesh_filename_matches_the_stored_container_only() {
+        assert!(is_mesh_filename("mold-hunyuan3d-1.glb"));
+        assert!(is_mesh_filename("CHAIR.GLB"));
+        assert!(!is_mesh_filename("chair.obj"));
+        assert!(!is_mesh_filename("chair.stl"));
+        assert!(!is_mesh_filename("chair.ply"));
+        assert!(!is_mesh_filename("frame.png"));
+        assert!(!is_mesh_filename("clip.mp4"));
+        assert!(!is_mesh_filename("no_extension"));
+        // A mesh is never a video, so the two probes cannot both fire.
+        assert!(!is_video_filename("mold-hunyuan3d-1.glb"));
+    }
+
+    #[test]
+    fn a_poster_is_a_raster_and_the_placeholder_is_not() {
+        assert!(looks_like_raster(b"\x89PNG\r\n\x1a\n\0\0"));
+        assert!(looks_like_raster(&[0xFF, 0xD8, 0xFF, 0xE0]));
+        assert!(!looks_like_raster(
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+        ));
+        assert!(!looks_like_raster(b""));
     }
 
     #[test]

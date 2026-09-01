@@ -26,6 +26,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::SettingsInput { .. }) => render_settings_input(frame, app),
         Some(Popup::Info { message }) => render_info(frame, app, message.clone()),
         Some(Popup::UpscaleModelSelector { .. }) => render_upscale_model_selector(frame, app),
+        Some(Popup::MeshExportPicker { .. }) => render_mesh_export_picker(frame, app),
         None => {}
     }
 }
@@ -124,6 +125,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  e / r              Recall into Create"),
         Line::from("  d                  Remove print (trash when every machine supports it)"),
         Line::from("  u                  Upscale with AI model"),
+        Line::from("  x                  Export a 3-D print as OBJ / STL / PLY"),
         Line::from("  o                  Open in system viewer"),
         Line::from("  /                  Filter by prompt, model, or filename"),
         Line::from(""),
@@ -1442,6 +1444,83 @@ fn render_info(frame: &mut Frame, app: &App, message: String) {
     frame.render_widget(paragraph, area);
 }
 
+/// Library `x`: the export-container picker for a stored `.glb`. One row
+/// per container, each naming what that container drops, so the choice is
+/// informed before a file is written.
+fn render_mesh_export_picker(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let Some(Popup::MeshExportPicker {
+        filename,
+        formats,
+        selected,
+    }) = &app.popup
+    else {
+        return;
+    };
+    let area = centered_rect(frame.area(), 55, 30);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(format!(" Export {filename} "))
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+
+    let mut text: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "The gallery keeps its GLB; a converted copy is written beside your other saves.",
+            theme.dim(),
+        )),
+        Line::from(""),
+    ];
+    for (index, format) in formats.iter().enumerate() {
+        let note = mesh_export_format_note(*format);
+        let label = format!("{:<4} {note}", format.extension().to_ascii_uppercase());
+        let style = if index == *selected {
+            theme.param_selected()
+        } else {
+            Style::default().fg(theme.text)
+        };
+        let marker = if index == *selected {
+            "\u{25b8} "
+        } else {
+            "  "
+        };
+        text.push(Line::from(vec![
+            Span::styled(marker, style),
+            Span::styled(label, style),
+        ]));
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::styled("Enter", theme.status_key()),
+        Span::styled(" Export  ", Style::default().fg(theme.text)),
+        Span::styled("j/k", theme.status_key()),
+        Span::styled(" Choose  ", Style::default().fg(theme.text)),
+        Span::styled("Esc", theme.status_key()),
+        Span::styled(" Cancel", Style::default().fg(theme.text)),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// What each export container carries, in the picker's own words — the
+/// same table `website/guide/mesh.md` documents.
+pub(crate) fn mesh_export_format_note(format: mold_core::MeshExportFormat) -> &'static str {
+    match format {
+        mold_core::MeshExportFormat::Glb => "the stored file, unchanged",
+        mold_core::MeshExportFormat::Obj => {
+            "positions, normals, UVs; no materials (Blender, MeshLab)"
+        }
+        mold_core::MeshExportFormat::Stl => "triangles only; no UVs or colour (3-D printing, CAD)",
+        mold_core::MeshExportFormat::Ply => "shared vertices with normals (point-and-mesh tooling)",
+    }
+}
+
 fn render_settings_input(frame: &mut Frame, app: &mut App) {
     let theme = &app.theme;
     let area = centered_rect(frame.area(), 55, 15);
@@ -1793,6 +1872,7 @@ mod tests {
                 last_output_path: None,
                 held_batch: None,
                 prompt_transform_token: 0,
+                last_mesh_summary: None,
             },
             gallery: crate::app::GalleryState::default(),
             models: crate::app::ModelsState {

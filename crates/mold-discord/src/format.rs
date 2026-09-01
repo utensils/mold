@@ -169,7 +169,38 @@ pub fn format_generation_result(
         prompt.to_string()
     };
 
-    let (title, mut fields) = if let Some(video) = resp.video.as_ref() {
+    let (title, mut fields) = if let Some(mesh) = resp.mesh.as_ref() {
+        // Probed before video for the reason `select_attachment` gives: a
+        // mesh response has no video and no images, so the image arm below
+        // would caption it with an empty size.
+        let extent = |axis: usize| (mesh.bounds_max[axis] - mesh.bounds_min[axis]).abs();
+        let fields = vec![
+            ("Model".to_string(), resp.model.clone(), true),
+            (
+                "Triangles".to_string(),
+                group_thousands(mesh.face_count),
+                true,
+            ),
+            (
+                "Vertices".to_string(),
+                group_thousands(mesh.vertex_count),
+                true,
+            ),
+            (
+                "Bounds".to_string(),
+                format!("{:.2} × {:.2} × {:.2}", extent(0), extent(1), extent(2)),
+                true,
+            ),
+            ("Time".to_string(), format!("{time_secs:.1}s"), true),
+            (
+                "Format".to_string(),
+                mesh.format.extension().to_ascii_uppercase(),
+                true,
+            ),
+            ("Seed".to_string(), resp.seed_used.to_string(), false),
+        ];
+        ("Mesh Generated".to_string(), fields)
+    } else if let Some(video) = resp.video.as_ref() {
         let format_label = video.format.extension().to_ascii_uppercase();
         let mut fields = vec![
             ("Model".to_string(), resp.model.clone(), true),
@@ -820,6 +851,19 @@ pub fn format_error(msg: &str) -> EmbedData {
 }
 
 /// Format seconds into a human-readable duration string.
+/// `49152` → `49,152`: triangle and vertex counts run to seven digits.
+fn group_thousands(value: u32) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn format_duration_secs(secs: u64) -> String {
     let days = secs / 86400;
     let hours = (secs % 86400) / 3600;
@@ -1155,6 +1199,57 @@ mod tests {
             .fields
             .iter()
             .any(|(k, v, _)| k == "Size" && v == "768x512"));
+    }
+
+    /// A mesh gets its own summary: geometry counts, extent, and the GLB
+    /// container, never an empty "Size" row from the image arm.
+    #[test]
+    fn generation_result_mesh_lists_tris_verts_bounds_and_seed() {
+        let resp = GenerateResponse {
+            mesh: Some(mold_core::MeshData {
+                data: vec![0u8; 16],
+                format: OutputFormat::Glb,
+                vertex_count: 24_576,
+                face_count: 49_152,
+                bounds_min: [-0.5, -0.4, -0.3],
+                bounds_max: [0.5, 0.4, 0.3],
+                textured: false,
+                poster: vec![],
+                poster_width: 512,
+                poster_height: 512,
+            }),
+            request_warnings: Vec::new(),
+            audio: None,
+            images: vec![],
+            video: None,
+            generation_time_ms: 4_000,
+            model: mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string(),
+            seed_used: 9,
+            gpu: Some(1),
+        };
+        let embed = format_generation_result(&resp, "", None);
+        assert_eq!(embed.title, "Mesh Generated");
+        let field = |name: &str| {
+            embed
+                .fields
+                .iter()
+                .find(|(k, _, _)| k == name)
+                .map(|(_, v, _)| v.as_str())
+        };
+        assert_eq!(field("Triangles"), Some("49,152"));
+        assert_eq!(field("Vertices"), Some("24,576"));
+        assert_eq!(field("Bounds"), Some("1.00 × 0.80 × 0.60"));
+        assert_eq!(field("Format"), Some("GLB"));
+        assert_eq!(field("Seed"), Some("9"));
+        assert_eq!(field("Time"), Some("4.0s"));
+        assert_eq!(field("Device"), Some("GPU 1"));
+        assert!(field("Size").is_none(), "a mesh has no raster size");
+        assert!(
+            embed.description.is_empty(),
+            "an empty prompt is not padded with placeholder text"
+        );
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
     }
 
     #[test]

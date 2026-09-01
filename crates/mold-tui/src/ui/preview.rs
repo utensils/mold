@@ -84,6 +84,43 @@ pub(crate) fn preview_caption(model: &str, seed: u64, time_ms: u64, host_label: 
     )
 }
 
+/// `49152` → `49,152`. Counts of triangles and vertices run to six or seven
+/// digits, where an unseparated number stops being readable at a glance.
+pub(crate) fn format_thousands(value: u32) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// The one-line statistics of a finished 3-D print:
+/// `49,152 tris · 24,576 verts · 1.00×0.80×0.60`.
+///
+/// The extent is the axis-aligned box the mesh occupies in its own
+/// coordinate space (`MeshData.bounds_*`), carried on the wire precisely so
+/// no client has to parse the geometry to describe it.
+pub(crate) fn mesh_summary(
+    vertices: u32,
+    faces: u32,
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+) -> String {
+    let extent = |axis: usize| (bounds_max[axis] - bounds_min[axis]).abs();
+    format!(
+        "{} tris \u{00b7} {} verts \u{00b7} {:.2}\u{00d7}{:.2}\u{00d7}{:.2}",
+        format_thousands(faces),
+        format_thousands(vertices),
+        extent(0),
+        extent(1),
+        extent(2)
+    )
+}
+
 /// Display name of the sticky generation target ("This Mac" unless a
 /// registered host is pinned).
 pub(crate) fn target_host_label(app: &App) -> String {
@@ -184,9 +221,16 @@ fn render_done(frame: &mut Frame, app: &mut App, inner: Rect) {
             &target_host_label(app),
         )
     });
-    let image_area = if caption.is_some() && inner.height > 1 {
+    // A finished 3-D print gets a second caption row with its statistics
+    // (`tris · verts · bounds`) above the usual one, when there is room.
+    let mesh_summary = caption
+        .as_ref()
+        .and(app.generate.last_mesh_summary.clone())
+        .filter(|_| inner.height > 2);
+    let caption_rows = u16::from(caption.is_some()) + u16::from(mesh_summary.is_some());
+    let image_area = if caption_rows > 0 && inner.height > caption_rows {
         Rect {
-            height: inner.height - 1,
+            height: inner.height - caption_rows,
             ..inner
         }
     } else {
@@ -195,6 +239,19 @@ fn render_done(frame: &mut Frame, app: &mut App, inner: Rect) {
     if let Some(ref mut image_state) = app.generate.image_state {
         let widget = StatefulImage::default().resize(ratatui_image::Resize::Scale(None));
         frame.render_stateful_widget(widget, image_area, image_state);
+    }
+    if let Some(summary) = mesh_summary {
+        let row = Rect {
+            y: inner.y + inner.height - 2,
+            height: 1,
+            ..inner
+        };
+        frame.render_widget(
+            Paragraph::new(summary)
+                .style(app.theme.dim())
+                .alignment(Alignment::Center),
+            row,
+        );
     }
     if let Some(caption) = caption {
         if inner.height > 1 {
@@ -323,6 +380,28 @@ mod tests {
         let (_, bar, stats) = preview_progress(28, 28, 14_000);
         assert!(bar.chars().all(|c| c == '\u{2588}'));
         assert!(stats.starts_with("100%"), "{stats}");
+    }
+
+    #[test]
+    fn mesh_summary_reads_tris_verts_and_extent() {
+        assert_eq!(
+            mesh_summary(24_576, 49_152, [-0.5, -0.4, -0.3], [0.5, 0.4, 0.3]),
+            "49,152 tris \u{00b7} 24,576 verts \u{00b7} 1.00\u{00d7}0.80\u{00d7}0.60"
+        );
+        // Small counts carry no separator; a degenerate box reads as zeros
+        // rather than as a panic.
+        assert_eq!(
+            mesh_summary(8, 12, [0.0; 3], [0.0; 3]),
+            "12 tris \u{00b7} 8 verts \u{00b7} 0.00\u{00d7}0.00\u{00d7}0.00"
+        );
+    }
+
+    #[test]
+    fn format_thousands_groups_every_three_digits() {
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(999), "999");
+        assert_eq!(format_thousands(1_000), "1,000");
+        assert_eq!(format_thousands(2_000_000), "2,000,000");
     }
 
     #[test]

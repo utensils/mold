@@ -31,3 +31,28 @@
   were previously printed twice each with the whole render attributed to the
   decode — and `-o` refuses a filename a 3-D render cannot write, pointing at
   the export command for `.obj`, `.stl`, and `.ply`.
+- **The TUI renders, previews, and exports 3-D prints.** Selecting a
+  Hunyuan3D model in `mold tui` reshapes the Create form from the recipe's
+  profile: an Advanced ▸ **3-D mesh** section (Octree over the advertised
+  allowlist, Iso threshold, Target faces — absent until touched, defaults
+  shown from the profile), a Format row pinned to GLB, Strength / Mask /
+  Negative hidden because the profile says so, and Generate that submits
+  without a prompt because the profile advertises `prompt.mode: ignored`.
+  A finished mesh saves its `.glb`, caches the poster under the gallery
+  thumbnail key, previews the poster, and captions it with
+  `tris · verts · bounds`; the Library never hands a `.glb` to a raster
+  decoder, and `x` on a mesh opens an OBJ / STL / PLY export picker (the
+  owning machine's `capabilities.mesh.export_formats`, or the in-process
+  writer for a local print) that writes beside the TUI's other saves.
+- **The Discord bot delivers meshes.** `/generate` with a Hunyuan3D model
+  and a `source_image` needs no prompt, is delivered as GLB whatever the
+  format option says (the server's own pin), posts the rendered poster as
+  the embed image with the `.glb` attached beside it, and summarises as
+  **Mesh Generated** with triangles, vertices, bounds, format, and seed.
+- **The `generate_mesh` MCP tool advertises the profile's own bounds.** Its
+  `octree`, `threshold`, and `target_faces` schema (with the previous
+  `octree_resolution` / `mesh_threshold` spellings still accepted) is built
+  from the same `validation::MESH_*` constants the generation profile and
+  admission read, and its description points at `export_mesh` for every
+  container other than the stored GLB. The tool count is thirteen, and the
+  docs say so.

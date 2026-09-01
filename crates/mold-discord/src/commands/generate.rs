@@ -522,9 +522,17 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
     let is_video_family = params.family.and_then(video_family).is_some();
     let is_ltx2 = params.family == Some("ltx2");
     let is_h3 = params.family.is_some_and(mold_core::minimax_h3::is_family);
+    // The one family whose container is pinned, not chosen — the same rule
+    // `GenerateRequest::pin_output_format_for_family` applies at admission,
+    // so the bot and the server can never disagree about what a 3-D render
+    // is delivered as. The family is read from `/api/models` (or the manifest
+    // fallback while the cache is cold), never guessed from the model name.
+    let is_mesh = params.family == Some(mold_core::manifest::HUNYUAN3D_FAMILY);
 
     // Video families always deliver MP4 or GIF. Image models stay PNG.
-    let output_format = if is_h3 {
+    let output_format = if is_mesh {
+        OutputFormat::Glb
+    } else if is_h3 {
         // H3 always emits synchronized audio and its contract requires an MP4
         // container. This does not activate the hidden family; it only keeps
         // the request builder from manufacturing an invalid future request.
@@ -959,12 +967,21 @@ fn prompt_missing_before_defer(prompt: Option<&str>, has_visual_conditioning: bo
     !has_visual_conditioning && prompt.is_none_or(|p| p.trim().is_empty())
 }
 
-/// Generate an image (PNG) or video (MP4 by default, GIF on request).
+// The doc comment below IS the slash command's description (Discord caps it
+// at 100 characters), so the design note lives here instead.
+//
+// The prompt is optional whenever a source image is attached — that covers
+// image-to-video AND image-to-3D. Discord options cannot be optional per
+// model, so the gate is "visual conditioning present", which is exactly the
+// set of recipes whose profile advertises `prompt.mode` other than
+// `required`; the server's own admission (the same profile) is the final
+// word, and a text-only model with an empty prompt is still refused there.
+/// Generate an image (PNG), a video (MP4/GIF), or a 3-D mesh (GLB, from a source image).
 #[allow(clippy::too_many_arguments)]
 #[poise::command(slash_command)]
 pub async fn generate(
     ctx: Context<'_>,
-    #[description = "Text prompt — optional for image-to-video when a source image is attached"]
+    #[description = "Text prompt — optional with a source image (image-to-video, image-to-3D)"]
     prompt: Option<String>,
     #[description = "Model to use (e.g. flux-schnell:q8, ltx-2-19b-distilled:fp8)"]
     #[autocomplete = "autocomplete_model"]
@@ -1547,6 +1564,46 @@ mod tests {
         assert_eq!(req.steps, 28);
         assert_eq!(req.guidance, 7.5);
         assert_eq!(req.seed, Some(42));
+    }
+
+    /// A mesh family is delivered as GLB whatever the video-format option
+    /// says, mirroring `GenerateRequest::pin_output_format_for_family`, and
+    /// its (empty) prompt rides the request as-is: the profile marks it
+    /// `ignored`, so there is nothing to invent.
+    #[test]
+    fn build_request_pins_glb_for_the_mesh_family() {
+        let req = build_generate_request(BuildParams {
+            family: Some(mold_core::manifest::HUNYUAN3D_FAMILY),
+            source_image: Some(vec![0x89, b'P', b'N', b'G']),
+            video_format: Some(VideoFormat::Gif),
+            ..base_params("", mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL)
+        });
+        assert_eq!(req.output_format, Some(OutputFormat::Glb));
+        assert_eq!(req.prompt, "");
+        assert!(req.frames.is_none(), "a mesh has no timeline");
+        assert!(req.fps.is_none());
+        assert!(req.source_image.is_some(), "the image is the conditioning");
+        assert!(req.mesh.is_none(), "the recipe's own defaults apply");
+
+        // Only that family: a raster family with a source image stays PNG.
+        let raster = build_generate_request(BuildParams {
+            family: Some("sd15"),
+            source_image: Some(vec![0x89, b'P', b'N', b'G']),
+            ..base_params("a cat", "sd15:fp16")
+        });
+        assert_eq!(raster.output_format, Some(OutputFormat::Png));
+    }
+
+    /// The pre-defer prompt gate is "visual conditioning present": a mesh
+    /// run always carries a source image, so it is admitted without a
+    /// prompt, while a bare empty prompt is still refused before deferring.
+    #[test]
+    fn an_empty_prompt_passes_the_pre_defer_gate_only_with_visual_conditioning() {
+        assert!(!prompt_missing_before_defer(None, true));
+        assert!(!prompt_missing_before_defer(Some("   "), true));
+        assert!(prompt_missing_before_defer(None, false));
+        assert!(prompt_missing_before_defer(Some("   "), false));
+        assert!(!prompt_missing_before_defer(Some("a chair"), false));
     }
 
     #[test]

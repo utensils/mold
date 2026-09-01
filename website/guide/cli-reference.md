@@ -445,10 +445,14 @@ Start a stdio Model Context Protocol server that proxies to `mold serve`.
 mold mcp [--host URL]
 ```
 
-MCP exposes twelve tools: `generate_image`, `generate_mesh`,
+MCP exposes thirteen tools: `generate_image`, `generate_mesh`, `export_mesh`,
 `generate_image_async`, `generation_status`, `generation_retry`, `list_gallery`,
 `get_gallery_image`, `list_models`, `list_loras`, `server_status`,
-`expand_prompt`, and `remix_prompt`. The prompt-transform tools call
+`expand_prompt`, and `remix_prompt`. `generate_mesh` takes `image`, `model`,
+`steps`, `seed`, `octree`, `threshold`, and `target_faces` — the same bounds
+the generation profile advertises, read from one set of core constants — and
+`export_mesh` transcodes a stored `.glb` into OBJ, STL, or PLY by gallery
+filename. The prompt-transform tools call
 `/api/expand` and `/api/remix` with the target model and an optional `context`
 object (canvas, frames, fps, references, LoRA names) so the host's rewrite
 follows the model's prompting guide. The same guides are published as

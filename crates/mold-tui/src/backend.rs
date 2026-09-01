@@ -990,7 +990,15 @@ async fn hydrate_last_completed(
     else {
         return;
     };
-    last.preview_bytes = client.get_gallery_image(filename).await.ok();
+    // A mesh has no raster to show: its `.glb` would only fail the pane's
+    // decode after a multi-megabyte download, so the poster the server
+    // rendered at save time (served by the thumbnail route) is fetched
+    // instead — the same picture the grid shows.
+    last.preview_bytes = if crate::gallery_scan::is_mesh_filename(filename) {
+        client.get_gallery_thumbnail(filename).await.ok()
+    } else {
+        client.get_gallery_image(filename).await.ok()
+    };
 }
 
 /// What the batch was submitted with. The Create form may have moved on
@@ -1590,7 +1598,13 @@ fn build_request(
     });
 
     Ok(GenerateRequest {
-        mesh: None,
+        // Absent-until-touched, like every optional block: an untouched form
+        // ships no `mesh` at all (the recipe's defaults apply), and the
+        // capability sync already cleared the block on any recipe whose
+        // profile has no `mesh` — where the server refuses it rather than
+        // ignoring it.
+        mesh: (params.mesh != mold_core::MeshRequestOptions::default())
+            .then(|| params.mesh.clone()),
         video_only: None,
         collection: params
             .collection
@@ -1835,6 +1849,29 @@ mod tests {
     fn ordinary_request() -> GenerateRequest {
         let config = mold_core::Config::default();
         build_request(&GenerateParams::from_config(&config), "print", &None).unwrap()
+    }
+
+    /// The mesh block is absent-until-touched: an untouched form ships no
+    /// `mesh` (the recipe's defaults apply, and a raster recipe would refuse
+    /// the block), and a touched knob ships exactly as the row shows it.
+    #[test]
+    fn the_mesh_block_rides_the_request_only_once_touched() {
+        let config = mold_core::Config::default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        let untouched = build_request(&params, "", &None).unwrap();
+        assert!(untouched.mesh.is_none());
+        // The family normalizer pins the container regardless of the form.
+        assert_eq!(untouched.output_format, Some(mold_core::OutputFormat::Glb));
+
+        params.mesh.octree_resolution = Some(320);
+        params.mesh.threshold = Some(0.55);
+        let touched = build_request(&params, "", &None).unwrap();
+        let mesh = touched.mesh.expect("touched knobs ship");
+        assert_eq!(mesh.octree_resolution, Some(320));
+        assert_eq!(mesh.threshold, Some(0.55));
+        assert_eq!(mesh.target_faces, None);
+        assert_eq!(mesh.texture, None, "no texture stage is ever requested");
     }
 
     /// A host that advertises no batch limit advertises no generation at all,

@@ -118,6 +118,52 @@ mold run hunyuan3d-mini-turbo --image chair.png --output - > chair.glb
 cat chair.png | mold run hunyuan3d-mini-turbo --image - -o chair.glb
 ```
 
+## In the TUI
+
+Pick a Hunyuan3D model in `mold tui`'s Create form and the form reshapes
+itself from the model's generation profile rather than from its name:
+
+- **Source image** is the only conditioning row. Strength, Mask and the
+  Negative prompt disappear because the profile advertises no strength
+  (`supports_strength` is false), a hidden mask, and no negative prompt.
+- **Advanced ▸ 3-D mesh** appears with three rows — **Octree** (`◀▶` walks
+  the advertised allowlist), **Iso threshold** (0.05 per press inside the
+  advertised range) and **Target faces** (10 000 per press; stepping below
+  the minimum turns decimation off). Each row reads `default` until touched,
+  showing the profile's own default, and an untouched row sends nothing so
+  the recipe's defaults apply.
+- **Format** is pinned to `glb`; `◀▶` cannot walk it onto a raster container
+  the server would only pin straight back.
+- **Generate** submits with an empty prompt, because the profile advertises
+  `prompt.mode: ignored`; the same gate still refuses an empty prompt on a
+  text model.
+
+A finished mesh saves `mold-<model>-<timestamp>.glb` beside your other
+prints, caches its poster where the Library looks for thumbnails, shows the
+poster in the Preview panel, and captions it with
+`49,152 tris · 24,576 verts · 1.00×0.80×0.60`.
+
+In the **Library**, a `.glb` tile shows its poster (fetched from the owning
+machine's thumbnail route; never the geometry through a raster decoder), and
+`x` opens an export picker offering OBJ, STL and PLY — the list the owning
+machine advertises on `capabilities.mesh.export_formats`, or every container
+for a print that lives only on this machine. The converted copy is written
+beside your other saves as `<print>.<ext>` and its path is shown when it
+lands; the gallery file is untouched.
+
+## In Discord
+
+`/generate` with a Hunyuan3D `model` and a `source_image` attachment renders
+a mesh. The `prompt` option is optional whenever a source image is attached
+(Discord cannot make an option optional per model, and a source image is
+exactly what image-to-video and image-to-3D have in common), the
+`video_format` option is ignored because the family has one deliverable
+container, and the reply embeds the rendered poster with the `.glb` attached
+beside it as a download. The summary reads **Mesh Generated** with the
+triangle and vertex counts, the bounds, the format and the seed. A mesh
+larger than Discord's upload limit posts the poster alone with a note saying
+to fetch the `.glb` from the gallery.
+
 ## In the gallery
 
 A mesh cannot be decoded by a raster thumbnailer, so mold renders a **poster

@@ -1156,8 +1156,13 @@ struct GenerateMeshArgs {
     model: Option<String>,
     steps: Option<u32>,
     seed: Option<u64>,
-    octree_resolution: Option<u32>,
-    mesh_threshold: Option<f32>,
+    /// Named as the CLI names it (`--octree`); the wire field it becomes is
+    /// `mesh.octree_resolution`, accepted here as an alias.
+    #[serde(alias = "octree_resolution")]
+    octree: Option<u32>,
+    /// `--mesh-threshold` on the CLI; `mesh.threshold` on the wire.
+    #[serde(alias = "mesh_threshold")]
+    threshold: Option<f32>,
     target_faces: Option<u32>,
 }
 
@@ -2492,8 +2497,8 @@ fn build_generate_mesh_request(
             .map_err(|e| format!("failed to resolve installed catalog model '{model}': {e}"))?;
     }
     let mesh = mold_core::MeshRequestOptions {
-        octree_resolution: args.octree_resolution,
-        threshold: args.mesh_threshold,
+        octree_resolution: args.octree,
+        threshold: args.threshold,
         target_faces: args.target_faces,
         texture: None,
         texture_resolution: None,
@@ -3027,7 +3032,12 @@ fn builtin_tool_definitions() -> Value {
         },
         {
             "name": "generate_mesh",
-            "description": "Generate a 3D mesh from ONE image using the Hunyuan3D family. There is no prompt: this family has no text encoder, so the image is the entire conditioning. Best results come from one object, centred, filling most of the frame, on a plain or removed background, seen from a three-quarter angle. Returns a rendered poster image plus mesh statistics; the glTF itself lands in the gallery and is fetched by filename.",
+            "description": format!(
+                "Generate a 3D mesh from ONE image using the Hunyuan3D family. There is no prompt; the image is the whole conditioning (the family has no text encoder, and the profile advertises prompt.mode = ignored). Best results come from one object, centred, filling most of the frame, on a plain or removed background, seen from a three-quarter angle. The stored artifact is always GLB. Returns a rendered poster image plus mesh statistics; the glTF itself lands in the gallery and is fetched by filename. To get OBJ, STL, or PLY, call export_mesh with that gallery filename — exports are transcodes of the stored GLB, never generation targets. Defaults: model {}, octree {}, threshold {}.",
+                mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
+                mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION,
+                mold_core::validation::MESH_DEFAULT_THRESHOLD
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3037,24 +3047,35 @@ fn builtin_tool_definitions() -> Value {
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model name. Defaults to hunyuan3d-mini-turbo:fp16."
+                        "description": format!("Model name. Defaults to {}.", mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL)
                     },
                     "steps": { "type": "integer", "minimum": 1, "maximum": 100 },
                     "seed": { "type": "integer", "minimum": 0 },
-                    "octree_resolution": {
+                    "octree": {
                         "type": "integer",
-                        "enum": [128, 192, 256, 320, 384],
-                        "description": "Query-grid resolution; the detail knob. Cost is CUBIC, so 384 is roughly eight times 192. Defaults to 256."
+                        "enum": mold_core::validation::MESH_OCTREE_RESOLUTIONS,
+                        "default": mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION,
+                        "description": format!(
+                            "Query-grid resolution; the detail knob. An allowlist, not a range, because the occupancy field is evaluated on (n + 1)^3 points and cost is CUBIC — 384 is roughly eight times 192. One of {:?}; defaults to {}.",
+                            mold_core::validation::MESH_OCTREE_RESOLUTIONS,
+                            mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION
+                        )
                     },
-                    "mesh_threshold": {
+                    "threshold": {
                         "type": "number",
                         "minimum": 0.0,
                         "maximum": 1.0,
-                        "description": "Iso-level at which the surface is extracted. Defaults to 0.6; lower recovers thin features and adds noise."
+                        "default": mold_core::validation::MESH_DEFAULT_THRESHOLD,
+                        "description": format!(
+                            "Iso-level at which the surface is extracted, on the same [0, 1] occupancy scale ComfyUI's VoxelToMesh node uses, so a value tuned there carries over unchanged. Defaults to {}; lower recovers thin features and adds noise.",
+                            mold_core::validation::MESH_DEFAULT_THRESHOLD
+                        )
                     },
                     "target_faces": {
                         "type": "integer",
-                        "description": "Decimate to approximately this many triangles. Omit to keep the raw surface."
+                        "minimum": mold_core::validation::MESH_MIN_TARGET_FACES,
+                        "maximum": mold_core::validation::MESH_MAX_TARGET_FACES,
+                        "description": "Decimate to approximately this many triangles. Omit to keep the raw surface-net output, which is dense and regular."
                     }
                 },
                 "required": ["image"],
@@ -3386,8 +3407,8 @@ mod tests {
             model: None,
             steps: None,
             seed: None,
-            octree_resolution: None,
-            mesh_threshold: None,
+            octree: None,
+            threshold: None,
             target_faces: None,
         })
         .unwrap_err();
@@ -3398,8 +3419,8 @@ mod tests {
             model: None,
             steps: None,
             seed: None,
-            octree_resolution: None,
-            mesh_threshold: None,
+            octree: None,
+            threshold: None,
             target_faces: None,
         })
         .unwrap_err();
@@ -3414,8 +3435,8 @@ mod tests {
             model: None,
             steps: Some(5),
             seed: Some(42),
-            octree_resolution: Some(320),
-            mesh_threshold: Some(0.55),
+            octree: Some(320),
+            threshold: Some(0.55),
             target_faces: Some(50_000),
         })
         .expect("a well-formed mesh request builds");
@@ -3452,6 +3473,65 @@ mod tests {
         // Every other generate tool requires a prompt; this one must not, or
         // an agent will invent one for a family that never reads it.
         assert!(!required.contains(&Value::from("prompt")));
+    }
+
+    /// The schema advertises the SAME bounds admission enforces — the octree
+    /// allowlist, the iso range and default, the face bounds — from the core
+    /// constants rather than literals that could drift, and points an agent
+    /// at `export_mesh` for every container other than the stored GLB.
+    #[test]
+    fn the_mesh_tool_schema_mirrors_the_profile_constants_and_names_the_export() {
+        let tools = tool_definitions();
+        let mesh = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("generate_mesh"))
+            .expect("generate_mesh must be registered");
+        let description = mesh["description"].as_str().unwrap();
+        assert!(description.contains("There is no prompt; the image is the whole conditioning"));
+        assert!(description.contains("export_mesh"), "{description}");
+
+        let props = &mesh["inputSchema"]["properties"];
+        let octree = props["octree"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as u32)
+            .collect::<Vec<_>>();
+        assert_eq!(octree, mold_core::validation::MESH_OCTREE_RESOLUTIONS);
+        assert_eq!(
+            props["octree"]["default"].as_u64().unwrap() as u32,
+            mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION
+        );
+        assert_eq!(
+            props["threshold"]["default"].as_f64().unwrap(),
+            mold_core::validation::MESH_DEFAULT_THRESHOLD
+        );
+        assert_eq!(props["threshold"]["minimum"].as_f64(), Some(0.0));
+        assert_eq!(props["threshold"]["maximum"].as_f64(), Some(1.0));
+        assert!(props["threshold"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("VoxelToMesh"));
+        assert_eq!(
+            props["target_faces"]["minimum"].as_u64().unwrap() as u32,
+            mold_core::validation::MESH_MIN_TARGET_FACES
+        );
+        assert_eq!(
+            props["target_faces"]["maximum"].as_u64().unwrap() as u32,
+            mold_core::validation::MESH_MAX_TARGET_FACES
+        );
+        // The previous spellings still deserialize, so an agent written
+        // against the earlier schema keeps working.
+        let legacy: GenerateMeshArgs = serde_json::from_value(json!({
+            "image": "AA==",
+            "octree_resolution": 192,
+            "mesh_threshold": 0.5
+        }))
+        .unwrap();
+        assert_eq!(legacy.octree, Some(192));
+        assert_eq!(legacy.threshold, Some(0.5));
     }
 
     use super::*;
@@ -4693,7 +4773,7 @@ mod tests {
     fn prompt_transform_tools_are_registered_with_the_context_schema() {
         let tools = tool_definitions();
         let tools = tools.as_array().unwrap();
-        assert_eq!(tools.len(), 12, "tool count is documented; update the docs");
+        assert_eq!(tools.len(), 13, "tool count is documented; update the docs");
         for name in ["expand_prompt", "remix_prompt"] {
             let tool = tools
                 .iter()

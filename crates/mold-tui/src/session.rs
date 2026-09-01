@@ -720,6 +720,7 @@ mod tests {
             tags: Vec::new(),
             collection: None,
             auto_tag_title: true,
+            mesh: mold_core::MeshRequestOptions::default(),
         };
 
         let session = TuiSession::from_params("a sunset", "blurry", &params);

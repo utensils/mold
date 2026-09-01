@@ -62,6 +62,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let identity = crate::identity::metadata_summary(&entry.metadata);
     let machine = entry.machine_label();
     let can_upscale = app.can_upscale_entry(entry);
+    let is_mesh = crate::gallery_scan::is_mesh_filename(&entry.filename());
 
     // ── Thumbnail (fixed protocol, one-slot cache) ──────────────
     let mut y = inner.y;
@@ -156,7 +157,11 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         Line::from(""),
     ]);
     let mut actions = vec![("[r]", "Recall prompt")];
-    if can_upscale {
+    if is_mesh {
+        // A raster upscaler has nothing to read in a `.glb`; export is the
+        // mesh's second action.
+        actions.push(("[x]", "Export"));
+    } else if can_upscale {
         actions.push(("[u]", "Upscale"));
     }
     for (key, label) in actions {
