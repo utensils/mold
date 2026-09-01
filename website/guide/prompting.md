@@ -53,9 +53,9 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `qwen-image-edit-2511` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md` | 100 | 494 |
 | `qwen-image-edit-lightning` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md`, `models/qwen-image-edit-lightning.md` | 100 | 575 |
 | `wuerstchen-v2` | `wuerstchen` | `shared.md`, `families/wuerstchen.md` | 50 | 325 |
-| `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 395 |
-| `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 395 |
-| `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 395 |
+| `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 449 |
+| `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 449 |
+| `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 449 |
 | `ltx-video-0.9.6` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
 | `ltx-video-0.9.6-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
 | `ltx-video-0.9.8-2b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 497 |
@@ -706,7 +706,11 @@ ground and every other prop cropped away.
 
 - Frames, fps, masks, ControlNet, and an explicit canvas are refused for this
   family rather than ignored.
-- Output is always binary glTF; OBJ exists only as a gallery export.
+- Output is always binary glTF, so `-o` must name a `.glb` file or `-` for
+  stdout; a raster, video, or audio extension is refused before any weight is
+  read. An explicit `png` in a request is coerced to `glb`, not refused.
+- OBJ, STL, and PLY exist only as gallery exports of the stored glTF, never as
+  generation targets, because each loses something the glTF carries.
 - Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not
   supported, so today's result is geometry only.
 - Detail is bought with the octree resolution and its cost is cubic.
@@ -722,6 +726,9 @@ mold run hunyuan3d --image chair.png --octree 320 -o chair.glb
 
 # Recover thin features by lowering the surface threshold
 mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
+
+# Export a saved mesh from the gallery as STL, OBJ, or PLY
+mold library export chair.glb --format stl -o chair.stl
 ```
 
 `--octree` (128 | 192 | 256 | 320 | 384, default 256) is the detail knob and
