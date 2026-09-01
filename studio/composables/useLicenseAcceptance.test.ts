@@ -44,6 +44,58 @@ afterEach(() => {
 });
 
 describe("runWithLicenseConsent", () => {
+  it("dismisses after an older host queues the accepted download", async () => {
+    const fetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/licenses/accept")) {
+          return Response.json({ error: "not found" }, { status: 404 });
+        }
+        if (url.endsWith("/api/downloads") && init?.method === "POST") {
+          return Response.json({ id: "job-legacy", position: 0 });
+        }
+        if (url.endsWith("/api/downloads")) {
+          return Response.json({
+            active_jobs: [],
+            queued: [],
+            history: [
+              {
+                id: "job-legacy",
+                model: "future-face-adapter",
+                status: "completed",
+                bytes_done: 1,
+                bytes_total: 1,
+              },
+            ],
+          });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetch);
+    const start = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(refusal())
+      .mockRejectedValueOnce(refusal());
+
+    const running = runWithLicenseConsent({
+      hostLabel: "legacy-host",
+      target,
+      installModel: "future-face-adapter",
+      start,
+    });
+    await answerPrompt(true);
+
+    await expect(running).resolves.toEqual({ kind: "accepted" });
+    expect(useLicenseAcceptance().pending.value).toBeNull();
+    expect(
+      fetch.mock.calls.filter(
+        ([input, init]) =>
+          String(input).endsWith("/api/downloads") && !init?.method,
+      ),
+    ).toHaveLength(0);
+  });
+
   it("takes consent and re-drives the caller's own enqueue exactly once", async () => {
     vi.stubGlobal(
       "fetch",

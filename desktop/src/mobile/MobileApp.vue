@@ -190,6 +190,7 @@ import {
 import {
   relayRetainedSourceMedia,
   retainedSourceMediaBlob,
+  retainedSourceMediaDisclosable,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
   retainedSourceMediaMembersForRequest,
@@ -8311,13 +8312,20 @@ async function restoreOrdinaryReusedSource(
   const restoredSourceFit = parseSourceFitPolicy(print.metadata.source_fit);
   let retainedUnavailable: RetainedSourceMediaAvailability | null = null;
   let retainedInventory: RetainedSourceMediaInventory | null = null;
-  if (!print.target.apiKey) {
-    retainedUnavailable = "unavailable_auth";
-  } else {
+  // Ask the host, never guess its policy: "this phone holds no key" is not
+  // "this host requires one", and a keyless host is open by design. The shared
+  // probe already reports a middleware 401 as `unavailable_auth`. An
+  // UNAVAILABLE answer is disclosed only when the print's own metadata says
+  // conditioning bytes were shipped — a text-to-image print's archive entry
+  // resolves with no pins, which the server can only call `unavailable_legacy`,
+  // a reattach instruction for a source that never was.
+  {
     try {
       retainedInventory = await readRetainedSourceInventory(print.target, print.filename, signal);
       if (!stillCurrent()) return null;
-      retainedUnavailable = retainedInventory.availability;
+      if (retainedSourceMediaDisclosable(print.metadata)) {
+        retainedUnavailable = retainedInventory.availability;
+      }
       retainedSourceAuthority.setIfCurrent(retainedVersion, {
         filename: print.filename,
         origin: print.target,

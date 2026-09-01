@@ -155,6 +155,7 @@ import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { restoreGenerationSourceMedia } from "@studio/lib/generationSourceMedia";
 import {
+  retainedSourceMediaDisclosable,
   retainedSourceMediaBlob,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
@@ -1732,6 +1733,12 @@ async function restoreLibrarySource(
   const retainedTarget = owner
     ? { baseUrl: owner.url, apiKey: owner.apiKey ?? null }
     : null;
+  // Always ask — the host is the only authority on what it retained. But a
+  // text-to-image print's archive entry resolves with no pins, which the
+  // server can only report as `unavailable_legacy` (a reattach instruction for
+  // a source that never existed), so an UNAVAILABLE answer is disclosed only
+  // when the print's own metadata says conditioning bytes were shipped.
+  const disclosable = retainedSourceMediaDisclosable(item.metadata);
   let retainedUnavailable: RetainedSourceMediaAvailability | null = null;
   const retainedRead = retainedTarget
     ? retainedSourceMediaInventory(item.filename, retainedTarget).catch(
@@ -1742,7 +1749,7 @@ async function restoreLibrarySource(
     inventory: Awaited<ReturnType<typeof retainedSourceMediaInventory>> | null,
   ) => {
     if (!inventory || !retainedTarget || epoch !== reuseEpoch) return;
-    retainedUnavailable = inventory.availability;
+    if (disclosable) retainedUnavailable = inventory.availability;
     setRetainedSourceReuseIntentIfCurrent(retainedVersion, {
       filename: item.filename,
       origin: retainedTarget,
@@ -1765,9 +1772,10 @@ async function restoreLibrarySource(
     await restoreCanvas(stored.base64);
     void retainedRead.then((inventory) => {
       acceptRetainedInventory(inventory);
-      const disclosure = inventory
-        ? retainedSourceMediaDisclosure(inventory.availability)
-        : null;
+      const disclosure =
+        inventory && disclosable
+          ? retainedSourceMediaDisclosure(inventory.availability)
+          : null;
       if (disclosure) toast("error", disclosure);
     });
     return;

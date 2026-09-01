@@ -1,4 +1,4 @@
-import { apiFetchTo, type ApiTarget } from "./client";
+import { ApiError, apiFetchTo, type ApiTarget } from "./client";
 
 export type RetainedSourceMediaAvailability =
   | "available"
@@ -44,11 +44,24 @@ export async function retainedSourceMediaInventory(
   target: ApiTarget,
   signal?: AbortSignal,
 ): Promise<RetainedSourceMediaInventory> {
-  const response = await apiFetchTo(
-    target,
-    inventoryPath(filename),
-    signal ? { signal } : {},
-  );
+  let response: Response;
+  try {
+    response = await apiFetchTo(
+      target,
+      inventoryPath(filename),
+      signal ? { signal } : {},
+    );
+  } catch (error) {
+    // A host that enforces API keys rejects the probe in middleware, before the
+    // handler can answer. That IS the auth state, and it is the one case this
+    // wording is actually about — so report it rather than letting a caller's
+    // catch swallow it into silence. Every other failure still throws, so the
+    // server remains the single authority for the other three states.
+    if (error instanceof ApiError && error.status === 401) {
+      return { availability: "unavailable_auth", members: [] };
+    }
+    throw error;
+  }
   if (!response.ok) {
     throw new Error(
       `Could not inspect retained source media (HTTP ${response.status})`,
@@ -94,6 +107,68 @@ export async function createRetainedSourceMediaReuseSession<TRequest>(
     }),
   });
   return response.json();
+}
+
+/**
+ * Structural minimum of the print metadata this rule reads. Desktop, web, and
+ * iPhone each keep their own `OutputMetadata` interface, so a structural shape
+ * is what travels between them.
+ */
+export interface RetainedSourceMediaMetadataLike {
+  source_image_sha256?: string | null;
+  edit_image_sha256s?: readonly unknown[] | null;
+  id_image_sha256?: string | null;
+  id_image_sha256s?: readonly unknown[] | null;
+  references?: readonly unknown[] | null;
+  keyframes?: readonly unknown[] | null;
+  source_video_path?: string | null;
+  audio_file_path?: string | null;
+  extend_video_path?: string | null;
+  extend_overlap_frames?: number | null;
+}
+
+/**
+ * Whether an UNAVAILABLE inventory answer is worth telling the user about.
+ *
+ * This decides disclosure, never whether to ask. The server is the only
+ * authority on what it retained, and `OutputMetadata` under-reports it: inline
+ * `source_video`, `audio_file`, and `mask_image` bytes leave no marker at all
+ * (only the `_path` forms are recorded, and browser clients always send
+ * bytes), so a rule that skipped the probe on missing markers would silently
+ * lose those restorations. Every surface therefore always asks, attaches an
+ * `available` inventory regardless, and consults this only before toasting.
+ *
+ * What it guards against: a text-to-image print retains no media set, but its
+ * archive entry still exists with no pins, which the server can only report
+ * as `unavailable_legacy` — "Reattach it before developing", for a source that
+ * never existed. The server cannot tell that from a genuinely pre-feature
+ * print, so the client stays quiet unless the print's own metadata says
+ * conditioning bytes were shipped. The markers mirror the server's
+ * downloadable retained roles (`downloadable_role` in
+ * `gallery_source_media.rs`); `extend_overlap_frames` is recorded exactly when
+ * an extension video (inline or path) was present. `source_image_name` alone
+ * is deliberately EXCLUDED even though `metadataReferencesSource` includes it
+ * for the local-stash restore: it is a name with no bytes, and MiniMax H3 sets
+ * it alone.
+ */
+export function retainedSourceMediaDisclosable(
+  metadata: RetainedSourceMediaMetadataLike | null | undefined,
+): boolean {
+  if (!metadata) return false;
+  const filled = (value: readonly unknown[] | null | undefined) =>
+    Array.isArray(value) && value.length > 0;
+  return Boolean(
+    metadata.source_image_sha256 ||
+    metadata.id_image_sha256 ||
+    metadata.source_video_path ||
+    metadata.audio_file_path ||
+    metadata.extend_video_path ||
+    metadata.extend_overlap_frames != null ||
+    filled(metadata.edit_image_sha256s) ||
+    filled(metadata.id_image_sha256s) ||
+    filled(metadata.references) ||
+    filled(metadata.keyframes),
+  );
 }
 
 /** Persistent wording shared by web, desktop and mobile Reuse settings. */

@@ -63,6 +63,7 @@ import {
 } from "@studio/lib/libraryOrganization";
 import { ApiError, type ApiTarget } from "../lib/api/client";
 import {
+  retainedSourceMediaDisclosable,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
 } from "@studio/api/gallerySourceMedia";
@@ -655,6 +656,11 @@ function reuseSettings(entry: MergedPrint) {
   // scheduler, video params, …) via `applyPrefillToForm`.
   const retainedVersion = composer.beginRetainedSourceReuse({ metadata: entry.item.metadata });
   const target = gallery.targetOf(entry.sourceKey);
+  // Always ask — the host is the only authority on what it retained, and the
+  // metadata under-reports inline video/audio/mask bytes. But a text-to-image
+  // print's archive entry resolves with no pins, which the server can only
+  // report as `unavailable_legacy`, so an UNAVAILABLE answer is toasted only
+  // when the print's own metadata says conditioning bytes were shipped.
   if (target) {
     void retainedSourceMediaInventory(entry.item.filename, target)
       .then((inventory) => {
@@ -667,7 +673,9 @@ function reuseSettings(entry: MergedPrint) {
         ) {
           return;
         }
-        const disclosure = retainedSourceMediaDisclosure(inventory.availability);
+        const disclosure = retainedSourceMediaDisclosable(entry.item.metadata)
+          ? retainedSourceMediaDisclosure(inventory.availability)
+          : null;
         if (disclosure) toasts.push(disclosure, "error");
       })
       .catch(() => {
@@ -2897,6 +2905,7 @@ onUnmounted(() => {
       @next="moveSelection(1)"
       @delete="removeSelected"
       @use-source="useSelectedAsSource"
+      @reuse="reuseSettings(selectedEntry!)"
       @reuse-sequence="reuseSequence(selectedEntry)"
       @edit-sequence="editSequence(selectedEntry)"
       @rename="(title) => renamePrint(selectedEntry!, title)"

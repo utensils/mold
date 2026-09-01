@@ -82,7 +82,10 @@ describe("upscale capability", () => {
 });
 
 describe("Lightbox reuse", () => {
-  it("hands the composer the full metadata so nothing is dropped", async () => {
+  it("hands a one-shot back to the owner instead of prefilling it here", async () => {
+    // Prefilling here called `composer.set`, which INVALIDATES retained-source
+    // authority — so this button silently dropped a print's private source
+    // media while the right-click item kept it. The owner runs both now.
     const metadata = {
       ...item.metadata,
       negative_prompt: "blurry",
@@ -99,7 +102,9 @@ describe("Lightbox reuse", () => {
 
     await wrapper.get("button.bg-safelight").trigger("click");
 
-    expect(useComposerStore().prefill).toEqual({ metadata });
+    expect(wrapper.emitted("reuse")).toHaveLength(1);
+    expect(wrapper.emitted("reuseSequence")).toBeUndefined();
+    expect(useComposerStore().prefill).toBeNull();
   });
 
   it("makes cached editing primary and keeps duplication explicit for sequence prints", async () => {
