@@ -6,6 +6,7 @@ import {
   buildQueueStatusIndex,
   normalizeBlockedReason,
   queuePositionLabel,
+  queueRuntimeLabel,
   queueStatusFor,
   queueWaitCode,
   queueWaitLabel,
@@ -43,6 +44,36 @@ function plan(blocked: Record<string, string>): QueuePlan {
 }
 
 describe("buildQueueStatusIndex", () => {
+  it("formats byte totals while a queued job is loading model weights", () => {
+    const loadingPlan: QueuePlan = {
+      plan_version: 1,
+      state_version: 1,
+      optimizer_state: "settled",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [
+        {
+          work_id: "job-1",
+          parent_id: "job-1",
+          work_kind: "generation",
+          priority_class: "normal",
+          queue_rank: 0,
+          bypass_count: 0,
+          estimate_confidence: "medium",
+          blocked_reason: "running",
+          runtime_phase: "loading",
+          runtime_stage: "Loading model",
+          runtime_current: 2_539_086_011,
+          runtime_total: 12_923_897_280,
+        },
+      ],
+    };
+
+    expect(queueRuntimeLabel(loadingPlan, "job-1")).toBe(
+      "Loading model · 2.5 GB / 12.9 GB",
+    );
+  });
+
   it("prefers an exact batch child over an earlier parent aggregate", () => {
     const exactPlan: QueuePlan = {
       plan_version: 1,

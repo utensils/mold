@@ -323,8 +323,8 @@ describe("MobileHostDetail remote host data", () => {
                 activity_phase: "active",
                 runtime_phase: "loading",
                 runtime_stage: "Loading Flux.2 transformer",
-                runtime_current: 17,
-                runtime_total: 20,
+                runtime_current: 2_539_086_011,
+                runtime_total: 12_923_897_280,
               },
             ],
           },
@@ -335,7 +335,7 @@ describe("MobileHostDetail remote host data", () => {
 
     const view = await mountDetail();
     const row = view.get("[data-test='host-detail-queue-row-job-queued']");
-    expect(row.text()).toContain("LOADING FLUX.2 TRANSFORMER · 17/20");
+    expect(row.text()).toContain("LOADING FLUX.2 TRANSFORMER · 2.5 GB / 12.9 GB");
     expect(row.text()).not.toContain("NEXT UP");
   });
 

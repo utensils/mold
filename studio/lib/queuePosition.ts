@@ -10,6 +10,7 @@
  */
 
 import type { QueueEntry, QueuePlan, QueueWorkItem } from "../api/queuePlan";
+import { formatByteProgress } from "./formatBytes";
 
 export interface QueueStatus {
   /** The row's lifecycle as the host listed it (`queued`, `running`, `held`), or null. */
@@ -80,7 +81,11 @@ export function queueRuntimeLabel(
     item.runtime_total != null &&
     item.runtime_total > 0
   ) {
-    return `${stage} · ${item.runtime_current}/${item.runtime_total}`;
+    const progress =
+      item.runtime_phase === "loading"
+        ? formatByteProgress(item.runtime_current, item.runtime_total)
+        : `${item.runtime_current}/${item.runtime_total}`;
+    return `${stage} · ${progress}`;
   }
   return stage;
 }

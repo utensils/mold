@@ -1,5 +1,6 @@
 import { apiJsonTo, type ApiTarget } from "./client";
 import { compareNewestSubmitted } from "../lib/activityOrder";
+import { formatByteProgress } from "../lib/formatBytes";
 
 export interface ActiveWorkItem {
   id: string;
@@ -33,7 +34,14 @@ export function activeWorkPhaseLabel(row: ActiveWorkItem): string {
   }
   const stage = row.stage?.trim() || row.phase.replaceAll("_", " ");
   if (row.current != null && row.total != null && row.total > 0) {
-    return `${stage} · ${row.current}/${row.total}`;
+    const progress =
+      row.kind === "download" ||
+      (row.kind === "generation" &&
+        row.execution !== "chain" &&
+        row.phase === "loading")
+        ? formatByteProgress(row.current, row.total)
+        : `${row.current}/${row.total}`;
+    return `${stage} · ${progress}`;
   }
   return stage;
 }

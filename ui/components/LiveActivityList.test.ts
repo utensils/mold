@@ -36,6 +36,30 @@ function mountList() {
 }
 
 describe("LiveActivityList swipe actions", () => {
+  it("renders remote download progress without raw byte counters", () => {
+    const wrapper = mount(LiveActivityList, {
+      props: {
+        rows: [
+          {
+            ...row,
+            key: "host-1:download:download-1",
+            id: "download-1",
+            kind: "download",
+            phase: "downloading",
+            model: "ltx-2.5-22b-distilled:q3",
+            current: 3_627_980_783,
+            total: 31_375_569_558,
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toMatch(
+      /hal9000 · downloading · 3\.6 GB \/ 31\.4 GB\s+· 12%/,
+    );
+    expect(wrapper.text()).not.toContain("3627980783/31375569558");
+  });
+
   it("opens actions for a clearly horizontal swipe", async () => {
     const wrapper = mountList();
     const item = wrapper.get(".live-activity-row");
