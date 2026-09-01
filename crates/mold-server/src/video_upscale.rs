@@ -1319,6 +1319,18 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use mold_core::ModelConfig;
+    use std::sync::Mutex;
+
+    static FFMPEG_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn ffmpeg_fixture_tools_available() -> bool {
+        ["ffmpeg", "ffprobe"].into_iter().all(|tool| {
+            Command::new(tool)
+                .arg("-version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        })
+    }
     #[test]
     fn rational_rate_is_exact() {
         assert_eq!(rational("24000/1001").unwrap(), (24000, 1001));
@@ -1411,6 +1423,13 @@ mod tests {
 
     #[test]
     fn probe_reports_exact_cfr_and_primary_audio_facts() {
+        let _fixture_guard = FFMPEG_FIXTURE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !ffmpeg_fixture_tools_available() {
+            eprintln!("skipping ffmpeg integration fixture: ffmpeg/ffprobe unavailable");
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("fixture.mp4");
         let output = Command::new("ffmpeg")
@@ -1418,6 +1437,8 @@ mod tests {
                 "-v",
                 "error",
                 "-y",
+                "-filter_threads",
+                "1",
                 "-f",
                 "lavfi",
                 "-i",
@@ -1433,6 +1454,8 @@ mod tests {
                 "-c:a",
                 "aac",
                 "-shortest",
+                "-threads",
+                "1",
             ])
             .arg(&path)
             .output()
@@ -1453,6 +1476,13 @@ mod tests {
 
     #[test]
     fn probe_rejects_vfr_timestamps_even_when_container_is_supported() {
+        let _fixture_guard = FFMPEG_FIXTURE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !ffmpeg_fixture_tools_available() {
+            eprintln!("skipping ffmpeg integration fixture: ffmpeg/ffprobe unavailable");
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("vfr.mp4");
         let output = Command::new("ffmpeg")
@@ -1460,6 +1490,8 @@ mod tests {
                 "-v",
                 "error",
                 "-y",
+                "-filter_threads",
+                "1",
                 "-f",
                 "lavfi",
                 "-i",
@@ -1472,6 +1504,8 @@ mod tests {
                 "libx264",
                 "-pix_fmt",
                 "yuv420p",
+                "-threads",
+                "1",
             ])
             .arg(&path)
             .output()
