@@ -26,9 +26,14 @@ that invocation and confirm it with a read-only status call first.
 
 ```bash
 mold server status
+mold server status --host gpu-host
 MOLD_HOST=http://gpu-host:7680 mold server status
 mold run --local flux2-klein:q8 "A graphite sketch of a lighthouse"
 ```
+
+`mold server status` reports on the named host over HTTP; PID, port and log
+path appear only for this machine's managed daemon. An unreachable host exits
+non-zero rather than reporting on the local machine.
 
 Never paste an API key into a prompt or command example. Supply secrets through
 the user's existing environment or approved secret store at execution time.

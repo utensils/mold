@@ -633,8 +633,17 @@ Examples:
         #[arg(long)]
         no_mdns: bool,
     },
-    /// Show status of the managed server
-    Status,
+    /// Show status of the managed server, or of `--host` when one is named
+    #[command(after_long_help = "\
+Examples:
+  mold server status                       This machine's managed daemon
+  mold server status --host plato          A remote server (PID/logs are local-only)
+  MOLD_HOST=plato mold server status       Same, from the environment")]
+    Status {
+        /// Report on this server instead of the local managed daemon
+        #[arg(long, env = "MOLD_HOST", help_heading = "Server")]
+        host: Option<String>,
+    },
     /// Discover mold servers advertised on the local network via mDNS
     #[cfg(feature = "mdns")]
     #[command(after_long_help = "\
@@ -2805,8 +2814,8 @@ async fn run() -> anyhow::Result<()> {
                 )
                 .await?;
             }
-            ServerAction::Status => {
-                commands::server::run_status().await?;
+            ServerAction::Status { host } => {
+                commands::server::run_status(host).await?;
             }
             ServerAction::Stop => {
                 commands::server::run_stop().await?;

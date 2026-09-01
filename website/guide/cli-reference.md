@@ -361,6 +361,33 @@ Live changes require Scheduler V2. In legacy or observe mode, `gpu enable`
 can recover a persistently-disabled, startup-selected device for the next
 server restart; live disable remains unavailable.
 
+## `mold server status`
+
+Report on a running server. With no host this reads the PID file for the
+daemon `mold server start` manages on this machine, so it can also print the
+PID, port and the `mold server stop` hint.
+
+```bash
+mold server status                       # this machine's managed daemon
+mold server status --host plato          # a named server, over HTTP
+MOLD_HOST=plato mold server status       # same, from the environment
+```
+
+When `--host`/`MOLD_HOST` names a server that is not this machine's managed
+daemon, the status is read over HTTP from that server and reports what the
+server itself knows — version, uptime, loaded models, devices. PID, log path
+and the stop hint are omitted: those describe a local process, and Mold never
+answers a question about a selected remote host with this machine's state. An
+unreachable host is an error (exit 1), not "No server running".
+
+Only the managed daemon's own address keeps the PID reading. A loopback host
+on any other port is a server you named explicitly, so it is probed over HTTP
+too — if nothing answers there, Mold also lists any unmanaged `mold serve`
+processes on this machine, since that is the usual explanation.
+
+An API key from `MOLD_API_KEY` is sent with the status read, so a server with
+authentication enabled reports normally instead of looking unreachable.
+
 ## `mold server discover`
 
 Browse the local network (mDNS/DNS-SD, `_mold._tcp`) for running `mold serve`
@@ -556,15 +583,15 @@ The CLI does not need a daemon for work whose authority already exists on disk,
 in the local runtime, or in a named cloud API. Server-first commands fall back
 only when doing so preserves the target the user asked about.
 
-| Behavior without a local server    | Commands                                                                                                              | Result                                                                                                               |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Fully standalone, local files      | `list`, `info`, `default`, `config`, `stats`, `clean`, `rm`, `chain validate`                                         | Reads or changes `MOLD_HOME` directly                                                                                |
-| Fully standalone, local runtime    | `gpu list`, `gpu enable`, `gpu disable`, `ps`, `unload`                                                               | Lists local devices, persists next-start device preferences, reports processes, or completes an already-empty unload |
-| Server-first with local execution  | `run`, `pull`, `upscale`                                                                                              | Uses the server when reachable, otherwise executes or downloads locally                                              |
-| Standalone prompt tooling          | `expand`, `remix`                                                                                                     | Uses the configured local expansion model or external API backend                                                    |
-| Standalone lifecycle/discovery     | `serve`, `server start`, `server status`, `server stop`, `server discover`                                            | Starts or inspects processes, or browses mDNS directly                                                               |
-| Standalone utility/network clients | `version`, `update`, `completions`, `skill`, `runpod`, `lambda`                                                       | Uses embedded data, GitHub, agent paths, or the explicitly named cloud API                                           |
-| Requires a live Mold server        | `jobs`, `queue`, `library` (except `library grid --local`), `trash`, `mcp`, `discord`; `tui` unless `--local` is used | These operate on server-owned queue, gallery, tool, or UI state and do not substitute a different local authority    |
+| Behavior without a local server    | Commands                                                                                                              | Result                                                                                                                                |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Fully standalone, local files      | `list`, `info`, `default`, `config`, `stats`, `clean`, `rm`, `chain validate`                                         | Reads or changes `MOLD_HOME` directly                                                                                                 |
+| Fully standalone, local runtime    | `gpu list`, `gpu enable`, `gpu disable`, `ps`, `unload`                                                               | Lists local devices, persists next-start device preferences, reports processes, or completes an already-empty unload                  |
+| Server-first with local execution  | `run`, `pull`, `upscale`                                                                                              | Uses the server when reachable, otherwise executes or downloads locally                                                               |
+| Standalone prompt tooling          | `expand`, `remix`                                                                                                     | Uses the configured local expansion model or external API backend                                                                     |
+| Standalone lifecycle/discovery     | `serve`, `server start`, `server status`, `server stop`, `server discover`                                            | Starts or inspects processes, or browses mDNS directly; `server status` reports on `--host`/`MOLD_HOST` when one names another server |
+| Standalone utility/network clients | `version`, `update`, `completions`, `skill`, `runpod`, `lambda`                                                       | Uses embedded data, GitHub, agent paths, or the explicitly named cloud API                                                            |
+| Requires a live Mold server        | `jobs`, `queue`, `library` (except `library grid --local`), `trash`, `mcp`, `discord`; `tui` unless `--local` is used | These operate on server-owned queue, gallery, tool, or UI state and do not substitute a different local authority                     |
 
 An unreachable non-loopback `MOLD_HOST` remains an error for host-administration
 commands. In particular, `gpu`, `ps`, and `unload` do not answer with this
