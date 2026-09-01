@@ -61,6 +61,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let pipeline = entry.metadata.pipeline.map(|pipeline| pipeline.to_string());
     let identity = crate::identity::metadata_summary(&entry.metadata);
     let machine = entry.machine_label();
+    let can_upscale = app.can_upscale_entry(entry);
 
     // ── Thumbnail (fixed protocol, one-slot cache) ──────────────
     let mut y = inner.y;
@@ -154,7 +155,11 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         crate::ui::widgets::kv_row_line(theme, "Machine", &machine, 8, false),
         Line::from(""),
     ]);
-    for (key, label) in [("[r]", "Recall prompt"), ("[u]", "Upscale")] {
+    let mut actions = vec![("[r]", "Recall prompt")];
+    if can_upscale {
+        actions.push(("[u]", "Upscale"));
+    }
+    for (key, label) in actions {
         lines.push(Line::from(vec![
             Span::styled(key, theme.status_key()),
             Span::raw(" "),

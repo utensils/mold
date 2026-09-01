@@ -1149,16 +1149,45 @@ pub(crate) async fn require_server_generation_request_activation(
         // by Library. Refuse before generation starts if the host cannot
         // assemble the result, rather than rendering an expensive source clip
         // that can only fail during settlement.
-        if request.frames.unwrap_or(1) > 1 {
+        if generation_request_produces_video(request, family) {
             let codec_available = tokio::task::spawn_blocking(
                 crate::video_upscale::framewise_codec_runtime_available,
             )
             .await
             .unwrap_or(false);
-            crate::video_upscale::require_framewise_codec_runtime_with(codec_available)?;
+            require_generation_framewise_runtime(request, family, codec_available)?;
         }
     }
     Ok(())
+}
+
+fn require_generation_framewise_runtime(
+    request: &mold_core::GenerateRequest,
+    family: Option<&str>,
+    codec_available: bool,
+) -> Result<(), ApiError> {
+    if request.upscale_model.is_some() && generation_request_produces_video(request, family) {
+        crate::video_upscale::require_framewise_codec_runtime_with(codec_available)?;
+    }
+    Ok(())
+}
+
+fn generation_request_produces_video(
+    request: &mold_core::GenerateRequest,
+    family: Option<&str>,
+) -> bool {
+    family.is_some_and(|family| {
+        matches!(
+            mold_core::ExpandTask::for_generation(family, request),
+            mold_core::ExpandTask::TextToVideo
+                | mold_core::ExpandTask::ImageToVideo
+                | mold_core::ExpandTask::VideoToVideo
+                | mold_core::ExpandTask::Retake
+                | mold_core::ExpandTask::KeyframeInterpolation
+                | mold_core::ExpandTask::AudioDrivenVideo
+                | mold_core::ExpandTask::ReferenceToAudioVideo
+        )
+    })
 }
 
 pub(crate) struct PreparedGenerationRoute {
@@ -10648,6 +10677,32 @@ mod tests {
         let ready = video_upscale_capabilities(true, true);
         assert!(ready.available);
         assert!(ready.gallery_image);
+    }
+
+    #[test]
+    fn generation_framewise_gate_uses_video_family_defaults_not_explicit_frames() {
+        let request = |model: &str| {
+            serde_json::from_value::<mold_core::GenerateRequest>(serde_json::json!({
+                "prompt": "a ship",
+                "model": model,
+                "width": 512,
+                "height": 512,
+                "steps": 4,
+                "guidance": 1.0,
+                "batch_size": 1,
+                "upscale_model": "real-esrgan-x4plus:fp16"
+            }))
+            .unwrap()
+        };
+
+        let video = request("wan2.2-t2v:a14b");
+        assert!(video.frames.is_none());
+        let error = require_generation_framewise_runtime(&video, Some("wan"), false).unwrap_err();
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "VIDEO_UPSCALE_CODEC_RUNTIME_UNAVAILABLE");
+
+        let image = request("flux-schnell:q8");
+        require_generation_framewise_runtime(&image, Some("flux"), false).unwrap();
     }
 
     #[test]
