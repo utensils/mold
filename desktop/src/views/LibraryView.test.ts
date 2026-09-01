@@ -601,6 +601,40 @@ describe("LibraryView source reuse", () => {
     );
     wrapper.unmount();
   });
+
+  it("keeps a failed desktop Framewise submission visible in the dialog", async () => {
+    createFramewiseUpscaleMock.mockRejectedValueOnce(
+      new Error("Framewise upscale is unavailable on this machine"),
+    );
+    const video = {
+      ...prints[0]!,
+      filename: "unsupported-clip.mp4",
+      format: "mp4",
+    } as GalleryImage;
+    const { wrapper } = await mountView(
+      undefined,
+      (gallery) => {
+        gallery.buckets.local!.items = [video];
+      },
+      "/library",
+      true,
+    );
+
+    await wrapper.get(".ms-lib-tile").trigger("contextmenu");
+    const upscale = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Framewise upscale",
+    );
+    useContextMenuStore().activate(upscale!);
+    await flushPromises();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(document.querySelector("[data-test='upscale-dialog']")).not.toBeNull();
+    expect(document.querySelector("[data-test='upscale-error']")?.textContent).toContain(
+      "Framewise upscale is unavailable on this machine",
+    );
+    wrapper.unmount();
+  });
 });
 
 describe("LibraryView header + NEW badges", () => {

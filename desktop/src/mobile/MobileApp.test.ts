@@ -9205,6 +9205,41 @@ describe("MobileApp gallery", () => {
     );
   });
 
+  it("shows a failed mobile Framewise submission inside the open upscale sheet", async () => {
+    const upscaler: ModelEntry = {
+      ...model,
+      name: "real-esrgan-x4plus:fp16",
+      family: "upscaler",
+      description: "4x video upscaler",
+      downloaded: false,
+    };
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/models") return Promise.resolve([model, upscaler]);
+      if (path === "/api/video-upscale-jobs" && init?.method === "POST") {
+        return Promise.reject(new Error("Framewise upscale is unavailable on this machine"));
+      }
+      if (path === "/api/video-upscale-jobs") return Promise.resolve([]);
+      return base(callTarget, path, init);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-upscale']").trigger("click");
+    await flushPromises();
+    (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(document.querySelector("[data-test='upscale-dialog']")).not.toBeNull();
+    expect(document.querySelector("[data-test='upscale-error']")?.textContent).toContain(
+      "Framewise upscale is unavailable on this machine",
+    );
+  });
+
   it("uses the selected Library image as the older-host upscale fallback source", async () => {
     serveStillModel();
     const imagePrint: GalleryImage = {

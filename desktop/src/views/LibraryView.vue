@@ -339,6 +339,7 @@ const upscalingFilename = ref<string | null>(null);
 const upscaleEntry = ref<MergedPrint | null>(null);
 const upscaleModel = ref(defaultUpscaler(models.upscalers));
 const upscaleJob = ref<VideoUpscaleJob | null>(null);
+const upscaleError = ref("");
 let upscalePoll: ReturnType<typeof setTimeout> | null = null;
 let upscaleEpoch = 0;
 const upscaleKind = computed(() =>
@@ -355,6 +356,7 @@ function closeUpscaleDialog() {
   stopUpscalePoll();
   upscaleEntry.value = null;
   upscaleJob.value = null;
+  upscaleError.value = "";
 }
 
 async function openUpscaleDialog(entry: MergedPrint) {
@@ -363,6 +365,7 @@ async function openUpscaleDialog(entry: MergedPrint) {
   const epoch = ++upscaleEpoch;
   upscaleEntry.value = entry;
   upscaleJob.value = null;
+  upscaleError.value = "";
   upscaleModel.value = defaultUpscaler(models.upscalers);
   if (isVideo(entry.item)) {
     try {
@@ -399,7 +402,8 @@ async function pollUpscaleJob() {
     }
   } catch (error) {
     if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
-    toasts.push(error instanceof Error ? error.message : String(error), "error");
+    upscaleError.value = error instanceof Error ? error.message : String(error);
+    toasts.push(upscaleError.value, "error");
     return;
   }
   if (shouldPollFramewiseJob(upscaleJob.value))
@@ -452,6 +456,7 @@ async function startUpscale() {
   if (!entry || !target || upscalingFilename.value) return;
   const epoch = ++upscaleEpoch;
   stopUpscalePoll();
+  upscaleError.value = "";
   upscalingFilename.value = entry.item.filename;
   try {
     if (isVideo(entry.item)) {
@@ -476,7 +481,8 @@ async function startUpscale() {
     }
   } catch (error) {
     if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
-    toasts.push(error instanceof Error ? error.message : String(error), "error");
+    upscaleError.value = error instanceof Error ? error.message : String(error);
+    toasts.push(upscaleError.value, "error");
   } finally {
     upscalingFilename.value = null;
   }
@@ -489,6 +495,7 @@ async function transitionUpscale(action: "pause" | "resume" | "cancel") {
   if (!entry || !target || !job) return;
   stopUpscalePoll();
   const epoch = ++upscaleEpoch;
+  upscaleError.value = "";
   try {
     const transitioned = await transitionFramewiseUpscale(target, job.id, action);
     if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
@@ -496,7 +503,8 @@ async function transitionUpscale(action: "pause" | "resume" | "cancel") {
     if (action === "resume") void pollUpscaleJob();
   } catch (error) {
     if (epoch !== upscaleEpoch || upscaleEntry.value !== entry) return;
-    toasts.push(error instanceof Error ? error.message : String(error), "error");
+    upscaleError.value = error instanceof Error ? error.message : String(error);
+    toasts.push(upscaleError.value, "error");
   }
 }
 
@@ -2809,6 +2817,7 @@ onUnmounted(() => {
       :job-state="upscaleJob?.state ?? null"
       :status="upscaleJob ? framewiseStatus(upscaleJob) : null"
       :progress="upscaleJob ? framewiseProgress(upscaleJob) : null"
+      :error="upscaleError || null"
       @confirm="startUpscale"
       @close="closeUpscaleDialog"
       @pause="transitionUpscale('pause')"

@@ -10126,6 +10126,7 @@ const viewerUpscaleItem = ref<GalleryPrint | null>(null);
 const viewerUpscaleModel = ref("");
 const viewerUpscaleBusy = ref(false);
 const viewerUpscaleJob = ref<VideoUpscaleJob | null>(null);
+const viewerUpscaleError = ref("");
 let viewerUpscalePoll: ReturnType<typeof setTimeout> | null = null;
 let viewerUpscaleEpoch = 0;
 const viewerUpscaleKind = computed(() =>
@@ -10141,6 +10142,7 @@ function closeViewerUpscale(): void {
   stopViewerUpscalePoll();
   viewerUpscaleItem.value = null;
   viewerUpscaleJob.value = null;
+  viewerUpscaleError.value = "";
 }
 async function openUpscaleForPrint(print: GalleryPrint | null): Promise<void> {
   if (!print || isAudioItem(print) || isMeshItem(print)) return;
@@ -10148,6 +10150,7 @@ async function openUpscaleForPrint(print: GalleryPrint | null): Promise<void> {
   const epoch = ++viewerUpscaleEpoch;
   viewerUpscaleItem.value = print;
   viewerUpscaleJob.value = null;
+  viewerUpscaleError.value = "";
   viewerUpscaleModel.value = defaultUpscaler(upscalers.value);
   if (isVideoItem(print)) {
     try {
@@ -10192,7 +10195,7 @@ async function pollViewerUpscale(): Promise<void> {
     }
   } catch (error) {
     if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
-    generationAnnouncement.value = describeTransportError(error, print.hostName);
+    viewerUpscaleError.value = describeTransportError(error, print.hostName);
     return;
   }
   if (shouldPollFramewiseJob(viewerUpscaleJob.value))
@@ -10203,6 +10206,7 @@ async function startViewerUpscale(): Promise<void> {
   if (!print || viewerUpscaleBusy.value) return;
   const epoch = ++viewerUpscaleEpoch;
   stopViewerUpscalePoll();
+  viewerUpscaleError.value = "";
   viewerUpscaleBusy.value = true;
   try {
     if (isVideoItem(print)) {
@@ -10236,7 +10240,7 @@ async function startViewerUpscale(): Promise<void> {
     }
   } catch (error) {
     if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
-    generationAnnouncement.value = describeTransportError(error, print.hostName);
+    viewerUpscaleError.value = describeTransportError(error, print.hostName);
   } finally {
     viewerUpscaleBusy.value = false;
   }
@@ -10247,6 +10251,7 @@ async function transitionViewerUpscale(action: "pause" | "resume" | "cancel"): P
   if (!print || !job) return;
   stopViewerUpscalePoll();
   const epoch = ++viewerUpscaleEpoch;
+  viewerUpscaleError.value = "";
   try {
     const transitioned = await transitionFramewiseUpscale(print.target, job.id, action);
     if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
@@ -10254,7 +10259,7 @@ async function transitionViewerUpscale(action: "pause" | "resume" | "cancel"): P
     if (action === "resume") void pollViewerUpscale();
   } catch (error) {
     if (epoch !== viewerUpscaleEpoch || viewerUpscaleItem.value !== print) return;
-    generationAnnouncement.value = describeTransportError(error, print.hostName);
+    viewerUpscaleError.value = describeTransportError(error, print.hostName);
   }
 }
 
@@ -13484,6 +13489,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :job-state="viewerUpscaleJob?.state ?? null"
       :status="viewerUpscaleJob ? framewiseStatus(viewerUpscaleJob) : null"
       :progress="viewerUpscaleJob ? framewiseProgress(viewerUpscaleJob) : null"
+      :error="viewerUpscaleError || null"
       @confirm="startViewerUpscale"
       @close="closeViewerUpscale"
       @pause="transitionViewerUpscale('pause')"
