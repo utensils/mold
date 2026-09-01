@@ -622,6 +622,34 @@ jobs:
       - name: Record protected gate success
         run: echo "Required Rust and release routes completed successfully."
 
+  # The shipping Windows CLI compiles mold-server routes that Unix cfgs can
+  # accidentally hide from every Linux PR gate. Keep this as a typecheck: the
+  # signed installer remains main-only in windows-nightly.yml.
+  windows-rust:
+    timeout-minutes: 45
+    needs: changes
+    if: >-
+      always() && !cancelled() &&
+      (needs.changes.result != 'success' ||
+       ((needs.changes.outputs.rust == 'true' ||
+         needs.changes.outputs.workflow == 'true') &&
+        needs.changes.outputs.trusted_release_pr != 'true'))
+    runs-on: windows-latest
+    steps:
+      - name: Require successful change classification
+        if: needs.changes.result != 'success'
+        run: |
+          Write-Error 'The required path classifier did not complete successfully.'
+          exit 1
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-server-typecheck
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Typecheck Windows server routes
+        run: cargo check --locked -p mold-ai-server
+
   # The `flash-attn` feature was decorative for months (issue #598) precisely
   # because nothing ever compiled it: the cfg-stripped fallback in
   # `attention.rs` rotted into dead code that only a `--features flash-attn`

@@ -1,0 +1,1 @@
+- Fixed Windows nightly builds after durable gallery source-media retention and made the restart GPU-renumbering CI regression deterministic.

@@ -9666,19 +9666,14 @@ mod tests {
                     "clip_l": { "kind": "cpu" }
                 }
             });
-            let task = tokio::spawn(async move {
-                app.oneshot(json_request("POST", "/api/generate", body))
-                    .await
-            });
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while journal.list_all().is_empty() {
-                    tokio::task::yield_now().await;
-                }
-            })
+            let response = tokio::time::timeout(
+                Duration::from_secs(5),
+                app.oneshot(json_request("POST", "/api/generate/stream", body)),
+            )
             .await
-            .expect("direct admission");
-            task.abort();
-            let _ = task.await;
+            .expect("direct admission")
+            .expect("direct route response");
+            assert_eq!(response.status(), StatusCode::OK);
             let row = journal
                 .list_all()
                 .into_iter()

@@ -336,7 +336,6 @@ impl QueueMediaLifecycle {
             .load_from_gallery_pin(&GalleryMediaPinRef::new(media_set, pin_id)?)
     }
 
-    #[cfg(unix)]
     pub(crate) fn gallery_member_bytes(
         &self,
         media_set: MediaSetRef,
