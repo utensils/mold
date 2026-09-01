@@ -586,7 +586,7 @@ pub struct SseChainCompleteEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChainProgressEvent {
     /// Emitted once at the start of the chain, after normalisation. Gives
-    /// consumers the final stage count and the target pre-trim frame total
+    /// consumers the final stage count and the target stitched frame total
     /// so they can size progress bars up front.
     ChainStart {
         stage_count: u32,
@@ -1144,9 +1144,9 @@ impl ChainRequest {
         Ok(self)
     }
 
-    /// Predicted stitched frame count *before* any top-level `total_frames`
-    /// trim. Used by UIs for the footer summary and by the server to size
-    /// the final buffer.
+    /// Predicted stitched frame count — this IS the delivered length; no
+    /// top-level trim exists downstream. Used by UIs for the footer summary
+    /// and by the server to size the final buffer.
     ///
     /// Per-boundary rule:
     /// - smooth: drop leading `motion_tail_frames` of the incoming clip
@@ -1275,6 +1275,15 @@ fn build_auto_expand_stages(
             .and_then(crate::validation::frame_step_for_family)
             .unwrap_or(8);
         let last = needed + (step + 1 - needed % step) % step;
+        // Floor at the smallest non-degenerate grid clip. A zero tail with
+        // `total == clip + 1` snaps to a 1-frame last stage — on-grid and
+        // above the tail, but a single pixel frame is one latent frame,
+        // which wan's continuation conditioning refuses only after every
+        // earlier clip has rendered. A non-zero tail is `≥ step + 1` on its
+        // own grid rule and already implies `needed > step + 1`, so the
+        // floor engages for tail 0 alone; the `clip_frames` cap keeps a
+        // degenerate 1-frame-clip request inside its own envelope.
+        let last = last.max((step + 1).min(clip_frames));
         (count, last)
     };
 
@@ -1651,6 +1660,48 @@ mod tests {
             vec![73, 73, 57],
         );
         assert_eq!(normalised.estimated_total_frames(), 201);
+    }
+
+    /// A zero-tail request one frame past the clip would exact-fit to a
+    /// 1-frame last stage — on-grid, above the tail, and refused by the wan
+    /// conditioning path only after every earlier clip has rendered. The
+    /// fit floors the last stage at the smallest non-degenerate grid value
+    /// instead; the extra frames are disclosed like any other residual.
+    #[test]
+    fn auto_expand_floors_a_degenerate_last_stage() {
+        // LTX grid: total = 98 @ clip 97 / tail 0 → needed 1, floored to 9.
+        let normalised = auto_expand_request("x", 98, 97, 0, None)
+            .normalise()
+            .expect("normalise should succeed");
+        assert_eq!(
+            normalised
+                .stages
+                .iter()
+                .map(|stage| stage.frames)
+                .collect::<Vec<_>>(),
+            vec![97, 9],
+        );
+        assert_eq!(normalised.estimated_total_frames(), 106);
+
+        // Wan grid: an opaque checkpoint whose contract could not be probed
+        // gets tail 0 from the router; total = 122 @ clip 121 → needed 1,
+        // floored to 5 — the 2-latent-frame minimum WanTi2vInpaint accepts.
+        let mut request = auto_expand_request("x", 122, 121, 0, None);
+        request.model = "hf:opaque-wan".into();
+        request.width = 832;
+        request.height = 480;
+        let normalised = request
+            .normalise_with_family(Some("wan"))
+            .expect("wan auto-expand should succeed");
+        assert_eq!(
+            normalised
+                .stages
+                .iter()
+                .map(|stage| stage.frames)
+                .collect::<Vec<_>>(),
+            vec![121, 5],
+        );
+        assert_eq!(normalised.estimated_total_frames(), 126);
     }
 
     /// A layout the lattice cannot close (a zero motion tail makes every

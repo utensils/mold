@@ -1359,7 +1359,14 @@ pub async fn run(
                 // cannot close (a zero motion tail, an off-grid total), and
                 // a request that cannot be honoured exactly must be
                 // disclosed, never silently over-rendered.
-                let mut chain_req = inputs.to_chain_request().normalise()?;
+                // Pass the resolved family: an opaque `cv:`/`hf:` id has no
+                // manifest for normalise to consult, and family-blind
+                // normalisation would exact-fit an opaque wan chain on the
+                // LTX 8k+1 grid and repeat its opening image onto every
+                // continuation (the wan stage-source rule keys on family).
+                let mut chain_req = inputs
+                    .to_chain_request()
+                    .normalise_with_family(family.as_deref())?;
                 let stitched_total = chain_req.estimated_total_frames();
                 if stitched_total != total_frames {
                     status!(

@@ -880,7 +880,7 @@ function reset() {
         <div v-if="chainDecision.kind === 'chain'" data-test="chain-cue" class="ms-cue">
           Will render as
           <span class="data-mono font-semibold text-ink">{{ chainDecision.stageCount }}</span>
-          chained clips of {{ chainDecision.clipFrames }} frames (motion-tail
+          chained clips of up to {{ chainDecision.clipFrames }} frames (motion-tail
           {{ chainDecision.motionTail }}) — expect this to take substantially longer than a single
           clip.
         </div>
