@@ -12,6 +12,7 @@ const props = withDefaults(
     jobState?: string | null;
     status?: string | null;
     progress?: number | null;
+    error?: string | null;
   }>(),
   {
     models: () => [],
@@ -19,6 +20,7 @@ const props = withDefaults(
     jobState: null,
     status: null,
     progress: null,
+    error: null,
   },
 );
 
@@ -126,6 +128,15 @@ const emit = defineEmits<{
           ></progress>
         </div>
 
+        <p
+          v-if="error"
+          class="upscale-dialog__error"
+          role="alert"
+          data-test="upscale-error"
+        >
+          {{ error }}
+        </p>
+
         <footer>
           <button class="upscale-dialog__secondary" @click="emit('close')">
             {{ jobState ? "Close" : "Cancel" }}
@@ -187,6 +198,9 @@ const emit = defineEmits<{
 }
 .upscale-dialog {
   width: min(460px, 100%);
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.14));
   border-radius: 18px;
   padding: 22px;
@@ -231,6 +245,13 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.upscale-dialog__error {
+  max-width: 100%;
+  margin: 14px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--danger, #ff7f72);
+  font-size: 13px;
+}
 .upscale-dialog__copy {
   margin: 0 0 18px;
   color: var(--text-secondary, #c7cbbf);
@@ -238,12 +259,17 @@ h2 {
 }
 .upscale-dialog__field {
   display: grid;
+  min-width: 0;
+  box-sizing: border-box;
   gap: 7px;
   font-size: 13px;
   font-weight: 650;
 }
 select {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   min-height: 42px;
   border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.14));
   border-radius: 10px;

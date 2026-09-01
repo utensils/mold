@@ -1,0 +1,1 @@
+- **Mobile upscale sheet containment.** Keeps image and Framewise video upscale controls inside narrow phone screens and shows submission failures directly in the open dialog instead of appearing unresponsive.
