@@ -45,7 +45,7 @@ Suites:
   docs       website prettier, reference verification, VitePress build
   contracts  the CI routing, release and MiniMax H3 contract scripts
   gpu        CUDA (Linux) or Metal (macOS) forced-local clippy — needs the toolchain
-  nix        `nix build .#mold-web`, the sandboxed web bundle CI builds
+  nix        the sandboxed `mold-web` build and the devshell CUDA load path
 
 Options:
   -k, --keep-going  run every step even after a failure, then summarise
@@ -375,8 +375,21 @@ fi
 if wants nix; then
   if command -v nix >/dev/null 2>&1; then
     step "nix: mold-web sandbox build" nix build .#mold-web --print-build-logs
+    # The devshell's own advertised feature set has to be runnable in it: a
+    # `cudnn` build keeps no RUNPATH, so LD_LIBRARY_PATH is the only thing that
+    # can resolve libcudnn at startup (#1510). Gated on the exact system the
+    # attribute names -- the flake declares only x86_64-linux and
+    # aarch64-darwin, so anything else would fail on a foreign system rather
+    # than skip. Pure eval, so it costs nothing.
+    if [ "$(uname -sm)" = "Linux x86_64" ]; then
+      step "nix: devshell CUDA load path" \
+        nix build .#checks.x86_64-linux.devshell-cuda-load-path --print-build-logs
+    else
+      skip "nix: devshell CUDA load path" "x86_64-linux-only check"
+    fi
   else
     skip "nix: mold-web sandbox build" "nix not installed"
+    skip "nix: devshell CUDA load path" "nix not installed"
   fi
 fi
 

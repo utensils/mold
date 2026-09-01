@@ -452,6 +452,7 @@ jobs:
         if: needs.changes.outputs.release == 'true'
         run: |
           nix run nixpkgs#actionlint -- .github/workflows/*.yml
+          nix build .#checks.x86_64-linux.devshell-cuda-load-path --print-build-logs
           bash scripts/tests/release-sync-pr.sh
           bash scripts/tests/changelog-fragments-contract.sh
           bash scripts/tests/crates-publish-contract.sh

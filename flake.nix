@@ -63,6 +63,7 @@
 
       perSystem =
         {
+          config,
           system,
           lib,
           ...
@@ -221,6 +222,50 @@
             (lib.makeSearchPath "lib/pkgconfig" (map lib.getDev desktopPkgConfigInputs))
             (lib.makeSearchPath "share/pkgconfig" (map lib.getDev desktopPkgConfigInputs))
           ];
+
+          # Every shared library a `releaseFeatures` binary ends up NEEDED
+          # against. `cudnn` is in that set (#1483), so `cudnn.lib` belongs here
+          # beside the rest rather than being left to chance.
+          #
+          # This list is about the LOAD, not the link. cudarc's build script
+          # emits `-L $CUDA_PATH/lib` and the merged `cudaToolkit` carries
+          # `libcudnn.so`, so a devshell `cudnn` build links clean either way —
+          # the issue's reported `-lcudnn` link error does not reproduce. It
+          # then dies in the dynamic loader, because the binary carries no
+          # RUNPATH at all: nixpkgs' `ld` wrapper is what turns a store `-L`
+          # into `-rpath`, and `.cargo/config.toml` links this target with
+          # `-fuse-ld=lld`, which goes around that wrapper. LD_LIBRARY_PATH is
+          # then the only thing left that can resolve `libcudnn.so.9`.
+          #
+          # `nix build` is immune for a reason that does NOT apply here:
+          # `mkMold` runs `autoPatchelfHook` + `autoAddDriverRunpath`, which
+          # rewrite RUNPATH from `buildInputs` — and those carry `cudnn.lib`.
+          # (Not `NIX_LDFLAGS`: it also names `cuda_cudart/lib/stubs`, which
+          # appears in no built `mold`'s RUNPATH.) The devshell gets no such
+          # pass, so omitting cuDNN here made the one feature combination that
+          # matches a release artifact the one a developer could build but not
+          # run (#1510). `devshell-cuda-load-path` in `checks` is the guard.
+          devshellLinuxCudaLibs = [
+            pkgs.stdenv.cc.cc.lib
+            pkgs.cudaPackages.cuda_cudart
+            pkgs.cudaPackages.libcublas.lib
+            pkgs.cudaPackages.cuda_nvrtc.lib
+            pkgs.cudaPackages.libcurand.lib
+            pkgs.cudaPackages.cudnn.lib
+          ];
+
+          # /run/opengl-driver/lib MUST come before cuda_cudart/lib/stubs so the
+          # real libcuda.so (NVIDIA driver) is found before the stub
+          # placeholder. Without this, debug builds link against the stub and
+          # fail at runtime with CUDA_ERROR_STUB_LIBRARY.
+          devshellLinuxLibraryPath =
+            "/run/opengl-driver/lib:"
+            + lib.makeLibraryPath (desktopLinuxRuntimeInputs ++ devshellLinuxCudaLibs)
+            + ":${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
+
+          devshellLinuxLdLibraryPath =
+            "/run/opengl-driver/lib:"
+            + lib.makeLibraryPath (desktopLinuxRuntimeInputs ++ devshellLinuxCudaLibs);
 
           # SM89 names `h3-cuda`, never `cuda,h3` -- since #1164 the bare `h3`
           # feature implies neither CUDA nor the SM89 attention kernel, and
@@ -876,6 +921,82 @@
             '';
           }
           // lib.optionalAttrs isLinux {
+            # The devshell's own advertised feature set must be RUNNABLE in it.
+            # `releaseFeatures` includes `cudnn` on Linux and the binary carries
+            # no RUNPATH, so every library it links has to be on LD_LIBRARY_PATH
+            # or `mold` dies in the dynamic loader (#1510); LIBRARY_PATH is held
+            # to the same set so the link path cannot drift from the load path.
+            #
+            # Read back out of `config.devshells.default.env` rather than off
+            # the `let` bindings, so re-inlining either `value =` as a
+            # hand-rolled list — the exact regression shape — is still caught
+            # instead of quietly orphaning the bindings this would have tested.
+            devshell-cuda-load-path =
+              let
+                # `builtins.match`, under `hasPrefix`/`hasSuffix`, refuses a
+                # pattern carrying string context, so compare as plain text.
+                plain = builtins.unsafeDiscardStringContext;
+
+                envValue =
+                  name:
+                  let
+                    matches = lib.filter (entry: entry.name == name) config.devshells.default.env;
+                  in
+                  assert lib.assertMsg (matches != [ ]) "the devshell sets no ${name}";
+                  plain (lib.head matches).value;
+
+                libraryPath = envValue "LIBRARY_PATH";
+                ldLibraryPath = envValue "LD_LIBRARY_PATH";
+
+                driverPath = "/run/opengl-driver/lib";
+                stubsPath = plain "${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
+
+                # `lib.getLib` mirrors what `makeLibraryPath` resolves, and the
+                # comparison is per `:`-segment rather than by substring:
+                # `${cuda_cudart}/lib` is a prefix of `${cuda_cudart}/lib/stubs`,
+                # so an infix test would call cudart present on a path carrying
+                # only its stub directory.
+                required = lib.mapAttrs (_: drv: plain "${lib.getLib drv}/lib") {
+                  "libstdc++" = pkgs.stdenv.cc.cc.lib;
+                  cudart = pkgs.cudaPackages.cuda_cudart;
+                  cublas = pkgs.cudaPackages.libcublas.lib;
+                  nvrtc = pkgs.cudaPackages.cuda_nvrtc.lib;
+                  curand = pkgs.cudaPackages.libcurand.lib;
+                  cudnn = pkgs.cudaPackages.cudnn.lib;
+                };
+                missingFrom =
+                  value:
+                  let
+                    entries = lib.splitString ":" value;
+                  in
+                  lib.filter (name: !builtins.elem required.${name} entries) (lib.attrNames required);
+
+                missingLink = missingFrom libraryPath;
+                missingLoad = missingFrom ldLibraryPath;
+              in
+              assert lib.assertMsg (missingLoad == [ ]) (
+                "devshell LD_LIBRARY_PATH is missing libraries the release feature set links: "
+                + lib.concatStringsSep ", " missingLoad
+              );
+              assert lib.assertMsg (missingLink == [ ]) (
+                "devshell LIBRARY_PATH is missing libraries the release feature set links: "
+                + lib.concatStringsSep ", " missingLink
+              );
+              # The driver directory has to lead both paths so the real
+              # libcuda.so wins over the cudart stub, which has to stay last on
+              # LIBRARY_PATH. Losing that order costs CUDA_ERROR_STUB_LIBRARY at
+              # runtime, and a membership test alone cannot see it.
+              assert lib.assertMsg (lib.hasPrefix "${driverPath}:" libraryPath) (
+                "devshell LIBRARY_PATH must start with ${driverPath}"
+              );
+              assert lib.assertMsg (lib.hasPrefix "${driverPath}:" ldLibraryPath) (
+                "devshell LD_LIBRARY_PATH must start with ${driverPath}"
+              );
+              assert lib.assertMsg (lib.hasSuffix ":${stubsPath}" libraryPath) (
+                "devshell LIBRARY_PATH must end with the cudart stubs directory"
+              );
+              pkgs.runCommand "mold-devshell-cuda-load-path-check" { } "touch $out";
+
             artifact-attestation-private-state =
               let
                 evaluated = inputs.nixpkgs.lib.nixosSystem {
@@ -1098,38 +1219,11 @@
               }
               {
                 name = "LIBRARY_PATH";
-                value =
-                  # /run/opengl-driver/lib MUST come before cuda_cudart/lib/stubs
-                  # so the real libcuda.so (NVIDIA driver) is found before the
-                  # stub placeholder. Without this, debug builds link against
-                  # the stub and fail at runtime with CUDA_ERROR_STUB_LIBRARY.
-                  "/run/opengl-driver/lib:"
-                  + lib.makeLibraryPath (
-                    desktopLinuxRuntimeInputs
-                    ++ [
-                      pkgs.stdenv.cc.cc.lib
-                      pkgs.cudaPackages.cuda_cudart
-                      pkgs.cudaPackages.libcublas.lib
-                      pkgs.cudaPackages.cuda_nvrtc.lib
-                      pkgs.cudaPackages.libcurand.lib
-                    ]
-                  )
-                  + ":${pkgs.cudaPackages.cuda_cudart}/lib/stubs";
+                value = devshellLinuxLibraryPath;
               }
               {
                 name = "LD_LIBRARY_PATH";
-                value =
-                  "/run/opengl-driver/lib:"
-                  + lib.makeLibraryPath (
-                    desktopLinuxRuntimeInputs
-                    ++ [
-                      pkgs.stdenv.cc.cc.lib
-                      pkgs.cudaPackages.cuda_cudart
-                      pkgs.cudaPackages.libcublas.lib
-                      pkgs.cudaPackages.cuda_nvrtc.lib
-                      pkgs.cudaPackages.libcurand.lib
-                    ]
-                  );
+                value = devshellLinuxLdLibraryPath;
               }
             ];
 
