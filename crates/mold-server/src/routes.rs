@@ -2350,7 +2350,59 @@ async fn schedule_local_expansion(
     result_rx
         .await
         .map_err(|_| ApiError::internal("prompt expansion owner worker dropped its result"))?
-        .map_err(|error| ApiError::internal(format!("prompt expansion failed: {error}")))
+        .map_err(expansion_failed)
+}
+
+/// Build the client-facing expansion failure and record it in the host journal.
+///
+/// The response body is the only place an expansion failure was ever described:
+/// the access log records a bare 500, so a batch that died on a bad completion
+/// left nothing on the host to diagnose it with.
+///
+/// The client keeps the message verbatim; the journal entry is redacted,
+/// because an API-backend transport error embeds the configured
+/// `expand.backend` URL and that URL may carry credentials in its userinfo.
+/// The response already went to an authenticated caller — the log is a new sink.
+pub(crate) fn expansion_failed(error: impl std::fmt::Display) -> ApiError {
+    let error = error.to_string();
+    tracing::warn!("prompt expansion failed: {}", redact_url_userinfo(&error));
+    ApiError::internal(format!("prompt expansion failed: {error}"))
+}
+
+/// Replace the `user:password@` userinfo of every URL in `text` with `***@`.
+///
+/// Deliberately conservative: the userinfo ends at the first `@` before the
+/// authority's terminator, so a bare `https://host/a@b` is left alone.
+pub(crate) fn redact_url_userinfo(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("://") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut redacted = false;
+    while let Some(scheme_end) = rest.find("://") {
+        let authority_start = scheme_end + "://".len();
+        out.push_str(&rest[..authority_start]);
+        rest = &rest[authority_start..];
+        let authority_end = rest
+            .find(['/', '?', '#', ' ', '"', '\''])
+            .unwrap_or(rest.len());
+        match rest[..authority_end].rfind('@') {
+            Some(at) => {
+                out.push_str("***");
+                out.push_str(&rest[at..authority_end]);
+                redacted = true;
+            }
+            None => out.push_str(&rest[..authority_end]),
+        }
+        rest = &rest[authority_end..];
+    }
+    out.push_str(rest);
+    if redacted {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 fn require_expand_model_activation(settings: &mold_core::ExpandSettings) -> Result<(), ApiError> {
@@ -3594,7 +3646,7 @@ async fn maybe_expand_prompt(
         tokio::task::spawn_blocking(move || expander.expand(&original_prompt, &expand_config))
             .await
             .map_err(|e| ApiError::internal(format!("expand task failed: {e}")))?
-            .map_err(|e| ApiError::internal(format!("prompt expansion failed: {e}")))?;
+            .map_err(expansion_failed)?;
 
     if let Some(expanded) = result.expanded.first() {
         req.original_prompt = Some(req.prompt.clone());
@@ -3709,7 +3761,7 @@ async fn expand_prompt(
     let result = tokio::task::spawn_blocking(move || expander.expand(&prompt, &expand_config))
         .await
         .map_err(|e| ApiError::internal(format!("expand task failed: {e}")))?
-        .map_err(|e| ApiError::internal(format!("prompt expansion failed: {e}")))?;
+        .map_err(expansion_failed)?;
 
     Ok(Json(mold_core::ExpandResponse {
         original: req.prompt,

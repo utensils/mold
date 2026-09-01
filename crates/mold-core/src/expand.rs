@@ -201,6 +201,26 @@ pub fn validate_expansion_variation_count(variations: usize) -> Result<()> {
     Ok(())
 }
 
+/// Split `remaining` prompts into the fewest chunks of at most
+/// `EXPANSION_CHUNK_SIZE`, then even those chunks out.
+///
+/// Taking `EXPANSION_CHUNK_SIZE` greedily leaves every batch of `4k + 1` ending
+/// on a chunk of exactly one, which is rendered through the BATCH template —
+/// "Generate 1 distinct prompts ... Output as a JSON array of 1 strings". A
+/// small local model answers that degenerate instruction with prose often
+/// enough to matter, and prose is what `parse_variations` must refuse to
+/// truncate. Evening the chunks costs no extra completions (the chunk count is
+/// unchanged) and no chunk is ever asked for one prompt unless the whole batch
+/// is one, where the single-prompt template is used instead.
+///
+/// A retry can still ask for one — a chunk of three that collected two needs
+/// one more — so this narrows the trigger rather than removing it. The attempt
+/// budget covers the rest.
+fn balanced_chunk_target(remaining: usize) -> usize {
+    let chunks = remaining.div_ceil(EXPANSION_CHUNK_SIZE).max(1);
+    remaining.div_ceil(chunks)
+}
+
 /// Generate an exact logical expansion from bounded backend completions.
 ///
 /// `generate` receives a cloned config whose `variations` and `max_tokens` are
@@ -217,8 +237,13 @@ where
     let mut expanded = Vec::new();
     let mut normalized = HashSet::new();
     while expanded.len() < config.variations {
-        let chunk_target = (config.variations - expanded.len()).min(EXPANSION_CHUNK_SIZE);
+        let chunk_target = balanced_chunk_target(config.variations - expanded.len());
         let mut chunk = Vec::with_capacity(chunk_target);
+
+        // Records the last attempt that over-delivered, so an exhausted budget
+        // can name that cause instead of the generic shortfall. Cleared by any
+        // later attempt, which is what actually ended the chunk.
+        let mut overshoot: Option<(usize, usize)> = None;
 
         for _ in 0..EXPANSION_CHUNK_ATTEMPTS {
             let missing = chunk_target - chunk.len();
@@ -236,11 +261,16 @@ where
             };
             let attempt = generate(&attempt_config, attempt_context)?;
             if attempt.len() > missing {
-                anyhow::bail!(
-                    "expansion backend returned {} prompts when exactly {missing} were requested",
-                    attempt.len()
-                );
+                // An over-delivering completion is ambiguous: `parse_variations`
+                // deliberately refuses to truncate a response it cannot prove is
+                // all prompts, so the extras may be reasoning rather than
+                // variations and none of them may be kept. Spend one of this
+                // chunk's attempts and ask again — a single ambiguous completion
+                // must never fail a whole batch.
+                overshoot = Some((attempt.len(), missing));
+                continue;
             }
+            overshoot = None;
             for prompt in attempt {
                 let key = normalize_expanded_prompt(&prompt);
                 if !key.is_empty() && normalized.insert(key) {
@@ -250,6 +280,13 @@ where
         }
 
         if chunk.len() != chunk_target {
+            if let Some((returned, requested)) = overshoot {
+                anyhow::bail!(
+                    "expansion backend returned {returned} prompts when exactly {requested} were requested, and did not return a usable count in {EXPANSION_CHUNK_ATTEMPTS} attempts; assembled {} of {} prompts",
+                    expanded.len() + chunk.len(),
+                    config.variations
+                );
+            }
             anyhow::bail!(
                 "expected exactly {} distinct non-empty prompts, but the expansion backend returned {}",
                 config.variations,
@@ -530,6 +567,30 @@ fn parse_variations(text: &str, expected: usize) -> Vec<String> {
         }
     }
 
+    // A response whose every line is a singleton JSON array is the one-array-per
+    // -variation shape some local backends emit. Unquoted prose cannot parse as
+    // JSON, so the structure is as good a delimiter as a consecutive numbered
+    // list and an overshoot may be capped the same way. It is not proof that
+    // every line is a PROMPT — a model that wrapped its own preamble in the
+    // requested syntax would pass — which is the same bounded trade the
+    // numbered-list cap already makes. A short response is retained for the
+    // exact-count retry rather than left to the paragraph fallback, which would
+    // otherwise join these lines into one literal `["a"] ["b"]` prompt.
+    let singleton_arrays = raw_lines
+        .iter()
+        .map(|line| singleton_json_array_item(line))
+        .collect::<Option<Vec<_>>>();
+    if let Some(items) = singleton_arrays {
+        let items = items
+            .iter()
+            .map(|item| clean_expanded_prompt(item))
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>();
+        if !items.is_empty() {
+            return items.into_iter().take(expected).collect();
+        }
+    }
+
     let lines = raw_lines
         .iter()
         .map(|line| clean_expanded_prompt(line))
@@ -579,15 +640,20 @@ fn parse_numbered_variation(line: &str) -> Option<(usize, String)> {
     (!prompt.is_empty()).then_some((number, prompt))
 }
 
+/// Unwrap a lone `["prompt"]` array. Some OpenAI-compatible and local backends
+/// emit one JSON array per requested variation (`["prompt"]\n["prompt"]`)
+/// instead of one shared array. Never flattens a real multi-item array.
+fn singleton_json_array_item(text: &str) -> Option<String> {
+    serde_json::from_str::<Vec<String>>(text.trim())
+        .ok()
+        .and_then(|items| (items.len() == 1).then(|| items.into_iter().next().unwrap()))
+}
+
 /// Clean up an expanded prompt: trim whitespace, remove quotes, collapse whitespace.
 fn clean_expanded_prompt(text: &str) -> String {
-    // Some OpenAI-compatible/local backends emit one JSON array per requested
-    // variation (`["prompt"]\n["prompt"]`) instead of one shared array. The
-    // line fallback feeds each singleton here, so unwrap it before ordinary
-    // quote/whitespace cleanup. Never flatten a real multi-item array.
-    let singleton = serde_json::from_str::<Vec<String>>(text.trim())
-        .ok()
-        .and_then(|items| (items.len() == 1).then(|| items.into_iter().next().unwrap()));
+    // The line fallback feeds each singleton array here, so unwrap it before
+    // ordinary quote/whitespace cleanup.
+    let singleton = singleton_json_array_item(text);
     let trimmed = singleton
         .as_deref()
         .unwrap_or(text)
@@ -1013,6 +1079,46 @@ I need four alternatives [composition, camera, lighting, setting].
         assert_eq!(result, vec!["a cat", "a dog", "a bird"]);
     }
 
+    #[test]
+    fn parse_variations_caps_repeated_singleton_json_arrays() {
+        // Every line is a singleton array, so no line can be prose. That is as
+        // structurally unambiguous as a consecutive numbered list, and an
+        // overshoot may be capped rather than forced through a retry.
+        let input = "[\"a cat\"]\n[\"a dog\"]\n[\"a bird\"]";
+        assert_eq!(parse_variations(input, 1), vec!["a cat"]);
+        assert_eq!(parse_variations(input, 2), vec!["a cat", "a dog"]);
+    }
+
+    #[test]
+    fn parse_variations_keeps_a_short_singleton_array_run_for_the_retry() {
+        // Never let the paragraph fallback join these into one literal
+        // `["a cat"] ["a dog"]` prompt. Two real prompts reach the exact-count
+        // guard, which asks for the third.
+        let input = "[\"a cat\"]\n[\"a dog\"]";
+        assert_eq!(parse_variations(input, 3), vec!["a cat", "a dog"]);
+    }
+
+    #[test]
+    fn parse_variations_caps_a_singleton_run_it_cannot_prove_is_all_prompts() {
+        // Documented trade, not an accident: a model that wrapped its preamble
+        // in the requested syntax passes the structural test. This is the same
+        // exposure the consecutive-numbered-list cap already accepts, and it is
+        // pinned so a future change to that trade is deliberate.
+        let input = "[\"Here are the prompts\"]\n[\"a cat\"]\n[\"a dog\"]";
+        assert_eq!(
+            parse_variations(input, 2),
+            vec!["Here are the prompts", "a cat"]
+        );
+    }
+
+    #[test]
+    fn parse_variations_keeps_mixed_prose_and_singleton_arrays_ambiguous() {
+        // One prose line among the arrays means the structure no longer proves
+        // which lines are prompts, so the exact-count guard must still see it.
+        let input = "Here are the prompts:\n[\"a cat\"]\n[\"a dog\"]";
+        assert_eq!(parse_variations(input, 2).len(), 3);
+    }
+
     // ── bounded exact expansion ─────────────────────────────────────────
 
     #[test]
@@ -1040,8 +1146,32 @@ I need four alternatives [composition, camera, lighting, setting].
         assert_eq!(expanded.len(), 10);
         assert_eq!(
             attempts,
-            vec![(4, 1200, 1, 10), (4, 1200, 5, 10), (2, 600, 9, 10)]
+            vec![(4, 1200, 1, 10), (3, 900, 5, 10), (3, 900, 8, 10)]
         );
+    }
+
+    #[test]
+    fn no_chunk_is_ever_asked_for_a_lone_prompt_inside_a_larger_batch() {
+        // The degenerate `4k + 1` tail is what routed a one-prompt ask through
+        // the batch template. Sweep every reachable batch size rather than
+        // pinning the one that was reported.
+        for variations in 2..=256usize {
+            let mut remaining = variations;
+            let mut chunks = Vec::new();
+            while remaining > 0 {
+                let target = balanced_chunk_target(remaining);
+                assert!(
+                    (2..=EXPANSION_CHUNK_SIZE).contains(&target),
+                    "variations {variations} produced a chunk of {target}"
+                );
+                chunks.push(target);
+                remaining -= target;
+            }
+            assert_eq!(chunks.iter().sum::<usize>(), variations);
+            assert_eq!(chunks.len(), variations.div_ceil(EXPANSION_CHUNK_SIZE));
+        }
+        // A one-print request stays one chunk, which takes the single template.
+        assert_eq!(balanced_chunk_target(1), 1);
     }
 
     #[test]
@@ -1130,11 +1260,224 @@ I need four alternatives [composition, camera, lighting, setting].
             variations: 2,
             ..Default::default()
         };
+        let mut attempts = 0;
         let error = expand_exact_with(&config, |_, _| {
+            attempts += 1;
             Ok(vec!["one".into(), "two".into(), "three".into()])
         })
         .unwrap_err();
+        assert_eq!(attempts, EXPANSION_CHUNK_ATTEMPTS);
         assert!(error.to_string().contains("exactly 2 were requested"));
+    }
+
+    #[test]
+    fn an_ambiguous_overshoot_spends_an_attempt_instead_of_failing_the_batch() {
+        let config = ExpandConfig {
+            variations: 2,
+            ..Default::default()
+        };
+        let mut attempts = 0;
+
+        let expanded = expand_exact_with(&config, |_, _| {
+            attempts += 1;
+            if attempts == 1 {
+                // One ambiguous completion: reasoning plus the requested pair.
+                Ok(vec![
+                    "first I will vary the camera".into(),
+                    "one".into(),
+                    "two".into(),
+                ])
+            } else {
+                Ok(vec!["one".into(), "two".into()])
+            }
+        })
+        .unwrap();
+
+        assert_eq!(expanded, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn a_tail_chunk_overshoot_recovers_the_whole_logical_batch() {
+        // The reported failure shape, reachable now only through a partial
+        // fill: a five-print batch chunks into 3 + 2, chunk two answers with
+        // one prompt, and the retry that asks for the single missing one draws
+        // a three-line completion from the local model. That last ambiguous
+        // completion must not kill a batch with four prompts already in hand.
+        let config = ExpandConfig {
+            variations: 5,
+            ..Default::default()
+        };
+        let mut asks = Vec::new();
+
+        let expanded = expand_exact_with(&config, |attempt, context| {
+            asks.push(attempt.variations);
+            match asks.as_slice() {
+                [3] => Ok(vec![
+                    "prompt 1".into(),
+                    "prompt 2".into(),
+                    "prompt 3".into(),
+                ]),
+                [3, 2] => Ok(vec!["prompt 4".into()]),
+                [3, 2, 1] => {
+                    assert_eq!(context.start, 5);
+                    Ok(vec![
+                        "here is the final direction".into(),
+                        "prompt 5".into(),
+                        "and that keeps the subject".into(),
+                    ])
+                }
+                _ => Ok(vec!["prompt 5".into()]),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(expanded.len(), 5);
+        assert_eq!(expanded[4], "prompt 5");
+        assert_eq!(asks, vec![3, 2, 1, 1]);
+    }
+
+    #[test]
+    fn an_overshooting_attempt_contributes_none_of_its_prompts() {
+        let config = ExpandConfig {
+            variations: 1,
+            ..Default::default()
+        };
+        let mut attempts = 0;
+
+        let expanded = expand_exact_with(&config, |_, _| {
+            attempts += 1;
+            if attempts == 1 {
+                Ok(vec!["reasoning line".into(), "trailing note".into()])
+            } else {
+                Ok(vec!["the real prompt".into()])
+            }
+        })
+        .unwrap();
+
+        assert_eq!(expanded, vec!["the real prompt".to_string()]);
+    }
+
+    #[test]
+    fn a_persistent_overshoot_reports_both_counts_after_the_attempt_budget() {
+        let config = ExpandConfig {
+            variations: 1,
+            ..Default::default()
+        };
+        let mut attempts = 0;
+
+        let error = expand_exact_with(&config, |_, _| {
+            attempts += 1;
+            Ok(vec!["one".into(), "two".into(), "three".into()])
+        })
+        .unwrap_err();
+
+        assert_eq!(attempts, EXPANSION_CHUNK_ATTEMPTS);
+        let message = error.to_string();
+        assert!(
+            message.contains("returned 3 prompts when exactly 1 were requested"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("in {EXPANSION_CHUNK_ATTEMPTS} attempts")),
+            "{message}"
+        );
+        assert!(message.contains("assembled 0 of 1 prompts"), "{message}");
+    }
+
+    #[test]
+    fn an_overshoot_in_an_early_chunk_does_not_diagnose_a_later_one() {
+        // `overshoot` state is per chunk. If a refactor ever hoists it out of
+        // the loop, chunk two's shortfall would be reported as chunk one's
+        // overshoot.
+        let config = ExpandConfig {
+            variations: 8,
+            ..Default::default()
+        };
+        let mut attempts = 0;
+
+        let error = expand_exact_with(&config, |attempt, context| {
+            attempts += 1;
+            if context.start <= 4 {
+                if attempts == 1 {
+                    // Chunk one over-delivers once, then answers cleanly.
+                    return Ok(vec![
+                        "a".into(),
+                        "b".into(),
+                        "c".into(),
+                        "d".into(),
+                        "e".into(),
+                    ]);
+                }
+                return Ok((0..attempt.variations)
+                    .map(|index| format!("prompt {}", context.start + index))
+                    .collect());
+            }
+            // Chunk two simply under-delivers, forever.
+            Ok(Vec::new())
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected exactly 8 distinct non-empty prompts"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_overshoot_then_a_partial_fill_still_completes_the_chunk() {
+        let config = ExpandConfig {
+            variations: 4,
+            ..Default::default()
+        };
+        let mut attempts = 0;
+
+        let expanded = expand_exact_with(&config, |attempt, _| {
+            attempts += 1;
+            match attempts {
+                1 => Ok(vec!["x".into(); 5]),
+                2 => Ok(vec!["one".into(), "two".into()]),
+                _ => {
+                    assert_eq!(attempt.variations, 2);
+                    Ok(vec!["three".into(), "four".into()])
+                }
+            }
+        })
+        .unwrap();
+
+        assert_eq!(expanded, vec!["one", "two", "three", "four"]);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn an_overshoot_does_not_mask_a_later_shortfall() {
+        // The final diagnosis must describe the attempt state that actually
+        // ended the chunk, not an earlier one that a retry moved past.
+        let config = ExpandConfig {
+            variations: 2,
+            ..Default::default()
+        };
+        let mut attempts = 0;
+
+        let error = expand_exact_with(&config, |_, _| {
+            attempts += 1;
+            if attempts == 1 {
+                Ok(vec!["one".into(), "two".into(), "three".into()])
+            } else {
+                Ok(Vec::new())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(attempts, EXPANSION_CHUNK_ATTEMPTS);
+        assert!(
+            error
+                .to_string()
+                .contains("expected exactly 2 distinct non-empty prompts"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1147,8 +1490,13 @@ I need four alternatives [composition, camera, lighting, setting].
 
         let expanded = expand_exact_with(&config, |attempt, context| {
             attempts += 1;
-            if context.start == 5 && attempts == 2 {
-                Ok(vec!["prompt 1".into(), "prompt 5".into()])
+            if context.start == 4 && attempts == 2 {
+                // One of the three repeats a prompt chunk one already used.
+                Ok(vec![
+                    "prompt 1".into(),
+                    "prompt 4".into(),
+                    "prompt 5".into(),
+                ])
             } else {
                 Ok((0..attempt.variations)
                     .map(|index| format!("prompt {}", context.start + index))

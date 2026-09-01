@@ -79,9 +79,16 @@ on the same model. When no eligible machine has the model, Create offers to
 pull it and names the machine (the one expansion would have used) instead of
 failing. iPhone pins one machine, so expansion always runs there.
 Large expansions are assembled from bounded
-four-prompt model calls with position-aware instructions and per-chunk token
-budgets. Missing or duplicate positions are retried, and Mold rejects any
-result that is not exactly N distinct, non-empty prompts. Changing the source
+model calls of at most four prompts, with position-aware instructions and
+per-chunk token budgets. The chunks are evened out rather than filled greedily,
+so a batch of five is asked for three prompts and then two — never four and then
+a lone one, which asks a batch instruction for a single variation and is the
+shape a small local model answers with prose. Missing, duplicate, and
+over-delivered positions are each retried within the chunk's attempt budget: a
+response carrying more prompts than were asked for may be reasoning rather than
+variations, so none of it is kept and the chunk simply asks again. Mold still
+rejects any final result that is not exactly N distinct, non-empty prompts, and
+a chunk that exhausts its attempts says which of the two shapes it kept seeing. Changing the source
 prompt, model, host, conditioning task, or Batch count keeps
 the reviewed prompts visible but blocks generation until you refresh or discard
 them. A missing expansion model is pulled on the named host without falling

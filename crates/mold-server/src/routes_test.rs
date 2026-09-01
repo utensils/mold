@@ -21129,4 +21129,32 @@ mod tests {
             .expect("sweep runs");
         assert_eq!(result, mold_core::HeldSweepResult::default());
     }
+
+    #[test]
+    fn an_expansion_failure_never_journals_a_backend_url_credential() {
+        use crate::routes::redact_url_userinfo;
+
+        assert_eq!(
+            redact_url_userinfo(
+                "expand API request failed: https://svc:s3cret@llm.example.com/v1/chat/completions timed out"
+            ),
+            "expand API request failed: https://***@llm.example.com/v1/chat/completions timed out"
+        );
+        // A credential-free URL is returned untouched, path `@` included.
+        for untouched in [
+            "expand API request failed: http://127.0.0.1:7791/v1/chat/completions refused",
+            "expansion backend returned 3 prompts when exactly 1 were requested",
+            "expand API request failed: https://llm.example.com/v1/a@b failed",
+        ] {
+            assert_eq!(redact_url_userinfo(untouched), untouched);
+        }
+        // The client-facing message is deliberately NOT redacted.
+        let api_error = crate::routes::expansion_failed(
+            "expand API request failed: https://svc:s3cret@llm.example.com/v1 timed out",
+        );
+        assert!(
+            format!("{api_error:?}").contains("s3cret"),
+            "the authenticated caller keeps the verbatim reason"
+        );
+    }
 }
