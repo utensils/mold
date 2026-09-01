@@ -61,7 +61,7 @@ onBeforeUnmount(() => {
       data-test="pod-cost-stop"
       class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
       :disabled="busy"
-      @click="emit('stop')"
+      @click.stop="emit('stop')"
     >
       Stop pod
     </button>

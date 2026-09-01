@@ -5,6 +5,8 @@ import { createMemoryHistory, createRouter, type Router } from "vue-router";
 
 const appSettingsGet = vi.fn();
 const discoverServers = vi.fn();
+const runpodOverview = vi.fn();
+const runpodStop = vi.fn().mockResolvedValue(undefined);
 const secretGet = vi.fn().mockResolvedValue(null);
 const testRemoteHost = vi.fn().mockResolvedValue({
   ok: true,
@@ -21,6 +23,8 @@ vi.mock("../lib/ipc", () => ({
     secretGet: (...a: unknown[]) => secretGet(...a),
     secretSet: vi.fn().mockResolvedValue(undefined),
     discoverServers: (...a: unknown[]) => discoverServers(...(a as [])),
+    runpodOverview: (...a: unknown[]) => runpodOverview(...(a as [])),
+    runpodStop: (...a: unknown[]) => runpodStop(...a),
     testRemoteHost: (...a: unknown[]) => testRemoteHost(...a),
     forgetRemoteHost: vi.fn().mockResolvedValue([]),
   },
@@ -41,6 +45,18 @@ import { useContextMenuStore } from "../stores/contextMenu";
 
 const stub = { template: "<div />" };
 let router: Router;
+
+function addRunPodHost(hosts: ReturnType<typeof useHostsStore>) {
+  hosts.extras.push({
+    id: "pod-123-7680-proxy-runpod-net",
+    label: "mold-runpod",
+    url: "https://pod-123-7680.proxy.runpod.net",
+    apiKey: null,
+    status: "ready",
+    error: null,
+    instanceId: "uuid-runpod",
+  });
+}
 
 async function mountView(setup?: (hosts: ReturnType<typeof useHostsStore>) => void) {
   router = createRouter({
@@ -134,6 +150,37 @@ beforeEach(() => {
       isThisMachine: false,
     },
   ]);
+  runpodOverview.mockResolvedValue({
+    configured: true,
+    credentialSource: "app",
+    account: null,
+    pods: [
+      {
+        id: "pod-123",
+        name: "mold-runpod",
+        desiredStatus: "RUNNING",
+        imageName: "mold:latest",
+        gpuCount: 1,
+        costPerHr: 0.74,
+        uptimeSeconds: 120,
+        memoryInGb: 26,
+        vcpuCount: 8,
+        volumeInGb: 40,
+        machine: {
+          gpuDisplayName: "NVIDIA GeForce RTX 4090",
+          gpuTypeId: "NVIDIA GeForce RTX 4090",
+          dataCenterId: "US-TX-3",
+          location: "Texas",
+        },
+        gpu: null,
+        networkVolumeId: null,
+        networkVolume: null,
+      },
+    ],
+    gpus: [],
+    datacenters: [],
+    networkVolumes: [],
+  });
 });
 
 describe("MachinesView overview", () => {
@@ -220,6 +267,75 @@ describe("MachinesView overview", () => {
     await wrapper.get("[data-test='host-card']").trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.path).toBe("/machines/hal9000-7680");
+  });
+
+  it("opens the connected machine detail when its RunPod row is clicked", async () => {
+    const wrapper = await mountView(addRunPodHost);
+
+    const pod = wrapper.get("[data-test='runpod-running']");
+    const open = pod.get("[data-test='runpod-open']");
+    expect(open.attributes("aria-label")).toBe("Open mold-runpod machine details");
+    expect(pod.text()).toContain("mold-runpod");
+    expect(pod.find("[data-test='machine-chevron']").exists()).toBe(true);
+
+    await open.trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.path).toBe("/machines/pod-123-7680-proxy-runpod-net");
+  });
+
+  it("connects to an unconnected RunPod before opening its machine detail", async () => {
+    const wrapper = await mountView();
+
+    await wrapper.get("[data-test='runpod-open']").trigger("click");
+    await flushPromises();
+
+    expect(testRemoteHost).toHaveBeenCalledWith("https://pod-123-7680.proxy.runpod.net", null);
+    expect(router.currentRoute.value.path).toBe("/machines/pod-123-7680-proxy-runpod-net");
+  });
+
+  it("offers machine and RunPod context actions on a running pod", async () => {
+    const wrapper = await mountView(addRunPodHost);
+
+    await wrapper.get("[data-test='runpod-running']").trigger("contextmenu");
+    expect(
+      useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
+    ).toEqual([
+      "Open details",
+      "Set as generation target",
+      "Copy address",
+      "Open web UI",
+      "Disconnect",
+      "Forget…",
+      "Manage RunPod",
+      "Stop pod",
+    ]);
+  });
+
+  it("does not offer Stop for a pod backed by a network volume", async () => {
+    const overview = await runpodOverview();
+    overview.pods[0].networkVolumeId = "network-volume-1";
+    overview.pods[0].networkVolume = {
+      id: "network-volume-1",
+      name: "models",
+      dataCenterId: "US-TX-3",
+      size: 100,
+    };
+    runpodOverview.mockResolvedValue(overview);
+    const wrapper = await mountView(addRunPodHost);
+
+    await wrapper.get("[data-test='runpod-running']").trigger("contextmenu");
+    expect(
+      useContextMenuStore().entries.flatMap((entry) => ("separator" in entry ? [] : [entry.label])),
+    ).not.toContain("Stop pod");
+  });
+
+  it("stops a pod without also opening its machine detail", async () => {
+    const wrapper = await mountView(addRunPodHost);
+
+    await wrapper.get("[data-test='pod-cost-stop']").trigger("click");
+    await flushPromises();
+    expect(runpodStop).toHaveBeenCalledWith("pod-123");
+    expect(router.currentRoute.value.path).toBe("/machines");
   });
 
   it("lists remembered (offline) hosts with a Connect action", async () => {
