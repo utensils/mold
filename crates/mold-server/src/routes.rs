@@ -518,7 +518,6 @@ use crate::queue::clean_error_message;
 pub struct ApiDoc;
 
 pub fn create_router(state: AppState) -> Router {
-    crate::video_upscale::recover_at_startup(&state);
     // Stateful routes (need AppState) are added first, then .with_state() converts
     // Router<AppState> → Router<()>. Stateless routes (OpenAPI, docs) are merged after.
     Router::new()

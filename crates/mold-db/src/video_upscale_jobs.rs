@@ -219,6 +219,15 @@ pub fn pause_unfinished_for_recovery(db: &MetadataDb, now_ms: i64) -> Result<usi
     db.with_conn(|conn| Ok(conn.execute("UPDATE video_upscale_jobs SET state='paused',updated_at_ms=?1 WHERE state IN ('queued','running','finalizing')", [now_ms])?))
 }
 
+/// Cooperative server shutdown parks work that can still stop at a frame
+/// boundary. A job that already claimed finalization must drain while the
+/// server awaits it, keeping Gallery publication and the completed row atomic
+/// from the next runtime's perspective. Crash recovery still pauses that state
+/// through [`pause_unfinished_for_recovery`].
+pub fn pause_interruptible_for_shutdown(db: &MetadataDb, now_ms: i64) -> Result<usize> {
+    db.with_conn(|conn| Ok(conn.execute("UPDATE video_upscale_jobs SET state='paused',updated_at_ms=?1 WHERE state IN ('queued','running')", [now_ms])?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +267,19 @@ mod tests {
         let recovered = get(&db, "vup-1").unwrap().unwrap();
         assert_eq!(recovered.job.state, VideoUpscaleJobState::Paused);
         assert_eq!(recovered.job.completed_frames, 3);
+    }
+
+    #[test]
+    fn cooperative_shutdown_leaves_claimed_finalization_to_drain() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut row = stored();
+        row.job.state = VideoUpscaleJobState::Finalizing;
+        insert(&db, &row).unwrap();
+        assert_eq!(pause_interruptible_for_shutdown(&db, 2).unwrap(), 0);
+        assert_eq!(
+            get(&db, "vup-1").unwrap().unwrap().job.state,
+            VideoUpscaleJobState::Finalizing
+        );
     }
 
     #[test]

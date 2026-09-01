@@ -19,6 +19,7 @@ use mold_db::video_upscale_jobs::{self as jobs, StoredVideoUpscaleJob};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     convert::Infallible,
     fs,
     io::{BufRead, Read, Write},
@@ -48,10 +49,20 @@ fn db(state: &AppState) -> Result<&mold_db::MetadataDb, ApiError> {
     })
 }
 
-pub fn recover_at_startup(state: &AppState) {
-    let Some(db) = state.metadata_db.as_ref().as_ref() else {
-        return;
-    };
+pub struct VideoUpscaleRuntime {
+    shutdown: tokio_util::sync::CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl VideoUpscaleRuntime {
+    pub async fn shutdown(self) {
+        self.shutdown.cancel();
+        let _ = self.handle.await;
+    }
+}
+
+pub fn recover_at_startup(state: &AppState) -> Option<VideoUpscaleRuntime> {
+    let db = state.metadata_db.as_ref().as_ref()?;
     match jobs::pause_unfinished_for_recovery(db, now_ms()) {
         Ok(count) if count > 0 => tracing::info!(
             count,
@@ -65,26 +76,79 @@ pub fn recover_at_startup(state: &AppState) {
     // or a dedicated GPU owner thread. Both can durably enqueue the follow-up
     // in SQLite; this lightweight dispatcher supplies the AppState needed to
     // run it without making generation completion depend on a connected UI.
-    let state = state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        loop {
-            interval.tick().await;
-            let Some(database) = state.metadata_db.as_ref().as_ref() else {
-                break;
-            };
-            let queued = match jobs::list_queued_ids(database) {
-                Ok(ids) => ids,
-                Err(error) => {
-                    tracing::warn!(%error, "could not scan queued framewise upscale jobs");
-                    continue;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let handle = tokio::spawn(run_dispatcher(
+        state.clone(),
+        shutdown.clone(),
+        state.events.shutdown_token(),
+        std::sync::Arc::new(|state, id| async move { run_tracked_job(state, id).await }),
+    ));
+    Some(VideoUpscaleRuntime { shutdown, handle })
+}
+
+async fn run_dispatcher<F, Fut>(
+    state: AppState,
+    lifecycle_shutdown: tokio_util::sync::CancellationToken,
+    server_shutdown: tokio_util::sync::CancellationToken,
+    runner: std::sync::Arc<F>,
+) where
+    F: Fn(AppState, String) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    let mut active = HashSet::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = lifecycle_shutdown.cancelled() => break,
+            _ = server_shutdown.cancelled() => break,
+            completed = tasks.join_next(), if !tasks.is_empty() => {
+                match completed {
+                    Some(Ok(id)) => { active.remove(&id); }
+                    Some(Err(error)) => tracing::error!(%error, "framewise upscale task panicked"),
+                    None => {}
                 }
-            };
-            for id in queued {
-                spawn_job(state.clone(), id);
+            }
+            _ = interval.tick() => {
+                let Some(database) = state.metadata_db.as_ref().as_ref() else {
+                    break;
+                };
+                let queued = match jobs::list_queued_ids(database) {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not scan queued framewise upscale jobs");
+                        continue;
+                    }
+                };
+                for id in queued {
+                    if active.insert(id.clone()) {
+                        let state = state.clone();
+                        let runner = runner.clone();
+                        tasks.spawn(async move {
+                            runner(state, id.clone()).await;
+                            id
+                        });
+                    }
+                }
             }
         }
-    });
+    }
+
+    // Parking is the cancellation signal observed by run_job at frame
+    // boundaries. Finalizing rows have crossed the no-cancel publication
+    // boundary, so leave them claimed and drain them through completion. Drain
+    // every tracked task before returning so an embedded restart cannot inherit
+    // old DB, GPU, ffmpeg, or gallery owners.
+    if let Some(database) = state.metadata_db.as_ref().as_ref() {
+        if let Err(error) = jobs::pause_interruptible_for_shutdown(database, now_ms()) {
+            tracing::error!(%error, "failed to park framewise upscale jobs for shutdown");
+        }
+    }
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            tracing::error!(%error, "framewise upscale task panicked during shutdown");
+        }
+    }
 }
 
 fn scale_for(model: &str) -> u32 {
@@ -247,29 +311,27 @@ fn source_metadata(stored: &StoredVideoUpscaleJob) -> anyhow::Result<mold_core::
     )?)?)
 }
 
-fn spawn_job(state: AppState, id: String) {
-    tokio::spawn(async move {
-        if let Err(error) = run_job(state.clone(), &id).await {
-            let current = state
-                .metadata_db
-                .as_ref()
-                .as_ref()
-                .and_then(|db| jobs::get(db, &id).ok().flatten())
-                .map(|stored| stored.job.state);
-            let terminal = current
-                .is_some_and(|state| state == VideoUpscaleJobState::Paused || state.is_terminal());
-            if !terminal {
-                if let Some(db) = state.metadata_db.as_ref().as_ref() {
-                    if current == Some(VideoUpscaleJobState::Finalizing) {
-                        let _ = jobs::pause_after_error(db, &id, &format!("{error:#}"), now_ms());
-                    } else {
-                        let _ = jobs::fail(db, &id, &format!("{error:#}"), now_ms());
-                    }
+async fn run_tracked_job(state: AppState, id: String) {
+    if let Err(error) = run_job(state.clone(), &id).await {
+        let current = state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .and_then(|db| jobs::get(db, &id).ok().flatten())
+            .map(|stored| stored.job.state);
+        let terminal = current
+            .is_some_and(|state| state == VideoUpscaleJobState::Paused || state.is_terminal());
+        if !terminal {
+            if let Some(db) = state.metadata_db.as_ref().as_ref() {
+                if current == Some(VideoUpscaleJobState::Finalizing) {
+                    let _ = jobs::pause_after_error(db, &id, &format!("{error:#}"), now_ms());
+                } else {
+                    let _ = jobs::fail(db, &id, &format!("{error:#}"), now_ms());
                 }
             }
-            tracing::warn!(job_id = %id, %error, "framewise upscale stopped");
         }
-    });
+        tracing::warn!(job_id = %id, %error, "framewise upscale stopped");
+    }
 }
 
 async fn create_library_job(
@@ -407,7 +469,6 @@ pub(crate) async fn create_generated_video_job(
         },
     )
     .await?;
-    spawn_job(state.clone(), job.id.clone());
     Ok(job)
 }
 
@@ -416,7 +477,6 @@ pub async fn create_job(
     Json(request): Json<CreateVideoUpscaleJobRequest>,
 ) -> Result<(StatusCode, Json<VideoUpscaleJob>), ApiError> {
     let job = create_library_job(&state, request).await?;
-    spawn_job(state, job.id.clone());
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
@@ -632,7 +692,6 @@ pub async fn resume_job(
         VideoUpscaleJobState::Queued,
     )
     .await?;
-    spawn_job(state, id);
     Ok(Json(job))
 }
 
@@ -1331,6 +1390,230 @@ mod tests {
                 .is_ok_and(|output| output.status.success())
         })
     }
+
+    #[tokio::test]
+    async fn shutdown_parks_and_joins_active_jobs_before_restart() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.mp4");
+        fs::write(&source, b"source-placeholder").unwrap();
+        let database = mold_db::MetadataDb::open_in_memory().unwrap();
+        let metadata = mold_db::metadata_io::synthesize_from_filename("source.mp4", 1);
+        let record = mold_db::GenerationRecord::from_save(
+            temp.path(),
+            "source.mp4",
+            OutputFormat::Mp4,
+            metadata,
+            mold_db::RecordSource::Server,
+            1,
+        );
+        database.upsert(&record).unwrap();
+
+        let mut state = AppState::for_tests();
+        state.metadata_db = Arc::new(Some(database));
+        let lifecycle_shutdown = tokio_util::sync::CancellationToken::new();
+        let server_shutdown = tokio_util::sync::CancellationToken::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let stopped = Arc::new(tokio::sync::Notify::new());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runner = {
+            let started = started.clone();
+            let stopped = stopped.clone();
+            let runs = runs.clone();
+            Arc::new(move |state: AppState, id: String| {
+                let started = started.clone();
+                let stopped = stopped.clone();
+                let runs = runs.clone();
+                async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    let database = state.metadata_db.as_ref().as_ref().unwrap();
+                    assert!(jobs::transition(
+                        database,
+                        &id,
+                        &[VideoUpscaleJobState::Queued],
+                        VideoUpscaleJobState::Running,
+                        now_ms(),
+                    )
+                    .unwrap());
+                    started.notify_one();
+                    loop {
+                        if jobs::get(database, &id).unwrap().unwrap().job.state
+                            == VideoUpscaleJobState::Paused
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    stopped.notify_one();
+                }
+            })
+        };
+        let handle = tokio::spawn(run_dispatcher(
+            state.clone(),
+            lifecycle_shutdown.clone(),
+            server_shutdown,
+            runner,
+        ));
+        let runtime = VideoUpscaleRuntime {
+            shutdown: lifecycle_shutdown,
+            handle,
+        };
+        let job = enqueue_gallery_video_job(
+            temp.path(),
+            state.metadata_db.as_ref().as_ref().unwrap(),
+            "source.mp4",
+            "real-esrgan-x4plus:fp16".into(),
+            None,
+        )
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .expect("queued job must start");
+        runtime.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), stopped.notified())
+            .await
+            .expect("shutdown must join the parked active job");
+        assert_eq!(
+            jobs::get(state.metadata_db.as_ref().as_ref().unwrap(), &job.id)
+                .unwrap()
+                .unwrap()
+                .job
+                .state,
+            VideoUpscaleJobState::Paused
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        let restarted = recover_at_startup(&state).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        restarted.shutdown().await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "a restart must not auto-resume parked work"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_claimed_finalization_before_returning() {
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.mp4");
+        fs::write(&source, b"source-placeholder").unwrap();
+        let database = mold_db::MetadataDb::open_in_memory().unwrap();
+        let metadata = mold_db::metadata_io::synthesize_from_filename("source.mp4", 1);
+        let record = mold_db::GenerationRecord::from_save(
+            temp.path(),
+            "source.mp4",
+            OutputFormat::Mp4,
+            metadata,
+            mold_db::RecordSource::Server,
+            1,
+        );
+        database.upsert(&record).unwrap();
+
+        let mut state = AppState::for_tests();
+        state.metadata_db = Arc::new(Some(database));
+        let lifecycle_shutdown = tokio_util::sync::CancellationToken::new();
+        let finalizing = Arc::new(tokio::sync::Notify::new());
+        let allow_completion = Arc::new(tokio::sync::Notify::new());
+        let runner = {
+            let finalizing = finalizing.clone();
+            let allow_completion = allow_completion.clone();
+            Arc::new(move |state: AppState, id: String| {
+                let finalizing = finalizing.clone();
+                let allow_completion = allow_completion.clone();
+                async move {
+                    let database = state.metadata_db.as_ref().as_ref().unwrap();
+                    assert!(jobs::transition(
+                        database,
+                        &id,
+                        &[VideoUpscaleJobState::Queued],
+                        VideoUpscaleJobState::Running,
+                        now_ms(),
+                    )
+                    .unwrap());
+                    assert!(jobs::transition(
+                        database,
+                        &id,
+                        &[VideoUpscaleJobState::Running],
+                        VideoUpscaleJobState::Finalizing,
+                        now_ms(),
+                    )
+                    .unwrap());
+                    finalizing.notify_one();
+                    allow_completion.notified().await;
+                    let facts = VideoUpscaleMediaFacts {
+                        container: "mov,mp4,m4a,3gp,3g2,mj2".into(),
+                        video_codec: "h264".into(),
+                        width: 64,
+                        height: 64,
+                        frame_count: 5,
+                        fps: "5/1".into(),
+                        duration_ms: 1_000,
+                        primary_audio_codec: None,
+                        primary_audio_sample_rate: None,
+                        primary_audio_channels: None,
+                    };
+                    assert!(jobs::complete(database, &id, "out.mp4", &facts, now_ms()).unwrap());
+                }
+            })
+        };
+        let handle = tokio::spawn(run_dispatcher(
+            state.clone(),
+            lifecycle_shutdown.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            runner,
+        ));
+        let runtime = VideoUpscaleRuntime {
+            shutdown: lifecycle_shutdown,
+            handle,
+        };
+        let job = enqueue_gallery_video_job(
+            temp.path(),
+            state.metadata_db.as_ref().as_ref().unwrap(),
+            "source.mp4",
+            "real-esrgan-x4plus:fp16".into(),
+            None,
+        )
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), finalizing.notified())
+            .await
+            .expect("job must claim finalization");
+        let shutdown = tokio::spawn(runtime.shutdown());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!shutdown.is_finished(), "shutdown must await finalization");
+        assert_eq!(
+            jobs::get(state.metadata_db.as_ref().as_ref().unwrap(), &job.id)
+                .unwrap()
+                .unwrap()
+                .job
+                .state,
+            VideoUpscaleJobState::Finalizing,
+            "normal shutdown must not park a claimed publication"
+        );
+
+        allow_completion.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), shutdown)
+            .await
+            .expect("shutdown must return after finalization")
+            .unwrap();
+        assert_eq!(
+            jobs::get(state.metadata_db.as_ref().as_ref().unwrap(), &job.id)
+                .unwrap()
+                .unwrap()
+                .job
+                .state,
+            VideoUpscaleJobState::Completed
+        );
+    }
+
     #[test]
     fn rational_rate_is_exact() {
         assert_eq!(rational("24000/1001").unwrap(), (24000, 1001));
