@@ -180,6 +180,7 @@ RUN set -eux; \
     for attempt in 1 2 3 4 5; do \
         apt-get update && apt-get install -y --no-install-recommends \
             ca-certificates \
+            ffmpeg \
             libcudnn9-cuda-12 \
             libwebp7 \
             tini \

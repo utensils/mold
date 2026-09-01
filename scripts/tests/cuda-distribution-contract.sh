@@ -310,6 +310,11 @@ docker_runtime_copy_line="$(
 )"
 [[ "$docker_seal_line" -lt "$docker_runtime_copy_line" ]] \
   || fail "Docker PTX sealing must precede runtime image publication"
+docker_runtime_packages="$(sed -n '/# Same apt retry wrapper as the builder stage/,/rm -rf \/var\/lib\/apt\/lists/p' "$repo_root/Dockerfile")"
+grep -Eq '^[[:space:]]+ffmpeg[[:space:]]*\\$' <<< "$docker_runtime_packages" \
+  || fail "Docker runtime omits ffmpeg/ffprobe required by Framewise upscale"
+require_text "flake.nix" 'MOLD_BUNDLED_FFMPEG = "${pkgs.ffmpeg}/bin/ffmpeg";'
+require_text "flake.nix" 'MOLD_BUNDLED_FFPROBE = "${pkgs.ffmpeg}/bin/ffprobe";'
 require_release_job_text "docker" \
   'Create once and verify immutable stable tag'
 require_release_job_text "docker" \

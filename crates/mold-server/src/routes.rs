@@ -7384,6 +7384,17 @@ async fn server_capabilities(
     // needs somewhere to move bytes to. With the DB disabled, DELETE stays a
     // hard delete and the organization routes answer 501.
     let db_available = state.metadata_db.is_some();
+    let framewise_base_available = db_available
+        && !state.is_output_disabled(&config)
+        && state
+            .generation_unavailable_reason
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none();
+    let framewise_capabilities = video_upscale_capabilities(
+        framewise_base_available,
+        crate::video_upscale::framewise_codec_runtime_available(),
+    );
     let gallery = mold_core::GalleryCapabilities {
         can_delete: true,
         trash: Some(mold_core::GalleryTrashCapabilities {
@@ -7428,34 +7439,7 @@ async fn server_capabilities(
                 .generation_admitted()
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
         },
-        video_upscale: mold_core::VideoUpscaleCapabilities {
-            available: db_available
-                && !state.is_output_disabled(&config)
-                && state
-                    .generation_unavailable_reason
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .is_none(),
-            gallery_image: db_available
-                && !state.is_output_disabled(&config)
-                && state
-                    .generation_unavailable_reason
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .is_none(),
-            contract_version: mold_core::VIDEO_UPSCALE_CONTRACT_VERSION,
-            source_library: true,
-            source_upload: false,
-            input_containers: ["mp4", "mov", "webm"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            output_container: "mp4".into(),
-            preserves_primary_audio_when_compatible: true,
-            supports_vfr: false,
-            supports_hdr: false,
-            disclosure: mold_core::VIDEO_UPSCALE_DISCLOSURE.into(),
-        },
+        video_upscale: framewise_capabilities,
         durable_media: readiness.advertised_media(),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             // The request-bound upload protocol derives its authority from an
@@ -7491,6 +7475,28 @@ async fn server_capabilities(
         },
         mesh: Some(mesh_capabilities()),
     })
+}
+
+fn video_upscale_capabilities(
+    base_available: bool,
+    codec_runtime_available: bool,
+) -> mold_core::VideoUpscaleCapabilities {
+    mold_core::VideoUpscaleCapabilities {
+        available: base_available && codec_runtime_available,
+        gallery_image: base_available,
+        contract_version: mold_core::VIDEO_UPSCALE_CONTRACT_VERSION,
+        source_library: true,
+        source_upload: false,
+        input_containers: ["mp4", "mov", "webm"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        output_container: "mp4".into(),
+        preserves_primary_audio_when_compatible: true,
+        supports_vfr: false,
+        supports_hdr: false,
+        disclosure: mold_core::VIDEO_UPSCALE_DISCLOSURE.into(),
+    }
 }
 
 /// What this build can do with 3-D artifacts.
@@ -10616,6 +10622,17 @@ mod tests {
     use crate::test_support::env_lock;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    #[test]
+    fn framewise_capability_requires_codec_runtime_without_disabling_image_upscale() {
+        let missing_codec = video_upscale_capabilities(true, false);
+        assert!(!missing_codec.available);
+        assert!(missing_codec.gallery_image);
+
+        let ready = video_upscale_capabilities(true, true);
+        assert!(ready.available);
+        assert!(ready.gallery_image);
+    }
 
     #[test]
     fn event_stream_gap_has_explicit_resync_wire_contract() {

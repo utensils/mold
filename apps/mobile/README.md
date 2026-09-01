@@ -233,6 +233,10 @@ pushed screen opened from the header.
   offers **Upscale…** for images and **Framewise upscale…** for videos through
   the shared model/progress dialog, including first-use model download and
   pause/resume/cancel for durable video jobs.
+  Video processing runs on the selected Mold host. Official Nix and CUDA
+  container hosts include the required FFmpeg codec bridge; other server
+  installations advertise Framewise upscale only when both `ffmpeg` and
+  `ffprobe` are available.
   Library organization (V3) rides each host's advertised
   `capabilities.gallery`: when a connected host advertises `organize` or
   `trash`, a 44pt **Prints | Collections | Trash** scope row (with counts)

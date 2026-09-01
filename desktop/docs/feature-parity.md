@@ -92,6 +92,12 @@ Desktop parity: `edit_images` is surfaced by `SourceImageWell.vue`'s qwen-edit b
 
 The earlier image-only upscale description is superseded by cross-media parity: `upscale_model` appears for still and video generation on web, desktop, mobile, and TUI. Stills upscale inline; videos publish the original and then queue a durable Framewise job. Library context menus and full-media/info viewers offer **Upscale…** for images and **Framewise upscale…** for videos through a shared model/progress dialog. First use downloads the selected model on the owning host; durable video work supports pause, resume, cancel, and restart recovery. `POST /api/gallery/upscale` publishes image results and `/api/video-upscale-jobs` owns video processing.
 
+Frame decoding, constant-FPS validation, H.264 encoding, and compatible audio
+muxing use a process-isolated FFmpeg bridge on the owning host. Nix packages
+bind exact `ffmpeg` and `ffprobe` store paths and the CUDA container installs
+them; raw binary hosts advertise video upscale as unavailable when either tool
+is absent while preserving server-side image upscale capability.
+
 Post-generation image upscale persists distinct `-original` and `-upscaled` entries on the serving host. Remote-output auto-save mirrors both to This Mac, and gallery reuse restores the pre-upscale generation dimensions rather than the upscaled raster size. If upscaling fails after generation, the job completes with the original image as a single artifact.
 
 `GenerateResponse`: `images[]` (`{data,width,height,index}`), optional `video` (`{data,format,width,height,frames,fps,thumbnail,gif_preview}`), `generation_time_ms`, `model`, `seed_used`, `gpu` (ordinal, multi-GPU).

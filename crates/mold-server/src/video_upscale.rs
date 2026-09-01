@@ -25,6 +25,7 @@ use std::{
     io::{BufRead, Read, Write},
     path::{Path as FsPath, PathBuf},
     process::{Command, Stdio},
+    sync::OnceLock,
 };
 
 use crate::{routes::ApiError, state::AppState};
@@ -36,6 +37,50 @@ const MAX_FRAME_BYTES: u64 = 128 * 1024 * 1024;
 const DISK_SAFETY_BYTES: u64 = 1024 * 1024 * 1024;
 const SOURCE_DIGEST_FILE: &str = "source.sha256";
 const SOURCE_METADATA_FILE: &str = "source-metadata.json";
+const FRAMEWISE_CODEC_UNAVAILABLE: &str =
+    "Framewise upscale is unavailable because this Mold host does not provide ffmpeg and ffprobe";
+
+fn codec_command(tool: &str) -> Command {
+    let bundled = match tool {
+        "ffmpeg" => option_env!("MOLD_BUNDLED_FFMPEG"),
+        "ffprobe" => option_env!("MOLD_BUNDLED_FFPROBE"),
+        _ => None,
+    };
+    Command::new(bundled.unwrap_or(tool))
+}
+
+fn detect_framewise_codec_runtime(mut available: impl FnMut(&str) -> bool) -> bool {
+    let ffmpeg = available("ffmpeg");
+    let ffprobe = available("ffprobe");
+    ffmpeg && ffprobe
+}
+
+pub(crate) fn framewise_codec_runtime_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        detect_framewise_codec_runtime(|tool| {
+            codec_command(tool)
+                .arg("-version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    })
+}
+
+fn require_framewise_codec_runtime() -> Result<(), ApiError> {
+    if framewise_codec_runtime_available() {
+        Ok(())
+    } else {
+        Err(ApiError::with_code(
+            FRAMEWISE_CODEC_UNAVAILABLE,
+            "VIDEO_UPSCALE_CODEC_RUNTIME_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ))
+    }
+}
 
 fn now_ms() -> i64 {
     mold_core::time::now_epoch_ms_u64() as i64
@@ -377,6 +422,7 @@ pub(crate) fn enqueue_gallery_video_job(
     model: String,
     tile_size: Option<u32>,
 ) -> Result<VideoUpscaleJob, ApiError> {
+    require_framewise_codec_runtime()?;
     let source_metadata = database
         .get(output_dir, filename)
         .map_err(|e| ApiError::internal(e.to_string()))?
@@ -786,7 +832,7 @@ fn rational(value: &str) -> anyhow::Result<(u64, u64)> {
 }
 
 fn probe(path: &FsPath) -> anyhow::Result<VideoUpscaleMediaFacts> {
-    let output = Command::new("ffprobe")
+    let output = codec_command("ffprobe")
         .args([
             "-v",
             "error",
@@ -902,7 +948,7 @@ fn validate_constant_frame_timestamps(
     let (numerator, denominator) = rational(fps)?;
     let expected_delta = denominator as f64 / numerator as f64;
     let tolerance = (expected_delta * 0.001).max(0.000_002);
-    let mut child = Command::new("ffprobe")
+    let mut child = codec_command("ffprobe")
         .args([
             "-v",
             "error",
@@ -1000,7 +1046,7 @@ fn spawn_decoder(source: &FsPath, start: u64, count: u64) -> anyhow::Result<std:
         "trim=start_frame={start}:end_frame={},setpts=PTS-STARTPTS",
         start + count
     );
-    Ok(Command::new("ffmpeg")
+    Ok(codec_command("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(source)
         .args([
@@ -1018,7 +1064,7 @@ fn spawn_encoder(
     height: u32,
     fps: &str,
 ) -> anyhow::Result<std::process::Child> {
-    Ok(Command::new("ffmpeg")
+    Ok(codec_command("ffmpeg")
         .args([
             "-v",
             "error",
@@ -1265,7 +1311,7 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
     }
     list.sync_all()?;
     let video_only = stored.work_dir.join("video-only.mp4");
-    let concat = Command::new("ffmpeg")
+    let concat = codec_command("ffmpeg")
         .current_dir(&stored.work_dir)
         .args([
             "-v",
@@ -1291,7 +1337,7 @@ async fn run_job(state: AppState, id: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let final_path = stored.work_dir.join("final.mp4");
-    let mut mux = Command::new("ffmpeg");
+    let mut mux = codec_command("ffmpeg");
     mux.args(["-v", "error", "-y", "-i"]).arg(&video_only);
     if facts.primary_audio_codec.is_some() {
         mux.args(["-i"]).arg(&stored.source_path).args([
@@ -1381,6 +1427,19 @@ mod tests {
     use std::sync::Mutex;
 
     static FFMPEG_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn framewise_codec_runtime_requires_ffmpeg_and_ffprobe() {
+        let mut checked = Vec::new();
+        let available = detect_framewise_codec_runtime(|tool| {
+            checked.push(tool.to_string());
+            tool == "ffmpeg"
+        });
+
+        assert!(!available);
+        assert_eq!(checked, ["ffmpeg", "ffprobe"]);
+        assert!(detect_framewise_codec_runtime(|_| true));
+    }
 
     fn ffmpeg_fixture_tools_available() -> bool {
         ["ffmpeg", "ffprobe"].into_iter().all(|tool| {
