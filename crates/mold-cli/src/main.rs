@@ -3401,12 +3401,22 @@ mod tests {
 
     /// Parse CLI args from a vector (simulates command-line invocation).
     fn parse(args: &[&str]) -> Cli {
-        Cli::parse_from(std::iter::once("mold").chain(args.iter().copied()))
+        try_parse(args).unwrap_or_else(|error| panic!("{error}"))
     }
 
-    /// Try to parse CLI args, returning the clap error on failure.
+    /// Try to parse CLI args, returning the clap error on failure. The full
+    /// clap tree no longer fits the default 2 MiB test-thread stack in a
+    /// debug build, so parsing runs on a thread sized like the real `main`.
     fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("mold").chain(args.iter().copied()))
+        let argv = std::iter::once("mold".to_string())
+            .chain(args.iter().map(|arg| (*arg).to_string()))
+            .collect::<Vec<_>>();
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || Cli::try_parse_from(argv))
+            .expect("spawn parse thread")
+            .join()
+            .expect("parse thread panicked")
     }
 
     /// `--video-only` skips the audio branch, so asking for audio beside it
@@ -4723,8 +4733,19 @@ mod tests {
         // Regression: `mold --version` used bare `#[command(version)]` which only
         // printed CARGO_PKG_VERSION without the git SHA. Now it uses
         // `mold_core::build_info::FULL_VERSION` to match `mold version`.
-        let cmd = Cli::command();
-        let version = cmd.get_version().expect("version should be set");
+        // Building the full clap tree needs more than the default test stack.
+        let version = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                Cli::command()
+                    .get_version()
+                    .expect("version should be set")
+                    .to_string()
+            })
+            .expect("spawn")
+            .join()
+            .expect("join");
+        let version = version.as_str();
         assert_eq!(
             version,
             mold_core::build_info::FULL_VERSION,
