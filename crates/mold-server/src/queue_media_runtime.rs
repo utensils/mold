@@ -894,6 +894,42 @@ mod tests {
         assert!(!private_path.exists());
     }
 
+    /// A mesh-family print's metadata carries the octree and iso-threshold
+    /// that rendered — resolved from the request, defaults filled — through
+    /// BOTH attempt shapes, so Reuse settings restores what shaped the mesh
+    /// and a raster print records nothing.
+    #[test]
+    fn attempt_metadata_records_the_resolved_mesh_controls_for_a_mesh_print() {
+        let mut mesh_request = request(std::path::Path::new("/user/media/source.mp4"));
+        mesh_request.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        mesh_request.output_format = Some(mold_core::OutputFormat::Glb);
+        mesh_request.mesh = Some(mold_core::MeshRequestOptions {
+            octree_resolution: Some(320),
+            threshold: None,
+            target_faces: Some(50_000),
+            texture: None,
+            texture_resolution: None,
+        });
+        let attempt = AttemptQueueMediaRequest::plain(&mesh_request);
+        let mesh = attempt
+            .output_metadata(11, None, "test")
+            .mesh
+            .expect("a mesh print records its controls");
+        assert_eq!(mesh.octree_resolution, Some(320));
+        assert_eq!(
+            mesh.threshold,
+            Some(mold_core::validation::MESH_DEFAULT_THRESHOLD as f32),
+            "the default that rendered is recorded, not left blank"
+        );
+        assert_eq!(mesh.target_faces, Some(50_000));
+
+        let raster = request(std::path::Path::new("/user/media/source.mp4"));
+        assert!(AttemptQueueMediaRequest::plain(&raster)
+            .output_metadata(11, None, "test")
+            .mesh
+            .is_none());
+    }
+
     #[test]
     fn plain_attempt_metadata_preserves_non_durable_paths() {
         let request = request(std::path::Path::new("/user/media/source.mp4"));

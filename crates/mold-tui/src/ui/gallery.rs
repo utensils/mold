@@ -353,6 +353,7 @@ pub(crate) mod tests {
             width,
             height,
             generation_width: Some(width),
+            mesh: None,
             generation_height: Some(height),
             strength: None,
             source_image_name: None,

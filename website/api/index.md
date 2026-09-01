@@ -2289,8 +2289,12 @@ The server caches the upscaler engine between requests; repeated upscales with t
 Gallery rows (`GET /api/gallery`, the `image.metadata` object on
 `gallery_added`, and the embedded `mold:parameters` chunk) map to
 `mold_core::OutputMetadata`. The request's engine-ignored `source_fit`
-provenance, when sent, is echoed verbatim here as `source_fit`. Two additive
-fields record sequence provenance:
+provenance, when sent, is echoed verbatim here as `source_fit`. A 3-D print
+carries an additive `mesh` block — the `octree_resolution` and `threshold`
+that actually rendered (the request's values, or the recipe defaults it fell
+back to) plus any `target_faces` — so Reuse settings restores what shaped the
+mesh; it is absent on every raster print and on prints saved before the field
+existed. Two additive fields record sequence provenance:
 
 - `chain_job_id`: the durable chain job this output was finalized from.
   Absent for single generations and legacy rows.

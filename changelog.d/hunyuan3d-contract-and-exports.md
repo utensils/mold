@@ -40,7 +40,11 @@
   without a prompt because the profile advertises `prompt.mode: ignored`.
   A finished mesh saves its `.glb`, caches the poster under the gallery
   thumbnail key, previews the poster, and captions it with
-  `tris · verts · bounds`; the Library never hands a `.glb` to a raster
+  `tris · verts · bounds`. Every mesh print now records the octree
+  resolution, iso-threshold and face target that actually rendered in an
+  additive `OutputMetadata.mesh` block (request values, or the defaults the
+  engine fell back to), so Reuse settings restores what shaped the mesh
+  rather than a form's leftovers; the Library never hands a `.glb` to a raster
   decoder, and `x` on a mesh opens an OBJ / STL / PLY export picker (the
   owning machine's `capabilities.mesh.export_formats`, or the in-process
   writer for a local print) that writes beside the TUI's other saves.

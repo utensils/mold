@@ -2572,6 +2572,54 @@ pub struct MeshRequestOptions {
     pub texture_resolution: Option<u32>,
 }
 
+impl MeshRequestOptions {
+    /// The controls to RECORD for a print, or `None` for a raster request.
+    ///
+    /// A request is a mesh request when it carries a `mesh` block, names a
+    /// mesh container (admission pins `glb` onto the mesh family at both
+    /// doors before metadata is built), or resolves to the mesh family
+    /// through the built-in manifest. The octree resolution and iso-level
+    /// are filled from the same `validation::MESH_DEFAULT_*` constants the
+    /// engine falls back to, so the recorded values are the ones that
+    /// rendered; a decimation target and the texture stage stay as
+    /// requested, because absence there IS the rendered choice (raw surface,
+    /// geometry only).
+    pub fn provenance_for_request(req: &GenerateRequest) -> Option<Self> {
+        let is_mesh_request = req.mesh.is_some()
+            || req.output_format.is_some_and(|format| format.is_mesh())
+            || crate::manifest::find_manifest(&req.model)
+                .is_some_and(|manifest| manifest.family == crate::manifest::HUNYUAN3D_FAMILY);
+        if !is_mesh_request {
+            return None;
+        }
+        Some(
+            req.mesh
+                .clone()
+                .unwrap_or_default()
+                .resolved_with_defaults(),
+        )
+    }
+
+    /// The same options with the octree resolution and iso-level filled from
+    /// the engine's own defaults — what a mesh print RECORDS, so provenance
+    /// names the values that rendered rather than "whatever the default was
+    /// that day". A decimation target and the texture stage stay as given:
+    /// absence there is the rendered choice (raw surface, geometry only).
+    pub fn resolved_with_defaults(&self) -> Self {
+        Self {
+            octree_resolution: self
+                .octree_resolution
+                .or(Some(crate::validation::MESH_DEFAULT_OCTREE_RESOLUTION)),
+            threshold: self
+                .threshold
+                .or(Some(crate::validation::MESH_DEFAULT_THRESHOLD as f32)),
+            target_faces: self.target_faces,
+            texture: self.texture,
+            texture_resolution: self.texture_resolution,
+        }
+    }
+}
+
 /// 3-D mesh output from a mesh model family.
 ///
 /// The bytes are ONE self-contained file. For [`OutputFormat::Glb`] that
@@ -2716,6 +2764,15 @@ pub struct OutputMetadata {
     pub generation_height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strength: Option<f64>,
+    /// The 3-D controls that shaped a mesh print, RESOLVED: the octree
+    /// resolution and iso-threshold that actually ran (the request's own
+    /// values, or the recipe defaults it fell back to), plus any decimation
+    /// target. Present only on a mesh print, so Reuse settings on every
+    /// surface restores what rendered rather than a form's leftovers; absent
+    /// on every raster print and on every print saved before this field
+    /// existed. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshRequestOptions>,
     /// Provenance label of the img2img source (client-supplied filename) —
     /// present only when the request carried a source image and a name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2976,6 +3033,7 @@ impl OutputMetadata {
             width: req.width,
             height: req.height,
             generation_width: Some(req.width),
+            mesh: MeshRequestOptions::provenance_for_request(req),
             generation_height: Some(req.height),
             strength: req.source_image.as_ref().map(|_| req.strength),
             source_image_name: req
@@ -5414,6 +5472,90 @@ mod tests {
                 "{format:?} must be pinned to glb"
             );
         }
+    }
+
+    /// A mesh print records the controls that actually rendered — the
+    /// request's values, or the engine's defaults it fell back to — so a
+    /// Reuse restores them; a raster print records nothing.
+    #[test]
+    fn a_mesh_print_records_its_resolved_mesh_controls() {
+        let json = r#"{"prompt":"","model":"hunyuan3d-mini-turbo:fp16","width":0,"height":0,"steps":5,"batch_size":1}"#;
+        // Untouched: the family alone (through the manifest) makes it a mesh
+        // request, and the defaults are recorded verbatim.
+        let untouched: GenerateRequest = serde_json::from_str(json).unwrap();
+        let meta = OutputMetadata::from_generate_request(&untouched, 1, None, "test");
+        let mesh = meta.mesh.expect("a mesh print records its controls");
+        assert_eq!(
+            mesh.octree_resolution,
+            Some(crate::validation::MESH_DEFAULT_OCTREE_RESOLUTION)
+        );
+        assert_eq!(
+            mesh.threshold,
+            Some(crate::validation::MESH_DEFAULT_THRESHOLD as f32)
+        );
+        assert_eq!(
+            mesh.target_faces, None,
+            "no decimation IS the rendered choice"
+        );
+        assert_eq!(mesh.texture, None);
+
+        // Touched: the request's own values win, and the rest still fills.
+        let mut touched: GenerateRequest = serde_json::from_str(json).unwrap();
+        touched.mesh = Some(MeshRequestOptions {
+            octree_resolution: Some(320),
+            threshold: None,
+            target_faces: Some(50_000),
+            texture: None,
+            texture_resolution: None,
+        });
+        let mesh = OutputMetadata::from_generate_request(&touched, 1, None, "test")
+            .mesh
+            .unwrap();
+        assert_eq!(mesh.octree_resolution, Some(320));
+        assert_eq!(
+            mesh.threshold,
+            Some(crate::validation::MESH_DEFAULT_THRESHOLD as f32)
+        );
+        assert_eq!(mesh.target_faces, Some(50_000));
+
+        // A pinned container alone (a catalog model the manifest cannot
+        // resolve) is enough to mark the print as a mesh.
+        let mut pinned: GenerateRequest = serde_json::from_str(json).unwrap();
+        pinned.model = "cv:12345".into();
+        pinned.output_format = Some(OutputFormat::Glb);
+        assert!(
+            OutputMetadata::from_generate_request(&pinned, 1, None, "test")
+                .mesh
+                .is_some()
+        );
+
+        // A raster print records nothing, and its JSON gains no key.
+        let raster: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q8","width":1024,"height":1024,"steps":20,"batch_size":1}"#,
+        )
+        .unwrap();
+        let meta = OutputMetadata::from_generate_request(&raster, 1, None, "test");
+        assert!(meta.mesh.is_none());
+        assert!(!serde_json::to_string(&meta).unwrap().contains("\"mesh\""));
+    }
+
+    /// The field is additive: metadata saved before it existed (no `mesh`
+    /// key) still parses, and a present block round-trips.
+    #[test]
+    fn output_metadata_mesh_round_trips_and_is_optional() {
+        let older = r#"{"prompt":"a cat","model":"flux-dev:q8","seed":1,"steps":20,"guidance":3.5,"width":1024,"height":1024,"version":"0.1"}"#;
+        let meta: OutputMetadata = serde_json::from_str(older).expect("older JSON parses");
+        assert!(meta.mesh.is_none());
+
+        let with_mesh = r#"{"prompt":"","model":"hunyuan3d-mini-turbo:fp16","seed":1,"steps":5,"guidance":5.0,"width":512,"height":512,"version":"0.1","mesh":{"octree_resolution":320,"threshold":0.55,"target_faces":50000}}"#;
+        let meta: OutputMetadata = serde_json::from_str(with_mesh).unwrap();
+        let mesh = meta.mesh.clone().expect("present block parses");
+        assert_eq!(mesh.octree_resolution, Some(320));
+        assert_eq!(mesh.threshold, Some(0.55));
+        assert_eq!(mesh.target_faces, Some(50_000));
+        let again: OutputMetadata =
+            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        assert_eq!(again.mesh, meta.mesh);
     }
 
     /// The pin is a mesh-only rule. Everywhere else an unavailable format is

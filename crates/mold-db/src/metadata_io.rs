@@ -144,6 +144,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         width: 0,
         height: 0,
         generation_width: None,
+        mesh: None,
         generation_height: None,
         strength: None,
         source_image_name: None,

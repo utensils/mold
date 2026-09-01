@@ -627,6 +627,7 @@ mod tests {
             width: 64,
             height: 64,
             generation_width: Some(64),
+            mesh: None,
             generation_height: Some(64),
             strength: None,
             source_image_name: None,

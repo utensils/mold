@@ -251,6 +251,7 @@ mod tests {
             width: 1024,
             height: 1024,
             generation_width: Some(1024),
+            mesh: None,
             generation_height: Some(1024),
             strength: None,
             source_image_name: None,

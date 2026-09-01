@@ -5432,6 +5432,7 @@ mod tests {
                 width: 768,
                 height: 768,
                 generation_width: Some(768),
+                mesh: None,
                 generation_height: Some(768),
                 strength: None,
                 source_image_name: None,

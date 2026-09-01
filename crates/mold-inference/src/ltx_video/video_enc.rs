@@ -119,6 +119,7 @@ impl VideoMetadata {
             width: self.width,
             height: self.height,
             generation_width: Some(self.width),
+            mesh: None,
             generation_height: Some(self.height),
             strength: None,
             source_image_name: None,

@@ -6479,12 +6479,13 @@ impl App {
             self.generate.params.strength = strength;
         }
         self.generate.params.scheduler = meta.scheduler;
-        // The mesh rows restore the recipe's defaults: the server records no
-        // octree / iso-level / face-target provenance in `OutputMetadata`
-        // yet, so there is nothing truthful to restore, and carrying the
-        // previous form's values into a reuse would attribute them to a
-        // print they never shaped.
-        self.generate.params.mesh = mold_core::MeshRequestOptions::default();
+        // A mesh print recorded the octree / iso-level / face target that
+        // rendered (`OutputMetadata.mesh`, resolved with the engine's
+        // defaults at save time), so the rows restore exactly that. Any
+        // other print — raster, or a mesh saved before the field existed —
+        // leaves the rows at the recipe's defaults rather than carrying the
+        // previous form's values into a print they never shaped.
+        self.generate.params.mesh = meta.mesh.clone().unwrap_or_default();
         if let Some(ref lora) = meta.lora {
             self.generate.params.lora_path = Some(lora.clone());
             self.generate.params.lora_scale = meta.lora_scale.unwrap_or(1.0);
@@ -9288,6 +9289,13 @@ impl App {
                             width: entry_width,
                             height: entry_height,
                             generation_width: Some(entry_width),
+                            // A local mesh save records the controls that
+                            // rendered, resolved with the engine's defaults
+                            // exactly as the server's own save does.
+                            mesh: response
+                                .mesh
+                                .as_ref()
+                                .map(|_| submitted_params.mesh.resolved_with_defaults()),
                             generation_height: Some(entry_height),
                             strength: if submitted_params.source_image_path.is_some() {
                                 Some(submitted_params.strength)
@@ -9879,6 +9887,7 @@ impl App {
                                 .unwrap_or(original_height),
                         ),
                         strength: None,
+                        mesh: None,
                         source_image_name: None,
                         source_image_sha256: None,
                         edit_image_sha256s: None,
@@ -11265,6 +11274,7 @@ mod tests {
                 width: 1024,
                 height: 1024,
                 generation_width: Some(1024),
+                mesh: None,
                 generation_height: Some(1024),
                 strength: None,
                 source_image_name: None,
@@ -11353,6 +11363,7 @@ mod tests {
                 width: 512,
                 height: 512,
                 generation_width: Some(512),
+                mesh: None,
                 generation_height: Some(512),
                 strength: None,
                 source_image_name: None,
@@ -11502,6 +11513,7 @@ mod tests {
             width: 1024,
             height: 1024,
             generation_width: Some(1024),
+            mesh: None,
             generation_height: Some(1024),
             strength: Some(0.75),
             source_image_name: None,
@@ -15003,6 +15015,11 @@ mod tests {
                 (32, 24),
                 "poster size, as the server records"
             );
+            assert_eq!(
+                meta.mesh.as_ref().and_then(|mesh| mesh.octree_resolution),
+                Some(mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION),
+                "an untouched form records the default that rendered"
+            );
             assert!(
                 app.generate
                     .progress
@@ -15111,6 +15128,34 @@ mod tests {
             other => panic!("expected the export picker, got {}", other.is_some()),
         }
         app.popup = None;
+
+        // Reuse settings restores the recorded mesh controls from a print
+        // that carries them, and leaves the rows at the defaults for one
+        // that does not (raster, or saved before the field existed). The
+        // catalog must carry the profile, or the capability sync clears the
+        // block for a recipe with no mesh rows.
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.gallery.entries[0].metadata.mesh = Some(mold_core::MeshRequestOptions {
+            octree_resolution: Some(320),
+            threshold: Some(0.55),
+            target_faces: Some(50_000),
+            texture: None,
+            texture_resolution: None,
+        });
+        app.gallery.selected = 0;
+        app.load_gallery_into_generate();
+        assert_eq!(app.generate.params.mesh.octree_resolution, Some(320));
+        assert_eq!(app.generate.params.mesh.threshold, Some(0.55));
+        assert_eq!(app.generate.params.mesh.target_faces, Some(50_000));
+        app.active_view = View::Library;
+        app.gallery.selected = 1;
+        app.load_gallery_into_generate();
+        assert_eq!(
+            app.generate.params.mesh,
+            mold_core::MeshRequestOptions::default(),
+            "a print without the field restores no mesh controls"
+        );
+        app.active_view = View::Library;
 
         app.gallery.selected = 1;
         app.dispatch_action(Action::ExportMesh);
