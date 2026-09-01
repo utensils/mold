@@ -272,17 +272,17 @@ Preview prompt expansion without generating.
 mold expand <PROMPT> [OPTIONS]
 ```
 
-| Flag                        | Description                                                                                      |
-| --------------------------- | ------------------------------------------------------------------------------------------------ |
-| `-m, --model <MODEL>`       | Target model; selects the family guide and any per-checkpoint leaf                              |
-| `--task <TASK>`             | Conditioning task to preview                                                                     |
-| `--variations <N>`          | Number of variations                                                                             |
-| `--json`                    | Output as JSON array                                                                             |
-| `--backend <URL>`           | Expansion backend override                                                                       |
-| `--expand-model <MODEL>`    | LLM model override                                                                               |
-| `--width <PX>` / `--height` | Canvas the prompt targets                                                                        |
-| `--frames <N>` / `--fps`    | Clip length the prompt targets (video families); duration is derived as frames / fps            |
-| `--clip-frames <N>`         | Frames per clip when the run auto-chains                                                         |
+| Flag                        | Description                                                                                                                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-m, --model <MODEL>`       | Target model; selects the family guide and any per-checkpoint leaf                                                                                                                                   |
+| `--task <TASK>`             | Conditioning task to preview                                                                                                                                                                         |
+| `--variations <N>`          | Number of variations                                                                                                                                                                                 |
+| `--json`                    | Output as JSON array                                                                                                                                                                                 |
+| `--backend <URL>`           | Expansion backend override                                                                                                                                                                           |
+| `--expand-model <MODEL>`    | LLM model override                                                                                                                                                                                   |
+| `--width <PX>` / `--height` | Canvas the prompt targets                                                                                                                                                                            |
+| `--frames <N>` / `--fps`    | Clip length the prompt targets (video families); duration is derived as frames / fps                                                                                                                 |
+| `--clip-frames <N>`         | Frames per clip when the run auto-chains                                                                                                                                                             |
 | `--reference <KIND[:ROLE]>` | Attached reference to name, in order: `image`, `video`, or `audio`, with an optional role such as `first-frame`, `last-frame`, `keyframe`, `source`, `identity`, `edit`, or `reference` (repeatable) |
 
 The expander always receives the target model's prompting guide from the

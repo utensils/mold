@@ -1,0 +1,1044 @@
+{
+  "schema_version": 1,
+  "excerpt_word_budget": 700,
+  "agent_only_sections": [
+    "CLI",
+    "Sources"
+  ],
+  "shared": {
+    "path": "shared.md",
+    "contents": "# Shared prompting practice\n\n## Prompt style\n\nState the subject and action before style, lighting, lens, or material cues.\nKeep one coherent visual or temporal idea. Preserve exact user wording unless\nthe user asks for expansion. When source media owns appearance or composition,\nprompt only the requested change and name what must stay unchanged.\n\n## Pitfalls\n\nHold one seed while refining a prompt, then vary the seed for final art. Never\npromise sound, speech, or motion the selected family does not generate.\n\n## CLI\n\nRead this file for every generation or upscale request, then read exactly one\nfamily base guide linked from `SKILL.md`. Read a task leaf only when that task\nneeds its own prompt grammar.\n\nConfirm the selected identity with `mold info <model>` or the remote\n`/api/models` row before choosing dimensions, frames, steps, guidance, or\nconditioning. Installed catalog checkpoints can differ from manifest defaults.\n\n```bash\n# Confirm an identity and its advertised defaults before writing the prompt\nmold info flux2-klein:q8\n```\n",
+    "expansion_excerpt": "## Prompt style\n\nState the subject and action before style, lighting, lens, or material cues.\nKeep one coherent visual or temporal idea. Preserve exact user wording unless\nthe user asks for expansion. When source media owns appearance or composition,\nprompt only the requested change and name what must stay unchanged.\n\n## Pitfalls\n\nHold one seed while refining a prompt, then vary the seed for final art. Never\npromise sound, speech, or motion the selected family does not generate."
+  },
+  "families": [
+    {
+      "family": "flux",
+      "aliases": [
+        "flux.1",
+        "flux-1"
+      ],
+      "word_limit": 150,
+      "guide": {
+        "path": "families/flux.md",
+        "contents": "# FLUX.1 prompting\n\nManifest family: `flux`.\n\n## Prompt style\n\nApplies to Schnell, Dev, Krea, and FLUX.1 fine-tunes. Write the prompt as a\nclear description of the finished image. FLUX reads natural sentences, so\nprefer prose to tag piles. BFL publishes one starting structure, \"a useful\nstarting structure, not a strict formula\": subject, location, style, camera\nsettings, lighting, colors, effect, additional elements. Put the subject and\nits action first, then composition, lighting, lens or material cues, and style\nlast. English gives the most precise results. Keep the expanded prompt under\n150 words. Schnell is a four-step draft model and wants a single\nidea. Dev, Krea, and quality fine-tunes reward exact materials, spatial\nrelationships, and light.\n\n## Syntax\n\nmold parses no weighting syntax. `(word:1.3)` and `[word]` reach the encoder as\nliteral characters, so lead with the important term or repeat it instead.\nFLUX.1 Dev is guidance distilled and has no negative branch, so a negative\nprompt does nothing in ordinary use. Describe what you want, not what you want\nremoved. The one exception is true CFG, which requires an identity reference:\n`--true-cfg` above 1.0 paired with `--guidance 1.0` runs a real negative\nbranch, and it is FLUX only. Put visible lettering in quotation marks and name\nits placement, typeface feel, and colour. With a source image, prompt the\nchange and name what must stay unchanged. With an identity reference the\nreference owns the face: describe role, clothing, setting, pose, composition,\nand light, and never re-describe facial features. Start near `--id-weight 0.8`.\n\n## Generation context\n\nThe default canvas is 1024x1024. Match composition to the aspect: a wide\nestablishing frame for landscape, a tight head-and-shoulders crop for portrait.\nDev follows guidance 3.5 over 50 steps upstream and wants a full brief. Schnell\nis fixed at four steps and guidance 0, so cut back to one subject and one\nsetting. In img2img a higher strength moves further from the source, so carry\nmore of the target description as strength rises. When inpainting, describe\nonly what belongs inside the mask and how it meets the surrounding pixels.\n\n## Examples\n\nInput: my face as an astronaut botanist, identity reference attached\n\nOutput: Cinematic medium close-up of an orbital botanist inside a glass greenhouse above Earth, cream flight jacket, tending luminous blue orchids, sunrise through curved windows, natural skin texture, 50mm documentary photograph.\n\nInput: bakery sign at night\n\nOutput: A rain-slick corner bakery at dusk, the window sign reading \"OPEN\" in warm pink neon, reflections pooling on wet pavement, shallow depth of field, 35mm night photograph.\n\n## Pitfalls\n\nTag piles and two competing styles weaken prompt following. A negative prompt\non Dev is silently inert without true CFG. A very high identity weight makes\nskin look waxy. Raise it only when the face drifts. Identity cannot be combined\nwith a LoRA or with img2img. Schnell loaded with detail returns its average.\n\n## CLI\n\n```bash\n# Text to image; Dev rewards a full brief\nmold run flux-dev:q4 \\\n  \"A cozy Japanese tea house interior, two ceramic cups steaming on a low cedar table, warm paper lanterns, rain beyond the open shoji, intimate eye-level composition, delicate watercolor texture\" \\\n  --seed 1337\n\n# Four-step draft\nmold run flux-schnell:q8 \"a red fox asleep on a mossy log, soft morning light\" --steps 4\n\n# img2img: prompt the change, raise --strength for a bigger move\nmold run flux-dev:q4 \"oil painting style, visible brushwork\" --image photo.png --strength 0.6\n\n# Inpaint: white in the mask is repainted, black is preserved\nmold run flux-dev:q4 \"a golden retriever sitting on the grass\" --image park.png --mask mask.png\n\n# LoRA adapters, stacked; one --lora-scale applies to the stack\nmold run flux-dev:bf16 \"epic mountain shot at golden hour\" \\\n  --lora cinematic.safetensors --lora dramatic-lighting.safetensors --lora-scale 0.8\n\n# PuLID identity: one-time licence-gated pull, then reference the face\nmold pull pulid-flux --accept-license insightface-antelopev2\nmold run flux-dev:q4 \"an astronaut in a roadside diner\" --id-image face.jpg --id-weight 0.85 --id-start-step 2\n\n# Several views of the same person are averaged, up to four\nmold run flux-dev:q4 \"a chef plating in a copper kitchen\" \\\n  --id-image front.jpg --id-image side.jpg --id-image smiling.jpg\n\n# The real negative branch: FLUX only, and only with an active identity\nmold run flux-dev:q4 \"a hiker on a ridge at sunrise\" --id-image face.jpg \\\n  --true-cfg 2.0 --guidance 1.0 --negative-prompt \"blurry, cartoon, waxy skin\"\n```\n\n## Sources\n\n- https://docs.bfl.ai/guides/prompting_summary\n- https://docs.bfl.ai/guides/prompting_unified_basics\n- https://huggingface.co/black-forest-labs/FLUX.1-dev\n- https://huggingface.co/black-forest-labs/FLUX.1-schnell\n- https://github.com/ToTheBeginning/PuLID\n",
+        "expansion_excerpt": "## Prompt style\n\nApplies to Schnell, Dev, Krea, and FLUX.1 fine-tunes. Write the prompt as a\nclear description of the finished image. FLUX reads natural sentences, so\nprefer prose to tag piles. BFL publishes one starting structure, \"a useful\nstarting structure, not a strict formula\": subject, location, style, camera\nsettings, lighting, colors, effect, additional elements. Put the subject and\nits action first, then composition, lighting, lens or material cues, and style\nlast. English gives the most precise results. Keep the expanded prompt under\n150 words. Schnell is a four-step draft model and wants a single\nidea. Dev, Krea, and quality fine-tunes reward exact materials, spatial\nrelationships, and light.\n\n## Syntax\n\nmold parses no weighting syntax. `(word:1.3)` and `[word]` reach the encoder as\nliteral characters, so lead with the important term or repeat it instead.\nFLUX.1 Dev is guidance distilled and has no negative branch, so a negative\nprompt does nothing in ordinary use. Describe what you want, not what you want\nremoved. The one exception is true CFG, which requires an identity reference:\n`--true-cfg` above 1.0 paired with `--guidance 1.0` runs a real negative\nbranch, and it is FLUX only. Put visible lettering in quotation marks and name\nits placement, typeface feel, and colour. With a source image, prompt the\nchange and name what must stay unchanged. With an identity reference the\nreference owns the face: describe role, clothing, setting, pose, composition,\nand light, and never re-describe facial features. Start near `--id-weight 0.8`.\n\n## Generation context\n\nThe default canvas is 1024x1024. Match composition to the aspect: a wide\nestablishing frame for landscape, a tight head-and-shoulders crop for portrait.\nDev follows guidance 3.5 over 50 steps upstream and wants a full brief. Schnell\nis fixed at four steps and guidance 0, so cut back to one subject and one\nsetting. In img2img a higher strength moves further from the source, so carry\nmore of the target description as strength rises. When inpainting, describe\nonly what belongs inside the mask and how it meets the surrounding pixels.\n\n## Examples\n\nInput: my face as an astronaut botanist, identity reference attached\n\nOutput: Cinematic medium close-up of an orbital botanist inside a glass greenhouse above Earth, cream flight jacket, tending luminous blue orchids, sunrise through curved windows, natural skin texture, 50mm documentary photograph.\n\nInput: bakery sign at night\n\nOutput: A rain-slick corner bakery at dusk, the window sign reading \"OPEN\" in warm pink neon, reflections pooling on wet pavement, shallow depth of field, 35mm night photograph.\n\n## Pitfalls\n\nTag piles and two competing styles weaken prompt following. A negative prompt\non Dev is silently inert without true CFG. A very high identity weight makes\nskin look waxy. Raise it only when the face drifts. Identity cannot be combined\nwith a LoRA or with img2img. Schnell loaded with detail returns its average."
+      }
+    },
+    {
+      "family": "flux2",
+      "aliases": [],
+      "word_limit": 120,
+      "guide": {
+        "path": "families/flux2.md",
+        "contents": "# FLUX.2 prompting\n\nManifest family: `flux2`.\n\n## Prompt style\n\nApplies to Klein 4B and 9B, Klein Base, Dev, and compatible fine-tunes. BFL's\nformula is Subject + Action + Style + Context: the main focus, what it is doing\nor its pose, the artistic approach or medium, then the setting, lighting, time,\nand mood. \"Word order matters - FLUX.2 pays more attention to what comes\nfirst\", so order the prompt main subject, key action, critical style, essential\ncontext, secondary details. Length tiers: 10 to 30 words for quick concepts, 30\nto 80 words \"usually ideal for most projects\", 80 or more for complex scenes\nneeding detailed specifications. Keep the expanded prompt under 120\nwords. Distilled Klein renders in four steps and holds one visual idea best.\n\n## Syntax\n\nmold parses no weighting syntax, so `(word:1.2)` reaches the encoder as literal\ncharacters. \"FLUX.2 does not support negative prompts. Focus on describing what\nyou want, not what you don't want.\" Turn \"no blur\" into \"sharp focus\nthroughout\" and \"no people\" into \"an empty scene\". mold's undistilled\n`flux2-klein-base` tiers are the one exception, because above guidance 1.0 they\nrun a real unconditional branch and honour a negative prompt. Put visible\nlettering in quotation marks: the text \"OPEN\" appears in red neon letters. Name\nits placement, typography, and colour. Tie a hex colour to a named object: a\ncobalt jacket, color #1B4FA0. \"Hex codes work best when clearly associated with\nspecific objects. Vague references like 'use #FF0000 somewhere' may produce\ninconsistent results.\" With several references, \"clearly describe the role of\neach: subject from image 1, style from image 2, background from image 3.\" BFL\nalso accepts a JSON prompt for a complex scene, with the keys scene, subjects\n(description, position, action), style, color_palette, lighting, mood,\nbackground, composition, and camera (angle, lens, depth_of_field).\n\n## Generation context\n\nThe default canvas is 1024x1024, so match the composition clause to the\nrequested aspect. Distilled Klein runs four steps at guidance 1.0, so spend the\nwords on one subject and one setting. Klein Base and Dev run 50 steps at\nguidance 4.0 and reward placed elements and named materials. With a source\nimage, prompt the change and name what must stay.\n\n## Examples\n\nInput: ship in a bottle\n\nOutput: Macro photograph of a glass bottle ship inside a curling ocean wave, the bottle centered and fully visible, lightning behind translucent blue water, dramatic dark background.\n\nInput: combine these two references into a product shot\n\nOutput: The ceramic kettle from image 1 in the warm studio lighting and muted palette of image 2, three-quarter view on pale linen, sharp focus throughout.\n\n## Pitfalls\n\nA negative prompt is inert on every distilled Klein and Dev tier, so rewrite an\nexclusion as a positive description. Burying the subject behind style words\ncosts prompt following, because leading words weigh more. A hex code naming no\nobject drifts. A four-step Klein given an 80-word brief averages it.\n\n## CLI\n\n```bash\n# Distilled Klein: one idea at four steps\nmold run flux2-klein-9b:q4 \\\n  \"Macro photograph of a glass bottle ship caught inside a curling ocean wave, the bottle centered and fully visible, lightning behind translucent blue water, crisp reflections, dramatic dark background\" \\\n  --steps 4 --seed 999\n\n# Klein Base is undistilled: 50 steps at guidance 4.0 and a real negative prompt\nmold run flux2-klein-base:q8 \"a brass orrery on a walnut desk, low winter sun\" \\\n  --steps 50 --guidance 4.0 --negative-prompt \"blurry, warped rings, text, watermark\"\n\n# Dev carries the densest brief\nmold run flux2-dev:q6 \"An empty art-deco cinema lobby at dawn, brass handrails, the marquee reading \\\"CLOSED\\\", color #C8A24B accents, wide symmetrical composition\" \\\n  --steps 50 --guidance 4.0\n\n# Image editing: name the change and what stays\nmold run flux2-klein:q8 \"repaint the front door in deep teal, leave the brickwork and planters unchanged\" --image house.png\n```\n\n## Sources\n\n- https://docs.bfl.ai/guides/prompting_guide_flux2\n- https://docs.bfl.ai/guides/prompting_unified_basics\n- https://huggingface.co/black-forest-labs/FLUX.2-dev\n",
+        "expansion_excerpt": "## Prompt style\n\nApplies to Klein 4B and 9B, Klein Base, Dev, and compatible fine-tunes. BFL's\nformula is Subject + Action + Style + Context: the main focus, what it is doing\nor its pose, the artistic approach or medium, then the setting, lighting, time,\nand mood. \"Word order matters - FLUX.2 pays more attention to what comes\nfirst\", so order the prompt main subject, key action, critical style, essential\ncontext, secondary details. Length tiers: 10 to 30 words for quick concepts, 30\nto 80 words \"usually ideal for most projects\", 80 or more for complex scenes\nneeding detailed specifications. Keep the expanded prompt under 120\nwords. Distilled Klein renders in four steps and holds one visual idea best.\n\n## Syntax\n\nmold parses no weighting syntax, so `(word:1.2)` reaches the encoder as literal\ncharacters. \"FLUX.2 does not support negative prompts. Focus on describing what\nyou want, not what you don't want.\" Turn \"no blur\" into \"sharp focus\nthroughout\" and \"no people\" into \"an empty scene\". mold's undistilled\n`flux2-klein-base` tiers are the one exception, because above guidance 1.0 they\nrun a real unconditional branch and honour a negative prompt. Put visible\nlettering in quotation marks: the text \"OPEN\" appears in red neon letters. Name\nits placement, typography, and colour. Tie a hex colour to a named object: a\ncobalt jacket, color #1B4FA0. \"Hex codes work best when clearly associated with\nspecific objects. Vague references like 'use #FF0000 somewhere' may produce\ninconsistent results.\" With several references, \"clearly describe the role of\neach: subject from image 1, style from image 2, background from image 3.\" BFL\nalso accepts a JSON prompt for a complex scene, with the keys scene, subjects\n(description, position, action), style, color_palette, lighting, mood,\nbackground, composition, and camera (angle, lens, depth_of_field).\n\n## Generation context\n\nThe default canvas is 1024x1024, so match the composition clause to the\nrequested aspect. Distilled Klein runs four steps at guidance 1.0, so spend the\nwords on one subject and one setting. Klein Base and Dev run 50 steps at\nguidance 4.0 and reward placed elements and named materials. With a source\nimage, prompt the change and name what must stay.\n\n## Examples\n\nInput: ship in a bottle\n\nOutput: Macro photograph of a glass bottle ship inside a curling ocean wave, the bottle centered and fully visible, lightning behind translucent blue water, dramatic dark background.\n\nInput: combine these two references into a product shot\n\nOutput: The ceramic kettle from image 1 in the warm studio lighting and muted palette of image 2, three-quarter view on pale linen, sharp focus throughout.\n\n## Pitfalls\n\nA negative prompt is inert on every distilled Klein and Dev tier, so rewrite an\nexclusion as a positive description. Burying the subject behind style words\ncosts prompt following, because leading words weigh more. A hex code naming no\nobject drifts. A four-step Klein given an 80-word brief averages it."
+      }
+    },
+    {
+      "family": "sd15",
+      "aliases": [
+        "sd1.5",
+        "stable-diffusion-1.5"
+      ],
+      "word_limit": 50,
+      "guide": {
+        "path": "families/sd15.md",
+        "contents": "# SD 1.5 prompting\n\nManifest family: `sd15`.\n\n## Prompt style\n\nApplies to the base model and SD1.5 fine-tunes such as DreamShaper and\nRealistic Vision. Community practice on AUTOMATIC1111 and Civitai is compact\ncomma-separated tags rather than sentences, and SD1.5 follows tags far better\nthan prose. Front-load the subject: the earliest tags carry the most weight.\nThen medium and style, then setting, then lighting, then quality words. Keep\nthe expanded prompt under 50 words. The CLIP text encoder holds 75\ncontent tokens and mold truncates past that with no chunking, so anything after\nroughly 60 words never reaches the model. Fine-tunes publish trigger words:\npreserve them exactly and place them first.\n\n## Syntax\n\nmold parses no attention weighting. `(word:1.3)`, `(word)`, and `[word]` are an\nAUTOMATIC1111 and ComfyUI interface convention. mold sends those characters to\nCLIP as text. To emphasise a term, move it earlier or repeat it. The negative\nprompt is load-bearing on SD1.5 and there is no default, so always supply one.\nFill it with visible defects such as blurry, low detail, extra fingers, bad\nanatomy, text, watermark, and never restate the positive prompt inside it.\nOn-image lettering is unreliable at this scale, so avoid quoted text. With\nControlNet the control image owns pose, edges, or depth, so the prompt\ndescribes only the rendered subject, its materials, and the light.\n\n## Generation context\n\nThe native canvas is 512x512 at 25 steps and guidance 7.5. Above roughly 768\npixels SD1.5 duplicates subjects and limbs, so keep one subject and a simple\ncomposition when the canvas grows, and upscale afterwards instead of rendering\nlarge. Name the framing that fits the aspect, such as a wide establishing shot\nor a head-and-shoulders portrait. In img2img a higher strength moves further\nfrom the source. When inpainting, tag only what belongs inside the mask.\n\n## Examples\n\nInput: castle on floating islands\n\nOutput: fantasy castle on floating islands, waterfalls, sunrise, wide establishing shot, detailed concept art, luminous atmosphere\n\nInput: portrait of a woman, photo\n\nOutput: portrait photograph of a woman, freckles, soft window light, shallow depth of field, 85mm lens, film grain, natural skin texture\n\n## Pitfalls\n\nA long prose paragraph is truncated before its ending is read. Weighting\nparentheses are inert and waste tokens. An empty negative prompt is the most\ncommon cause of muddy SD1.5 output. Hands and small faces degrade, so frame\nthem large or leave them out. Rendering far above 512 duplicates subjects.\n\n## CLI\n\n```bash\n# Tags plus a real negative prompt\nmold run dreamshaper-v8:fp16 \\\n  \"fantasy castle on floating islands, waterfalls, sunrise, wide establishing shot, detailed concept art\" \\\n  --negative-prompt \"blurry, low detail, text, watermark, malformed architecture\" --seed 555\n\n# Base model at its native scale\nmold run sd15:fp16 \"a portrait of an old fisherman, weathered face, harbour light\" \\\n  -n \"blurry, watermark, ugly, bad anatomy\" --width 512 --height 512\n\n# ControlNet: the control image owns the pose or geometry\nmold run sd15:fp16 \"a person in a red raincoat\" --control edges.png --control-model controlnet-canny-sd15:fp16\nmold run sd15:fp16 \"a sunlit loft interior\" --control depth.png --control-model controlnet-depth-sd15:fp16 --control-scale 0.8\n\n# img2img and inpainting\nmold run sd15:fp16 \"watercolor painting\" --image photo.png --strength 0.6\nmold run sd15:fp16 \"a golden retriever on the grass\" --image park.png --mask mask.png\n\n# Render at native scale, then upscale\nmold upscale portrait.png\n```\n\n## Sources\n\n- https://huggingface.co/runwayml/stable-diffusion-v1-5\n- https://huggingface.co/docs/diffusers/using-diffusers/weighted_prompts\n- https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/Features (community convention for weighting syntax)\n- https://education.civitai.com/civitais-prompt-crafting-guide-part-1-basics/ (community consensus on tag order and negative prompts)\n- https://github.com/lllyasviel/ControlNet\n",
+        "expansion_excerpt": "## Prompt style\n\nApplies to the base model and SD1.5 fine-tunes such as DreamShaper and\nRealistic Vision. Community practice on AUTOMATIC1111 and Civitai is compact\ncomma-separated tags rather than sentences, and SD1.5 follows tags far better\nthan prose. Front-load the subject: the earliest tags carry the most weight.\nThen medium and style, then setting, then lighting, then quality words. Keep\nthe expanded prompt under 50 words. The CLIP text encoder holds 75\ncontent tokens and mold truncates past that with no chunking, so anything after\nroughly 60 words never reaches the model. Fine-tunes publish trigger words:\npreserve them exactly and place them first.\n\n## Syntax\n\nmold parses no attention weighting. `(word:1.3)`, `(word)`, and `[word]` are an\nAUTOMATIC1111 and ComfyUI interface convention. mold sends those characters to\nCLIP as text. To emphasise a term, move it earlier or repeat it. The negative\nprompt is load-bearing on SD1.5 and there is no default, so always supply one.\nFill it with visible defects such as blurry, low detail, extra fingers, bad\nanatomy, text, watermark, and never restate the positive prompt inside it.\nOn-image lettering is unreliable at this scale, so avoid quoted text. With\nControlNet the control image owns pose, edges, or depth, so the prompt\ndescribes only the rendered subject, its materials, and the light.\n\n## Generation context\n\nThe native canvas is 512x512 at 25 steps and guidance 7.5. Above roughly 768\npixels SD1.5 duplicates subjects and limbs, so keep one subject and a simple\ncomposition when the canvas grows, and upscale afterwards instead of rendering\nlarge. Name the framing that fits the aspect, such as a wide establishing shot\nor a head-and-shoulders portrait. In img2img a higher strength moves further\nfrom the source. When inpainting, tag only what belongs inside the mask.\n\n## Examples\n\nInput: castle on floating islands\n\nOutput: fantasy castle on floating islands, waterfalls, sunrise, wide establishing shot, detailed concept art, luminous atmosphere\n\nInput: portrait of a woman, photo\n\nOutput: portrait photograph of a woman, freckles, soft window light, shallow depth of field, 85mm lens, film grain, natural skin texture\n\n## Pitfalls\n\nA long prose paragraph is truncated before its ending is read. Weighting\nparentheses are inert and waste tokens. An empty negative prompt is the most\ncommon cause of muddy SD1.5 output. Hands and small faces degrade, so frame\nthem large or leave them out. Rendering far above 512 duplicates subjects."
+      }
+    },
+    {
+      "family": "sdxl",
+      "aliases": [],
+      "word_limit": 60,
+      "guide": {
+        "path": "families/sdxl.md",
+        "contents": "# SDXL prompting\n\nManifest family: `sdxl`.\n\n## Prompt style\n\nApplies to SDXL Base, Turbo, Playground v2.5, Juggernaut XL, DreamShaper XL,\nRealVis XL, Pony Diffusion V6, and CyberRealistic Pony. SDXL runs two text\nencoders, CLIP ViT-L and OpenCLIP ViT-bigG, and mold sends the same prompt to\nboth, so it reads fuller sentences than SD1.5. Open with a concise subject and\nscene sentence, then add photographic or illustrative treatment as short\nclauses: lens, lighting, palette, medium. Keep the expanded prompt under\n60 words. Each encoder still truncates at 75 content tokens, so a\nvery long prompt loses its tail. Turbo and other few-step tiers need one simple\nidea. Base and quality fine-tunes carry richer composition. Fine-tunes publish\ntrigger words and tag prefixes: preserve them exactly and place them first.\n\n## Syntax\n\nmold parses no attention weighting, so `(word:1.3)` and `[word]` reach the\nencoders as literal characters. Move a term earlier or repeat it instead. The\nnegative prompt works normally on every SDXL checkpoint because SDXL uses\nordinary classifier-free guidance, and there is no default, so supply visible\ndefects such as blur, jpeg artifacts, text, watermark, extra fingers. Never\npass true CFG on SDXL: it is a FLUX-only path and mold refuses it by name.\nQuoted lettering renders more reliably than on SD1.5 but should stay short.\nWith an identity reference the reference owns the face, so describe role,\nclothing, setting, pose, composition, and light without re-describing features.\nStart near an identity weight of 0.8. The negative pass is conditioned on the\nunconditional identity automatically.\n\n## Generation context\n\nThe native canvas is 1024x1024 at 25 steps and guidance 7.5. mold ships no\nSDXL refiner stage, so never write a prompt that assumes a refinement pass.\nRender at native scale and upscale afterwards. Turbo is native at 512 and\nguidance 0. Name the framing that fits the aspect. In img2img a higher strength\nmoves further from the source. When inpainting, describe only the masked\ncontent and how it meets the surrounding pixels.\n\n## Examples\n\nInput: night market photo\n\nOutput: Vibrant Bangkok street-food market at night, steam rising from woks, neon reflected on wet pavement, bustling documentary photograph, 35mm, shallow depth of field.\n\nInput: noir detective with my face, identity reference attached\n\nOutput: Film-noir detective in a rain-soaked 1940s train station, charcoal overcoat, single platform lamp, drifting steam, wet pavement reflections, black-and-white 35mm photograph.\n\n## Pitfalls\n\nDropping a fine-tune's trigger words or tag prefix loses the look the\ncheckpoint was trained for. Piling quality words onto a modern fine-tune adds\nnothing. A few-step tier given base-model steps and guidance degrades. Turbo is\nthe one SDXL checkpoint that identity conditioning does not accept.\n\n## CLI\n\n```bash\n# Turbo: one simple idea at four steps\nmold run sdxl-turbo:fp16 \\\n  \"Vibrant Bangkok street-food market at night, steam rising from woks, neon reflected on wet pavement, bustling documentary photograph\" \\\n  --steps 4 --seed 88\n\n# Base and fine-tunes take a real negative prompt\nmold run sdxl-base:fp16 \"a landscape at golden hour, layered ridgelines, drifting mist\" \\\n  --negative-prompt \"low quality, jpeg artifacts, text, watermark\"\nmold run juggernaut-xl:fp16 \"a studio portrait on grey seamless, softbox key light, 85mm\" \\\n  --negative-prompt \"blurry, distorted face, text, watermark\" --seed 4242\n\n# PuLID identity: one-time licence-gated pull, then reference the face\nmold pull pulid-sdxl --accept-license insightface-antelopev2\nmold run juggernaut-xl:fp16 \\\n  \"film-noir detective in a rain-soaked 1940s train station, charcoal overcoat, single platform lamp, wet pavement reflections, black-and-white 35mm photograph\" \\\n  --id-image portrait.png --id-weight 0.8 \\\n  --negative-prompt \"cartoon, waxy skin, distorted face, text, watermark\" --seed 83121\n\n# LoRA, img2img, and inpainting\nmold run sdxl-base:fp16 \"a lighthouse in a storm\" --lora style.safetensors --lora-scale 0.8\nmold run sdxl-base:fp16 \"anime style\" --image photo.png --strength 0.7\nmold run sdxl-base:fp16 \"a red bicycle leaning on the wall\" --image street.png --mask mask.png\n\n# No refiner stage exists; upscale the native render instead\nmold upscale portrait.png -o portrait_4x.png\n```\n\n## Sources\n\n- https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0\n- https://huggingface.co/stabilityai/sdxl-turbo\n- https://huggingface.co/docs/diffusers/using-diffusers/sdxl\n- https://github.com/ToTheBeginning/PuLID\n- https://education.civitai.com/civitais-prompt-crafting-guide-part-1-basics/ (community consensus on trigger words and negative prompts)\n",
+        "expansion_excerpt": "## Prompt style\n\nApplies to SDXL Base, Turbo, Playground v2.5, Juggernaut XL, DreamShaper XL,\nRealVis XL, Pony Diffusion V6, and CyberRealistic Pony. SDXL runs two text\nencoders, CLIP ViT-L and OpenCLIP ViT-bigG, and mold sends the same prompt to\nboth, so it reads fuller sentences than SD1.5. Open with a concise subject and\nscene sentence, then add photographic or illustrative treatment as short\nclauses: lens, lighting, palette, medium. Keep the expanded prompt under\n60 words. Each encoder still truncates at 75 content tokens, so a\nvery long prompt loses its tail. Turbo and other few-step tiers need one simple\nidea. Base and quality fine-tunes carry richer composition. Fine-tunes publish\ntrigger words and tag prefixes: preserve them exactly and place them first.\n\n## Syntax\n\nmold parses no attention weighting, so `(word:1.3)` and `[word]` reach the\nencoders as literal characters. Move a term earlier or repeat it instead. The\nnegative prompt works normally on every SDXL checkpoint because SDXL uses\nordinary classifier-free guidance, and there is no default, so supply visible\ndefects such as blur, jpeg artifacts, text, watermark, extra fingers. Never\npass true CFG on SDXL: it is a FLUX-only path and mold refuses it by name.\nQuoted lettering renders more reliably than on SD1.5 but should stay short.\nWith an identity reference the reference owns the face, so describe role,\nclothing, setting, pose, composition, and light without re-describing features.\nStart near an identity weight of 0.8. The negative pass is conditioned on the\nunconditional identity automatically.\n\n## Generation context\n\nThe native canvas is 1024x1024 at 25 steps and guidance 7.5. mold ships no\nSDXL refiner stage, so never write a prompt that assumes a refinement pass.\nRender at native scale and upscale afterwards. Turbo is native at 512 and\nguidance 0. Name the framing that fits the aspect. In img2img a higher strength\nmoves further from the source. When inpainting, describe only the masked\ncontent and how it meets the surrounding pixels.\n\n## Examples\n\nInput: night market photo\n\nOutput: Vibrant Bangkok street-food market at night, steam rising from woks, neon reflected on wet pavement, bustling documentary photograph, 35mm, shallow depth of field.\n\nInput: noir detective with my face, identity reference attached\n\nOutput: Film-noir detective in a rain-soaked 1940s train station, charcoal overcoat, single platform lamp, drifting steam, wet pavement reflections, black-and-white 35mm photograph.\n\n## Pitfalls\n\nDropping a fine-tune's trigger words or tag prefix loses the look the\ncheckpoint was trained for. Piling quality words onto a modern fine-tune adds\nnothing. A few-step tier given base-model steps and guidance degrades. Turbo is\nthe one SDXL checkpoint that identity conditioning does not accept."
+      }
+    },
+    {
+      "family": "sd3",
+      "aliases": [
+        "sd3.5",
+        "sd35"
+      ],
+      "word_limit": 150,
+      "guide": {
+        "path": "families/sd3.md",
+        "contents": "# SD 3.5 prompting\n\nManifest family: `sd3`.\n\n## Prompt style\n\nWrite complete natural-language sentences, not a comma-separated tag list. The\nMMDiT backbone reads two CLIP encoders plus a T5 encoder and rewards grammar\nthat the CLIP-only families ignore. Lead with the subject and its action, then\nstate count, placement, and spatial relationship explicitly, then the setting\nand lighting, and finish with the medium, lens, or style. Say \"three lanterns\"\nand \"in the left third\" rather than leaving quantity and position implicit.\nFront-load the clause that matters most: the CLIP encoders see only the first\n77 tokens, so a detail buried at the end reaches T5 alone. Keep the finished\nprompt under 150 words.\n\n## Syntax\n\nNo weighting syntax; emphasis is expressed in words. The negative prompt is\nsupported whenever guidance stays above 1. Fill it with visible defects to\nsuppress, such as warped anatomy, illegible signage, or a watermark, and never\nrestate the positive prompt in it. Typography is a strength of this family, so\nput required on-image lettering in double quotes and name where it sits. There\nis no reference-image addressing to write.\n\n## Generation context\n\n1024x1024 is the native canvas. Match the composition to the requested aspect\nratio: a portrait canvas wants a vertical subject with headroom, a wide canvas\nwants a horizontal relationship between subject and setting. Around 28 steps\nat a guidance of 4 to 7 is the quality reference for the undistilled\ncheckpoints. A four-step turbo checkpoint has its own recipe in its model leaf.\n\n## Examples\n\nInput: victorian clocktower at sunset\n\nOutput: A Victorian clocktower fills the left third of a city square at sunset.\nIts glass walls reveal interlocking brass gears while pedestrians cross below.\nLow-angle architectural photograph, dramatic clouds.\n\nInput: a bookshop sign that says Fable and Ink\n\nOutput: A narrow corner bookshop at dusk, its hand-painted sign reading \"Fable\n& Ink\" centred above the door. Two customers browse a table of secondhand books\non the pavement. Warm window light against a blue evening street, 35mm\ndocumentary photograph.\n\n## Pitfalls\n\n- The CLIP window truncates at 77 tokens, so the opening sentence has to carry\n  the composition on its own.\n- Counting is dependable for a handful of objects and drifts for a crowd\n  (community observation).\n- A checkpoint running at guidance 1.0 ignores the negative prompt entirely.\n- Naming the subject in the negative prompt removes it from the image.\n\n## CLI\n\n```bash\n# Quality reference: SD3.5 Large with a real negative prompt\nmold run sd3.5-large:q8 \\\n  \"A Victorian clocktower fills the left third of a city square at sunset; its glass walls reveal interlocking brass gears while pedestrians cross below, low-angle architectural photograph, dramatic clouds\" \\\n  --negative-prompt \"illegible clock, warped buildings, text, watermark\" --seed 2024\n\n# Smaller medium checkpoint at the same canvas\nmold run sd3.5-medium:q8 \"A red paper crane on a windowsill, soft morning light, still-life photograph\" --seed 2025\n\n# Four-step distill: one idea, no negative prompt\nmold run sd3.5-large-turbo:q8 \"A lone sailboat on a mirror-flat lake at dawn, wide landscape photograph\" --steps 4 --seed 2026\n```\n\n## Sources\n\n- https://huggingface.co/stabilityai/stable-diffusion-3.5-large\n- https://huggingface.co/stabilityai/stable-diffusion-3.5-large-turbo\n- https://huggingface.co/docs/diffusers/en/api/pipelines/stable_diffusion/stable_diffusion_3\n- Community: crowd-count drift is user-reported and not documented by Stability AI.\n",
+        "expansion_excerpt": "## Prompt style\n\nWrite complete natural-language sentences, not a comma-separated tag list. The\nMMDiT backbone reads two CLIP encoders plus a T5 encoder and rewards grammar\nthat the CLIP-only families ignore. Lead with the subject and its action, then\nstate count, placement, and spatial relationship explicitly, then the setting\nand lighting, and finish with the medium, lens, or style. Say \"three lanterns\"\nand \"in the left third\" rather than leaving quantity and position implicit.\nFront-load the clause that matters most: the CLIP encoders see only the first\n77 tokens, so a detail buried at the end reaches T5 alone. Keep the finished\nprompt under 150 words.\n\n## Syntax\n\nNo weighting syntax; emphasis is expressed in words. The negative prompt is\nsupported whenever guidance stays above 1. Fill it with visible defects to\nsuppress, such as warped anatomy, illegible signage, or a watermark, and never\nrestate the positive prompt in it. Typography is a strength of this family, so\nput required on-image lettering in double quotes and name where it sits. There\nis no reference-image addressing to write.\n\n## Generation context\n\n1024x1024 is the native canvas. Match the composition to the requested aspect\nratio: a portrait canvas wants a vertical subject with headroom, a wide canvas\nwants a horizontal relationship between subject and setting. Around 28 steps\nat a guidance of 4 to 7 is the quality reference for the undistilled\ncheckpoints. A four-step turbo checkpoint has its own recipe in its model leaf.\n\n## Examples\n\nInput: victorian clocktower at sunset\n\nOutput: A Victorian clocktower fills the left third of a city square at sunset.\nIts glass walls reveal interlocking brass gears while pedestrians cross below.\nLow-angle architectural photograph, dramatic clouds.\n\nInput: a bookshop sign that says Fable and Ink\n\nOutput: A narrow corner bookshop at dusk, its hand-painted sign reading \"Fable\n& Ink\" centred above the door. Two customers browse a table of secondhand books\non the pavement. Warm window light against a blue evening street, 35mm\ndocumentary photograph.\n\n## Pitfalls\n\n- The CLIP window truncates at 77 tokens, so the opening sentence has to carry\n  the composition on its own.\n- Counting is dependable for a handful of objects and drifts for a crowd\n  (community observation).\n- A checkpoint running at guidance 1.0 ignores the negative prompt entirely.\n- Naming the subject in the negative prompt removes it from the image."
+      }
+    },
+    {
+      "family": "z-image",
+      "aliases": [
+        "zimage",
+        "z_image"
+      ],
+      "word_limit": 150,
+      "guide": {
+        "path": "families/z-image.md",
+        "contents": "# Z-Image prompting\n\nManifest family: `z-image`.\n\n## Prompt style\n\nThe text encoder is a Qwen3 language model, so write grammatical sentences and\nnot a tag list. Long, detailed prompts are what the model was tuned for: one\ncontinuous scene description built from subject, action, spatial arrangement,\nsetting, light, and finally medium or style. Keep it to one composition and\nstay under 150 words. Write in English or Chinese; both are read\nnatively and neither needs translating.\n\n## Syntax\n\nNo weighting syntax. Text rendering is a headline strength in both Chinese and\nEnglish, so put visible lettering in quotation marks and name its position,\nscript, and style. The negative prompt is honoured only on the undistilled base\ncheckpoint, which runs guidance between 3 and 5. There is no reference-image\naddressing to write.\n\n## Generation context\n\n1024x1024 is the reference canvas and any aspect ratio between roughly 512 and\n2048 on a side is supported, so state the framing that suits the chosen shape.\nTurbo runs nine steps at guidance 0. Because the sampler is short, one clear\ncomposition resolves better than several competing ones on the same canvas.\n\n## Examples\n\nInput: astronaut in an underwater cave\n\nOutput: An astronaut floats through a bioluminescent underwater cave. The visor\nreflects blue coral below while a shaft of sunlight falls from the opening\nabove. Wide science-fiction illustration with a crisp silhouette.\n\nInput: a tea shop sign in Chinese and English\n\nOutput: A narrow tea shop at dusk on a wet city street. The lantern-lit sign\nabove the door reads \"云间茶室\" in gold brush script with \"CLOUD ROOM TEA\" in\nsmall white capitals beneath it. Warm interior light spills onto the pavement,\nrealistic photography.\n\n## Pitfalls\n\n- Turbo is guidance-distilled and runs at guidance 0, so a negative prompt has\n  no effect at all. Remove unwanted content by describing what belongs in the\n  frame instead.\n- Comma-separated tag salad underperforms an equivalent sentence.\n- Very long prompts can exceed the encoder sequence limit and lose the tail.\n- Repeating the same prompt and seed produces near-identical output, so vary\n  the wording rather than only the seed (community observation).\n\n## CLI\n\n```bash\n# Turbo at its published recipe\nmold run z-image-turbo:q8 \\\n  \"An astronaut floats through a bioluminescent underwater cave, helmet visor reflecting blue coral below and a shaft of sunlight above, wide science-fiction illustration, crisp silhouette\" \\\n  --steps 9 --seed 777\n\n# Bilingual signage, quoted so the lettering is rendered verbatim\nmold run z-image-turbo:bf16 \\\n  'A narrow tea shop at dusk on a wet city street, the lantern-lit sign reading \"云间茶室\" in gold brush script with \"CLOUD ROOM TEA\" beneath it, realistic photography' \\\n  --steps 9 --seed 778\n```\n\n## Sources\n\n- https://huggingface.co/Tongyi-MAI/Z-Image-Turbo\n- https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/discussions/8\n- https://github.com/Tongyi-MAI/Z-Image\n- Community: seed-versus-prompt variation is reported in the discussion thread.\n",
+        "expansion_excerpt": "## Prompt style\n\nThe text encoder is a Qwen3 language model, so write grammatical sentences and\nnot a tag list. Long, detailed prompts are what the model was tuned for: one\ncontinuous scene description built from subject, action, spatial arrangement,\nsetting, light, and finally medium or style. Keep it to one composition and\nstay under 150 words. Write in English or Chinese; both are read\nnatively and neither needs translating.\n\n## Syntax\n\nNo weighting syntax. Text rendering is a headline strength in both Chinese and\nEnglish, so put visible lettering in quotation marks and name its position,\nscript, and style. The negative prompt is honoured only on the undistilled base\ncheckpoint, which runs guidance between 3 and 5. There is no reference-image\naddressing to write.\n\n## Generation context\n\n1024x1024 is the reference canvas and any aspect ratio between roughly 512 and\n2048 on a side is supported, so state the framing that suits the chosen shape.\nTurbo runs nine steps at guidance 0. Because the sampler is short, one clear\ncomposition resolves better than several competing ones on the same canvas.\n\n## Examples\n\nInput: astronaut in an underwater cave\n\nOutput: An astronaut floats through a bioluminescent underwater cave. The visor\nreflects blue coral below while a shaft of sunlight falls from the opening\nabove. Wide science-fiction illustration with a crisp silhouette.\n\nInput: a tea shop sign in Chinese and English\n\nOutput: A narrow tea shop at dusk on a wet city street. The lantern-lit sign\nabove the door reads \"云间茶室\" in gold brush script with \"CLOUD ROOM TEA\" in\nsmall white capitals beneath it. Warm interior light spills onto the pavement,\nrealistic photography.\n\n## Pitfalls\n\n- Turbo is guidance-distilled and runs at guidance 0, so a negative prompt has\n  no effect at all. Remove unwanted content by describing what belongs in the\n  frame instead.\n- Comma-separated tag salad underperforms an equivalent sentence.\n- Very long prompts can exceed the encoder sequence limit and lose the tail.\n- Repeating the same prompt and seed produces near-identical output, so vary\n  the wording rather than only the seed (community observation)."
+      }
+    },
+    {
+      "family": "hunyuan3d",
+      "aliases": [],
+      "word_limit": 40,
+      "guide": {
+        "path": "families/hunyuan3d.md",
+        "contents": "# Hunyuan3D prompting\n\nManifest family: `hunyuan3d`.\n\n## Prompt style\n\nWrite no prompt. There is no text encoder anywhere in this family. The source\nimage is the entire conditioning, a prompt is recorded as provenance and never\nread, and a request without an image is refused rather than answered from\nnothing. The 40-word budget is therefore unused: spend the effort\non the image instead.\n\n## Syntax\n\nNothing in the text field reaches the model, so there is no weighting, no\nnegative prompt, no quoted text, and no reference addressing to write. The one\nimage is passed as the source, not named in prose.\n\n## Generation context\n\nThree properties of the image move the result, and none of them are prose.\n\n- One object, centred, filling most of the frame. The model reconstructs what\n  it can see; a subject occupying a tenth of the frame reconstructs at a tenth\n  of the detail.\n- A plain or removed background. There is no segmentation stage, so a busy\n  background is read as geometry. An image with an alpha channel is the best\n  input, because mold letterboxes on the cutout.\n- A three-quarter view. A straight-on photograph gives no depth cue for the\n  sides.\n\n## Examples\n\nInput: 3-D model of my dining chair, photo attached\n\nOutput: No prompt. Supply chair.png cropped so the chair fills the frame,\nbackground removed to alpha, shot from a three-quarter angle.\n\nInput: turn this asset concept into a mesh\n\nOutput: No prompt. Supply concept.png with the single object centred on a plain\nground and every other prop cropped away.\n\n## Pitfalls\n\n- Frames, fps, masks, ControlNet, and an explicit canvas are refused for this\n  family rather than ignored.\n- Output is always binary glTF; OBJ exists only as a gallery export.\n- Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not\n  supported, so today's result is geometry only.\n- Detail is bought with the octree resolution and its cost is cubic.\n\n## CLI\n\n```bash\n# The default tier: 0.6B, step-distilled, ~5 GB VRAM\nmold run hunyuan3d-mini-turbo --image chair.png -o chair.glb\n\n# Undistilled 1.1B, 30 guided steps, higher detail\nmold run hunyuan3d --image chair.png --octree 320 -o chair.glb\n\n# Recover thin features by lowering the surface threshold\nmold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb\n```\n\n`--octree` (128 | 192 | 256 | 320 | 384, default 256) is the detail knob and\nits cost is cubic. `--mesh-threshold` (default 0.6) moves the extracted\nsurface: lower recovers thin features and adds noise.\n\n## Sources\n\n- https://github.com/Tencent-Hunyuan/Hunyuan3D-2\n- Best practice: the centred-subject, cutout-background, three-quarter-view\n  image advice is community practice, not a published upstream rule.\n",
+        "expansion_excerpt": "## Prompt style\n\nWrite no prompt. There is no text encoder anywhere in this family. The source\nimage is the entire conditioning, a prompt is recorded as provenance and never\nread, and a request without an image is refused rather than answered from\nnothing. The 40-word budget is therefore unused: spend the effort\non the image instead.\n\n## Syntax\n\nNothing in the text field reaches the model, so there is no weighting, no\nnegative prompt, no quoted text, and no reference addressing to write. The one\nimage is passed as the source, not named in prose.\n\n## Generation context\n\nThree properties of the image move the result, and none of them are prose.\n\n- One object, centred, filling most of the frame. The model reconstructs what\n  it can see; a subject occupying a tenth of the frame reconstructs at a tenth\n  of the detail.\n- A plain or removed background. There is no segmentation stage, so a busy\n  background is read as geometry. An image with an alpha channel is the best\n  input, because mold letterboxes on the cutout.\n- A three-quarter view. A straight-on photograph gives no depth cue for the\n  sides.\n\n## Examples\n\nInput: 3-D model of my dining chair, photo attached\n\nOutput: No prompt. Supply chair.png cropped so the chair fills the frame,\nbackground removed to alpha, shot from a three-quarter angle.\n\nInput: turn this asset concept into a mesh\n\nOutput: No prompt. Supply concept.png with the single object centred on a plain\nground and every other prop cropped away.\n\n## Pitfalls\n\n- Frames, fps, masks, ControlNet, and an explicit canvas are refused for this\n  family rather than ignored.\n- Output is always binary glTF; OBJ exists only as a gallery export.\n- Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not\n  supported, so today's result is geometry only.\n- Detail is bought with the octree resolution and its cost is cubic."
+      }
+    },
+    {
+      "family": "wuerstchen",
+      "aliases": [
+        "wuerstchen-v2"
+      ],
+      "word_limit": 50,
+      "guide": {
+        "path": "families/wuerstchen.md",
+        "contents": "# Wuerstchen v2 prompting\n\nManifest family: `wuerstchen`.\n\n## Prompt style\n\nName a broad subject, its dominant colours, the lighting, and the medium, in\none or two sentences under 50 words. Both cascade stages read a\nCLIP text encoder with a 77-token window, so extra clauses are truncated rather\nthan honoured. Ask for mood and palette. Do not ask for small, countable, or\nfinely structured detail.\n\n## Syntax\n\nNo weighting syntax. The negative prompt is supported and applied by the prior\nstage, which runs guidance above 1; mold ships a defect-suppression default.\nUse it for blur, muddy colour, and watermarks. There is no on-image text worth\nquoting and no reference image to address.\n\n## Generation context\n\n1024x1024 is the default canvas and resolution moves in 128-pixel steps, so the\nnext size up is 1152x1152. Choose an aspect ratio that suits one large subject\nfilling the frame.\n\n## Examples\n\nInput: a lighthouse at sunset\n\nOutput: A lighthouse on a rocky coast during a dramatic sunset, bold oil\npainting, vibrant orange and purple sky, crashing surf.\n\nInput: a forest in autumn\n\nOutput: A dense autumn forest in low golden light, deep amber and rust foliage,\npainterly landscape illustration with soft atmospheric haze.\n\n## Pitfalls\n\n- The 42x latent compression costs fine detail, and it shows first in faces and\n  hands.\n- The model cannot render correct text in an image.\n- Output is often not photorealistic, so painterly and illustrative requests\n  suit it best.\n- Difficult compositional prompts, meaning several named objects in stated\n  positions, are unreliable.\n\n## CLI\n\n```bash\n# Painterly subject with a real negative prompt\nmold run wuerstchen-v2:fp16 \\\n  \"A lighthouse on a rocky coast during a dramatic sunset, bold oil painting, vibrant orange and purple sky, crashing surf\" \\\n  --negative-prompt \"fine text, watermark, muddy colors\" --seed 42\n\n# Next canvas up the 128-pixel ladder\nmold run wuerstchen-v2:fp16 \"A dense autumn forest in low golden light, painterly landscape illustration\" --width 1152 --height 1152 --seed 43\n```\n\n## Sources\n\n- https://arxiv.org/abs/2306.00637\n- https://huggingface.co/docs/diffusers/main/en/api/pipelines/wuerstchen\n- https://huggingface.co/warp-ai/wuerstchen\n",
+        "expansion_excerpt": "## Prompt style\n\nName a broad subject, its dominant colours, the lighting, and the medium, in\none or two sentences under 50 words. Both cascade stages read a\nCLIP text encoder with a 77-token window, so extra clauses are truncated rather\nthan honoured. Ask for mood and palette. Do not ask for small, countable, or\nfinely structured detail.\n\n## Syntax\n\nNo weighting syntax. The negative prompt is supported and applied by the prior\nstage, which runs guidance above 1; mold ships a defect-suppression default.\nUse it for blur, muddy colour, and watermarks. There is no on-image text worth\nquoting and no reference image to address.\n\n## Generation context\n\n1024x1024 is the default canvas and resolution moves in 128-pixel steps, so the\nnext size up is 1152x1152. Choose an aspect ratio that suits one large subject\nfilling the frame.\n\n## Examples\n\nInput: a lighthouse at sunset\n\nOutput: A lighthouse on a rocky coast during a dramatic sunset, bold oil\npainting, vibrant orange and purple sky, crashing surf.\n\nInput: a forest in autumn\n\nOutput: A dense autumn forest in low golden light, deep amber and rust foliage,\npainterly landscape illustration with soft atmospheric haze.\n\n## Pitfalls\n\n- The 42x latent compression costs fine detail, and it shows first in faces and\n  hands.\n- The model cannot render correct text in an image.\n- Output is often not photorealistic, so painterly and illustrative requests\n  suit it best.\n- Difficult compositional prompts, meaning several named objects in stated\n  positions, are unreliable."
+      }
+    },
+    {
+      "family": "qwen-image",
+      "aliases": [
+        "qwen_image"
+      ],
+      "word_limit": 180,
+      "guide": {
+        "path": "families/qwen-image.md",
+        "contents": "# Qwen-Image prompting\n\nManifest family: `qwen-image`.\n\n## Prompt style\n\nRewrite the request into a complete, expressive prompt that preserves its\noriginal meaning. For an overly brief input, reasonably infer and add detail so\nthe frame is visually complete, without altering the core content. Refine four\nthings in order: subject characteristics, visual style, spatial relationships,\nand shot composition. Match the prompt to a precise, niche style aligned with\nthe stated intent; when no style is given, choose the most appropriate one,\nusually realistic photography. Keep the rewrite under 180 words,\nthen append `Ultra HD, 4K, cinematic composition` (a Chinese prompt appends\n`超清，4K，电影级构图`).\n\n## Syntax\n\nEnclose on-image text in quotation marks and name its position, such as the\ntop-left corner, along with its style. Quoted text is never translated and\nnever altered. Do not add lettering the user did not ask for. Avoid negation in\nthe positive prompt: describe what should be present rather than what should be\nabsent. The negative prompt is honoured whenever guidance stays above 1. No\nweighting syntax, and no reference-image addressing on this family.\n\n## Generation context\n\n1328x1328 is the default canvas; match the composition to the requested aspect\nratio. The base and 2512 checkpoints at fifty steps are the quality reference\nand carry a dense art-direction brief. The few-step distills need a simpler\nprompt and run their own fixed step-and-guidance recipe, described in their\nmodel leaf.\n\n## Examples\n\nInput: a poster for a small bakery called MOLD & FLOUR\n\nOutput: Straight-on editorial architectural photograph of a tiny artisan bakery\non a quiet European corner, deep teal facade with three arched windows and a\nstriped awning. The hand-painted sign above the door reads \"MOLD & FLOUR\" in\ncream serif capitals. A vintage delivery bicycle leans at the right edge. Sunny\nspring morning, crisp realistic detail, balanced symmetrical composition. Ultra\nHD, 4K, cinematic composition.\n\nInput: a lion statue\n\nOutput: Dynamic lion stone sculpture mid-pounce, front legs airborne and hind\nlegs pushing off, smooth lines and defined muscles showing power. Faded ancient\ncourtyard background with trees and stone steps. Weathered surface gives an\nantique look. Documentary photography style with fine details. Ultra HD, 4K,\ncinematic composition.\n\n## Pitfalls\n\n- A vague text request such as \"a sign with the date\" renders as garbled\n  lettering. Write the exact string the image should carry.\n- Negation words leak into the frame; rephrase them as what should be there.\n- Dense small text, hair-fine texture, and very complex scenes degrade on the\n  few-step distills.\n\n## CLI\n\n```bash\n# Quality reference: the 2512 recipe with quoted signage\nmold run qwen-image-2512:q8 \\\n  'Straight-on editorial architectural photograph of a tiny artisan bakery named \"MOLD & FLOUR\" on a quiet European corner, deep teal facade, three arched windows, striped awning, sunny spring morning, crisp realistic detail, balanced symmetrical composition' \\\n  --seed 251201\n\n# Quantize the Qwen2.5 text encoder when VRAM is tight\nmold run qwen-image:q2 \"a travel poster of a mountain lake at dawn\" --qwen2-variant q6 --seed 251202\n\n# Four-step distill: one simple idea at its fixed recipe\nmold run qwen-image-flash:q8 \"A red enamel teapot on a sunlit windowsill, still-life photograph\" --steps 4 --seed 251203\n```\n\n## Sources\n\n- https://raw.githubusercontent.com/QwenLM/Qwen-Image/main/src/examples/tools/prompt_utils.py\n- https://github.com/QwenLM/Qwen-Image\n- https://huggingface.co/Qwen/Qwen-Image\n",
+        "expansion_excerpt": "## Prompt style\n\nRewrite the request into a complete, expressive prompt that preserves its\noriginal meaning. For an overly brief input, reasonably infer and add detail so\nthe frame is visually complete, without altering the core content. Refine four\nthings in order: subject characteristics, visual style, spatial relationships,\nand shot composition. Match the prompt to a precise, niche style aligned with\nthe stated intent; when no style is given, choose the most appropriate one,\nusually realistic photography. Keep the rewrite under 180 words,\nthen append `Ultra HD, 4K, cinematic composition` (a Chinese prompt appends\n`超清，4K，电影级构图`).\n\n## Syntax\n\nEnclose on-image text in quotation marks and name its position, such as the\ntop-left corner, along with its style. Quoted text is never translated and\nnever altered. Do not add lettering the user did not ask for. Avoid negation in\nthe positive prompt: describe what should be present rather than what should be\nabsent. The negative prompt is honoured whenever guidance stays above 1. No\nweighting syntax, and no reference-image addressing on this family.\n\n## Generation context\n\n1328x1328 is the default canvas; match the composition to the requested aspect\nratio. The base and 2512 checkpoints at fifty steps are the quality reference\nand carry a dense art-direction brief. The few-step distills need a simpler\nprompt and run their own fixed step-and-guidance recipe, described in their\nmodel leaf.\n\n## Examples\n\nInput: a poster for a small bakery called MOLD & FLOUR\n\nOutput: Straight-on editorial architectural photograph of a tiny artisan bakery\non a quiet European corner, deep teal facade with three arched windows and a\nstriped awning. The hand-painted sign above the door reads \"MOLD & FLOUR\" in\ncream serif capitals. A vintage delivery bicycle leans at the right edge. Sunny\nspring morning, crisp realistic detail, balanced symmetrical composition. Ultra\nHD, 4K, cinematic composition.\n\nInput: a lion statue\n\nOutput: Dynamic lion stone sculpture mid-pounce, front legs airborne and hind\nlegs pushing off, smooth lines and defined muscles showing power. Faded ancient\ncourtyard background with trees and stone steps. Weathered surface gives an\nantique look. Documentary photography style with fine details. Ultra HD, 4K,\ncinematic composition.\n\n## Pitfalls\n\n- A vague text request such as \"a sign with the date\" renders as garbled\n  lettering. Write the exact string the image should carry.\n- Negation words leak into the frame; rephrase them as what should be there.\n- Dense small text, hair-fine texture, and very complex scenes degrade on the\n  few-step distills."
+      }
+    },
+    {
+      "family": "qwen-image-edit",
+      "aliases": [
+        "qwen_image_edit"
+      ],
+      "word_limit": 100,
+      "guide": {
+        "path": "families/qwen-image-edit.md",
+        "contents": "# Qwen-Image Edit prompting\n\nManifest family: `qwen-image-edit`.\n\n## Prompt style\n\nWrite one imperative edit instruction, direct and specific, under\n100 words. Keep the core intention of the request unchanged and add\nonly clarity, rationality, and visual feasibility. For an add, delete, or\nreplace, supplement a vague request with minimal but sufficient detail:\ncategory, colour, size, orientation, position. Phrase a swap as \"Replace Y with\nX\" and briefly describe X's key visual features. Every added object must match\nthe logic and style of the source image. Name what must stay identical, such as\ngeometry, camera position, composition, and any subject the edit does not\ntouch.\n\n## Syntax\n\nOn-image text goes in double quotes, keeping its original language and\ncapitalization. Adding text and changing text are both replacements, so write\n`Replace \"OPEN\" with \"CLOSED\"`. State text position, colour, and layout only\nwhen the user asked for them. Colorization and old-photo restoration use the\nfixed instruction `Restore and colorize the photo.` Inpainting uses `Perform\ninpainting on this image. The original caption is:` and outpainting uses\n`Extend the image beyond its boundaries using outpainting. The original caption\nis:`. Address multiple references by ordinal in the order they were supplied,\nas \"the first image\" and \"the second image\". This family has no img2img\nstrength control.\n\n## Generation context\n\nThe source image owns appearance, geometry, and canvas, so prompt only the\nchange. A person edit keeps ethnicity, gender, age, hairstyle, expression, and\noutfit consistent, and any expression, beauty, or make-up change must be\nnatural and subtle, never exaggerated. When a style is transferred from a\nsecond reference, describe that style in key visual features and place the\nstyle clause last.\n\n## Examples\n\nInput: make the bakery photo wintry\n\nOutput: Change the sunny spring morning into a snowy winter blue hour. Add\nfresh snow to the exterior and turn on warm interior lights. Preserve the exact\nteal facade, the readable \"MOLD & FLOUR\" sign, windows, door, camera position,\ngeometry, and composition.\n\nInput: put the person from the second photo into the first\n\nOutput: Replace the woman in the first image with the man from the second\nimage, matching the first image's lighting and camera angle. Keep the first\nimage's background, furniture, and composition unchanged.\n\n## Pitfalls\n\n- Describing the whole scene instead of the change makes the model repaint what\n  you described. State the edit, then the invariants.\n- Omitting what must stay identical is the usual cause of drifted geometry.\n- Translating quoted text or changing its case rewrites the sign.\n- Exaggerated face or make-up edits break identity.\n\n## CLI\n\n```bash\n# Single-image edit that names the preserved elements\nmold run qwen-image-edit-2511:q8 \\\n  \"Change the sunny spring morning into a cozy snowy winter blue hour. Add fresh snow to the exterior and turn on warm interior lights. Preserve the exact teal facade, readable MOLD & FLOUR sign, windows, door, camera position, geometry, and composition.\" \\\n  --image bakery.png --seed 251111\n\n# Two references, addressed in the supplied order\nmold run qwen-image-edit-2511:q4 \"make the chair red leather\" --image chair.png --image swatch.png --qwen2-variant q4\n\n# Four-step Lightning distill: keep the instruction simple\nmold run qwen-image-edit-lightning:fp8 'Replace the sign text with \"CLOSED\", keeping the font, colour, and placement.' --image shop.png --seed 251112\n```\n\n## Sources\n\n- https://raw.githubusercontent.com/QwenLM/Qwen-Image/main/src/examples/tools/prompt_utils.py\n- https://github.com/QwenLM/Qwen-Image\n- https://huggingface.co/Qwen/Qwen-Image-Edit\n",
+        "expansion_excerpt": "## Prompt style\n\nWrite one imperative edit instruction, direct and specific, under\n100 words. Keep the core intention of the request unchanged and add\nonly clarity, rationality, and visual feasibility. For an add, delete, or\nreplace, supplement a vague request with minimal but sufficient detail:\ncategory, colour, size, orientation, position. Phrase a swap as \"Replace Y with\nX\" and briefly describe X's key visual features. Every added object must match\nthe logic and style of the source image. Name what must stay identical, such as\ngeometry, camera position, composition, and any subject the edit does not\ntouch.\n\n## Syntax\n\nOn-image text goes in double quotes, keeping its original language and\ncapitalization. Adding text and changing text are both replacements, so write\n`Replace \"OPEN\" with \"CLOSED\"`. State text position, colour, and layout only\nwhen the user asked for them. Colorization and old-photo restoration use the\nfixed instruction `Restore and colorize the photo.` Inpainting uses `Perform\ninpainting on this image. The original caption is:` and outpainting uses\n`Extend the image beyond its boundaries using outpainting. The original caption\nis:`. Address multiple references by ordinal in the order they were supplied,\nas \"the first image\" and \"the second image\". This family has no img2img\nstrength control.\n\n## Generation context\n\nThe source image owns appearance, geometry, and canvas, so prompt only the\nchange. A person edit keeps ethnicity, gender, age, hairstyle, expression, and\noutfit consistent, and any expression, beauty, or make-up change must be\nnatural and subtle, never exaggerated. When a style is transferred from a\nsecond reference, describe that style in key visual features and place the\nstyle clause last.\n\n## Examples\n\nInput: make the bakery photo wintry\n\nOutput: Change the sunny spring morning into a snowy winter blue hour. Add\nfresh snow to the exterior and turn on warm interior lights. Preserve the exact\nteal facade, the readable \"MOLD & FLOUR\" sign, windows, door, camera position,\ngeometry, and composition.\n\nInput: put the person from the second photo into the first\n\nOutput: Replace the woman in the first image with the man from the second\nimage, matching the first image's lighting and camera angle. Keep the first\nimage's background, furniture, and composition unchanged.\n\n## Pitfalls\n\n- Describing the whole scene instead of the change makes the model repaint what\n  you described. State the edit, then the invariants.\n- Omitting what must stay identical is the usual cause of drifted geometry.\n- Translating quoted text or changing its case rewrites the sign.\n- Exaggerated face or make-up edits break identity."
+      }
+    },
+    {
+      "family": "ltx-video",
+      "aliases": [
+        "ltx_video",
+        "ltxvideo"
+      ],
+      "word_limit": 150,
+      "guide": {
+        "path": "families/ltx-video.md",
+        "contents": "# LTX-Video 0.9.x prompting\n\nManifest family: `ltx-video`.\n\n## Prompt style\n\nWrite one flowing paragraph, chronological, literal and precise, the way a\ncinematographer describes a shot list. Start directly with the main action in a\nsingle sentence. Then add the specific movements and gestures, precise\nappearances of the characters and objects, the background and environment, the\ncamera angle and movement, lighting and colors, and last any change or sudden\nevent. Keep within 150 words. Prefer visible action over abstract\nmood: concrete observable detail steers this model, adjectives about feeling do\nnot.\n\n## Syntax\n\nNo weighting or attention syntax. A guidance-based checkpoint takes a negative\nprompt for visible defects; a distilled checkpoint is pinned at guidance 1.0 and\ntakes none, so do not write one for it. Visible lettering is unreliable, so keep\non-image text out of the prompt. A source image or video is attached rather than\nnamed in the prompt, and a conditioned run may omit the prompt entirely, which\nrenders near-static micro-motion. Camera vocabulary is\nplain English: the camera slowly tilts upward, tracks alongside, pushes in,\npulls back, or holds locked off. Use one move per clip.\n\n## Generation context\n\nFrames follow the 8n+1 grid and both dimensions are multiples of 32. The default\ncanvas is 1216x704 at 30 fps with 25 frames, which is under a second, so one\nbeat is all that fits; 49 frames is about 1.6 seconds and 97 about 3.2. A longer\nrequest is rendered as chained 97-frame clips, so write each clip as one\ncontinuous shot that opens on the previous clip's closing pose.\n\n## Examples\n\nInput: northern lights over a frozen lake\n\nOutput: Northern lights ripple from left to right over a frozen lake; green and\nviolet ribbons reflect in the ice while the camera slowly tilts upward, one\ncontinuous time-lapse shot.\n\nInput: a chef plating a dish\n\nOutput: A chef's hands lower a seared scallop onto a white plate with tongs,\nthen trail a spoon of green oil around the rim. Steam rises from the plate.\nStainless counters and hanging pans fill the blurred background under warm\noverhead light. The camera holds a locked-off overhead close-up.\n\n## Pitfalls\n\nLegacy LTX-Video renders silent video, so never promise speech, music, or sound\neffects. It is not LTX-2, and a prompt written for that audio-video family does\nnot transfer. Avoid cuts, a second shot, and more action than a short clip can\nhold. The 0.9.6 distilled checkpoint is the safest default, the 0.9.8\ncheckpoints run the full multiscale refinement path, and the 13B BF16 tiers need\na 40 GB-class GPU.\n\n## CLI\n\n```bash\n# Basic clip (25 frames, MP4 default in a build carrying the mp4 feature)\nmold run ltx-video-0.9.6-distilled:bf16 \"a cat walking across a windowsill\" --frames 25\n# Frame counts are 8n+1 (9, 17, 25, 33, 49, ...)\nmold run ltx-video-0.9.8-2b-distilled:bf16 \"ocean waves at sunset\" --frames 49\n# Explicit MP4 output\nmold run ltx-video-0.9.6-distilled:bf16 \"a campfire at night\" --frames 17 --format mp4\n# GIF (256 colors)\nmold run ltx-video-0.9.6-distilled:bf16 \"a sunset\" --frames 17 --format gif -o sunset.gif\n# Animated WebP output (needs the webp feature)\nmold run ltx-video-0.9.6-distilled:bf16 \"a waterfall\" --frames 9 --format webp -o waterfall.webp\n# A finished chronological prompt\nmold run ltx-video-0.9.6-distilled:bf16 \\\n  \"Northern lights ripple from left to right over a frozen lake; green and violet ribbons reflect in the ice while the camera slowly tilts upward, one continuous time-lapse shot\" \\\n  --frames 33 --seed 1234\n```\n\n## Sources\n\n- https://github.com/Lightricks/LTX-Video (README prompt engineering section)\n- https://huggingface.co/Lightricks/LTX-Video\n- Community: https://github.com/Lightricks/ComfyUI-LTXVideo\n",
+        "expansion_excerpt": "## Prompt style\n\nWrite one flowing paragraph, chronological, literal and precise, the way a\ncinematographer describes a shot list. Start directly with the main action in a\nsingle sentence. Then add the specific movements and gestures, precise\nappearances of the characters and objects, the background and environment, the\ncamera angle and movement, lighting and colors, and last any change or sudden\nevent. Keep within 150 words. Prefer visible action over abstract\nmood: concrete observable detail steers this model, adjectives about feeling do\nnot.\n\n## Syntax\n\nNo weighting or attention syntax. A guidance-based checkpoint takes a negative\nprompt for visible defects; a distilled checkpoint is pinned at guidance 1.0 and\ntakes none, so do not write one for it. Visible lettering is unreliable, so keep\non-image text out of the prompt. A source image or video is attached rather than\nnamed in the prompt, and a conditioned run may omit the prompt entirely, which\nrenders near-static micro-motion. Camera vocabulary is\nplain English: the camera slowly tilts upward, tracks alongside, pushes in,\npulls back, or holds locked off. Use one move per clip.\n\n## Generation context\n\nFrames follow the 8n+1 grid and both dimensions are multiples of 32. The default\ncanvas is 1216x704 at 30 fps with 25 frames, which is under a second, so one\nbeat is all that fits; 49 frames is about 1.6 seconds and 97 about 3.2. A longer\nrequest is rendered as chained 97-frame clips, so write each clip as one\ncontinuous shot that opens on the previous clip's closing pose.\n\n## Examples\n\nInput: northern lights over a frozen lake\n\nOutput: Northern lights ripple from left to right over a frozen lake; green and\nviolet ribbons reflect in the ice while the camera slowly tilts upward, one\ncontinuous time-lapse shot.\n\nInput: a chef plating a dish\n\nOutput: A chef's hands lower a seared scallop onto a white plate with tongs,\nthen trail a spoon of green oil around the rim. Steam rises from the plate.\nStainless counters and hanging pans fill the blurred background under warm\noverhead light. The camera holds a locked-off overhead close-up.\n\n## Pitfalls\n\nLegacy LTX-Video renders silent video, so never promise speech, music, or sound\neffects. It is not LTX-2, and a prompt written for that audio-video family does\nnot transfer. Avoid cuts, a second shot, and more action than a short clip can\nhold. The 0.9.6 distilled checkpoint is the safest default, the 0.9.8\ncheckpoints run the full multiscale refinement path, and the 13B BF16 tiers need\na 40 GB-class GPU."
+      }
+    },
+    {
+      "family": "ltx2",
+      "aliases": [
+        "ltx-2.3",
+        "ltx-2.5",
+        "ltx2.3",
+        "ltx2.5"
+      ],
+      "word_limit": 200,
+      "guide": {
+        "path": "families/ltx2.md",
+        "contents": "# LTX-2 prompting\n\nManifest family: `ltx2`.\n\n## Prompt style\n\nWrite one flowing paragraph under 200 words, four to eight\nsentences. Start directly with the action, never with \"The scene opens\" or \"We\nsee\". Add movement, appearance, environment, camera, lighting, and colour,\nthen any sudden change. Use present-progressive verbs and strict chronological\norder joined by \"as\", \"then\", and \"while\". Describe only what is visible or\naudible: physical cues, not emotion labels. Keep wording restrained and\ncolours plain, so \"red dress\" rather than \"vibrant red dress\".\n\n## Syntax\n\nNo weighting, no negative prompt. When the style is known, prefix the\nparagraph with `Style: <style>,`. LTX-2 generates audio, so integrate the\nsoundscape beside the actions rather than appending it. Quote speech exactly,\nkeep the user's words verbatim, and name voice, delivery, accent, and language\nwhen it is not English. Camera vocabulary is plain film language: static\nframe, pans, tilts, pushes in, pulls back, tracks, arcs, handheld. Never\ninvent camera motion or dialogue the user did not request, and never write\ntimestamps or cuts.\n\n## Generation context\n\nFrames sit on the `8k+1` grid at 24 fps, so 121 frames is about five seconds.\nBoth axes must be multiples of 32, and of 64 for lip dub. Size the action to\nthat duration, keep one continuous take per clip, and keep lip sync inside a\nsingle clip. With a source image attached, describe only what changes from it;\nrestating the frame inaccurately makes the model cut. Distilled LTX-2.5 fixes\nguidance at 1.0.\n\n## Examples\n\nInput: a woman on a rainy street says the tagline\n\nOutput: Style: cinematic-realistic, a woman in a red raincoat stands beneath a\nglass awning at night as rain taps the panels above her. She turns toward the\nlens and says in a clear, delighted voice, \"This was made locally with Mold,\nincluding the sound.\" The camera remains static. Traffic hisses on the wet\nstreet beneath her close voice.\n\nInput: make this photo of a chef move (source image attached)\n\nOutput: The chef lifts the pan off the flame and tilts it as the vegetables\nslide forward, then sets it down. Oil crackles and an extractor fan hums under\nthe sizzle. The camera remains static.\n\n## Pitfalls\n\nReadable on-screen text is unreliable, so avoid signage and logos. Avoid fast\ntwisting motion, crowded layered scenes, and conflicting light sources.\n\n## CLI\n\n```bash\n# Fast joint audio-video on the distilled default\nmold run ltx-2-19b-distilled:fp8 \"rain on a neon taxi window\" --frames 97 --format mp4\n\n# LTX-2.5 distilled, duration head picks the clip length\nmold run ltx-2.5-22b-distilled \"a complete product reveal\" --predict-duration --fps 24 --audio --format mp4\n\n# A fully written LTX-2.5 prompt in one continuous clip\nmold run ltx-2.5-22b-distilled:q6 \"A woman in a red raincoat stands beneath a glass awning at night as rain taps the panels above her. She turns toward the lens and says in a clear, delighted voice, 'This was made locally with Mold, including the sound.' The camera remains static. Traffic hisses on the wet street beneath her close, clean voice.\" --width 768 --height 512 --frames 121 --clip-frames 121 --fps 24 --audio --seed 83007\n\n# Audio-to-video: motion driven by a supplied track\nmold run ltx-2-19b-distilled:fp8 \"paper sculpture reacting to music\" --audio-file cello.wav\n\n# Keyframe interpolation between two stills\nmold run ltx-2-19b-distilled:fp8 \"a canyon flyover\" --pipeline keyframe --frames 97 --keyframe 0:start.png --keyframe 96:end.png\n\n# Camera-control preset\nmold run ltx-2-19b-distilled:fp8 \"lantern-lit cave entrance\" --camera-control dolly-in\n\n# Lip dub: re-voice a clip. Frames and fps come from the reference video; both axes must be multiples of 64\nmold run ltx-2.3-22b-distilled:fp8 \"she says: the harbour freezes every winter\" --ic-lora-control lipdub --video speaker.mp4 --width 704 --height 448\n\n# Guidance overrides on the two-stage pipeline\nmold run ltx-2-19b-distilled:fp8 \"handheld shot through a night market\" --pipeline two-stage --stg-scale 0.6 --stg-blocks 20,29 --rescale-scale 0.9\n\n# Text-to-audio: no video at all, WAV output\nmold run ltx-2.3-22b-dev:fp8 \"heavy rain on a tin roof, distant thunder\" --pipeline t2a --frames 121 --fps 24 --output rain.wav\n```\n\n## Sources\n\n- https://github.com/Lightricks/LTX-2 (README, \"Prompting for LTX-2\")\n- LTX-2 official prompt-enhancer system prompts, `packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/` in the same repository\n- https://ltx.io/blog/prompting-guide-for-ltx-2\n- https://docs.ltx.io/open-source-model/usage-guides/prompting-guide\n",
+        "expansion_excerpt": "## Prompt style\n\nWrite one flowing paragraph under 200 words, four to eight\nsentences. Start directly with the action, never with \"The scene opens\" or \"We\nsee\". Add movement, appearance, environment, camera, lighting, and colour,\nthen any sudden change. Use present-progressive verbs and strict chronological\norder joined by \"as\", \"then\", and \"while\". Describe only what is visible or\naudible: physical cues, not emotion labels. Keep wording restrained and\ncolours plain, so \"red dress\" rather than \"vibrant red dress\".\n\n## Syntax\n\nNo weighting, no negative prompt. When the style is known, prefix the\nparagraph with `Style: <style>,`. LTX-2 generates audio, so integrate the\nsoundscape beside the actions rather than appending it. Quote speech exactly,\nkeep the user's words verbatim, and name voice, delivery, accent, and language\nwhen it is not English. Camera vocabulary is plain film language: static\nframe, pans, tilts, pushes in, pulls back, tracks, arcs, handheld. Never\ninvent camera motion or dialogue the user did not request, and never write\ntimestamps or cuts.\n\n## Generation context\n\nFrames sit on the `8k+1` grid at 24 fps, so 121 frames is about five seconds.\nBoth axes must be multiples of 32, and of 64 for lip dub. Size the action to\nthat duration, keep one continuous take per clip, and keep lip sync inside a\nsingle clip. With a source image attached, describe only what changes from it;\nrestating the frame inaccurately makes the model cut. Distilled LTX-2.5 fixes\nguidance at 1.0.\n\n## Examples\n\nInput: a woman on a rainy street says the tagline\n\nOutput: Style: cinematic-realistic, a woman in a red raincoat stands beneath a\nglass awning at night as rain taps the panels above her. She turns toward the\nlens and says in a clear, delighted voice, \"This was made locally with Mold,\nincluding the sound.\" The camera remains static. Traffic hisses on the wet\nstreet beneath her close voice.\n\nInput: make this photo of a chef move (source image attached)\n\nOutput: The chef lifts the pan off the flame and tilts it as the vegetables\nslide forward, then sets it down. Oil crackles and an extractor fan hums under\nthe sizzle. The camera remains static.\n\n## Pitfalls\n\nReadable on-screen text is unreliable, so avoid signage and logos. Avoid fast\ntwisting motion, crowded layered scenes, and conflicting light sources."
+      }
+    },
+    {
+      "family": "wan",
+      "aliases": [
+        "wan2.1",
+        "wan2.2",
+        "wan21",
+        "wan22"
+      ],
+      "word_limit": 100,
+      "guide": {
+        "path": "families/wan.md",
+        "contents": "# Wan prompting\n\nManifest family: `wan`.\n\n## Prompt style\n\nWrite one English shot description of about 100 words. Infer missing\ndetail for a short input without changing its intent. Enhance what the user\nnamed: appearance, expression, quantity, posture, visual style, spatial\nrelationships, shot scale. Never add a subject the input lacks. Detail how the\naction unfolds and give background elements their own motion. Use simple direct\nverbs. Emphasize motion and camera movement. Skip literary mood writing. Name a\nstyle only when the user did, and put it first; a 2D style takes no cinematic\nterms.\n\n## Syntax\n\nWan has no weighting syntax. The server prefills the model's tuned default\nnegative prompt, a standard Chinese quality list; never restate its terms in the\npositive. Keep quoted text verbatim.\n\nAdd at most four cinematic settings, drawn from time, light, tone, composition,\nshot size, and camera angle. Shot size: Extreme close-up shot, Close-up shot, Medium close-up shot, Medium\nshot, Medium wide shot, Wide shot, Extreme wide shot; default Medium shot or\nWide shot. Camera angle: Over-the-shoulder shot, Low angle shot, High angle\nshot, Dutch angle shot, Aerial shot, Overhead shot; skip it when the request\nalready gives a camera move.\n\n## Generation context\n\nWan runs at 16 fps on a 4k+1 frame grid, so 49 frames is about three seconds and\n81 about five. Fit the action to that: two or three beats, one shot, one camera\nmove. A longer request renders as chained clips, and the seam carries motion\nonly on an image-conditioned checkpoint.\n\n## Examples\n\nInput: a fox in the snow\n\nOutput: Medium wide shot, day time, side lighting. A red fox trots through fresh\nsnow in a pine forest, breath drifting back, powder lifting from each paw. The\ncamera tracks alongside.\n\nInput: a paper boat in a rain gutter\n\nOutput: Close-up shot, overcast lighting. A folded paper boat drifts down a\ngutter, spins once against a leaf, then straightens and speeds up as the camera\npushes forward.\n\n## Pitfalls\n\nWan generates silent video. Never request dialogue or sound, or claim\nsynchronized audio. Wan S2V is a separate speech-to-video model. Wan 2.2 A14B\ndrives two experts from this one prompt, so keep it internally consistent. Read\none task leaf: text-to-video for T2V identities, image-conditioned for I2V and\nTI2V identities or any source frame.\n\n## CLI\n\n```bash\n# Wan 2.1 text-to-video (frames are 4k+1: 49, 81, 121, ...; MP4 default)\nmold run wan21-t2v-1.3b \"a red fox trotting through snow\" --frames 81 --fps 16\n# Wan 2.1 14B, the dense 2.1 quality tier (a bare name resolves :q8)\nmold run wan21-t2v-14b \"a red fox trotting through snow\"\n# Wan 2.2 A14B, 4-step Lightning tier (two experts, one resident at a time)\nmold run wan22-t2v-a14b:q5 \"a paper boat drifting down a rain gutter\"\nmold run wan22-i2v-a14b:q5 \"the balloon lifts off\" --image balloon.png\n# Low-VRAM tier: Q4_K_M A14B keeps the same Lightning recipe\nmold run wan22-t2v-a14b:q4 \"a paper boat drifting down a rain gutter\"\n# fp8-scaled A14B quality tier (20-step recipe, lower peak VRAM than :q8)\nmold run wan22-t2v-a14b:fp8 \"storm waves crash over the lighthouse\"\n# Wan 2.2 5B at 720p24\nmold run wan22-ti2v-5b \"waves on a black sand beach\" --width 1280 --height 704 --frames 121 --fps 24\n# Q8_0 5B reaches smaller cards\nmold run wan22-ti2v-5b:q8 \"waves on a black sand beach\" --width 1280 --height 704\n# Sequences: past the per-clip envelope this auto-chains and stitches one MP4.\n# The seam continues only on an image-conditioned checkpoint; clips are 4k+1.\nmold run wan22-ti2v-5b:q8 \"a paper boat drifting down a rain gutter\" --frames 100 --clip-frames 49\n# Single-frame text-to-image: --frames 1 renders a still (png default, jpeg allowed)\nmold run wan22-t2v-a14b:q5 \"a lighthouse at dusk, volumetric fog\" --frames 1 -o still.png\n# Recipe controls: flow shift, sample solver, per-expert distill strength\nmold run wan22-t2v-a14b:q8 \"storm waves\" --sample-shift 12\nmold run wan22-t2v-a14b:q5 \"storm waves\" --sample-solver euler\nmold run wan22-t2v-a14b:q5 \"storm waves\" --distill-strength high=1.8,low=1.0 --steps 6\n# First/last-frame interpolation (A14B I2V or TI2V-5B; endpoints only)\nmold run wan22-i2v-a14b:q5 \"the sapling grows into an oak\" --image sapling.png --last-image oak.png\n# Send an explicit empty negative prompt, disabling the tuned model default\nmold run wan22-t2v-a14b:q5 \"a cat\" --no-negative\n# Animated WebP output\nmold run wan22-ti2v-5b:q8 \"waves on a black sand beach\" --frames 49 --format webp -o waves.webp\n```\n\n## Sources\n\n- https://github.com/Wan-Video/Wan2.2\n- https://github.com/Wan-Video/Wan2.2/blob/main/wan/utils/system_prompt.py\n- https://github.com/Wan-Video/Wan2.1/blob/main/wan/utils/prompt_extend.py\n- https://github.com/Wan-Video/Wan2.1/blob/main/wan/configs/shared_config.py\n",
+        "expansion_excerpt": "## Prompt style\n\nWrite one English shot description of about 100 words. Infer missing\ndetail for a short input without changing its intent. Enhance what the user\nnamed: appearance, expression, quantity, posture, visual style, spatial\nrelationships, shot scale. Never add a subject the input lacks. Detail how the\naction unfolds and give background elements their own motion. Use simple direct\nverbs. Emphasize motion and camera movement. Skip literary mood writing. Name a\nstyle only when the user did, and put it first; a 2D style takes no cinematic\nterms.\n\n## Syntax\n\nWan has no weighting syntax. The server prefills the model's tuned default\nnegative prompt, a standard Chinese quality list; never restate its terms in the\npositive. Keep quoted text verbatim.\n\nAdd at most four cinematic settings, drawn from time, light, tone, composition,\nshot size, and camera angle. Shot size: Extreme close-up shot, Close-up shot, Medium close-up shot, Medium\nshot, Medium wide shot, Wide shot, Extreme wide shot; default Medium shot or\nWide shot. Camera angle: Over-the-shoulder shot, Low angle shot, High angle\nshot, Dutch angle shot, Aerial shot, Overhead shot; skip it when the request\nalready gives a camera move.\n\n## Generation context\n\nWan runs at 16 fps on a 4k+1 frame grid, so 49 frames is about three seconds and\n81 about five. Fit the action to that: two or three beats, one shot, one camera\nmove. A longer request renders as chained clips, and the seam carries motion\nonly on an image-conditioned checkpoint.\n\n## Examples\n\nInput: a fox in the snow\n\nOutput: Medium wide shot, day time, side lighting. A red fox trots through fresh\nsnow in a pine forest, breath drifting back, powder lifting from each paw. The\ncamera tracks alongside.\n\nInput: a paper boat in a rain gutter\n\nOutput: Close-up shot, overcast lighting. A folded paper boat drifts down a\ngutter, spins once against a leaf, then straightens and speeds up as the camera\npushes forward.\n\n## Pitfalls\n\nWan generates silent video. Never request dialogue or sound, or claim\nsynchronized audio. Wan S2V is a separate speech-to-video model. Wan 2.2 A14B\ndrives two experts from this one prompt, so keep it internally consistent. Read\none task leaf: text-to-video for T2V identities, image-conditioned for I2V and\nTI2V identities or any source frame."
+      }
+    },
+    {
+      "family": "minimax-h3",
+      "aliases": [],
+      "word_limit": 250,
+      "guide": {
+        "path": "families/minimax-h3.md",
+        "contents": "# MiniMax H3 prompting\n\nManifest family: `minimax-h3`.\n\n## Prompt style\n\nWrite the three core fields in order: `integrated_multimodal_description`,\n`overall_soundscape`, `non_diegetic_music`. Every detail must be visible or\naudible. Open `[Shot 1]` with the visual style and initial composition, then\nsubjects, scene, and actions. Prefer concrete detail over abstract words.\nWrite in English, preserving the original language of dialogue, lyrics, and\nvisible text. Stay within 250 words.\n\n## Syntax\n\n`[Shot 1]` takes no timestamp. Later shots open `[Shot n] At MM:SS.mmm,` with\na strictly increasing cut time inside the duration. Write camera motion as\nnatural English in the shot: type, amplitude, speed. The types are Zoom\nIn/Out, Push In/Pull Out, Pan Left/Right, Truck Left/Right, Tilt Up/Down,\nPedestal Up/Down, Arc Shot, Tracking Shot, Static Shot, Shake\nSlightly/Strongly, POV, and Roll Clockwise/Counterclockwise. Omit amplitude\nand speed when medium and normal. Give each vocal source a stable id such as\n`(S1)`, with its identifying phrase and delivery outside the tag. Inside\n`<d>[English] ...</d>` put only the language tag and the verbatim words. For\nvoiceover use the exact phrase \"says in an off-screen voiceover\", then state\nthat the character's lips remain closed. Use `<scenetrans>` where a line\ncrosses a cut and `<cutoff>` where speech is truncated by the ending. Quote\nvisible on-screen text verbatim. Reference labels `<Picture n>`, `<Video n>`,\nand `<Audio n>` keep one meaning across every section.\n\n## Generation context\n\nMatch the described duration to the requested four to fifteen seconds.\n`overall_soundscape` is one to four sentences of ambience, action sounds, and\nnon-verbal sounds, never repeating dialogue or music. `non_diegetic_music`\ncovers instrumentation, tempo, and dynamics; `N/A` when no score is wanted.\n\n## Examples\n\nInput: a baker opens the shutters before sunrise and says one line\n\n```text\nintegrated_multimodal_description: [Shot 1] Live-action, cinematic, a medium-wide shot frames a baker opening a street bakery's shutters before sunrise. The camera pushes in at slow speed as the baker with a calm, raspy voice (S1) says: <d>[English] First batch of the morning.</d>\n\noverall_soundscape: Wooden shutters scrape open over a quiet street as trays clink.\n\nnon_diegetic_music: A soft acoustic-guitar pattern at a moderate tempo.\n```\n\n## Pitfalls\n\nAvoid plot summaries, unresolved labels, and timing that misses the duration.\nExpansion produces this grammar when given the H3 route. Check live runtime\navailability before promising speech; mold's tokenizer does not yet register\nthe official dialogue tokens (issue #1430).\n\n## CLI\n\nRead exactly one direct task leaf from `SKILL.md`: base modes for FL2VA\nidentities, or Ref2VA for reference-conditioned identities.\n\n```bash\n# Feed a written Context-IR prompt from a file\nmold run minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p \"$(cat h3-prompt.txt)\" --first-frame presenter.png --duration 5 --seed 83009\n```\n\n## Sources\n\n- https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/SKILL.md\n- https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/base-en.txt\n- https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/ref-en.txt\n- https://huggingface.co/MiniMaxAI/MiniMax-H3\n",
+        "expansion_excerpt": "## Prompt style\n\nWrite the three core fields in order: `integrated_multimodal_description`,\n`overall_soundscape`, `non_diegetic_music`. Every detail must be visible or\naudible. Open `[Shot 1]` with the visual style and initial composition, then\nsubjects, scene, and actions. Prefer concrete detail over abstract words.\nWrite in English, preserving the original language of dialogue, lyrics, and\nvisible text. Stay within 250 words.\n\n## Syntax\n\n`[Shot 1]` takes no timestamp. Later shots open `[Shot n] At MM:SS.mmm,` with\na strictly increasing cut time inside the duration. Write camera motion as\nnatural English in the shot: type, amplitude, speed. The types are Zoom\nIn/Out, Push In/Pull Out, Pan Left/Right, Truck Left/Right, Tilt Up/Down,\nPedestal Up/Down, Arc Shot, Tracking Shot, Static Shot, Shake\nSlightly/Strongly, POV, and Roll Clockwise/Counterclockwise. Omit amplitude\nand speed when medium and normal. Give each vocal source a stable id such as\n`(S1)`, with its identifying phrase and delivery outside the tag. Inside\n`<d>[English] ...</d>` put only the language tag and the verbatim words. For\nvoiceover use the exact phrase \"says in an off-screen voiceover\", then state\nthat the character's lips remain closed. Use `<scenetrans>` where a line\ncrosses a cut and `<cutoff>` where speech is truncated by the ending. Quote\nvisible on-screen text verbatim. Reference labels `<Picture n>`, `<Video n>`,\nand `<Audio n>` keep one meaning across every section.\n\n## Generation context\n\nMatch the described duration to the requested four to fifteen seconds.\n`overall_soundscape` is one to four sentences of ambience, action sounds, and\nnon-verbal sounds, never repeating dialogue or music. `non_diegetic_music`\ncovers instrumentation, tempo, and dynamics; `N/A` when no score is wanted.\n\n## Examples\n\nInput: a baker opens the shutters before sunrise and says one line\n\n```text\nintegrated_multimodal_description: [Shot 1] Live-action, cinematic, a medium-wide shot frames a baker opening a street bakery's shutters before sunrise. The camera pushes in at slow speed as the baker with a calm, raspy voice (S1) says: <d>[English] First batch of the morning.</d>\n\noverall_soundscape: Wooden shutters scrape open over a quiet street as trays clink.\n\nnon_diegetic_music: A soft acoustic-guitar pattern at a moderate tempo.\n```\n\n## Pitfalls\n\nAvoid plot summaries, unresolved labels, and timing that misses the duration.\nExpansion produces this grammar when given the H3 route. Check live runtime\navailability before promising speech; mold's tokenizer does not yet register\nthe official dialogue tokens (issue #1430)."
+      }
+    },
+    {
+      "family": "upscaler",
+      "aliases": [],
+      "word_limit": 20,
+      "guide": {
+        "path": "families/upscaler.md",
+        "contents": "# Upscaler prompting\n\nManifest family: `upscaler`.\n\n## Prompt style\n\nWrite no prompt. Real-ESRGAN upscalers have no text encoder, so the\n20-word budget is unused and the model choice does all the work.\n\n## Syntax\n\nNo weighting, no negative prompt, no quoted text, and no reference addressing.\n\n## Generation context\n\nThe scale factor is fixed by the chosen model, 2x or 4x, and the canvas follows\nthe source image. Pick the general model for photographs and mixed artwork, or\nan anime model for line art. Lower the tile size when VRAM is tight.\n\n## Examples\n\nInput: make this photo bigger\n\nOutput: No prompt. Run the general 4x model and compare against the original.\n\nInput: upscale this anime cel\n\nOutput: No prompt. Run an anime 4x model so the line art stays clean.\n\n## Pitfalls\n\n- Judge fine texture, halos, and facial detail against the original at 100\n  percent zoom.\n- Upscaling cannot recover detail the source never held.\n\n## CLI\n\n```bash\n# Default general model, auto-downloads on the host that runs the job\nmold upscale photo.png\n\n# Anime line art\nmold upscale photo.png -m real-esrgan-x4plus-anime:fp16\n\n# Custom output path with an inline preview\nmold upscale photo.png -o photo_4x.png --preview\n\n# Smaller tile size for limited VRAM\nmold upscale large_photo.png --tile-size 256\n```\n\n## Sources\n\n- https://github.com/xinntao/Real-ESRGAN\n",
+        "expansion_excerpt": "## Prompt style\n\nWrite no prompt. Real-ESRGAN upscalers have no text encoder, so the\n20-word budget is unused and the model choice does all the work.\n\n## Syntax\n\nNo weighting, no negative prompt, no quoted text, and no reference addressing.\n\n## Generation context\n\nThe scale factor is fixed by the chosen model, 2x or 4x, and the canvas follows\nthe source image. Pick the general model for photographs and mixed artwork, or\nan anime model for line art. Lower the tile size when VRAM is tight.\n\n## Examples\n\nInput: make this photo bigger\n\nOutput: No prompt. Run the general 4x model and compare against the original.\n\nInput: upscale this anime cel\n\nOutput: No prompt. Run an anime 4x model so the line art stays clean.\n\n## Pitfalls\n\n- Judge fine texture, halos, and facial detail against the original at 100\n  percent zoom.\n- Upscaling cannot recover detail the source never held."
+      }
+    }
+  ],
+  "task_leaves": [
+    {
+      "family": "minimax-h3",
+      "label": "MiniMax H3 base modes",
+      "tasks": [
+        "text-to-video",
+        "image-to-video",
+        "keyframe-interpolation"
+      ],
+      "word_limit": 250,
+      "standalone": false,
+      "guide": {
+        "path": "minimax-h3/base-modes.md",
+        "contents": "# MiniMax H3 base modes\n\n## Prompt style\n\nT2VA builds the whole timeline from text. I2VA, FL2VA, and L2VA prepend one\ninstruction line, a blank line, then the three core fields:\n\n```text\nFor the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n```\n\nPreserve the frame's identity, clothing, layout, lighting, and composition,\nthen describe one continuous observable path forward. Never contradict it.\n\n## Examples\n\n```text\nintegrated_multimodal_description: [Shot 1] Live-action, cinematic, the presenter shown in <Picture 1> retains the exact face, clothing, workstation layout, lighting, and framing. The camera trucks right at slow speed as the presenter turns toward the lens. The presenter with a bright voice (S1) says: <d>[English] With Mold, your ideas render right here.</d> Their lips synchronize; they gesture once.\n\noverall_soundscape: Low workstation airflow continues beneath clean close-miked speech.\n\nnon_diegetic_music: N/A\n```\n\n## CLI\n\n```bash\n# First-frame conditioning; the prompt file holds the instruction line plus the three fields\nmold run minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p \"$(cat h3-prompt.txt)\" --first-frame presenter.png --duration 5 --seed 83009\n```\n\n## Sources\n\n- https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/base-en.txt\n",
+        "expansion_excerpt": "## Prompt style\n\nT2VA builds the whole timeline from text. I2VA, FL2VA, and L2VA prepend one\ninstruction line, a blank line, then the three core fields:\n\n```text\nFor the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n```\n\nPreserve the frame's identity, clothing, layout, lighting, and composition,\nthen describe one continuous observable path forward. Never contradict it.\n\n## Examples\n\n```text\nintegrated_multimodal_description: [Shot 1] Live-action, cinematic, the presenter shown in <Picture 1> retains the exact face, clothing, workstation layout, lighting, and framing. The camera trucks right at slow speed as the presenter turns toward the lens. The presenter with a bright voice (S1) says: <d>[English] With Mold, your ideas render right here.</d> Their lips synchronize; they gesture once.\n\noverall_soundscape: Low workstation airflow continues beneath clean close-miked speech.\n\nnon_diegetic_music: N/A\n```"
+      }
+    },
+    {
+      "family": "minimax-h3",
+      "label": "MiniMax H3 Ref2VA",
+      "tasks": [
+        "reference-to-audio-video"
+      ],
+      "word_limit": 300,
+      "standalone": false,
+      "guide": {
+        "path": "minimax-h3/ref2va.md",
+        "contents": "# MiniMax H3 Ref2VA\n\n## Prompt style\n\nRef2VA replaces the three core fields with six, in order:\n`subject_definitions`, `summary`, `retention_analysis`,\n`detailed_description`, `overall_soundscape`, `non_diegetic_music`. Establish\nthe style in one sentence before `[Shot 1]`. State which traits each reference\nowns, and never let one reference silently replace another's identity, motion,\nor sound role.\n\n## Syntax\n\nLabel references `<Picture n>`, `<Video n>`, and `<Audio n>` in the order\nsupplied, counting each category independently. A reference video carrying a\nsoundtrack also takes the next `<Audio n>` label first, so strip unwanted\naudio before upload. Retention markers are `fully_preserved`,\n`partially_preserved`, `attribute_transfer`, and `weak_reference`; audio uses\n`fully_copy`, `partially_copy`, `reference`, and `weak_reference`.\n\n## Generation context\n\nA five-second clip normally stays one continuous shot. Keep speech short\nenough to finish before the final pose.\n\n## CLI\n\nReferences upload through authenticated endpoints, so `MOLD_API_KEY` must be\nset. The supplied order is part of the render.\n\n```bash\n# Ordered reference set: images, then video, then audio\nmold run minimax-h3-ref2va:comfy-pruned-int8 \"$(cat h3-ref-prompt.txt)\" --reference image=a.png --reference video=b.mp4 --reference audio=c.wav\n```\n\n## Sources\n\n- https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/ref-en.txt\n",
+        "expansion_excerpt": "## Prompt style\n\nRef2VA replaces the three core fields with six, in order:\n`subject_definitions`, `summary`, `retention_analysis`,\n`detailed_description`, `overall_soundscape`, `non_diegetic_music`. Establish\nthe style in one sentence before `[Shot 1]`. State which traits each reference\nowns, and never let one reference silently replace another's identity, motion,\nor sound role.\n\n## Syntax\n\nLabel references `<Picture n>`, `<Video n>`, and `<Audio n>` in the order\nsupplied, counting each category independently. A reference video carrying a\nsoundtrack also takes the next `<Audio n>` label first, so strip unwanted\naudio before upload. Retention markers are `fully_preserved`,\n`partially_preserved`, `attribute_transfer`, and `weak_reference`; audio uses\n`fully_copy`, `partially_copy`, `reference`, and `weak_reference`.\n\n## Generation context\n\nA five-second clip normally stays one continuous shot. Keep speech short\nenough to finish before the final pose."
+      }
+    },
+    {
+      "family": "wan",
+      "label": "Wan text-to-video",
+      "tasks": [
+        "text-to-video"
+      ],
+      "word_limit": 100,
+      "standalone": false,
+      "guide": {
+        "path": "wan/text-to-video.md",
+        "contents": "# Wan text-to-video\n\n## Prompt style\n\nUse for T2V identities. Open with the shot size, then the subject and setting,\nthen the action in two or three beats, then background motion and lighting.\nClose with the one camera move. Keep to about 100 words.\n\n## Generation context\n\nOne continuous shot per clip, no cuts. A T2V checkpoint cannot carry a chain\nseam, so clips in a longer sequence are independent shots. Ask for an\nimage-conditioned checkpoint when motion must continue across clips.\n\n## Examples\n\nInput: a fox in the snow, tracking shot\n\nOutput: Medium wide shot at sunrise, side lighting. A red fox trots through\nfresh snow in a pine forest; breath drifts back and powder lifts from each paw.\nThe camera tracks alongside in one continuous move.\n\n## Pitfalls\n\nDo not name two camera moves or a second unrelated action.\n\n## CLI\n\n```bash\nmold run wan22-t2v-a14b:q4 \\\n  \"Medium-wide wildlife shot at sunrise. A red fox trots steadily through fresh snow in a quiet pine forest; visible breath drifts back and powder lifts from each paw. The camera tracks alongside at eye level in one continuous move. Soft side light, realistic fur, stable background, no text.\" \\\n  --width 832 --height 480 --frames 49 --fps 16 --seed 83005\nmold run wan21-t2v-1.3b \"a red fox trotting through snow\" --frames 81 --fps 16\n```\n\n## Sources\n\n- https://github.com/Wan-Video/Wan2.1/blob/main/wan/utils/prompt_extend.py\n- https://github.com/Wan-Video/Wan2.2/blob/main/wan/utils/system_prompt.py\n",
+        "expansion_excerpt": "## Prompt style\n\nUse for T2V identities. Open with the shot size, then the subject and setting,\nthen the action in two or three beats, then background motion and lighting.\nClose with the one camera move. Keep to about 100 words.\n\n## Generation context\n\nOne continuous shot per clip, no cuts. A T2V checkpoint cannot carry a chain\nseam, so clips in a longer sequence are independent shots. Ask for an\nimage-conditioned checkpoint when motion must continue across clips.\n\n## Examples\n\nInput: a fox in the snow, tracking shot\n\nOutput: Medium wide shot at sunrise, side lighting. A red fox trots through\nfresh snow in a pine forest; breath drifts back and powder lifts from each paw.\nThe camera tracks alongside in one continuous move.\n\n## Pitfalls\n\nDo not name two camera moves or a second unrelated action."
+      }
+    },
+    {
+      "family": "wan",
+      "label": "Wan image-conditioned",
+      "tasks": [
+        "image-to-video",
+        "keyframe-interpolation"
+      ],
+      "word_limit": 80,
+      "standalone": false,
+      "guide": {
+        "path": "wan/image-conditioned.md",
+        "contents": "# Wan image-conditioned video\n\n## Prompt style\n\nUse for I2V and TI2V identities and any source frame. Stay under 80\nwords and write dynamics only. Drop description already visible in the frame,\nwhich owns appearance. Supplement a bare action with the visible subject, so\n\"dancing\" becomes \"the girl is dancing\". Keep and emphasize camera phrases such\nas \"the camera pans up\".\n\n## Generation context\n\nName what must stay stable. For a first and last frame pair, describe a\nphysically continuous path between them and the change that happens: walking\ninto, appearing, turning into, camera left, camera right. Check the model row\nfor its supported source roles.\n\n## Examples\n\nInput: dancing\n\nOutput: The girl is dancing, turning slowly on the spot as her skirt lifts. The\ncamera pushes forward.\n\n## Pitfalls\n\nDo not redescribe or contradict the frame.\n\n## CLI\n\n```bash\nmold run wan22-i2v-a14b:q5 \"the balloon lifts off\" --image balloon.png\nmold run wan22-i2v-a14b:q5 \"the sapling grows into an oak\" --image sapling.png --last-image oak.png\nmold run wan22-ti2v-5b:q8 \"the paper boat drifts on down the gutter\" --image boat.png --frames 100 --clip-frames 49\n```\n\n## Sources\n\n- https://github.com/Wan-Video/Wan2.2/blob/main/wan/utils/system_prompt.py\n- https://github.com/Wan-Video/Wan2.1/blob/main/wan/utils/prompt_extend.py\n",
+        "expansion_excerpt": "## Prompt style\n\nUse for I2V and TI2V identities and any source frame. Stay under 80\nwords and write dynamics only. Drop description already visible in the frame,\nwhich owns appearance. Supplement a bare action with the visible subject, so\n\"dancing\" becomes \"the girl is dancing\". Keep and emphasize camera phrases such\nas \"the camera pans up\".\n\n## Generation context\n\nName what must stay stable. For a first and last frame pair, describe a\nphysically continuous path between them and the change that happens: walking\ninto, appearing, turning into, camera left, camera right. Check the model row\nfor its supported source roles.\n\n## Examples\n\nInput: dancing\n\nOutput: The girl is dancing, turning slowly on the spot as her skirt lifts. The\ncamera pushes forward.\n\n## Pitfalls\n\nDo not redescribe or contradict the frame."
+      }
+    },
+    {
+      "family": "ltx2",
+      "label": "LTX-2 Dub-It",
+      "tasks": [],
+      "word_limit": 120,
+      "standalone": false,
+      "guide": {
+        "path": "ltx2/dub-it.md",
+        "contents": "# LTX-2 Dub-It\n\n## Prompt style\n\nThe reference video owns timing, visible speakers, cuts, and mouth motion.\nWrite replacement speech that fits the observed speaking windows, identify\neach speaker consistently, and describe voice, accent, emotion, and delivery.\nDo not change the visual action. Preserve the existing ambience unless asked\nto replace it.\n\n## Generation context\n\nDuration is not yours to choose: the reference supplies frames and fps, and\nboth axes must be multiples of 64. Fit the new line inside the same speaking\nwindow, because a longer line desynchronizes the mouth. The reference must\ncarry an audio track, since its speech is what the dub imitates.\n\n## Examples\n\nInput: make the presenter say the new tagline in a calmer tone\n\nOutput: The same speaker says in a calm, lower voice, \"We render it locally\nnow.\" The room tone underneath is unchanged.\n\n## CLI\n\nInspect `mold --help` and the selected host's capabilities for the current\nDub-It invocation; do not infer support from the family name alone. Verify the\nreturned clip before reporting success.\n\n```bash\n# Re-voice a clip of someone speaking; frames and fps come from the reference\nmold run ltx-2.3-22b-distilled:fp8 \"she says: the harbour freezes every winter\" --ic-lora-control lipdub --video speaker.mp4 --width 704 --height 448\n```\n\n## Sources\n\n- https://github.com/Lightricks/LTX-2 (`DubItPipeline`, `packages/ltx-pipelines/src/ltx_pipelines/dubit.py`)\n",
+        "expansion_excerpt": "## Prompt style\n\nThe reference video owns timing, visible speakers, cuts, and mouth motion.\nWrite replacement speech that fits the observed speaking windows, identify\neach speaker consistently, and describe voice, accent, emotion, and delivery.\nDo not change the visual action. Preserve the existing ambience unless asked\nto replace it.\n\n## Generation context\n\nDuration is not yours to choose: the reference supplies frames and fps, and\nboth axes must be multiples of 64. Fit the new line inside the same speaking\nwindow, because a longer line desynchronizes the mouth. The reference must\ncarry an audio track, since its speech is what the dub imitates.\n\n## Examples\n\nInput: make the presenter say the new tagline in a calmer tone\n\nOutput: The same speaker says in a calm, lower voice, \"We render it locally\nnow.\" The room tone underneath is unchanged."
+      }
+    },
+    {
+      "family": "ltx2",
+      "label": "LTX-2 text-to-audio",
+      "tasks": [
+        "text-to-audio"
+      ],
+      "word_limit": 120,
+      "standalone": true,
+      "guide": {
+        "path": "ltx2/text-to-audio.md",
+        "contents": "# LTX-2 text-to-audio\n\n## Prompt style\n\nDescribe the audible result rather than a camera scene: sound sources, their\nsequence, the space, distance, dynamics, and texture. For speech, give the\nexact short line and describe voice and delivery. Keep dialogue, ambience,\neffects, and music in separate clauses so their roles do not conflict.\n\n## Generation context\n\nDuration comes from `--frames` and `--fps`, so 121 frames at 24 fps is about\nfive seconds. Write only as much sound as fits that span. Text-to-audio\nrejects every conditioning input and renders no picture, so describe nothing\nvisual.\n\n## Examples\n\nInput: rain on a roof\n\nOutput: Heavy rain drums on a tin roof at a steady rate as water spills from a\ngutter to the left. Distant thunder rolls twice, seconds apart, with no music.\n\n## CLI\n\nInspect `mold --help` and the selected host's capabilities for the current\ntext-to-audio invocation. Verify the returned artifact is audio before\nreporting success.\n\n```bash\n# Audio only, 16-bit stereo WAV; duration is frames divided by fps\nmold run ltx-2.3-22b-dev:fp8 \"heavy rain on a tin roof, distant thunder\" --pipeline t2a --frames 121 --fps 24 --output rain.wav\n```\n\n## Sources\n\n- https://github.com/Lightricks/LTX-2 (audio VAE and vocoder, `packages/ltx-pipelines`)\n",
+        "expansion_excerpt": "## Prompt style\n\nDescribe the audible result rather than a camera scene: sound sources, their\nsequence, the space, distance, dynamics, and texture. For speech, give the\nexact short line and describe voice and delivery. Keep dialogue, ambience,\neffects, and music in separate clauses so their roles do not conflict.\n\n## Generation context\n\nDuration comes from `--frames` and `--fps`, so 121 frames at 24 fps is about\nfive seconds. Write only as much sound as fits that span. Text-to-audio\nrejects every conditioning input and renders no picture, so describe nothing\nvisual.\n\n## Examples\n\nInput: rain on a roof\n\nOutput: Heavy rain drums on a tin roof at a steady rate as water spills from a\ngutter to the left. Distant thunder rolls twice, seconds apart, with no music."
+      }
+    }
+  ],
+  "model_leaves": [
+    {
+      "family": "flux",
+      "label": "FLUX.1 Schnell",
+      "models": [
+        "flux-schnell"
+      ],
+      "guide": {
+        "path": "models/flux-schnell.md",
+        "contents": "# FLUX.1 Schnell prompting\n\n## Prompt style\n\nA four-step distilled FLUX.1 for drafts and thumbnails. Give it one subject,\none action, one setting, and one style word. Guidance is fixed at 0.\n\n## Syntax\n\nA negative prompt does nothing: Schnell has no negative branch, and true CFG\nneeds an identity reference. Quoted lettering is unreliable at four steps.\n\n## Pitfalls\n\nPiling on detail returns the average of it rather than all of it. Move to Dev\nor Krea when materials, small text, or exact spatial relationships matter.\n\n## CLI\n\n```bash\nmold run flux-schnell:q8 \"a red fox asleep on a mossy log, soft morning light\" --steps 4\nmold run flux-schnell:bf16 \"a lighthouse in a storm, dramatic illustration\" --steps 4 --seed 12\n```\n\n## Sources\n\n- https://huggingface.co/black-forest-labs/FLUX.1-schnell\n- https://docs.bfl.ai/guides/prompting_unified_basics\n",
+        "expansion_excerpt": "## Prompt style\n\nA four-step distilled FLUX.1 for drafts and thumbnails. Give it one subject,\none action, one setting, and one style word. Guidance is fixed at 0.\n\n## Syntax\n\nA negative prompt does nothing: Schnell has no negative branch, and true CFG\nneeds an identity reference. Quoted lettering is unreliable at four steps.\n\n## Pitfalls\n\nPiling on detail returns the average of it rather than all of it. Move to Dev\nor Krea when materials, small text, or exact spatial relationships matter."
+      }
+    },
+    {
+      "family": "flux2",
+      "label": "FLUX.2 Klein base (undistilled)",
+      "models": [
+        "flux2-klein-base",
+        "flux2-klein-base-9b"
+      ],
+      "guide": {
+        "path": "models/flux2-klein-base.md",
+        "contents": "# FLUX.2 Klein Base prompting\n\n## Prompt style\n\nThe undistilled 4B and 9B Klein weights, at 50 steps and guidance 4.0, so they\ncarry a far denser brief than four-step Klein. Keep FLUX.2's Subject + Action +\nStyle + Context order.\n\n## Syntax\n\nThe only FLUX.2 tier where a negative prompt works: above guidance 1.0 it runs\na real unconditional branch. `--guidance 1` skips it and the negative prompt\ngoes inert.\n\n## Pitfalls\n\nGuidance above 1.0 costs two forward passes per step. Reusing a four-step Klein\nrecipe wastes the model.\n\n## CLI\n\n```bash\nmold run flux2-klein-base:q8 \"a brass orrery on a walnut desk, low winter sun through tall windows\" \\\n  --steps 50 --guidance 4.0 --negative-prompt \"blurry, warped rings, text, watermark\"\n\nmold run flux2-klein-base-9b:q6 \"an empty greenhouse at dawn, condensation on the glass, terracotta pots\" \\\n  --steps 50 --guidance 4.0\n```\n\n## Sources\n\n- https://docs.bfl.ai/guides/prompting_guide_flux2\n- https://huggingface.co/black-forest-labs/FLUX.2-klein-base\n",
+        "expansion_excerpt": "## Prompt style\n\nThe undistilled 4B and 9B Klein weights, at 50 steps and guidance 4.0, so they\ncarry a far denser brief than four-step Klein. Keep FLUX.2's Subject + Action +\nStyle + Context order.\n\n## Syntax\n\nThe only FLUX.2 tier where a negative prompt works: above guidance 1.0 it runs\na real unconditional branch. `--guidance 1` skips it and the negative prompt\ngoes inert.\n\n## Pitfalls\n\nGuidance above 1.0 costs two forward passes per step. Reusing a four-step Klein\nrecipe wastes the model."
+      }
+    },
+    {
+      "family": "sdxl",
+      "label": "SDXL Turbo",
+      "models": [
+        "sdxl-turbo"
+      ],
+      "guide": {
+        "path": "models/sdxl-turbo.md",
+        "contents": "# SDXL Turbo prompting\n\n## Prompt style\n\nOne simple idea in a short sentence: subject, setting, treatment. Turbo renders\nin four steps at guidance 0, so extra clauses average out instead of resolving.\nIts native canvas is 512x512.\n\n## Syntax\n\nGuidance 0 runs no classifier-free branch, so a negative prompt has no effect\nhere. Never pass true CFG. Turbo is the one SDXL checkpoint that identity\nconditioning does not accept.\n\n## Pitfalls\n\nRaising steps and guidance to base-SDXL values degrades Turbo rather than\nimproving it. Long tag lists are wasted tokens.\n\n## CLI\n\n```bash\nmold run sdxl-turbo:fp16 \"a red canoe on a still lake at dawn\" --steps 4 --seed 88\nmold run sdxl-turbo:fp16 \"neon ramen counter at night, documentary photograph\" --width 512 --height 512\n```\n\n## Sources\n\n- https://huggingface.co/stabilityai/sdxl-turbo\n",
+        "expansion_excerpt": "## Prompt style\n\nOne simple idea in a short sentence: subject, setting, treatment. Turbo renders\nin four steps at guidance 0, so extra clauses average out instead of resolving.\nIts native canvas is 512x512.\n\n## Syntax\n\nGuidance 0 runs no classifier-free branch, so a negative prompt has no effect\nhere. Never pass true CFG. Turbo is the one SDXL checkpoint that identity\nconditioning does not accept.\n\n## Pitfalls\n\nRaising steps and guidance to base-SDXL values degrades Turbo rather than\nimproving it. Long tag lists are wasted tokens."
+      }
+    },
+    {
+      "family": "sdxl",
+      "label": "Pony Diffusion V6 XL",
+      "models": [
+        "pony-v6",
+        "cyberrealistic-pony"
+      ],
+      "guide": {
+        "path": "models/pony-v6.md",
+        "contents": "# Pony Diffusion V6 XL prompting\n\n## Prompt style\n\nBooru tags, comma separated. Open with the score prefix `score_9, score_8_up,\nscore_7_up, score_6_up, score_5_up, score_4_up`, then a source tag\n(`source_anime`, `source_pony`, `source_furry`, `source_cartoon`), then a\nrating tag (`rating_safe`, `rating_questionable`, `rating_explicit`), then\nsubject tags. CyberRealistic Pony uses the same prefix, photographic tags.\n\n## Syntax\n\nThe author says it needs no negative prompt in most cases and warns off quality\nwords like masterpiece. Community practice adds `score_6, score_5, score_4`\nthere.\n\n## Pitfalls\n\nWithout the score prefix, output looks washed out. mold has no clip skip\ncontrol.\n\n## CLI\n\n```bash\nmold run pony-v6:fp16 \\\n  \"score_9, score_8_up, score_7_up, source_anime, rating_safe, 1girl, red scarf, snowy street, city lights, night\" \\\n  --negative-prompt \"score_6, score_5, score_4, blurry, watermark\" --seed 606\n\nmold run cyberrealistic-pony:fp16 \\\n  \"score_9, score_8_up, score_7_up, rating_safe, portrait photograph of a woman, freckles, soft window light, 85mm\" \\\n  --negative-prompt \"score_6, score_5, score_4, cartoon, text, watermark\"\n```\n\n## Sources\n\n- https://civitai.com/models/257749/pony-diffusion-v6-xl\n- https://huggingface.co/AstraliteHeart/pony-diffusion-v6\n",
+        "expansion_excerpt": "## Prompt style\n\nBooru tags, comma separated. Open with the score prefix `score_9, score_8_up,\nscore_7_up, score_6_up, score_5_up, score_4_up`, then a source tag\n(`source_anime`, `source_pony`, `source_furry`, `source_cartoon`), then a\nrating tag (`rating_safe`, `rating_questionable`, `rating_explicit`), then\nsubject tags. CyberRealistic Pony uses the same prefix, photographic tags.\n\n## Syntax\n\nThe author says it needs no negative prompt in most cases and warns off quality\nwords like masterpiece. Community practice adds `score_6, score_5, score_4`\nthere.\n\n## Pitfalls\n\nWithout the score prefix, output looks washed out. mold has no clip skip\ncontrol."
+      }
+    },
+    {
+      "family": "sdxl",
+      "label": "Playground v2.5",
+      "models": [
+        "playground-v2.5"
+      ],
+      "guide": {
+        "path": "models/playground-v2.5.md",
+        "contents": "# Playground v2.5 prompting\n\n## Prompt style\n\nAn aesthetic SDXL fine-tune tuned for photographic and painterly quality. It\nlikes short natural prompts: one subject, one setting, one lighting note. Extra\ntags and quality words do not add polish, because the aesthetic is baked in.\n\n## Syntax\n\nAn ordinary SDXL negative prompt applies. There are no trigger words.\n\n## Pitfalls\n\nIt runs the EDM DPM++ 2M scheduler at 50 steps and guidance 3.0. Pushing\nguidance toward SDXL's 7.5 oversaturates and hardens the image.\n\n## CLI\n\n```bash\nmold run playground-v2.5:fp16 \"a quiet harbour at first light, fishing boats at anchor\" \\\n  --steps 50 --guidance 3.0 --seed 250\n\nmold run playground-v2.5:fp16 \"portrait of a ceramicist in her studio, soft north light\" \\\n  --negative-prompt \"blurry, text, watermark\"\n```\n\n## Sources\n\n- https://huggingface.co/playgroundai/playground-v2.5-1024px-aesthetic\n",
+        "expansion_excerpt": "## Prompt style\n\nAn aesthetic SDXL fine-tune tuned for photographic and painterly quality. It\nlikes short natural prompts: one subject, one setting, one lighting note. Extra\ntags and quality words do not add polish, because the aesthetic is baked in.\n\n## Syntax\n\nAn ordinary SDXL negative prompt applies. There are no trigger words.\n\n## Pitfalls\n\nIt runs the EDM DPM++ 2M scheduler at 50 steps and guidance 3.0. Pushing\nguidance toward SDXL's 7.5 oversaturates and hardens the image."
+      }
+    },
+    {
+      "family": "sd3",
+      "label": "SD 3.5 Large Turbo",
+      "models": [
+        "sd3.5-large-turbo"
+      ],
+      "guide": {
+        "path": "models/sd3.5-large-turbo.md",
+        "contents": "# SD 3.5 Large Turbo prompting\n\n## Prompt style\n\nOne idea, one or two sentences, well under 150 words. This\ncheckpoint is distilled to four steps, so a dense multi-clause brief resolves\nworse than a single subject with its setting and light.\n\n## Syntax\n\nIt runs at guidance 1.0, so the negative prompt is ignored. Exclude things by\ndescribing what belongs in the frame instead. Quoted on-image text still works.\n\n## Pitfalls\n\nCrowded scenes and fine texture degrade against SD3.5 Large. Raising the step\ncount does not buy back that fidelity.\n\n## CLI\n\n```bash\nmold run sd3.5-large-turbo:q8 \"A lone sailboat on a mirror-flat lake at dawn, wide landscape photograph\" --steps 4 --seed 2026\n```\n\n## Sources\n\n- https://huggingface.co/stabilityai/stable-diffusion-3.5-large-turbo\n",
+        "expansion_excerpt": "## Prompt style\n\nOne idea, one or two sentences, well under 150 words. This\ncheckpoint is distilled to four steps, so a dense multi-clause brief resolves\nworse than a single subject with its setting and light.\n\n## Syntax\n\nIt runs at guidance 1.0, so the negative prompt is ignored. Exclude things by\ndescribing what belongs in the frame instead. Quoted on-image text still works.\n\n## Pitfalls\n\nCrowded scenes and fine texture degrade against SD3.5 Large. Raising the step\ncount does not buy back that fidelity."
+      }
+    },
+    {
+      "family": "qwen-image",
+      "label": "Qwen-Image few-step distills",
+      "models": [
+        "qwen-image-flash",
+        "qwen-image-distill",
+        "qwen-image-lightning"
+      ],
+      "guide": {
+        "path": "models/qwen-image-flash.md",
+        "contents": "# Qwen-Image few-step distills prompting\n\nCovers `qwen-image-flash`, `qwen-image-distill`, and `qwen-image-lightning`.\n\n## Prompt style\n\nSimplify. Keep the official rewrite rules but drop the densest art direction\nand stay well under 180 words. One subject, one setting, one style.\n\n## Syntax\n\nAll three run CFG-free at guidance 1.0, so the negative prompt is ignored.\nQuoted on-image text still works but keep it short.\n\n## Pitfalls\n\nFixed step recipes: flash 4, distill 15, lightning 4 or 8 by tag. Dense small\ntext, hair-fine detail, and very complex scenes degrade against base.\n\n## CLI\n\n```bash\n# NVIDIA DMD2 four-step distill of base\nmold run qwen-image-flash:q8 \"A red enamel teapot on a sunlit windowsill, still-life photograph\" --steps 4 --seed 251203\n\n# DiffSynth 15-step distill: closer to base fidelity\nmold run qwen-image-distill:q8 \"A quiet harbour at dawn, fishing boats at anchor, realistic photography\" --steps 15 --seed 251204\n\n# Lightning, eight-step tag\nmold run qwen-image-lightning:fp8-8step \"A snowy mountain village at blue hour, warm window lights\" --steps 8 --seed 251205\n```\n\n## Sources\n\n- https://raw.githubusercontent.com/QwenLM/Qwen-Image/main/src/examples/tools/prompt_utils.py\n- https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning\n",
+        "expansion_excerpt": "Covers `qwen-image-flash`, `qwen-image-distill`, and `qwen-image-lightning`.\n\n## Prompt style\n\nSimplify. Keep the official rewrite rules but drop the densest art direction\nand stay well under 180 words. One subject, one setting, one style.\n\n## Syntax\n\nAll three run CFG-free at guidance 1.0, so the negative prompt is ignored.\nQuoted on-image text still works but keep it short.\n\n## Pitfalls\n\nFixed step recipes: flash 4, distill 15, lightning 4 or 8 by tag. Dense small\ntext, hair-fine detail, and very complex scenes degrade against base."
+      }
+    },
+    {
+      "family": "qwen-image-edit",
+      "label": "Qwen-Image-Edit Lightning",
+      "models": [
+        "qwen-image-edit-lightning"
+      ],
+      "guide": {
+        "path": "models/qwen-image-edit-lightning.md",
+        "contents": "# Qwen-Image-Edit Lightning prompting\n\n## Prompt style\n\nA four-step fused Lightning distill of Edit-2511. Keep the edit simple: one\nchange plus the invariants, well under 100 words. Chained or\nmulti-part instructions resolve poorly in four steps.\n\n## Syntax\n\nIt runs at guidance 1.0, so the negative prompt is ignored. Quoted text edits\nand ordinal image addressing behave as on the base edit checkpoint.\n\n## Pitfalls\n\nFine texture and small lettering degrade against Edit-2511. Prefer the base\ncheckpoint when the edit has to survive close inspection.\n\n## CLI\n\n```bash\nmold run qwen-image-edit-lightning:fp8 'Replace the sign text with \"CLOSED\", keeping the font, colour, and placement.' --image shop.png --seed 251112\n```\n\n## Sources\n\n- https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning\n- https://raw.githubusercontent.com/QwenLM/Qwen-Image/main/src/examples/tools/prompt_utils.py\n",
+        "expansion_excerpt": "## Prompt style\n\nA four-step fused Lightning distill of Edit-2511. Keep the edit simple: one\nchange plus the invariants, well under 100 words. Chained or\nmulti-part instructions resolve poorly in four steps.\n\n## Syntax\n\nIt runs at guidance 1.0, so the negative prompt is ignored. Quoted text edits\nand ordinal image addressing behave as on the base edit checkpoint.\n\n## Pitfalls\n\nFine texture and small lettering degrade against Edit-2511. Prefer the base\ncheckpoint when the edit has to survive close inspection."
+      }
+    },
+    {
+      "family": "ltx2",
+      "label": "LTX-2.5",
+      "models": [
+        "ltx-2.5-22b-dev",
+        "ltx-2.5-22b-distilled"
+      ],
+      "guide": {
+        "path": "models/ltx-2.5.md",
+        "contents": "# LTX-2.5 22B\n\n## Generation context\n\nBoth base names resolve to the `int8-conv` pack by default. The prompt is\nencoded by a packed Gemma 4 text encoder this family requires. Audio renders\nby default on MP4 output; `--audio` states it explicitly and `--no-audio`\nsuppresses it. `--predict-duration` lets a qualified duration head choose a\none to twenty second clip in place of `--frames`, so describe an action whose\nlength is not fixed.\n\n## Pitfalls\n\nThe distilled recipe fixes guidance at 1.0. Do not override it.\n\n## CLI\n\n```bash\n# Distilled default pack, duration head picks the clip length\nmold run ltx-2.5-22b-distilled \"a complete product reveal\" --predict-duration --fps 24 --audio --format mp4\n\n# Base checkpoint at an explicit length\nmold run ltx-2.5-22b-dev \"a slow flyover of a salt flat at dawn\" --frames 121 --fps 24 --audio\n```\n\n## Sources\n\n- https://github.com/Lightricks/LTX-2 (LTX-2.5 checkpoints and duration head)\n- https://huggingface.co/Lightricks/LTX-2.5\n",
+        "expansion_excerpt": "## Generation context\n\nBoth base names resolve to the `int8-conv` pack by default. The prompt is\nencoded by a packed Gemma 4 text encoder this family requires. Audio renders\nby default on MP4 output; `--audio` states it explicitly and `--no-audio`\nsuppresses it. `--predict-duration` lets a qualified duration head choose a\none to twenty second clip in place of `--frames`, so describe an action whose\nlength is not fixed.\n\n## Pitfalls\n\nThe distilled recipe fixes guidance at 1.0. Do not override it."
+      }
+    },
+    {
+      "family": "wan",
+      "label": "Wan 2.2 TI2V-5B",
+      "models": [
+        "wan22-ti2v-5b"
+      ],
+      "guide": {
+        "path": "models/wan22-ti2v-5b.md",
+        "contents": "# Wan 2.2 TI2V-5B\n\n## Generation context\n\nThe family's 720p path: 1280x704 at 24 fps, 4k+1 frames, both dimensions a\nmultiple of 32. One checkpoint serves text-to-video and image-conditioned work,\nso a chain seam continues on it and a long sequence keeps one motion.\n\n## Pitfalls\n\nAt 24 fps a 121-frame clip runs five seconds, so pace the action faster than on\nthe 16 fps tiers. Keep a `:turbo` prompt to one simple idea.\n\n## CLI\n\n```bash\nmold run wan22-ti2v-5b \"waves on a black sand beach\" --width 1280 --height 704 --frames 121 --fps 24\nmold run wan22-ti2v-5b:q8 \"a paper boat drifting down a rain gutter\" --frames 100 --clip-frames 49\nmold run wan22-ti2v-5b:turbo \"waves on a black sand beach\" --width 1280 --height 704\nmold run wan22-ti2v-5b:q8 \"the balloon lifts off\" --image balloon.png --frames 49\n```\n\n## Sources\n\n- https://github.com/Wan-Video/Wan2.2\n- https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B\n",
+        "expansion_excerpt": "## Generation context\n\nThe family's 720p path: 1280x704 at 24 fps, 4k+1 frames, both dimensions a\nmultiple of 32. One checkpoint serves text-to-video and image-conditioned work,\nso a chain seam continues on it and a long sequence keeps one motion.\n\n## Pitfalls\n\nAt 24 fps a 121-frame clip runs five seconds, so pace the action faster than on\nthe 16 fps tiers. Keep a `:turbo` prompt to one simple idea."
+      }
+    }
+  ],
+  "routes": [
+    {
+      "model": "flux-schnell",
+      "family": "flux",
+      "paths": [
+        "shared.md",
+        "families/flux.md",
+        "models/flux-schnell.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 627
+    },
+    {
+      "model": "flux-dev",
+      "family": "flux",
+      "paths": [
+        "shared.md",
+        "families/flux.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 544
+    },
+    {
+      "model": "flux-krea",
+      "family": "flux",
+      "paths": [
+        "shared.md",
+        "families/flux.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 544
+    },
+    {
+      "model": "jibmix-flux",
+      "family": "flux",
+      "paths": [
+        "shared.md",
+        "families/flux.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 544
+    },
+    {
+      "model": "ultrareal-v2",
+      "family": "flux",
+      "paths": [
+        "shared.md",
+        "families/flux.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 544
+    },
+    {
+      "model": "ultrareal-v3",
+      "family": "flux",
+      "paths": [
+        "shared.md",
+        "families/flux.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 544
+    },
+    {
+      "model": "ultrareal-v4",
+      "family": "flux",
+      "paths": [
+        "shared.md",
+        "families/flux.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 544
+    },
+    {
+      "model": "iniverse-mix",
+      "family": "flux",
+      "paths": [
+        "shared.md",
+        "families/flux.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 544
+    },
+    {
+      "model": "sd15",
+      "family": "sd15",
+      "paths": [
+        "shared.md",
+        "families/sd15.md"
+      ],
+      "word_limit": 50,
+      "excerpt_words": 471
+    },
+    {
+      "model": "dreamshaper-v8",
+      "family": "sd15",
+      "paths": [
+        "shared.md",
+        "families/sd15.md"
+      ],
+      "word_limit": 50,
+      "excerpt_words": 471
+    },
+    {
+      "model": "realistic-vision-v5",
+      "family": "sd15",
+      "paths": [
+        "shared.md",
+        "families/sd15.md"
+      ],
+      "word_limit": 50,
+      "excerpt_words": 471
+    },
+    {
+      "model": "sd3.5-large",
+      "family": "sd3",
+      "paths": [
+        "shared.md",
+        "families/sd3.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 470
+    },
+    {
+      "model": "sd3.5-large-turbo",
+      "family": "sd3",
+      "paths": [
+        "shared.md",
+        "families/sd3.md",
+        "models/sd3.5-large-turbo.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 555
+    },
+    {
+      "model": "sd3.5-medium",
+      "family": "sd3",
+      "paths": [
+        "shared.md",
+        "families/sd3.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 470
+    },
+    {
+      "model": "sdxl-base",
+      "family": "sdxl",
+      "paths": [
+        "shared.md",
+        "families/sdxl.md"
+      ],
+      "word_limit": 60,
+      "excerpt_words": 509
+    },
+    {
+      "model": "dreamshaper-xl",
+      "family": "sdxl",
+      "paths": [
+        "shared.md",
+        "families/sdxl.md"
+      ],
+      "word_limit": 60,
+      "excerpt_words": 509
+    },
+    {
+      "model": "juggernaut-xl",
+      "family": "sdxl",
+      "paths": [
+        "shared.md",
+        "families/sdxl.md"
+      ],
+      "word_limit": 60,
+      "excerpt_words": 509
+    },
+    {
+      "model": "realvis-xl",
+      "family": "sdxl",
+      "paths": [
+        "shared.md",
+        "families/sdxl.md"
+      ],
+      "word_limit": 60,
+      "excerpt_words": 509
+    },
+    {
+      "model": "playground-v2.5",
+      "family": "sdxl",
+      "paths": [
+        "shared.md",
+        "families/sdxl.md",
+        "models/playground-v2.5.md"
+      ],
+      "word_limit": 60,
+      "excerpt_words": 587
+    },
+    {
+      "model": "pony-v6",
+      "family": "sdxl",
+      "paths": [
+        "shared.md",
+        "families/sdxl.md",
+        "models/pony-v6.md"
+      ],
+      "word_limit": 60,
+      "excerpt_words": 596
+    },
+    {
+      "model": "cyberrealistic-pony",
+      "family": "sdxl",
+      "paths": [
+        "shared.md",
+        "families/sdxl.md",
+        "models/pony-v6.md"
+      ],
+      "word_limit": 60,
+      "excerpt_words": 596
+    },
+    {
+      "model": "sdxl-turbo",
+      "family": "sdxl",
+      "paths": [
+        "shared.md",
+        "families/sdxl.md",
+        "models/sdxl-turbo.md"
+      ],
+      "word_limit": 60,
+      "excerpt_words": 596
+    },
+    {
+      "model": "z-image-turbo",
+      "family": "z-image",
+      "paths": [
+        "shared.md",
+        "families/z-image.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 425
+    },
+    {
+      "model": "flux2-klein",
+      "family": "flux2",
+      "paths": [
+        "shared.md",
+        "families/flux2.md"
+      ],
+      "word_limit": 120,
+      "excerpt_words": 554
+    },
+    {
+      "model": "flux2-klein-9b",
+      "family": "flux2",
+      "paths": [
+        "shared.md",
+        "families/flux2.md"
+      ],
+      "word_limit": 120,
+      "excerpt_words": 554
+    },
+    {
+      "model": "flux2-dev",
+      "family": "flux2",
+      "paths": [
+        "shared.md",
+        "families/flux2.md"
+      ],
+      "word_limit": 120,
+      "excerpt_words": 554
+    },
+    {
+      "model": "flux2-klein-base",
+      "family": "flux2",
+      "paths": [
+        "shared.md",
+        "families/flux2.md",
+        "models/flux2-klein-base.md"
+      ],
+      "word_limit": 120,
+      "excerpt_words": 639
+    },
+    {
+      "model": "flux2-klein-base-9b",
+      "family": "flux2",
+      "paths": [
+        "shared.md",
+        "families/flux2.md",
+        "models/flux2-klein-base.md"
+      ],
+      "word_limit": 120,
+      "excerpt_words": 639
+    },
+    {
+      "model": "qwen-image",
+      "family": "qwen-image",
+      "paths": [
+        "shared.md",
+        "families/qwen-image.md"
+      ],
+      "word_limit": 180,
+      "excerpt_words": 484
+    },
+    {
+      "model": "qwen-image-2512",
+      "family": "qwen-image",
+      "paths": [
+        "shared.md",
+        "families/qwen-image.md"
+      ],
+      "word_limit": 180,
+      "excerpt_words": 484
+    },
+    {
+      "model": "qwen-image-lightning",
+      "family": "qwen-image",
+      "paths": [
+        "shared.md",
+        "families/qwen-image.md",
+        "models/qwen-image-flash.md"
+      ],
+      "word_limit": 180,
+      "excerpt_words": 567
+    },
+    {
+      "model": "qwen-image-flash",
+      "family": "qwen-image",
+      "paths": [
+        "shared.md",
+        "families/qwen-image.md",
+        "models/qwen-image-flash.md"
+      ],
+      "word_limit": 180,
+      "excerpt_words": 567
+    },
+    {
+      "model": "qwen-image-distill",
+      "family": "qwen-image",
+      "paths": [
+        "shared.md",
+        "families/qwen-image.md",
+        "models/qwen-image-flash.md"
+      ],
+      "word_limit": 180,
+      "excerpt_words": 567
+    },
+    {
+      "model": "qwen-image-edit-2511",
+      "family": "qwen-image-edit",
+      "paths": [
+        "shared.md",
+        "families/qwen-image-edit.md"
+      ],
+      "word_limit": 100,
+      "excerpt_words": 494
+    },
+    {
+      "model": "qwen-image-edit-lightning",
+      "family": "qwen-image-edit",
+      "paths": [
+        "shared.md",
+        "families/qwen-image-edit.md",
+        "models/qwen-image-edit-lightning.md"
+      ],
+      "word_limit": 100,
+      "excerpt_words": 575
+    },
+    {
+      "model": "wuerstchen-v2",
+      "family": "wuerstchen",
+      "paths": [
+        "shared.md",
+        "families/wuerstchen.md"
+      ],
+      "word_limit": 50,
+      "excerpt_words": 325
+    },
+    {
+      "model": "hunyuan3d-mini-turbo",
+      "family": "hunyuan3d",
+      "paths": [
+        "shared.md",
+        "families/hunyuan3d.md"
+      ],
+      "word_limit": 40,
+      "excerpt_words": 395
+    },
+    {
+      "model": "hunyuan3d-turbo",
+      "family": "hunyuan3d",
+      "paths": [
+        "shared.md",
+        "families/hunyuan3d.md"
+      ],
+      "word_limit": 40,
+      "excerpt_words": 395
+    },
+    {
+      "model": "hunyuan3d",
+      "family": "hunyuan3d",
+      "paths": [
+        "shared.md",
+        "families/hunyuan3d.md"
+      ],
+      "word_limit": 40,
+      "excerpt_words": 395
+    },
+    {
+      "model": "ltx-video-0.9.6",
+      "family": "ltx-video",
+      "paths": [
+        "shared.md",
+        "families/ltx-video.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 497
+    },
+    {
+      "model": "ltx-video-0.9.6-distilled",
+      "family": "ltx-video",
+      "paths": [
+        "shared.md",
+        "families/ltx-video.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 497
+    },
+    {
+      "model": "ltx-video-0.9.8-2b-distilled",
+      "family": "ltx-video",
+      "paths": [
+        "shared.md",
+        "families/ltx-video.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 497
+    },
+    {
+      "model": "ltx-video-0.9.8-13b-dev",
+      "family": "ltx-video",
+      "paths": [
+        "shared.md",
+        "families/ltx-video.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 497
+    },
+    {
+      "model": "ltx-video-0.9.8-13b-distilled",
+      "family": "ltx-video",
+      "paths": [
+        "shared.md",
+        "families/ltx-video.md"
+      ],
+      "word_limit": 150,
+      "excerpt_words": 497
+    },
+    {
+      "model": "ltx-2-19b-dev",
+      "family": "ltx2",
+      "paths": [
+        "shared.md",
+        "families/ltx2.md"
+      ],
+      "word_limit": 200,
+      "excerpt_words": 458
+    },
+    {
+      "model": "ltx-2-19b-distilled",
+      "family": "ltx2",
+      "paths": [
+        "shared.md",
+        "families/ltx2.md"
+      ],
+      "word_limit": 200,
+      "excerpt_words": 458
+    },
+    {
+      "model": "ltx-2.3-22b-dev",
+      "family": "ltx2",
+      "paths": [
+        "shared.md",
+        "families/ltx2.md"
+      ],
+      "word_limit": 200,
+      "excerpt_words": 458
+    },
+    {
+      "model": "ltx-2.3-22b-distilled",
+      "family": "ltx2",
+      "paths": [
+        "shared.md",
+        "families/ltx2.md"
+      ],
+      "word_limit": 200,
+      "excerpt_words": 458
+    },
+    {
+      "model": "ltx-2.5-22b-dev",
+      "family": "ltx2",
+      "paths": [
+        "shared.md",
+        "families/ltx2.md",
+        "models/ltx-2.5.md"
+      ],
+      "word_limit": 200,
+      "excerpt_words": 539
+    },
+    {
+      "model": "ltx-2.5-22b-distilled",
+      "family": "ltx2",
+      "paths": [
+        "shared.md",
+        "families/ltx2.md",
+        "models/ltx-2.5.md"
+      ],
+      "word_limit": 200,
+      "excerpt_words": 539
+    },
+    {
+      "model": "wan21-t2v-1.3b",
+      "family": "wan",
+      "paths": [
+        "shared.md",
+        "families/wan.md",
+        "wan/text-to-video.md"
+      ],
+      "word_limit": 100,
+      "excerpt_words": 592
+    },
+    {
+      "model": "wan21-t2v-14b",
+      "family": "wan",
+      "paths": [
+        "shared.md",
+        "families/wan.md",
+        "wan/text-to-video.md"
+      ],
+      "word_limit": 100,
+      "excerpt_words": 592
+    },
+    {
+      "model": "wan22-ti2v-5b",
+      "family": "wan",
+      "paths": [
+        "shared.md",
+        "families/wan.md",
+        "wan/image-conditioned.md",
+        "models/wan22-ti2v-5b.md"
+      ],
+      "word_limit": 80,
+      "excerpt_words": 657
+    },
+    {
+      "model": "wan22-t2v-a14b",
+      "family": "wan",
+      "paths": [
+        "shared.md",
+        "families/wan.md",
+        "wan/text-to-video.md"
+      ],
+      "word_limit": 100,
+      "excerpt_words": 592
+    },
+    {
+      "model": "wan22-i2v-a14b",
+      "family": "wan",
+      "paths": [
+        "shared.md",
+        "families/wan.md",
+        "wan/image-conditioned.md"
+      ],
+      "word_limit": 80,
+      "excerpt_words": 587
+    },
+    {
+      "model": "minimax-h3-fl2va",
+      "family": "minimax-h3",
+      "paths": [
+        "shared.md",
+        "families/minimax-h3.md",
+        "minimax-h3/base-modes.md"
+      ],
+      "word_limit": 250,
+      "excerpt_words": 595
+    },
+    {
+      "model": "minimax-h3-ref2va",
+      "family": "minimax-h3",
+      "paths": [
+        "shared.md",
+        "families/minimax-h3.md",
+        "minimax-h3/ref2va.md"
+      ],
+      "word_limit": 300,
+      "excerpt_words": 579
+    },
+    {
+      "model": "real-esrgan-x4plus",
+      "family": "upscaler",
+      "paths": [
+        "shared.md",
+        "families/upscaler.md"
+      ],
+      "word_limit": 20,
+      "excerpt_words": 229
+    },
+    {
+      "model": "real-esrgan-x4plus-anime",
+      "family": "upscaler",
+      "paths": [
+        "shared.md",
+        "families/upscaler.md"
+      ],
+      "word_limit": 20,
+      "excerpt_words": 229
+    },
+    {
+      "model": "real-esrgan-anime-v3",
+      "family": "upscaler",
+      "paths": [
+        "shared.md",
+        "families/upscaler.md"
+      ],
+      "word_limit": 20,
+      "excerpt_words": 229
+    },
+    {
+      "model": "real-esrgan-x2plus",
+      "family": "upscaler",
+      "paths": [
+        "shared.md",
+        "families/upscaler.md"
+      ],
+      "word_limit": 20,
+      "excerpt_words": 229
+    }
+  ]
+}

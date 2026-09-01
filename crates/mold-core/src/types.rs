@@ -5534,6 +5534,7 @@ mod tests {
             "prompt": "the balloon lifts off",
             "width": 832,
             "height": 480,
+            "steps": 8,
             "frames": 81,
             "source_image": "AQID",
             "loras": [{"path": "/adapters/paper-boat.safetensors", "scale": 0.8}]

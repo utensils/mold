@@ -230,7 +230,6 @@ pub const TASK_LEAVES: &[TaskLeaf] = &[
     ),
 ];
 
-#[allow(unused_macros)]
 macro_rules! model_leaf {
     ($family:literal, $label:literal, $file:literal, $models:expr) => {
         ModelLeaf {
@@ -244,7 +243,67 @@ macro_rules! model_leaf {
 }
 
 /// Per-checkpoint quirk leaves. A model appears in at most one leaf.
-pub const MODEL_LEAVES: &[ModelLeaf] = &[];
+pub const MODEL_LEAVES: &[ModelLeaf] = &[
+    model_leaf!(
+        "flux",
+        "FLUX.1 Schnell",
+        "flux-schnell.md",
+        &["flux-schnell"]
+    ),
+    model_leaf!(
+        "flux2",
+        "FLUX.2 Klein base (undistilled)",
+        "flux2-klein-base.md",
+        &["flux2-klein-base", "flux2-klein-base-9b"]
+    ),
+    model_leaf!("sdxl", "SDXL Turbo", "sdxl-turbo.md", &["sdxl-turbo"]),
+    model_leaf!(
+        "sdxl",
+        "Pony Diffusion V6 XL",
+        "pony-v6.md",
+        &["pony-v6", "cyberrealistic-pony"]
+    ),
+    model_leaf!(
+        "sdxl",
+        "Playground v2.5",
+        "playground-v2.5.md",
+        &["playground-v2.5"]
+    ),
+    model_leaf!(
+        "sd3",
+        "SD 3.5 Large Turbo",
+        "sd3.5-large-turbo.md",
+        &["sd3.5-large-turbo"]
+    ),
+    model_leaf!(
+        "qwen-image",
+        "Qwen-Image few-step distills",
+        "qwen-image-flash.md",
+        &[
+            "qwen-image-flash",
+            "qwen-image-distill",
+            "qwen-image-lightning"
+        ]
+    ),
+    model_leaf!(
+        "qwen-image-edit",
+        "Qwen-Image-Edit Lightning",
+        "qwen-image-edit-lightning.md",
+        &["qwen-image-edit-lightning"]
+    ),
+    model_leaf!(
+        "ltx2",
+        "LTX-2.5",
+        "ltx-2.5.md",
+        &["ltx-2.5-22b-dev", "ltx-2.5-22b-distilled"]
+    ),
+    model_leaf!(
+        "wan",
+        "Wan 2.2 TI2V-5B",
+        "wan22-ti2v-5b.md",
+        &["wan22-ti2v-5b"]
+    ),
+];
 
 /// A resolved route: shared practice, one family base, at most one task
 /// leaf, at most one model leaf.
@@ -320,7 +379,7 @@ fn model_leaf(family: &str, model: &str) -> Option<&'static ModelLeaf> {
     let base = crate::manifest::model_base_name(model);
     MODEL_LEAVES
         .iter()
-        .find(|leaf| leaf.family == family && leaf.models.iter().any(|name| *name == base))
+        .find(|leaf| leaf.family == family && leaf.models.contains(&base))
 }
 
 /// Resolve the route for a family, an optional exact model identity, and an
@@ -894,6 +953,11 @@ mod tests {
                 "{path} has an unrendered placeholder"
             );
             assert!(!path.contains(':'), "identity tag leaked into {path}");
+            if path.starts_with("models/") {
+                // A model leaf is named after the checkpoint base name, which
+                // may legitimately be `sdxl-turbo`; only the `:tag` is banned.
+                continue;
+            }
             for tag in [
                 "q4",
                 "q5",

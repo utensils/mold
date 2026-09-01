@@ -32,6 +32,7 @@ fn expand_progress_callback() -> mold_inference::progress::ProgressCallback {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     prompt: &str,
     model: Option<&str>,
@@ -236,7 +237,7 @@ pub(crate) fn context_from_flags(
         return Ok(None);
     }
     Ok(Some(ExpandContext {
-        model: model.map(|model| mold_core::manifest::resolve_model_name(model)),
+        model: model.map(mold_core::manifest::resolve_model_name),
         width,
         height,
         frames,

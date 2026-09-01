@@ -24,8 +24,9 @@ export interface ExpansionTaskRequest {
   clip_frames?: number | null;
   enable_audio?: boolean | null;
   negative_prompt?: string | null;
-  lora?: string | null;
-  loras?: readonly { path?: string | null }[] | null;
+  /** A path string (web) or a `{ path, scale }` object (desktop). */
+  lora?: unknown;
+  loras?: readonly unknown[] | null;
   edit_images?: readonly unknown[] | null;
   id_images?: readonly unknown[] | null;
   source_image?: unknown;
@@ -155,8 +156,14 @@ export interface ExpandContext {
   loras?: string[];
 }
 
-function loraStem(path: string | null | undefined): string | null {
-  const trimmed = path?.trim();
+function loraStem(lora: unknown): string | null {
+  const path =
+    typeof lora === "string"
+      ? lora
+      : lora && typeof lora === "object" && "path" in lora
+        ? (lora as { path?: unknown }).path
+        : null;
+  const trimmed = typeof path === "string" ? path.trim() : "";
   if (!trimmed) return null;
   const base = trimmed.split(/[\\/]/).pop() ?? trimmed;
   return base.replace(/\.(safetensors|gguf|pt|bin)$/i, "");
@@ -234,7 +241,7 @@ export function expansionContextForRequest(
   const single = loraStem(request.lora);
   if (single) loras.push(single);
   for (const lora of request.loras ?? []) {
-    const stem = loraStem(lora?.path);
+    const stem = loraStem(lora);
     if (stem) loras.push(stem);
   }
   const context: ExpandContext = {};

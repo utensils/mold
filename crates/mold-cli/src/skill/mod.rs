@@ -1064,6 +1064,10 @@ mod tests {
 
         for path in canonical.keys() {
             assert!(!path.contains(':'), "identity tag leaked into {path}");
+            if path.starts_with("references/prompting/models/") {
+                // Model leaves are named after checkpoint base names.
+                continue;
+            }
             for tag in [
                 "q4",
                 "q5",
@@ -1355,9 +1359,7 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 << 20)
             .spawn(move || {
-                match crate::Cli::try_parse_from(
-                    std::iter::once("mold".to_string()).chain(argv.into_iter()),
-                ) {
+                match crate::Cli::try_parse_from(std::iter::once("mold".to_string()).chain(argv)) {
                     Ok(_) => Ok(()),
                     // `mold --help` and `mold <cmd> --help` are documented on
                     // purpose; clap reports them as errors that print help.
