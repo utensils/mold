@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { hunyuan3dRecipe, sdxlRecipe } from "./generationProfile.testFixtures";
 import {
+  IGNORED_PROMPT_PLACEHOLDER,
   OPTIONAL_PROMPT_GUIDANCE,
   OPTIONAL_PROMPT_PLACEHOLDER,
   familyAllowsEmptyPrompt,
@@ -8,27 +10,60 @@ import {
   promptOptional,
   promptPlaceholder,
   promptRequired,
+  promptRequirementFor,
+  promptRequirementForRecipe,
 } from "./promptRequirement";
 
-describe("familyAllowsEmptyPrompt", () => {
-  it("accepts the video families whose engines carry visual conditioning", () => {
+/** An LTX-2 recipe as the host advertises it: optional WITH conditioning. */
+function ltxRecipe() {
+  const recipe = sdxlRecipe();
+  recipe.capabilities.prompt = {
+    mode: "optional",
+    reason: "A conditioned render animates what it sees.",
+  };
+  return recipe;
+}
+
+describe("promptRequirementForRecipe", () => {
+  // The advertised mode answers for a CONDITIONED request, because that is
+  // the only case that can differ; the caller resolves it against the
+  // request it is building.
+  it("resolves an optional recipe to required until conditioning arrives", () => {
+    expect(promptRequirementForRecipe(ltxRecipe(), false)).toBe("required");
+    expect(promptRequirementForRecipe(ltxRecipe(), true)).toBe("optional");
+  });
+
+  it("keeps ignored ignored and required required regardless of conditioning", () => {
+    expect(promptRequirementForRecipe(hunyuan3dRecipe(), false)).toBe(
+      "ignored",
+    );
+    expect(promptRequirementForRecipe(hunyuan3dRecipe(), true)).toBe("ignored");
+    expect(promptRequirementForRecipe(sdxlRecipe(), true)).toBe("required");
+    expect(promptRequirementForRecipe(sdxlRecipe(), false)).toBe("required");
+  });
+
+  it("reads an older host's recipe that never advertised a prompt mode as required", () => {
+    const recipe = sdxlRecipe();
+    delete (recipe.capabilities as { prompt?: unknown }).prompt;
+    expect(promptRequirementForRecipe(recipe, true)).toBe("required");
+    expect(promptRequirementForRecipe(null, true)).toBe("required");
+    expect(promptRequirementForRecipe(undefined, true)).toBe("required");
+  });
+});
+
+describe("familyAllowsEmptyPrompt (deprecated)", () => {
+  it("answers through the recipe when one is passed", () => {
+    expect(familyAllowsEmptyPrompt("flux", ltxRecipe())).toBe(true);
+    expect(familyAllowsEmptyPrompt("flux", hunyuan3dRecipe())).toBe(true);
+    expect(familyAllowsEmptyPrompt("ltx2", sdxlRecipe())).toBe(false);
+  });
+
+  it("falls back to the legacy family rule without a recipe", () => {
     expect(familyAllowsEmptyPrompt("ltx2")).toBe(true);
-    expect(familyAllowsEmptyPrompt("ltx-2")).toBe(true);
-    expect(familyAllowsEmptyPrompt("ltx-video")).toBe(true);
-  });
-
-  it("normalizes case and surrounding whitespace like the server", () => {
-    expect(familyAllowsEmptyPrompt("  LTX2 ")).toBe(true);
-    expect(familyAllowsEmptyPrompt("LTX-Video")).toBe(true);
-  });
-
-  it("rejects image families and an unknown family", () => {
+    expect(familyAllowsEmptyPrompt("  LTX-Video ")).toBe(true);
     expect(familyAllowsEmptyPrompt("flux")).toBe(false);
-    expect(familyAllowsEmptyPrompt("qwen-image-edit")).toBe(false);
-    expect(familyAllowsEmptyPrompt("sd35")).toBe(false);
-    expect(familyAllowsEmptyPrompt("")).toBe(false);
     expect(familyAllowsEmptyPrompt(null)).toBe(false);
-    expect(familyAllowsEmptyPrompt(undefined)).toBe(false);
+    expect(familyAllowsEmptyPrompt("hunyuan3d", null)).toBe(false);
   });
 });
 
@@ -128,6 +163,49 @@ describe("promptRequired / promptOptional", () => {
     expect(promptRequired(undefined)).toBe(true);
   });
 
+  it("prefers the recipe carried on the input over the family rule", () => {
+    // A hunyuan3d recipe ignores the prompt entirely: optional even without
+    // conditioning, and the family string is never consulted.
+    expect(
+      promptRequirementFor({ family: "flux", recipe: hunyuan3dRecipe() }),
+    ).toBe("ignored");
+    expect(promptOptional({ family: "flux", recipe: hunyuan3dRecipe() })).toBe(
+      true,
+    );
+    // An optional recipe still needs conditioning to resolve.
+    expect(promptRequired({ family: "ltx2", recipe: ltxRecipe() })).toBe(true);
+    expect(
+      promptOptional({
+        family: "ltx2",
+        recipe: ltxRecipe(),
+        sourceImage: "b64",
+      }),
+    ).toBe(true);
+    // A required recipe overrides a legacy-optional family: the host knows.
+    expect(
+      promptRequired({
+        family: "ltx2",
+        recipe: sdxlRecipe(),
+        sourceImage: "b64",
+      }),
+    ).toBe(true);
+  });
+
+  it("uses the legacy family rule when the input carries no recipe", () => {
+    expect(promptRequirementFor({ family: "ltx2", sourceImage: "b64" })).toBe(
+      "optional",
+    );
+    expect(promptRequirementFor({ family: "ltx2" })).toBe("required");
+    expect(
+      promptRequirementFor({
+        family: "ltx2",
+        recipe: null,
+        sourceImage: "b64",
+      }),
+    ).toBe("optional");
+    expect(promptRequirementFor(null)).toBe("required");
+  });
+
   it("is the exact complement of promptOptional", () => {
     const inputs = [
       { family: "ltx2", sourceImage: "b64" },
@@ -158,6 +236,16 @@ describe("copy helpers", () => {
         "Describe the print…",
       ),
     ).toContain("synchronized shot");
+  });
+
+  it("tells the user the prompt is a note when the recipe ignores it", () => {
+    expect(
+      promptPlaceholder(
+        { family: "hunyuan3d", recipe: hunyuan3dRecipe() },
+        "Describe the print…",
+      ),
+    ).toBe(IGNORED_PROMPT_PLACEHOLDER);
+    expect(IGNORED_PROMPT_PLACEHOLDER.toLowerCase()).toContain("note");
   });
 
   // Two things the copy must never imply: that a blank prompt saves memory

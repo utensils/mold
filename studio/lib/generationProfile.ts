@@ -5,15 +5,21 @@ import type {
   GenerationRecipeProfile as WireGenerationRecipeProfile,
   GenerationProfileSet,
   IntegerControl,
+  MeshCapabilitiesProfile,
   OutputCapabilitiesProfile,
   OutputFormat,
   FloatControl,
   ProfileAspectGroup,
   ProfileFpsControl,
+  PromptCapabilitiesProfile,
   ResolutionProfile,
   TemporalProfile,
   WanRecipeCapabilitiesProfile,
 } from "./generated/generationProfileV1";
+import {
+  legacyPromptRequirementForFamily,
+  legacySupportsStrength,
+} from "./legacyRecipeRules";
 
 export type {
   AdapterControlProfile,
@@ -22,7 +28,10 @@ export type {
   FloatControl,
   GenerationProfileSet,
   IntegerControl,
+  MeshCapabilitiesProfile,
   OutputCapabilitiesProfile,
+  PromptCapabilitiesProfile,
+  PromptRequirement,
   ProfileAspectGroup,
   ProfileFpsControl,
   ProfileResolutionPreset,
@@ -131,6 +140,21 @@ export function generationRecipeSelectionError(
   )
     ? null
     : `Pipeline “${pipeline}” is not supported by this model.`;
+}
+
+/**
+ * Whether the recipe renders without a pixel canvas at all — a 3-D mesh
+ * recipe advertises `resolution.domain: "none"` with zero defaults, so
+ * width, height, and aspect controls have nothing to bind to and every
+ * surface hides them rather than rendering a canvas the request ignores.
+ */
+export function recipeIsCanvasless(
+  recipe:
+    | { resolution?: Pick<ResolutionProfile, "domain"> | null }
+    | null
+    | undefined,
+): boolean {
+  return recipe?.resolution?.domain === "none";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -310,7 +334,16 @@ function isRecipe(value: unknown): value is GenerationRecipeProfile {
     isWanRecipeCapabilities(caps.wan_recipe) &&
     (caps.schedulers === undefined ||
       (Array.isArray(caps.schedulers) &&
-        caps.schedulers.every((scheduler) => typeof scheduler === "string")));
+        caps.schedulers.every((scheduler) => typeof scheduler === "string"))) &&
+    // The three fields below are additive: an older host omits them, and
+    // serde's defaults (Required / false / absent) are what its silence
+    // means. Accept absence, refuse a shape this client cannot read.
+    (caps.prompt === undefined || isPromptCapabilities(caps.prompt)) &&
+    (caps.supports_strength === undefined ||
+      typeof caps.supports_strength === "boolean") &&
+    (caps.mesh === undefined ||
+      caps.mesh === null ||
+      isMeshCapabilities(caps.mesh));
   if (!structurallyValid) return false;
 
   const recipe = value as unknown as GenerationRecipeProfile;
@@ -346,6 +379,46 @@ function isRecipe(value: unknown): value is GenerationRecipeProfile {
         (recipe.defaults.fps === null ||
           recipe.defaults.fps === undefined ||
           fpsControlAccepts(recipe.temporal.fps, recipe.defaults.fps))))
+  );
+}
+
+function isPromptCapabilities(
+  value: unknown,
+): value is PromptCapabilitiesProfile {
+  return (
+    isRecord(value) &&
+    ["required", "optional", "ignored"].includes(String(value.mode)) &&
+    (value.reason === undefined ||
+      value.reason === null ||
+      typeof value.reason === "string")
+  );
+}
+
+/**
+ * The mesh block is validated as strictly as the canvas controls: the octree
+ * list is an ALLOWLIST the server evaluates on `(n + 1)^3` points, so a
+ * default outside it, or a non-integer entry, is a contract this client
+ * could only misrender.
+ */
+function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
+  if (!isRecord(value)) return false;
+  const { octree_resolutions, octree_default, target_faces_min } = value;
+  const { target_faces_max, export_formats } = value;
+  return (
+    Array.isArray(octree_resolutions) &&
+    octree_resolutions.length > 0 &&
+    octree_resolutions.every(positiveIntegerValue) &&
+    positiveIntegerValue(octree_default) &&
+    octree_resolutions.includes(octree_default) &&
+    isFloatControl(value.threshold) &&
+    positiveIntegerValue(target_faces_min) &&
+    positiveIntegerValue(target_faces_max) &&
+    target_faces_min <= target_faces_max &&
+    isFeatureControl(value.texture) &&
+    (export_formats === undefined ||
+      export_formats === null ||
+      (Array.isArray(export_formats) &&
+        export_formats.every((format) => typeof format === "string")))
   );
 }
 
@@ -645,13 +718,15 @@ function legacyRecipe(
         supports_first_last_frame: false,
       },
       schedulers: [],
-      // A legacy host advertises none of these, so the adapter answers what
-      // was true of every recipe before they existed. It deliberately does
-      // NOT try to reconstruct them from the family name: this object is
-      // this client talking, and a caller must be able to tell a host's
-      // answer from a fallback.
-      prompt: { mode: "required" },
-      supports_strength: false,
+      // A legacy host advertises neither field, so the adapter fills them
+      // from the rules every client applied to such a host before the
+      // fields existed — behaviour on an old host is unchanged, and a reader
+      // that resolves through the recipe gets the same answer it would have
+      // computed from the family. `legacy_adapter` still marks this object
+      // as the client talking, for callers that must tell a host's answer
+      // from a fallback. No legacy host has a mesh family.
+      prompt: { mode: legacyPromptRequirementForFamily(family) },
+      supports_strength: legacySupportsStrength(family, model.name ?? ""),
     },
   };
 }

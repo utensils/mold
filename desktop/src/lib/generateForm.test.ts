@@ -131,6 +131,8 @@ function profiledLtx2Model(): ModelEntry {
       mask: { mode: "hidden" as const, required: false },
       keyframes: { mode: "adjustable" as const, required: false },
       audio: { mode: "adjustable" as const, required: false },
+      prompt: { mode: "required" as const },
+      supports_strength: false,
       lora: { mode: "adjustable" as const, max_count: 4 },
       controlnet: { mode: "hidden" as const, max_count: 0 },
       output: {
