@@ -170,10 +170,7 @@ import {
   defaultSourceFitPolicy,
   parseSourceFitPolicy,
 } from "@studio/lib/sourceFit";
-import {
-  expansionContextForRequest,
-  expansionTaskForRequest,
-} from "@studio/lib/expandTask";
+import { expansionContextForRequest, expansionTaskForRequest } from "@studio/lib/expandTask";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";

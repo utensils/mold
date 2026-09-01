@@ -8061,7 +8061,8 @@ impl App {
                         mold_core::GenerationReferenceKind::Audio
                     }
                 },
-                has_audio: false,
+                has_audio: reference.kind == crate::h3_references::ReferenceKind::Video
+                    && crate::h3_references::video_has_audio(&reference.path),
                 role: Some(mold_core::ExpandReferenceRole::Reference),
             });
         }

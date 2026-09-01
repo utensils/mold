@@ -256,7 +256,9 @@
     {
       "family": "ltx2",
       "label": "LTX-2 Dub-It",
-      "tasks": [],
+      "tasks": [
+        "audio-driven-video"
+      ],
       "word_limit": 120,
       "standalone": false,
       "guide": {

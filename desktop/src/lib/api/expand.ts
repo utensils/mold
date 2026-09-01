@@ -1,10 +1,5 @@
 import { apiJson, apiJsonTo, type ApiTarget } from "./client";
-import type {
-  ExpandContext,
-  ExpandRequest,
-  ExpandResponse,
-  ExpandTask,
-} from "./types";
+import type { ExpandContext, ExpandRequest, ExpandResponse, ExpandTask } from "./types";
 
 export interface ExpandPromptOptions {
   /** Steers the expansion style; omitted → the server's default family. */

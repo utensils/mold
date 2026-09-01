@@ -696,7 +696,11 @@ pub fn format_expand_result(
         title: "Prompt Expanded".to_string(),
         description,
         fields: vec![
-            ("Original".to_string(), original_prompt.to_string(), false),
+            (
+                "Original".to_string(),
+                bounded_field(original_prompt),
+                false,
+            ),
             ("Family".to_string(), model_family.to_uppercase(), true),
             (
                 "Variations".to_string(),
@@ -705,6 +709,17 @@ pub fn format_expand_result(
             ),
         ],
         color: COLOR_SUCCESS,
+    }
+}
+
+/// Discord rejects an embed whose field value exceeds 1,024 characters.
+fn bounded_field(value: &str) -> String {
+    const LIMIT: usize = 1_024;
+    if value.chars().count() > LIMIT {
+        let truncated: String = value.chars().take(LIMIT - 3).collect();
+        format!("{truncated}...")
+    } else {
+        value.to_string()
     }
 }
 
@@ -743,7 +758,11 @@ pub fn format_remix_result(resp: &mold_core::RemixResponse, model_family: &str) 
         title: "Prompt Remixed".to_string(),
         description,
         fields: vec![
-            ("Source".to_string(), resp.source_prompt.clone(), false),
+            (
+                "Source".to_string(),
+                bounded_field(&resp.source_prompt),
+                false,
+            ),
             ("Family".to_string(), model_family.to_uppercase(), true),
             (
                 "Alternatives".to_string(),

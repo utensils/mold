@@ -1574,7 +1574,7 @@ mold run wan22-ti2v-5b:q8 "the paper boat drifts on down the gutter" --image boa
 
 <!-- ltx2/dub-it.md -->
 
-Family `ltx2`; tasks: explicit selection only; word limit: 120.
+Family `ltx2`; tasks: `audio-driven-video`; word limit: 120.
 
 ### LTX-2 Dub-It
 

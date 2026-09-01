@@ -29,10 +29,7 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
-import {
-  expansionContextForRequest,
-  expansionTaskForRequest,
-} from "@studio/lib/expandTask";
+import { expansionContextForRequest, expansionTaskForRequest } from "@studio/lib/expandTask";
 import {
   effectiveGenerationRecipe,
   fixedRecipeControlOverrides,

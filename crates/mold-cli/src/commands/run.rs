@@ -1367,6 +1367,15 @@ pub async fn run(
                 ));
             }
         }
+        let identity_count = identity
+            .id_images
+            .as_ref()
+            .map_or(usize::from(identity.id_image.is_some()), Vec::len);
+        for _ in 0..identity_count {
+            references.push(mold_core::ExpandReference::image(
+                mold_core::ExpandReferenceRole::Identity,
+            ));
+        }
         if source_video_bytes.is_some() || extend_video_bytes.is_some() {
             references.push(mold_core::ExpandReference {
                 kind: mold_core::GenerationReferenceKind::Video,

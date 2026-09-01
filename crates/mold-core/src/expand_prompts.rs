@@ -277,13 +277,41 @@ fn batch_template(task: ExpandTask) -> &'static str {
 /// any user-provided overrides on top of the corpus defaults. A custom
 /// `style_notes` override replaces the guide excerpt wholesale; a custom
 /// `word_limit` re-renders the excerpt with that budget.
+fn route_hints(context: Option<&ExpandContext>) -> prompting::RouteHints {
+    prompting::RouteHints {
+        source_video: context.is_some_and(|context| {
+            context.references.iter().any(|reference| {
+                reference.kind == crate::GenerationReferenceKind::Video
+                    && reference.role == Some(crate::ExpandReferenceRole::Source)
+            })
+        }),
+    }
+}
+
+#[cfg(test)]
 fn resolve_task_family_config(
     family: &str,
     model: Option<&str>,
     task: ExpandTask,
     overrides: Option<&FamilyOverride>,
 ) -> (u32, String) {
-    let route = prompting::route(family, model, Some(task)).ok();
+    resolve_task_family_config_with_hints(
+        family,
+        model,
+        task,
+        overrides,
+        prompting::RouteHints::default(),
+    )
+}
+
+fn resolve_task_family_config_with_hints(
+    family: &str,
+    model: Option<&str>,
+    task: ExpandTask,
+    overrides: Option<&FamilyOverride>,
+    hints: prompting::RouteHints,
+) -> (u32, String) {
+    let route = prompting::route_with_hints(family, model, Some(task), hints).ok();
     let default_limit = route
         .as_ref()
         .map_or(GENERIC_WORD_LIMIT, prompting::PromptingRoute::word_limit);
@@ -375,8 +403,13 @@ pub fn build_single_messages_for_task(
     context: Option<&ExpandContext>,
 ) -> Vec<(String, String)> {
     let model = context.and_then(|context| context.model.as_deref());
-    let (word_limit, model_notes) =
-        resolve_task_family_config(family, model, task, family_override);
+    let (word_limit, model_notes) = resolve_task_family_config_with_hints(
+        family,
+        model,
+        task,
+        family_override,
+        route_hints(context),
+    );
     let template = custom_template.unwrap_or_else(|| single_template(task));
     let mut system = template
         .replace("{WORD_LIMIT}", &word_limit.to_string())
@@ -454,8 +487,13 @@ pub fn build_batch_messages_with_context_for_task(
     context: Option<&ExpandContext>,
 ) -> Vec<(String, String)> {
     let model = context.and_then(|context| context.model.as_deref());
-    let (word_limit, model_notes) =
-        resolve_task_family_config(family, model, task, family_override);
+    let (word_limit, model_notes) = resolve_task_family_config_with_hints(
+        family,
+        model,
+        task,
+        family_override,
+        route_hints(context),
+    );
     let template = custom_template.unwrap_or_else(|| batch_template(task));
     let mut system = template
         .replace("{N}", &variations.to_string())
@@ -495,8 +533,13 @@ pub fn build_remix_messages_with_context_for_task(
     context: Option<&ExpandContext>,
 ) -> Vec<(String, String)> {
     let model = context.and_then(|context| context.model.as_deref());
-    let (word_limit, model_notes) =
-        resolve_task_family_config(family, model, task, family_override);
+    let (word_limit, model_notes) = resolve_task_family_config_with_hints(
+        family,
+        model,
+        task,
+        family_override,
+        route_hints(context),
+    );
     let start = logical_range.map_or(1, |(start, _)| start);
     let dimension_plan = (0..variations)
         .map(|offset| {
@@ -654,6 +697,50 @@ mod tests {
         assert!(msgs[0]
             .1
             .contains("GENERATION CONTEXT:\nTarget: video on wan22-ti2v-5b:q8"));
+    }
+
+    #[test]
+    fn a_source_video_routes_ltx2_audio_driven_expansion_to_the_dub_it_leaf() {
+        let context = ExpandContext {
+            model: Some("ltx-2.3-22b-distilled:fp8".into()),
+            references: vec![
+                crate::ExpandReference {
+                    kind: crate::GenerationReferenceKind::Video,
+                    has_audio: false,
+                    role: Some(crate::ExpandReferenceRole::Source),
+                },
+                crate::ExpandReference {
+                    kind: crate::GenerationReferenceKind::Audio,
+                    has_audio: false,
+                    role: Some(crate::ExpandReferenceRole::Source),
+                },
+            ],
+            ..ExpandContext::default()
+        };
+        let with_clip = build_single_messages_for_task(
+            "she says: the harbour freezes every winter",
+            "ltx2",
+            ExpandTask::AudioDrivenVideo,
+            None,
+            None,
+            None,
+            Some(&context),
+        );
+        let dub = prompting::route_with_leaf("ltx2", "", "ltx2/dub-it.md").unwrap();
+        let dub_excerpt = prompting::excerpt(dub.task.unwrap().contents, dub.word_limit());
+        let first_line = dub_excerpt.lines().nth(2).unwrap_or("");
+        assert!(!first_line.is_empty());
+        assert!(with_clip[0].1.contains(first_line), "{}", with_clip[0].1);
+        let without_clip = build_single_messages_for_task(
+            "a paper sculpture reacting to music",
+            "ltx2",
+            ExpandTask::AudioDrivenVideo,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!without_clip[0].1.contains(first_line));
     }
 
     #[test]

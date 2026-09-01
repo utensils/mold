@@ -92,6 +92,16 @@ pub struct TaskLeaf {
     /// The leaf replaces the family base in the expansion excerpt (an
     /// audio-only task must not inherit the family's camera language).
     pub standalone: bool,
+    /// The leaf applies only when the request carries a source video (Dub-It
+    /// re-voices an existing clip; plain audio-to-video does not).
+    pub needs_source_video: bool,
+}
+
+/// Request facts that refine leaf selection beyond family, identity, and task.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RouteHints {
+    /// A source video is attached (video-to-video, retake, lip dub).
+    pub source_video: bool,
 }
 
 /// A per-checkpoint quirk leaf added after the task leaf.
@@ -157,9 +167,21 @@ pub const FAMILY_GUIDES: &[FamilyGuide] = &[
 
 macro_rules! leaf {
     ($family:literal, $label:literal, $file:literal, $tasks:expr, $identity:expr, $limit:expr) => {
-        leaf!($family, $label, $file, $tasks, $identity, $limit, false)
+        leaf!($family, $label, $file, $tasks, $identity, $limit, false, false)
     };
     ($family:literal, $label:literal, $file:literal, $tasks:expr, $identity:expr, $limit:expr, $standalone:expr) => {
+        leaf!(
+            $family,
+            $label,
+            $file,
+            $tasks,
+            $identity,
+            $limit,
+            $standalone,
+            false
+        )
+    };
+    ($family:literal, $label:literal, $file:literal, $tasks:expr, $identity:expr, $limit:expr, $standalone:expr, $source_video:expr) => {
         TaskLeaf {
             family: $family,
             label: $label,
@@ -169,6 +191,7 @@ macro_rules! leaf {
             identity: $identity,
             word_limit: $limit,
             standalone: $standalone,
+            needs_source_video: $source_video,
         }
     };
 }
@@ -215,9 +238,11 @@ pub const TASK_LEAVES: &[TaskLeaf] = &[
         "ltx2",
         "LTX-2 Dub-It",
         "ltx2/dub-it.md",
-        &[],
+        &[ExpandTask::AudioDrivenVideo],
         IdentityMatch::Any,
-        Some(120)
+        Some(120),
+        false,
+        true
     ),
     leaf!(
         "ltx2",
@@ -363,16 +388,22 @@ fn identity_leaf(family: &str, model: &str) -> Option<&'static TaskLeaf> {
     })
 }
 
-fn task_leaf(family: &str, model: &str, task: ExpandTask) -> Option<&'static TaskLeaf> {
-    TASK_LEAVES
-        .iter()
-        .filter(|leaf| leaf.family == family && leaf.tasks.contains(&task))
-        .find(|leaf| leaf.identity.matches(model))
-        .or_else(|| {
-            TASK_LEAVES
-                .iter()
-                .find(|leaf| leaf.family == family && leaf.tasks.contains(&task))
+fn task_leaf(
+    family: &str,
+    model: &str,
+    task: ExpandTask,
+    hints: RouteHints,
+) -> Option<&'static TaskLeaf> {
+    let candidates = || {
+        TASK_LEAVES.iter().filter(|leaf| {
+            leaf.family == family
+                && leaf.tasks.contains(&task)
+                && (!leaf.needs_source_video || hints.source_video)
         })
+    };
+    candidates()
+        .find(|leaf| leaf.identity.matches(model))
+        .or_else(|| candidates().next())
 }
 
 fn model_leaf(family: &str, model: &str) -> Option<&'static ModelLeaf> {
@@ -393,11 +424,23 @@ pub fn route(
     model: Option<&str>,
     task: Option<ExpandTask>,
 ) -> Result<PromptingRoute, RouteError> {
+    route_with_hints(family, model, task, RouteHints::default())
+}
+
+/// [`route`] with request facts that refine leaf selection: an LTX-2
+/// audio-driven expansion reads the Dub-It leaf only when a source video is
+/// attached.
+pub fn route_with_hints(
+    family: &str,
+    model: Option<&str>,
+    task: Option<ExpandTask>,
+    hints: RouteHints,
+) -> Result<PromptingRoute, RouteError> {
     let family_guide =
         family_guide(family).ok_or_else(|| RouteError::UnknownFamily(family.to_string()))?;
     let model = model.unwrap_or("");
     let leaf = match task {
-        Some(task) => task_leaf(family_guide.family, model, task),
+        Some(task) => task_leaf(family_guide.family, model, task, hints),
         None => identity_leaf(family_guide.family, model),
     };
     Ok(PromptingRoute {
@@ -871,8 +914,25 @@ mod tests {
         assert_eq!(leaf("ltx2", "ltx-2.5-22b:q6", None), None);
         assert_eq!(
             leaf("ltx2", "ltx-2.5-22b:q6", Some(ExpandTask::TextToVideo)),
+            None
+        );
+        assert_eq!(
+            leaf("ltx2", "ltx-2.5-22b:q6", Some(ExpandTask::AudioDrivenVideo)),
             None,
-            "Dub-It is explicit-only"
+            "audio-to-video without a clip is not a dub"
+        );
+        assert_eq!(
+            route_with_hints(
+                "ltx2",
+                Some("ltx-2.5-22b:q6"),
+                Some(ExpandTask::AudioDrivenVideo),
+                RouteHints { source_video: true },
+            )
+            .unwrap()
+            .task
+            .map(|leaf| leaf.path),
+            Some("ltx2/dub-it.md"),
+            "lip dub re-voices an attached clip through the Dub-It leaf"
         );
         assert_eq!(
             route_with_leaf("ltx2", "ltx-2.5-22b:q6", "ltx2/dub-it.md")
