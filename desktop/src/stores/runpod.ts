@@ -3,12 +3,14 @@ import { ipc } from "../lib/ipc";
 import {
   emptyRunPodOverview,
   friendlyRunPodError,
+  isRunPodHostUrl,
   rankRunPodGpus,
   type RunPodCreateInput,
   type RunPodNetworkVolumeCreateInput,
   type RunPodNetworkVolumeUpdateInput,
   type RunPodOverview,
 } from "../lib/runpod";
+import { useHostsStore } from "./hosts";
 
 export const useRunPodStore = defineStore("runpod", {
   state: () => ({
@@ -123,7 +125,20 @@ export const useRunPodStore = defineStore("runpod", {
       try {
         if (action === "start") await ipc.runpodStart(id);
         else if (action === "stop") await ipc.runpodStop(id);
-        else await ipc.runpodDelete(id);
+        else {
+          const hosts = useHostsStore();
+          const connectedHostIds = hosts.extras
+            .filter((host) => isRunPodHostUrl(id, host.url))
+            .map((host) => host.id);
+          await ipc.runpodDelete(id);
+          const cleanup = await Promise.allSettled(
+            connectedHostIds.map((hostId) => hosts.disconnect(hostId)),
+          );
+          if (cleanup.some((result) => result.status === "rejected")) {
+            this.operationError =
+              "The RunPod instance was deleted and its activity was cleared, but Studio couldn't save the disconnected host. It may reappear after restart; disconnect it again if it does.";
+          }
+        }
         await this.load();
       } catch (error) {
         this.operationError = friendlyRunPodError(

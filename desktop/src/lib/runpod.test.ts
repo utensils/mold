@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   friendlyRunPodError,
   isNetworkVolumeDatacenter,
+  isRunPodHostUrl,
   podGpuName,
   podProxyUrl,
   rankRunPodGpus,
@@ -59,6 +60,11 @@ describe("RunPod presentation helpers", () => {
       running,
     );
     expect(runPodForHostUrl([stopped], "https://stopped-7680.proxy.runpod.net")).toBeNull();
+  });
+
+  it("recognizes a pod proxy even after that pod is stopped", () => {
+    expect(isRunPodHostUrl("abc123", "http://abc123-7680.proxy.runpod.net:80/api")).toBe(true);
+    expect(isRunPodHostUrl("abc123", "https://another-7680.proxy.runpod.net")).toBe(false);
   });
 
   it("uses the top-level REST GPU when machine metadata omits it", () => {

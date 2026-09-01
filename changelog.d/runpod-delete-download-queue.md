@@ -1,0 +1,1 @@
+- **Clean up deleted RunPod activity.** Deleting a RunPod instance now disconnects its Mold host so stale model-download rows and routing state disappear from Studio.
