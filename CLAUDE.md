@@ -128,13 +128,18 @@ it never looked at. They never expose paths or store identities and
 report explicit `unavailable_auth`, `unavailable_legacy`, and
 `unavailable_missing_or_corrupt` states; an empty member list after a CLEAN
 resolve is `unavailable_legacy`, never corruption, because `downloadable_role`
-filters provenance-text roles by design. The server cannot tell a pre-feature
-print from one that never had source media (both resolve with no pins), so
-every client gates the probe on `printRetainedSourceMediaCandidate` in
-`studio/api/gallerySourceMedia.ts` — the print's own recorded conditioning
-BYTES — and never asks about a text-to-image print; the same module maps a
-middleware `401` to `unavailable_auth` so a keyed host reached without a key
-gets the API-key disclosure instead of a swallowed error. Desktop's Lightbox
+filters provenance-text roles by design. **Every client always asks, and the
+server is the only authority on what it retained** — `OutputMetadata` records
+no marker at all for inline `source_video`, `audio_file`, or `mask_image`
+bytes, so a client that skipped the probe on missing markers would silently
+lose those restorations. What the metadata decides is DISCLOSURE: the server
+cannot tell a pre-feature print from one that never had source media (both
+resolve with no pins), so an UNAVAILABLE answer is toasted only when
+`retainedSourceMediaDisclosable` in `studio/api/gallerySourceMedia.ts` finds
+the print's own recorded conditioning bytes, and a text-to-image print stays
+silent. The same module maps a middleware `401` to `unavailable_auth` so a
+keyed host reached without a key gets the API-key disclosure instead of a
+swallowed error. Desktop's Lightbox
 primary button and its right-click item both go through `reuseSettings`, which
 is the only path that attaches retained authority (`composer.set` invalidates
 it). A same-host reuse session is one-time, short-lived, and bound to the exact

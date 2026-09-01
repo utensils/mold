@@ -512,18 +512,26 @@ describe("LibraryPage", () => {
     expect(pushMock).toHaveBeenCalledWith({ name: "create" });
   });
 
-  it("reuse never probes retained media for a print that shipped none", async () => {
+  it("reuse stays quiet about an unavailable answer for a print that shipped none", async () => {
     // The reported bug: a text-to-image print from a keyless remote host. Its
     // archive entry resolves with no pins, which the server can only report
     // as `unavailable_legacy` — and a keyless host used to answer
-    // `unavailable_auth` before even looking. The question is not asked.
+    // `unavailable_auth` before even looking. The host is still asked (it is
+    // the authority on what it retained); the answer is just not toasted.
+    retainedInventoryMock.mockResolvedValue({
+      availability: "unavailable_legacy",
+      members: [],
+    });
     const wrapper = await mounted();
     await wrapper.find("[data-test='grid-open']").trigger("click");
     await wrapper.vm.$nextTick();
     await wrapper.find("[data-test='lb-reuse']").trigger("click");
     await flushPromises();
 
-    expect(retainedInventoryMock).not.toHaveBeenCalled();
+    expect(retainedInventoryMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ apiKey: null }),
+    );
     expect(
       useNotifications().toasts.some((toast) => toast.kind === "error"),
     ).toBe(false);

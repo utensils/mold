@@ -4,7 +4,7 @@
   at, so restoring a print's original source never worked on a default host
   and a plain text-to-image print raised the error on every surface. The
   routes now ask whether the caller is authorized — open on a keyless host,
-  exactly like the rest of the API — clients ask only about prints that
-  recorded conditioning media, a host that genuinely refuses the probe still
-  gets the API-key disclosure, and the desktop Lightbox's primary Reuse button
+  exactly like the rest of the API — clients no longer warn about a print that
+  never recorded conditioning media, a host that genuinely refuses the probe
+  still gets the API-key disclosure, and the desktop Lightbox's primary Reuse button
   attaches retained source media the way its right-click item already did.

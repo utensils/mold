@@ -394,11 +394,12 @@ keyframes, and audio-driven video preserve their source authority. Changing the
 conditioning names the work as stale, and `/api/expand` receives only the task,
 never source media bytes. The host may retain those bytes encrypted after a
 successful durable publication. Mobile treats the host's
-`/api/gallery/source-media/:filename` inventory as authority — asked only for a
-print whose metadata records conditioning bytes, and never guessed from whether
-the phone holds a key, since a keyless host is open by design: legacy and
-missing/corrupt items show an explicit unavailable state, a host that refuses
-the probe shows the API-key state, while cross-host reuse downloads an opaque
+`/api/gallery/source-media/:filename` inventory as authority — always asked,
+never guessed from whether the phone holds a key, since a keyless host is open
+by design: legacy and missing/corrupt items show an explicit unavailable state
+when the print's own metadata records conditioning bytes (a text-to-image
+print stays silent), a host that refuses the probe shows the API-key state,
+while cross-host reuse downloads an opaque
 member and relays it through ordinary upload admission instead of receiving
 any server path.
 Once the host accepts the batch, the composer is immediately available to

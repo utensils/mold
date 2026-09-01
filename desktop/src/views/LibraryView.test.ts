@@ -861,28 +861,66 @@ describe("LibraryView Reuse settings retained source media", () => {
     await flushPromises();
   }
 
-  it("never probes the host for a print that shipped no conditioning bytes", async () => {
+  it("stays quiet about an unavailable answer for a print that shipped no bytes", async () => {
     // The reported bug: a text-to-image print rendered by the CLI on plato.
     // Its archive entry resolves with no pins, which the server can only call
     // `unavailable_legacy` — and on a keyless host it used to answer
-    // `unavailable_auth` before even looking. Neither is a toast this print
-    // deserves, so the question is not asked.
+    // `unavailable_auth` before even looking. The host is still asked (it is
+    // the only authority on what it retained, and the metadata under-reports
+    // inline video/audio bytes), but neither answer is a toast this print
+    // deserves.
     const t2i: GalleryImage = {
       ...prints[0]!,
       filename: "mold-flux2-dev-q8-1788282033839~thermalnuclear-explosion.png",
       timestamp: 3,
       metadata: { ...prints[0]!.metadata, seed: 9 },
     };
+    const inventory = { availability: "unavailable_legacy" as const, members: [] };
+    retainedInventoryMock.mockResolvedValueOnce(inventory);
     const { wrapper, router } = await mountView(t2i);
     const toastsBefore = useToastStore().items.length;
 
     await reuseFromContextMenu(wrapper);
 
-    expect(retainedInventoryMock).not.toHaveBeenCalled();
+    expect(retainedInventoryMock).toHaveBeenCalledWith(t2i.filename, plato);
     expect(useToastStore().items.length).toBe(toastsBefore);
     expect(useComposerStore().prefill).toEqual({ metadata: t2i.metadata });
-    expect(useComposerStore().retainedSource).toBeNull();
+    expect(useComposerStore().retainedSource?.inventory).toEqual(inventory);
     expect(router.currentRoute.value.path).toBe("/create");
+    wrapper.unmount();
+  });
+
+  it("still restores retained media the metadata could not name", async () => {
+    // An inline source video leaves no `OutputMetadata` marker at all, yet the
+    // host retains it. Skipping the probe on missing markers would have lost it.
+    const v2v: GalleryImage = {
+      ...prints[0]!,
+      filename: "remote-v2v.mp4",
+      format: "mp4",
+      timestamp: 3,
+      metadata: { ...prints[0]!.metadata, seed: 9 },
+    };
+    const inventory = {
+      availability: "available" as const,
+      members: [
+        {
+          member_id: "v".repeat(64),
+          role: "source_video",
+          display_name: "clip.mp4",
+          size_bytes: 9,
+        },
+      ],
+    };
+    retainedInventoryMock.mockResolvedValueOnce(inventory);
+    const { wrapper } = await mountView(v2v);
+
+    await reuseFromContextMenu(wrapper);
+
+    expect(useComposerStore().retainedSource).toEqual({
+      filename: "remote-v2v.mp4",
+      origin: plato,
+      inventory,
+    });
     wrapper.unmount();
   });
 

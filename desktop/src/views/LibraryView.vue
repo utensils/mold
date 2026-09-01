@@ -63,7 +63,7 @@ import {
 } from "@studio/lib/libraryOrganization";
 import { ApiError, type ApiTarget } from "../lib/api/client";
 import {
-  printRetainedSourceMediaCandidate,
+  retainedSourceMediaDisclosable,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
 } from "@studio/api/gallerySourceMedia";
@@ -656,12 +656,12 @@ function reuseSettings(entry: MergedPrint) {
   // scheduler, video params, …) via `applyPrefillToForm`.
   const retainedVersion = composer.beginRetainedSourceReuse({ metadata: entry.item.metadata });
   const target = gallery.targetOf(entry.sourceKey);
-  // Only ask about a print that actually shipped conditioning bytes. A
-  // text-to-image print has no media set, yet its archive entry still resolves
-  // with no pins, which the server can only report as `unavailable_legacy` —
-  // so probing here toasted "Reattach it before developing" for a source that
-  // never existed.
-  if (target && printRetainedSourceMediaCandidate(entry.item.metadata)) {
+  // Always ask — the host is the only authority on what it retained, and the
+  // metadata under-reports inline video/audio/mask bytes. But a text-to-image
+  // print's archive entry resolves with no pins, which the server can only
+  // report as `unavailable_legacy`, so an UNAVAILABLE answer is toasted only
+  // when the print's own metadata says conditioning bytes were shipped.
+  if (target) {
     void retainedSourceMediaInventory(entry.item.filename, target)
       .then((inventory) => {
         if (
@@ -673,7 +673,9 @@ function reuseSettings(entry: MergedPrint) {
         ) {
           return;
         }
-        const disclosure = retainedSourceMediaDisclosure(inventory.availability);
+        const disclosure = retainedSourceMediaDisclosable(entry.item.metadata)
+          ? retainedSourceMediaDisclosure(inventory.availability)
+          : null;
         if (disclosure) toasts.push(disclosure, "error");
       })
       .catch(() => {

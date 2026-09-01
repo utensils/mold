@@ -110,7 +110,7 @@ export async function createRetainedSourceMediaReuseSession<TRequest>(
 }
 
 /**
- * Structural minimum of the print metadata this gate reads. Desktop, web, and
+ * Structural minimum of the print metadata this rule reads. Desktop, web, and
  * iPhone each keep their own `OutputMetadata` interface, so a structural shape
  * is what travels between them.
  */
@@ -124,25 +124,34 @@ export interface RetainedSourceMediaMetadataLike {
   source_video_path?: string | null;
   audio_file_path?: string | null;
   extend_video_path?: string | null;
+  extend_overlap_frames?: number | null;
 }
 
 /**
- * Whether this print shipped conditioning BYTES worth restoring.
+ * Whether an UNAVAILABLE inventory answer is worth telling the user about.
  *
- * A text-to-image print retains no media set at all, but its archive entry
- * still exists with no pins, which the server can only report as
- * `unavailable_legacy` — "Reattach it before developing", for a source that
- * never existed. The server cannot tell that apart from a genuinely
- * pre-feature print, so the client must not ask about a print it already knows
- * had no media.
+ * This decides disclosure, never whether to ask. The server is the only
+ * authority on what it retained, and `OutputMetadata` under-reports it: inline
+ * `source_video`, `audio_file`, and `mask_image` bytes leave no marker at all
+ * (only the `_path` forms are recorded, and browser clients always send
+ * bytes), so a rule that skipped the probe on missing markers would silently
+ * lose those restorations. Every surface therefore always asks, attaches an
+ * `available` inventory regardless, and consults this only before toasting.
  *
- * The fields mirror the server's downloadable retained roles
- * (`downloadable_role` in `gallery_source_media.rs`). `source_image_name` is
- * deliberately EXCLUDED even though `metadataReferencesSource` includes it for
- * the local-stash restore: it is a name with no bytes, and MiniMax H3 sets it
- * alone — probing on it yields an empty member list that used to read as damage.
+ * What it guards against: a text-to-image print retains no media set, but its
+ * archive entry still exists with no pins, which the server can only report
+ * as `unavailable_legacy` — "Reattach it before developing", for a source that
+ * never existed. The server cannot tell that from a genuinely pre-feature
+ * print, so the client stays quiet unless the print's own metadata says
+ * conditioning bytes were shipped. The markers mirror the server's
+ * downloadable retained roles (`downloadable_role` in
+ * `gallery_source_media.rs`); `extend_overlap_frames` is recorded exactly when
+ * an extension video (inline or path) was present. `source_image_name` alone
+ * is deliberately EXCLUDED even though `metadataReferencesSource` includes it
+ * for the local-stash restore: it is a name with no bytes, and MiniMax H3 sets
+ * it alone.
  */
-export function printRetainedSourceMediaCandidate(
+export function retainedSourceMediaDisclosable(
   metadata: RetainedSourceMediaMetadataLike | null | undefined,
 ): boolean {
   if (!metadata) return false;
@@ -154,6 +163,7 @@ export function printRetainedSourceMediaCandidate(
     metadata.source_video_path ||
     metadata.audio_file_path ||
     metadata.extend_video_path ||
+    metadata.extend_overlap_frames != null ||
     filled(metadata.edit_image_sha256s) ||
     filled(metadata.id_image_sha256s) ||
     filled(metadata.references) ||

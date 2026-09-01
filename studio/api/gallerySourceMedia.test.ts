@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __testing__,
   createRetainedSourceMediaReuseSession,
-  printRetainedSourceMediaCandidate,
+  retainedSourceMediaDisclosable,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
   relayRetainedSourceMedia,
@@ -62,15 +62,17 @@ describe("gallery retained source media API", () => {
     expect(headers.get("content-type")).toBe("application/json");
   });
 
-  it("never probes for a print that shipped no conditioning bytes", () => {
+  it("stays quiet about an unavailable answer for a print that shipped no bytes", () => {
     // A text-to-image print. The server can only answer `unavailable_legacy`
     // here — "Reattach it before developing" for a source that never existed.
-    expect(printRetainedSourceMediaCandidate({})).toBe(false);
-    expect(printRetainedSourceMediaCandidate(null)).toBe(false);
-    expect(printRetainedSourceMediaCandidate(undefined)).toBe(false);
+    // The probe still runs (the server is the authority); only the toast is
+    // withheld.
+    expect(retainedSourceMediaDisclosable({})).toBe(false);
+    expect(retainedSourceMediaDisclosable(null)).toBe(false);
+    expect(retainedSourceMediaDisclosable(undefined)).toBe(false);
     // An empty array is not evidence either.
-    expect(printRetainedSourceMediaCandidate({ references: [] })).toBe(false);
-    expect(printRetainedSourceMediaCandidate({ keyframes: [] })).toBe(false);
+    expect(retainedSourceMediaDisclosable({ references: [] })).toBe(false);
+    expect(retainedSourceMediaDisclosable({ keyframes: [] })).toBe(false);
   });
 
   it("excludes a bare source name, which carries no restorable bytes", () => {
@@ -78,14 +80,15 @@ describe("gallery retained source media API", () => {
     // all filtered by the server's `downloadable_role`, so probing on it only
     // ever produced an empty list.
     expect(
-      printRetainedSourceMediaCandidate({
+      retainedSourceMediaDisclosable({
         source_image_name: "closing-boundary.png",
       } as Record<string, unknown>),
     ).toBe(false);
   });
 
-  it("probes for every role the server can hand back", () => {
+  it("discloses for every recorded marker of a downloadable role", () => {
     for (const metadata of [
+      { extend_overlap_frames: 8 },
       { source_image_sha256: "a".repeat(64) },
       { id_image_sha256: "b".repeat(64) },
       { source_video_path: "/clip.mp4" },
@@ -96,7 +99,7 @@ describe("gallery retained source media API", () => {
       { references: [{ media: { authority: "descriptor" } }] },
       { keyframes: [{ frame: 0 }] },
     ]) {
-      expect(printRetainedSourceMediaCandidate(metadata)).toBe(true);
+      expect(retainedSourceMediaDisclosable(metadata)).toBe(true);
     }
   });
 

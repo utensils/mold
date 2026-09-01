@@ -8565,9 +8565,21 @@ describe("MobileApp gallery", () => {
     // settings. The phone used to SYNTHESIZE `unavailable_auth` whenever it
     // held no key for the host — but a keyless host is open by design, and a
     // text-to-image print has no private source media to restore anyway. The
-    // host is asked only for prints that shipped conditioning bytes, and the
-    // shared probe reports a real 401 itself.
+    // host is asked (it is the authority), the shared probe reports a real 401
+    // itself, and an unavailable answer for a print that shipped no bytes is
+    // not disclosed.
     invoke.mockImplementation(() => Promise.resolve(null));
+    apiFetchTo.mockImplementation((_callTarget: unknown, path: string) => {
+      if (String(path).startsWith("/api/gallery/source-media/")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ availability: "unavailable_legacy", members: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return Promise.reject(new Error("offline"));
+    });
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
@@ -8586,7 +8598,7 @@ describe("MobileApp gallery", () => {
       apiFetchTo.mock.calls.some(([, path]) =>
         String(path).startsWith("/api/gallery/source-media/"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("asks the host about a conditioned print and surfaces its own auth answer", async () => {
