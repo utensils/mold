@@ -63,6 +63,7 @@ import {
 } from "@studio/lib/libraryOrganization";
 import { ApiError, type ApiTarget } from "../lib/api/client";
 import {
+  printRetainedSourceMediaCandidate,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
 } from "@studio/api/gallerySourceMedia";
@@ -655,7 +656,12 @@ function reuseSettings(entry: MergedPrint) {
   // scheduler, video params, …) via `applyPrefillToForm`.
   const retainedVersion = composer.beginRetainedSourceReuse({ metadata: entry.item.metadata });
   const target = gallery.targetOf(entry.sourceKey);
-  if (target) {
+  // Only ask about a print that actually shipped conditioning bytes. A
+  // text-to-image print has no media set, yet its archive entry still resolves
+  // with no pins, which the server can only report as `unavailable_legacy` —
+  // so probing here toasted "Reattach it before developing" for a source that
+  // never existed.
+  if (target && printRetainedSourceMediaCandidate(entry.item.metadata)) {
     void retainedSourceMediaInventory(entry.item.filename, target)
       .then((inventory) => {
         if (
@@ -2897,6 +2903,7 @@ onUnmounted(() => {
       @next="moveSelection(1)"
       @delete="removeSelected"
       @use-source="useSelectedAsSource"
+      @reuse="reuseSettings(selectedEntry!)"
       @reuse-sequence="reuseSequence(selectedEntry)"
       @edit-sequence="editSequence(selectedEntry)"
       @rename="(title) => renamePrint(selectedEntry!, title)"

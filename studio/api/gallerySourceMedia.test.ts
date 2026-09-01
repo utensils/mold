@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __testing__,
   createRetainedSourceMediaReuseSession,
+  printRetainedSourceMediaCandidate,
   retainedSourceMediaDisclosure,
+  retainedSourceMediaInventory,
   relayRetainedSourceMedia,
 } from "./gallerySourceMedia";
 
@@ -58,6 +60,77 @@ describe("gallery retained source media API", () => {
     const headers = fetchMock.mock.calls[0]![1]!.headers as Headers;
     expect(headers.get("x-api-key")).toBe("secret");
     expect(headers.get("content-type")).toBe("application/json");
+  });
+
+  it("never probes for a print that shipped no conditioning bytes", () => {
+    // A text-to-image print. The server can only answer `unavailable_legacy`
+    // here — "Reattach it before developing" for a source that never existed.
+    expect(printRetainedSourceMediaCandidate({})).toBe(false);
+    expect(printRetainedSourceMediaCandidate(null)).toBe(false);
+    expect(printRetainedSourceMediaCandidate(undefined)).toBe(false);
+    // An empty array is not evidence either.
+    expect(printRetainedSourceMediaCandidate({ references: [] })).toBe(false);
+    expect(printRetainedSourceMediaCandidate({ keyframes: [] })).toBe(false);
+  });
+
+  it("excludes a bare source name, which carries no restorable bytes", () => {
+    // MiniMax H3 records `source_image_name` alone. Its retained members are
+    // all filtered by the server's `downloadable_role`, so probing on it only
+    // ever produced an empty list.
+    expect(
+      printRetainedSourceMediaCandidate({
+        source_image_name: "closing-boundary.png",
+      } as Record<string, unknown>),
+    ).toBe(false);
+  });
+
+  it("probes for every role the server can hand back", () => {
+    for (const metadata of [
+      { source_image_sha256: "a".repeat(64) },
+      { id_image_sha256: "b".repeat(64) },
+      { source_video_path: "/clip.mp4" },
+      { audio_file_path: "/voice.wav" },
+      { extend_video_path: "/tail.mp4" },
+      { edit_image_sha256s: ["c".repeat(64)] },
+      { id_image_sha256s: ["d".repeat(64)] },
+      { references: [{ media: { authority: "descriptor" } }] },
+      { keyframes: [{ frame: 0 }] },
+    ]) {
+      expect(printRetainedSourceMediaCandidate(metadata)).toBe(true);
+    }
+  });
+
+  it("reports a middleware 401 as the auth state instead of throwing", async () => {
+    // A host that enforces API keys refuses before the handler answers. Without
+    // this, the caller's catch swallowed it and the one case the "connect this
+    // machine with an API key" sentence is about showed nothing at all.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: "missing X-Api-Key header",
+          code: "UNAUTHORIZED",
+        }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await expect(
+      retainedSourceMediaInventory("print.png", {
+        baseUrl: "http://host-a:7680",
+        apiKey: null,
+      }),
+    ).resolves.toEqual({ availability: "unavailable_auth", members: [] });
+  });
+
+  it("still throws for a failure that is not an auth refusal", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("boom", { status: 500 }),
+    );
+    await expect(
+      retainedSourceMediaInventory("print.png", {
+        baseUrl: "http://host-a:7680",
+        apiKey: "secret",
+      }),
+    ).rejects.toThrow();
   });
 
   it("maps every unavailable state to an explicit reuse disclosure", () => {

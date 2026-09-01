@@ -117,11 +117,29 @@ permanent deletion removes gallery authority first and releases only that
 print's pins afterward, so sibling outputs remain independent.
 
 `GET /api/gallery/source-media/:filename` and its opaque-member download route
-require API-key authentication. They never expose paths or store identities and
+require the CALLER to be authorized, which is the same question every other
+privileged route asks: on a host with `MOLD_API_KEY` set that is an
+authenticated request, and on a keyless host it is every request, exactly as
+`DELETE /api/gallery/image/:filename` and device lifecycle already behave. The
+gate must never read the server's own configuration as the answer —
+`AuthState = None` means "open by policy", and treating it as a refusal made the
+whole feature dead on a default server, answering `unavailable_auth` for prints
+it never looked at. They never expose paths or store identities and
 report explicit `unavailable_auth`, `unavailable_legacy`, and
-`unavailable_missing_or_corrupt` states. A same-host reuse session is one-time,
-short-lived, and bound to the exact target request; cross-host reuse remains a
-client download-and-upload relay.
+`unavailable_missing_or_corrupt` states; an empty member list after a CLEAN
+resolve is `unavailable_legacy`, never corruption, because `downloadable_role`
+filters provenance-text roles by design. The server cannot tell a pre-feature
+print from one that never had source media (both resolve with no pins), so
+every client gates the probe on `printRetainedSourceMediaCandidate` in
+`studio/api/gallerySourceMedia.ts` — the print's own recorded conditioning
+BYTES — and never asks about a text-to-image print; the same module maps a
+middleware `401` to `unavailable_auth` so a keyed host reached without a key
+gets the API-key disclosure instead of a swallowed error. Desktop's Lightbox
+primary button and its right-click item both go through `reuseSettings`, which
+is the only path that attaches retained authority (`composer.set` invalidates
+it). A same-host reuse session is one-time, short-lived, and bound to the exact
+target request — on a keyless host to one stable anonymous subject; cross-host
+reuse remains a client download-and-upload relay.
 
 Two stores, one logical `Config` view:
 

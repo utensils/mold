@@ -155,6 +155,7 @@ import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { restoreGenerationSourceMedia } from "@studio/lib/generationSourceMedia";
 import {
+  printRetainedSourceMediaCandidate,
   retainedSourceMediaBlob,
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
@@ -1729,9 +1730,15 @@ async function restoreLibrarySource(
       item.metadata.generation_height ?? item.metadata.height;
   };
   const owner = hostForEntry(item);
-  const retainedTarget = owner
-    ? { baseUrl: owner.url, apiKey: owner.apiKey ?? null }
-    : null;
+  // Only ask about a print that shipped conditioning bytes. A text-to-image
+  // print's archive entry resolves with no pins, which the server can only
+  // report as `unavailable_legacy` — a reattach instruction for a source that
+  // never existed — and on a keyless host it used to answer `unavailable_auth`
+  // before even looking. Neither is a toast this print deserves.
+  const retainedTarget =
+    owner && printRetainedSourceMediaCandidate(item.metadata)
+      ? { baseUrl: owner.url, apiKey: owner.apiKey ?? null }
+      : null;
   let retainedUnavailable: RetainedSourceMediaAvailability | null = null;
   const retainedRead = retainedTarget
     ? retainedSourceMediaInventory(item.filename, retainedTarget).catch(
