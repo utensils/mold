@@ -156,10 +156,17 @@ mold skill install --detected
 ```
 
 The installed bundle uses each agent's native metadata and discovery contract,
-with a concise router, safety guidance, tested examples, a shared prompting
-guide, one base guide per manifest family, and task leaves only for the distinct
-H3, Wan, and LTX-2 grammars that need them. Hunyuan3D's base guide is the one
-that tells an agent NOT to write a prompt.
+with a concise router, safety guidance, tested examples, and the prompting
+corpus: a shared guide, one complete base guide per manifest family (prompt
+style, syntax, generation context, examples, pitfalls, and that family's CLI
+examples), task leaves for the distinct H3, Wan, and LTX-2 grammars, and model
+leaves for checkpoints with quirks of their own. The corpus in
+`crates/mold-core/src/prompting/` is also what `mold expand`, `mold remix`,
+`--expand`, the app Expand and Remix actions, and the MCP `expand_prompt` /
+`remix_prompt` tools hand to the LLM, together with the exact model, canvas,
+frame count, fps, and ordered references, so agents and the expander follow one
+set of rules. Hunyuan3D's base guide is the one that tells an agent NOT to
+write a prompt.
 
 ## Project
 

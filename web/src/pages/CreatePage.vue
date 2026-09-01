@@ -59,7 +59,9 @@ import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
+  expansionContextForRequest,
   expansionTaskForRequest,
+  type ExpandContext,
   type ExpandTask,
 } from "@studio/lib/expandTask";
 import {
@@ -887,6 +889,8 @@ function consumeOutputQuery(query: Record<string, unknown>) {
 const expandClipId = ref<string | null>(null);
 const expandStagePrompt = ref("");
 const expandTask = ref<ExpandTask>("text-to-image");
+const expandContext = ref<ExpandContext | null>(null);
+const remixContext = ref<ExpandContext | null>(null);
 
 function expansionTaskForCurrentOutput(
   request: GenerateRequestWire,
@@ -4243,6 +4247,11 @@ async function onExpand() {
           variations: count,
           ...(style ? { style } : {}),
           task,
+          ...(sequenceMode.value
+            ? {}
+            : {
+                context: expansionContextForRequest(family, baseRequest),
+              }),
         },
         undefined,
         submitRoute?.target,
@@ -4280,9 +4289,11 @@ async function onExpand() {
   if (expansion.missing) return;
   expandRoute.value = cloneRoute(expansion.route);
   expandPrintRoute.value = cloneRoute(route);
-  expandTask.value = expansionTaskForCurrentOutput(
-    form.toRequest(currentModel.value),
-  );
+  const expandRequest = form.toRequest(currentModel.value);
+  expandTask.value = expansionTaskForCurrentOutput(expandRequest);
+  expandContext.value = sequenceMode.value
+    ? null
+    : expansionContextForRequest(currentFamily.value, expandRequest);
   showExpand.value = true;
 }
 
@@ -4311,6 +4322,10 @@ async function onRemix() {
   remixRoute.value = cloneRoute(expansion.route);
   remixPrintRoute.value = cloneRoute(result.route);
   remixTask.value = expansionTaskForCurrentOutput(baseRequest);
+  remixContext.value = expansionContextForRequest(
+    currentFamily.value,
+    baseRequest,
+  );
   showRemix.value = true;
 }
 
@@ -4414,6 +4429,7 @@ function onExpandClip(clipId: string, prompt: string) {
     : index > 0 && clip?.transition === "smooth"
       ? "video-to-video"
       : expansionTaskForRequest(currentFamily.value, {});
+  expandContext.value = null;
   showExpand.value = true;
 }
 
@@ -5980,6 +5996,7 @@ onBeforeUnmount(() => {
       :current-model="currentModel"
       :style-directive="expandStyleDirective"
       :task="expandTask"
+      :context="expandContext"
       :target="expandRoute?.target"
       @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
       @apply-prompt="applyExpandedPrompt"
@@ -5996,6 +6013,7 @@ onBeforeUnmount(() => {
       :original-prompt="form.state.value.originalPrompt"
       :family="currentFamily"
       :task="remixTask"
+      :context="remixContext"
       :style="styleHint(form.state.value.stylePreset ?? '')"
       :target="normalizeSubmitRoute(remixRoute)?.target"
       @close="showRemix = false"

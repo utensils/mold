@@ -75,6 +75,7 @@ pub async fn run() -> Result<()> {
                 commands::identity::identity(),
                 commands::sequence::sequence(),
                 commands::expand::expand(),
+                commands::remix::remix(),
                 commands::models::models(),
                 commands::status::status(),
                 commands::quota::quota(),

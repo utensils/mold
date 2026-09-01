@@ -550,6 +550,9 @@ jobs:
       - name: Check generated generation profiles
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo run -p mold-ai-core --bin generate_generation_profiles -- --check
+      - name: Check generated prompting guides
+        if: env.RUN_RUST_SUITE == 'true'
+        run: cargo run -p mold-ai-core --bin generate_prompting_guides -- --check
       - name: Clippy
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings

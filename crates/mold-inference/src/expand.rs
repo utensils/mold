@@ -702,6 +702,7 @@ impl PromptExpander for LocalExpander {
                     family_override,
                     attempt_config.style.as_deref(),
                     &attempt_config.remix_dimensions,
+                    config.context.as_ref(),
                 )
             } else if attempt.total > 1 {
                 build_batch_messages_with_context_for_task(
@@ -713,6 +714,7 @@ impl PromptExpander for LocalExpander {
                     attempt_config.batch_prompt.as_deref(),
                     family_override,
                     attempt_config.style.as_deref(),
+                    config.context.as_ref(),
                 )
             } else {
                 build_single_messages_for_task(
@@ -722,6 +724,7 @@ impl PromptExpander for LocalExpander {
                     attempt_config.system_prompt.as_deref(),
                     family_override,
                     attempt_config.style.as_deref(),
+                    config.context.as_ref(),
                 )
             };
 

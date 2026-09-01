@@ -29,7 +29,7 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
-import { expansionTaskForRequest } from "@studio/lib/expandTask";
+import { expansionContextForRequest, expansionTaskForRequest } from "@studio/lib/expandTask";
 import {
   effectiveGenerationRecipe,
   fixedRecipeControlOverrides,
@@ -5583,6 +5583,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     model: form.model,
     family: form.family,
     task: expansionTaskForRequest(form.family, request),
+    context: expansionContextForRequest(form.family, request),
     requestedCount: count,
     stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,
@@ -5901,6 +5902,7 @@ async function expandForCurrentBatch(
         variations: count,
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
         task: inputs.task,
+        ...(inputs.context ? { context: inputs.context } : {}),
         ...(styleDirective ? { style: styleDirective } : {}),
       },
       expandOn.target,
@@ -6007,6 +6009,7 @@ async function remixCurrent(
         model_family: prepared.family,
         variations: DEFAULT_REMIX_VARIATIONS,
         task: prepared.task,
+        ...(prepared.context ? { context: prepared.context } : {}),
         ...(styleDirective ? { style: styleDirective } : {}),
         dimensions: [...remix.dimensions],
       },
@@ -6469,6 +6472,7 @@ async function retryExpansionAfterPull(): Promise<void> {
             model_family: recovery.inputs.family,
             variations: DEFAULT_REMIX_VARIATIONS,
             task: recovery.inputs.task,
+            ...(recovery.inputs.context ? { context: recovery.inputs.context } : {}),
             ...(styleDirective ? { style: styleDirective } : {}),
             dimensions: [...recovery.remix.dimensions],
           },
@@ -6480,6 +6484,7 @@ async function retryExpansionAfterPull(): Promise<void> {
             variations: recovery.inputs.requestedCount,
             ...(recovery.inputs.family ? { modelFamily: recovery.inputs.family } : {}),
             task: recovery.inputs.task,
+            ...(recovery.inputs.context ? { context: recovery.inputs.context } : {}),
             ...(styleDirective ? { style: styleDirective } : {}),
           },
           recovery.route.target,

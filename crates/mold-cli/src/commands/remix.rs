@@ -20,6 +20,7 @@ pub async fn run(
     root_prompt: Option<&str>,
     dimension_values: &[String],
     style: Option<&str>,
+    context: Option<mold_core::ExpandContext>,
 ) -> Result<()> {
     mold_core::expand::validate_expansion_variation_count(variations)?;
     anyhow::ensure!(
@@ -68,6 +69,7 @@ pub async fn run(
     remix_config.operation = PromptTransformOperation::Remix;
     remix_config.remix_dimensions = dimensions.clone();
     remix_config.style = style.map(str::to_string);
+    remix_config.context = context;
     remix_config.system_prompt = None;
     remix_config.batch_prompt = None;
 

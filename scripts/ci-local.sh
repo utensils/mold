@@ -246,6 +246,8 @@ if wants rust; then
   step "rust: fmt" cargo fmt --all -- --check
   step "rust: generated generation profiles" \
     cargo run -p mold-ai-core --bin generate_generation_profiles -- --check
+  step "rust: generated prompting guides" \
+    cargo run -p mold-ai-core --bin generate_prompting_guides -- --check
   step "rust: clippy" cargo clippy --workspace --all-targets -- -D warnings
   step "rust: test (full main suite)" cargo test --workspace
   step "rust: optional feature check" \

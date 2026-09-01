@@ -974,7 +974,12 @@ export interface ExpandRequestWire {
   style?: string;
   /** Resolved generation/conditioning policy; no media bytes travel here. */
   task?: ExpandTask;
+  /** Identity, canvas, clip, and ordered references (additive). */
+  context?: ExpandContextWire;
 }
+
+/** Mirrors `mold_core::ExpandContext` (see `@studio/lib/expandTask`). */
+export type ExpandContextWire = import("@studio/lib/expandTask").ExpandContext;
 
 export interface ExpandResponseWire {
   original: string;
@@ -999,6 +1004,8 @@ export interface RemixRequestWire {
   task: ExpandTask;
   style?: string;
   dimensions: RemixDimension[];
+  /** Identity, canvas, clip, and ordered references (additive). */
+  context?: ExpandContextWire;
 }
 export interface RemixResponseWire {
   source_prompt: string;

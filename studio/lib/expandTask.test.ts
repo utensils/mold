@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { expansionTaskForRequest } from "./expandTask";
+import {
+  expansionContextForRequest,
+  expansionTaskForRequest,
+} from "./expandTask";
 
 describe("expansionTaskForRequest", () => {
   it("keeps image families on image expansion", () => {
@@ -103,5 +106,66 @@ describe("expansionTaskForRequest", () => {
     expect(expansionTaskForRequest("ltx2", { pipeline: "t2a" })).toBe(
       "text-to-audio",
     );
+  });
+});
+
+describe("expansionContextForRequest", () => {
+  it("mirrors mold_core::ExpandContext::for_generation", () => {
+    expect(
+      expansionContextForRequest("wan", {
+        model: "wan22-i2v-a14b:q5",
+        width: 832,
+        height: 480,
+        frames: 81,
+        fps: 16,
+        enable_audio: false,
+        source_image: "png",
+        loras: [{ path: "/adapters/paper-boat.safetensors" }],
+      }),
+    ).toEqual({
+      model: "wan22-i2v-a14b:q5",
+      width: 832,
+      height: 480,
+      frames: 81,
+      fps: 16,
+      audio: false,
+      references: [{ kind: "image", role: "first-frame" }],
+      loras: ["paper-boat"],
+    });
+  });
+
+  it("keeps ordered H3 references and marks a video soundtrack", () => {
+    expect(
+      expansionContextForRequest("minimax-h3", {
+        model: "minimax-h3-ref2va:comfy-pruned-int8",
+        references: [
+          { kind: "video", has_audio: true },
+          { kind: "image" },
+          { kind: "audio" },
+        ],
+      }).references,
+    ).toEqual([
+      { kind: "video", has_audio: true, role: "reference" },
+      { kind: "image", role: "reference" },
+      { kind: "audio", role: "reference" },
+    ]);
+  });
+
+  it("omits absent facts and classifies image-family sources", () => {
+    expect(expansionContextForRequest("flux", {})).toEqual({});
+    expect(
+      expansionContextForRequest("qwen-image-edit", {
+        source_image: "png",
+        edit_images: ["png"],
+        id_image: "png",
+      }).references,
+    ).toEqual([
+      { kind: "image", role: "edit" },
+      { kind: "image", role: "edit" },
+      { kind: "image", role: "identity" },
+    ]);
+    expect(
+      expansionContextForRequest("sdxl", { source_image: "png" }).references,
+    ).toEqual([{ kind: "image", role: "source" }]);
   });
 });

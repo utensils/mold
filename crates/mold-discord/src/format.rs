@@ -696,11 +696,77 @@ pub fn format_expand_result(
         title: "Prompt Expanded".to_string(),
         description,
         fields: vec![
-            ("Original".to_string(), original_prompt.to_string(), false),
+            (
+                "Original".to_string(),
+                bounded_field(original_prompt),
+                false,
+            ),
             ("Family".to_string(), model_family.to_uppercase(), true),
             (
                 "Variations".to_string(),
                 resp.expanded.len().to_string(),
+                true,
+            ),
+        ],
+        color: COLOR_SUCCESS,
+    }
+}
+
+/// Discord rejects an embed whose field value exceeds 1,024 characters.
+fn bounded_field(value: &str) -> String {
+    const LIMIT: usize = 1_024;
+    if value.chars().count() > LIMIT {
+        let truncated: String = value.chars().take(LIMIT - 3).collect();
+        format!("{truncated}...")
+    } else {
+        value.to_string()
+    }
+}
+
+/// Format a remix result into embed data. Every variant names the dimension
+/// it varied so the reader can pick by intent, not by reading each prompt.
+pub fn format_remix_result(resp: &mold_core::RemixResponse, model_family: &str) -> EmbedData {
+    let mut parts = Vec::new();
+    for (i, variant) in resp.variants.iter().enumerate() {
+        let display = if variant.prompt.chars().count() > 800 {
+            let truncated: String = variant.prompt.chars().take(797).collect();
+            format!("{truncated}...")
+        } else {
+            variant.prompt.clone()
+        };
+        let labels = variant
+            .dimensions
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let heading = if labels.is_empty() {
+            format!("**Variation {}:**", i + 1)
+        } else {
+            format!("**Variation {} ({labels}):**", i + 1)
+        };
+        parts.push(format!("{heading}\n{display}"));
+    }
+    let joined = parts.join("\n\n");
+    let description = if joined.chars().count() > 4000 {
+        let truncated: String = joined.chars().take(3997).collect();
+        format!("{truncated}...")
+    } else {
+        joined
+    };
+    EmbedData {
+        title: "Prompt Remixed".to_string(),
+        description,
+        fields: vec![
+            (
+                "Source".to_string(),
+                bounded_field(&resp.source_prompt),
+                false,
+            ),
+            ("Family".to_string(), model_family.to_uppercase(), true),
+            (
+                "Alternatives".to_string(),
+                resp.variants.len().to_string(),
                 true,
             ),
         ],

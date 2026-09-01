@@ -4,5 +4,6 @@ pub mod generate;
 pub mod identity;
 pub mod models;
 pub mod quota;
+pub mod remix;
 pub mod sequence;
 pub mod status;

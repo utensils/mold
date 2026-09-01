@@ -335,6 +335,17 @@ fn probe_image(
     })
 }
 
+/// Whether an MP4 reference carries a soundtrack, using the same probe the
+/// prepared descriptor uses, so the expander's `<Audio n>` labels match the
+/// conditioner. Unreadable files report `false`; preparation reports the
+/// error itself later.
+pub(crate) fn video_has_audio(path: &std::path::Path) -> bool {
+    File::open(path)
+        .ok()
+        .and_then(|file| mold_inference::ltx2::media::probe_video_file(file).ok())
+        .is_some_and(|probe| probe.has_audio)
+}
+
 fn probe_video(
     file: File,
     provenance: GenerationReferenceProvenance,

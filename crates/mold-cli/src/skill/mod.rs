@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
+use mold_core::prompting;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,146 +16,6 @@ const TEMPLATE_MD: &str = include_str!("template.md");
 const CLI_MD: &str = include_str!("references/cli.md");
 const SAFETY_MD: &str = include_str!("references/safety.md");
 const EXAMPLES_MD: &str = include_str!("examples/quickstart.md");
-
-const SHARED_PROMPTING_PATH: &str = "references/prompting/shared.md";
-
-#[derive(Clone, Copy)]
-struct FamilyGuide {
-    family: &'static str,
-    path: &'static str,
-    contents: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TaskGuide {
-    H3BaseModes,
-    H3Ref2va,
-    WanTextToVideo,
-    WanImageConditioned,
-    Ltx2DubIt,
-    Ltx2TextToAudio,
-}
-
-impl TaskGuide {
-    fn family(self) -> &'static str {
-        match self {
-            Self::H3BaseModes | Self::H3Ref2va => "minimax-h3",
-            Self::WanTextToVideo | Self::WanImageConditioned => "wan",
-            Self::Ltx2DubIt | Self::Ltx2TextToAudio => "ltx2",
-        }
-    }
-
-    fn path(self) -> &'static str {
-        match self {
-            Self::H3BaseModes => "references/prompting/minimax-h3/base-modes.md",
-            Self::H3Ref2va => "references/prompting/minimax-h3/ref2va.md",
-            Self::WanTextToVideo => "references/prompting/wan/text-to-video.md",
-            Self::WanImageConditioned => "references/prompting/wan/image-conditioned.md",
-            Self::Ltx2DubIt => "references/prompting/ltx2/dub-it.md",
-            Self::Ltx2TextToAudio => "references/prompting/ltx2/text-to-audio.md",
-        }
-    }
-
-    fn contents(self) -> &'static str {
-        match self {
-            Self::H3BaseModes => include_str!("references/prompting/minimax-h3/base-modes.md"),
-            Self::H3Ref2va => include_str!("references/prompting/minimax-h3/ref2va.md"),
-            Self::WanTextToVideo => include_str!("references/prompting/wan/text-to-video.md"),
-            Self::WanImageConditioned => {
-                include_str!("references/prompting/wan/image-conditioned.md")
-            }
-            Self::Ltx2DubIt => include_str!("references/prompting/ltx2/dub-it.md"),
-            Self::Ltx2TextToAudio => include_str!("references/prompting/ltx2/text-to-audio.md"),
-        }
-    }
-}
-
-const TASK_GUIDES: &[TaskGuide] = &[
-    TaskGuide::H3BaseModes,
-    TaskGuide::H3Ref2va,
-    TaskGuide::WanTextToVideo,
-    TaskGuide::WanImageConditioned,
-    TaskGuide::Ltx2DubIt,
-    TaskGuide::Ltx2TextToAudio,
-];
-
-const FAMILY_GUIDES: &[FamilyGuide] = &[
-    FamilyGuide {
-        family: "flux",
-        path: "references/prompting/families/flux.md",
-        contents: include_str!("references/prompting/families/flux.md"),
-    },
-    FamilyGuide {
-        family: "flux2",
-        path: "references/prompting/families/flux2.md",
-        contents: include_str!("references/prompting/families/flux2.md"),
-    },
-    FamilyGuide {
-        family: "sd15",
-        path: "references/prompting/families/sd15.md",
-        contents: include_str!("references/prompting/families/sd15.md"),
-    },
-    FamilyGuide {
-        family: "sdxl",
-        path: "references/prompting/families/sdxl.md",
-        contents: include_str!("references/prompting/families/sdxl.md"),
-    },
-    FamilyGuide {
-        family: "sd3",
-        path: "references/prompting/families/sd3.md",
-        contents: include_str!("references/prompting/families/sd3.md"),
-    },
-    FamilyGuide {
-        family: "z-image",
-        path: "references/prompting/families/z-image.md",
-        contents: include_str!("references/prompting/families/z-image.md"),
-    },
-    FamilyGuide {
-        family: "hunyuan3d",
-        path: "references/prompting/families/hunyuan3d.md",
-        contents: include_str!("references/prompting/families/hunyuan3d.md"),
-    },
-    FamilyGuide {
-        family: "wuerstchen",
-        path: "references/prompting/families/wuerstchen.md",
-        contents: include_str!("references/prompting/families/wuerstchen.md"),
-    },
-    FamilyGuide {
-        family: "qwen-image",
-        path: "references/prompting/families/qwen-image.md",
-        contents: include_str!("references/prompting/families/qwen-image.md"),
-    },
-    FamilyGuide {
-        family: "qwen-image-edit",
-        path: "references/prompting/families/qwen-image-edit.md",
-        contents: include_str!("references/prompting/families/qwen-image-edit.md"),
-    },
-    FamilyGuide {
-        family: "ltx-video",
-        path: "references/prompting/families/ltx-video.md",
-        contents: include_str!("references/prompting/families/ltx-video.md"),
-    },
-    FamilyGuide {
-        family: "ltx2",
-        path: "references/prompting/families/ltx2.md",
-        contents: include_str!("references/prompting/families/ltx2.md"),
-    },
-    FamilyGuide {
-        family: "wan",
-        path: "references/prompting/families/wan.md",
-        contents: include_str!("references/prompting/families/wan.md"),
-    },
-    FamilyGuide {
-        family: "minimax-h3",
-        path: "references/prompting/families/minimax-h3.md",
-        contents: include_str!("references/prompting/families/minimax-h3.md"),
-    },
-    FamilyGuide {
-        family: "upscaler",
-        path: "references/prompting/families/upscaler.md",
-        contents: include_str!("references/prompting/families/upscaler.md"),
-    },
-];
 
 #[derive(Parser, Debug)]
 pub struct SkillArgs {
@@ -536,70 +397,31 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn family_guide(family: &str) -> Option<&'static FamilyGuide> {
-    FAMILY_GUIDES.iter().find(|guide| guide.family == family)
-}
-
-fn task_guide_for_identity(family: &str, model: &str) -> Option<TaskGuide> {
-    match family {
-        "minimax-h3" if model.starts_with("minimax-h3-ref2va:") => Some(TaskGuide::H3Ref2va),
-        "minimax-h3" => Some(TaskGuide::H3BaseModes),
-        "wan" if model.contains("-t2v-") => Some(TaskGuide::WanTextToVideo),
-        "wan" if model.contains("-i2v-") || model.contains("-ti2v-") => {
-            Some(TaskGuide::WanImageConditioned)
-        }
-        _ => None,
-    }
-}
-
-fn prompting_route(
-    family: &str,
-    model: &str,
-    explicit_task: Option<TaskGuide>,
-) -> Result<Vec<&'static str>> {
-    let base = family_guide(family)
-        .with_context(|| format!("no canonical prompting guide for manifest family {family}"))?;
-    let mut route = vec![SHARED_PROMPTING_PATH, base.path];
-    let identity_task = task_guide_for_identity(family, model);
-    if let Some(task) = explicit_task {
-        if task.family() != family {
-            anyhow::bail!("{} task guide cannot route family {family}", task.path());
-        }
-        if identity_task.is_some_and(|identity| identity != task) {
-            anyhow::bail!(
-                "{} task guide conflicts with model identity {model}",
-                task.path()
-            );
-        }
-    }
-    if let Some(task) = explicit_task.or(identity_task) {
-        route.push(task.path());
-    }
-    Ok(route)
-}
+const PROMPTING_PREFIX: &str = "references/prompting/";
 
 fn prompting_routes_markdown(prefix: &str) -> String {
-    let link = |path: &str| {
-        let relative = path.strip_prefix("references/").unwrap_or(path);
-        format!("[{path}]({prefix}/{relative})")
-    };
+    let link = |path: &str| format!("[{PROMPTING_PREFIX}{path}]({prefix}/prompting/{path})");
     let mut output = format!(
         "- Always: {}.\n- Family bases (choose exactly one):\n",
-        link(SHARED_PROMPTING_PATH)
+        link(prompting::SHARED_PATH)
     );
-    for guide in FAMILY_GUIDES {
+    for guide in prompting::FAMILY_GUIDES {
         output.push_str(&format!("  - `{}`: {}\n", guide.family, link(guide.path)));
     }
     output.push_str("- Task leaves (add exactly one only when applicable):\n");
-    for (label, task) in [
-        ("MiniMax H3 base modes", TaskGuide::H3BaseModes),
-        ("MiniMax H3 Ref2VA", TaskGuide::H3Ref2va),
-        ("Wan text-to-video", TaskGuide::WanTextToVideo),
-        ("Wan image-conditioned", TaskGuide::WanImageConditioned),
-        ("LTX-2 Dub-It", TaskGuide::Ltx2DubIt),
-        ("LTX-2 text-to-audio", TaskGuide::Ltx2TextToAudio),
-    ] {
-        output.push_str(&format!("  - {label}: {}\n", link(task.path())));
+    for leaf in prompting::TASK_LEAVES {
+        output.push_str(&format!("  - {}: {}\n", leaf.label, link(leaf.path)));
+    }
+    if !prompting::MODEL_LEAVES.is_empty() {
+        output.push_str("- Model leaves (add only when the exact checkpoint is listed):\n");
+        for leaf in prompting::MODEL_LEAVES {
+            output.push_str(&format!(
+                "  - {} (`{}`): {}\n",
+                leaf.label,
+                leaf.models.join("`, `"),
+                link(leaf.path)
+            ));
+        }
     }
     output
 }
@@ -621,16 +443,11 @@ fn render_bundle(profile: RenderProfile) -> Result<Bundle> {
         "examples/quickstart.md".to_string(),
         EXAMPLES_MD.to_string(),
     );
-    files.insert(
-        SHARED_PROMPTING_PATH.to_string(),
-        include_str!("references/prompting/shared.md").to_string(),
-    );
-    for guide in FAMILY_GUIDES {
-        prompting_route(guide.family, "", None)?;
-        files.insert(guide.path.to_string(), guide.contents.to_string());
+    for guide in prompting::FAMILY_GUIDES {
+        prompting::route(guide.family, None, None).map_err(|error| anyhow::anyhow!("{error}"))?;
     }
-    for task in TASK_GUIDES {
-        files.insert(task.path().to_string(), task.contents().to_string());
+    for (path, contents) in prompting::rendered_files() {
+        files.insert(format!("{PROMPTING_PREFIX}{path}"), contents);
     }
     if profile == RenderProfile::Codex {
         files.insert("agents/openai.yaml".to_string(), "interface:\n  display_name: Mold\n  short_description: Generate and manage local AI media\n  default_prompt: Use $mold to handle this media-generation request safely.\n".to_string());
@@ -1217,94 +1034,6 @@ mod tests {
     }
 
     #[test]
-    fn prompting_routes_cover_manifest_families_tasks_and_identities() {
-        let manifest_families = mold_core::manifest::known_manifests()
-            .iter()
-            .filter(|manifest| manifest.is_generation_model() || manifest.is_upscaler())
-            .map(|manifest| manifest.family.as_str())
-            .collect::<BTreeSet<_>>();
-        let documented = FAMILY_GUIDES
-            .iter()
-            .map(|guide| guide.family)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(manifest_families, documented);
-        assert_eq!(
-            FAMILY_GUIDES.len(),
-            documented.len(),
-            "duplicate family base"
-        );
-
-        for manifest in mold_core::manifest::known_manifests()
-            .iter()
-            .filter(|manifest| manifest.is_generation_model() || manifest.is_upscaler())
-        {
-            let route = prompting_route(&manifest.family, &manifest.name, None).unwrap();
-            assert_eq!(route[0], SHARED_PROMPTING_PATH, "{}", manifest.name);
-            assert_eq!(
-                route
-                    .iter()
-                    .filter(|path| path.contains("/families/"))
-                    .count(),
-                1,
-                "{}",
-                manifest.name
-            );
-            let leaves = route
-                .iter()
-                .filter(|path| !path.contains("/families/") && **path != SHARED_PROMPTING_PATH)
-                .count();
-            match manifest.family.as_str() {
-                "minimax-h3" | "wan" => assert_eq!(leaves, 1, "{}", manifest.name),
-                _ => assert_eq!(leaves, 0, "{}", manifest.name),
-            }
-        }
-
-        assert_eq!(
-            prompting_route("minimax-h3", "minimax-h3-fl2va:q8", None)
-                .unwrap()
-                .last(),
-            Some(&TaskGuide::H3BaseModes.path())
-        );
-        assert_eq!(
-            prompting_route("minimax-h3", "minimax-h3-ref2va:q8", None)
-                .unwrap()
-                .last(),
-            Some(&TaskGuide::H3Ref2va.path())
-        );
-        assert_eq!(
-            prompting_route("wan", "wan22-t2v-a14b:q4", None)
-                .unwrap()
-                .last(),
-            Some(&TaskGuide::WanTextToVideo.path())
-        );
-        assert_eq!(
-            prompting_route("wan", "wan22-ti2v-5b:q8", None)
-                .unwrap()
-                .last(),
-            Some(&TaskGuide::WanImageConditioned.path())
-        );
-        assert_eq!(
-            prompting_route("ltx2", "ltx-2.5-22b:q6", Some(TaskGuide::Ltx2DubIt))
-                .unwrap()
-                .last(),
-            Some(&TaskGuide::Ltx2DubIt.path())
-        );
-        assert_eq!(
-            prompting_route("ltx2", "ltx-2.5-22b:q6", Some(TaskGuide::Ltx2TextToAudio))
-                .unwrap()
-                .last(),
-            Some(&TaskGuide::Ltx2TextToAudio.path())
-        );
-        assert!(prompting_route("flux", "flux-dev:q8", Some(TaskGuide::Ltx2DubIt)).is_err());
-        assert!(prompting_route(
-            "minimax-h3",
-            "minimax-h3-ref2va:q8",
-            Some(TaskGuide::H3BaseModes),
-        )
-        .is_err());
-    }
-
-    #[test]
     fn prompting_tree_is_identity_agnostic_and_byte_identical_across_renderers() {
         let portable = render_bundle(RenderProfile::Portable).unwrap();
         let canonical = portable
@@ -1335,6 +1064,10 @@ mod tests {
 
         for path in canonical.keys() {
             assert!(!path.contains(':'), "identity tag leaked into {path}");
+            if path.starts_with("references/prompting/models/") {
+                // Model leaves are named after checkpoint base names.
+                continue;
+            }
             for tag in [
                 "q4",
                 "q5",
@@ -1615,8 +1348,198 @@ mod tests {
                 EXAMPLES_MD.contains(&rendered),
                 "example fixture missing {rendered}"
             );
-            crate::Cli::try_parse_from(std::iter::once("mold").chain(argv.iter().copied()))
+            parse_on_large_stack(argv.iter().map(|arg| (*arg).to_string()).collect())
                 .unwrap_or_else(|error| panic!("invalid example {rendered}: {error}"));
         }
+    }
+
+    /// The full clap tree no longer fits the default test-thread stack, so
+    /// parse on a thread sized like the real `main`.
+    fn parse_on_large_stack(argv: Vec<String>) -> std::result::Result<(), String> {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                match crate::Cli::try_parse_from(std::iter::once("mold".to_string()).chain(argv)) {
+                    Ok(_) => Ok(()),
+                    // `mold --help` and `mold <cmd> --help` are documented on
+                    // purpose; clap reports them as errors that print help.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            clap::error::ErrorKind::DisplayHelp
+                                | clap::error::ErrorKind::DisplayVersion
+                        ) =>
+                    {
+                        Ok(())
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            })
+            .expect("spawn parse thread")
+            .join()
+            .expect("parse thread panicked")
+    }
+
+    /// Split one documented shell command into argv the way a POSIX shell
+    /// would for the subset the corpus uses: single and double quotes,
+    /// backslash escapes, `$(...)` kept as one word inside quotes, an
+    /// optional `KEY=VALUE` environment prefix, and a trailing `| pager`.
+    fn shell_words(command: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut in_word = false;
+        let mut quote: Option<char> = None;
+        let mut chars = command.chars().peekable();
+        while let Some(c) = chars.next() {
+            match quote {
+                Some('\'') => {
+                    if c == '\'' {
+                        quote = None;
+                    } else {
+                        current.push(c);
+                    }
+                }
+                Some('"') => match c {
+                    '"' => quote = None,
+                    '\\' => {
+                        if let Some(next) = chars.next() {
+                            current.push(next);
+                        }
+                    }
+                    _ => current.push(c),
+                },
+                _ => match c {
+                    '\'' | '"' => {
+                        quote = Some(c);
+                        in_word = true;
+                    }
+                    '\\' => {
+                        if let Some(next) = chars.next() {
+                            if next != '\n' {
+                                current.push(next);
+                                in_word = true;
+                            }
+                        }
+                    }
+                    '|' | '#' => break,
+                    c if c.is_whitespace() => {
+                        if in_word {
+                            words.push(std::mem::take(&mut current));
+                            in_word = false;
+                        }
+                    }
+                    _ => {
+                        current.push(c);
+                        in_word = true;
+                    }
+                },
+            }
+        }
+        if in_word {
+            words.push(current);
+        }
+        words
+    }
+
+    /// Every `mold ...` line in every fenced bash block of a markdown file.
+    fn documented_commands(markdown: &str) -> Vec<String> {
+        let mut commands = Vec::new();
+        let mut in_bash = false;
+        let mut pending = String::new();
+        for line in markdown.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                if in_bash {
+                    in_bash = false;
+                } else {
+                    let info = trimmed.trim_start_matches('`').trim().to_ascii_lowercase();
+                    in_bash = matches!(info.as_str(), "bash" | "sh" | "shell" | "console");
+                }
+                continue;
+            }
+            if !in_bash || trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(head) = trimmed.strip_suffix('\\') {
+                pending.push_str(head);
+                pending.push(' ');
+                continue;
+            }
+            pending.push_str(trimmed);
+            let command = std::mem::take(&mut pending);
+            // `cat x | mold ...` and `KEY=VALUE mold ...` prefixes.
+            let start = command.find("mold ").filter(|index| {
+                *index == 0 || command[..*index].ends_with(' ') || command[..*index].ends_with('|')
+            });
+            if let Some(start) = start {
+                commands.push(command[start..].to_string());
+            }
+        }
+        commands
+    }
+
+    #[test]
+    fn every_documented_bash_command_in_the_corpus_parses_with_the_cli() {
+        let bundle = render_bundle(RenderProfile::Portable).unwrap();
+        let mut seen = 0usize;
+        for (path, contents) in &bundle.files {
+            if !path.ends_with(".md") {
+                continue;
+            }
+            for command in documented_commands(contents) {
+                let argv = shell_words(&command);
+                assert_eq!(
+                    argv.first().map(String::as_str),
+                    Some("mold"),
+                    "{path}: {command}"
+                );
+                seen += 1;
+                parse_on_large_stack(argv[1..].to_vec())
+                    .unwrap_or_else(|error| panic!("{path}: invalid example `{command}`: {error}"));
+            }
+        }
+        assert!(
+            seen >= 20,
+            "expected the corpus to document CLI examples, found {seen}"
+        );
+    }
+
+    #[test]
+    fn shell_words_handles_the_corpus_quoting_forms() {
+        assert_eq!(
+            shell_words(r#"mold run flux-dev:q4 "a cat, \"quoted\"" --seed 1 | viu -"#),
+            vec![
+                "mold",
+                "run",
+                "flux-dev:q4",
+                "a cat, \"quoted\"",
+                "--seed",
+                "1"
+            ]
+        );
+        assert_eq!(
+            shell_words("mold run h3 \"$(cat h3-prompt.txt)\" --duration 5"),
+            vec![
+                "mold",
+                "run",
+                "h3",
+                "$(cat h3-prompt.txt)",
+                "--duration",
+                "5"
+            ]
+        );
+        assert_eq!(
+            shell_words("mold run 'it''s' -o out.png # comment"),
+            vec!["mold", "run", "its", "-o", "out.png"]
+        );
+        assert_eq!(
+            documented_commands(
+                "```bash\nMOLD_HOST=http://h mold server status\ncat p.png | mold run \"x\" \\\n  --image -\n```\n```text\nmold not-a-command\n```"
+            ),
+            vec![
+                "mold server status".to_string(),
+                "mold run \"x\"  --image -".to_string()
+            ]
+        );
     }
 }

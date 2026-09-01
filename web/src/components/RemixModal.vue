@@ -2,7 +2,12 @@
 import { computed, ref, watch } from "vue";
 import ModalPanel from "@ui/components/ModalPanel.vue";
 import { remixPrompt, type StreamTarget } from "../api";
-import type { ExpandTask, RemixResponseWire, RemixSourceKind } from "../types";
+import type {
+  ExpandContextWire,
+  ExpandTask,
+  RemixResponseWire,
+  RemixSourceKind,
+} from "../types";
 import {
   defaultRemixDimensions,
   promptSource,
@@ -17,6 +22,8 @@ const props = defineProps<{
   originalPrompt?: string | null;
   family: string;
   task: ExpandTask;
+  /** Generation facts frozen with the request (identity, canvas, frames). */
+  context?: ExpandContextWire | null;
   style?: string | null;
   target?: StreamTarget;
 }>();
@@ -73,6 +80,7 @@ async function remix() {
         model_family: props.family,
         variations: 3,
         task: props.task,
+        ...(props.context ? { context: props.context } : {}),
         ...(props.style?.trim() ? { style: props.style.trim() } : {}),
         dimensions: dimensions.value,
       },
