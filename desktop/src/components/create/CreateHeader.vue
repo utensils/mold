@@ -5,6 +5,7 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import type { GenerateForm } from "../../lib/generateForm";
 import { outputFamilyLabel } from "@studio/lib/outputShape";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import HostChip from "./HostChip.vue";
 
 /**
@@ -69,10 +70,22 @@ function onBlur() {
 
 const summary = computed(() => {
   const { width, height, steps } = props.form;
-  const aspect = outputFamilyLabel(width, height);
   if (isSequence.value) {
+    const aspect = outputFamilyLabel(width, height);
     return `${aspect} · ${width}×${height} · ${draft.clips.length} clips · ${props.form.fps} fps`;
   }
+  // A canvasless recipe (a 3-D mesh) has no aspect or pixel canvas — its
+  // width/height default to 0×0, so the ordinary summary read nonsense like
+  // "1:1 · 0×0 · 5 steps". Show its octree resolution instead, using the
+  // same canvasless predicate the rest of the form relies on (recipe
+  // snapshot first, family fallback for a form restored pre-snapshot).
+  const canvasless = props.form.recipeCapabilities?.canvasless ?? isMeshFamily(props.form.family);
+  if (canvasless) {
+    const octree =
+      props.form.mesh?.octreeResolution ?? props.form.recipeCapabilities?.mesh?.octree_default;
+    return octree != null ? `octree ${octree} · ${steps} steps` : `${steps} steps`;
+  }
+  const aspect = outputFamilyLabel(width, height);
   return `${aspect} · ${width}×${height} · ${steps} steps`;
 });
 </script>

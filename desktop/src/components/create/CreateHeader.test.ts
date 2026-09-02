@@ -62,6 +62,90 @@ describe("CreateHeader", () => {
     expect(wrapper.get(".ms-header__summary").text()).toBe("1:1 · 1024×1024 · 4 steps");
   });
 
+  it("omits the aspect and canvas for a canvasless (3-D mesh) recipe, showing octree instead", () => {
+    // A Hunyuan3D recipe renders no pixel canvas: width/height sit at the
+    // recipe's zero default (they describe a poster, not a canvas), so the
+    // old `${aspect} · ${width}×${height} · ${steps} steps` summary read
+    // "1:1 · 0×0 · 5 steps" — nonsense for a mesh. The snapshot's
+    // `canvasless` flag (mirroring the form's own source-of-truth) swaps in
+    // the octree resolution instead.
+    readyLocal();
+    const meshForm = form();
+    meshForm.family = "hunyuan3d";
+    meshForm.width = 0;
+    meshForm.height = 0;
+    meshForm.steps = 5;
+    meshForm.recipeCapabilities = {
+      outputFormats: ["glb"],
+      defaultOutputFormat: "glb",
+      promptMode: "ignored",
+      supportsStrength: false,
+      canvasless: true,
+      mesh: {
+        octree_resolutions: [128, 192, 256, 320, 384],
+        octree_default: 256,
+        threshold: { default: 0.6, min: 0.0, max: 1.0, step: 0.01, mode: "adjustable" },
+        target_faces_min: 100,
+        target_faces_max: 2_000_000,
+        texture: { mode: "hidden", required: false, reason: "not available" },
+      },
+    };
+    const wrapper = mount(CreateHeader, { props: { form: meshForm } });
+    const text = wrapper.get(".ms-header__summary").text();
+    expect(text).not.toContain("0×0");
+    expect(text).not.toContain("1:1");
+    expect(text).toBe("octree 256 · 5 steps");
+  });
+
+  it("uses the form's explicit octree override, not the recipe default, in the mesh summary", () => {
+    readyLocal();
+    const meshForm = form();
+    meshForm.family = "hunyuan3d";
+    meshForm.width = 0;
+    meshForm.height = 0;
+    meshForm.steps = 5;
+    meshForm.mesh.octreeResolution = 192;
+    meshForm.recipeCapabilities = {
+      outputFormats: ["glb"],
+      defaultOutputFormat: "glb",
+      promptMode: "ignored",
+      supportsStrength: false,
+      canvasless: true,
+      mesh: {
+        octree_resolutions: [128, 192, 256, 320, 384],
+        octree_default: 256,
+        threshold: { default: 0.6, min: 0.0, max: 1.0, step: 0.01, mode: "adjustable" },
+        target_faces_min: 100,
+        target_faces_max: 2_000_000,
+        texture: { mode: "hidden", required: false, reason: "not available" },
+      },
+    };
+    const wrapper = mount(CreateHeader, { props: { form: meshForm } });
+    expect(wrapper.get(".ms-header__summary").text()).toBe("octree 192 · 5 steps");
+  });
+
+  it("keeps the aspect and canvas summary unchanged for an ordinary (non-mesh) recipe", () => {
+    // Regression guard: an SDXL-style recipe with no recipeCapabilities
+    // snapshot (or one with canvasless: false) must still summarize as
+    // aspect · dimensions · steps.
+    readyLocal();
+    const sdxlForm = form();
+    sdxlForm.family = "sdxl";
+    sdxlForm.width = 1024;
+    sdxlForm.height = 1024;
+    sdxlForm.steps = 30;
+    sdxlForm.recipeCapabilities = {
+      outputFormats: ["png"],
+      defaultOutputFormat: "png",
+      promptMode: "required",
+      supportsStrength: false,
+      canvasless: false,
+      mesh: null,
+    };
+    const wrapper = mount(CreateHeader, { props: { form: sdxlForm } });
+    expect(wrapper.get(".ms-header__summary").text()).toBe("1:1 · 1024×1024 · 30 steps");
+  });
+
   it("titles a sequence draft and summarizes clips + fps instead of steps", () => {
     readyLocal();
     const draft = useSequenceDraftStore();
