@@ -8762,7 +8762,12 @@ mod tests {
         // and `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p` — two FL2VA
         // Turbo adapters from `lightx2v/Minimax-h3-Turbo` beside the same FL2VA
         // compact base stack, so each contributes exactly one manifest.
-        assert_eq!(known_manifests().len(), 197);
+        // Rank-21 Turbo bump: +3. `…-turbo-4step-768p-r21`, `…-turbo-8step-r21`
+        // and `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21` — SVD-resized
+        // derivatives of three already-shipped adapters, published by
+        // `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`. Two ride the FL2VA compact
+        // base stack and one the Ref2VA one; each is one manifest.
+        assert_eq!(known_manifests().len(), 200);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`

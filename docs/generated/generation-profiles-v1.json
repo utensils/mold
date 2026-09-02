@@ -23599,6 +23599,11 @@
           "hidden": false
         },
         {
+          "model": "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21",
+          "family": "minimax-h3",
+          "hidden": false
+        },
+        {
           "model": "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1",
           "family": "minimax-h3",
           "hidden": false
@@ -23840,6 +23845,11 @@
         },
         {
           "model": "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p",
+          "family": "minimax-h3",
+          "hidden": false
+        },
+        {
+          "model": "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21",
           "family": "minimax-h3",
           "hidden": false
         }
@@ -24538,6 +24548,11 @@
       "models": [
         {
           "model": "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step",
+          "family": "minimax-h3",
+          "hidden": false
+        },
+        {
+          "model": "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21",
           "family": "minimax-h3",
           "hidden": false
         }

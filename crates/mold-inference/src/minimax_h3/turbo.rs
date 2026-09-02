@@ -632,6 +632,61 @@ mod tests {
             mold_candle::minimax_h3::H3_TURBO_LORA_LIGHTX2V_SOURCE_REVISION,
             mold_core::minimax_h3::LIGHTX2V_REVISION
         );
+        assert_eq!(
+            mold_candle::minimax_h3::H3_TURBO_LORA_DRBAPH_REPOSITORY,
+            mold_core::minimax_h3::DRBAPH_TURBO_LORA_REPO
+        );
+        assert_eq!(
+            mold_candle::minimax_h3::H3_TURBO_LORA_DRBAPH_SOURCE_REVISION,
+            mold_core::minimax_h3::DRBAPH_TURBO_LORA_REVISION
+        );
+    }
+
+    /// A resized tier exists only as a cheaper approximation of an adapter
+    /// mold already ships, and every claim made for it — the A/B that gated
+    /// it, the VRAM saving, the "lossy approximation of the reviewed adapter"
+    /// sentence — is relative to that source. So a resized manifest tag may
+    /// never ship without the full-rank tag it approximates shipping beside
+    /// it, on the same task partition.
+    #[test]
+    fn every_resized_manifest_tag_ships_beside_the_tag_it_approximates() {
+        let mut resized = 0;
+        for manifest_tier in mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+            let tier = parse_turbo_tier(manifest_tier.tier_stable_id).unwrap();
+            let Some(source) = tier.source_tier() else {
+                continue;
+            };
+            resized += 1;
+            let source_row = mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS
+                .iter()
+                .find(|row| row.tier_stable_id == source.stable_id())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} approximates {} which ships no manifest tag",
+                        manifest_tier.model,
+                        source.stable_id()
+                    )
+                });
+            assert_eq!(
+                mold_core::minimax_h3::task_for_model(source_row.model),
+                mold_core::minimax_h3::task_for_model(manifest_tier.model),
+                "{}",
+                manifest_tier.model
+            );
+            assert_eq!(
+                source_row.steps, manifest_tier.steps,
+                "{}",
+                manifest_tier.model
+            );
+            // The approximation is the point: it must actually be smaller.
+            assert!(
+                manifest_tier.adapter_size_bytes < source_row.adapter_size_bytes,
+                "{} is not smaller than {}",
+                manifest_tier.model,
+                source_row.model
+            );
+        }
+        assert_eq!(resized, 3);
     }
 
     #[test]

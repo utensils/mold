@@ -2485,6 +2485,8 @@ mod tests {
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_R21,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_R21,
         ] {
             for (source_width, source_height, expected) in [
                 (1024, 1024, (992, 992)),

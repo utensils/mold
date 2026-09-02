@@ -2030,7 +2030,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 Schema 1 · hash `3fa216828a84b3d83ca657be541332a113bcbf0f512071428e9d86a02fd6baca` · default recipe `default`
 
-Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`.
+Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`.
 
 #### Default (`default`)
 
@@ -2054,7 +2054,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 Schema 1 · hash `ff73d0a72f83feff6997f026451e7325e23a13d96559e64085260b1208408566` · default recipe `default`
 
-Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`.
+Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`.
 
 #### Default (`default`)
 
@@ -2122,11 +2122,11 @@ Models: `minimax-h3-ref2va:comfy-pruned-int8`, `minimax-h3-ref2va:comfy-pruned-n
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
-### `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`
+### Profile `minimax-h3.minimax-h3-ref2va`
 
 Schema 1 · hash `1b1cfc56ba438f51a82032476324f5e2dddd9bbecc2ffd9b0e76fd79dc799ea2` · default recipe `default`
 
-Models: `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`.
+Models: `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`.
 
 #### Default (`default`)
 

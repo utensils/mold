@@ -18,6 +18,14 @@ export const MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP_768P =
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p";
 export const MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP =
   "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step";
+// SVD-resized rank-21 tiers: lossy per-module dynamic-rank derivatives of the
+// full-rank adapters above, published by drbaph/MiniMax-H3-Turbo-Lora-ComfyUI.
+export const MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P_R21 =
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21";
+export const MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP_R21 =
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21";
+export const MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP_R21 =
+  "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21";
 
 function normalize(value: string): string {
   return value.trim().toLowerCase().replaceAll("_", "-");
@@ -49,7 +57,10 @@ export function canonicalMinimaxH3ModelName(
     value === MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P ||
     value === MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P_V11 ||
     value === MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP_768P ||
-    value === MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP
+    value === MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP ||
+    value === MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P_R21 ||
+    value === MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP_R21 ||
+    value === MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP_R21
   ) {
     return value;
   }

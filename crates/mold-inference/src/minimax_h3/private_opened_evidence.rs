@@ -3062,6 +3062,13 @@ mod tests {
             contract::FL2VA_COMFY_TURBO_4STEP_768P,
             contract::FL2VA_COMFY_TURBO_4STEP_768P_V11,
             contract::FL2VA_COMFY_TURBO_8STEP_768P,
+            contract::FL2VA_COMFY_TURBO_4STEP_768P_R21,
+            contract::FL2VA_COMFY_TURBO_8STEP_R21,
+            // The first Ref2VA Turbo tag in this list: a resized tier keys
+            // storage on the Ref2VA partition exactly as its full-rank source
+            // does, so the two authorities must still agree on the OTHER task.
+            contract::REF2VA_COMFY_TURBO_4STEP_R21,
+            contract::REF2VA_COMFY_TURBO_4STEP,
         ] {
             let route = contract::capability_contract_for_model(model)
                 .unwrap_or_else(|| panic!("{model} must resolve a contract"));

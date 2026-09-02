@@ -147,6 +147,7 @@ gate.
 | [vLLM-Omni](https://github.com/vllm-project/vllm-omni/tree/3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc)                                | `3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc` | Loader, offload, and CUDA-kernel reference only                   |
 | [Abiray pruned NVFP4 checkpoints](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741) | `908eccad7e68751190d04c171956f163bfeed741` | Pruned NVFP4 transformer identities (download-only, no runtime arm) |
 | [lightx2v Turbo LoRA adapters](https://huggingface.co/lightx2v/Minimax-h3-Turbo/tree/05ef678438e84933c406131b59abbf86919b3aac)      | `05ef678438e84933c406131b59abbf86919b3aac` | Turbo LoRA adapter identities (v1.1 4-step 768p, v1.0 8-step 768p) |
+| [drbaph SVD-resized rank-21 Turbo LoRA adapters](https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/tree/be8eb3ea3466cbb7def202ffec0d2fdc054256ac) | `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` | Turbo LoRA adapter identities (three lossy rank-21 resizes) |
 
 Only Diffusers' official BF16/FP32 mixed execution is the current numerical
 oracle. Performance references do not become correctness authorities merely
@@ -1336,6 +1337,64 @@ The cache's `insert` call logs at `tracing::debug!`
 path logs at `tracing::info!` ("MiniMax H3 conditioner output served from
 the in-process cache"). At the default `MOLD_LOG=info`, storing a new key
 is silent — only a later hit against it produces a log line.
+
+### The rank-21 Turbo A/B
+
+Three FL2VA/Ref2VA Turbo tags — `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`,
+`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`, and
+`minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21` — pull the same compact
+base stack as their full-rank source tier, plus a SVD-resized, per-module
+dynamic-rank adapter from
+[`drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`](https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/tree/be8eb3ea3466cbb7def202ffec0d2fdc054256ac)
+at pinned revision `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` instead of the
+1.956 GB rank-128 PEFT export: 298,177,224 / 327,035,608 / 326,935,264 bytes
+respectively — about 1.66 GB less to download per tag, and about 1.6 GB less
+resident VRAM at runtime, because the adapter's own device residency is its
+file payload. Each is a lossy approximation, not a bit-identical repack: the
+publisher's own recorded average Frobenius retention against the source
+adapter is 94.95% (4-step 768p), 97.72% (8-step), and 98.33% (Ref2VA 4-step).
+
+**Planned gate: 12 renders, A/B per tier, both measured canvases.** Same fixed
+campaign request as the lightx2v campaign above (prompt "a red fox in a snowy
+pine forest at dawn", seed 770021, 124 frames, 24 fps, guidance 0, one
+recorded source PNG), full-rank source tier against its `-r21` resize, at both
+768x768 and 1344x768, for all three pairs — `-turbo-4step-768p` vs
+`-turbo-4step-768p-r21`, `-turbo-8step` vs `-turbo-8step-r21`, and Ref2VA
+`-turbo-4step` vs `-turbo-4step-r21` (one image reference) — with the server
+restarted between the A and the B render of each pair so `VmHWM` and the
+`scheduler_estimates` row are per-print. Per render: wall clock POST to MP4
+bytes, the `scheduler_estimates` row, a 1 Hz `nvidia-smi` peak, `VmHWM`,
+`ffprobe` facts with an output SHA-256 prefix, and a visual bullet after
+viewing frames 0, 40, 80, and 123. Each A/B pair is additionally scored by
+`python3 scripts/ltx25-metal-ab.py --reference A.mp4 --candidate B.mp4 --out
+<pair>.json` (ffmpeg RGB24 decode, per-frame RGB PSNR and 8x8 luma block
+SSIM), recording mean and minimum per-frame PSNR and mean block SSIM.
+
+**Acceptance rule, evaluated per tier at both canvases:**
+
+- Ship when mean RGB PSNR is at least 24 dB and minimum per-frame PSNR is at
+  least 18 dB and mean block SSIM is at least 0.85 against the full-rank
+  print; frame 0 is pinned to the source (FL2VA) or reference identity is
+  preserved (Ref2VA); the visual bullet reads "same shot, same motion;
+  differences confined to fine texture/grain"; audio is present with the same
+  duration; and VRAM high water is at least 1.4 GB below the full-rank print
+  of the same tier (the tier's reason to exist; expected around 1.6 GB).
+  32.1 dB is the measured CUDA-vs-CPU conditioner distance for "frame-for-frame
+  the same print" elsewhere in this record; 24 dB is a deliberately looser bar
+  for a 95-98% Frobenius approximation.
+- Drop when any render or provenance refusal occurs, the composition differs
+  (mean PSNR under 20 dB), any artifact class absent from the full-rank print
+  appears (flicker, banding, ghosting, texture collapse, audio dropout), or
+  the VRAM saving is missing.
+- 20-24 dB mean PSNR is the maintainer's call with the frames attached to the
+  PR; the default without an explicit call is drop. Each tier ships or is
+  dropped independently of the other two.
+
+**Measured rows are pending.** No render from this matrix has been captured
+for this record yet; the numbers above are the publisher's own recorded
+Frobenius figures and the acceptance thresholds this qualification will hold
+each tier to, not measured PSNR/SSIM evidence. This section gets a per-tier
+evidence table and decision the first time the gate actually runs.
 
 ### What is derived, and how
 

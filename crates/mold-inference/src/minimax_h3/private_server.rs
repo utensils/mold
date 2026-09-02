@@ -8724,6 +8724,16 @@ mod tests {
             .expect_err("a ref2v tier must not mint an fl2va qualification")
             .to_string();
         assert!(error.contains("was not reviewed for"), "{error}");
+        // The SVD-resized Ref2V tier is the same trap with a smaller file:
+        // its 5-point schedule still coincides with the FL2V 768p tier's, and
+        // the task is what refuses it.
+        let ref2v_r21 =
+            turbo_authority_for(mold_candle::minimax_h3::H3TurboLoraTier::Ref2v4StepV10Rank21);
+        assert_eq!(ref2v_r21.grid_points(), fl2v.grid_points());
+        let error = mint(Some(&ref2v_r21))
+            .expect_err("a resized ref2v tier must not mint an fl2va qualification")
+            .to_string();
+        assert!(error.contains("was not reviewed for"), "{error}");
         // The FL2V tier at the identical step count is accepted, so the
         // refusal is about task identity and not about the number.
         assert!(mint(Some(&fl2v)).is_ok());
