@@ -158,6 +158,10 @@ describe("MobilePromptTools", () => {
     const remix = wrapper.get("[data-test='mobile-prompt-remix']");
     expect(expand.attributes("disabled")).toBe("");
     expect(remix.attributes("disabled")).toBe("");
+    // A refused Remix has no options to disclose: the collapsed
+    // "Remixing current prompt · N dimensions" row under a disabled button
+    // would only invite a tap that goes nowhere.
+    expect(wrapper.find("[data-test='mobile-remix-options']").exists()).toBe(false);
     expect(wrapper.get("[data-test='mobile-prompt-transform-blocked']").text()).toBe(
       PROMPT_IGNORED_TRANSFORM_REASON,
     );

@@ -367,6 +367,18 @@
           "markdownDescription": "Denies the pick_identity_photo command without any pre-configured scope."
         },
         {
+          "description": "Enables the save_export_to_mold_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-export-to-mold-folder",
+          "markdownDescription": "Enables the save_export_to_mold_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_export_to_mold_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-export-to-mold-folder",
+          "markdownDescription": "Denies the save_export_to_mold_folder command without any pre-configured scope."
+        },
+        {
           "description": "Enables the save_image_to_photos command without any pre-configured scope.",
           "type": "string",
           "const": "allow-save-image-to-photos",

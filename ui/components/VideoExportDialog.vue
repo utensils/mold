@@ -7,6 +7,12 @@ import type {
   VideoExportOptions,
 } from "@studio/lib/videoExport";
 
+/** One place an export can go, when the caller offers more than one. */
+export interface ExportDestination {
+  value: string;
+  label: string;
+}
+
 const props = withDefaults(
   defineProps<{
     open: boolean;
@@ -14,13 +20,22 @@ const props = withDefaults(
     formats: VideoExportFormat[];
     busy?: boolean;
     error?: string;
+    /**
+     * Where the export may go, when there is a choice — the phone offers its
+     * share sheet or its on-device Mold folder. The pick rides BESIDE the
+     * options in the `export` event, never inside them: the options are the
+     * request body posted to the host, and a destination is the client's
+     * business alone. Absent or single, no control is shown and the event
+     * carries the options only, exactly as before.
+     */
+    destinations?: ExportDestination[];
   }>(),
-  { busy: false, error: "" },
+  { busy: false, error: "", destinations: () => [] },
 );
 
 const emit = defineEmits<{
   close: [];
-  export: [options: VideoExportOptions];
+  export: [options: VideoExportOptions, destination?: string];
 }>();
 
 const format = ref<VideoExportFormat>("gif");
@@ -28,26 +43,34 @@ const playback = ref<GifPlayback>("loop");
 const repeat = ref<GifRepeat>("forever");
 const maxDimension = ref<number | null>(720);
 const fps = ref<number | null>(12);
+const destination = ref<string>("");
 const isGif = computed(() => format.value === "gif");
+const offersDestinations = computed(() => props.destinations.length > 1);
 
 watch(
-  () => [props.open, props.formats] as const,
+  () => [props.open, props.formats, props.destinations] as const,
   ([open]) => {
     if (!open) return;
     if (!props.formats.includes(format.value))
       format.value = props.formats[0] ?? "gif";
+    if (
+      !props.destinations.some((choice) => choice.value === destination.value)
+    )
+      destination.value = props.destinations[0]?.value ?? "";
   },
   { immediate: true },
 );
 
 function submit(): void {
-  emit("export", {
+  const options: VideoExportOptions = {
     format: format.value,
     playback: isGif.value ? playback.value : "loop",
     repeat: isGif.value ? repeat.value : "forever",
     max_dimension: maxDimension.value,
     fps: fps.value,
-  });
+  };
+  if (offersDestinations.value) emit("export", options, destination.value);
+  else emit("export", options);
 }
 </script>
 
@@ -175,6 +198,21 @@ function submit(): void {
               :value="choice"
             />
             <span>{{ choice ? `${choice} fps` : "Original" }}</span>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset v-if="offersDestinations">
+        <legend>Destination</legend>
+        <div class="video-export-options">
+          <label v-for="choice in destinations" :key="choice.value">
+            <input
+              v-model="destination"
+              type="radio"
+              name="export-destination"
+              :value="choice.value"
+            />
+            <span>{{ choice.label }}</span>
           </label>
         </div>
       </fieldset>

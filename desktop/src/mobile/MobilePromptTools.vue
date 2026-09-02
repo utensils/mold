@@ -170,7 +170,10 @@ watch([() => props.target.baseUrl, () => props.target.apiKey] as const, () => {
       {{ blockedReason }}
     </p>
 
-    <details class="mobile-remix-options" data-test="mobile-remix-options">
+    <!-- A refused Remix has nothing to disclose: the collapsed source and
+         dimensions row under a disabled button would only invite a tap that
+         goes nowhere. -->
+    <details v-if="!blockedReason" class="mobile-remix-options" data-test="mobile-remix-options">
       <summary>{{ sourceLabel }} · {{ remixDimensions.length }} dimensions</summary>
       <fieldset v-if="hasOriginal" class="mobile-remix-source" :disabled="!!blockedReason">
         <legend>Remix source</legend>

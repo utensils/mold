@@ -81,6 +81,20 @@ impl<R: Runtime> MoldMobileNative<R> {
             .map_err(Into::into)
     }
 
+    /// File one gallery export under the public `Downloads/Mold` folder
+    /// through MediaStore (or the public Downloads directory before API 29).
+    /// Takes the same request as a share so a download staged for one serves
+    /// the other.
+    pub async fn save_exported_media_to_mold_folder(
+        &self,
+        request: ShareExportRequest,
+    ) -> crate::Result<SavedExportResponse> {
+        self.0
+            .run_mobile_plugin_async::<SavedExportResponse>("saveExportToMoldFolder", request)
+            .await
+            .map_err(Into::into)
+    }
+
     pub fn set_mobile_appearance(&self, appearance: String) -> crate::Result<()> {
         self.0
             .run_mobile_plugin("setMobileAppearance", AppearanceRequest { appearance })

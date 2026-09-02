@@ -66,6 +66,8 @@ class AndroidMediaInstrumentedTest {
             assertEquals("image/gif", send.type)
             assertTrue(send.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
             val uri = send.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)!!
+            // The chooser shows the file's own name, so it is staged under it.
+            assertEquals("clip.gif", uri.lastPathSegment)
             val shared = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
             assertArrayEquals("GIF89a uat".toByteArray(), shared)
             assertTrue(host.requestText.get().contains("x-api-key: uat-secret", ignoreCase = true))
@@ -98,11 +100,102 @@ class AndroidMediaInstrumentedTest {
             val send = chooser.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)!!
             assertEquals("model/gltf-binary", send.type)
             val uri = send.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)!!
+            assertEquals("armchair.glb", uri.lastPathSegment)
             val shared = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
             assertArrayEquals(glb, shared)
             assertTrue(host.requestText.get().endsWith("{\"format\":\"glb\"}"))
         } finally {
             host.server.close()
+        }
+    }
+
+    /**
+     * "Save to Mold folder" is the share's twin: the same one-shot host, the
+     * same byte check, but the glTF lands under Downloads/Mold as a readable
+     * MediaStore item and the label names that place for the toast.
+     */
+    @Test
+    fun filesMeshGeometryUnderTheDownloadsMoldFolder() {
+        val glb = "glTF".toByteArray() + byteArrayOf(2, 0, 0, 0)
+        val host = startExportHost(glb, "model/gltf-binary")
+        val name = "armchair-${System.nanoTime()}.glb"
+        var location: Uri? = null
+        try {
+            val saved = media.saveExportToMoldFolder(
+                "http://127.0.0.1:${host.server.localPort}/api/gallery/export/armchair.glb",
+                null,
+                "{\"format\":\"glb\"}",
+                name,
+                "model/gltf-binary",
+                "uat-mold-folder-${System.nanoTime()}",
+            )
+            host.responder.join(5_000)
+            location = Uri.parse(saved.location)
+
+            assertEquals(name, saved.filename)
+            assertEquals("Downloads/Mold/$name", saved.label)
+            val written = context.contentResolver.openInputStream(location)!!.use { it.readBytes() }
+            assertArrayEquals(glb, written)
+            assertTrue(host.requestText.get().endsWith("{\"format\":\"glb\"}"))
+        } finally {
+            host.server.close()
+            location?.let { context.contentResolver.delete(it, null, null) }
+        }
+    }
+
+    /**
+     * A second save of the same print is numbered the way the iPhone numbers
+     * it — `name (2).ext`, extension kept — rather than left to MediaStore,
+     * which does not know the geometry media types and would answer
+     * `name.stl (1)`.
+     */
+    @Test
+    fun numbersASecondMoldFolderSaveBeforeTheExtension() {
+        val stl = "solid armchair\nendsolid armchair\n".toByteArray()
+        val stem = "armchair-${System.nanoTime()}"
+        val locations = mutableListOf<Uri>()
+        try {
+            repeat(2) { attempt ->
+                val host = startExportHost(stl, "model/stl")
+                try {
+                    val saved = media.saveExportToMoldFolder(
+                        "http://127.0.0.1:${host.server.localPort}/api/gallery/export/armchair.glb",
+                        null,
+                        "{\"format\":\"stl\"}",
+                        "$stem.stl",
+                        "model/stl",
+                        "uat-mold-folder-$stem-$attempt",
+                    )
+                    host.responder.join(5_000)
+                    locations += Uri.parse(saved.location)
+                    val expected = if (attempt == 0) "$stem.stl" else "$stem (2).stl"
+                    assertTrue(saved.filename.endsWith(".stl"))
+                    assertEquals(expected, saved.filename)
+                    assertEquals("Downloads/Mold/$expected", saved.label)
+                } finally {
+                    host.server.close()
+                }
+            }
+        } finally {
+            locations.forEach { context.contentResolver.delete(it, null, null) }
+        }
+    }
+
+    /** A second export of the same print gets a numbered name, never an overwrite. */
+    @Test
+    fun numbersAMoldFolderCollisionInsteadOfOverwriting() {
+        val directory = java.io.File(context.cacheDir, "mold-folder-test-${System.nanoTime()}").apply { mkdirs() }
+        try {
+            assertEquals("chair (2).stl", AndroidMedia.uniqueName("chair.stl") { it == "chair.stl" })
+            assertEquals("chair.stl", AndroidMedia.uniqueDestination(directory, "chair.stl").name)
+            java.io.File(directory, "chair.stl").writeText("solid chair")
+            assertEquals("chair (2).stl", AndroidMedia.uniqueDestination(directory, "chair.stl").name)
+            java.io.File(directory, "chair (2).stl").writeText("solid chair")
+            assertEquals("chair (3).stl", AndroidMedia.uniqueDestination(directory, "chair.stl").name)
+            java.io.File(directory, "armchair.v2.glb").writeText("glTF")
+            assertEquals("armchair.v2 (2).glb", AndroidMedia.uniqueDestination(directory, "armchair.v2.glb").name)
+        } finally {
+            directory.deleteRecursively()
         }
     }
 
