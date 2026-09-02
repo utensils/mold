@@ -27,6 +27,7 @@ import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   coerceSourceFitForMaskless,
   defaultSourceFitPolicy,
@@ -76,6 +77,12 @@ const caps = computed(() =>
     props.form.pipeline,
     props.selectedModel?.guidance_capabilities ?? props.form.guidanceCapabilities,
     props.selectedModel?.source_image ?? props.form.sourceImageCapability,
+    // The recipe is the authority on strength, the repaint mask, and whether
+    // there is a canvas to fit onto at all. Without it the pre-profile family
+    // rules answer, and they say a 3-D mesh takes all three — so a Hunyuan3D
+    // source would show a denoise slider, a mask well, and a fit policy the
+    // request cannot carry.
+    effectiveGenerationRecipe(props.selectedModel, props.form.pipeline),
   ),
 );
 // Family-scoped label for the shared `strength` wire field (#1055).
@@ -540,8 +547,9 @@ function setSourceFitMode(e: Event) {
     />
 
     <!-- Source fit (how a mismatched source maps onto the target canvas;
-         applied client-side on submit — labels mirror the web SPA) -->
-    <template v-if="form.sourceImage">
+         applied client-side on submit — labels mirror the web SPA). A
+         canvasless recipe (a 3-D mesh) has no canvas to fit onto. -->
+    <template v-if="form.sourceImage && !caps.canvasless">
       <label class="mt-3 block text-caption text-ink-2" for="source-fit-policy">Source fit</label>
       <select
         id="source-fit-policy"

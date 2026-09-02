@@ -260,6 +260,41 @@ const activeRecipe = computed(() =>
  * distilled-CFG line was false for H3, whose guidance is pinned at 0. */
 const stepsNote = computed(() => controlNote(activeRecipe.value?.steps));
 const guidanceNote = computed(() => controlNote(activeRecipe.value?.guidance));
+
+// ── 3-D mesh (canvasless recipes) ───────────────────────────────────────────
+// A canvasless recipe advertises `resolution.domain: "none"` with a zero
+// canvas, so Shape and Resolution have nothing to bind to and are hidden
+// rather than steering a size the request ignores. Everything in the Mesh
+// group below is read off the recipe's own `capabilities.mesh` block — the
+// octree ladder, the iso-threshold bounds and the face bounds are the
+// server's, never a client constant.
+const canvasless = computed(() => caps.value.canvasless || outputShape.value.canvasless);
+const meshProfile = computed(() => caps.value.mesh ?? null);
+const octreeOptions = computed(() =>
+  (meshProfile.value?.octree_resolutions ?? []).map((value) => ({
+    value,
+    label: String(value),
+  })),
+);
+/** `null` on the form means "use the profile default", and the default is
+ * the segment that reads as chosen. */
+const octreeValue = computed(
+  () => props.form.mesh.octreeResolution ?? meshProfile.value?.octree_default ?? 0,
+);
+const thresholdControl = computed(() => meshProfile.value?.threshold ?? null);
+const thresholdValue = computed(
+  () => props.form.mesh.threshold ?? thresholdControl.value?.default ?? 0,
+);
+const thresholdNote = computed(() => controlNote(thresholdControl.value));
+function setTargetFaces(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    props.form.mesh.targetFaces = null;
+    return;
+  }
+  const value = Number(trimmed);
+  props.form.mesh.targetFaces = Number.isFinite(value) && value > 0 ? Math.round(value) : null;
+}
 // The sequence opening image is primary-form source media, so — exactly like
 // the one-shot source well — it never contributes to the Advanced badge.
 const advancedCount = computed(() =>
@@ -753,7 +788,7 @@ function resetSettings() {
       </div>
 
       <!-- Shape -->
-      <div class="ms-field">
+      <div v-if="!canvasless" class="ms-field">
         <div class="ms-field__label">Shape</div>
         <ShapePicker
           :model-value="shapeId"
@@ -765,7 +800,7 @@ function resetSettings() {
       </div>
 
       <!-- Resolution -->
-      <div class="ms-field">
+      <div v-if="!canvasless" class="ms-field">
         <div class="ms-field__label">Resolution</div>
         <ResolutionSelector
           :model-value="resolutionSizeId"
@@ -815,6 +850,65 @@ function resetSettings() {
           data-test="fixed-steps-hint"
         >
           {{ stepsNote }}
+        </p>
+      </div>
+
+      <!-- Mesh — 3-D geometry, built entirely from the recipe's advertised
+           `mesh` block, so a host that widens the octree ladder or the face
+           bounds widens this group with no client release. -->
+      <div v-if="meshProfile" class="ms-field" data-test="mesh-controls">
+        <div class="ms-field__label">Mesh</div>
+        <SegmentedControl
+          v-if="octreeOptions.length > 0"
+          :model-value="octreeValue"
+          :options="octreeOptions"
+          label="Octree detail"
+          wrap
+          data-test="mesh-octree"
+          @update:model-value="form.mesh.octreeResolution = $event"
+        />
+        <SliderRow
+          v-if="thresholdControl"
+          class="mt-3"
+          :model-value="thresholdValue"
+          :min="thresholdControl.min"
+          :max="thresholdControl.max"
+          :step="thresholdControl.step"
+          :disabled="thresholdControl.mode === 'fixed'"
+          label="Iso threshold"
+          :value-label="thresholdValue.toFixed(2)"
+          @update:model-value="form.mesh.threshold = $event"
+        />
+        <p
+          v-if="thresholdNote"
+          class="ms-field__hint ms-field__hint--after-slider"
+          data-test="mesh-threshold-note"
+        >
+          {{ thresholdNote }}
+        </p>
+        <div class="ms-field ms-field--row mt-3">
+          <label class="ms-field__label ms-field__label--inline" for="mesh-target-faces">
+            Target faces
+          </label>
+          <input
+            id="mesh-target-faces"
+            data-selectable
+            data-test="mesh-target-faces"
+            type="number"
+            inputmode="numeric"
+            :min="meshProfile.target_faces_min"
+            :max="meshProfile.target_faces_max"
+            placeholder="keep raw surface"
+            :value="form.mesh.targetFaces ?? ''"
+            class="ms-seed__input data-mono"
+            @input="setTargetFaces(($event.target as HTMLInputElement).value)"
+          />
+        </div>
+        <p class="ms-field__hint">
+          Leave blank to keep the raw surface — {{ meshProfile.target_faces_min }}–{{
+            meshProfile.target_faces_max
+          }}
+          triangles when decimating.
         </p>
       </div>
 

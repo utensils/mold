@@ -2018,6 +2018,18 @@ const selectedEntry = computed<MergedPrint | null>(
   () => entries.value[selectedIndex.value] ?? null,
 );
 
+/**
+ * What the host that HOLDS the open print can transcode a stored GLB into.
+ * GLB is the only stored form, so the export menu is this host's advertised
+ * list and nothing else — a host that adds a container adds an entry with no
+ * client release, and a host that predates 3-D offers none.
+ */
+const meshExportFormats = computed<string[]>(() => {
+  const entry = selectedEntry.value;
+  if (!entry) return [];
+  return hosts.capabilities[entry.sourceKey]?.mesh?.export_formats ?? [];
+});
+
 /** Shared with the store's kind filter so badge and chips never disagree. */
 const isVideo = (i: GalleryImage) => isVideoItem(i);
 const isAudio = (i: GalleryImage) => isAudioItem(i);
@@ -2885,6 +2897,7 @@ onUnmounted(() => {
       :video="isVideo(selectedEntry.item)"
       :audio="isAudio(selectedEntry.item)"
       :mesh="isMesh(selectedEntry.item)"
+      :mesh-export-formats="meshExportFormats"
       :source="gallery.mediaSourceOf(selectedEntry.sourceKey)"
       :target="targetFor(selectedEntry)"
       :cache-key="selectedEntry.sourceKey"

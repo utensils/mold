@@ -5,6 +5,9 @@ import ComposerCard from "./ComposerCard.vue";
 import StyleChips from "./StyleChips.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { recipeCapabilitiesSnapshot } from "../../lib/capabilities";
+import { hunyuan3dRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
+import { IGNORED_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
 
 vi.mock("../../lib/platform", () => ({
   primaryModifierPressed: (e: KeyboardEvent) => e.metaKey || e.ctrlKey,
@@ -181,6 +184,31 @@ describe("ComposerCard", () => {
     expect(typeof (wrapper.vm as unknown as { focus: () => void }).focus).toBe("function");
     expect(typeof (wrapper.vm as unknown as { record: (p: string) => void }).record).toBe(
       "function",
+    );
+  });
+});
+
+// The prompt rule's authority is the selected recipe, projected onto the form
+// by `applyModelDefaults` — a recipe that IGNORES the prompt (no text encoder
+// anywhere in the family) says so in the prompt bed rather than asking for a
+// description the engine will never read.
+describe("ComposerCard — prompt requirement", () => {
+  it("names the note placeholder for a recipe that ignores the prompt", () => {
+    const form = baseForm();
+    form.family = "hunyuan3d";
+    form.recipeCapabilities = recipeCapabilitiesSnapshot(hunyuan3dRecipe(), "hunyuan3d");
+    const wrapper = mountComposer(form);
+    expect(wrapper.get("textarea[aria-label='Prompt']").attributes("placeholder")).toBe(
+      IGNORED_PROMPT_PLACEHOLDER,
+    );
+  });
+
+  it("keeps this surface's own wording for a raster recipe", () => {
+    const form = baseForm();
+    form.recipeCapabilities = recipeCapabilitiesSnapshot(sdxlRecipe(), "sdxl");
+    const wrapper = mountComposer(form);
+    expect(wrapper.get("textarea[aria-label='Prompt']").attributes("placeholder")).toBe(
+      "Describe the image you want to create…",
     );
   });
 });

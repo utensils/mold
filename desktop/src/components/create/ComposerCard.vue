@@ -8,6 +8,7 @@ import ExpandControl from "../generate/ExpandControl.vue";
 import EstimateBadge from "../generate/EstimateBadge.vue";
 import StyleChips from "./StyleChips.vue";
 import type { GenerateForm } from "../../lib/generateForm";
+import { promptInputForForm } from "../../lib/promptRecipe";
 import type { GenerateRequest } from "../../lib/api/types";
 import type { ApiTarget } from "../../lib/api/client";
 import { autoGrowRows } from "../../lib/autogrow";
@@ -58,8 +59,11 @@ const emit = defineEmits<{
 // Disabled state and corrective guidance are intentionally separate: obvious
 // requirements such as an empty prompt do not need a persistent warning.
 const generateDisabled = computed(() => props.disabled && !props.submitting);
+// The recipe is the prompt rule's authority (a mesh family has no text
+// encoder to feed), so the form's snapshot of it rides along — without it the
+// pre-profile family rule would ask for a description nothing reads.
 const placeholder = computed(() =>
-  promptPlaceholder(props.form, "Describe the image you want to create…"),
+  promptPlaceholder(promptInputForForm(props.form), "Describe the image you want to create…"),
 );
 
 const promptEl = ref<HTMLTextAreaElement | null>(null);

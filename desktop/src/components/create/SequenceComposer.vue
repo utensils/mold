@@ -32,6 +32,7 @@ import {
   stageInvalidation,
 } from "@studio/lib/sequenceForm";
 import { promptOptional } from "@studio/lib/promptRequirement";
+import { promptRecipeFromForm } from "../../lib/promptRecipe";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
@@ -211,7 +212,14 @@ const stages = computed<SequenceStage[]>(() =>
 // previous clip's motion tail — the same handoff extend uses — so a
 // promptless-capable family can render the whole sequence undescribed.
 const clipPromptOptional = computed(() =>
-  promptOptional({ family: props.form.family, sourceImage: requestOpeningImage.value }),
+  promptOptional({
+    // The recipe is the authority; the family fields are the older host's
+    // fallback. Keeping the rail on the same input the composer uses is what
+    // stops the two disagreeing about a blank clip prompt.
+    recipe: promptRecipeFromForm(props.form),
+    family: props.form.family,
+    sourceImage: requestOpeningImage.value,
+  }),
 );
 const validation = computed(() =>
   sequenceValidation(stages.value, {

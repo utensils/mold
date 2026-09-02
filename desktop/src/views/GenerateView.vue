@@ -71,6 +71,11 @@ import {
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
 import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequirement";
+import { promptInputForForm } from "../lib/promptRecipe";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
+import { isMeshCompletion } from "@studio/lib/meshCompletion";
+import { meshStatsLabel } from "@studio/lib/meshControls";
+import MeshViewer from "@studio/components/MeshViewer.vue";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
   applyMinimaxH3ReferenceCrops,
@@ -941,12 +946,17 @@ const caps = computed(() =>
 );
 const formValidationError = computed(
   () =>
-    resolutionValidationError(
-      form.width,
-      form.height,
-      selectedEntry.value ?? null,
-      form.pipeline,
-    ) ??
+    // A canvasless recipe (a 3-D mesh) renders at 0 × 0 by contract, so the
+    // whole-number canvas check would block every mesh submit on the exact
+    // size the recipe itself advertises.
+    (caps.value.canvasless
+      ? null
+      : resolutionValidationError(
+          form.width,
+          form.height,
+          selectedEntry.value ?? null,
+          form.pipeline,
+        )) ??
     profileStepsValidationError(form.steps, selectedEntry.value, form.pipeline) ??
     profileGuidanceValidationError(
       caps.value.fixedGuidance ?? form.guidance,
@@ -2178,11 +2188,34 @@ function cancelSubmissionPlanning() {
   preparedSubmitting.value = false;
 }
 
-const previewWidth = computed(
-  () => selectedQueueRender.value?.width ?? job.value?.width ?? form.width,
+/**
+ * The first candidate that can actually shape a frame. A canvasless recipe
+ * (a 3-D mesh) requests 0 × 0 by contract, and `0 / 0` is invalid CSS that
+ * both rules below would be dropped for — collapsing the frame to nothing.
+ * A mesh print's poster dimensions answer instead, and a square is the last
+ * resort while one is still developing.
+ */
+function framedDimension(...candidates: (number | null | undefined)[]): number {
+  for (const value of candidates) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  }
+  return 1;
+}
+const previewWidth = computed(() =>
+  framedDimension(
+    selectedQueueRender.value?.width,
+    job.value?.width,
+    job.value?.result?.width,
+    form.width,
+  ),
 );
-const previewHeight = computed(
-  () => selectedQueueRender.value?.height ?? job.value?.height ?? form.height,
+const previewHeight = computed(() =>
+  framedDimension(
+    selectedQueueRender.value?.height,
+    job.value?.height,
+    job.value?.result?.height,
+    form.height,
+  ),
 );
 /**
  * The frame sizes itself with pure CSS — no measurement, observers, or
@@ -2264,7 +2297,19 @@ const edgeCode = computed(() => {
       ? "S random"
       : `S ${j.visualSeed.slice(0, 12)}`;
   const stepPart = `${j.status === "complete" ? j.total : j.step}/${j.total}`;
-  const size = j.result ? `${j.result.width}×${j.result.height}` : `${j.width}×${j.height}`;
+  // A mesh has no pixels to describe — `width`/`height` are its poster's, not
+  // the print's — so its geometry is the provenance: the one shared caption
+  // every surface writes under a 3-D print.
+  const size = isMeshCompletion(j.result)
+    ? meshStatsLabel(
+        j.result?.mesh_vertices,
+        j.result?.mesh_faces,
+        j.result?.mesh_bounds_min,
+        j.result?.mesh_bounds_max,
+      )
+    : j.result
+      ? `${j.result.width}×${j.result.height}`
+      : `${j.width}×${j.height}`;
   const time = j.result ? `${(j.result.generation_time_ms / 1000).toFixed(1)}s` : "";
   return [name, s, stepPart, size, time].filter(Boolean).join("  ");
 });
@@ -2306,6 +2351,61 @@ function isAudioResult(job: { result: CompleteEvent | null } | null): boolean {
   return isAudioCompletion(job?.result);
 }
 
+/**
+ * Whether this job produced a 3-D mesh. Probed BEFORE the audio and video
+ * questions everywhere it is asked: a mesh carries neither samples nor
+ * frames, so a wider test running first classifies it as a still and draws
+ * binary glTF through an `<img>`.
+ */
+function isMeshResult(job: { result: CompleteEvent | null } | null): boolean {
+  return isMeshCompletion(job?.result);
+}
+
+/** The rendered PNG a mesh print carries — its only raster, and the viewer's
+ * poster while the geometry loads (and forever, if it cannot). */
+const resultMeshPoster = computed(() => {
+  const result = job.value?.result;
+  return isMeshCompletion(result) && result?.mesh_poster
+    ? `data:image/png;base64,${result.mesh_poster}`
+    : "";
+});
+
+/**
+ * The GLB the viewer loads, as an object URL.
+ *
+ * A `data:model/gltf-binary` URL would re-encode tens of megabytes of
+ * geometry into the DOM on every render; a Blob keeps the bytes out of the
+ * document and is revoked the moment the canvas moves on, so a session of
+ * meshes cannot leak them.
+ */
+const resultMeshSrc = ref("");
+let revokeResultMesh: (() => void) | null = null;
+watch(
+  () => {
+    const result = job.value?.result;
+    return isMeshCompletion(result) && result?.image ? result.image : "";
+  },
+  (base64) => {
+    revokeResultMesh?.();
+    revokeResultMesh = null;
+    if (!base64) {
+      resultMeshSrc.value = "";
+      return;
+    }
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([bytes], { type: "model/gltf-binary" }));
+    resultMeshSrc.value = url;
+    revokeResultMesh = () => URL.revokeObjectURL(url);
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => {
+  revokeResultMesh?.();
+  revokeResultMesh = null;
+});
+
 function canvasMenu(): MenuEntry[] {
   const j = job.value;
   if (!j) return [];
@@ -2337,7 +2437,7 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: "Copy image",
-      disabled: !j.result || !!j.result.video_frames || isAudioResult(j),
+      disabled: !j.result || !!j.result.video_frames || isAudioResult(j) || isMeshResult(j),
       action: () => {
         if (!j.result) return;
         const mime = j.result.format === "jpeg" ? "image/jpeg" : `image/${j.result.format}`;
@@ -2371,8 +2471,14 @@ function canvasMenu(): MenuEntry[] {
     },
     {
       label: "Use as source",
+      // Binary glTF is not conditioning: a mesh print cannot be fed back in
+      // as a source image, exactly as the Library lightbox already refuses.
       disabled:
-        j.status !== "complete" || !j.result?.image || !!j.result.video_frames || isAudioResult(j),
+        j.status !== "complete" ||
+        !j.result?.image ||
+        !!j.result.video_frames ||
+        isAudioResult(j) ||
+        isMeshResult(j),
       action: () => {
         if (!j.result?.image) return;
         attachPickedImage(form, {
@@ -3164,6 +3270,13 @@ async function preprocessSourceFit(
     draft.guidanceCapabilities,
     draft.sourceImageCapability,
   );
+  // A canvasless recipe (a 3-D mesh) has no canvas to fit onto: its own
+  // advertised target is 0 × 0, so every fit below would resize the source to
+  // nothing. The engine reads the source at its native resolution.
+  const canvasless = draft.recipeCapabilities
+    ? draft.recipeCapabilities.canvasless
+    : isMeshFamily(draft.family);
+  if (canvasless) return true;
   // H3 FL2VA boundaries take the same client-side fit as an ordinary source,
   // coerced maskless (H3 has no repaint mask).
   if (draftCaps.sourceImageMode === "h3-boundaries") {
@@ -3308,7 +3421,9 @@ function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateFor
 // Generate button, the other this silent early return, and an enabled control
 // that quietly does nothing is exactly the dead end the prepared-expansion
 // invariant forbids.
-const promptMissing = computed(() => promptRequired(form) && !form.prompt.trim());
+const promptMissing = computed(
+  () => promptRequired(promptInputForForm(form)) && !form.prompt.trim(),
+);
 const h3RequireFirstFrame = computed(
   () =>
     effectiveGenerationRecipe(selectedEntry.value, form.pipeline)?.capabilities.source_image ===
@@ -3368,7 +3483,7 @@ const composerWarningReason = computed<string | null>(() =>
 );
 
 const emptyCanvasGuidance = computed(() =>
-  promptRequired(form)
+  promptRequired(promptInputForForm(form))
     ? "Describe an image below, pick a look, and press Generate. Everything runs on your own machine."
     : OPTIONAL_PROMPT_GUIDANCE,
 );
@@ -4472,13 +4587,26 @@ onBeforeUnmount(() => {
                 :style="previewFrameStyle"
                 @contextmenu="job ? contextMenu.open($event, canvasMenu()) : undefined"
               >
-                <!-- Audio is checked first: an audio print has no frames, so
+                <!-- A mesh is checked before everything else: it carries
+                     neither frames nor samples, so every arm below would draw
+                     its binary glTF as a picture. The poster is its still. -->
+                <MeshViewer
+                  v-if="resultMeshSrc"
+                  class="absolute inset-0"
+                  data-test="preview-mesh"
+                  :src="resultMeshSrc"
+                  :poster="resultMeshPoster"
+                  :alt="job?.prompt || 'Generated 3-D mesh'"
+                  auto-rotate
+                  expandable
+                />
+                <!-- Audio is checked next: an audio print has no frames, so
                      the video probe falls through and the <img> below renders
                      a WAV — a broken canvas at the end of a render that
                      actually succeeded. The waveform is the visual; the
                      transport sits over it. -->
                 <div
-                  v-if="job?.resultUrl && isAudioResult(job)"
+                  v-else-if="job?.resultUrl && isAudioResult(job)"
                   class="absolute inset-0 flex flex-col items-center justify-center gap-3 p-3"
                   data-test="preview-audio"
                 >

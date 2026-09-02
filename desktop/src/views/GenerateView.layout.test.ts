@@ -92,8 +92,11 @@ describe("GenerateView layout", () => {
     expect(composerCardSource).not.toContain("!form.prompt.trim() || !form.model");
 
     expect(viewSource).toContain('from "@studio/lib/promptRequirement"');
+    // The recipe rides along: `promptInputForForm` projects the form's
+    // snapshotted `promptMode` back onto the shared rule, so a recipe that
+    // IGNORES the prompt enables Generate with an empty one.
     expect(viewSource).toMatch(
-      /const promptMissing = computed\(\(\) => promptRequired\(form\) && !form\.prompt\.trim\(\)\);/,
+      /const promptMissing = computed\(\s*\(\) => promptRequired\(promptInputForForm\(form\)\) && !form\.prompt\.trim\(\),\s*\);/,
     );
     expect(viewSource).toContain("const generationInputBlockerReason = computed");
     expect(viewSource).toContain("if (generationInputBlockerReason.value ||");
