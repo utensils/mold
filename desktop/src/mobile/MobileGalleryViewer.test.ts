@@ -30,6 +30,7 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
 vi.mock("./platform", () => ({ isNativeAndroidRuntime, isNativeIOSRuntime }));
 
 import MeshViewer from "@studio/components/MeshViewer.vue";
+import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 
 const target = { baseUrl: "http://studio.tailnet.ts.net:7680", apiKey: "secret" };
@@ -1367,7 +1368,26 @@ describe("MobileGalleryViewer mesh export", () => {
     metadata: { ...image.metadata, model: "hunyuan3d-mini-turbo:fp16" },
   };
 
-  function mountMesh(exportFormats: string[]): VueWrapper {
+  /**
+   * A current host's `/api/capabilities.mesh.export_geometry`: OBJ writes
+   * model units Y-up, STL and PLY 100 mm Z-up on the bed. Its presence is the
+   * only gate — `null` is the older host every existing case here mounts.
+   */
+  const meshGeometryCapabilities: MeshExportGeometryCapabilities = {
+    size_mm: { min: 1, max: 1000, default: 100 },
+    up_axes: ["y", "z"],
+    origins: ["center", "floor"],
+    defaults: {
+      obj: { size_mm: null, up_axis: "y", origin: "floor" },
+      stl: { size_mm: 100, up_axis: "z", origin: "floor" },
+      ply: { size_mm: 100, up_axis: "z", origin: "floor" },
+    },
+  };
+
+  function mountMesh(
+    exportFormats: string[],
+    exportGeometry: MeshExportGeometryCapabilities | null = null,
+  ): VueWrapper {
     wrapper = mount(MobileGalleryViewer, {
       attachTo: document.body,
       props: {
@@ -1377,6 +1397,7 @@ describe("MobileGalleryViewer mesh export", () => {
         hostName: "Studio",
         thumbnailUrl: "blob:poster",
         meshExportFormats: exportFormats,
+        meshExportGeometry: exportGeometry,
       },
     });
     return wrapper;
@@ -1785,6 +1806,172 @@ describe("MobileGalleryViewer mesh export", () => {
     expect(view.get("[data-test='video-export-dialog'] [role='alert']").text()).toContain(
       "the export exceeds the 2 GB iPhone limit",
     );
+  });
+
+  /**
+   * A stored mesh is Hunyuan3D's normalized unit cube, so a slicer reads an
+   * unscaled STL as a 2 mm blob lying on its side. The three geometry knobs
+   * are the host's own, they live INLINE in the swipe-up sheet (a dialog
+   * stacked over the viewport would hide the print it belongs to), and their
+   * absence on an older host is the only gate.
+   */
+  describe("geometry options", () => {
+    /** The order of the export block: label, picker, options, then the verbs. */
+    function blockOrder(view: VueWrapper): string[] {
+      return [...view.get(".gallery-viewer-mesh-export").element.children].map(
+        (child) => child.getAttribute("data-test") ?? child.className,
+      );
+    }
+
+    it("renders the host's fields under the picker and posts the picked options", async () => {
+      invoke.mockResolvedValueOnce("shared");
+      const view = mountMesh(["obj", "stl", "ply"], meshGeometryCapabilities);
+      await flushPromises();
+
+      await pickFormat(view, "STL");
+      expect(view.find("[data-test='mesh-geometry-fields']").exists()).toBe(true);
+      expect(blockOrder(view)).toEqual([
+        "gallery-viewer-mesh-label",
+        "gallery-viewer-mesh-format",
+        "mesh-geometry-fields",
+        "gallery-viewer-mesh-verbs",
+      ]);
+      // The host's own STL default is already selected.
+      expect(
+        (view.get("[data-test='mesh-geometry-size-100']").element as HTMLInputElement).checked,
+      ).toBe(true);
+      expect(
+        (view.get("[data-test='mesh-geometry-up-z']").element as HTMLInputElement).checked,
+      ).toBe(true);
+
+      await view.get("[data-test='mesh-geometry-origin-center']").trigger("change");
+      await view.get("[data-test='gallery-viewer-mesh-export']").trigger("click");
+      await flushPromises();
+
+      expect(invoke).toHaveBeenCalledWith("share_exported_animation", {
+        url: "http://studio.tailnet.ts.net:7680/api/gallery/export/armchair%2001.glb",
+        apiKey: "secret",
+        request: { format: "stl", size_mm: 100, up_axis: "z", origin: "center" },
+        filename: "armchair 01.stl",
+        // The reuse key is the request's own JSON, so a changed knob is a
+        // different staged download rather than the previous file again.
+        reuseKey:
+          'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"stl","size_mm":100,"up_axis":"z","origin":"center"}',
+      });
+    });
+
+    /** The Mold folder save is the share's twin, geometry included. */
+    it("carries the same options into a Mold folder save", async () => {
+      invoke.mockResolvedValueOnce({
+        filename: "armchair 01.stl",
+        label: "Files ▸ Mold ▸ armchair 01.stl",
+      });
+      const view = mountMesh(["stl"], meshGeometryCapabilities);
+      await flushPromises();
+
+      await view.get("[data-test='gallery-viewer-mesh-save']").trigger("click");
+      await flushPromises();
+
+      expect(invoke).toHaveBeenCalledWith(
+        "save_export_to_mold_folder",
+        expect.objectContaining({
+          request: { format: "stl", size_mm: 100, up_axis: "z", origin: "floor" },
+        }),
+      );
+    });
+
+    /**
+     * An older host advertises no block at all, and drops unknown fields
+     * rather than refusing them — so the phone must post exactly what it
+     * always posted instead of a size the host will silently ignore.
+     */
+    it("posts the bare format on a host that advertises no geometry", async () => {
+      invoke.mockResolvedValueOnce("shared");
+      const view = mountMesh(["obj", "stl", "ply"]);
+      await flushPromises();
+
+      await pickFormat(view, "STL");
+      expect(view.find("[data-test='mesh-geometry-fields']").exists()).toBe(false);
+
+      await view.get("[data-test='gallery-viewer-mesh-export']").trigger("click");
+      await flushPromises();
+
+      expect(invoke).toHaveBeenCalledWith(
+        "share_exported_animation",
+        expect.objectContaining({
+          request: { format: "stl" },
+          reuseKey: 'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"stl"}',
+        }),
+      );
+    });
+
+    /** A turntable is rendered, not transcoded, and the stored GLB is untouched. */
+    it("offers no geometry for the turntable or the stored GLB", async () => {
+      const view = mountMesh(["glb", "obj", "gif", "webp"], meshGeometryCapabilities);
+      await flushPromises();
+
+      await pickFormat(view, "OBJ");
+      expect(view.find("[data-test='mesh-geometry-fields']").exists()).toBe(true);
+
+      await pickFormat(view, "Turntable");
+      expect(view.find("[data-test='mesh-geometry-fields']").exists()).toBe(false);
+
+      await pickFormat(view, "GLB");
+      expect(view.find("[data-test='mesh-geometry-fields']").exists()).toBe(false);
+    });
+
+    /** Each container has its own defaults; the draft belongs to the pick. */
+    it("resets the draft to the new format's defaults when the format changes", async () => {
+      invoke.mockResolvedValueOnce("shared");
+      const view = mountMesh(["obj", "stl"], meshGeometryCapabilities);
+      await flushPromises();
+
+      // OBJ writes model units, so "As stored" is a real choice there.
+      expect(view.find("[data-test='mesh-geometry-size-stored']").exists()).toBe(true);
+      expect(
+        (view.get("[data-test='mesh-geometry-size-stored']").element as HTMLInputElement).checked,
+      ).toBe(true);
+      await view.get("[data-test='mesh-geometry-size-200']").trigger("change");
+      expect(
+        (view.get("[data-test='mesh-geometry-size-200']").element as HTMLInputElement).checked,
+      ).toBe(true);
+
+      await pickFormat(view, "STL");
+      // STL's own default replaces the OBJ draft wholesale, and STL has no
+      // "as stored" to fall back to.
+      expect(view.find("[data-test='mesh-geometry-size-stored']").exists()).toBe(false);
+      expect(
+        (view.get("[data-test='mesh-geometry-size-100']").element as HTMLInputElement).checked,
+      ).toBe(true);
+
+      await view.get("[data-test='gallery-viewer-mesh-export']").trigger("click");
+      await flushPromises();
+
+      expect(invoke).toHaveBeenCalledWith(
+        "share_exported_animation",
+        expect.objectContaining({
+          request: { format: "stl", size_mm: 100, up_axis: "z", origin: "floor" },
+        }),
+      );
+    });
+
+    /** The viewer's own box is what lets the size line name real extents. */
+    it("names the exported extents from the box the viewer reports", async () => {
+      const view = mountMesh(["stl"], meshGeometryCapabilities);
+      await flushPromises();
+
+      view.findComponent(MeshViewer).vm.$emit("ready", {
+        vertexCount: 24_576,
+        triangleCount: 49_152,
+        bounds: { min: [-0.5, -0.25, -0.5], max: [0.5, 0.25, 0.5] },
+      });
+      await flushPromises();
+
+      // Z-up reorders the stored Y-up extents, and 100 mm is the longest side.
+      expect(view.get("[data-test='mesh-geometry-size-label']").text()).toBe(
+        "100.0 × 100.0 × 50.0 mm",
+      );
+    });
   });
 
   /** A clip's export sheet is unchanged: video exports have no Mold folder. */

@@ -304,6 +304,7 @@ import {
 import { base64ToDataUrl, blobToBase64, isStillImageFile } from "../lib/image";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { meshStatsLabel } from "@studio/lib/meshControls";
+import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 import { isMobileMeshResult, meshResultBlob } from "./meshResult";
 import { parseMissingExpandModel } from "../lib/expandErrors";
 import { resolveExpansionRoute } from "@studio/lib/expansionRouting";
@@ -3252,6 +3253,24 @@ const selectedPrintMeshExportFormats = computed(() =>
 );
 const generatedMeshExportFormats = computed(() =>
   meshExportFormatsForHost(latestResultJob.value?.hostId),
+);
+/**
+ * The same machine's geometry contract for those transcodes — the size
+ * bounds, up axes, origins and per-format defaults it applies to an OBJ / STL
+ * / PLY export. ABSENT on a machine that predates the feature, and that
+ * absence is the only gate: the viewer then posts the bare format, because an
+ * older server drops unknown fields instead of refusing them.
+ */
+function meshExportGeometryForHost(
+  hostId: string | null | undefined,
+): MeshExportGeometryCapabilities | null {
+  return hostId ? (serverCapabilities[hostId]?.mesh?.export_geometry ?? null) : null;
+}
+const selectedPrintMeshExportGeometry = computed(() =>
+  meshExportGeometryForHost(selectedPrint.value?.hostId),
+);
+const generatedMeshExportGeometry = computed(() =>
+  meshExportGeometryForHost(latestResultJob.value?.hostId),
 );
 const generatedPreviewHost = computed(() => {
   const job = latestResultJob.value;
@@ -13673,6 +13692,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :organization="selectedPrintOrganization ?? null"
       :organize-enabled="libraryOrganizeEnabled"
       :mesh-export-formats="selectedPrintMeshExportFormats"
+      :mesh-export-geometry="selectedPrintMeshExportGeometry"
       :upscale-enabled="canUpscalePrint(selectedPrint)"
       :trashed="selectedPrintTrashed"
       :organizing="organizationBusy"
@@ -13720,6 +13740,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       :thumbnail-url="resultPoster || resultUrl"
       :media-url-override="resultIsMesh ? resultMeshSrc : resultUrl"
       :mesh-export-formats="generatedMeshExportFormats"
+      :mesh-export-geometry="generatedMeshExportGeometry"
       :export-enabled="generatedPreviewHost !== null"
       :upscale-enabled="generatedUpscalePrint !== null"
       :generation-announcement="generationAnnouncement"

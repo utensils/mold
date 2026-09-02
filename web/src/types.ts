@@ -18,6 +18,7 @@ import type {
   MeshFormState,
   MeshRequestOptions,
 } from "@studio/lib/meshControls";
+import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 
 export type { MeshRequestOptions } from "@studio/lib/meshControls";
 import type {
@@ -253,6 +254,12 @@ export interface MeshServerCapabilities {
    * host that adds an animated turntable container advertises it here. */
   export_formats: string[];
   textures: boolean;
+  /** The size / up-axis / origin contract for geometry exports. ADDITIVE:
+   * absent on every host that predates it, and that absence is the only gate
+   * a client has — an older server drops the three keys instead of refusing
+   * them, so a client that sent them anyway would promise a resize the host
+   * never performed. The shape is the studio policy's, not a second copy. */
+  export_geometry?: MeshExportGeometryCapabilities | null;
 }
 
 export interface ServerCapabilities {

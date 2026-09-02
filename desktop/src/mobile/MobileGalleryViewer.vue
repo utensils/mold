@@ -27,6 +27,15 @@ import {
   type VideoExportFormat,
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
+import MeshGeometryFields from "@ui/components/MeshGeometryFields.vue";
+import {
+  meshExportRequest,
+  meshGeometryDefaults,
+  takesGeometryOptions,
+  type MeshBounds,
+  type MeshExportGeometryCapabilities,
+  type MeshGeometryOptions,
+} from "@studio/lib/meshExport";
 import { isAnimatedMeshExportFormat, meshExportFilename } from "./meshResult";
 import {
   meshExportChoices,
@@ -94,6 +103,16 @@ const props = withDefaults(
      * has none offers nothing.
      */
     meshExportFormats?: string[];
+    /**
+     * The same host's `/api/capabilities.mesh.export_geometry`: the size
+     * bounds, up axes, origins and per-format defaults it applies to an OBJ /
+     * STL / PLY export. ABSENT (or null) on a host that predates the feature,
+     * and that absence is the ONLY gate — a host with no block is posted the
+     * bare `{ format }` this viewer has always sent, because an older server
+     * DROPS unknown fields rather than refusing them and would silently write
+     * the unscaled mesh the user thought they had resized.
+     */
+    meshExportGeometry?: MeshExportGeometryCapabilities | null;
   }>(),
   {
     reusing: false,
@@ -116,6 +135,7 @@ const props = withDefaults(
     collections: () => [],
     upscaleEnabled: true,
     meshExportFormats: () => [],
+    meshExportGeometry: null,
   },
 );
 
@@ -214,6 +234,38 @@ watch(
   { immediate: true },
 );
 /**
+ * The host's own defaults for the container the picker holds, or `null`
+ * meaning DO NOT OFFER the knobs at all: a host that predates the block, the
+ * stored GLB, or the Turntable entry (which is a render, not a transcode, and
+ * is not a container the host's own `defaults` table can name).
+ */
+const meshGeometryDefault = computed<MeshGeometryOptions | null>(() => {
+  const format = meshFormat.value;
+  if (!format || format === "turntable" || !takesGeometryOptions(format)) return null;
+  return meshGeometryDefaults(props.meshExportGeometry, format);
+});
+/**
+ * The live draft, which belongs to ONE container: switching the picker — or
+ * moving to a host that advertises different defaults — resets it wholesale
+ * rather than carrying an OBJ choice into an STL export.
+ */
+const meshGeometry = ref<MeshGeometryOptions | null>(null);
+watch(
+  meshGeometryDefault,
+  (defaults) => {
+    meshGeometry.value = defaults ? { ...defaults } : null;
+  },
+  { immediate: true },
+);
+/**
+ * The knobs that go on the wire for one container. The draft is only ever the
+ * answer for the container it was reset for, so anything else — and every
+ * host with no advertised block — posts the bare format.
+ */
+function meshGeometryFor(format: string): MeshGeometryOptions | null {
+  return format === meshFormat.value ? meshGeometry.value : null;
+}
+/**
  * The primary verb. A native shell shares (the shell runs the export and
  * opens the system share sheet); a browser downloads, and says which file.
  */
@@ -275,6 +327,12 @@ const mediaKind = computed<ViewerMediaKind>(() =>
 const kindLabel = computed(() => viewerKindLabel(mediaKind.value));
 /** What the staged media reported about itself, cleared with every print. */
 const meshStats = ref<{ vertexCount: number; triangleCount: number } | null>(null);
+/**
+ * The box the staged mesh reported, in model units. Nothing about the export
+ * depends on it — it is what lets the size control say what the file will
+ * actually measure — so it stays null until the viewer has drawn a frame.
+ */
+const meshBounds = ref<MeshBounds | null>(null);
 const mediaDurationMs = ref<number | null>(null);
 const peekSummary = computed(() =>
   viewerPeekSummary(mediaKind.value, props.item, {
@@ -655,11 +713,22 @@ function mediaReady(detail?: unknown): void {
     return;
   }
   if (detail && typeof detail === "object" && "triangleCount" in detail) {
-    const stats = detail as { vertexCount?: number; triangleCount?: number };
+    const stats = detail as {
+      vertexCount?: number;
+      triangleCount?: number;
+      bounds?: MeshBounds | null;
+    };
     meshStats.value = {
       vertexCount: stats.vertexCount ?? 0,
       triangleCount: stats.triangleCount ?? 0,
     };
+    // A viewer that could not measure a box reports none; the size control
+    // then names the knob instead of inventing extents.
+    const bounds = stats.bounds;
+    meshBounds.value =
+      bounds && Array.isArray(bounds.min) && Array.isArray(bounds.max)
+        ? { min: bounds.min, max: bounds.max }
+        : null;
   }
 }
 
@@ -800,6 +869,7 @@ watch(
     if (sheetBody.value) sheetBody.value.scrollTop = 0;
     actionStatus.value = "";
     meshStats.value = null;
+    meshBounds.value = null;
     mediaDurationMs.value = null;
   },
 );
@@ -866,6 +936,10 @@ interface MoldFolderSave {
  * the identical arguments and reuse key, so a download staged for a share the
  * user backed out of is saved without a second fetch, and the shell checks
  * the bytes against the container the filename claims on either path.
+ *
+ * The reuse key is the request's own JSON, so it already covers the geometry
+ * knobs: changing a size, an up axis or an origin correctly invalidates a
+ * staged download instead of handing back the previous file.
  */
 function nativeExportArguments(filename: string, request: Record<string, unknown>) {
   return {
@@ -879,7 +953,9 @@ function nativeExportArguments(filename: string, request: Record<string, unknown
 
 /**
  * One geometry transcode of the stored GLB — or, on a phone, the stored GLB
- * itself. The body is the bare format: a mesh export has no playback options.
+ * itself. The body is the format plus whatever geometry knobs the holding
+ * host advertised for that container; on a host with no block it stays the
+ * bare format this viewer has always posted.
  *
  * On the native shells this is the SAME command a turntable takes: the shell
  * runs the export itself, checks the bytes against the container the filename
@@ -897,7 +973,7 @@ async function performMeshExport(format: string): Promise<void> {
   try {
     const path = videoExportPath(props.item.filename);
     const filename = meshExportFilename(props.item.filename, format);
-    const request = { format };
+    const request = meshExportRequest(format, meshGeometryFor(format));
     if (nativeShell.value) {
       const outcome = await invoke<"shared" | "cancelled">(
         "share_exported_animation",
@@ -937,7 +1013,10 @@ async function performMeshSave(format: string): Promise<void> {
   try {
     const saved = await invoke<MoldFolderSave>(
       "save_export_to_mold_folder",
-      nativeExportArguments(meshExportFilename(props.item.filename, format), { format }),
+      nativeExportArguments(
+        meshExportFilename(props.item.filename, format),
+        meshExportRequest(format, meshGeometryFor(format)),
+      ),
     );
     actionStatus.value = `Saved to ${saved.label}`;
   } catch (error) {
@@ -1358,6 +1437,21 @@ onBeforeUnmount(() => {
                 wrap
               />
             </div>
+            <!-- The stored mesh is a normalized unit cube, so a slicer reads
+               an unscaled STL as a 2 mm blob on its side. The three knobs that
+               fix that are the HOST's own, and they live here in the sheet,
+               under the picker they belong to: a dialog stacked over the
+               viewport would hide the print being exported. A host that
+               advertises no defaults for this container offers none. -->
+            <MeshGeometryFields
+              v-if="meshExportGeometry && meshGeometry"
+              :model-value="meshGeometry"
+              :capabilities="meshExportGeometry"
+              :format="meshFormat"
+              :bounds="meshBounds"
+              :disabled="!!actionBusy || exportBusy"
+              @update:model-value="meshGeometry = $event"
+            />
             <div class="gallery-viewer-mesh-verbs">
               <button
                 class="secondary-button gallery-viewer-export"
@@ -1784,6 +1878,14 @@ onBeforeUnmount(() => {
   display: grid;
   min-width: 0;
   gap: 8px;
+}
+
+/* The shared geometry fields are sized for the desktop dialog, where 13px is
+   right. On a phone an editable field under 16px makes iOS zoom the viewport
+   the moment it takes focus, so the one text input they render is bumped here
+   rather than in the component every surface shares. */
+.gallery-viewer-mesh-export :deep(.mesh-geometry-custom input) {
+  font-size: 16px;
 }
 
 .gallery-viewer-identity {

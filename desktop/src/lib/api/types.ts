@@ -16,6 +16,7 @@ import type { OutputFormat as WireOutputFormat } from "@studio/lib/generated/gen
 import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
 import type { MeshRequestOptions } from "@studio/lib/meshControls";
+import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 
 export type { MeshRequestOptions } from "@studio/lib/meshControls";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
@@ -143,6 +144,13 @@ export interface MeshServerCapabilities {
    * host that adds an animated turntable container advertises it here. */
   export_formats: string[];
   textures: boolean;
+  /** The geometry knobs (`size_mm`, `up_axis`, `origin`) this host applies to
+   * an OBJ / STL / PLY export before it writes the file. Additive, and its
+   * ABSENCE (or null) is the ONLY gate a client has: an older server DROPS
+   * unknown body fields rather than refusing them, so posting these to a host
+   * that never advertised them would hand back the unscaled mesh the user
+   * thought they had resized. Absent ⇒ post `{ format }` exactly as before. */
+  export_geometry?: MeshExportGeometryCapabilities | null;
 }
 
 export interface ServerCapabilities {

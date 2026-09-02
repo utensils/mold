@@ -115,6 +115,7 @@ import {
   libraryUpscaleLabel,
   shouldPollFramewiseJob,
 } from "@studio/lib/upscale";
+import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 
 const GAP = 8;
 const PAD = 16;
@@ -2032,6 +2033,17 @@ const meshExportFormats = computed<string[]>(() => {
   return hosts.capabilities[entry.sourceKey]?.mesh?.export_formats ?? [];
 });
 
+/**
+ * The same host's geometry contract for those transcodes. Absent (or null)
+ * means it predates the feature — the ONLY gate there is, since an older
+ * server would drop the fields and silently write an unscaled mesh.
+ */
+const meshExportGeometry = computed<MeshExportGeometryCapabilities | null>(() => {
+  const entry = selectedEntry.value;
+  if (!entry) return null;
+  return hosts.capabilities[entry.sourceKey]?.mesh?.export_geometry ?? null;
+});
+
 /** Shared with the store's kind filter so badge and chips never disagree. */
 const isVideo = (i: GalleryImage) => isVideoItem(i);
 const isAudio = (i: GalleryImage) => isAudioItem(i);
@@ -2916,6 +2928,7 @@ onUnmounted(() => {
       :audio="isAudio(selectedEntry.item)"
       :mesh="isMesh(selectedEntry.item)"
       :mesh-export-formats="meshExportFormats"
+      :mesh-export-geometry="meshExportGeometry"
       :source="gallery.mediaSourceOf(selectedEntry.sourceKey)"
       :target="targetFor(selectedEntry)"
       :cache-key="selectedEntry.sourceKey"
