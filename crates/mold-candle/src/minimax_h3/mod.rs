@@ -13,6 +13,7 @@ mod dit;
 mod loader;
 mod model;
 mod presentation;
+mod special_tokens;
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 mod private_runtime_observation;
 mod processor;
@@ -123,6 +124,12 @@ pub use presentation::{
     build_fl2va_presentation, build_ref2va_presentation, build_text_presentation, H3ModalityTag,
     H3Presentation, H3RawTokenizer, PresentationError, RefPresentation, RefPresentationKind,
     VideoPresentationBlock,
+};
+pub use special_tokens::{
+    register_extra_special_tokens, H3SpecialTokenError, H3_BASE_VOCABULARY_SIZE,
+    H3_EXTRA_SPECIAL_TOKENS, H3_REGISTERED_ADDED_TOKEN_COUNT, H3_REGISTERED_MAX_TOKEN_ID,
+    H3_REGISTERED_VOCABULARY_SIZE, H3_RELEASED_ADDED_TOKEN_COUNT, H3_RELEASED_MAX_TOKEN_ID,
+    H3_RELEASED_VOCABULARY_SIZE,
 };
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub use private_runtime_observation::{H3PrivateWorkspaceCapture, H3PrivateWorkspaceObservation};
