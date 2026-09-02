@@ -46,6 +46,7 @@ import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import {
   effectiveGenerationRecipe,
+  recipeIsCanvasless,
   fixedRecipeControlOverrides,
   floatControlError,
   integerControlError,
@@ -1534,7 +1535,12 @@ function syncSourceCanvas(
   const isReferenceConditioning = isFlux2DevModel(
     currentModel.value?.name ?? form.state.value.model,
   );
-  if (!isReferenceConditioning) {
+  // A canvasless recipe (a 3-D mesh) has no canvas for the source to steer:
+  // its zero size is the recipe's own default and must stay on the wire.
+  const canvasless = recipeIsCanvasless(
+    effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline),
+  );
+  if (!isReferenceConditioning && !canvasless) {
     const preserveReplacement =
       replaced && preservedSourceReplacement === image.base64;
     const nextResolution = resolveSourceCanvasTransition({

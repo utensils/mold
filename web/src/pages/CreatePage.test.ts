@@ -5100,6 +5100,35 @@ describe("CreatePage 3-D mesh prints", () => {
     );
   });
 
+  it("keeps the zero canvas when a source image is attached", async () => {
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = meshModel.name;
+    form.state.value.modelFamily = meshModel.family;
+    form.state.value.width = 0;
+    form.state.value.height = 0;
+    await nextTick();
+
+    // The source watcher steers a raster canvas toward the attached image;
+    // a canvasless recipe has nothing for it to steer, and the recipe's own
+    // zero default must stay on the wire.
+    form.state.value.imageAttachments = [
+      {
+        kind: "upload",
+        filename: "armchair.png",
+        base64: "Q0hBSVI=",
+        width: 1024,
+        height: 1024,
+      },
+    ];
+    await nextTick();
+    await flushPromises();
+
+    expect(form.state.value.width).toBe(0);
+    expect(form.state.value.height).toBe(0);
+  });
+
   it("keeps the required wording for a raster model", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("flux-dev:q4", "flux"),
