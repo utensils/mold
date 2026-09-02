@@ -382,7 +382,7 @@ if wants gpu; then
         # lane's H3 foundations step never exercises an enabled cache. It runs
         # here under the shipping `h3-cuda` edge (the attention release contract
         # refuses a bare `h3` recipe in this file; GitHub CI's host runner takes
-        # the same module filter under `--features h3`). Module-filtered because
+        # the same module filter with the bare feature, which that contract does not scan). Module-filtered because
         # the unfiltered `h3` graph carries private-UAT-only fixtures.
         step "gpu: CUDA MiniMax H3 conditioner cache (enabled)" \
           cargo test -p mold-ai-inference --lib --features h3-cuda minimax_h3::conditioner_cache
