@@ -1187,10 +1187,11 @@ PR 1 does not change that contract. Lifting it so an FL2VA tier can run
 text-only is tracked in #1552.
 
 **Adapters pulled ahead of the release are unowned by the running service.**
-Both adapters land in the shared model store at
+This holds for EVERY adapter pulled ahead of the release that first ships its
+tag, not only this campaign's two: they all land in the shared model store at
 `shared/minimax-h3/loras/<basename>`, beside the Comfy-Org adapters, keyed by
-their own basenames. A mold that does not know the two tags has no manifest for
-them: `/api/models` shows no row, `mold rm` claims no removal ownership, and
+their own basenames. A mold that does not know a tag has no manifest for
+it: `/api/models` shows no row, `mold rm` claims no removal ownership, and
 repair will not touch them. So a scratch server used to pull them onto a host
 whose production service is an older release leaves bytes that older service can
 neither see nor clean up — invisible and unowned, not harmless-and-managed —
@@ -1199,7 +1200,9 @@ until that service upgrades to a release carrying the tags, after which
 concrete case: both adapters were pulled through the scratch server into the
 shared store, and the host's 0.26.0 production service, a build that predates
 the tags, has no row for either one — invisible and unowned until it
-upgrades.
+upgrades. The rank-21 campaign below pulls three more adapters onto the same
+shared store, through the same scratch server, onto the same production host,
+and inherits this paragraph unchanged.
 
 ### The conditioner cache
 
@@ -1338,7 +1341,7 @@ path logs at `tracing::info!` ("MiniMax H3 conditioner output served from
 the in-process cache"). At the default `MOLD_LOG=info`, storing a new key
 is silent — only a later hit against it produces a log line.
 
-### The rank-21 Turbo A/B
+### The rank-21 Turbo tiers campaign (gate not yet run)
 
 Three FL2VA/Ref2VA Turbo tags — `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`,
 `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`, and
@@ -1348,9 +1351,14 @@ dynamic-rank adapter from
 [`drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`](https://huggingface.co/drbaph/MiniMax-H3-Turbo-Lora-ComfyUI/tree/be8eb3ea3466cbb7def202ffec0d2fdc054256ac)
 at pinned revision `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` instead of the
 1.956 GB rank-128 PEFT export: 298,177,224 / 327,035,608 / 326,935,264 bytes
-respectively — about 1.66 GB less to download per tag, and about 1.6 GB less
-resident VRAM at runtime, because the adapter's own device residency is its
-file payload. Each is a lossy approximation, not a bit-identical repack: the
+respectively — 1.66 GB less to download for the 4-step 768p tier and 1.63 GB
+less for the other two (1,658,015,768 / 1,629,157,392 / 1,629,257,736 bytes
+exactly). The paired resident saving is DERIVED, not measured: the adapter's
+own device residency is its file payload minus its F32 alphas
+(1,956,118,528 vs 298,124,288 / 326,982,656 / 326,882,304 device bytes, so
+1.658 / 1.629 / 1.629 GB), and the gate below still has to measure VRAM high
+water end to end before that number is an observation. Each is a lossy
+approximation, not a bit-identical repack: the
 publisher's own recorded average Frobenius retention against the source
 adapter is 94.95% (4-step 768p), 97.72% (8-step), and 98.33% (Ref2VA 4-step).
 
@@ -1390,11 +1398,17 @@ SSIM), recording mean and minimum per-frame PSNR and mean block SSIM.
   PR; the default without an explicit call is drop. Each tier ships or is
   dropped independently of the other two.
 
-**Measured rows are pending.** No render from this matrix has been captured
-for this record yet; the numbers above are the publisher's own recorded
-Frobenius figures and the acceptance thresholds this qualification will hold
-each tier to, not measured PSNR/SSIM evidence. This section gets a per-tier
-evidence table and decision the first time the gate actually runs.
+**Measured rows are pending, and the three tags shipped anyway.** No render
+from this matrix has been captured for this record yet; the numbers above are
+the publisher's own recorded Frobenius figures, arithmetic on the pinned file
+identities, and the acceptance thresholds this qualification will hold each
+tier to — not measured PSNR/SSIM evidence. The three tags are registered as
+ordinary, runnable manifest identities on that pinned-identity evidence
+alone, and every surface that describes them says so; no surface may claim a
+tier passed a gate this record has not run. This section gets its per-tier
+evidence table, its ship-or-drop decision, and the run date in its heading the
+first time the gate actually runs; a tier that fails it is then dropped from
+`REVIEWED_TURBO_MANIFEST_TIERS` rather than left registered.
 
 ### What is derived, and how
 

@@ -433,9 +433,10 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     // future tier — shares one on-disk copy under the family `loras/` bucket
     // instead of duplicating ~1.96 GB per manifest name. The upstream
     // directory is deliberately dropped: Comfy-Org publishes under `loras/`
-    // and lightx2v at its repository root, and both belong in the one bucket
-    // the docs promise. For the Comfy-Org adapters the derivation is
-    // byte-identical to joining `hf_filename`, so installed files stay valid.
+    // while lightx2v and drbaph publish at their repository roots, and every
+    // one of them belongs in the single bucket the docs promise. For the
+    // Comfy-Org adapters the derivation is byte-identical to joining
+    // `hf_filename`, so installed files stay valid.
     // A tier-basename distinctness test in `minimax_h3` is what keeps two
     // adapters from colliding on one on-disk name.
     if manifest.family == crate::minimax_h3::FAMILY

@@ -79,11 +79,15 @@ pub const LIGHTX2V_REVISION: &str = "05ef678438e84933c406131b59abbf86919b3aac";
 /// still governs the base checkpoint a tag executes on.
 ///
 /// Only the three `resized_avg_rank_21` files are reviewed. The repository's
-/// rank-28 and rank-64 v1.1 resizes are deliberately excluded (their
-/// `baked_scale` metadata is free text rather than a number, so nothing pins
-/// the scale that was folded in), and so are the Kijai rank-21 files
-/// republished elsewhere (no declared license, and an internal-checkpoint
-/// source that cannot be corroborated against anything mold ships).
+/// other rank-20/28/64 resizes at the same revision are deliberately excluded
+/// (their `baked_scale` metadata is free text rather than a number and they
+/// carry no `resized_from`, so nothing pins the scale that was folded in or
+/// the adapter it approximates), and so are the eight `*_pruned_comfyui`
+/// full checkpoints published beside them (whole transformers, not adapters —
+/// mold's compact transformer identity is pinned from [`COMFY_REPO`]) and the
+/// Kijai rank-21 files republished elsewhere (no declared license, and an
+/// internal-checkpoint source that cannot be corroborated against anything
+/// mold ships).
 pub const DRBAPH_TURBO_LORA_REPO: &str = "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI";
 pub const DRBAPH_TURBO_LORA_REVISION: &str = "be8eb3ea3466cbb7def202ffec0d2fdc054256ac";
 pub const LICENSE_SHA256: &str = MINIMAX_H3_LICENSE_SHA256;
@@ -185,17 +189,18 @@ pub struct TurboManifestTier {
     pub tier_stable_id: &'static str,
     /// Human-facing tier label ("Turbo 8-step").
     pub display_label: &'static str,
-    /// Repository publishing this tier's adapter: [`COMFY_REPO`] or
-    /// [`LIGHTX2V_REPO`]. The base stack is unaffected — a Turbo tag is the
-    /// compact stack of its own task plus this one file.
+    /// Repository publishing this tier's adapter: [`COMFY_REPO`],
+    /// [`LIGHTX2V_REPO`], or [`DRBAPH_TURBO_LORA_REPO`]. The base stack is
+    /// unaffected — a Turbo tag is the compact stack of its own task plus
+    /// this one file.
     pub adapter_hf_repo: &'static str,
     /// Pinned revision of [`Self::adapter_hf_repo`] this adapter is published
     /// at. `file_revision` resolves the pair, so an adapter can never be
     /// fetched from an unpinned `main`.
     pub adapter_hf_revision: &'static str,
     /// Repository-relative adapter path at [`Self::adapter_hf_revision`].
-    /// Comfy-Org publishes under `loras/`; lightx2v publishes at the
-    /// repository root.
+    /// Comfy-Org publishes under `loras/`; lightx2v and drbaph publish at
+    /// their repository roots.
     pub adapter_hf_filename: &'static str,
     pub adapter_size_bytes: u64,
     pub adapter_sha256: &'static str,
@@ -3581,11 +3586,21 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: tier.model.to_string(),
             family: FAMILY.to_string(),
+            // This one sentence is the whole `/api/models` row, the
+            // Discover card, and the `mold list` line a user reads before a
+            // ~42.8 GB pull, so it discloses the adapter's SHAPE and not
+            // only its label: a lossy SVD resize is never described in the
+            // same words as the full-rank adapter it approximates.
             description: format!(
-                "MiniMax H3 {} Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed {} LoRA (downloadable; CUDA or Apple Metal)",
+                "MiniMax H3 {} Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed{} {} LoRA (downloadable; CUDA or Apple Metal)",
                 match task {
                     Task::Fl2va => "FL2VA",
                     Task::Ref2va => "Ref2VA",
+                },
+                if tier.adapter_shape_label == RESIZED_TURBO_ADAPTER_SHAPE {
+                    ", lossy SVD-resized"
+                } else {
+                    ""
                 },
                 tier.display_label
             ),
@@ -5470,8 +5485,9 @@ mod tests {
             assert_eq!(manifest.files.len(), base.files.len() + 1);
 
             // The adapter downloads from its OWN pinned source revision —
-            // Comfy-Org's later `loras/` publication, or lightx2v's repository
-            // root — while the base stack stays on the reviewed pin.
+            // Comfy-Org's later `loras/` publication, or lightx2v's or
+            // drbaph's repository root — while the base stack stays on the
+            // reviewed pin.
             assert_eq!(
                 file_revision(&adapter.hf_repo, &adapter.hf_filename),
                 Some(tier.adapter_hf_revision)
@@ -5662,8 +5678,9 @@ mod tests {
 
     /// A user reading an acquisition contract must be able to tell a lossy
     /// SVD-resized adapter from the rank-128 adapter it approximates, so the
-    /// `DistilledLora` shape sentence is derived from the tier row rather
-    /// than written once for every adapter.
+    /// `DistilledLora` shape sentence — and the manifest description the
+    /// Discover row, `/api/models`, and `mold list` actually show — are both
+    /// derived from the tier row rather than written once for every adapter.
     #[test]
     fn the_distilled_lora_shape_names_the_tier_it_actually_describes() {
         let mut seen_uniform = false;
@@ -5684,6 +5701,14 @@ mod tests {
             );
             assert_eq!(contract.dtype, "bf16", "{}", tier.model);
             assert_eq!(contract.shape, tier.adapter_shape_label, "{}", tier.model);
+            // The description is the only sentence most clients ever render
+            // for this row, so it carries the same disclosure the contract
+            // shape does.
+            assert!(
+                manifest.description.contains(tier.display_label),
+                "{}",
+                tier.model
+            );
             match tier.adapter_shape_label {
                 UNIFORM_TURBO_ADAPTER_SHAPE => {
                     seen_uniform = true;
@@ -5693,12 +5718,30 @@ mod tests {
                         tier.model
                     );
                     assert!(contract.shape.contains("rank 128"), "{}", tier.model);
+                    assert!(
+                        !manifest.description.contains("lossy"),
+                        "{} is full rank but its description calls it lossy",
+                        tier.model
+                    );
+                    assert!(
+                        manifest.description.contains("with the reviewed "),
+                        "{}",
+                        tier.model
+                    );
                 }
                 RESIZED_TURBO_ADAPTER_SHAPE => {
                     seen_resized = true;
                     assert!(contract.shape.contains("avg 21"), "{}", tier.model);
                     assert!(contract.shape.contains("baked scale"), "{}", tier.model);
                     assert!(!contract.shape.contains("rank 128"), "{}", tier.model);
+                    assert!(
+                        manifest
+                            .description
+                            .contains("with the reviewed, lossy SVD-resized "),
+                        "{} description does not disclose the resize: {}",
+                        tier.model,
+                        manifest.description
+                    );
                 }
                 other => panic!("{} declares an unreviewed shape {other}", tier.model),
             }

@@ -6846,10 +6846,18 @@ mod tests {
         FrozenH3FactoryAuthority::new_contract_only(exact_input()).unwrap()
     }
 
-    /// Exact resident and staging cost of a published Turbo adapter, from the
-    /// mold-candle derivation: 1,956,118,528 BF16 matrix bytes (the published
-    /// payload minus its 208 F32 alphas), and twice the widest single matrix
-    /// (`lora_B` at `[21504, 384]`) staged on the host.
+    /// Exact resident and staging cost of a published FULL-RANK Turbo
+    /// adapter, from the mold-candle derivation: 1,956,118,528 BF16 matrix
+    /// bytes (the published payload minus its 208 F32 alphas), and twice the
+    /// widest single matrix (`lora_B` at `[21504, 384]`) staged on the host.
+    ///
+    /// It is an arbitrary well-formed charge for every tier these tests build
+    /// an authority for, NOT a pinned cost per tier: the authority takes its
+    /// byte counts as parameters, and the assertions below compare grid
+    /// points, shift, and sampler kind. The SVD-resized `-r21` tiers really
+    /// carry 298,124,288 / 326,982,656 / 326,882,304 device bytes; a test
+    /// that asserts a residency figure must read it from the tier under test
+    /// rather than from this constant.
     const TURBO_DEVICE_BYTES: u64 = 1_956_118_528;
     /// The widest module (fused `attn.qkv_proj`): its transposed copies live
     /// beside its originals during the upload.

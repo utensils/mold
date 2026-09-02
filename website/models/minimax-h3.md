@@ -193,27 +193,32 @@ for the three lossy SVD-resized rank-21 tiers below — 298,177,224 bytes,
   sampler grid points (8 model evaluations)
 - `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`: 5
   terminal-inclusive sampler grid points (4 model evaluations) — a lossy
-  low-rank approximation of the reviewed adapter; about 1.6 GB less VRAM
-  and 1.66 GB less to download; 94.95% average Frobenius retention against
+  low-rank approximation of the reviewed adapter; about 1.66 GB less to
+  download, and about 1.66 GB less resident VRAM derived from the adapter
+  payload rather than measured; 94.95% average Frobenius retention against
   the full-rank `-turbo-4step-768p` adapter it was resized from
 - `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`: 9 terminal-inclusive
   sampler grid points (8 model evaluations) — a lossy low-rank approximation
-  of the reviewed adapter; about 1.6 GB less VRAM and 1.66 GB less to
-  download; 97.72% average Frobenius retention against the full-rank
+  of the reviewed adapter; about 1.63 GB less to download, and about 1.63 GB
+  less resident VRAM derived from the adapter payload rather than measured;
+  97.72% average Frobenius retention against the full-rank
   `-turbo-8step` adapter it was resized from
 - `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`: 5 terminal-inclusive
   sampler grid points (4 model evaluations)
 - `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`: 5 terminal-inclusive
   sampler grid points (4 model evaluations) — a lossy low-rank approximation
-  of the reviewed adapter; about 1.6 GB less VRAM and 1.66 GB less to
-  download; 98.33% average Frobenius retention against the full-rank
+  of the reviewed adapter; about 1.63 GB less to download, and about 1.63 GB
+  less resident VRAM derived from the adapter payload rather than measured;
+  98.33% average Frobenius retention against the full-rank
   `-turbo-4step` adapter it was resized from
 
 An adapter is reviewed for exactly one task partition, so a `ref2v` adapter
-can never mint an FL2VA qualification and vice versa. Each `-r21` tier is
-gated on a measured A/B against its full-rank source tier before it ships
-(`docs/qualification/minimax-h3.md`, "The rank-21 Turbo A/B"); a tier that
-fails that gate is simply not registered as a model tag.
+can never mint an FL2VA qualification and vice versa. Each `-r21` tier
+carries pinned-identity evidence only: size, SHA-256, and the full-rank
+adapter it was resized from. The measured A/B against that source tier has
+not run yet — `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers
+campaign", carries the planned gate and its per-tier acceptance rule, and
+gets the measured rows and the decision the first time it runs.
 
 A Turbo tag stores its base stack in its own task's base checkpoint directory
 (`minimax-h3-fl2va-comfy-pruned-int8/` or `minimax-h3-ref2va-comfy-pruned-int8/`,
@@ -287,10 +292,12 @@ at the repository ROOT at pinned revision
 (327,035,608 bytes), and `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_resized_avg_rank_21_bf16.safetensors`
 (326,935,264 bytes), bringing those three Turbo variants to 42,780,267,542,
 42,809,125,926, and 42,809,025,582 bytes (42.780 GB, 42.809 GB, and
-42.809 GB) respectively — about 1.66 GB less than their full-rank source
-tier. Each is a lossy, per-module dynamic-rank SVD resize of one of the
-full-rank adapters above, published with a numeric `baked_scale` folded into
-the weights rather than an `alpha`/rank pair. drbaph declares `apache-2.0`
+42.809 GB) respectively — 1,658,015,768 bytes less to download for the
+4-step 768p tier and 1,629,157,392 / 1,629,257,736 bytes less for the other
+two (about 1.66 GB and about 1.63 GB). Each is a lossy, per-module
+dynamic-rank SVD resize of one of the full-rank adapters above, published
+with a numeric `baked_scale` folded into the weights rather than an
+`alpha`/rank pair. drbaph declares `apache-2.0`
 for these resized derivatives specifically; the MiniMax H3 Community License
 still governs the base checkpoint and the full-rank adapter each was resized
 from. Every adapter, whichever of the three sources it comes from, lands at

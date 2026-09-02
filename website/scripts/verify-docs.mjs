@@ -187,6 +187,12 @@ const requiredH3DownloadFacts = [
   '326,935,264',
   '44,438,283,310',
   '44,438,283,318',
+  '42,780,267,542',
+  '42,809,125,926',
+  '42,809,025,582',
+  // A rank-21 tier is an APPROXIMATION of the adapter it ships beside, and
+  // the page must say so in the sentence a user reads before the pull.
+  'lossy low-rank approximation',
   'capture-scope UAT override',
   '42,482,090,318',
   '63,452,470,480',

@@ -9,8 +9,10 @@
 //! Selection is by model identity: the reviewed Turbo manifest tags
 //! (`mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS`) name a tier and
 //! pin its adapter file inside the model's own manifest, together with the
-//! repository and revision that tier's adapter is published at — Comfy-Org's
-//! `loras/` re-hosts or lightx2v's repository root. The historical
+//! repository and revision that tier's adapter is published at — each tier's
+//! OWN pinned source, which today is Comfy-Org's `loras/` re-hosts or the
+//! repository root of `lightx2v/Minimax-h3-Turbo` or
+//! `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`. The historical
 //! `MOLD_H3_TURBO_ADAPTER` (path) + `MOLD_H3_TURBO_TIER` (tier id) pair
 //! remains a capture-scope UAT override honored only under the
 //! `h3-private-uat` feature; ordinary builds refuse a set pair outright so
@@ -613,6 +615,19 @@ mod tests {
             );
             assert_eq!(tier.file_bytes(), manifest_tier.adapter_size_bytes);
             assert_eq!(tier.content_sha256(), manifest_tier.adapter_sha256);
+            // The manifest's shape label is the acquisition contract a user
+            // reads before a pull; the runtime shape is what the file must
+            // actually be. Welded as a BICONDITIONAL, because either
+            // direction ships a wrong contract with every other test green:
+            // a full-rank row labelled "SVD-resized" understates what it
+            // downloads, and a resized row labelled uniform hides a lossy
+            // approximation behind the words of the adapter it approximates.
+            assert_eq!(
+                tier.shape().is_dynamic(),
+                manifest_tier.adapter_shape_label.starts_with("SVD-resized"),
+                "{} shape label disagrees with the runtime tier shape",
+                manifest_tier.model
+            );
             let contract = turbo_tier_contract(tier).unwrap();
             assert_eq!(contract.grid_points, manifest_tier.steps);
         }
