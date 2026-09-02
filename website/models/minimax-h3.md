@@ -214,11 +214,15 @@ for the three lossy SVD-resized rank-21 tiers below — 298,177,224 bytes,
 
 An adapter is reviewed for exactly one task partition, so a `ref2v` adapter
 can never mint an FL2VA qualification and vice versa. Each `-r21` tier
-carries pinned-identity evidence only: size, SHA-256, and the full-rank
-adapter it was resized from. The measured A/B against that source tier has
-not run yet — `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers
-campaign", carries the planned gate and its per-tier acceptance rule, and
-gets the measured rows and the decision the first time it runs.
+carries pinned-identity evidence (size, SHA-256, and the full-rank adapter it
+was resized from) plus a measured A/B against that full-rank tier, run
+2026-09-02 on an L40S: about 1.5-1.6 GB less VRAM measured at both 768x768
+and 1344x768, with mean PSNR 21-29 dB on the FL2VA pairs (`-4step-768p-r21`,
+`-8step-r21`) and 16-17 dB on the panning Ref2VA pair (`-4step-r21`) against
+the full-rank source. The per-tier ship/drop decision is pending the
+maintainer's call and is recorded, along with the full measured evidence, in
+`docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers campaign
+(2026-09-02)".
 
 A Turbo tag stores its base stack in its own task's base checkpoint directory
 (`minimax-h3-fl2va-comfy-pruned-int8/` or `minimax-h3-ref2va-comfy-pruned-int8/`,

@@ -99,9 +99,14 @@ The current decision permits:
   v1.1 4-step 768p and 8-step 768p adapters from `lightx2v/Minimax-h3-Turbo`
   at the repository root, and three lossy SVD-resized rank-21 adapters — a
   per-module dynamic-rank derivative of the full-rank adapter each was
-  resized from, carrying pinned-identity evidence only, because the measured
-  A/B against that full-rank tier has not run — from
-  `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` at the repository root); and the
+  resized from; the A/B against each full-rank tier ran 2026-09-02 (the
+  8-step r21 tier cleared the acceptance thresholds at 768x768 and sits in
+  the 20-24 dB maintainer band at 1344x768; the 4-step 768p r21 tier sits in
+  the band at both canvases; the Ref2VA r21 tier measured 16-17 dB with
+  visual parity), and the per-tier registration decision is pending the
+  maintainer's call on this branch's pull request (see
+  `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers campaign") —
+  from `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` at the repository root); and the
   pinned download-only tiers
   (`minimax-h3-{fl2va,ref2va}:official-bf16` and `:comfy-pruned-nvfp4`), which
   acquire, verify, inventory, and remove normally but are refused at
@@ -204,12 +209,16 @@ below requires re-confirming this source before every release that ships it.
 three SVD-resized rank-21 Turbo adapters: lossy, per-module dynamic-rank
 derivatives of three of the full-rank adapters above.
 
-These three tags carry PINNED-IDENTITY evidence only — size, SHA-256, header
-identity, and the welded source tier. The measured A/B against the exact
-full-rank tier each was resized from has NOT run; the planned gate, its
-per-tier acceptance rule, and the record that will carry the measured
-evidence and the ship-or-drop decision are in
-`docs/qualification/minimax-h3.md` ("The rank-21 Turbo tiers campaign").
+These three tags carry PINNED-IDENTITY evidence — size, SHA-256, header
+identity, and the welded source tier — plus MEASURED A/B evidence against the
+exact full-rank tier each was resized from: the gate ran 2026-09-02 (the
+8-step r21 tier cleared the acceptance thresholds at 768x768 and sits in the
+20-24 dB maintainer band at 1344x768; the 4-step 768p r21 tier sits in the
+band at both canvases; the Ref2VA r21 tier measured 16-17 dB with visual
+parity). The per-tier registration decision is pending the maintainer's call
+on this branch's pull request; the gate, its per-tier acceptance rule, and
+the measured evidence are in `docs/qualification/minimax-h3.md` ("The
+rank-21 Turbo tiers campaign (2026-09-02)").
 
 The repository declares `license: apache-2.0` for these SVD-resized
 derivatives specifically, and `base_model: Comfy-Org/MiniMax-H3` with
@@ -246,7 +255,7 @@ not the private correspondence itself.
 | Upstream review        | At upstream HEAD `42ed227ee7df40d41602854ae760620d6eb651fe`, LICENSE and Q&A hashes still match the pinned review; Q&A SHA-256 `c39dcfc5dc3e546918509b57709db826a9b1945311bffaa01e80501101b8abe4`        |
 | Qualification root     | Owner-only `/Volumes/ExternalStorage/mold/uat-h3`; validated external authorization record under its `compliance` directory; no evidence or model payload committed                                      |
 | Permitted artifacts    | Mold code/docs/manifests, upstream or transformed H3 artifacts, and generated outputs; private correspondence and owner-only qualification evidence remain confidential                                  |
-| Third-party sources    | `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot` @ `908eccad7e68751190d04c171956f163bfeed741`, pruned NVFP4 transformers only. Declares the reviewed MiniMax H3 Community License and `base_model: MiniMaxAI/MiniMax-H3`; ships no LICENSE file (404 at the pinned revision). Reviewed 2026-08-22; downloadable, no runtime arm. `lightx2v/Minimax-h3-Turbo` @ `05ef678438e84933c406131b59abbf86919b3aac`, Turbo LoRA adapters only (v1.1 4-step 768p, v1.0 8-step 768p). Declares `apache-2.0` for the adapters and `base_model: MiniMaxAI/MiniMax-H3`; its v1.0 files are byte-identical to Comfy-Org's re-host; ships no LICENSE file (404 at the pinned revision), the same packaging gap as the NVFP4 source. Reviewed 2026-09-01; runnable on the FL2VA compact stack. `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` @ `be8eb3ea3466cbb7def202ffec0d2fdc054256ac`, SVD-resized rank-21 Turbo LoRA adapters only (three, lossy per-module dynamic-rank derivatives of the full-rank adapters above). Declares `apache-2.0` for these derivatives, `base_model: Comfy-Org/MiniMax-H3` and `base_model_relation: adapter`; ships no LICENSE file (404 at the pinned revision), the same packaging gap as the two sources above; the base MiniMax H3 Community License still governs the checkpoint and full-rank adapter each was resized from. Reviewed 2026-09-02; runnable on the compact stack of its own task, carrying pinned-identity evidence only — the measured A/B against each full-rank source has not run (see `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers campaign") |
+| Third-party sources    | `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot` @ `908eccad7e68751190d04c171956f163bfeed741`, pruned NVFP4 transformers only. Declares the reviewed MiniMax H3 Community License and `base_model: MiniMaxAI/MiniMax-H3`; ships no LICENSE file (404 at the pinned revision). Reviewed 2026-08-22; downloadable, no runtime arm. `lightx2v/Minimax-h3-Turbo` @ `05ef678438e84933c406131b59abbf86919b3aac`, Turbo LoRA adapters only (v1.1 4-step 768p, v1.0 8-step 768p). Declares `apache-2.0` for the adapters and `base_model: MiniMaxAI/MiniMax-H3`; its v1.0 files are byte-identical to Comfy-Org's re-host; ships no LICENSE file (404 at the pinned revision), the same packaging gap as the NVFP4 source. Reviewed 2026-09-01; runnable on the FL2VA compact stack. `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` @ `be8eb3ea3466cbb7def202ffec0d2fdc054256ac`, SVD-resized rank-21 Turbo LoRA adapters only (three, lossy per-module dynamic-rank derivatives of the full-rank adapters above). Declares `apache-2.0` for these derivatives, `base_model: Comfy-Org/MiniMax-H3` and `base_model_relation: adapter`; ships no LICENSE file (404 at the pinned revision), the same packaging gap as the two sources above; the base MiniMax H3 Community License still governs the checkpoint and full-rank adapter each was resized from. Reviewed 2026-09-02; runnable on the compact stack of its own task, carrying pinned-identity evidence plus the measured A/B against each full-rank source, which ran 2026-09-02 with the per-tier registration decision pending the maintainer's call on this branch's pull request (see `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers campaign (2026-09-02)") |
 | Permitted users        | Any person or organization in every territory, using local, remote-client, shared-server, hosted, or redistributed Mold/H3 paths                                                                         |
 | Prohibited scope       | Claiming technical support for an unimplemented runtime/task/device/envelope; publication of private correspondence or owner-only qualification evidence                                                 |
 | Expiry/revocation      | Immediate on MiniMax revocation, narrowed authority, license/Q&A change, loss of access control, or maintainer decision                                                                                  |
