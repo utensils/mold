@@ -19,6 +19,7 @@ import {
   storeCachedHostPresentation,
 } from "./galleryCache";
 import { clearSessionScrollForTests, sessionScrollPosition } from "@studio/lib/libraryOrganization";
+import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
 import { thumbnailTier } from "@studio/lib/thumbnailPersistentCache";
 
 const {
@@ -460,6 +461,44 @@ function serveStillModel(): void {
   const base = apiJsonTo.getMockImplementation()!;
   apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
     if (path === "/api/models") return Promise.resolve([stillModel]);
+    return base(callTarget, path, init);
+  });
+}
+
+/**
+ * A Hunyuan3D checkpoint exactly as a current host advertises one: canvasless,
+ * prompt ignored, source image required, `glb` its only container.
+ */
+const meshModel: ModelEntry = {
+  ...model,
+  name: "hunyuan3d-mini-turbo:fp16",
+  family: "hunyuan3d",
+  description: "Mesh model",
+  source_image: "required",
+  generation_profile: {
+    schema_version: 1,
+    profile_id: "hunyuan3d.mini",
+    profile_hash: "hunyuan3d-mini-hash",
+    default_recipe_id: "default",
+    recipes: [hunyuan3dRecipe()],
+  },
+};
+
+function serveMeshModel(): void {
+  const base = apiJsonTo.getMockImplementation()!;
+  apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+    if (path === "/api/models") return Promise.resolve([meshModel]);
+    if (path === "/api/capabilities") {
+      return Promise.resolve({
+        ...durableQueueCapabilities,
+        mesh: {
+          generation: true,
+          formats: ["glb"],
+          export_formats: ["obj", "stl", "ply"],
+          textures: false,
+        },
+      });
+    }
     return base(callTarget, path, init);
   });
 }
@@ -6330,6 +6369,50 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("video.result-media").attributes("src")).toBe(
       "https://studio/media/full-video",
     );
+  });
+
+  /**
+   * A 3-D print is neither a still nor a clip: drawing glTF bytes into an
+   * `<img>` shows a broken tile, and the phone must recognize the mesh from
+   * the only thing a durable completion carries — its container.
+   */
+  it("shows a finished 3-D print in the interactive viewer, not an image tile", async () => {
+    serveMeshModel();
+    streamableMediaUrl.mockResolvedValue("https://studio/media/armchair.glb");
+    admitCompletedPrints("armchair.glb");
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(liveForm.outputFormat).toBe("glb");
+    // Canvasless: the recipe's own zero canvas, never a malformed size.
+    expect(liveForm.width).toBe(0);
+    liveForm.sourceImage = btoa("armchair");
+    liveForm.sourceImageName = "armchair.png";
+    await flushPromises();
+
+    // The prompt is IGNORED by this family, so Develop is live without one.
+    const develop = wrapper.get("[data-test='mobile-develop-button']");
+    expect(develop.attributes("disabled")).toBeUndefined();
+    await develop.trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    await vi.waitFor(() =>
+      expect(wrapper!.find("[data-test='mobile-generated-mesh']").exists()).toBe(true),
+    );
+    expect(wrapper.find("img.result-media").exists()).toBe(false);
+    expect(wrapper.find("video.result-media").exists()).toBe(false);
+    // A mesh is fetched whole by its viewer; it must not take the legacy blob.
+    expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/armchair.glb", {
+      target,
+      cacheKey: "studio-id",
+      allowLegacyBlob: false,
+    });
+    expect(admittedRequests()[0]).toMatchObject({ output_format: "glb", width: 0, height: 0 });
+    expect(admittedRequests()[0]!.source_fit).toBeUndefined();
+    // Nothing was fitted toward the zero canvas on the way out.
+    expect(applySourceFitPreprocess).not.toHaveBeenCalled();
   });
 
   it("fails a completion that published no file instead of showing a stub", async () => {

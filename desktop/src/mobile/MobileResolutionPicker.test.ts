@@ -1,8 +1,32 @@
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { defineComponent, reactive } from "vue";
 import { describe, expect, it } from "vitest";
+import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import type { ModelEntry } from "../lib/api/types";
+
+/** A Hunyuan3D checkpoint exactly as the host advertises one. */
+const meshModel: ModelEntry = {
+  name: "hunyuan3d-mini-turbo:fp16",
+  family: "hunyuan3d",
+  size_gb: 2,
+  is_loaded: false,
+  hf_repo: "tencent/Hunyuan3D-2mini",
+  default_steps: 5,
+  default_guidance: 5,
+  default_width: 1024,
+  default_height: 1024,
+  description: "Mesh model",
+  downloaded: true,
+  source_image: "required",
+  generation_profile: {
+    schema_version: 1,
+    profile_id: "hunyuan3d.mini",
+    profile_hash: "hunyuan3d-mini-hash",
+    default_recipe_id: "default",
+    recipes: [hunyuan3dRecipe()],
+  },
+};
 
 interface PickerState {
   width: number;
@@ -315,5 +339,26 @@ describe("MobileResolutionPicker", () => {
     await wrapper.get("[data-shape='4:5']").trigger("click");
     expect(wrapper.emitted("update:width")).toEqual([[896]]);
     expect(wrapper.emitted("update:height")).toEqual([[1152]]);
+  });
+
+  /**
+   * A canvasless recipe renders a mesh, not pixels: there is no shape, no
+   * ladder and no custom size to offer, and the zero canvas it carries is
+   * correct rather than malformed input. Blocking on `width < 1` here would
+   * disable Develop for every 3-D print.
+   */
+  it("renders nothing and stays valid on a canvasless recipe", () => {
+    const wrapper = mount(MobileResolutionPicker, {
+      props: {
+        family: meshModel.family,
+        model: meshModel,
+        width: 0,
+        height: 0,
+      },
+    });
+
+    expect(wrapper.find(".mobile-resolution-picker").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-resolution-error']").exists()).toBe(false);
+    expect(wrapper.emitted("validity-change")).toEqual([[true]]);
   });
 });

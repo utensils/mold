@@ -361,6 +361,15 @@ describe("mobile form spacing", () => {
     );
     expect(duration?.[1]).toMatch(/margin-bottom:\s*14px\s*;/);
   });
+
+  it("keeps the 3-D octree segments on the 44pt touch floor", () => {
+    const octree = css.match(/\.mobile-mesh-group \.ms-seg \.ms-seg__btn\s*\{([^}]*)\}/s);
+
+    expect(octree?.[1]).toMatch(/min-height:\s*44px\s*;/);
+    expect(sharedParamsComponent).toMatch(
+      /<div v-if="octreeSegments\.length" class="mobile-mesh-group">/,
+    );
+  });
 });
 
 describe("mobile safe areas", () => {

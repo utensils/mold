@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { hunyuan3dRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
+import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/generationProfile";
 import type { ModelEntry, OutputMetadata } from "../lib/api/types";
 import { buildRequest, newGenerateForm } from "../lib/generateForm";
 import { applyMobileGalleryMetadata } from "./reuse";
@@ -628,5 +630,140 @@ describe("applyMobileGalleryMetadata — sequence prints", () => {
         [unconditioned],
       ).sequence?.raised,
     ).toBe(0);
+  });
+});
+
+/**
+ * A 3-D print restores through the same shared mapper as every other print,
+ * so the phone must not undo its answers afterwards: the format stays the
+ * `glb` the recipe advertises, the canvas stays the zero canvas a canvasless
+ * recipe renders with, and the mesh controls the print recorded come back.
+ */
+describe("applyMobileGalleryMetadata on a mesh print", () => {
+  function profile(recipe: GenerationRecipeProfile): GenerationProfileSet {
+    return {
+      schema_version: 1,
+      profile_id: "mesh-reuse",
+      profile_hash: "mesh-reuse-hash",
+      default_recipe_id: recipe.id,
+      recipes: [recipe],
+    };
+  }
+
+  const meshModel: ModelEntry = {
+    name: "hunyuan3d-mini-turbo:fp16",
+    family: "hunyuan3d",
+    size_gb: 2,
+    is_loaded: false,
+    hf_repo: "tencent/Hunyuan3D-2mini",
+    default_steps: 5,
+    default_guidance: 5,
+    default_width: 1024,
+    default_height: 1024,
+    description: "Mesh model",
+    downloaded: true,
+    source_image: "required",
+    generation_profile: profile(hunyuan3dRecipe()),
+  };
+
+  const meshPrint: OutputMetadata = {
+    prompt: "an armchair",
+    model: meshModel.name,
+    seed: 4,
+    steps: 5,
+    guidance: 5,
+    // A mesh print's width/height describe its POSTER, never a canvas.
+    width: 512,
+    height: 512,
+    output_format: "glb",
+    strength: 0.42,
+    source_fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
+    mesh: { octree_resolution: 384, threshold: 0.42, target_faces: 25_000 },
+  };
+
+  it("keeps glb, the zero canvas, and the recorded mesh controls", () => {
+    const form = newGenerateForm();
+    const result = applyMobileGalleryMetadata(form, meshPrint, [meshModel]);
+
+    expect(result.modelName).toBe(meshModel.name);
+    expect(result.substitutedModel).toBe(false);
+    expect(form.outputFormat).toBe("glb");
+    expect(form.width).toBe(0);
+    expect(form.height).toBe(0);
+    expect(form.mesh).toEqual({
+      octreeResolution: 384,
+      threshold: 0.42,
+      targetFaces: 25_000,
+    });
+
+    form.sourceImage = "c291cmNl";
+    const request = buildRequest(form);
+    expect(request.output_format).toBe("glb");
+    expect(request.width).toBe(0);
+    expect(request.height).toBe(0);
+    expect(request.source_fit).toBeUndefined();
+    expect(request.strength).toBeUndefined();
+    expect(request.mesh).toEqual({
+      octree_resolution: 384,
+      threshold: 0.42,
+      target_faces: 25_000,
+    });
+  });
+
+  /**
+   * The phone corrected the restored format against the pre-profile FAMILY
+   * list, which recognizes exactly one mesh family name. A host that ships a
+   * second one still advertises `glb` in its recipe, and the family list
+   * would answer `png` — turning a reuse into a request the mesh engine
+   * refuses. The advertised recipe is the authority.
+   */
+  it("keeps an advertised mesh format the legacy family list does not know", () => {
+    const futureMesh: ModelEntry = {
+      ...meshModel,
+      name: "hunyuan3d-2.1-standard:fp16",
+      family: "hunyuan3d-2.1",
+    };
+
+    const form = newGenerateForm();
+    applyMobileGalleryMetadata(form, { ...meshPrint, model: futureMesh.name }, [futureMesh]);
+
+    expect(form.outputFormat).toBe("glb");
+    expect(buildRequest(form).output_format).toBe("glb");
+  });
+
+  /**
+   * The same rule in the other direction: the substituted model's own
+   * advertised contract, not the wider family list, corrects the format.
+   */
+  it("corrects the format against the substituted model's recipe, not its family", () => {
+    const narrowRecipe = sdxlRecipe();
+    narrowRecipe.capabilities.output = {
+      ...narrowRecipe.capabilities.output,
+      default_format: "png",
+      formats: ["png"],
+    };
+    const fallback: ModelEntry = {
+      name: "sdxl-base:fp16",
+      family: "sdxl",
+      size_gb: 6,
+      is_loaded: false,
+      hf_repo: "sdxl",
+      default_steps: 30,
+      default_guidance: 7,
+      default_width: 1024,
+      default_height: 1024,
+      description: "Image model",
+      downloaded: true,
+      generation_profile: profile(narrowRecipe),
+    };
+
+    const form = newGenerateForm();
+    const result = applyMobileGalleryMetadata(form, { ...meshPrint, output_format: "webp" }, [
+      fallback,
+    ]);
+
+    expect(result.substitutedModel).toBe(true);
+    // `webp` is in the legacy sdxl family list but NOT in this recipe's.
+    expect(form.outputFormat).toBe("png");
   });
 });

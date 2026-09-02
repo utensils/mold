@@ -1135,3 +1135,112 @@ describe("MobileGalleryViewer info sheet", () => {
     expect(view.emitted("restore")).toHaveLength(1);
   });
 });
+
+/**
+ * GLB is the only container mold STORES; OBJ, STL and PLY are transcodes of
+ * that stored file. The menu is built from the owning host's advertised
+ * `capabilities.mesh.export_formats` and never from a client constant, so a
+ * machine that adds a container offers it here without a client release.
+ */
+describe("MobileGalleryViewer mesh export", () => {
+  const meshPrint: GalleryImage = {
+    ...image,
+    filename: "armchair 01.glb",
+    format: "glb",
+    metadata: { ...image.metadata, model: "hunyuan3d-mini-turbo:fp16" },
+  };
+
+  function mountMesh(exportFormats: string[]): VueWrapper {
+    wrapper = mount(MobileGalleryViewer, {
+      attachTo: document.body,
+      props: {
+        item: meshPrint,
+        target,
+        cacheKey: "studio",
+        hostName: "Studio",
+        thumbnailUrl: "blob:poster",
+        meshExportFormats: exportFormats,
+      },
+    });
+    return wrapper;
+  }
+
+  it("offers exactly what the host advertises, and nothing when it advertises none", async () => {
+    const none = mountMesh([]);
+    await flushPromises();
+    expect(none.find("[data-test='gallery-viewer-mesh-export-obj']").exists()).toBe(false);
+    expect(none.find("[data-test='gallery-viewer-mesh-export-animation']").exists()).toBe(false);
+    none.unmount();
+
+    const view = mountMesh(["obj", "stl", "ply"]);
+    await flushPromises();
+    expect(
+      view.findAll("[data-test^='gallery-viewer-mesh-export-']").map((button) => button.text()),
+    ).toEqual(["Export as OBJ", "Export as STL", "Export as PLY"]);
+    // A stored mesh is not a raster: Photos and the clipboard take neither.
+    expect(view.find("[data-test='gallery-viewer-copy']").exists()).toBe(false);
+    expect(view.find("[data-test='gallery-viewer-save']").exists()).toBe(false);
+  });
+
+  it("posts the bare format and shares the returned geometry file", async () => {
+    const share = vi.fn(async (_data: { files: File[] }) => undefined);
+    Object.defineProperty(navigator, "share", { value: share, configurable: true });
+    Object.defineProperty(navigator, "canShare", {
+      value: vi.fn(() => true),
+      configurable: true,
+    });
+    apiFetchTo.mockResolvedValue({
+      blob: () => Promise.resolve(new Blob([Uint8Array.from([1, 2, 3])], { type: "model/obj" })),
+    } as Response);
+    const view = mountMesh(["obj", "stl", "ply"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-export-stl']").trigger("click");
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/export/armchair%2001.glb", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ format: "stl" }),
+    });
+    expect(share).toHaveBeenCalledTimes(1);
+    expect(share.mock.calls[0]![0].files[0]!.name).toBe("armchair 01.stl");
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Export ready to share",
+    );
+  });
+
+  /**
+   * A turntable carries playback, repeat, size and frame rate, so it goes
+   * through the export sheet the phone already has for clips — and posts the
+   * identical body to the identical route.
+   */
+  it("routes an advertised turntable through the existing options sheet", async () => {
+    invoke.mockResolvedValueOnce("shared");
+    const view = mountMesh(["obj", "gif", "webp"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-export-animation']").trigger("click");
+    await flushPromises();
+    // The formats offered are the host's advertised ANIMATED ones only; the
+    // video-only `/api/gallery/export-options` probe never runs for a mesh.
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(
+      view
+        .findAll("[data-test='video-export-dialog'] input[name='export-format']")
+        .map((radio) => (radio.element as HTMLInputElement).value),
+    ).toEqual(["gif", "webp"]);
+
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "share_exported_animation",
+      expect.objectContaining({
+        url: "http://studio.tailnet.ts.net:7680/api/gallery/export/armchair%2001.glb",
+        filename: "armchair 01.gif",
+        request: expect.objectContaining({ format: "gif" }),
+      }),
+    );
+  });
+});

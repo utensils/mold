@@ -57,7 +57,23 @@ export interface MobileDurableHostIdentity {
   instanceId?: string | null | undefined;
 }
 
-const OUTPUT_FORMATS = new Set<OutputFormat>(["png", "jpeg", "webp", "gif", "apng", "mp4", "wav"]);
+/**
+ * Every container a GENERATION request can name. `glb` is the mesh family's
+ * only stored form — OBJ/STL/PLY are gallery transcodes and can never be a
+ * generation target, so they are deliberately absent. A format missing here
+ * drops the whole replayed record, which would lose an in-flight batch across
+ * a relaunch, so this list must stay complete.
+ */
+const OUTPUT_FORMATS = new Set<OutputFormat>([
+  "png",
+  "jpeg",
+  "webp",
+  "gif",
+  "apng",
+  "mp4",
+  "wav",
+  "glb",
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

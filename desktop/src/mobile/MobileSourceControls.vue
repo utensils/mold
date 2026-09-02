@@ -88,6 +88,14 @@ const caps = computed(() =>
 );
 // Family-scoped label for the shared `strength` wire field (#1055).
 const strength = computed(() => strengthSemantics(props.form.family));
+/**
+ * A canvasless recipe (a 3-D mesh) renders no pixel canvas, so there is
+ * nothing for the source to be cropped, padded or upscaled toward: the fit
+ * policy is not a choice the user has here. `buildRequest` records no
+ * `source_fit` for such a request either, so offering the control would
+ * promise a setting the wire drops.
+ */
+const canvasless = computed(() => caps.value.canvasless);
 /** The model's own image-attachment shape — the single shared policy. */
 const plan = computed(() => sourceMediaPlan(caps.value));
 const isAttachmentMode = computed(() => plan.value.kind === "attachments");
@@ -768,7 +776,8 @@ function applyMask(mask: string): void {
           />
         </label>
 
-        <label class="field">
+        <!-- A canvasless (3-D) recipe fits the source to no canvas at all. -->
+        <label v-if="!canvasless" class="field">
           <span>Source fit</span>
           <select
             class="control"
@@ -783,7 +792,10 @@ function applyMask(mask: string): void {
             <option value="upscale-then-fit">Upscale then fit</option>
           </select>
         </label>
-        <p v-if="form.sourceFit.mode === 'upscale-then-fit'" class="mobile-source-note">
+        <p
+          v-if="!canvasless && form.sourceFit.mode === 'upscale-then-fit'"
+          class="mobile-source-note"
+        >
           {{
             form.sourceFit.upscalerModel
               ? `Preprocesses with ${form.sourceFit.upscalerModel}.`

@@ -6,11 +6,7 @@ import {
   type SequenceReuseLossiness,
 } from "@studio/lib/sequenceReuse";
 import type { ModelEntry, OutputMetadata } from "../lib/api/types";
-import {
-  defaultOutputFormat,
-  generationCapabilitiesForFamily,
-  outputFormatsForFamily,
-} from "../lib/capabilities";
+import { coerceFormOutputFormat, generationCapabilitiesForFamily } from "../lib/capabilities";
 import { applyMetadataToForm, type GenerateForm } from "../lib/generateForm";
 import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import { emptyWanRecipe } from "@studio/lib/wanRecipe";
@@ -137,9 +133,15 @@ export function applyMobileGalleryMetadata(
   // A substituted model can belong to a different family. Keep the original
   // canvas/settings where they remain portable, but never leave an impossible
   // output format selected (for example MP4 on an image-only model).
-  if (!outputFormatsForFamily(form.family).includes(form.outputFormat)) {
-    form.outputFormat = defaultOutputFormat(form.family);
-  }
+  //
+  // The RECIPE answers, through the one shared coercion every restore site
+  // uses; the pre-profile family list is only the fallback inside it. Asking
+  // the family directly recognizes exactly one mesh family name, so a second
+  // one would have had its advertised `glb` rewritten to `png` here — after
+  // the shared mapper had already resolved it correctly.
+  form.outputFormat =
+    coerceFormOutputFormat(form.outputFormat, form.family, form.recipeCapabilities) ??
+    form.outputFormat;
 
   let sequence: MobileSequenceReuse | null = null;
   if (plan) {

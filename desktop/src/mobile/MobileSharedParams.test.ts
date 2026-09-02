@@ -2,7 +2,8 @@ import { mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import { beforeEach, describe, expect, it } from "vitest";
-import { newGenerateForm } from "../lib/generateForm";
+import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
 import MobileSharedParams from "./MobileSharedParams.vue";
 
@@ -320,6 +321,145 @@ describe("MobileSharedParams fixed-control notes", () => {
 
     expect(wrapper.find("[data-test='mobile-fixed-steps-hint']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(false);
+  });
+});
+
+/**
+ * The 3-D group. Every control here is driven by the recipe's advertised
+ * `capabilities.mesh` block — the phone never carries an octree ladder, a
+ * threshold range or a face budget of its own — and an untouched control
+ * stays `null` so the request omits it and the engine's own default renders.
+ */
+describe("MobileSharedParams mesh controls", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  function meshModel(recipe = hunyuan3dRecipe()): ModelEntry {
+    return {
+      name: "hunyuan3d-mini-turbo:fp16",
+      family: "hunyuan3d",
+      downloaded: true,
+      source_image: "required",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "hunyuan3d.mini",
+        profile_hash: "hunyuan3d-mini-hash",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as ModelEntry;
+  }
+
+  function meshForm(): GenerateForm {
+    return reactive({
+      ...newGenerateForm(),
+      model: "hunyuan3d-mini-turbo:fp16",
+      family: "hunyuan3d",
+      width: 0,
+      height: 0,
+    });
+  }
+
+  function mountMesh(form: GenerateForm, model = meshModel()) {
+    return mount(MobileSharedParams, {
+      props: { form, model, lastSeed: null },
+      global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
+    });
+  }
+
+  it("renders no mesh group for a recipe that advertises none", () => {
+    const form = reactive({ ...newGenerateForm(), model: "sdxl:test", family: "sdxl" });
+    const wrapper = mount(MobileSharedParams, {
+      props: { form, lastSeed: null },
+      global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
+    });
+
+    expect(wrapper.find("[data-test='mobile-mesh-controls']").exists()).toBe(false);
+  });
+
+  it("lights the advertised octree default while the control is untouched", async () => {
+    const form = meshForm();
+    const wrapper = mountMesh(form);
+
+    const segments = wrapper.get("[data-test='mobile-mesh-octree']").findAll("button");
+    expect(segments.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
+      "128",
+      "192",
+      "256",
+      "320",
+      "384",
+    ]);
+    expect(form.mesh.octreeResolution).toBeNull();
+    expect(segments[2]!.attributes("aria-checked")).toBe("true");
+
+    await segments[4]!.trigger("click");
+    expect(form.mesh.octreeResolution).toBe(384);
+    expect(
+      wrapper
+        .get("[data-test='mobile-mesh-octree']")
+        .findAll("button")[4]!
+        .attributes("aria-checked"),
+    ).toBe("true");
+  });
+
+  it("drives the iso threshold from the advertised float control", async () => {
+    const form = meshForm();
+    const wrapper = mountMesh(form);
+
+    const slider = wrapper.get<HTMLInputElement>("[data-test='mobile-mesh-threshold']");
+    expect(slider.attributes("min")).toBe("0");
+    expect(slider.attributes("max")).toBe("1");
+    expect(slider.attributes("step")).toBe("0.01");
+    expect(slider.attributes("disabled")).toBeUndefined();
+    expect(slider.element.value).toBe("0.6");
+
+    slider.element.value = "0.42";
+    await slider.trigger("input");
+    expect(form.mesh.threshold).toBe(0.42);
+  });
+
+  it("disables a fixed threshold and shows the host's own note", () => {
+    const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh = {
+      ...recipe.capabilities.mesh!,
+      threshold: {
+        default: 0.5,
+        min: 0.5,
+        max: 0.5,
+        step: 0.01,
+        mode: "fixed",
+        note: "This build pins the iso surface at 0.50.",
+      },
+    };
+    const wrapper = mountMesh(meshForm(), meshModel(recipe));
+
+    const slider = wrapper.get("[data-test='mobile-mesh-threshold']");
+    expect(slider.attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-test='mobile-mesh-threshold-note']").text()).toBe(
+      "This build pins the iso surface at 0.50.",
+    );
+  });
+
+  it("keeps target faces optional and clamps a typed budget into the advertised bounds", async () => {
+    const form = meshForm();
+    const wrapper = mountMesh(form);
+
+    const faces = wrapper.get<HTMLInputElement>("[data-test='mobile-mesh-target-faces']");
+    expect(faces.element.value).toBe("");
+    expect(faces.attributes("min")).toBe("100");
+    expect(faces.attributes("max")).toBe("2000000");
+    expect(form.mesh.targetFaces).toBeNull();
+
+    faces.element.value = "25000";
+    await faces.trigger("change");
+    expect(form.mesh.targetFaces).toBe(25_000);
+
+    faces.element.value = "9000000";
+    await faces.trigger("change");
+    expect(form.mesh.targetFaces).toBe(2_000_000);
+
+    faces.element.value = "";
+    await faces.trigger("change");
+    expect(form.mesh.targetFaces).toBeNull();
   });
 });
 

@@ -20,11 +20,14 @@ import { isUpscaledImage } from "../lib/gallery/upscaled";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
   downloadVideoExport,
+  shareVideoExport,
   videoExportFilename,
   videoExportPath,
   type VideoExportCapabilities,
+  type VideoExportFormat,
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
+import { isAnimatedMeshExportFormat, meshExportFilename } from "./meshResult";
 import { isNativeAndroidRuntime, isNativeIOSRuntime } from "./platform";
 import {
   collectionSlug,
@@ -76,6 +79,14 @@ const props = withDefaults(
     collections?: MobileCollectionCard[];
     /** The owning host can accept an upscale request for this saved print. */
     upscaleEnabled?: boolean;
+    /**
+     * The containers the OWNING host advertises it can transcode a stored
+     * mesh into (`/api/capabilities.mesh.export_formats`). The export menu is
+     * built from THIS list and never from a client constant, so a machine
+     * that adds a container offers it without a client release, and one that
+     * has none offers nothing.
+     */
+    meshExportFormats?: string[];
   }>(),
   {
     reusing: false,
@@ -97,6 +108,7 @@ const props = withDefaults(
     tagSuggestions: () => [],
     collections: () => [],
     upscaleEnabled: true,
+    meshExportFormats: () => [],
   },
 );
 
@@ -128,6 +140,22 @@ const canExportVideo = computed(
   () => props.exportEnabled && video.value && props.item.filename.toLowerCase().endsWith(".mp4"),
 );
 const canSaveVideo = computed(() => props.exportEnabled && video.value);
+/**
+ * GLB is the only container mold STORES; OBJ, STL and PLY are transcodes of
+ * that stored file, produced by the same `POST /api/gallery/export/:filename`
+ * route a clip's animation export uses. Geometry files export on one tap; an
+ * advertised turntable carries playback/size options, so it goes through the
+ * sheet the phone already has.
+ */
+const meshExports = computed(() =>
+  props.exportEnabled && mesh.value ? props.meshExportFormats : [],
+);
+const meshGeometryExports = computed(() =>
+  meshExports.value.filter((format) => !isAnimatedMeshExportFormat(format)),
+);
+const meshAnimationExports = computed(
+  () => meshExports.value.filter(isAnimatedMeshExportFormat) as VideoExportFormat[],
+);
 const pipeline = computed(() => (video.value ? (props.item.metadata.pipeline ?? null) : null));
 const canReuse = computed(() => !props.item.metadata_synthetic);
 const canUseSource = computed(() => props.canUseAsSource && !video.value && !audio.value);
@@ -503,7 +531,9 @@ async function fullImageBase64(): Promise<string> {
 }
 
 async function performImageAction(action: "copy" | "save"): Promise<void> {
-  if (video.value || actionBusy.value) return;
+  // A stored mesh is glTF, not a raster: neither Photos nor the clipboard
+  // takes it, and its poster is the gallery's, not the print itself.
+  if (video.value || mesh.value || actionBusy.value) return;
   actionBusy.value = action;
   actionStatus.value = "";
   try {
@@ -537,9 +567,51 @@ async function performVideoSave(): Promise<void> {
   }
 }
 
+/**
+ * One geometry transcode of the stored GLB. The body is the bare format — a
+ * mesh export has no playback options — and the file comes back as bytes the
+ * phone shares (or, outside the native shells, downloads).
+ */
+async function performMeshExport(format: string): Promise<void> {
+  if (exportBusy.value) return;
+  exportBusy.value = true;
+  exportError.value = "";
+  actionStatus.value = "";
+  try {
+    const response = await apiFetchTo(props.target, videoExportPath(props.item.filename), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ format }),
+    });
+    const filename = meshExportFilename(props.item.filename, format);
+    const blob = await response.blob();
+    if (isNativeIOSRuntime() || isNativeAndroidRuntime()) {
+      const outcome = await shareVideoExport(blob, filename);
+      if (outcome === "cancelled") return;
+      actionStatus.value = outcome === "shared" ? "Export ready to share" : "Mesh exported";
+      return;
+    }
+    downloadVideoExport(blob, filename);
+    actionStatus.value = "Mesh exported";
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
 async function openVideoExport(): Promise<void> {
   exportOpen.value = true;
   exportError.value = "";
+  if (mesh.value) {
+    // A turntable's containers are the host's advertised ANIMATED mesh
+    // exports; `/api/gallery/export-options` answers for clips only.
+    exportCapabilities.value = {
+      ...DEFAULT_VIDEO_EXPORT_CAPABILITIES,
+      formats: meshAnimationExports.value,
+    };
+    return;
+  }
   try {
     exportCapabilities.value = await apiJsonTo<VideoExportCapabilities>(
       props.target,
@@ -579,7 +651,11 @@ async function performVideoExport(options: VideoExportOptions): Promise<void> {
       downloadVideoExport(blob, filename);
     }
     exportOpen.value = false;
-    actionStatus.value = native ? "Export ready to share" : "Video exported";
+    actionStatus.value = native
+      ? "Export ready to share"
+      : mesh.value
+        ? "Mesh exported"
+        : "Video exported";
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -833,7 +909,30 @@ onBeforeUnmount(() => {
         >
           Export format…
         </button>
-        <template v-if="!video && !audio">
+        <!-- 3-D: GLB is the only stored container; these are transcodes of
+             it, built from what THIS host advertises. -->
+        <button
+          v-for="format in meshGeometryExports"
+          :key="format"
+          class="secondary-button gallery-viewer-export"
+          type="button"
+          :data-test="`gallery-viewer-mesh-export-${format}`"
+          :disabled="!!actionBusy || exportBusy"
+          @click="performMeshExport(format)"
+        >
+          Export as {{ format.toUpperCase() }}
+        </button>
+        <button
+          v-if="meshAnimationExports.length"
+          class="secondary-button gallery-viewer-export"
+          type="button"
+          data-test="gallery-viewer-mesh-export-animation"
+          :disabled="!!actionBusy || exportBusy"
+          @click="openVideoExport"
+        >
+          Export turntable…
+        </button>
+        <template v-if="!video && !audio && !mesh">
           <button
             class="secondary-button gallery-viewer-copy"
             type="button"

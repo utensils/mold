@@ -981,6 +981,38 @@ textarea.control {
   font-size: var(--text-data);
 }
 
+/*
+ * 3-D mesh controls. Rendered only for a recipe advertising a `capabilities.mesh`
+ * block, which is also the only request the server accepts `mesh` on, so this
+ * group simply does not exist on a raster model. Same chrome as the resolution
+ * group it follows; the segment override keeps the 44pt touch floor.
+ */
+.mobile-mesh-controls {
+  min-width: 0;
+  margin: 4px 0 18px;
+  border: 0;
+  padding: 0;
+}
+
+.mobile-mesh-legend,
+.mobile-mesh-label {
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mobile-mesh-group {
+  display: grid;
+  gap: 7px;
+  margin-top: 13px;
+}
+
+.mobile-mesh-group .ms-seg .ms-seg__btn {
+  min-height: 44px;
+}
+
 .mobile-resolution-custom-toggle {
   width: 100%;
   margin-top: 2px;
@@ -2696,6 +2728,25 @@ button:disabled {
   object-fit: contain;
   background: var(--color-print-surface);
   border-radius: var(--radius-media);
+}
+
+/*
+ * 3-D result. The viewer is an interactive surface rather than a tap target,
+ * so the bed frames it and puts the mesh's own stats caption underneath —
+ * the same `.result-media` box every other output kind gets.
+ */
+.result-mesh {
+  display: block;
+  margin: 0;
+}
+
+.result-mesh .result-media {
+  aspect-ratio: 1 / 1;
+  height: auto;
+}
+
+.result-mesh figcaption {
+  margin-top: 6px;
 }
 
 .result-media-button {

@@ -61,6 +61,14 @@ const shapeInput = computed<OutputShapeInput>(() => ({
   intent: props.canvasIntent,
 }));
 const outputShape = computed(() => resolveOutputShape(shapeInput.value));
+/**
+ * A canvasless recipe (a 3-D mesh) has no canvas to pick: no shape, no
+ * ladder, no custom width/height. The whole picker leaves the Create stack
+ * rather than rendering an empty fieldset — and the zero canvas it carries is
+ * the recipe's own answer, never malformed input, so validity stays true and
+ * Develop is not blocked by a control the user cannot even see.
+ */
+const canvasless = computed(() => outputShape.value.canvasless);
 const currentOrientation = computed(() => orientationLabel(width.value, height.value));
 const currentAspect = computed(() => outputShape.value.family.label);
 /** The active family has authored sizes; a lone custom entry is not a ladder. */
@@ -72,7 +80,9 @@ const onLadder = computed(() =>
 );
 const customVisible = computed(() => manualOpen.value || !onLadder.value);
 const resolutionError = computed(() =>
-  resolutionValidationError(width.value, height.value, props.model, props.pipeline),
+  canvasless.value
+    ? null
+    : resolutionValidationError(width.value, height.value, props.model, props.pipeline),
 );
 /** Warn-policy bucket recipes admit this size but are not tuned for it. */
 const resolutionWarning = computed(() =>
@@ -152,7 +162,7 @@ function matchSource(): void {
 </script>
 
 <template>
-  <fieldset class="mobile-resolution-picker" :disabled="disabled">
+  <fieldset v-if="!canvasless" class="mobile-resolution-picker" :disabled="disabled">
     <legend class="mobile-resolution-legend">Resolution</legend>
 
     <p

@@ -1,4 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
+import {
+  IGNORED_PROMPT_PLACEHOLDER,
+  promptPlaceholder,
+  promptRequired,
+} from "@studio/lib/promptRequirement";
 import mobileAppSource from "./MobileApp.vue?raw";
 
 /**
@@ -11,7 +17,19 @@ describe("MobileApp prompt requirement", () => {
   it("derives the Develop gate from the shared predicate", () => {
     expect(mobileAppSource).toContain('from "@studio/lib/promptRequirement"');
     expect(mobileAppSource).toMatch(
-      /const promptMissing = computed\(\(\) => promptRequired\(form\) && !form\.prompt\.trim\(\)\);/,
+      /const promptMissing = computed\(\s*\(\) => promptRequired\(promptConditioning\.value\) && !form\.prompt\.trim\(\),?\s*\);/,
+    );
+  });
+
+  /**
+   * The advertised recipe is the AUTHORITY on the prompt rule — a family
+   * allowlist cannot see `ignored`, which is what a text-encoder-free 3-D
+   * checkpoint reports. Reading the form alone left Develop disabled forever
+   * on a model whose prompt the host never encodes.
+   */
+  it("resolves the rule against the selected model's advertised recipe", () => {
+    expect(mobileAppSource).toMatch(
+      /const promptConditioning = computed\(\(\) => \(\{\s*\.\.\.form,\s*recipe: effectiveGenerationRecipe\(selectedGenerationModel\.value, form\.pipeline\),\s*\}\)\);/,
     );
   });
 
@@ -28,8 +46,32 @@ describe("MobileApp prompt requirement", () => {
 
   it("softens the prompt placeholder through the shared helper", () => {
     expect(mobileAppSource).toMatch(
-      /const promptFieldPlaceholder = computed\(\(\) => promptPlaceholder\(form, "Describe the print…"\)\);/,
+      /const promptFieldPlaceholder = computed\(\(\) =>\s*promptPlaceholder\(promptConditioning\.value, "Describe the print…"\),?\s*\);/,
     );
     expect(mobileAppSource).toContain(':placeholder="promptFieldPlaceholder"');
+  });
+});
+
+/**
+ * The recipe answers, so the shared helpers are exercised here directly with
+ * the exact input `MobileApp` builds: a 3-D checkpoint has no text encoder
+ * anywhere, so an empty prompt must never block Develop and the bed says so.
+ */
+describe("mobile prompt rule on a text-encoder-free recipe", () => {
+  const conditioning = {
+    family: "hunyuan3d",
+    model: "hunyuan3d-mini-turbo:fp16",
+    sourceImage: "c291cmNl",
+    recipe: hunyuan3dRecipe(),
+  };
+
+  it("never demands a prompt and names the field a note", () => {
+    expect(promptRequired(conditioning)).toBe(false);
+    expect(promptPlaceholder(conditioning, "Describe the print…")).toBe(IGNORED_PROMPT_PLACEHOLDER);
+  });
+
+  it("still demands one without the recipe's answer", () => {
+    const { recipe: _recipe, ...legacy } = conditioning;
+    expect(promptRequired(legacy)).toBe(true);
   });
 });
