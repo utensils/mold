@@ -696,6 +696,7 @@ mod tests {
             offload: true,
             upscale_model: None,
             source_image_path: None,
+            source_image_recall: None,
             reference_paths: Vec::new(),
             identity_image_path: None,
             id_weight: mold_core::identity::ID_WEIGHT_DEFAULT,
@@ -720,6 +721,7 @@ mod tests {
             tags: Vec::new(),
             collection: None,
             auto_tag_title: true,
+            mesh: mold_core::MeshRequestOptions::default(),
         };
 
         let session = TuiSession::from_params("a sunset", "blurry", &params);

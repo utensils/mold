@@ -215,7 +215,7 @@ fn adjustable(field: ParamField) -> bool {
     )
 }
 
-fn field_value(state: &GenerateState, field: ParamField) -> String {
+pub(crate) fn field_value(state: &GenerateState, field: ParamField) -> String {
     match field {
         // Detail: 8-dot gauge + the raw step count.
         ParamField::Steps => format!(
@@ -226,6 +226,20 @@ fn field_value(state: &GenerateState, field: ParamField) -> String {
         ParamField::Guidance if !state.guidance_adjustable() => {
             "1.0 · fixed (distilled CFG)".into()
         }
+        // Untouched mesh rows show the PROFILE's default, marked as such, so
+        // the user sees the number the render will use rather than a blank.
+        ParamField::Octree if state.params.mesh.octree_resolution.is_none() => state
+            .capabilities
+            .mesh
+            .as_ref()
+            .map(|mesh| format!("{} · default", mesh.octree_default))
+            .unwrap_or_else(|| "default".into()),
+        ParamField::MeshThreshold if state.params.mesh.threshold.is_none() => state
+            .capabilities
+            .mesh
+            .as_ref()
+            .map(|mesh| format!("{:.2} · default", mesh.threshold.default))
+            .unwrap_or_else(|| "default".into()),
         _ => state.params.display_value(&field),
     }
 }
@@ -269,6 +283,11 @@ fn row_lines(
             }
             let suffix = match field {
                 ParamField::Model => " \u{25be}".to_string(),
+                // Enter opens the path picker, x clears — the row is not
+                // one ◀▶ can walk, so it says which keys it does take.
+                ParamField::SourceImage | ParamField::IdentityImage if selected => {
+                    " \u{23ce} \u{00b7} x".to_string()
+                }
                 ParamField::Guidance if !state.guidance_adjustable() => String::new(),
                 f if selected && adjustable(*f) => " \u{25c0}\u{25b6}".to_string(),
                 _ => String::new(),

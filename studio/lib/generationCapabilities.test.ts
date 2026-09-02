@@ -7,6 +7,7 @@ import {
   schedulerLabel,
 } from "./generationCapabilities";
 import type { GenerationRecipeProfile } from "./generationProfile";
+import { hunyuan3dRecipe, sdxlRecipe } from "./generationProfile.testFixtures";
 
 describe("baseGenerationCapabilities", () => {
   it("takes advanced, scheduler, and output policy from the resolved recipe", () => {
@@ -467,5 +468,92 @@ describe("Flux.2 negative prompt", () => {
         supports_negative_prompt: false,
       }).supportsNegativePrompt,
     ).toBe(false);
+  });
+});
+
+describe("prompt mode, strength, and mesh from the advertised recipe", () => {
+  it("reads the hunyuan3d contract: no canvas, no strength, prompt ignored, mesh controls", () => {
+    const caps = baseGenerationCapabilities(
+      "hunyuan3d",
+      "hunyuan3d-mini-turbo:fp16",
+      null,
+      null,
+      "required",
+      hunyuan3dRecipe(),
+    );
+    expect(caps.supportsStrength).toBe(false);
+    expect(caps.promptMode).toBe("ignored");
+    expect(caps.canvasless).toBe(true);
+    expect(caps.mesh).toBeDefined();
+    expect(caps.mesh?.octree_default).toBe(256);
+    expect(caps.mesh?.octree_resolutions).toEqual([128, 192, 256, 320, 384]);
+    expect(caps.mesh?.texture.mode).toBe("hidden");
+    expect(caps.requiresSourceImage).toBe(true);
+    expect(caps.outputFormats).toEqual(["glb"]);
+  });
+
+  it("reads the sdxl contract: canvas, strength, prompt required, no mesh", () => {
+    const caps = baseGenerationCapabilities(
+      "sdxl",
+      "cyberrealistic-pony:fp16",
+      null,
+      null,
+      null,
+      sdxlRecipe(),
+    );
+    expect(caps.supportsStrength).toBe(true);
+    expect(caps.promptMode).toBe("required");
+    expect(caps.canvasless).toBe(false);
+    expect(caps.mesh).toBeUndefined();
+  });
+
+  it("trusts an advertised supports_strength over the family heuristic", () => {
+    // The host says a flux checkpoint does not read strength; the client
+    // must not overrule it with the old "every image family does" rule.
+    const recipe = sdxlRecipe();
+    recipe.capabilities.supports_strength = false;
+    expect(
+      baseGenerationCapabilities("flux", "", null, null, null, recipe)
+        .supportsStrength,
+    ).toBe(false);
+  });
+
+  it("falls back to the legacy strength and prompt rules when the host is silent", () => {
+    // An older host's recipe carries neither field; its serde default would
+    // be `false`, which is not an assertion that strength is unsupported.
+    const recipe = sdxlRecipe();
+    delete (recipe.capabilities as { supports_strength?: unknown })
+      .supports_strength;
+    delete (recipe.capabilities as { prompt?: unknown }).prompt;
+    const flux = baseGenerationCapabilities(
+      "flux",
+      "",
+      null,
+      null,
+      null,
+      recipe,
+    );
+    expect(flux.supportsStrength).toBe(true);
+    expect(flux.promptMode).toBe("required");
+    const wan = baseGenerationCapabilities(
+      "wan",
+      "wan22-i2v-a14b:q8",
+      null,
+      null,
+      null,
+      recipe,
+    );
+    expect(wan.supportsStrength).toBe(false);
+    expect(
+      baseGenerationCapabilities("ltx2", "", null, null, null, recipe)
+        .promptMode,
+    ).toBe("optional");
+    // No recipe at all: the same legacy answers.
+    expect(baseGenerationCapabilities("ltx2")).toMatchObject({
+      promptMode: "optional",
+      supportsStrength: true,
+      canvasless: false,
+      mesh: undefined,
+    });
   });
 });

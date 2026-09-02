@@ -458,6 +458,13 @@ pub struct ExpandContext {
     /// LoRA adapter names (file stems), so trigger words can be honoured.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loras: Vec<String>,
+    /// Whether the target reads the prompt at all, from the ONE profile rule
+    /// (`generation_profile::prompt_requirement_for_family`) resolved against
+    /// this request's conditioning. `Ignored` means the text conditions
+    /// nothing and the expander is never called. Additive: absent from old
+    /// clients, and then the family alone decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_mode: Option<crate::generation_profile::PromptRequirement>,
 }
 
 impl ExpandContext {
@@ -576,6 +583,10 @@ impl ExpandContext {
                 loras.push(lora_display_name(&lora.path));
             }
         }
+        let prompt_mode = Some(crate::generation_profile::prompt_requirement_for_family(
+            Some(family),
+            crate::validation::has_visual_conditioning(req),
+        ));
         Self {
             model: Some(req.model.clone()),
             width: (req.width > 0).then_some(req.width),
@@ -587,6 +598,7 @@ impl ExpandContext {
             audio: req.enable_audio,
             references,
             loras,
+            prompt_mode,
         }
     }
 
@@ -1955,6 +1967,12 @@ impl GenerateRequest {
         if self.output_format.is_some() {
             return self;
         }
+        // A mesh family stores binary glTF and nothing else, whatever else the
+        // request looks like.
+        if family == Some(crate::manifest::HUNYUAN3D_FAMILY) {
+            self.output_format = Some(OutputFormat::Glb);
+            return self;
+        }
         // An audio-only pipeline has no frames to encode, so the family
         // default (mp4) would be rejected by the validator. Resolve it to the
         // one container that can hold the artifact it actually produces.
@@ -1967,6 +1985,25 @@ impl GenerateRequest {
             Some(family) if family_output_defaults_to_mp4(family) => OutputFormat::Mp4,
             _ => OutputFormat::Png,
         });
+        self
+    }
+
+    /// Coerce an explicit output format a family cannot produce at all.
+    ///
+    /// Only the mesh family has one today, and this is deliberately NOT the
+    /// same rule as [`Self::normalise_output_format`]: a 3-D render emits
+    /// binary glTF, so `png` on a mesh model is not a default the request can
+    /// outrank — it names an artifact the engine has no way to make. The CLI
+    /// already resolved it this way (`default_output_format`), and this is
+    /// what makes the server agree, so an older client that always sends
+    /// `png` renders instead of being refused.
+    ///
+    /// Every other family is untouched: an unavailable format there is a real
+    /// client mistake and stays a 422 from the recipe's own delivery list.
+    pub fn pin_output_format_for_family(&mut self, family: Option<&str>) -> &mut Self {
+        if family == Some(crate::manifest::HUNYUAN3D_FAMILY) {
+            self.output_format = Some(OutputFormat::Glb);
+        }
         self
     }
 }
@@ -2164,6 +2201,12 @@ impl GuidanceCapabilities {
             "flux2" | "flux.2" | "flux-2" if crate::validation::is_flux2_base_model(model) => {
                 Self::ADJUSTABLE_CFG
             }
+            // A mesh family has no text encoder at all, so it has no
+            // unconditional branch and no negative prompt to encode — but its
+            // guidance-embedded DiT does read the scale. Without this arm
+            // `/api/models` advertised a negative-prompt field the engine
+            // cannot use.
+            family if family == crate::manifest::HUNYUAN3D_FAMILY => Self::ADJUSTABLE_NO_NEGATIVE,
             "flux" | "flux2" | "flux.2" | "flux-2" | "z-image" | "qwen-image" | "qwen_image" => {
                 Self::ADJUSTABLE_NO_NEGATIVE
             }
@@ -2541,6 +2584,54 @@ pub struct MeshRequestOptions {
     pub texture_resolution: Option<u32>,
 }
 
+impl MeshRequestOptions {
+    /// The controls to RECORD for a print, or `None` for a raster request.
+    ///
+    /// A request is a mesh request when it carries a `mesh` block, names a
+    /// mesh container (admission pins `glb` onto the mesh family at both
+    /// doors before metadata is built), or resolves to the mesh family
+    /// through the built-in manifest. The octree resolution and iso-level
+    /// are filled from the same `validation::MESH_DEFAULT_*` constants the
+    /// engine falls back to, so the recorded values are the ones that
+    /// rendered; a decimation target and the texture stage stay as
+    /// requested, because absence there IS the rendered choice (raw surface,
+    /// geometry only).
+    pub fn provenance_for_request(req: &GenerateRequest) -> Option<Self> {
+        let is_mesh_request = req.mesh.is_some()
+            || req.output_format.is_some_and(|format| format.is_mesh())
+            || crate::manifest::find_manifest(&req.model)
+                .is_some_and(|manifest| manifest.family == crate::manifest::HUNYUAN3D_FAMILY);
+        if !is_mesh_request {
+            return None;
+        }
+        Some(
+            req.mesh
+                .clone()
+                .unwrap_or_default()
+                .resolved_with_defaults(),
+        )
+    }
+
+    /// The same options with the octree resolution and iso-level filled from
+    /// the engine's own defaults — what a mesh print RECORDS, so provenance
+    /// names the values that rendered rather than "whatever the default was
+    /// that day". A decimation target and the texture stage stay as given:
+    /// absence there is the rendered choice (raw surface, geometry only).
+    pub fn resolved_with_defaults(&self) -> Self {
+        Self {
+            octree_resolution: self
+                .octree_resolution
+                .or(Some(crate::validation::MESH_DEFAULT_OCTREE_RESOLUTION)),
+            threshold: self
+                .threshold
+                .or(Some(crate::validation::MESH_DEFAULT_THRESHOLD as f32)),
+            target_faces: self.target_faces,
+            texture: self.texture,
+            texture_resolution: self.texture_resolution,
+        }
+    }
+}
+
 /// 3-D mesh output from a mesh model family.
 ///
 /// The bytes are ONE self-contained file. For [`OutputFormat::Glb`] that
@@ -2685,6 +2776,15 @@ pub struct OutputMetadata {
     pub generation_height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strength: Option<f64>,
+    /// The 3-D controls that shaped a mesh print, RESOLVED: the octree
+    /// resolution and iso-threshold that actually ran (the request's own
+    /// values, or the recipe defaults it fell back to), plus any decimation
+    /// target. Present only on a mesh print, so Reuse settings on every
+    /// surface restores what rendered rather than a form's leftovers; absent
+    /// on every raster print and on every print saved before this field
+    /// existed. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshRequestOptions>,
     /// Provenance label of the img2img source (client-supplied filename) —
     /// present only when the request carried a source image and a name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2945,8 +3045,17 @@ impl OutputMetadata {
             width: req.width,
             height: req.height,
             generation_width: Some(req.width),
+            mesh: MeshRequestOptions::provenance_for_request(req),
             generation_height: Some(req.height),
-            strength: req.source_image.as_ref().map(|_| req.strength),
+            // A mesh request carries a source image but no latent to
+            // partially denoise, and its profile advertises
+            // `supports_strength: false`; recording the wire default would
+            // describe a knob nothing read.
+            strength: req
+                .source_image
+                .as_ref()
+                .filter(|_| !req.output_format.is_some_and(|format| format.is_mesh()))
+                .map(|_| req.strength),
             source_image_name: req
                 .source_image
                 .as_ref()
@@ -3114,8 +3223,9 @@ pub enum OutputFormat {
     Glb,
     /// Wavefront OBJ. **Export-only** — a `.obj` is never the stored artifact
     /// because it cannot carry its own material or textures, so mold serves it
-    /// as a transcode alongside the `.mtl` and texture files rather than
-    /// publishing a file that is incomplete on its own.
+    /// as a transcode of the stored GLB (positions, UVs and normals as text,
+    /// no `mtllib`) rather than publishing a file that is incomplete on its
+    /// own.
     Obj,
 }
 
@@ -5355,6 +5465,170 @@ mod tests {
         }
     }
 
+    /// A 3-D render produces binary glTF and nothing else, so an omitted
+    /// format resolves to GLB and an explicit raster/video/audio format is
+    /// COERCED rather than refused — an older client that always sends `png`
+    /// must still get its mesh.
+    #[test]
+    fn a_mesh_family_pins_its_output_format_to_glb() {
+        let json = r#"{"prompt":"","model":"hunyuan3d-mini-turbo:fp16","width":0,"height":0,"steps":5,"batch_size":1}"#;
+        let mut omitted: GenerateRequest = serde_json::from_str(json).unwrap();
+        omitted.normalise_output_format(Some(crate::manifest::HUNYUAN3D_FAMILY));
+        assert_eq!(omitted.resolved_output_format(), OutputFormat::Glb);
+
+        for format in [
+            OutputFormat::Png,
+            OutputFormat::Jpeg,
+            OutputFormat::Webp,
+            OutputFormat::Mp4,
+            OutputFormat::Wav,
+            OutputFormat::Obj,
+        ] {
+            let mut explicit: GenerateRequest = serde_json::from_str(json).unwrap();
+            explicit.output_format = Some(format);
+            explicit.pin_output_format_for_family(Some(crate::manifest::HUNYUAN3D_FAMILY));
+            assert_eq!(
+                explicit.resolved_output_format(),
+                OutputFormat::Glb,
+                "{format:?} must be pinned to glb"
+            );
+        }
+    }
+
+    /// A mesh print records the controls that actually rendered — the
+    /// request's values, or the engine's defaults it fell back to — so a
+    /// Reuse restores them; a raster print records nothing.
+    #[test]
+    fn a_mesh_print_records_its_resolved_mesh_controls() {
+        let json = r#"{"prompt":"","model":"hunyuan3d-mini-turbo:fp16","width":0,"height":0,"steps":5,"batch_size":1}"#;
+        // Untouched: the family alone (through the manifest) makes it a mesh
+        // request, and the defaults are recorded verbatim.
+        let untouched: GenerateRequest = serde_json::from_str(json).unwrap();
+        let meta = OutputMetadata::from_generate_request(&untouched, 1, None, "test");
+        let mesh = meta.mesh.expect("a mesh print records its controls");
+        assert_eq!(
+            mesh.octree_resolution,
+            Some(crate::validation::MESH_DEFAULT_OCTREE_RESOLUTION)
+        );
+        assert_eq!(
+            mesh.threshold,
+            Some(crate::validation::MESH_DEFAULT_THRESHOLD as f32)
+        );
+        assert_eq!(
+            mesh.target_faces, None,
+            "no decimation IS the rendered choice"
+        );
+        assert_eq!(mesh.texture, None);
+
+        // Touched: the request's own values win, and the rest still fills.
+        let mut touched: GenerateRequest = serde_json::from_str(json).unwrap();
+        touched.mesh = Some(MeshRequestOptions {
+            octree_resolution: Some(320),
+            threshold: None,
+            target_faces: Some(50_000),
+            texture: None,
+            texture_resolution: None,
+        });
+        let mesh = OutputMetadata::from_generate_request(&touched, 1, None, "test")
+            .mesh
+            .unwrap();
+        assert_eq!(mesh.octree_resolution, Some(320));
+        assert_eq!(
+            mesh.threshold,
+            Some(crate::validation::MESH_DEFAULT_THRESHOLD as f32)
+        );
+        assert_eq!(mesh.target_faces, Some(50_000));
+
+        // A pinned container alone (a catalog model the manifest cannot
+        // resolve) is enough to mark the print as a mesh.
+        let mut pinned: GenerateRequest = serde_json::from_str(json).unwrap();
+        pinned.model = "cv:12345".into();
+        pinned.output_format = Some(OutputFormat::Glb);
+        assert!(
+            OutputMetadata::from_generate_request(&pinned, 1, None, "test")
+                .mesh
+                .is_some()
+        );
+
+        // A raster print records nothing, and its JSON gains no key.
+        let raster: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q8","width":1024,"height":1024,"steps":20,"batch_size":1}"#,
+        )
+        .unwrap();
+        let meta = OutputMetadata::from_generate_request(&raster, 1, None, "test");
+        assert!(meta.mesh.is_none());
+        assert!(!serde_json::to_string(&meta).unwrap().contains("\"mesh\""));
+    }
+
+    /// The field is additive: metadata saved before it existed (no `mesh`
+    /// key) still parses, and a present block round-trips.
+    #[test]
+    fn output_metadata_mesh_round_trips_and_is_optional() {
+        let older = r#"{"prompt":"a cat","model":"flux-dev:q8","seed":1,"steps":20,"guidance":3.5,"width":1024,"height":1024,"version":"0.1"}"#;
+        let meta: OutputMetadata = serde_json::from_str(older).expect("older JSON parses");
+        assert!(meta.mesh.is_none());
+
+        let with_mesh = r#"{"prompt":"","model":"hunyuan3d-mini-turbo:fp16","seed":1,"steps":5,"guidance":5.0,"width":512,"height":512,"version":"0.1","mesh":{"octree_resolution":320,"threshold":0.55,"target_faces":50000}}"#;
+        let meta: OutputMetadata = serde_json::from_str(with_mesh).unwrap();
+        let mesh = meta.mesh.clone().expect("present block parses");
+        assert_eq!(mesh.octree_resolution, Some(320));
+        assert_eq!(mesh.threshold, Some(0.55));
+        assert_eq!(mesh.target_faces, Some(50_000));
+        let again: OutputMetadata =
+            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        assert_eq!(again.mesh, meta.mesh);
+    }
+
+    /// The pin is a mesh-only rule. Everywhere else an unavailable format is
+    /// a real client mistake and must stay a refusal, not a silent rewrite.
+    #[test]
+    fn pinning_never_rewrites_a_non_mesh_request() {
+        let json = r#"{"prompt":"a cat","model":"flux-dev:q8","width":1024,"height":1024,"steps":20,"batch_size":1}"#;
+        for family in [Some("flux"), Some("ltx2"), Some("wan"), None] {
+            let mut req: GenerateRequest = serde_json::from_str(json).unwrap();
+            req.output_format = Some(OutputFormat::Gif);
+            req.pin_output_format_for_family(family);
+            assert_eq!(
+                req.resolved_output_format(),
+                OutputFormat::Gif,
+                "{family:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mesh_family_advertises_adjustable_guidance_with_no_negative_prompt() {
+        assert_eq!(
+            GuidanceCapabilities::for_recipe(
+                crate::manifest::HUNYUAN3D_FAMILY,
+                "hunyuan3d-mini-turbo:fp16",
+                None
+            ),
+            GuidanceCapabilities::ADJUSTABLE_NO_NEGATIVE
+        );
+    }
+
+    /// The export enum is a delivery contract, and `glb`/`obj` keep the exact
+    /// wire spellings the old `Vec<OutputFormat>` field used.
+    #[test]
+    fn mesh_export_formats_round_trip_on_the_wire() {
+        for (format, wire, extension) in [
+            (MeshExportFormat::Glb, "\"glb\"", "glb"),
+            (MeshExportFormat::Obj, "\"obj\"", "obj"),
+            (MeshExportFormat::Stl, "\"stl\"", "stl"),
+            (MeshExportFormat::Ply, "\"ply\"", "ply"),
+        ] {
+            assert_eq!(serde_json::to_string(&format).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<MeshExportFormat>(wire).unwrap(),
+                format
+            );
+            assert_eq!(format.extension(), extension);
+            assert_eq!(extension.parse::<MeshExportFormat>().unwrap(), format);
+        }
+        assert!("fbx".parse::<MeshExportFormat>().is_err());
+    }
+
     #[test]
     fn audio_only_pipeline_defaults_output_format_to_wav() {
         // The ltx2 family default is mp4, which the validator rejects for an
@@ -5551,6 +5825,53 @@ mod tests {
         );
         assert_eq!(derived.negative_prompt_supported, None);
         assert_eq!(derived.loras, vec!["paper-boat".to_string()]);
+    }
+
+    #[test]
+    fn expand_context_reads_the_prompt_mode_from_the_profile_rule() {
+        use crate::generation_profile::PromptRequirement;
+        let request = |model: &str, source_image: bool| -> GenerateRequest {
+            let mut value = serde_json::json!({
+                "model": model,
+                "prompt": "a chair",
+                "width": 1024,
+                "height": 1024,
+                "steps": 4
+            });
+            if source_image {
+                value["source_image"] = serde_json::Value::String("AQID".into());
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let mesh = ExpandContext::for_generation(
+            "hunyuan3d",
+            &request("hunyuan3d-mini-turbo", true),
+            None,
+        );
+        assert_eq!(mesh.prompt_mode, Some(PromptRequirement::Ignored));
+        let conditioned = ExpandContext::for_generation(
+            "ltx2",
+            &request("ltx-2.3-22b-distilled:fp8", true),
+            None,
+        );
+        assert_eq!(conditioned.prompt_mode, Some(PromptRequirement::Optional));
+        let bare = ExpandContext::for_generation(
+            "ltx2",
+            &request("ltx-2.3-22b-distilled:fp8", false),
+            None,
+        );
+        assert_eq!(bare.prompt_mode, Some(PromptRequirement::Required));
+        let image = ExpandContext::for_generation("flux", &request("flux-schnell", false), None);
+        assert_eq!(image.prompt_mode, Some(PromptRequirement::Required));
+        // Additive on the wire: absent for old clients, lowercase when sent.
+        let old_wire: ExpandContext = serde_json::from_str(r#"{"model":"flux-schnell"}"#).unwrap();
+        assert_eq!(old_wire.prompt_mode, None);
+        assert!(!serde_json::to_string(&old_wire)
+            .unwrap()
+            .contains("prompt_mode"));
+        assert!(serde_json::to_string(&mesh)
+            .unwrap()
+            .contains(r#""prompt_mode":"ignored""#));
     }
 
     #[test]
@@ -6467,9 +6788,9 @@ mod tests {
         assert!(metadata.source_preprocessing.is_some());
     }
 
-    #[test]
-    fn output_metadata_omits_strength_without_source_image() {
-        let req = GenerateRequest {
+    /// A plain text-to-image request every metadata test can start from.
+    fn text_to_image_request() -> GenerateRequest {
+        GenerateRequest {
             mesh: None,
             video_only: None,
             collection: None,
@@ -6539,7 +6860,12 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
-        };
+        }
+    }
+
+    #[test]
+    fn output_metadata_omits_strength_without_source_image() {
+        let req = text_to_image_request();
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
         assert_eq!(metadata.strength, None);
@@ -6554,6 +6880,32 @@ mod tests {
         let json = serde_json::to_string(&metadata).unwrap();
         assert!(!json.contains("source_image_name"));
         assert!(!json.contains("source_image_sha256"));
+    }
+
+    /// The strength field is recorded only where it was read. A raster
+    /// img2img request records it; a mesh request carries a source image
+    /// too, but its profile advertises `supports_strength: false` and the
+    /// engine never reads the field, so the print must not claim one.
+    #[test]
+    fn output_metadata_omits_strength_for_a_mesh_request_with_a_source_image() {
+        let mut raster = text_to_image_request();
+        raster.source_image = Some(vec![0x89, b'P', b'N', b'G']);
+        let metadata = OutputMetadata::from_generate_request(&raster, 7, None, "0.1.0");
+        assert_eq!(metadata.strength, Some(0.75));
+
+        let mut mesh = text_to_image_request();
+        mesh.model = crate::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        mesh.prompt = String::new();
+        mesh.width = 0;
+        mesh.height = 0;
+        mesh.source_image = Some(vec![0x89, b'P', b'N', b'G']);
+        mesh.output_format = Some(OutputFormat::Glb);
+        let metadata = OutputMetadata::from_generate_request(&mesh, 7, None, "0.1.0");
+        assert_eq!(metadata.strength, None);
+        assert!(
+            metadata.source_image_sha256.is_some(),
+            "the image is still provenance"
+        );
     }
 
     /// Identity conditioning rides the wire additively: present fields
@@ -10386,13 +10738,91 @@ pub struct MeshCapabilities {
     /// Formats this host will STORE. GLB only today.
     pub formats: Vec<OutputFormat>,
     /// Formats `POST /api/gallery/export/:filename` can transcode a stored
-    /// mesh into. Separate from `formats` because OBJ is exportable but never
-    /// storable — it carries neither materials nor textures on its own.
-    pub export_formats: Vec<OutputFormat>,
+    /// mesh into. Separate from `formats` because OBJ, STL and PLY are
+    /// exportable but never storable — none of them carries materials and
+    /// textures the way the stored GLB does.
+    ///
+    /// Typed as [`MeshExportFormat`] rather than [`OutputFormat`] so an
+    /// export-only container can never be named as a generation target. The
+    /// wire spellings of `glb` and `obj` are unchanged, so an older client
+    /// reading this list keeps working.
+    pub export_formats: Vec<MeshExportFormat>,
     /// Whether generated PBR textures are available. False means geometry
     /// only, which is a materially different product and must not be
     /// discovered by a user after waiting for a render.
     pub textures: bool,
+}
+
+/// A container `POST /api/gallery/export/:filename` can transcode a stored
+/// `.glb` into.
+///
+/// Deliberately its own enum rather than more [`OutputFormat`] variants: these
+/// are DELIVERY containers for geometry that already exists, and a request can
+/// never name one as a generation target. The stored artifact stays GLB — the
+/// one form that carries geometry, UVs, normals and any textures in a single
+/// file — and everything else here loses something on the way out, which is
+/// exactly why it is an export and not a save.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshExportFormat {
+    /// The stored form, served back unchanged.
+    Glb,
+    /// Wavefront OBJ: positions, UVs and normals as text. No materials.
+    Obj,
+    /// Binary STL: triangle soup with a per-face normal. No UVs, no vertex
+    /// identity, no colour — the format 3-D printers and CAD tools want.
+    Stl,
+    /// Binary little-endian PLY: positions plus per-vertex normals when the
+    /// mesh has them. Vertices stay shared, unlike STL.
+    Ply,
+}
+
+impl MeshExportFormat {
+    /// The file extension an exported download is named with.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Glb => "glb",
+            Self::Obj => "obj",
+            Self::Stl => "stl",
+            Self::Ply => "ply",
+        }
+    }
+
+    /// The MIME type the export response carries.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Glb => "model/gltf-binary",
+            Self::Obj => "model/obj",
+            Self::Stl => "model/stl",
+            // PLY has no registered media type; this is the spelling every
+            // viewer and toolchain uses.
+            Self::Ply => "application/x-ply",
+        }
+    }
+}
+
+impl std::fmt::Display for MeshExportFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.extension())
+    }
+}
+
+impl std::str::FromStr for MeshExportFormat {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "glb" => Ok(Self::Glb),
+            "obj" => Ok(Self::Obj),
+            "stl" => Ok(Self::Stl),
+            "ply" => Ok(Self::Ply),
+            other => Err(format!(
+                "unknown mesh export format '{other}' (expected glb, obj, stl, or ply)"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

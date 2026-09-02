@@ -139,6 +139,7 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Down | KeyCode::Char('j') => return Action::Down,
             KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => return Action::Increment,
             KeyCode::Char('-') | KeyCode::Left => return Action::Decrement,
+            KeyCode::Char('x') | KeyCode::Backspace => return Action::ClearField,
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('a') | KeyCode::Char('A') => return Action::ToggleAdvanced,
             KeyCode::Char('1') => return Action::SwitchView(View::Create),
@@ -169,6 +170,7 @@ fn map_gallery_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('d') => Action::DeleteImage,
             KeyCode::Char('o') => Action::OpenFile,
             KeyCode::Char('u') => Action::UpscaleImage,
+            KeyCode::Char('x') => Action::ExportMesh,
             KeyCode::Char('/') => Action::FilterLibrary,
             // Esc first clears an applied filter, then leaves the view.
             KeyCode::Esc if !app.gallery.filter.is_empty() => Action::FilterLibraryClear,
@@ -187,6 +189,7 @@ fn map_gallery_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('r') => Action::Regenerate,
             KeyCode::Char('d') => Action::DeleteImage,
             KeyCode::Char('u') => Action::UpscaleImage,
+            KeyCode::Char('x') => Action::ExportMesh,
             KeyCode::Up | KeyCode::Char('k') => Action::Up,
             KeyCode::Down | KeyCode::Char('j') => Action::Down,
             KeyCode::Esc => Action::Cancel,
@@ -358,6 +361,7 @@ mod tests {
                 KeyCode::Char('d') => Action::DeleteImage,
                 KeyCode::Char('o') => Action::OpenFile,
                 KeyCode::Char('u') => Action::UpscaleImage,
+                KeyCode::Char('x') => Action::ExportMesh,
                 KeyCode::Char('/') => Action::FilterLibrary,
                 KeyCode::Esc if filter_active => Action::FilterLibraryClear,
                 KeyCode::Esc => Action::SwitchView(View::Create),
@@ -370,6 +374,7 @@ mod tests {
                 KeyCode::Char('r') => Action::Regenerate,
                 KeyCode::Char('d') => Action::DeleteImage,
                 KeyCode::Char('u') => Action::UpscaleImage,
+                KeyCode::Char('x') => Action::ExportMesh,
                 KeyCode::Up | KeyCode::Char('k') => Action::Up,
                 KeyCode::Down | KeyCode::Char('j') => Action::Down,
                 KeyCode::Esc => Action::Cancel,
@@ -388,6 +393,20 @@ mod tests {
         assert_eq!(
             gallery_key(KeyCode::Char('/'), GalleryViewMode::Grid),
             Action::FilterLibrary
+        );
+    }
+
+    /// `x` exports the selected 3-D print in both Library modes; the
+    /// handler itself ignores it on anything but a `.glb`.
+    #[test]
+    fn gallery_x_exports_mesh_in_grid_and_detail() {
+        assert_eq!(
+            gallery_key(KeyCode::Char('x'), GalleryViewMode::Grid),
+            Action::ExportMesh
+        );
+        assert_eq!(
+            gallery_key(KeyCode::Char('x'), GalleryViewMode::Detail),
+            Action::ExportMesh
         );
     }
 

@@ -522,9 +522,17 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
     let is_video_family = params.family.and_then(video_family).is_some();
     let is_ltx2 = params.family == Some("ltx2");
     let is_h3 = params.family.is_some_and(mold_core::minimax_h3::is_family);
+    // The one family whose container is pinned, not chosen — the same rule
+    // `GenerateRequest::pin_output_format_for_family` applies at admission,
+    // so the bot and the server can never disagree about what a 3-D render
+    // is delivered as. The family is read from `/api/models` (or the manifest
+    // fallback while the cache is cold), never guessed from the model name.
+    let is_mesh = params.family == Some(mold_core::manifest::HUNYUAN3D_FAMILY);
 
     // Video families always deliver MP4 or GIF. Image models stay PNG.
-    let output_format = if is_h3 {
+    let output_format = if is_mesh {
+        OutputFormat::Glb
+    } else if is_h3 {
         // H3 always emits synchronized audio and its contract requires an MP4
         // container. This does not activate the hidden family; it only keeps
         // the request builder from manufacturing an invalid future request.
@@ -959,12 +967,36 @@ fn prompt_missing_before_defer(prompt: Option<&str>, has_visual_conditioning: bo
     !has_visual_conditioning && prompt.is_none_or(|p| p.trim().is_empty())
 }
 
-/// Generate an image (PNG) or video (MP4 by default, GIF on request).
+/// The up-front refusal for a mesh model with nothing to condition on.
+const MESH_NEEDS_SOURCE_IMAGE: &str = "This model renders a 3-D mesh from a picture: attach a \
+                                       `source_image`. A prompt is not read by this family.";
+
+/// Whether `/generate` must reject the interaction up front because the
+/// selected model is the mesh family and no `source_image` is attached.
+///
+/// Checked BEFORE the prompt gate: the family is known from the model option
+/// (or the default model) without deferring, and a mesh model's prompt is
+/// ignored, so refusing it for an empty prompt would send the user off to
+/// write one and fail again for the real reason.
+fn mesh_missing_source_image_before_defer(family: Option<&str>, has_source_image: bool) -> bool {
+    family == Some(mold_core::manifest::HUNYUAN3D_FAMILY) && !has_source_image
+}
+
+// The doc comment below IS the slash command's description (Discord caps it
+// at 100 characters), so the design note lives here instead.
+//
+// The prompt is optional whenever a source image is attached — that covers
+// image-to-video AND image-to-3D. Discord options cannot be optional per
+// model, so the gate is "visual conditioning present", which is exactly the
+// set of recipes whose profile advertises `prompt.mode` other than
+// `required`; the server's own admission (the same profile) is the final
+// word, and a text-only model with an empty prompt is still refused there.
+/// Generate an image (PNG), a video (MP4/GIF), or a 3-D mesh (GLB, from a source image).
 #[allow(clippy::too_many_arguments)]
 #[poise::command(slash_command)]
 pub async fn generate(
     ctx: Context<'_>,
-    #[description = "Text prompt — optional for image-to-video when a source image is attached"]
+    #[description = "Text prompt — optional with a source image (image-to-video, image-to-3D)"]
     prompt: Option<String>,
     #[description = "Model to use (e.g. flux-schnell:q8, ltx-2-19b-distilled:fp8)"]
     #[autocomplete = "autocomplete_model"]
@@ -1094,6 +1126,46 @@ pub async fn generate(
         .await?;
         return Ok(());
     }
+    // Resolve model name — use server's loaded/downloaded model if none
+    // specified. This is a cache read, so it happens BEFORE the interaction
+    // is deferred: the family decides which up-front refusal applies.
+    let models = ctx.data().cached_models().await;
+    let model_name = model.unwrap_or_else(|| resolve_default_model(&models));
+
+    // Look up model defaults + family from cache
+    let model_entry = models.iter().find(|m| m.info.name == model_name);
+    // Autocomplete deliberately falls back to built-in manifests while the
+    // server cache is cold. Preserve duration/default behavior in that window
+    // instead of presenting a model that the timing resolver cannot identify.
+    let fallback_manifest = model_entry
+        .is_none()
+        .then(|| mold_core::manifest::find_manifest(&model_name))
+        .flatten();
+    let fallback_defaults = fallback_manifest.map(defaults_from_manifest);
+    let model_defaults = model_entry
+        .map(|m| &m.defaults)
+        .or(fallback_defaults.as_ref());
+    let family = model_entry
+        .map(|m| m.info.family.as_str())
+        .or_else(|| fallback_manifest.map(|manifest| manifest.family.as_str()))
+        .or_else(|| {
+            mold_core::minimax_h3::task_for_model(&model_name)
+                .map(|_| mold_core::minimax_h3::FAMILY)
+        });
+    let h3_task = mold_core::minimax_h3::task_for_model(&model_name);
+
+    // A mesh model is refused for the thing it actually lacks. Its prompt is
+    // never read, so "Prompt cannot be empty" would send the user off to
+    // write one and fail again; the image is the whole conditioning.
+    if mesh_missing_source_image_before_defer(family, source_image.is_some()) {
+        ctx.send(
+            poise::CreateReply::default()
+                .content(MESH_NEEDS_SOURCE_IMAGE)
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
     // Validate prompt before deferring (avoids wasting the interaction)
     if prompt_missing_before_defer(
         prompt.as_deref(),
@@ -1124,31 +1196,6 @@ pub async fn generate(
     // Defer the response (shows "Bot is thinking...")
     ctx.defer().await?;
 
-    // Resolve model name — use server's loaded/downloaded model if none specified
-    let models = ctx.data().cached_models().await;
-    let model_name = model.unwrap_or_else(|| resolve_default_model(&models));
-
-    // Look up model defaults + family from cache
-    let model_entry = models.iter().find(|m| m.info.name == model_name);
-    // Autocomplete deliberately falls back to built-in manifests while the
-    // server cache is cold. Preserve duration/default behavior in that window
-    // instead of presenting a model that the timing resolver cannot identify.
-    let fallback_manifest = model_entry
-        .is_none()
-        .then(|| mold_core::manifest::find_manifest(&model_name))
-        .flatten();
-    let fallback_defaults = fallback_manifest.map(defaults_from_manifest);
-    let model_defaults = model_entry
-        .map(|m| &m.defaults)
-        .or(fallback_defaults.as_ref());
-    let family = model_entry
-        .map(|m| m.info.family.as_str())
-        .or_else(|| fallback_manifest.map(|manifest| manifest.family.as_str()))
-        .or_else(|| {
-            mold_core::minimax_h3::task_for_model(&model_name)
-                .map(|_| mold_core::minimax_h3::FAMILY)
-        });
-    let h3_task = mold_core::minimax_h3::task_for_model(&model_name);
     if !reference_attachments.is_empty() && h3_task != Some(mold_core::minimax_h3::Task::Ref2va) {
         ctx.data().quotas.refund(user_id);
         handler::send_error(
@@ -1547,6 +1594,65 @@ mod tests {
         assert_eq!(req.steps, 28);
         assert_eq!(req.guidance, 7.5);
         assert_eq!(req.seed, Some(42));
+    }
+
+    /// A mesh family is delivered as GLB whatever the video-format option
+    /// says, mirroring `GenerateRequest::pin_output_format_for_family`, and
+    /// its (empty) prompt rides the request as-is: the profile marks it
+    /// `ignored`, so there is nothing to invent.
+    #[test]
+    fn build_request_pins_glb_for_the_mesh_family() {
+        let req = build_generate_request(BuildParams {
+            family: Some(mold_core::manifest::HUNYUAN3D_FAMILY),
+            source_image: Some(vec![0x89, b'P', b'N', b'G']),
+            video_format: Some(VideoFormat::Gif),
+            ..base_params("", mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL)
+        });
+        assert_eq!(req.output_format, Some(OutputFormat::Glb));
+        assert_eq!(req.prompt, "");
+        assert!(req.frames.is_none(), "a mesh has no timeline");
+        assert!(req.fps.is_none());
+        assert!(req.source_image.is_some(), "the image is the conditioning");
+        assert!(req.mesh.is_none(), "the recipe's own defaults apply");
+
+        // Only that family: a raster family with a source image stays PNG.
+        let raster = build_generate_request(BuildParams {
+            family: Some("sd15"),
+            source_image: Some(vec![0x89, b'P', b'N', b'G']),
+            ..base_params("a cat", "sd15:fp16")
+        });
+        assert_eq!(raster.output_format, Some(OutputFormat::Png));
+    }
+
+    /// The pre-defer prompt gate is "visual conditioning present": a mesh
+    /// run always carries a source image, so it is admitted without a
+    /// prompt, while a bare empty prompt is still refused before deferring.
+    #[test]
+    fn an_empty_prompt_passes_the_pre_defer_gate_only_with_visual_conditioning() {
+        assert!(!prompt_missing_before_defer(None, true));
+        assert!(!prompt_missing_before_defer(Some("   "), true));
+        assert!(prompt_missing_before_defer(None, false));
+        assert!(prompt_missing_before_defer(Some("   "), false));
+        assert!(!prompt_missing_before_defer(Some("a chair"), false));
+    }
+
+    /// `/generate model:hunyuan3d` with no `source_image` is refused for the
+    /// image it lacks, not for the prompt it does not read — and only that
+    /// family: a raster or video model without an image falls through to
+    /// the ordinary prompt gate.
+    #[test]
+    fn a_mesh_model_without_a_source_image_is_refused_up_front_for_the_image() {
+        let mesh = Some(mold_core::manifest::HUNYUAN3D_FAMILY);
+        assert!(mesh_missing_source_image_before_defer(mesh, false));
+        assert!(!mesh_missing_source_image_before_defer(mesh, true));
+        assert!(!mesh_missing_source_image_before_defer(Some("flux"), false));
+        assert!(!mesh_missing_source_image_before_defer(Some("ltx2"), false));
+        assert!(!mesh_missing_source_image_before_defer(None, false));
+        assert!(
+            MESH_NEEDS_SOURCE_IMAGE.contains("source_image"),
+            "the refusal names the option to add"
+        );
+        assert!(!MESH_NEEDS_SOURCE_IMAGE.contains("Prompt cannot be empty"));
     }
 
     #[test]

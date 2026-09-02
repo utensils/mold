@@ -1241,6 +1241,14 @@ fn resolved_family<'a>(model_name: &'a str, family_hint: Option<&'a str>) -> Opt
 /// toward near-static micro-motion. Callers should surface that as guidance
 /// rather than synthesising a placeholder prompt.
 ///
+/// A family with NO text encoder at all — hunyuan3d — never requires one; the
+/// prompt is recorded as provenance and conditions nothing.
+///
+/// The rule itself lives in
+/// [`crate::generation_profile::prompt_requirement_for_family`], which is also
+/// what every recipe's advertised `prompt` block is built from, so admission
+/// and every client necessarily agree.
+///
 /// `family_hint` mirrors [`validate_generate_request_with_family`]: pass the
 /// catalog-resolved family for `cv:` / `hf:` model IDs, whose family the
 /// manifest cannot see.
@@ -1275,7 +1283,8 @@ pub fn prompt_required_with_conditioning(
     family: Option<&str>,
     has_visual_conditioning: bool,
 ) -> bool {
-    !(matches!(family, Some("ltx2" | "ltx-video")) && has_visual_conditioning)
+    crate::generation_profile::prompt_requirement_for_family(family, has_visual_conditioning)
+        .is_required()
 }
 
 fn validate_lora_weight(lora: &LoraWeight, field_name: &str) -> Result<(), String> {
@@ -2001,6 +2010,21 @@ pub const MESH_MAX_TARGET_FACES: u32 = 2_000_000;
 /// Lower bound. Below a few hundred triangles the result is not a model of
 /// anything.
 pub const MESH_MIN_TARGET_FACES: u32 = 100;
+
+/// Query-grid resolution an omitted `mesh.octree_resolution` renders at.
+/// Upstream's own default (`comfy_extras/nodes_hunyuan3d.py`,
+/// `VAEDecodeHunyuan3D`), and what the generation profile advertises.
+pub const MESH_DEFAULT_OCTREE_RESOLUTION: u32 = 256;
+
+/// Iso-level an omitted `mesh.threshold` extracts at. Upstream's default is
+/// 0.6, not 0.5.
+///
+/// `f64` so the advertised control carries the exact decimal a client shows.
+/// Widening an `f32` 0.6 here would put `0.6000000238418579` on the wire.
+pub const MESH_DEFAULT_THRESHOLD: f64 = 0.6;
+
+/// Granularity the iso-level control moves in on every client.
+pub const MESH_THRESHOLD_STEP: f64 = 0.01;
 
 /// Family-shape rules for the 3-D families.
 ///
@@ -5209,6 +5233,56 @@ mod tests {
                 "{model} must still require a prompt"
             );
         }
+    }
+
+    /// The whole point of the profile-owned prompt contract: a family with no
+    /// text encoder cannot require text. Before this, `mold run
+    /// hunyuan3d-mini-turbo --image x.png` failed on an empty prompt from
+    /// every surface.
+    #[test]
+    fn a_mesh_family_admits_an_empty_prompt() {
+        let mut req = mesh_request("hunyuan3d-mini-turbo:fp16");
+        req.source_image = Some(png_bytes());
+        req.prompt = String::new();
+        req.output_format = Some(OutputFormat::Glb);
+        validate_generate_request_with_family(&req, Some("hunyuan3d")).unwrap();
+        assert!(!super::prompt_required_for(&req, Some("hunyuan3d")));
+    }
+
+    #[test]
+    fn the_prompt_requirement_is_the_profile_rule() {
+        use crate::generation_profile::{prompt_requirement_for_family, PromptRequirement};
+        assert_eq!(
+            prompt_requirement_for_family(Some("hunyuan3d"), false),
+            PromptRequirement::Ignored
+        );
+        assert_eq!(
+            prompt_requirement_for_family(Some("hunyuan3d"), true),
+            PromptRequirement::Ignored
+        );
+        for family in ["ltx2", "ltx-2", "ltx-video"] {
+            assert_eq!(
+                prompt_requirement_for_family(Some(family), true),
+                PromptRequirement::Optional,
+                "{family} conditioned"
+            );
+            assert_eq!(
+                prompt_requirement_for_family(Some(family), false),
+                PromptRequirement::Required,
+                "{family} unconditioned"
+            );
+        }
+        for family in ["flux", "sdxl", "wan", "z-image"] {
+            assert_eq!(
+                prompt_requirement_for_family(Some(family), true),
+                PromptRequirement::Required,
+                "{family}"
+            );
+        }
+        assert_eq!(
+            prompt_requirement_for_family(None, true),
+            PromptRequirement::Required
+        );
     }
 
     #[test]

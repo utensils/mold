@@ -205,6 +205,7 @@ mold library title <FILENAME> --clear
 mold library favorite <FILENAME>...
 mold library unfavorite <FILENAME>...
 mold library trash <FILENAME>...
+mold library export <FILENAME.glb> --format glb|obj|stl|ply [-o PATH | --output -]
 
 mold library tag list [--json]
 mold library tag add <FILENAME>... --tag <TAG> [--tag <TAG>]...
@@ -220,6 +221,14 @@ mold library collection delete <NAME-OR-SLUG> [--yes]
 mold library collection add <NAME-OR-SLUG> <FILENAME>...
 mold library collection remove <NAME-OR-SLUG> <FILENAME>...
 ```
+
+`export` converts one stored 3-D print into a container other tools read: OBJ
+for Blender and MeshLab, STL for 3-D printing and CAD, PLY for point-and-mesh
+tooling. It is a download — the gallery keeps its `.glb`, which is the only
+form carrying geometry, UVs, normals and textures in one file — and it defaults
+to writing the print's stem with the new extension in the current directory.
+`--output -` writes to stdout. A host that does not advertise the format under
+`capabilities.mesh.export_formats` is refused by name.
 
 Repeat `--tag` for every tag; one flag consumes exactly one value. Multiple
 `--tag` filters use AND semantics. Listing filters first, orders by
@@ -436,10 +445,14 @@ Start a stdio Model Context Protocol server that proxies to `mold serve`.
 mold mcp [--host URL]
 ```
 
-MCP exposes twelve tools: `generate_image`, `generate_mesh`,
+MCP exposes thirteen tools: `generate_image`, `generate_mesh`, `export_mesh`,
 `generate_image_async`, `generation_status`, `generation_retry`, `list_gallery`,
 `get_gallery_image`, `list_models`, `list_loras`, `server_status`,
-`expand_prompt`, and `remix_prompt`. The prompt-transform tools call
+`expand_prompt`, and `remix_prompt`. `generate_mesh` takes `image`, `model`,
+`steps`, `seed`, `octree`, `threshold`, and `target_faces` — the same bounds
+the generation profile advertises, read from one set of core constants — and
+`export_mesh` transcodes a stored `.glb` into OBJ, STL, or PLY by gallery
+filename. The prompt-transform tools call
 `/api/expand` and `/api/remix` with the target model and an optional `context`
 object (canvas, frames, fps, references, LoRA names) so the host's rewrite
 follows the model's prompting guide. The same guides are published as

@@ -196,6 +196,18 @@ impl ProgressReporter {
         });
     }
 
+    /// Finish a named stage that is ALSO a typed scheduler phase.
+    ///
+    /// One event, not two. [`ProgressEvent::PhaseDone`] already converts to
+    /// the wire's `StageDone`, so emitting `stage_done` beside `phase_done`
+    /// with the same label sends the SAME completion twice and every client
+    /// prints the line twice — which is exactly what the Hunyuan3D log did
+    /// for encode, decode, and extraction. Use this wherever a stage carries
+    /// a phase; keep the bare [`Self::stage_done`] for display-only stages.
+    pub fn stage_complete(&self, phase: ProgressPhase, name: &str, elapsed: Duration) {
+        self.phase_done(phase, name, elapsed);
+    }
+
     pub fn info(&self, message: &str) {
         self.emit(ProgressEvent::Info {
             message: message.to_string(),
@@ -538,6 +550,36 @@ mod tests {
                 } if name == "Finishing output"
             ));
         }
+    }
+
+    /// A stage that carries a typed phase completes ONCE. `PhaseDone` maps
+    /// to the wire's `StageDone`, so emitting `stage_done` beside it printed
+    /// every Hunyuan3D stage line twice on every client.
+    #[test]
+    fn a_typed_stage_completes_exactly_once_on_the_wire() {
+        let mut reporter = ProgressReporter::default();
+        let (cb, log) = capturing_callback();
+        reporter.set_callback(cb);
+
+        reporter.stage_start("Decoding volume");
+        reporter.stage_complete(
+            ProgressPhase::Vae,
+            "Decoding volume",
+            Duration::from_millis(1200),
+        );
+
+        let entries = log.lock().unwrap();
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert!(entries[0].contains("StageStart"), "{}", entries[0]);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.contains("Decoding volume")
+                    && (entry.contains("StageDone") || entry.contains("PhaseDone")))
+                .count(),
+            1,
+            "a stage must report one completion, got {entries:?}"
+        );
     }
 
     #[test]

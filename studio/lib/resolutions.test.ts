@@ -214,6 +214,8 @@ describe("shared resolution contract", () => {
                 supports_first_last_frame: false,
               },
               schedulers: [],
+              prompt: { mode: "required" as const },
+              supports_strength: false,
             },
             provenance: [],
           },

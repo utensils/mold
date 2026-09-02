@@ -1,6 +1,6 @@
 //! Canonical encrypted-media admission shared by batch and direct routes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::sync::Arc;
 
@@ -452,6 +452,12 @@ impl DurableMediaAdmission {
         // child's OWN resolution failure — an unknown handle, a digest that
         // drifted — spends sessions, and that child has to be re-staged anyway.
         let mut validated = Vec::with_capacity(body.requests.len());
+        // Resolving a generation profile builds the whole model catalog and
+        // scans the models directory, so a batch pays for it ONCE per model
+        // name rather than once per request; preparation resolves it again
+        // after the acknowledgement, which is one more, not N more.
+        let mut profiles_by_model: HashMap<String, Option<mold_core::GenerationProfileSet>> =
+            HashMap::new();
         for (offset, mut request) in body.requests.into_iter().enumerate() {
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
@@ -508,6 +514,11 @@ impl DurableMediaAdmission {
                     error.error = format!("requests[{}]: {}", offset + 1, error.error);
                     error
                 })?;
+                // Same pin `prepare_generation` applies, at the same point in
+                // the sequence — after the family is known. A mesh model has
+                // one deliverable container, so an explicit raster format is
+                // coerced rather than carried into a job that would refuse it.
+                request.pin_output_format_for_family(family.as_deref());
             }
             let validation = if private_ingress {
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -524,6 +535,48 @@ impl DurableMediaAdmission {
             validation.map_err(|error| {
                 ApiError::validation(format!("requests[{}]: {error}", offset + 1))
             })?;
+            // An output format the recipe does not advertise will never become
+            // valid, so it belongs at the DOOR. Before this it was only
+            // checked in preparation, which runs after durable
+            // acknowledgement — the row was accepted, held, and then failed
+            // with an error the client could have been told at submit time.
+            //
+            // LAST, after ordinary field validation: a request that is wrong
+            // in two ways must report the same error it always did, so this
+            // adds a refusal rather than reordering the existing ones.
+            if !private_ingress {
+                if let Some(output_format) = request.output_format {
+                    if !profiles_by_model.contains_key(&request.model) {
+                        let canonical = mold_core::manifest::resolve_model_name(&request.model);
+                        let profile = crate::routes::resolved_generation_profile(
+                            state,
+                            &request.model,
+                            &canonical,
+                        )
+                        .await;
+                        profiles_by_model.insert(request.model.clone(), profile);
+                    }
+                    // The door checks the recipe the request's own `pipeline`
+                    // names (the default one when it names none); preparation
+                    // may later pick IcLora or LipDub through
+                    // `plan_builtin_ltx2_control`, whose format lists match the
+                    // default's today.
+                    if let Some(profile) = profiles_by_model
+                        .get(&request.model)
+                        .and_then(Option::as_ref)
+                    {
+                        if let Some(recipe) = profile.recipe_for_pipeline(request.pipeline) {
+                            mold_core::validate_output_format_against_generation_profile(
+                                recipe,
+                                output_format,
+                            )
+                            .map_err(|error| {
+                                ApiError::validation(format!("requests[{}]: {error}", offset + 1))
+                            })?;
+                        }
+                    }
+                }
+            }
             validated.push((offset, request, preferred_gpu, reference_scope_sha256));
         }
 

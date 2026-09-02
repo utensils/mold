@@ -54,8 +54,8 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/gallery/source-media/:name`                | key           | List opaque retained source-media members, or an explicit legacy, missing/corrupt, or authentication-unavailable state (open, like every other route, on a host with no `MOLD_API_KEY`)                                                                                                                      |
 | `GET`    | `/api/gallery/source-media/:name/:member`        | key           | Download one exact retained source-media member without exposing a server path or queue-media identity                                                                                                                                                                                                       |
 | `POST`   | `/api/gallery/source-media/:name/reuse-sessions` | key           | Mint a one-time two-minute same-host hydration handle bound to the credential (one anonymous subject on a keyless host), server instance, exact gallery identity, selected members, and canonical target request; pass it only on the next singleton generation admission as `X-Mold-Retained-Media-Session` |
-| `GET`    | `/api/gallery/export-options`                    | key           | Animation export formats and options this build can transcode into                                                                                                                                                                                                                                           |
-| `POST`   | `/api/gallery/export/:name`                      | key           | Transcode one gallery MP4 into GIF, APNG, or WebP                                                                                                                                                                                                                                                            |
+| `GET`    | `/api/gallery/export-options`                    | key           | Animation and mesh export formats this build can transcode into                                                                                                                                                                                                                                              |
+| `POST`   | `/api/gallery/export/:name`                      | key           | Transcode one gallery MP4 into GIF/APNG/WebP, or one gallery GLB into GLB/OBJ/STL/PLY                                                                                                                                                                                                                        |
 | `PUT`    | `/api/gallery/import/:name`                      | key           | Stream an already-encoded print plus its metadata into this host's gallery                                                                                                                                                                                                                                   |
 | `POST`   | `/api/gallery/organize`                          | key           | Apply one organization edit (title, favorite, tags, collection) to many prints                                                                                                                                                                                                                               |
 | `POST`   | `/api/gallery/mutations`                         | key           | Replay-safe bulk organization mutation, deduped by operation ID                                                                                                                                                                                                                                              |
@@ -212,6 +212,36 @@ partition carries a reviewed qualification record.
 `generation_profile_v1` is true on a server whose `/api/models` rows carry the
 complete version-1 generation profile; false or absent identifies a legacy host
 whose flattened fields need the client-side adapter.
+
+Each recipe's `capabilities` block additionally carries three fields a client
+must treat as absent-means-no on an older host:
+
+| Field               | Type                                       | Absent means                                            |
+| ------------------- | ------------------------------------------ | ------------------------------------------------------- |
+| `prompt`            | `{ mode, reason? }`                        | `mode: "required"`, the answer before the field existed |
+| `supports_strength` | `boolean`                                  | `false`; fall back to the legacy family predicate       |
+| `mesh`              | mesh control block, present on 3-D recipes | `GenerateRequest.mesh` is refused for this recipe       |
+
+`prompt.mode` is `required`, `optional`, or `ignored`. It is the answer for a
+request that CARRIES visual conditioning, because that is the only case that
+can differ: a client resolves it against the request it is building, so an
+`optional` recipe with no source media still requires a prompt, while an
+`ignored` one (a 3-D family, which has no text encoder) never does.
+`reason` is the sentence to show; it is absent when the prompt is required.
+
+`mesh` carries `octree_resolutions` (an allowlist), `octree_default`,
+`threshold` (a float control), `target_faces_min` / `target_faces_max`, and a
+`texture` feature control. A client renders those instead of a resolution
+picker; a mesh recipe advertises `resolution.domain: "none"` and zero
+default width and height, exactly as an audio-only recipe does.
+`capabilities.mesh.export_formats` on `GET /api/capabilities` says which
+containers `POST /api/gallery/export/:name` can transcode a stored mesh into.
+
+An explicit `output_format` a recipe does not advertise is a `422` at
+admission, named as `requests[N]: output format 'x' is not available for this
+recipe`, so a client learns at submit time rather than watching the job hold.
+A 3-D model is the one exception: it has a single deliverable container, so an
+explicit raster format is coerced to `glb` rather than refused.
 
 `queue` additionally carries `durable_queue`, `stable_device_pins`,
 `cooperative_cancellation`, and `heterogeneous_batch_max_outputs`, and
@@ -1096,11 +1126,23 @@ advertised as `capabilities.gallery.trash` (`enabled`, `retention_days`).
 
 ### Export and import
 
-`GET /api/gallery/export-options` reports the animation formats this build can
-transcode a gallery MP4 into (`gif`, `apng`, and `webp` when the `webp` feature
-is on) plus the GIF playback and repeat options.
-`POST /api/gallery/export/:name` performs one such transcode; one export runs
-at a time per server process. `PUT /api/gallery/import/:name` streams an
+`GET /api/gallery/export-options` reports every format this build can transcode
+into: the animation containers a gallery MP4 re-encodes to (`gif`, `apng`, and
+`webp` when the `webp` feature is on) plus the GIF playback and repeat options,
+and the mesh containers a gallery GLB transcodes to (`glb`, `obj`, `stl`,
+`ply`, which need no encoder feature because they are conversions of geometry
+that already exists).
+
+`POST /api/gallery/export/:name` performs one such transcode and answers with
+the bytes as a download (`Content-Disposition: attachment`), never writing
+anything back into the gallery. The SOURCE extension picks the group: a `.mp4`
+takes the animation formats and a `.glb` takes the mesh formats, and crossing
+them is a `422` naming the other side. Exporting a `.glb` as `glb` returns the
+stored bytes unchanged; `obj` is `model/obj`, `stl` is `model/stl`, and `ply`
+is `application/x-ply`. A `.glb` this build's reader does not cover — a foreign
+file dropped into the output directory — is a `422` naming what is
+unsupported rather than a corrupt download. One export runs at a time per
+server process. `PUT /api/gallery/import/:name` streams an
 already-encoded print into the gallery using a fixed binary envelope —
 `u32 metadata_len`, `u64 file_len`, the metadata JSON, then exactly `file_len`
 bytes — so a native client can mirror a print with its metadata and
@@ -2247,8 +2289,12 @@ The server caches the upscaler engine between requests; repeated upscales with t
 Gallery rows (`GET /api/gallery`, the `image.metadata` object on
 `gallery_added`, and the embedded `mold:parameters` chunk) map to
 `mold_core::OutputMetadata`. The request's engine-ignored `source_fit`
-provenance, when sent, is echoed verbatim here as `source_fit`. Two additive
-fields record sequence provenance:
+provenance, when sent, is echoed verbatim here as `source_fit`. A 3-D print
+carries an additive `mesh` block — the `octree_resolution` and `threshold`
+that actually rendered (the request's values, or the recipe defaults it fell
+back to) plus any `target_faces` — so Reuse settings restores what shaped the
+mesh; it is absent on every raster print and on prints saved before the field
+existed. Two additive fields record sequence provenance:
 
 - `chain_job_id`: the durable chain job this output was finalized from.
   Absent for single generations and legacy rows.

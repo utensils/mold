@@ -191,6 +191,7 @@ fn render_grid_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, selected: bool) {
     let theme = &app.theme;
+    let placeholder_style = theme.dim();
     let entry = &app.gallery.entries[idx];
 
     let border_style = if selected {
@@ -231,6 +232,24 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
             let centered =
                 centered_thumb_rect(thumb_area, iw, ih, font_size, app.picker.protocol_type());
             frame.render_stateful_widget(StatefulImage::default(), centered, state);
+        } else if app
+            .gallery
+            .thumbnail_missing
+            .contains(&app.gallery.entries[idx].path)
+        {
+            // A mesh with no poster: say what the tile is rather than
+            // leaving a blank frame that looks like a decode still pending.
+            let row = Rect {
+                y: thumb_area.y + thumb_area.height / 2,
+                height: 1,
+                ..thumb_area
+            };
+            frame.render_widget(
+                Paragraph::new(MESH_PLACEHOLDER)
+                    .style(placeholder_style)
+                    .alignment(Alignment::Center),
+                row,
+            );
         }
     }
 
@@ -243,6 +262,7 @@ pub(crate) fn queue_thumbnail(app: &mut App, idx: usize) {
         return;
     };
     if app.gallery.thumbnail_loading.contains(&entry.path)
+        || app.gallery.thumbnail_missing.contains(&entry.path)
         || app.gallery.thumbnail_loading.len() >= 8
     {
         return;
@@ -263,7 +283,17 @@ pub(crate) fn queue_thumbnail(app: &mut App, idx: usize) {
     });
 }
 
-async fn load_thumbnail_off_thread(
+/// Decode (or fetch, then decode) the grid thumbnail for one entry.
+///
+/// A 3-D print has no raster of its own: its only picture is the poster the
+/// host rendered at save time, served by the thumbnail route and cached
+/// under the same key as every other thumbnail. So a `.glb` is NEVER handed
+/// to `image::open` (glTF is not an image, and the failed decode would be
+/// retried on every scroll), and a host's SVG placeholder for a poster-less
+/// mesh is never written into the cache, where it would be served back as
+/// "the poster" forever. Both answer `None`, which the app records as a
+/// missing poster.
+pub(crate) async fn load_thumbnail_off_thread(
     path: std::path::PathBuf,
     remote: Option<(String, String)>,
 ) -> Option<image::DynamicImage> {
@@ -277,12 +307,18 @@ async fn load_thumbnail_off_thread(
     {
         return Some(image);
     }
+    let is_mesh = path
+        .file_name()
+        .is_some_and(|name| crate::gallery_scan::is_mesh_filename(&name.to_string_lossy()));
 
     if let Some((url, host_id)) = remote {
         let filename = path.file_name()?.to_string_lossy().to_string();
         let api_key = crate::hosts::api_key_for(&host_id);
         let client = crate::hosts::client_for(&url, api_key.as_deref());
         if let Ok(data) = client.get_gallery_thumbnail(&filename).await {
+            if is_mesh && !crate::gallery_scan::looks_like_raster(&data) {
+                return None;
+            }
             let key = path.clone();
             return tokio::task::spawn_blocking(move || {
                 let saved = crate::thumbnails::save_thumbnail_bytes(&data, &key).ok()?;
@@ -291,6 +327,9 @@ async fn load_thumbnail_off_thread(
             .await
             .ok()
             .flatten();
+        }
+        if is_mesh {
+            return None;
         }
         let cached = crate::gallery_scan::cached_image_path(&host_id, &filename);
         return tokio::task::spawn_blocking(move || {
@@ -302,6 +341,9 @@ async fn load_thumbnail_off_thread(
         .flatten();
     }
 
+    if is_mesh {
+        return None;
+    }
     tokio::task::spawn_blocking(move || {
         let saved = crate::thumbnails::generate_thumbnail(&path).ok()?;
         image::open(saved).ok()
@@ -310,6 +352,9 @@ async fn load_thumbnail_off_thread(
     .ok()
     .flatten()
 }
+
+/// What a grid cell shows for a 3-D print with no poster.
+pub(crate) const MESH_PLACEHOLDER: &str = "\u{25c7} 3-D";
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
@@ -353,6 +398,7 @@ pub(crate) mod tests {
             width,
             height,
             generation_width: Some(width),
+            mesh: None,
             generation_height: Some(height),
             strength: None,
             source_image_name: None,
@@ -428,6 +474,214 @@ pub(crate) mod tests {
         let rect = center_rect(area, 10, 6);
 
         assert_eq!(rect, Rect::new(6, 2, 10, 6));
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 2, Rgba([9, 9, 9, 255])))
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    const SVG_PLACEHOLDER: &[u8] =
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"></svg>";
+
+    /// Scoped `MOLD_HOME`, so the thumbnail cache lands in a temp dir.
+    /// Holds the env lock for the whole body (single-threaded runtime, so
+    /// holding it across the awaits is sound).
+    pub(crate) struct ScopedHome {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        previous: Option<String>,
+        pub(crate) dir: tempfile::TempDir,
+    }
+
+    impl ScopedHome {
+        pub(crate) fn enter() -> Self {
+            crate::test_env::disable_db_for_non_isolated_tests();
+            let guard = crate::test_env::enter_test_scope();
+            let dir = tempfile::tempdir().unwrap();
+            let previous = std::env::var("MOLD_HOME").ok();
+            std::env::set_var("MOLD_HOME", dir.path());
+            Self {
+                _guard: guard,
+                previous,
+                dir,
+            }
+        }
+    }
+
+    impl Drop for ScopedHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("MOLD_HOME", value),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    /// A local `.glb` never reaches the raster decoder: no thumbnail is
+    /// generated from it, no cache file is written, and the answer is the
+    /// "no poster" `None` the app records as missing.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn a_local_mesh_never_reaches_the_raster_decoder() {
+        let home = ScopedHome::enter();
+        let glb = home.dir.path().join("chair.glb");
+        std::fs::write(&glb, b"glTF\x02\x00\x00\x00 not a picture").unwrap();
+
+        assert!(super::load_thumbnail_off_thread(glb.clone(), None)
+            .await
+            .is_none());
+        assert!(
+            !crate::thumbnails::thumbnail_path(&glb).exists(),
+            "nothing is cached for a poster-less mesh"
+        );
+
+        // With a poster cached under its key, the poster is the thumbnail.
+        crate::thumbnails::save_thumbnail_bytes(&png_bytes(), &glb).unwrap();
+        let image = super::load_thumbnail_off_thread(glb, None)
+            .await
+            .expect("the cached poster");
+        assert_eq!((image.width(), image.height()), (2, 2));
+    }
+
+    /// A host answers the thumbnail route of a poster-less mesh with its
+    /// SVG placeholder. That is not a poster: it is neither shown nor
+    /// cached, so the poster the host writes later is still picked up.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn a_remote_mesh_placeholder_is_neither_shown_nor_cached() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let home = ScopedHome::enter();
+        let _ = &home;
+        let server = MockServer::start().await;
+        let key = PathBuf::from("chair.glb");
+        let remote = Some((server.uri(), "bender".to_string()));
+
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/thumbnail/chair.glb"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/svg+xml")
+                    .set_body_bytes(SVG_PLACEHOLDER.to_vec()),
+            )
+            .mount(&server)
+            .await;
+        assert!(
+            super::load_thumbnail_off_thread(key.clone(), remote.clone())
+                .await
+                .is_none()
+        );
+        assert!(
+            !crate::thumbnails::thumbnail_path(&key).exists(),
+            "the placeholder is not cached as the poster"
+        );
+
+        // Once the host has a poster, it is fetched, shown, and cached.
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/thumbnail/chair.glb"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(png_bytes()),
+            )
+            .mount(&server)
+            .await;
+        let image = super::load_thumbnail_off_thread(key.clone(), remote)
+            .await
+            .expect("the poster");
+        assert_eq!((image.width(), image.height()), (2, 2));
+        let cached = std::fs::read(crate::thumbnails::thumbnail_path(&key)).unwrap();
+        assert!(crate::gallery_scan::looks_like_raster(&cached));
+    }
+
+    /// A placeholder that reached the cache by another route is not served
+    /// back as the poster by the detail pane's fetch either.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn a_cached_placeholder_is_replaced_by_the_poster_once_the_host_has_one() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let home = ScopedHome::enter();
+        let _ = &home;
+        let server = MockServer::start().await;
+        let key = PathBuf::from("chair.glb");
+        crate::thumbnails::save_thumbnail_bytes(SVG_PLACEHOLDER, &key).unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/thumbnail/chair.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let data =
+            crate::gallery_scan::fetch_and_cache_mesh_poster(&server.uri(), "bender", "chair.glb")
+                .await
+                .expect("the poster");
+        assert!(crate::gallery_scan::looks_like_raster(&data));
+        let cached = std::fs::read(crate::thumbnails::thumbnail_path(&key)).unwrap();
+        assert_eq!(cached, data, "the raster replaced the placeholder");
+
+        // Now cached as a raster, the next read never hits the host.
+        server.reset().await;
+        let again =
+            crate::gallery_scan::fetch_and_cache_mesh_poster(&server.uri(), "bender", "chair.glb")
+                .await
+                .expect("the cached poster");
+        assert_eq!(again, data);
+    }
+
+    /// A mesh recorded as poster-less paints its marker in the cell.
+    #[test]
+    fn gallery_grid_cell_marks_a_posterless_mesh() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        let mut app = App::new(None, true, picker).unwrap();
+        let entry_path = PathBuf::from("chair.glb");
+        app.gallery.entries = vec![GalleryEntry {
+            path: entry_path.clone(),
+            metadata: test_metadata(64, 64),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+            title: None,
+            origins: Vec::new(),
+        }];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumbnail_missing.insert(entry_path.clone());
+
+        let backend = TestBackend::new(CELL_W, CELL_H);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_grid_cell(frame, &mut app, Rect::new(0, 0, CELL_W, CELL_H), 0, true);
+            })
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            rendered.contains("3-D"),
+            "expected the mesh marker: {rendered:?}"
+        );
+        assert!(
+            !app.gallery.thumbnail_loading.contains(&entry_path),
+            "a marked mesh is not queued again"
+        );
     }
 
     #[test]
@@ -930,11 +1184,17 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
     lines.push(Line::from(""));
 
-    // Keybinding hints
+    // Keybinding hints. A 3-D print offers Export in place of Upscale: a
+    // raster upscaler has nothing to read in a `.glb`.
+    let is_mesh = crate::gallery_scan::is_mesh_filename(&entry.filename());
     let hints: &[(&str, &str)] = &[
         ("e", "Edit"),
         ("r", "Regenerate"),
-        ("u", "Upscale"),
+        if is_mesh {
+            ("x", "Export")
+        } else {
+            ("u", "Upscale")
+        },
         ("d", removal),
         ("o/Enter", "Open"),
         ("Esc", "Back"),

@@ -110,6 +110,45 @@ describe("expansionTaskForRequest", () => {
 });
 
 describe("expansionContextForRequest", () => {
+  it("carries the profile's prompt mode only when the recipe is known", () => {
+    const ignored = { capabilities: { prompt: { mode: "ignored" as const } } };
+    expect(
+      expansionContextForRequest(
+        "hunyuan3d",
+        { model: "hunyuan3d-mini-turbo:fp16", source_image: "png" },
+        ignored,
+      ),
+    ).toEqual({
+      model: "hunyuan3d-mini-turbo:fp16",
+      references: [{ kind: "image", role: "source" }],
+      prompt_mode: "ignored",
+    });
+    const optional = {
+      capabilities: { prompt: { mode: "optional" as const } },
+    };
+    expect(
+      expansionContextForRequest(
+        "ltx2",
+        { model: "ltx-2.3-22b-distilled:fp8", source_image: "png" },
+        optional,
+      ).prompt_mode,
+    ).toBe("optional");
+    expect(
+      expansionContextForRequest(
+        "ltx2",
+        { model: "ltx-2.3-22b-distilled:fp8" },
+        optional,
+      ).prompt_mode,
+    ).toBe("required");
+    // No recipe, no claim: the legacy family rule can never say `ignored`.
+    expect(
+      expansionContextForRequest("hunyuan3d", {
+        model: "hunyuan3d-mini-turbo:fp16",
+        source_image: "png",
+      }),
+    ).not.toHaveProperty("prompt_mode");
+  });
+
   it("mirrors mold_core::ExpandContext::for_generation", () => {
     expect(
       expansionContextForRequest("wan", {

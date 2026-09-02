@@ -309,7 +309,7 @@ use crate::queue::clean_error_message;
         delete_model,
         create_gallery_media_token,
         gallery_export_options,
-        export_gallery_video,
+        export_gallery_media,
         create_pairing_session,
         claim_pairing_session,
         list_paired_clients,
@@ -436,6 +436,10 @@ use crate::queue::clean_error_message;
         mold_core::TemporalProfile,
         mold_core::FpsControl,
         mold_core::RecipeSelector,
+        mold_core::PromptCapabilitiesProfile,
+        mold_core::PromptRequirement,
+        mold_core::MeshCapabilitiesProfile,
+        mold_core::MeshExportFormat,
         mold_core::ProfileProvenance,
         mold_core::ProvenanceKind,
         mold_core::LoraInfo,
@@ -676,7 +680,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/gallery/media-token", post(create_gallery_media_token))
         .route("/api/gallery/export-options", get(gallery_export_options))
-        .route("/api/gallery/export/:filename", post(export_gallery_video))
+        .route("/api/gallery/export/:filename", post(export_gallery_media))
         // ─── Library organization + trash ───────────────────────────────
         .route(
             "/api/gallery/organize",
@@ -1254,6 +1258,24 @@ fn durable_generation_unsupported(message: impl Into<String>) -> ApiError {
     )
 }
 
+/// The delivery-qualified generation profile this host would run `model` on.
+///
+/// Extracted so durable admission can ask the SAME question `prepare_generation`
+/// asks. Before this, an unavailable output format was only discovered after
+/// the row was accepted, so a client that named one got a Hold and a job that
+/// could never run instead of a 422 it could act on.
+pub(crate) async fn resolved_generation_profile(
+    state: &AppState,
+    model: &str,
+    canonical_model: &str,
+) -> Option<mold_core::GenerationProfileSet> {
+    model_manager::list_models(state)
+        .await
+        .into_iter()
+        .find(|entry| entry.info.name == model || entry.info.name == canonical_model)
+        .and_then(|entry| entry.generation_profile)
+}
+
 pub(crate) async fn prepare_generation_after_durable_ack(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
@@ -1330,7 +1352,14 @@ async fn prepare_generation_inner(
         mold_core::minimax_h3::validate_reference_descriptors(references)
             .map_err(ApiError::reference)?;
     }
-    if request.expand == Some(true) && !request.prompt.trim().is_empty() {
+    // The activation gate is asked only for an expansion that will happen:
+    // an empty prompt and a family whose profile ignores its prompt are both
+    // cleared by `maybe_expand_prompt` below without touching a model, so a
+    // mesh run must not be refused for an expansion model it will never use.
+    if request.expand == Some(true)
+        && !request.prompt.trim().is_empty()
+        && !generation_prompt_ignored(request, family.as_deref())
+    {
         let settings = state
             .config
             .read()
@@ -1376,11 +1405,7 @@ async fn prepare_generation_inner(
     let resolved_profile = if private_h3_ingress {
         None
     } else {
-        model_manager::list_models(state)
-            .await
-            .into_iter()
-            .find(|entry| entry.info.name == request.model || entry.info.name == canonical_model)
-            .and_then(|entry| entry.generation_profile)
+        resolved_generation_profile(state, &request.model, &canonical_model).await
     };
     // Expand only after live catalog resolution, so opaque cv:/hf: IDs use
     // their authoritative family and conditioning-aware task template. The
@@ -1394,6 +1419,12 @@ async fn prepare_generation_inner(
         resolved_profile.as_ref(),
     )
     .await?;
+    // A mesh family emits binary glTF and nothing else, so an explicit raster
+    // format is COERCED here rather than refused: it names an artifact the
+    // engine cannot make, and the CLI already resolved it the same way. Every
+    // other family's explicit format passes through to be validated against
+    // its recipe.
+    request.pin_output_format_for_family(resolved_family.as_deref());
     // The effective, delivery-qualified recipe owns the output default. A
     // family heuristic here can select MP4 even when this binary did not link
     // the encoder, causing an omitted field to fail its own advertised profile.
@@ -3635,6 +3666,24 @@ pub(crate) async fn apply_default_metadata_setting(
     req.embed_metadata = Some(config.effective_embed_metadata(None));
 }
 
+/// Whether the request's family ignores its prompt (no text encoder), from
+/// the ONE profile rule resolved against this request's conditioning. The
+/// family hint is the catalog-resolved one when the caller has it; the
+/// manifest answers otherwise.
+fn generation_prompt_ignored(
+    req: &mold_core::GenerateRequest,
+    resolved_family: Option<&str>,
+) -> bool {
+    let family = resolved_family
+        .map(str::to_owned)
+        .or_else(|| mold_core::manifest::find_manifest(&req.model).map(|m| m.family.clone()));
+    mold_core::prompt_requirement_for_family(
+        family.as_deref(),
+        mold_core::validation::has_visual_conditioning(req),
+    )
+    .is_ignored()
+}
+
 /// Apply prompt expansion if `expand: true` is set on a generate request.
 async fn maybe_expand_prompt(
     state: &AppState,
@@ -3654,6 +3703,13 @@ async fn maybe_expand_prompt(
     // when it plans the PromptExpansion dependency stage, so leaving it set
     // would hand "" to the expander one layer down.
     if req.prompt.trim().is_empty() {
+        req.expand = Some(false);
+        return Ok(());
+    }
+    // A family whose profile ignores the prompt has nothing to expand either:
+    // the text conditions nothing, so an expansion would only rewrite the
+    // recorded prompt. Cleared for the same scheduler reason as above.
+    if generation_prompt_ignored(req, resolved_family) {
         req.expand = Some(false);
         return Ok(());
     }
@@ -3790,6 +3846,15 @@ async fn expand_prompt(
     Json(req): Json<mold_core::ExpandRequest>,
 ) -> Result<Json<mold_core::ExpandResponse>, ApiError> {
     validate_expand_variations(req.variations)?;
+    // A family that reads no prompt is answered from the guide, before an
+    // expansion model is required, activated, or scheduled: one text
+    // whatever `variations` says, because there is exactly one thing to say.
+    if let Some(advice) = mold_core::ignored_prompt_advice(&req.model_family) {
+        return Ok(Json(mold_core::ExpandResponse {
+            original: req.prompt,
+            expanded: vec![advice.text()],
+        }));
+    }
 
     let config = state.config.read().await;
     let expand_settings = config.expand.clone().with_env_overrides();
@@ -3855,6 +3920,20 @@ async fn remix_prompt(
     let task = req
         .task
         .unwrap_or_else(|| mold_core::ExpandTask::for_family(&req.model_family));
+    // Same door as `/api/expand`: a family that reads no prompt gets the
+    // guide's image advice as its one alternative, varying nothing.
+    if let Some(advice) = mold_core::ignored_prompt_advice(&req.model_family) {
+        return Ok(Json(mold_core::RemixResponse {
+            source_prompt: req.source_prompt,
+            root_prompt: req.root_prompt,
+            source_kind: req.source_kind,
+            task,
+            variants: vec![mold_core::RemixVariant {
+                prompt: advice.text(),
+                dimensions: Vec::new(),
+            }],
+        }));
+    }
     let dimensions = mold_core::expand::resolve_remix_dimensions(
         &req.dimensions,
         task,
@@ -7773,7 +7852,7 @@ fn mesh_capabilities() -> mold_core::MeshCapabilities {
     mold_core::MeshCapabilities {
         generation,
         formats: vec![mold_core::OutputFormat::Glb],
-        export_formats: vec![mold_core::OutputFormat::Glb, mold_core::OutputFormat::Obj],
+        export_formats: MESH_EXPORT_FORMATS.to_vec(),
         // Geometry only. Flipped by the PBR paint stage, not before — a user
         // must not discover that a render is untextured after waiting for it.
         textures: false,
@@ -8845,31 +8924,68 @@ pub(crate) struct GalleryMediaTokenResponse {
     pub(crate) auth_required: bool,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
+/// A container `POST /api/gallery/export/:filename` can transcode into.
+///
+/// Two disjoint groups sharing one endpoint: the animation containers a stored
+/// MP4 re-encodes to, and the geometry containers a stored GLB transcodes to.
+/// The source extension picks the group, so asking for a GIF of a mesh (or an
+/// STL of a video) is a refusal that names both sides rather than a surprise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum GalleryExportFormat {
     Gif,
     Apng,
     Webp,
+    Glb,
+    Obj,
+    Stl,
+    Ply,
 }
 
 impl GalleryExportFormat {
-    fn output_format(self) -> mold_core::OutputFormat {
+    /// The animation container this names, or `None` for a mesh format.
+    fn animation_format(self) -> Option<mold_core::OutputFormat> {
         match self {
-            Self::Gif => mold_core::OutputFormat::Gif,
-            Self::Apng => mold_core::OutputFormat::Apng,
-            Self::Webp => mold_core::OutputFormat::Webp,
+            Self::Gif => Some(mold_core::OutputFormat::Gif),
+            Self::Apng => Some(mold_core::OutputFormat::Apng),
+            Self::Webp => Some(mold_core::OutputFormat::Webp),
+            Self::Glb | Self::Obj | Self::Stl | Self::Ply => None,
+        }
+    }
+
+    /// The mesh container this names, or `None` for an animation format.
+    fn mesh_format(self) -> Option<mold_core::MeshExportFormat> {
+        match self {
+            Self::Glb => Some(mold_core::MeshExportFormat::Glb),
+            Self::Obj => Some(mold_core::MeshExportFormat::Obj),
+            Self::Stl => Some(mold_core::MeshExportFormat::Stl),
+            Self::Ply => Some(mold_core::MeshExportFormat::Ply),
+            Self::Gif | Self::Apng | Self::Webp => None,
         }
     }
 
     fn extension(self) -> &'static str {
         match self {
             Self::Gif => "gif",
+            // An APNG file IS a PNG, and every viewer opens `.png` natively.
             Self::Apng => "png",
             Self::Webp => "webp",
+            Self::Glb => "glb",
+            Self::Obj => "obj",
+            Self::Stl => "stl",
+            Self::Ply => "ply",
         }
     }
 }
+
+/// Every mesh container a stored `.glb` can be exported as, in the order
+/// clients show them. GLB first because it is the stored form.
+pub(crate) const MESH_EXPORT_FORMATS: [mold_core::MeshExportFormat; 4] = [
+    mold_core::MeshExportFormat::Glb,
+    mold_core::MeshExportFormat::Obj,
+    mold_core::MeshExportFormat::Stl,
+    mold_core::MeshExportFormat::Ply,
+];
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -9235,11 +9351,14 @@ async fn create_gallery_media_token(
     responses((status = 200, description = "Available gallery video export formats", body = GalleryExportOptionsResponse))
 )]
 async fn gallery_export_options() -> Json<GalleryExportOptionsResponse> {
-    let formats = if cfg!(feature = "webp") {
+    let mut formats = if cfg!(feature = "webp") {
         vec!["gif", "apng", "webp"]
     } else {
         vec!["gif", "apng"]
     };
+    // The mesh containers need no encoder feature: they are transcodes of a
+    // stored glTF, so any build that can serve the file can export it.
+    formats.extend(MESH_EXPORT_FORMATS.iter().map(|format| format.extension()));
     Json(GalleryExportOptionsResponse {
         formats,
         gif_playback: ["loop", "bounce"],
@@ -9247,19 +9366,26 @@ async fn gallery_export_options() -> Json<GalleryExportOptionsResponse> {
     })
 }
 
+/// Transcode one stored gallery artifact into a delivery container.
+///
+/// Two source kinds, one route: an MP4 re-encodes to GIF/APNG/WebP, and a GLB
+/// transcodes to GLB/OBJ/STL/PLY. Both are DOWNLOADS — nothing is written back
+/// into the gallery, because the stored form stays authoritative and an export
+/// always loses something (frame timing for an animation, materials or vertex
+/// identity for a mesh).
 #[utoipa::path(
     post,
     path = "/api/gallery/export/{filename}",
     tag = "server",
-    params(("filename" = String, Path, description = "Gallery MP4 filename")),
+    params(("filename" = String, Path, description = "Gallery MP4 or GLB filename")),
     request_body = GalleryExportRequest,
     responses(
-        (status = 200, description = "Converted animation bytes"),
-        (status = 404, description = "Gallery video not found"),
+        (status = 200, description = "Converted animation or mesh bytes"),
+        (status = 404, description = "Gallery artifact not found"),
         (status = 422, description = "Unsupported source or export options")
     )
 )]
-async fn export_gallery_video(
+async fn export_gallery_media(
     State(state): State<AppState>,
     Path(filename): Path<String>,
     Json(request): Json<GalleryExportRequest>,
@@ -9287,12 +9413,15 @@ async fn export_gallery_video(
     if clean_name.is_empty() || clean_name != filename {
         return Err(ApiError::validation("invalid filename"));
     }
-    if !std::path::Path::new(&clean_name)
+    let extension = std::path::Path::new(&clean_name)
         .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
-    {
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let source_is_mesh = extension == "glb";
+    if !source_is_mesh && extension != "mp4" {
         return Err(ApiError::validation(
-            "only MP4 gallery videos can be exported",
+            "only MP4 gallery videos and GLB meshes can be exported",
         ));
     }
 
@@ -9301,10 +9430,48 @@ async fn export_gallery_video(
         .await
         .is_ok_and(|metadata| metadata.is_file())
     {
-        return Err(ApiError::not_found("gallery video not found"));
+        return Err(ApiError::not_found(if source_is_mesh {
+            "gallery mesh not found"
+        } else {
+            "gallery video not found"
+        }));
     }
 
-    let output_format = request.format.output_format();
+    // A mesh export is a pure transcode of geometry that already exists: read
+    // the stored glTF back, write the requested container, hand it over as a
+    // download. No re-encode, no frame buffer, and none of the animation
+    // options below mean anything here.
+    if source_is_mesh {
+        let Some(mesh_format) = request.format.mesh_format() else {
+            return Err(ApiError::validation(format!(
+                "'{}' is an animation format; a mesh exports as {}",
+                request.format.extension(),
+                MESH_EXPORT_FORMATS
+                    .iter()
+                    .map(|format| format.extension())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        let bytes =
+            tokio::task::spawn_blocking(move || transcode_gallery_mesh(&source, mesh_format))
+                .await
+                .map_err(|error| ApiError::internal(format!("mesh export task failed: {error}")))?
+                .map_err(ApiError::validation)?;
+        return Ok(mesh_export_response(
+            &clean_name,
+            mesh_format,
+            request.format.extension(),
+            bytes,
+        ));
+    }
+
+    let Some(output_format) = request.format.animation_format() else {
+        return Err(ApiError::validation(format!(
+            "'{}' is a mesh format; a video exports as gif, apng, or webp",
+            request.format.extension()
+        )));
+    };
     let bounce = matches!(request.playback, GalleryGifPlayback::Bounce);
     if bounce && !matches!(request.format, GalleryExportFormat::Gif) {
         return Err(ApiError::validation(
@@ -9339,19 +9506,7 @@ async fn export_gallery_video(
     .map_err(|error| ApiError::internal(format!("video export task failed: {error}")))?
     .map_err(|error| ApiError::inference(format!("video export failed: {error:#}")))?;
 
-    let stem = std::path::Path::new(&clean_name)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("mold-video")
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
+    let stem = export_download_stem(&clean_name, "mold-video");
     let download_name = format!("{stem}.{}", request.format.extension());
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -9363,6 +9518,75 @@ async fn export_gallery_video(
         .header(header::CACHE_CONTROL, "private, no-store")
         .body(Body::from(bytes))
         .expect("static export response headers are valid"))
+}
+
+/// Read a stored `.glb` and write the requested mesh container.
+///
+/// Blocking on purpose — it is called from `spawn_blocking`. Every refusal
+/// carries the reader's own sentence, so a user with a foreign `.glb` in their
+/// output directory is told which part of it is unsupported rather than being
+/// handed a file that opens wrong somewhere else.
+fn transcode_gallery_mesh(
+    source: &std::path::Path,
+    format: mold_core::MeshExportFormat,
+) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(source).map_err(|error| format!("cannot read the mesh: {error}"))?;
+    // GLB is the STORED form, so exporting as GLB is the file itself. Parsing
+    // and rewriting it would drop the material and any embedded texture the
+    // stored file carries.
+    if format == mold_core::MeshExportFormat::Glb {
+        return Ok(bytes);
+    }
+    let mesh = mold_inference::hunyuan3d::glb::read_glb(&bytes)
+        .map_err(|error| format!("cannot export this mesh: {error}"))?;
+    Ok(match format {
+        mold_core::MeshExportFormat::Glb => unreachable!("returned above"),
+        mold_core::MeshExportFormat::Obj => {
+            mold_inference::hunyuan3d::glb::write_obj(&mesh).into_bytes()
+        }
+        mold_core::MeshExportFormat::Stl => mold_inference::hunyuan3d::glb::write_stl(&mesh),
+        mold_core::MeshExportFormat::Ply => mold_inference::hunyuan3d::glb::write_ply(&mesh),
+    })
+}
+
+/// The download response for a transcoded mesh.
+fn mesh_export_response(
+    clean_name: &str,
+    format: mold_core::MeshExportFormat,
+    extension: &str,
+    bytes: Vec<u8>,
+) -> Response {
+    let download_name = format!(
+        "{}.{extension}",
+        export_download_stem(clean_name, "mold-mesh")
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, format.content_type())
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{download_name}\""),
+        )
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(Body::from(bytes))
+        .expect("static export response headers are valid")
+}
+
+/// The ASCII-safe stem an exported download is named with.
+fn export_download_stem(clean_name: &str, fallback: &str) -> String {
+    std::path::Path::new(clean_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(fallback)
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// `?view=` on `GET /api/gallery`. Absent means the live library.
@@ -12714,6 +12938,65 @@ mod tests {
         assert!(request.original_prompt.is_none());
         // Cleared so scheduler-owned local expansion doesn't re-plan it.
         assert_eq!(request.expand, Some(false));
+    }
+
+    #[tokio::test]
+    async fn expansion_skipped_for_a_prompt_ignored_family() {
+        // A mesh family has no text encoder: expanding "a chair" would only
+        // rewrite the recorded prompt, so the door clears the flag without
+        // creating, activating, or calling an expansion backend.
+        let state = AppState::for_tests();
+        state.config.write().await.expand.backend = "http://127.0.0.1:9".to_string();
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a chair",
+            "model": "hunyuan3d-mini-turbo",
+            "width": 0,
+            "height": 0,
+            "steps": 5,
+            "guidance": 5.0,
+            "batch_size": 1,
+            "source_image": "AQID",
+            "expand": true
+        }))
+        .unwrap();
+        assert!(generation_prompt_ignored(&request, Some("hunyuan3d")));
+        assert!(
+            generation_prompt_ignored(&request, None),
+            "manifest resolves the family"
+        );
+
+        maybe_expand_prompt(&state, &mut request, None, Some("hunyuan3d"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(request.prompt, "a chair");
+        assert!(request.original_prompt.is_none());
+        assert_eq!(request.expand, Some(false));
+
+        // A family that reads its prompt still reaches the backend and fails
+        // on it, so the skip above is the family rule and not a dead backend.
+        let mut flux: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a chair",
+            "model": "flux-schnell:q8",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1,
+            "expand": true
+        }))
+        .unwrap();
+        assert!(!generation_prompt_ignored(&flux, Some("flux")));
+        let error = maybe_expand_prompt(&state, &mut flux, None, Some("flux"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            error.error.contains("prompt expansion failed"),
+            "{}",
+            error.error
+        );
+        assert_eq!(flux.expand, Some(true));
     }
 
     #[tokio::test]

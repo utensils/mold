@@ -275,6 +275,14 @@ fn effective_dimensions(
             )),
         };
     }
+    // A mesh render has no canvas at all. The manifest's `width`/`height` are
+    // the checkpoint's own conditioning size, and the ENGINE letterboxes the
+    // source to it — so fitting the image here resamples it once for nothing,
+    // and printing "Source image 1024x1024 -> 1008x1008" describes a step
+    // that never happens. Canvasless requests submit 0x0, the t2a precedent.
+    if family == Some(mold_core::manifest::HUNYUAN3D_FAMILY) {
+        return Ok((0, 0));
+    }
     match (width, height, source_image) {
         (Some(width), Some(height), _) => Ok((width, height)),
         (Some(width), None, _) => Ok((width, model_cfg.effective_height(config))),
@@ -1049,6 +1057,7 @@ pub async fn run(
         fps.or_else(|| model_cfg.effective_fps())
     };
     let is_ltx2 = family.as_deref() == Some("ltx2");
+    let is_mesh = family.as_deref() == Some(mold_core::manifest::HUNYUAN3D_FAMILY);
     validate_cli_batch_for_family(family.as_deref(), batch)?;
 
     // Default video models to a sensible container unless the user explicitly picked one.
@@ -1111,6 +1120,11 @@ pub async fn run(
         delivery_capabilities_for_run(local),
     )
     .map_err(anyhow::Error::msg)?;
+    // The mesh half of the same rule. A 3-D render has one container, so this
+    // only ever agrees or refuses — and it refuses before a weight is read.
+    let output_format =
+        reconcile_mesh_format_with_output_extension(output_format, output.as_deref())
+            .map_err(anyhow::Error::msg)?;
 
     // ── Chain routing ─────────────────────────────────────────────────────
     // When --frames exceeds the per-clip cap, auto-build a ChainRequest and
@@ -1588,14 +1602,18 @@ pub async fn run(
             crate::output::colorize_description(desc)
         );
     }
-    // Show truncated prompt so the user can confirm their input
-    let display_prompt = if prompt.chars().count() > 60 {
-        let truncated: String = prompt.chars().take(57).collect();
-        format!("{truncated}...")
-    } else {
-        prompt.to_string()
-    };
-    status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
+    // Show truncated prompt so the user can confirm their input. A family
+    // whose profile ignores the prompt runs with none, and echoing `""` would
+    // read as a mistake, so an empty prompt prints nothing.
+    if !prompt.is_empty() {
+        let display_prompt = if prompt.chars().count() > 60 {
+            let truncated: String = prompt.chars().take(57).collect();
+            format!("{truncated}...")
+        } else {
+            prompt.to_string()
+        };
+        status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
+    }
     if !guidance_caps.adjustable {
         status!(
             "{} Distilled recipe fixes CFG at 1.0 and does not use negative-prompt guidance; choose a Dev checkpoint with Auto or a guided pipeline to adjust it",
@@ -1657,6 +1675,8 @@ pub async fn run(
             images.len(),
             if images.len() == 1 { "" } else { "s" }
         );
+    } else if let Some(line) = mesh_mode_line(is_mesh, source_image.is_some()) {
+        status!("{} {line}", theme::icon_mode());
     } else if source_image.is_some() {
         status!(
             "{} img2img mode (strength: {:.2})",
@@ -1729,6 +1749,26 @@ pub async fn run(
             theme::icon_info(),
             effective_steps,
             displayed_guidance,
+        );
+    } else if is_mesh {
+        // Same reason as audio, plus the two controls that actually shape a
+        // mesh. Both fall back to the profile-advertised defaults an omitted
+        // field renders at.
+        status!(
+            "{} {}",
+            theme::icon_info(),
+            mesh_generation_banner(
+                req.mesh
+                    .as_ref()
+                    .and_then(|options| options.octree_resolution)
+                    .unwrap_or(mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION),
+                req.mesh
+                    .as_ref()
+                    .and_then(|options| options.threshold)
+                    .map_or(mold_core::validation::MESH_DEFAULT_THRESHOLD, f64::from),
+                req.mesh.as_ref().and_then(|options| options.target_faces),
+                effective_steps,
+            )
         );
     } else {
         status!(
@@ -2389,6 +2429,108 @@ pub(crate) fn reconcile_video_format_with_output_extension(
         ));
     }
     Ok(named)
+}
+
+/// The line a 3-D run prints instead of `Generating {w}x{h}`.
+///
+/// The mode line for a 3-D run. The source image is this family's ONLY
+/// conditioning and there is no latent to partially denoise, so `strength`
+/// is never read and an img2img line would describe a knob the engine
+/// ignores. Without a source image there is no conditioning to announce —
+/// the request is refused further on, and a banner claiming "source image
+/// conditioning" would describe a run that never happens.
+pub(crate) fn mesh_mode_line(is_mesh: bool, has_source_image: bool) -> Option<&'static str> {
+    (is_mesh && has_source_image).then_some("3-D mode (source image conditioning)")
+}
+
+/// A mesh has no canvas, so printing one describes an artifact this family
+/// never produces — the same reason the audio-only pipeline prints
+/// "Generating audio". What a user can actually act on here is the query
+/// grid, the iso-level, and the face target when one was asked for, so those
+/// are what the line names.
+pub(crate) fn mesh_generation_banner(
+    octree: u32,
+    threshold: f64,
+    target_faces: Option<u32>,
+    steps: u32,
+) -> String {
+    let faces = target_faces
+        .map(|faces| {
+            format!(
+                ", target faces {}",
+                mold_core::format::group_thousands(faces)
+            )
+        })
+        .unwrap_or_default();
+    format!("Generating mesh (octree {octree}, threshold {threshold:.2}{faces}, {steps} steps)")
+}
+
+/// Refuse an `--output` name a 3-D render cannot write.
+///
+/// The mesh counterpart of [`reconcile_video_format_with_output_extension`],
+/// and deliberately narrower: a mesh render has exactly ONE container, so
+/// there is nothing to reconcile — either the filename agrees or it names an
+/// artifact this run will not produce. Catching it here means the refusal
+/// arrives before a multi-gigabyte checkpoint is mapped, not after a
+/// two-minute render lands in a file whose extension lies about its contents.
+///
+/// Three cases pass, matching the video rule: stdout claims no extension, an
+/// omitted `--output` claims none either, and `.glb` is what will be written.
+/// An export container (`.obj`, `.stl`, `.ply`) is refused ON PURPOSE with a
+/// pointer at the export command — those are transcodes of a stored mesh, not
+/// generation targets, and silently writing GLB bytes into `armchair.stl`
+/// would produce a file no printer can open.
+pub(crate) fn reconcile_mesh_format_with_output_extension(
+    resolved: OutputFormat,
+    output: Option<&str>,
+) -> Result<OutputFormat, String> {
+    if !resolved.is_mesh() {
+        return Ok(resolved);
+    }
+    let Some(path) = output.filter(|path| *path != "-") else {
+        return Ok(resolved);
+    };
+    let Some(extension) = std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return Ok(resolved);
+    };
+    if extension == "glb" {
+        return Ok(OutputFormat::Glb);
+    }
+    // An export container is a transcode of a STORED mesh, so it is refused
+    // with the command that produces one rather than with the generic
+    // sentence — the user asked for something mold can give them, just not
+    // from here.
+    if matches!(extension.as_str(), "obj" | "stl" | "ply") {
+        return Err(format!(
+            "--output '{path}' names a .{extension} file, but 3-D generation writes binary glTF — \
+             render to a .glb file, then export it with \
+             `mold library export <file> --format {extension}`"
+        ));
+    }
+    // `.gltf` is the JSON flavour of the same format, and mold writes only
+    // the binary one. It is not an `OutputFormat`, so the generic check
+    // below would wave it through and binary GLB would land under a name
+    // every viewer reads as JSON.
+    if extension == "gltf" {
+        return Err(format!(
+            "--output '{path}' names a .gltf file, but 3-D generation writes binary glTF — \
+             name a .glb file; mold does not write JSON glTF"
+        ));
+    }
+    // An extension mold has no container for at all (`.mesh`, `.zip`) carries
+    // no claim this function can reason about, exactly as `.mkv` does for a
+    // video render.
+    if extension.parse::<OutputFormat>().is_err() {
+        return Ok(resolved);
+    }
+    Err(format!(
+        "--output '{path}' names a .{extension} file, but 3-D generation writes binary glTF — \
+         name a .glb file, or write the bytes to stdout with --output -"
+    ))
 }
 
 /// Remote generation: try SSE streaming first, fall back to blocking API.
@@ -4302,6 +4444,108 @@ mod tests {
         }
     }
 
+    /// The mesh half of the `--output` reconciliation. A 3-D render has one
+    /// container, so this only ever agrees or refuses — and it refuses before
+    /// a weight is read.
+    #[test]
+    fn glb_stdout_and_extensionless_outputs_pass_a_mesh_render() {
+        for path in [Some("chair.glb"), Some("chair.GLB"), Some("-"), None] {
+            assert_eq!(
+                reconcile_mesh_format_with_output_extension(OutputFormat::Glb, path),
+                Ok(OutputFormat::Glb),
+                "{path:?} must pass"
+            );
+        }
+        // An extension mold has no container for at all carries no claim.
+        assert_eq!(
+            reconcile_mesh_format_with_output_extension(OutputFormat::Glb, Some("chair.mesh")),
+            Ok(OutputFormat::Glb)
+        );
+        // A non-mesh render is untouched.
+        assert_eq!(
+            reconcile_mesh_format_with_output_extension(OutputFormat::Png, Some("cat.png")),
+            Ok(OutputFormat::Png)
+        );
+    }
+
+    #[test]
+    fn raster_video_and_audio_extensions_on_a_mesh_render_are_refused() {
+        for path in ["chair.png", "chair.jpeg", "chair.mp4", "chair.wav"] {
+            let error = reconcile_mesh_format_with_output_extension(OutputFormat::Glb, Some(path))
+                .expect_err("no mesh fits that container");
+            assert!(error.contains("binary glTF"), "got: {error}");
+            assert!(error.contains("name a .glb file"), "got: {error}");
+        }
+    }
+
+    /// An export container is something mold CAN produce, just not from here,
+    /// so the refusal names the command that produces one.
+    #[test]
+    fn export_extensions_on_a_mesh_render_point_at_the_export_command() {
+        for (path, format) in [
+            ("chair.obj", "obj"),
+            ("chair.stl", "stl"),
+            ("chair.ply", "ply"),
+        ] {
+            let error = reconcile_mesh_format_with_output_extension(OutputFormat::Glb, Some(path))
+                .expect_err("an export container is not a generation target");
+            assert!(
+                error.contains(&format!("mold library export <file> --format {format}")),
+                "got: {error}"
+            );
+        }
+    }
+
+    /// JSON glTF is the one extension that is neither an `OutputFormat` nor
+    /// an export container, so it needs its own refusal: binary GLB under a
+    /// `.gltf` name opens in nothing.
+    #[test]
+    fn a_gltf_output_on_a_mesh_render_is_refused_by_name() {
+        for path in ["chair.gltf", "out/chair.GLTF"] {
+            let error = reconcile_mesh_format_with_output_extension(OutputFormat::Glb, Some(path))
+                .expect_err("JSON glTF is not written");
+            assert!(
+                error.contains(".gltf") && error.contains(".glb"),
+                "got: {error}"
+            );
+            assert!(!error.contains("library export"), "not an export: {error}");
+        }
+    }
+
+    /// The mode line describes a run that has its conditioning. Without a
+    /// source image the request is refused later, so no banner may claim
+    /// "source image conditioning" first; a raster family never gets it.
+    #[test]
+    fn the_mesh_mode_line_needs_the_family_and_a_source_image() {
+        assert_eq!(
+            mesh_mode_line(true, true),
+            Some("3-D mode (source image conditioning)")
+        );
+        assert_eq!(mesh_mode_line(true, false), None);
+        assert_eq!(mesh_mode_line(false, true), None);
+        assert_eq!(mesh_mode_line(false, false), None);
+    }
+
+    /// A mesh has no canvas, so the banner names the two controls that
+    /// actually shape one instead of a resolution the family never renders.
+    #[test]
+    fn the_mesh_banner_names_the_octree_and_threshold_not_a_canvas() {
+        assert_eq!(
+            mesh_generation_banner(256, 0.6, None, 5),
+            "Generating mesh (octree 256, threshold 0.60, 5 steps)"
+        );
+        assert_eq!(
+            mesh_generation_banner(384, 0.45, None, 30),
+            "Generating mesh (octree 384, threshold 0.45, 30 steps)"
+        );
+        // A face target the user asked for is part of what shapes the mesh,
+        // so it is named too; an omitted one is not padded in as a default.
+        assert_eq!(
+            mesh_generation_banner(256, 0.6, Some(50_000), 5),
+            "Generating mesh (octree 256, threshold 0.60, target faces 50,000, 5 steps)"
+        );
+    }
+
     #[test]
     fn raster_and_audio_extensions_on_a_video_render_are_refused() {
         for path in ["clip.jpg", "clip.wav"] {
@@ -5604,6 +5848,45 @@ mod tests {
             .unwrap(),
             (1344, 768)
         );
+    }
+
+    /// A mesh render has no canvas: the engine letterboxes the source to the
+    /// checkpoint's own conditioning size, so the request submits 0x0 (the
+    /// t2a precedent) whatever the manifest, the source, or an explicit
+    /// `--width`/`--height` say.
+    #[test]
+    fn effective_dimensions_are_zero_for_the_mesh_family() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1022),
+            default_height: Some(1022),
+            ..ModelConfig::default()
+        };
+        let source = png_with_dimensions(1280, 704);
+        for (width, height, source_image) in [
+            (None, None, None),
+            (None, None, Some(source.as_slice())),
+            (Some(1024), Some(1024), Some(source.as_slice())),
+            (Some(512), None, None),
+            (None, Some(768), None),
+        ] {
+            assert_eq!(
+                effective_dimensions(
+                    &config,
+                    &model_cfg,
+                    mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
+                    Some(mold_core::manifest::HUNYUAN3D_FAMILY),
+                    width,
+                    height,
+                    source_image,
+                    None,
+                )
+                .unwrap(),
+                (0, 0),
+                "width {width:?} height {height:?} source {}",
+                source_image.is_some()
+            );
+        }
     }
 
     #[test]

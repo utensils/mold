@@ -1102,6 +1102,7 @@ mod tests {
             width: 1,
             height: 1,
             generation_width: None,
+            mesh: None,
             generation_height: None,
             strength: None,
             source_image_name: None,
@@ -6520,6 +6521,95 @@ mod tests {
         );
     }
 
+    /// An output format the recipe does not advertise will NEVER become
+    /// valid, so it belongs at the door. Before this it was only checked in
+    /// preparation, which runs after durable acknowledgement: the row was
+    /// accepted, held, and then failed with an error the client could have
+    /// been given at submit time.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unavailable_output_format_is_a_422_at_admission_not_a_hold() {
+        let (state, _rx, _root) = durable_test_state(MockEngine::ready());
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let mut request_json = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "a cat in a gif nobody can render",
+            "flux-dev:q8",
+            1024,
+            1024,
+        ))
+        .unwrap();
+        request_json["output_format"] = serde_json::json!("gif");
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [request_json],
+        });
+
+        let response = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let response_body = json_body(response).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response_body}");
+        assert_eq!(response_body["code"], "VALIDATION_ERROR");
+        assert_eq!(
+            response_body["error"],
+            "requests[1]: output format 'gif' is not available for this recipe"
+        );
+        assert!(
+            journal.list_all().is_empty(),
+            "a refused request must enqueue nothing"
+        );
+    }
+
+    /// A mesh model stores binary glTF and nothing else, so an explicit
+    /// raster format is COERCED rather than refused: an older client that
+    /// always sends `png` must still get its mesh, exactly as the CLI already
+    /// resolved it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_mesh_request_pins_an_explicit_raster_format_to_glb() {
+        let (state, _rx, _root) = durable_test_state(MockEngine::ready());
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let mut request_json = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "an armchair",
+            "hunyuan3d-mini-turbo:fp16",
+            0,
+            0,
+        ))
+        .unwrap();
+        request_json["output_format"] = serde_json::json!("png");
+        request_json["steps"] = serde_json::json!(5);
+        request_json["source_image"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(minimal_png()));
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [request_json],
+        });
+
+        let response = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let response_body = json_body(response).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response_body}");
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1, "{response_body}");
+        assert_eq!(rows[0].model, "hunyuan3d-mini-turbo:fp16");
+        // The persisted request is what replay re-renders, so the pin has to
+        // be in the row rather than applied again later.
+        let admitted: mold_core::GenerateRequest =
+            serde_json::from_str(&rows[0].request_json).unwrap();
+        assert_eq!(
+            admitted.output_format,
+            Some(mold_core::OutputFormat::Glb),
+            "an explicit png on a mesh model must be pinned before the row is written"
+        );
+    }
+
     /// An LTX-2.5 GGUF tier is an ordinary durable admission since the
     /// native quantized runtime landed (#1414): the batch is accepted, the
     /// row is journaled, and preparation starts only in the feeder.
@@ -6539,8 +6629,14 @@ mod tests {
         );
         let mut request_json = serde_json::from_str::<serde_json::Value>(&gguf).unwrap();
         // The shared body builder is image-shaped; LTX-2 requires a video
-        // container.
-        request_json["output_format"] = serde_json::json!("mp4");
+        // container. WHICH video container depends on the encoders this
+        // binary linked — admission now refuses a format the delivery-
+        // qualified recipe does not advertise, and a test build without the
+        // `mp4` feature genuinely cannot deliver MP4. Asking for one here
+        // would test the encoder set rather than the subject of this test,
+        // which is that a GGUF tier is an ordinary durable admission.
+        request_json["output_format"] =
+            serde_json::json!(if cfg!(feature = "mp4") { "mp4" } else { "apng" });
         let body = serde_json::json!({
             "client_batch_id": uuid::Uuid::new_v4().to_string(),
             "requests": [request_json],
@@ -15836,6 +15932,215 @@ mod tests {
         assert_eq!(&bytes[..6], b"GIF89a");
     }
 
+    /// A two-triangle GLB written straight into the output directory, so the
+    /// export tests exercise the real reader and the real writers without
+    /// running a 3-D model.
+    fn gallery_glb_fixture() -> Vec<u8> {
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            normals: Some(vec![[0.0, 0.0, 1.0]; 4]),
+            uvs: None,
+            vertex_colors: None,
+        };
+        mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial::default(),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn gallery_export_app(files: &[(&str, Vec<u8>)]) -> (axum::Router, tempfile::TempDir) {
+        let output_dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in files {
+            std::fs::write(output_dir.path().join(name), bytes).unwrap();
+        }
+        let config = mold_core::Config {
+            output_dir: Some(output_dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        (create_router(state), output_dir)
+    }
+
+    async fn export_gallery_file(
+        app: &axum::Router,
+        filename: &str,
+        format: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/gallery/export/{filename}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(r#"{{"format":"{format}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// GLB is the stored form; OBJ, STL and PLY are transcodes of it. Each
+    /// one is a DOWNLOAD with its own media type and filename, because the
+    /// gallery keeps exactly one file per print.
+    #[tokio::test]
+    async fn exports_a_gallery_glb_as_obj_stl_and_ply() {
+        let (app, _output_dir) =
+            gallery_export_app(&[("armchair mesh.glb", gallery_glb_fixture())]);
+
+        let options = json_body(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/gallery/export-options")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        for format in ["glb", "obj", "stl", "ply"] {
+            assert!(
+                options["formats"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value == format),
+                "export options must advertise {format}: {options}"
+            );
+        }
+
+        for (format, content_type, filename) in [
+            ("obj", "model/obj", "armchair_mesh.obj"),
+            ("stl", "model/stl", "armchair_mesh.stl"),
+            ("ply", "application/x-ply", "armchair_mesh.ply"),
+        ] {
+            let response = export_gallery_file(&app, "armchair%20mesh.glb", format).await;
+            assert_eq!(response.status(), StatusCode::OK, "{format}");
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_TYPE],
+                content_type,
+                "{format}"
+            );
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_DISPOSITION],
+                format!("attachment; filename=\"{filename}\""),
+                "{format}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+                .await
+                .unwrap();
+            match format {
+                "obj" => {
+                    let text = String::from_utf8(bytes.to_vec()).unwrap();
+                    assert_eq!(
+                        text.lines().filter(|line| line.starts_with("v ")).count(),
+                        4
+                    );
+                    assert_eq!(
+                        text.lines().filter(|line| line.starts_with("f ")).count(),
+                        2
+                    );
+                }
+                "stl" => assert_eq!(bytes.len(), 84 + 2 * 50),
+                _ => assert!(bytes.starts_with(b"ply\nformat binary_little_endian 1.0\n")),
+            }
+        }
+    }
+
+    /// Exporting a mesh AS GLB hands back the stored bytes unchanged. Parsing
+    /// and rewriting would drop the material and any embedded texture.
+    #[tokio::test]
+    async fn exporting_a_glb_as_glb_returns_the_stored_bytes() {
+        let stored = gallery_glb_fixture();
+        let (app, _output_dir) = gallery_export_app(&[("mesh.glb", stored.clone())]);
+        let response = export_gallery_file(&app, "mesh.glb", "glb").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "model/gltf-binary"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), stored.as_slice());
+    }
+
+    /// The two format groups are disjoint, and a request that crosses them is
+    /// refused with a sentence naming the other side rather than a generic
+    /// "unsupported".
+    #[tokio::test]
+    async fn a_mesh_and_a_video_refuse_each_other_s_export_formats() {
+        let mp4 = base64::engine::general_purpose::STANDARD
+            .decode(include_str!("testdata/audio_muxed_final_mp4.b64").trim())
+            .unwrap();
+        let (app, _output_dir) = gallery_export_app(&[
+            ("mesh.glb", gallery_glb_fixture()),
+            ("clip.mp4", mp4),
+            ("still.png", b"not a mesh".to_vec()),
+        ]);
+
+        let refused = export_gallery_file(&app, "mesh.glb", "gif").await;
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(refused).await;
+        assert!(
+            body["error"].as_str().unwrap().contains("animation format"),
+            "{body}"
+        );
+
+        let refused = export_gallery_file(&app, "clip.mp4", "stl").await;
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(refused).await;
+        assert!(
+            body["error"].as_str().unwrap().contains("mesh format"),
+            "{body}"
+        );
+
+        let refused = export_gallery_file(&app, "still.png", "stl").await;
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(refused).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("only MP4 gallery videos and GLB meshes"),
+            "{body}"
+        );
+
+        let missing = export_gallery_file(&app, "absent.glb", "obj").await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A `.glb` that mold did not write is refused by NAME. The user is
+    /// looking at a file in their own gallery, so "this reader does not cover
+    /// that layout" has to be distinguishable from "that is not a mesh".
+    #[tokio::test]
+    async fn exporting_a_foreign_glb_names_what_is_unsupported() {
+        let (app, _output_dir) =
+            gallery_export_app(&[("foreign.glb", b"glTF not really".to_vec())]);
+        let refused = export_gallery_file(&app, "foreign.glb", "stl").await;
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(refused).await;
+        assert!(
+            body["error"].as_str().unwrap().contains("cannot export"),
+            "{body}"
+        );
+    }
+
     #[tokio::test]
     async fn gallery_media_token_endpoint_reports_when_auth_is_disabled() {
         let app = app_with_auth(None);
@@ -16033,6 +16338,7 @@ mod tests {
             width: 64,
             height: 64,
             generation_width: None,
+            mesh: None,
             generation_height: None,
             strength: None,
             source_image_name: None,
@@ -16967,6 +17273,7 @@ mod tests {
             width: 1,
             height: 1,
             generation_width: None,
+            mesh: None,
             generation_height: None,
             strength: None,
             source_image_name: None,
@@ -17641,6 +17948,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn expand_and_remix_answer_a_prompt_ignored_family_without_a_backend() {
+        let state = AppState::for_tests();
+        {
+            // An unreachable API backend: any completion attempt fails loudly.
+            let mut config = state.config.write().await;
+            config.expand.backend = "http://127.0.0.1:9".to_string();
+        }
+        let app = app_with_state(state);
+        let advice = mold_core::ignored_prompt_advice("hunyuan3d").unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/expand")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "prompt": "a dining chair",
+                            "model_family": "hunyuan3d",
+                            "variations": 3,
+                            "context": { "model": "hunyuan3d-mini-turbo:fp16" }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["original"], "a dining chair");
+        assert_eq!(body["expanded"], serde_json::json!([advice.text()]));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/remix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "source_prompt": "a dining chair",
+                            "model_family": "hunyuan3d",
+                            "variations": 3,
+                            "dimensions": ["movement"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["task"], "text-to-image");
+        assert_eq!(
+            body["variants"],
+            serde_json::json!([{ "prompt": advice.text(), "dimensions": [] }])
+        );
+
+        // Every other family still needs the backend, and says so.
+        let response = app
+            .oneshot(
+                Request::post("/api/expand")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "prompt": "a dining chair", "model_family": "flux" })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = json_body(response).await;
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("prompt expansion failed"), "{body}");
     }
 
     #[tokio::test]

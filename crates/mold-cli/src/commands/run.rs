@@ -113,8 +113,15 @@ fn resolve_family(model_name: &str, config: &Config) -> String {
 /// keyframes, source video, or an extend) may run unprompted — LTX-2's text
 /// encoder pads to a fixed-width context, so `""` is a trained input rather
 /// than a degenerate one. Expect near-static, micro-motion output; it saves no
-/// VRAM, since the prompt-context tensor is a fixed size either way. Every
-/// other case still needs a prompt.
+/// VRAM, since the prompt-context tensor is a fixed size either way.
+///
+/// A 3-D family runs unprompted whatever it carries: it has no text encoder
+/// at all, so the prompt is recorded as provenance and conditions nothing.
+/// Every other case still needs a prompt.
+///
+/// The rule itself is `mold_core`'s, shared with the server's own admission
+/// and with the `prompt` block every recipe advertises, so the CLI cannot
+/// refuse a request this host would accept.
 fn require_prompt(
     prompt: Option<String>,
     family: &str,
@@ -132,6 +139,45 @@ fn require_prompt(
          Example: mold run flux-dev:q4 \"a turtle in the desert\"\n\
          Stdin:   echo \"a turtle\" | mold run flux-dev:q4"
     ))
+}
+
+/// Whether a `mold run` expands its prompt before generating, and why not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExpansionDecision {
+    /// `--expand` or `expand.enabled` on a prompt the model will read.
+    Expand,
+    /// `--no-expand`, an empty prompt, or neither switch on.
+    Skip,
+    /// The family's profile ignores the prompt (no text encoder): the text
+    /// conditions nothing, so an expansion would only rewrite provenance.
+    /// `announced` is true when the user asked with `--expand` and deserves
+    /// a line saying why nothing happened; `expand.enabled` stays quiet.
+    PromptIgnored { announced: bool },
+}
+
+/// The one decision behind `mold run`'s expansion switch. Mirrors the
+/// server's `maybe_expand_prompt` door: an empty prompt never reaches the
+/// expander, and neither does a family whose profile ignores its prompt.
+pub(crate) fn decide_generation_expansion(
+    no_expand: bool,
+    expand: bool,
+    enabled: bool,
+    prompt: &str,
+    family: &str,
+    has_visual_conditioning: bool,
+) -> ExpansionDecision {
+    if no_expand || prompt.trim().is_empty() {
+        return ExpansionDecision::Skip;
+    }
+    if mold_core::prompt_requirement_for_family(Some(family), has_visual_conditioning).is_ignored()
+    {
+        return ExpansionDecision::PromptIgnored { announced: expand };
+    }
+    if expand || enabled {
+        ExpansionDecision::Expand
+    } else {
+        ExpansionDecision::Skip
+    }
 }
 
 fn require_normalized_prompt(
@@ -1293,11 +1339,22 @@ pub async fn run(
     // `maybe_expand_prompt` guard). `expand.enabled` must not turn that on
     // behind the user's back either, so the check covers both switches.
     let expand_settings = config.expand.clone().with_env_overrides();
-    let should_expand = if no_expand || prompt.trim().is_empty() {
-        false
-    } else {
-        expand || expand_settings.enabled
-    };
+    let decision = decide_generation_expansion(
+        no_expand,
+        expand,
+        expand_settings.enabled,
+        &prompt,
+        &family,
+        has_visual_conditioning,
+    );
+    if decision == (ExpansionDecision::PromptIgnored { announced: true }) {
+        crate::output::status!(
+            "{} {} reads no prompt; expansion skipped",
+            crate::theme::icon_info(),
+            family
+        );
+    }
+    let should_expand = decision == ExpansionDecision::Expand;
     if should_expand {
         mold_core::expand::validate_expansion_variation_count(batch.max(1) as usize)?;
     }
@@ -1417,6 +1474,10 @@ pub async fn run(
                         .to_string()
                 })
                 .collect(),
+            prompt_mode: Some(mold_core::prompt_requirement_for_family(
+                Some(&family),
+                has_visual_conditioning,
+            )),
         })
     };
 
@@ -1925,6 +1986,51 @@ mod placement_flag_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::{decide_generation_expansion, ExpansionDecision};
+
+    #[test]
+    fn a_prompt_ignored_family_skips_expansion_and_says_so_only_when_asked() {
+        let decide = |no_expand, expand, enabled, prompt, family| {
+            decide_generation_expansion(no_expand, expand, enabled, prompt, family, true)
+        };
+        assert_eq!(
+            decide(false, true, false, "a chair", "hunyuan3d"),
+            ExpansionDecision::PromptIgnored { announced: true }
+        );
+        assert_eq!(
+            decide(false, false, true, "a chair", "hunyuan3d"),
+            ExpansionDecision::PromptIgnored { announced: false },
+            "expand.enabled must not print a line the user did not ask for"
+        );
+        assert_eq!(
+            decide(false, true, false, "", "hunyuan3d"),
+            ExpansionDecision::Skip,
+            "an empty prompt is the ordinary skip, not the family's"
+        );
+        assert_eq!(
+            decide(true, true, true, "a chair", "hunyuan3d"),
+            ExpansionDecision::Skip,
+            "--no-expand wins before the family is consulted"
+        );
+        assert_eq!(
+            decide(false, true, false, "a chair", "flux"),
+            ExpansionDecision::Expand
+        );
+        assert_eq!(
+            decide(false, false, true, "a chair", "flux"),
+            ExpansionDecision::Expand
+        );
+        assert_eq!(
+            decide(false, false, false, "a chair", "flux"),
+            ExpansionDecision::Skip
+        );
+        assert_eq!(
+            decide_generation_expansion(false, true, false, "a chair", "hunyuan3d", false),
+            ExpansionDecision::PromptIgnored { announced: true },
+            "the family ignores its prompt with or without conditioning"
+        );
+    }
+
     #[test]
     fn mesh_flags_without_any_value_stay_absent() {
         // Load-bearing: a raster family REFUSES a present `mesh` field, so
@@ -2981,6 +3087,30 @@ mod tests {
         assert_eq!(
             require_prompt(Some("a turtle".to_string()), "ltx2", true).unwrap(),
             "a turtle"
+        );
+    }
+
+    /// `mold run hunyuan3d-mini-turbo --image cutout.png -o chair.glb` must
+    /// work with no prompt at all: the family has no text encoder, so a
+    /// prompt conditions nothing and refusing one is refusing the only way
+    /// this model is used.
+    #[test]
+    fn a_mesh_family_never_needs_a_prompt() {
+        for conditioned in [true, false] {
+            assert_eq!(
+                require_prompt(None, mold_core::manifest::HUNYUAN3D_FAMILY, conditioned).unwrap(),
+                ""
+            );
+        }
+        // A prompt is still accepted and recorded as provenance.
+        assert_eq!(
+            require_prompt(
+                Some("a wingback armchair".to_string()),
+                mold_core::manifest::HUNYUAN3D_FAMILY,
+                true
+            )
+            .unwrap(),
+            "a wingback armchair"
         );
     }
 

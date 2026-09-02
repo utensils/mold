@@ -39,6 +39,14 @@ pub struct ModelCapabilities {
     pub supports_video_upscale: bool,
     /// Whether the model takes Wan's request-level flow shift (#782).
     pub supports_flow_shift: bool,
+    /// The 3-D controls the selected recipe accepts, copied verbatim from
+    /// its generation profile (`capabilities.mesh`). `Some` is what shows the
+    /// Octree / Iso threshold / Target faces rows and pins the output format
+    /// to GLB; `None` means `GenerateRequest.mesh` is refused here. Never
+    /// derived from the family name: the profile is the one authority, and a
+    /// family-only catalog (no profile) offers no mesh rows at all rather
+    /// than inventing bounds the server might not honour.
+    pub mesh: Option<mold_core::MeshCapabilitiesProfile>,
     /// Default scheduler for UNet-based models.
     pub default_scheduler: Option<Scheduler>,
 }
@@ -66,6 +74,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: true,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         };
     }
@@ -87,6 +96,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sdxl" => ModelCapabilities {
@@ -106,6 +116,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sd3" | "sd3.5" | "stable-diffusion-3" => ModelCapabilities {
@@ -125,6 +136,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         "wuerstchen" | "wuerstchen-v2" => ModelCapabilities {
@@ -144,6 +156,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         "flux" => ModelCapabilities {
@@ -163,6 +176,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         "flux2" | "flux.2" | "flux2-klein" => ModelCapabilities {
@@ -182,6 +196,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         "z-image" => ModelCapabilities {
@@ -201,6 +216,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         "qwen-image" | "qwen_image" => ModelCapabilities {
@@ -220,6 +236,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         "qwen-image-edit" => ModelCapabilities {
@@ -239,6 +256,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         "ltx-video" => ModelCapabilities {
@@ -258,6 +276,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         "ltx2" => ModelCapabilities {
@@ -277,6 +296,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: true,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         // Wan differs from both LTX entries on three axes, and the catch-all
@@ -304,6 +324,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: true,
+            mesh: None,
             default_scheduler: None,
         },
         // A source image is REQUIRED here, not optional: it is the family's
@@ -330,6 +351,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
         _ => ModelCapabilities {
@@ -349,6 +371,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             audio_required: false,
             supports_video_upscale: false,
             supports_flow_shift: false,
+            mesh: None,
             default_scheduler: None,
         },
     }
@@ -360,6 +383,10 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
 /// omit the fields, so `None` preserves the family-level LTX-2 capability and
 /// the Wan name heuristic; a current server's explicit value hides a control
 /// the checkpoint cannot honor, or keeps one it cannot run without.
+///
+/// The generation profile is layered on afterwards by
+/// [`apply_recipe_capabilities`]; this function reads only `/api/models`
+/// facts.
 pub fn capabilities_for_model(
     family: &str,
     model: &str,
@@ -416,6 +443,40 @@ pub fn capabilities_for_model(
     caps
 }
 
+/// Layer the resolved generation profile's capability block over
+/// [`capabilities_for_model`]'s answer. Applied LAST, so the profile outranks
+/// every family and guidance fallback.
+///
+/// The profile is the single authority for the 3-D controls: a `mesh` block
+/// is copied onto the form verbatim, and on such a recipe the strength, mask,
+/// and negative-prompt rows follow `supports_strength`, `mask.mode`, and
+/// `negative_prompt.mode` rather than the family arm — exactly what
+/// `validate_request_against_recipe` enforces, so the form can never offer a
+/// knob admission refuses. The three row gates are read only on a recipe
+/// that carries the mesh block, because such a recipe is new enough to have
+/// authored all of them: `supports_strength` defaults to `false` on an older
+/// server's profile, and reading that `false` for SD img2img would hide a
+/// row that works. `None` (no profile at all) changes nothing.
+pub fn apply_recipe_capabilities(
+    caps: &mut ModelCapabilities,
+    recipe: Option<&mold_core::GenerationCapabilitiesProfile>,
+) {
+    caps.mesh = recipe.and_then(|recipe| recipe.mesh.clone());
+    if let Some(recipe) = recipe.filter(|recipe| recipe.mesh.is_some()) {
+        caps.supports_strength = recipe.supports_strength;
+        // Two capabilities in the family table, one signal in the profile:
+        // `supports_img2img` means "a denoise-strength img2img pass", which
+        // is exactly what `supports_strength` advertises. A mesh recipe
+        // conditions on its source image without a denoise pass, so both
+        // are false there; a profile that ever advertises strength on a
+        // mesh recipe is describing that pass and turns both on.
+        caps.supports_img2img = recipe.supports_strength;
+        caps.supports_mask = recipe.mask.mode != mold_core::ControlMode::Hidden;
+        caps.supports_negative_prompt =
+            recipe.negative_prompt.mode != mold_core::ControlMode::Hidden;
+    }
+}
+
 /// Reject a request the selected checkpoint's advertised source-image
 /// contract (#772) already refuses, before it costs a queue slot, a UMT5
 /// encode, and an expert load. Returns the server's own admission wording so
@@ -431,20 +492,39 @@ pub fn capabilities_for_model(
 /// a required contract and either is refused by a T2V-only checkpoint. The
 /// TUI Create form has no keyframe control, so its callers pass the source
 /// image alone.
+///
+/// The wording follows `family`: the contract is advertised per checkpoint
+/// for more than one family, and a 3-D model's "needs a source image" is a
+/// different instruction (attach one on the Source row) from Wan's (pick a
+/// text-to-video checkpoint instead).
 pub fn source_image_contract_error(
     capability: Option<mold_core::SourceImageCapability>,
     has_source: bool,
+    family: &str,
 ) -> Option<&'static str> {
+    let wan = family == "wan";
+    let mesh = family == mold_core::manifest::HUNYUAN3D_FAMILY;
     match capability {
-        Some(mold_core::SourceImageCapability::Unsupported) if has_source => Some(
+        Some(mold_core::SourceImageCapability::Unsupported) if has_source && wan => Some(
             "this Wan checkpoint is text-to-video only and does not accept a source image \
              or keyframes — remove them, or pick an I2V-capable checkpoint such as \
              wan22-ti2v-5b or wan22-i2v-a14b",
         ),
-        Some(mold_core::SourceImageCapability::Required) if !has_source => Some(
+        Some(mold_core::SourceImageCapability::Unsupported) if has_source => Some(
+            "this model does not accept a source image — clear the Source row (x), or \
+             pick a checkpoint that conditions on one",
+        ),
+        Some(mold_core::SourceImageCapability::Required) if !has_source && mesh => Some(
+            "this 3-D model reconstructs a source image; attach one on the Source row \
+             (Enter)",
+        ),
+        Some(mold_core::SourceImageCapability::Required) if !has_source && wan => Some(
             "this Wan I2V checkpoint needs a source image; supply one, or pick a \
              text-to-video checkpoint such as wan22-t2v-a14b",
         ),
+        Some(mold_core::SourceImageCapability::Required) if !has_source => {
+            Some("this model needs a source image; attach one on the Source row (Enter)")
+        }
         _ => None,
     }
 }
@@ -707,17 +787,64 @@ mod tests {
             (Some(Required), false, true),
             (Some(Required), true, false),
         ] {
-            assert_eq!(
-                source_image_contract_error(capability, has_source).is_some(),
-                rejected,
-                "{capability:?} with has_source={has_source}"
-            );
+            for family in ["wan", "hunyuan3d", "flux"] {
+                assert_eq!(
+                    source_image_contract_error(capability, has_source, family).is_some(),
+                    rejected,
+                    "{capability:?} with has_source={has_source} for {family}"
+                );
+            }
         }
 
-        assert!(source_image_contract_error(Some(Unsupported), true)
+        assert!(source_image_contract_error(Some(Unsupported), true, "wan")
             .is_some_and(|message| message.contains("text-to-video only")));
-        assert!(source_image_contract_error(Some(Required), false)
+        assert!(source_image_contract_error(Some(Required), false, "wan")
             .is_some_and(|message| message.contains("needs a source image")));
+    }
+
+    /// The refusal names the family's own remedy: a mesh reconstructs its
+    /// source image (attach one), Wan can swap to a T2V checkpoint, and any
+    /// other family gets a neutral sentence with no Wan checkpoint names.
+    #[test]
+    fn source_image_contract_wording_follows_the_family() {
+        use mold_core::SourceImageCapability::{Required, Unsupported};
+        let mesh = source_image_contract_error(
+            Some(Required),
+            false,
+            mold_core::manifest::HUNYUAN3D_FAMILY,
+        )
+        .unwrap();
+        assert!(
+            mesh.contains("3-D model reconstructs a source image"),
+            "{mesh}"
+        );
+        assert!(mesh.contains("Source row"), "{mesh}");
+        assert!(!mesh.contains("Wan"), "{mesh}");
+
+        let wan = source_image_contract_error(Some(Required), false, "wan").unwrap();
+        assert!(wan.contains("Wan I2V checkpoint"), "{wan}");
+        assert!(wan.contains("wan22-t2v-a14b"), "{wan}");
+
+        let other = source_image_contract_error(Some(Required), false, "ltx2").unwrap();
+        assert!(other.contains("needs a source image"), "{other}");
+        assert!(other.contains("Source row"), "{other}");
+        assert!(!other.to_ascii_lowercase().contains("wan"), "{other}");
+
+        let other_unsupported =
+            source_image_contract_error(Some(Unsupported), true, "flux").unwrap();
+        assert!(
+            !other_unsupported.to_ascii_lowercase().contains("wan"),
+            "{other_unsupported}"
+        );
+        assert!(
+            other_unsupported.contains("Source row"),
+            "{other_unsupported}"
+        );
+        let wan_unsupported = source_image_contract_error(Some(Unsupported), true, "wan").unwrap();
+        assert!(
+            wan_unsupported.contains("text-to-video only"),
+            "{wan_unsupported}"
+        );
     }
 
     #[test]
@@ -878,5 +1005,76 @@ mod tests {
         assert!(contradictory.audio_required);
         assert!(contradictory.supports_audio);
         assert!(!contradictory.supports_negative_prompt);
+    }
+
+    /// The local catalog's mesh recipe, exactly as `/api/models` serves it.
+    fn mesh_recipe() -> mold_core::GenerationCapabilitiesProfile {
+        let catalog = mold_core::build_model_catalog(&Config::default(), None, false);
+        catalog
+            .iter()
+            .find(|entry| entry.name == mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL)
+            .and_then(|entry| entry.generation_profile.as_ref())
+            .and_then(|profile| profile.default_recipe())
+            .map(|recipe| recipe.capabilities.clone())
+            .expect("the built-in catalog carries the Hunyuan3D profile")
+    }
+
+    /// The profile, not the family name, decides the 3-D rows and the three
+    /// gates a mesh recipe turns off. Reading the SAME profile with
+    /// `supports_strength` flipped must flip the row, or the form would be
+    /// carrying a family allowlist under another name.
+    #[test]
+    fn a_mesh_recipe_profile_drives_the_mesh_strength_mask_and_negative_rows() {
+        let recipe = mesh_recipe();
+        assert!(recipe.mesh.is_some(), "the fixture must be a mesh recipe");
+
+        let mut caps = capabilities_for_family("hunyuan3d");
+        apply_recipe_capabilities(&mut caps, Some(&recipe));
+        let mesh = caps.mesh.as_ref().expect("mesh block copied verbatim");
+        assert_eq!(
+            mesh.octree_resolutions,
+            mold_core::validation::MESH_OCTREE_RESOLUTIONS.to_vec()
+        );
+        assert_eq!(
+            mesh.octree_default,
+            mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION
+        );
+        assert!(!caps.supports_strength);
+        assert!(!caps.supports_mask);
+        assert!(!caps.supports_negative_prompt);
+        assert!(caps.supports_source_image, "the image is the conditioning");
+
+        let mut flipped = recipe.clone();
+        flipped.supports_strength = true;
+        flipped.mask.mode = mold_core::ControlMode::Adjustable;
+        flipped.negative_prompt.mode = mold_core::ControlMode::Adjustable;
+        let mut caps = capabilities_for_family("hunyuan3d");
+        apply_recipe_capabilities(&mut caps, Some(&flipped));
+        assert!(
+            caps.supports_strength,
+            "the profile, not the family, answers"
+        );
+        assert!(caps.supports_mask);
+        assert!(caps.supports_negative_prompt);
+    }
+
+    /// A raster profile never grows mesh rows, and an older server's profile
+    /// (no mesh block, `supports_strength` defaulted to false) must not hide
+    /// the SD strength row that works there.
+    #[test]
+    fn a_raster_profile_leaves_the_family_rows_alone() {
+        let mut raster = mesh_recipe();
+        raster.mesh = None;
+        raster.supports_strength = false;
+        let mut caps = capabilities_for_family("sd15");
+        apply_recipe_capabilities(&mut caps, Some(&raster));
+        assert!(caps.mesh.is_none());
+        assert!(caps.supports_strength, "legacy predicate survives");
+        assert!(caps.supports_mask);
+
+        let mut no_profile = capabilities_for_family("sd15");
+        apply_recipe_capabilities(&mut no_profile, None);
+        assert!(no_profile.mesh.is_none());
+        assert!(no_profile.supports_strength);
     }
 }

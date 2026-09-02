@@ -7,6 +7,7 @@ import {
   fixedRecipeControlOverrides,
   generationRecipeSelectionError,
   profileAspectOptions,
+  recipeIsCanvasless,
   resolutionProfileError,
   resolutionProfileFinding,
   resolutionProfileWarning,
@@ -14,6 +15,7 @@ import {
   type GenerationProfileSet,
   type GenerationRecipeProfile,
 } from "./generationProfile";
+import { hunyuan3dRecipe, sdxlRecipe } from "./generationProfile.testFixtures";
 
 function profileModel(): GenerationProfileModel {
   const recipe = (
@@ -89,6 +91,8 @@ function profileModel(): GenerationProfileModel {
         supports_first_last_frame: false,
       },
       schedulers: [],
+      prompt: { mode: "required" },
+      supports_strength: false,
     },
     provenance: [],
   });
@@ -416,5 +420,155 @@ describe("controlNote", () => {
     expect(controlNote({ mode: "hidden", note: "unreachable" })).toBeNull();
     expect(controlNote(null)).toBeNull();
     expect(controlNote(undefined)).toBeNull();
+  });
+});
+
+describe("prompt, strength, and mesh contract", () => {
+  function modelWith(recipe: GenerationRecipeProfile): GenerationProfileModel {
+    return {
+      name: "fixture",
+      family: "fixture",
+      ...(recipe.defaults.width
+        ? { default_width: recipe.defaults.width }
+        : {}),
+      ...(recipe.defaults.height
+        ? { default_height: recipe.defaults.height }
+        : {}),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "fixture.v1",
+        profile_hash: "hash",
+        default_recipe_id: recipe.id,
+        recipes: [recipe],
+      },
+    };
+  }
+  type LooseCaps = Record<string, unknown>;
+  function caps(recipe: GenerationRecipeProfile): LooseCaps {
+    return recipe.capabilities as unknown as LooseCaps;
+  }
+
+  it("accepts the real hunyuan3d recipe the server emits", () => {
+    const model = modelWith(hunyuan3dRecipe());
+    const recipe = effectiveGenerationRecipe(model);
+    expect(recipe?.legacy_adapter).toBeUndefined();
+    expect(recipe?.capabilities.prompt.mode).toBe("ignored");
+    expect(recipe?.capabilities.supports_strength).toBe(false);
+    expect(recipe?.capabilities.mesh?.octree_default).toBe(256);
+  });
+
+  it("accepts an older host's recipe that carries none of the new fields", () => {
+    // Serde defaults `prompt` to Required, `supports_strength` to false, and
+    // `mesh` to absent; the client must accept the wire shape that produced
+    // those defaults instead of rejecting the whole profile.
+    const recipe = sdxlRecipe();
+    delete caps(recipe).prompt;
+    delete caps(recipe).supports_strength;
+    delete caps(recipe).mesh;
+    const resolved = effectiveGenerationRecipe(modelWith(recipe));
+    expect(resolved).not.toBeNull();
+    expect(resolved?.legacy_adapter).toBeUndefined();
+  });
+
+  it("accepts a null mesh block and an absent prompt reason", () => {
+    const recipe = sdxlRecipe();
+    caps(recipe).mesh = null;
+    caps(recipe).prompt = { mode: "optional", reason: null };
+    expect(advertisedGenerationProfile(modelWith(recipe))).not.toBeNull();
+  });
+
+  it("rejects a prompt mode this client does not understand", () => {
+    const recipe = sdxlRecipe();
+    caps(recipe).prompt = { mode: "maybe" };
+    expect(advertisedGenerationProfile(modelWith(recipe))).toBeNull();
+    caps(recipe).prompt = "required";
+    expect(advertisedGenerationProfile(modelWith(recipe))).toBeNull();
+  });
+
+  it("rejects a supports_strength that is not a boolean", () => {
+    const recipe = sdxlRecipe();
+    caps(recipe).supports_strength = "yes";
+    expect(advertisedGenerationProfile(modelWith(recipe))).toBeNull();
+  });
+
+  it("rejects malformed mesh controls instead of trusting the outer version", () => {
+    const octree = (value: unknown) => {
+      const recipe = hunyuan3dRecipe();
+      (caps(recipe).mesh as LooseCaps).octree_resolutions = value;
+      return advertisedGenerationProfile(modelWith(recipe));
+    };
+    expect(octree("256")).toBeNull();
+    expect(octree([])).toBeNull();
+    expect(octree([128, 0])).toBeNull();
+    expect(octree([128, 1.5])).toBeNull();
+    expect(octree([128, -256])).toBeNull();
+
+    const defaultOff = hunyuan3dRecipe();
+    (caps(defaultOff).mesh as LooseCaps).octree_default = 300;
+    expect(advertisedGenerationProfile(modelWith(defaultOff))).toBeNull();
+
+    const badThreshold = hunyuan3dRecipe();
+    (caps(badThreshold).mesh as LooseCaps).threshold = { default: 0.6 };
+    expect(advertisedGenerationProfile(modelWith(badThreshold))).toBeNull();
+    (caps(badThreshold).mesh as LooseCaps).threshold = {
+      default: 2,
+      min: 0,
+      max: 1,
+      step: 0.01,
+      mode: "adjustable",
+    };
+    expect(advertisedGenerationProfile(modelWith(badThreshold))).toBeNull();
+
+    const faces = hunyuan3dRecipe();
+    (caps(faces).mesh as LooseCaps).target_faces_min = 5_000_000;
+    expect(advertisedGenerationProfile(modelWith(faces))).toBeNull();
+
+    const texture = hunyuan3dRecipe();
+    (caps(texture).mesh as LooseCaps).texture = { mode: "sometimes" };
+    expect(advertisedGenerationProfile(modelWith(texture))).toBeNull();
+
+    const notRecord = hunyuan3dRecipe();
+    caps(notRecord).mesh = [];
+    expect(advertisedGenerationProfile(modelWith(notRecord))).toBeNull();
+  });
+
+  it("fills the legacy adapter from the pre-profile family rules", () => {
+    // A host that predates the profile still has the old client rules
+    // applied to it, so behaviour there is unchanged: LTX-2 with visual
+    // conditioning was optional, wan never read strength, flux did.
+    const legacy = (family: string, name: string) =>
+      effectiveGenerationRecipe({
+        name,
+        family,
+        default_width: 1024,
+        default_height: 1024,
+      });
+    expect(legacy("ltx2", "ltx2-19b:q8")?.capabilities.prompt.mode).toBe(
+      "optional",
+    );
+    expect(legacy("flux", "flux-dev:q8")?.capabilities.prompt.mode).toBe(
+      "required",
+    );
+    expect(legacy("flux", "flux-dev:q8")?.capabilities.supports_strength).toBe(
+      true,
+    );
+    expect(
+      legacy("wan", "wan22-i2v-a14b:q8")?.capabilities.supports_strength,
+    ).toBe(false);
+    expect(
+      legacy("qwen-image-edit", "qwen-image-edit:q8")?.capabilities
+        .supports_strength,
+    ).toBe(false);
+    expect(legacy("flux", "flux-dev:q8")?.capabilities.mesh).toBeUndefined();
+    expect(legacy("flux", "flux-dev:q8")?.legacy_adapter).toBe(true);
+  });
+});
+
+describe("recipeIsCanvasless", () => {
+  it("is true only for a recipe with no resolution domain", () => {
+    expect(recipeIsCanvasless(hunyuan3dRecipe())).toBe(true);
+    expect(recipeIsCanvasless(sdxlRecipe())).toBe(false);
+    expect(recipeIsCanvasless(null)).toBe(false);
+    expect(recipeIsCanvasless(undefined)).toBe(false);
   });
 });

@@ -25,6 +25,13 @@ fn output_format_parser(formats: &'static [&'static str]) -> clap::builder::Valu
     clap::builder::ValueParser::new(parser)
 }
 
+/// Value parser for `mold library export --format`. Delegates to the wire
+/// type's own `FromStr` so the CLI can never accept a container the export
+/// endpoint would refuse.
+fn mesh_export_format_parser(raw: &str) -> Result<mold_core::MeshExportFormat, String> {
+    raw.parse()
+}
+
 /// Value parser for `--title`: applies the shared print-title contract
 /// (trim, no control characters, at most 120 characters) at parse time so a
 /// bad title is refused before any server or GPU work. An empty or
@@ -1052,6 +1059,30 @@ pub enum LibraryAction {
     Trash {
         #[arg(required = true, value_name = "FILENAME")]
         filenames: Vec<String>,
+    },
+    /// Export one stored 3-D print as OBJ, STL, or PLY
+    ///
+    /// The gallery keeps its `.glb`; this writes a converted copy beside it or
+    /// wherever `--output` names. Each container loses something the stored
+    /// glTF carries — OBJ has no materials, STL has no shared vertices or
+    /// UVs — which is why none of them is a generation target.
+    #[command(after_long_help = "\
+Examples:
+  mold library export mold-hunyuan3d-1700000000000.glb --format stl
+  mold library export chair.glb --format obj -o ~/prints/chair.obj
+  mold library export chair.glb --format ply --output -   Write to stdout")]
+    Export {
+        #[arg(value_name = "FILENAME")]
+        filename: String,
+        /// Container: glb, obj, stl, or ply. glb downloads the stored file
+        /// unchanged; the rest are transcodes.
+        #[arg(long, value_name = "FORMAT", value_parser = mesh_export_format_parser)]
+        format: mold_core::MeshExportFormat,
+        /// Where to write the converted file. Defaults to the print's stem
+        /// with the new extension in the current directory; `-` writes to
+        /// stdout.
+        #[arg(long, short = 'o', value_name = "PATH")]
+        output: Option<String>,
     },
 }
 
@@ -4230,6 +4261,53 @@ mod tests {
                 assert!(!json);
             }
             _ => panic!("expected Library show"),
+        }
+    }
+
+    /// `--format` is parsed by the WIRE type, so the CLI can never accept a
+    /// container the export endpoint would refuse.
+    #[test]
+    fn library_export_parses_every_mesh_container_and_rejects_the_rest() {
+        for (flag, expected) in [
+            ("glb", mold_core::MeshExportFormat::Glb),
+            ("obj", mold_core::MeshExportFormat::Obj),
+            ("stl", mold_core::MeshExportFormat::Stl),
+            ("ply", mold_core::MeshExportFormat::Ply),
+        ] {
+            match parse(&["library", "export", "chair.glb", "--format", flag]).command {
+                Commands::Library {
+                    action:
+                        LibraryAction::Export {
+                            filename,
+                            format,
+                            output,
+                        },
+                } => {
+                    assert_eq!(filename, "chair.glb");
+                    assert_eq!(format, expected);
+                    assert_eq!(output, None);
+                }
+                _ => panic!("expected Library export"),
+            }
+        }
+        assert!(try_parse(&["library", "export", "chair.glb", "--format", "fbx"]).is_err());
+        assert!(try_parse(&["library", "export", "chair.glb"]).is_err());
+
+        match parse(&[
+            "library",
+            "export",
+            "chair.glb",
+            "--format",
+            "stl",
+            "-o",
+            "-",
+        ])
+        .command
+        {
+            Commands::Library {
+                action: LibraryAction::Export { output, .. },
+            } => assert_eq!(output.as_deref(), Some("-")),
+            _ => panic!("expected Library export"),
         }
     }
 

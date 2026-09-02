@@ -58,12 +58,18 @@ pub enum Action {
     Regenerate,
     /// Gallery: load parameters into Create view for editing.
     EditAndGenerate,
+    /// Create: clear the selected row's attached file (Source image,
+    /// Identity photo). `x` / Backspace on the row.
+    ClearField,
     /// Gallery: delete the selected image (shows confirmation).
     DeleteImage,
     /// Gallery: open the image file in system viewer.
     OpenFile,
     /// Gallery: upscale the selected image.
     UpscaleImage,
+    /// Gallery: export the selected 3-D print as OBJ, STL, or PLY (opens
+    /// the format picker; a no-op on anything but a `.glb`).
+    ExportMesh,
     /// Models: pull the selected model.
     PullModel,
     /// Models: remove the selected model.

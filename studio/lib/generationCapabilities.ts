@@ -7,9 +7,26 @@ import {
   supportsFirstLastFrames,
   type SourceImageCapability,
 } from "./sourceImageCapability";
-import type { GenerationRecipeProfile } from "./generationProfile";
+import {
+  recipeIsCanvasless,
+  type GenerationRecipeProfile,
+  type MeshCapabilitiesProfile,
+  type PromptRequirement,
+} from "./generationProfile";
+import {
+  isFlux2DevModel,
+  isQwenImageEditFamily,
+  isWanFamily,
+  legacyPromptRequirementForFamily,
+  legacySupportsStrength,
+} from "./legacyRecipeRules";
 
 export { isMinimaxH3Family } from "./minimaxH3Authoring";
+export {
+  isFlux2DevModel,
+  isQwenImageEditFamily,
+  isWanFamily,
+} from "./legacyRecipeRules";
 
 /**
  * Solver selection, spelled exactly as `mold-core`'s kebab-case `Scheduler`
@@ -86,12 +103,27 @@ export interface BaseGenerationCapabilities {
   supportsEndFrame: boolean;
   supportsMask: boolean;
   /**
-   * Whether the engine reads `strength` for its source image. Wan pins the
-   * first frame exactly — its conditioning has no denoise-strength knob — so
-   * showing the slider (or serializing the field) would advertise a control
-   * the render ignores.
+   * Whether the engine reads `strength` for its source image. The recipe's
+   * `supports_strength` when the host advertises it; otherwise the legacy
+   * rule — Wan pins the first frame exactly, its conditioning has no
+   * denoise-strength knob — so showing the slider (or serializing the field)
+   * never advertises a control the render ignores.
    */
   supportsStrength: boolean;
+  /**
+   * The ADVERTISED prompt mode — the answer for a conditioned request.
+   * Resolve it against the request being built with
+   * `promptRequirementForRecipe`; `ignored` means the family has no text
+   * encoder and the prompt bed is a note.
+   */
+  promptMode: PromptRequirement;
+  /** Whether the recipe renders with no pixel canvas (a 3-D mesh). */
+  canvasless: boolean;
+  /**
+   * The recipe's 3-D controls, or `undefined` when the recipe is not a mesh
+   * recipe — in which case `GenerateRequest.mesh` is refused at admission.
+   */
+  mesh: MeshCapabilitiesProfile | undefined;
   forcesBatchSizeOne: boolean;
 }
 
@@ -421,7 +453,18 @@ export function baseGenerationCapabilities(
     supportsMask: profileCaps
       ? profileControlVisible(profileCaps.mask.mode)
       : !h3 && !qwenEdit && !flux2Dev && !wan,
-    supportsStrength: !h3 && !qwenEdit && !flux2Dev && !wan,
+    // A host that sends `supports_strength` is the authority. An older host's
+    // recipe never carried it, and its serde default would be `false` — not
+    // an assertion that strength is unsupported — so absence falls back to
+    // the rule every client applied before the field existed.
+    supportsStrength:
+      typeof profileCaps?.supports_strength === "boolean"
+        ? profileCaps.supports_strength
+        : legacySupportsStrength(normalized, model),
+    promptMode:
+      profileCaps?.prompt?.mode ?? legacyPromptRequirementForFamily(normalized),
+    canvasless: recipeIsCanvasless(advertisedRecipe),
+    mesh: profileCaps?.mesh ?? undefined,
     forcesBatchSizeOne: h3 || qwenEdit,
   };
 }
@@ -441,14 +484,6 @@ export function isImageConditionedVideoFamily(family: string): boolean {
   return IMAGE_CONDITIONED_VIDEO_FAMILIES.has(family.trim().toLowerCase());
 }
 
-export function isWanFamily(family: string): boolean {
-  return family.trim().toLowerCase() === "wan";
-}
-
-export function isQwenImageEditFamily(family: string): boolean {
-  return family === "qwen-image-edit";
-}
-
 /**
  * Whether a model is an UNDISTILLED FLUX.2 [klein] base checkpoint.
  *
@@ -461,11 +496,6 @@ export function isQwenImageEditFamily(family: string): boolean {
 export function isFlux2BaseModel(model: string): boolean {
   const normalized = model.trim().toLowerCase();
   return normalized.includes("klein-base") || normalized.includes("klein_base");
-}
-
-export function isFlux2DevModel(model: string): boolean {
-  const normalized = model.trim().toLowerCase();
-  return normalized.includes("flux2-dev") || normalized.includes("flux.2-dev");
 }
 
 export function isMinimaxH3Ref2vaModel(model: string): boolean {
