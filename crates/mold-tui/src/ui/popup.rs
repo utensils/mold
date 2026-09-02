@@ -723,13 +723,19 @@ fn render_identity_image_input(frame: &mut Frame, app: &mut App) {
          Checked before it is accepted.",
         input,
         error.as_deref(),
+        false,
     );
 }
 
 /// The Source row's picker: same shape as the identity one, because both
 /// are "one local file path, checked before it is accepted".
 fn render_source_image_input(frame: &mut Frame, app: &mut App) {
-    let Some(Popup::SourceImageInput { input, error }) = &app.popup else {
+    let Some(Popup::SourceImageInput {
+        input,
+        error,
+        selected,
+    }) = &app.popup
+    else {
         return;
     };
     render_path_input(
@@ -740,9 +746,12 @@ fn render_source_image_input(frame: &mut Frame, app: &mut App) {
          Checked before it is accepted.",
         input,
         error.as_deref(),
+        *selected,
     );
 }
 
+/// One-line path editor. `selected` draws the whole text reversed: the
+/// pre-fill is selected as a block, and typing replaces it.
 fn render_path_input(
     frame: &mut Frame,
     theme: &crate::ui::theme::Theme,
@@ -750,6 +759,7 @@ fn render_path_input(
     hint: &str,
     input: &str,
     error: Option<&str>,
+    selected: bool,
 ) {
     let area = centered_rect(frame.area(), 72, 24);
     frame.render_widget(Clear, area);
@@ -770,9 +780,21 @@ fn render_path_input(
             .wrap(Wrap { trim: true }),
         Rect { height: 2, ..inner },
     );
+    let text_style = Style::default().fg(theme.text);
+    let input_line = if selected {
+        Line::from(vec![
+            Span::styled(
+                input.to_string(),
+                text_style.add_modifier(Modifier::REVERSED),
+            ),
+            Span::styled("\u{2588}", text_style),
+        ])
+    } else {
+        Line::from(Span::styled(format!("{input}\u{2588}"), text_style))
+    };
     frame.render_widget(
-        Paragraph::new(format!("{input}\u{2588}"))
-            .style(Style::default().fg(theme.text))
+        Paragraph::new(input_line)
+            .style(text_style)
             .wrap(Wrap { trim: false }),
         Rect {
             y: inner.y + 3,
