@@ -1221,13 +1221,30 @@ The key deliberately excludes the frozen component's VALIDATION digest.
 identity into that digest, and `runtime_qualification_identity` hashes the
 request envelope (`public_runtime_envelope_for_shape(canvas, frames, steps)`),
 so the same conditioner file presents a different validation digest at every
-clip length, step count and canvas. Measured on plato on 2026-09-02 while it
-was still in the key: an FL2VA render at `--frames 141` stored key
-`ccbfa21f…` (594 text rows, 2,304 vision patches, 6,083,154 entry bytes,
-route `assigned-cuda-then-drop`), an otherwise identical `--frames 124` render
-MISSED while that entry was still resident and no reclaim had run, and a
-second `--frames 141` render hit `ccbfa21f…` again — the row counts, the
-placement and the device id were byte-identical across all three.
+clip length, step count and canvas.
+
+**The first campaign measured that defect directly, pre-fix.** Host: plato.
+GPU: NVIDIA L40S, ordinal 2 (production on port 7680 and PR 1's scratch
+server on port 7681 both ran undisturbed throughout). Scratch server on
+port 7682, `MOLD_HOME=/storage/mold` (shared with production). Binary
+`/storage/mold/uat-h3-fast/bin/mold-pr2-45e67af2`, `mold 0.26.0 (c5193d5
+2026-09-02)`, server-exe sha256
+`523a70687309da57c9eafaee6fc0aad403846392c35921fa7541ec1bfb00adcb`. Request:
+prompt "a red fox in a snowy pine forest at dawn", tag `minimax-h3-fl2va:
+comfy-pruned-int8-turbo-4step-768p`, seed 770021, 768x768, 24 fps, guidance
+0, first-frame `fox-1344x768.png`. An FL2VA `--frames 124` hit-pair (cold,
+then a repeat) stored and then served key `af3462d0cd8a82b5` (594 text
+rows, 2,304 vision rows, 6,083,154 entry bytes) — badge present on the
+repeat, sha256 `9d69e92114db…` identical on both renders. An
+otherwise-identical `--frames 141` render then MISSED: no badge, no cache
+log line, a full `Loading MiniMax H3 Qwen conditioner [18.8s]` +
+`Encoding MiniMax H3 multimodal conditioning [4.7s]` pair ran — the defect,
+because `frames` reached the validation digest through
+`public_runtime_envelope_for_shape` even though it never reaches the
+conditioner itself. A repeat `--frames 124` run immediately afterward still
+HIT the original `af3462d0cd8a82b5` entry, ruling out LRU eviction as an
+alternative explanation for the miss (the frames-141 render's own insert,
+logged only at debug, did not evict it).
 
 What a hit is worth is TWO numbers, and only one of them generalizes. The
 conditioner LOAD is shape-independent: 53.6 s in row `a″`. The ENCODE scales
@@ -1237,10 +1254,88 @@ the same reference on row `a′`'s host route), while an FL2VA endpoint is 4,032
 patches and encodes proportionally faster. Quote the row, never row `a″`'s
 total as if it were every render's saving.
 
-**The measured hit/miss rows for this cache — back-to-back renders on plato,
-`scheduler_estimates` before and after, and the paired MP4 SHA-256 check —
-are pending the plato UAT run and are not recorded here yet. The planned run
-is FL2VA-only, so its encode half will be far below row `a″`'s.**
+On the FL2VA route the first campaign's own hit-pair puts a number on that:
+server-reported generation time dropped from 198.9 s (miss) to 168.8 s
+(hit) — a 30.1 s saving matching the 20.0 s Qwen-conditioner load plus
+5.3 s multimodal-conditioning encode that the hit eliminated outright.
+`scheduler_estimates` recorded the same hit cleanly, with a real
+before/after pair on one server process (bucket
+`768x768:s5:f124:fps24:a1:src1:edit0:lora0:b1`,
+`minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`): `sample_count` 1 ->
+2, `ewma_prompt_encode_ms` staying **byte-identical** at 38,119.0 (a hit
+never calls `phase_done(PromptEncode)`), `ewma_total_ms` dropping from
+204,770.0 to 197,258.25. The `MOLD_H3_CONDITIONER_CACHE=off` control on the
+same campaign confirmed no false hits: with caching disabled, back-to-back
+identical renders (`off-a`, `off-b`) both ran the full Qwen load (19.2 s on
+`off-b`, a normal miss), and both produced sha256 `9d69e92114db…` — the SAME
+hash as the cache-on hit-pair, so the underlying Qwen encode is
+deterministic whether or not the cache is enabled, and the on-pair and the
+off-pair each share that one sha256 across their two renders.
+
+The campaign's Ref2VA pair also hit, shas identical, with one caveat: the
+first attempt's own bash-tool foreground command hit its 120 s timeout and
+was killed while the SERVER kept rendering to completion in the background
+(Ref2VA at 1344x768 takes 4-6 minutes); that render's wall clock and VRAM
+peak are a log-timestamp reconstruction, not a clean harness measurement, so
+only the clean immediate rerun is quoted here:
+`minimax-h3-ref2va:comfy-pruned-int8-turbo-4step` at 1344x768, 263.378 s,
+VRAM peak 13,536 MiB, sha256 `1ec8925d2f55…`, matching the reconstructed
+miss's sha256 bit for bit.
+
+**The fix drops the frozen component's VALIDATION digest from the key in
+favor of its CONTENT digest, and a second campaign verified it on plato.**
+Same host, GPU ordinal, and scratch-server setup as the first campaign;
+production and PR 1's scratch server were again left untouched. Binary
+`/storage/mold/uat-h3-fast/bin/mold-pr2-b0e9bb00`, `mold 0.26.0 (b0e9bb0
+2026-09-02)`, `/api/status` `git_sha`
+`b0e9bb00b8cd330698aa73d2f5d8dd7d6b47e105`, server-exe sha256
+`61b87fc8465ee2422346f8eba97fb1380a347e44c105f7029fcf8ae76c227d61`. Same
+fixed request line as the first campaign: prompt "a red fox in a snowy pine
+forest at dawn", tag `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`,
+seed 770021, 24 fps, guidance 0, first-frame `fox-1344x768.png`.
+
+| Case | Canvas | Frames | Hit? | Wall (s) | VRAM peak (MiB) | sha256 (12) | Badge | Server log |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| a | 768x768 | 124 | MISS (cold) | 333.519 | 9910 | `9d69e92114db` | absent | full Qwen load [18.5s] + encode [5.4s] ran |
+| b | 768x768 | 141 | HIT on a's key | 198.060 | 10590 | `28dac2124312` | present | `served from the in-process cache` key `98bfa749d4559492`, 594 text rows, 2,304 vision rows, 6,083,154 entry bytes, route `assigned-cuda-then-drop` |
+| c | 768x768 | 124 | HIT | 191.687 | 9928 | `9d69e92114db` (=a) | present | same key `98bfa749d4559492` (=b) |
+| d | 1344x768 | 124 | MISS, new key | 272.385 | 13520 | `feba94524968` | absent | full Qwen load [17.4s] + encode [6.1s] ran |
+| e | 1344x768 | 124 | HIT on d's key | 253.397 | 13528 | `feba94524968` (=d) | present | key `9688230e03e3165e`, 1,026 text rows, 4,032 vision rows, 10,507,266 entry bytes (new, != a/b/c's key) |
+
+sha(a) == sha(c) and sha(d) == sha(e), bit for bit — a cache hit and a cold
+render of the same request produce the identical output. sha(a) != sha(b)
+by design: 124 and 141 frames are genuinely different videos. The fix
+proves the documented invariant directly: `--frames` no longer moves the
+FL2VA key (124 -> 141 -> 124 all land on the one key `98bfa749d4559492`
+that the cold `a` render stored), while a canvas change (768x768 ->
+1344x768) still correctly stores and hits a second, distinct key.
+
+`scheduler_estimates` after the campaign shows `sample_count = 2` on both
+touched buckets, each under its own `execution_fingerprint` and each the
+ONLY row in the database under that fingerprint —
+`768x768:s5:f124:fps24:a1:src1:edit0:lora0:b1` (fingerprint
+`3a0ba041693ba39f42a4923304fc74988d98a45f9865d41be501f8c34788cec0`,
+`last_observed_at` matching case c's `finished_at` to the second,
+`ewma_total_ms=212,597.75`, `ewma_prompt_encode_ms=36,982.0`) and
+`1344x768:s5:f124:fps24:a1:src1:edit0:lora0:b1` (fingerprint
+`32d7d72fe4a28469b16a4f62bcb36f7cef7264e95398b64a1afba9e6a235175c`,
+`last_observed_at` matching case e's finish within a second,
+`ewma_total_ms=263,620.5`, `ewma_prompt_encode_ms=30,667.0`). Unlike the
+first campaign's hit-pair, this campaign did not query
+`scheduler_estimates` between the cold render and its hits, so there is no
+literal before/after pair of snapshots for this run: `sample_count = 2`
+under a single fresh fingerprint can only be explained by the cold render
+plus its hit(s) both landing on it, so `ewma_prompt_encode_ms` on that row
+is, by construction, still the cold render's own untouched value (a hit
+never calls `phase_done(PromptEncode)`) — an inference from single-sample
+EWMA semantics, not two independently measured readings shown side by side
+the way the first campaign's clean pair was.
+
+The cache's `insert` call logs at `tracing::debug!`
+(`crates/mold-inference/src/minimax_h3/conditioner_cache.rs`); only the hit
+path logs at `tracing::info!` ("MiniMax H3 conditioner output served from
+the in-process cache"). At the default `MOLD_LOG=info`, storing a new key
+is silent — only a later hit against it produces a log line.
 
 ### What is derived, and how
 

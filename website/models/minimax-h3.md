@@ -303,8 +303,10 @@ scales with how many patches were conditioned: that same row's single
 2048-square Ref2VA reference (16,384 vision patches) encoded in 24.6 s on the
 CUDA route and 2,405.6 s on the host fallback route used when the conditioner
 cannot fit on the device, while a smaller conditioning set — an FL2VA endpoint
-is 4,032 patches — encodes proportionally faster. The output is bit-identical
-to a fresh encode, and `mold run` and the TUI disclose the hit as
+is 4,032 patches — encodes proportionally faster. Measured directly on the
+FL2VA route, a repeated 4-step 768x768 render's hit saved about 30 s off a
+199 s server-reported generation time. The output is bit-identical to a
+fresh encode, and `mold run` and the TUI disclose the hit as
 `prompt conditioning [cache hit]`.
 
 ```bash
