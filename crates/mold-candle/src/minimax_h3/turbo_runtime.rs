@@ -1200,68 +1200,81 @@ mod tests {
         // Build that layout explicitly and prove the naive (x @ Aᵀ) @ Bᵀ
         // reproduces three independent rank-r deltas concatenated on the
         // output axis — which is why no FusedSlice bookkeeping is needed.
+        //
+        // The second case is the one an SVD-resized adapter actually ships:
+        // the three projections are compressed INDEPENDENTLY, so `A` is a
+        // concatenation of three different ranks and `B`'s diagonal blocks are
+        // different widths. The structural zeros still do the routing, so the
+        // fused delta stays exact with no per-projection bookkeeping — which
+        // is what lets one rank number per module describe a resized file.
         let device = Device::Cpu;
-        let rank = 2usize;
         let in_features = 5usize;
         let out_each = 3usize;
         let alpha = 4.0f32;
-        let scale = alpha / rank as f32;
 
-        let a = [
-            ramp(rank, in_features, 11, &device),
-            ramp(rank, in_features, 12, &device),
-            ramp(rank, in_features, 13, &device),
-        ];
-        let b = [
-            ramp(out_each, rank, 21, &device),
-            ramp(out_each, rank, 22, &device),
-            ramp(out_each, rank, 23, &device),
-        ];
+        // Uniform: alpha multiplied by three keeps alpha/rank unchanged.
+        assert_eq!((alpha * 3.0) / (2 * 3) as f32, alpha / 2.0);
 
-        // concat A on the rank axis
-        let fused_a = Tensor::cat(&[&a[0], &a[1], &a[2]], 0).unwrap();
-        assert_eq!(fused_a.dims(), &[3 * rank, in_features]);
+        for (ranks, scale) in [
+            // The published rank-128 layout, in miniature.
+            ([2usize, 2, 2], alpha / 2.0),
+            // A resized layout: unequal per-projection ranks, and a scale of
+            // one because it is already inside `lora_B`.
+            ([1usize, 5, 3], 1.0f32),
+        ] {
+            let a = [
+                ramp(ranks[0], in_features, 11, &device),
+                ramp(ranks[1], in_features, 12, &device),
+                ramp(ranks[2], in_features, 13, &device),
+            ];
+            let b = [
+                ramp(out_each, ranks[0], 21, &device),
+                ramp(out_each, ranks[1], 22, &device),
+                ramp(out_each, ranks[2], 23, &device),
+            ];
 
-        // block-diagonal B: [3*out_each, 3*rank] with two thirds zeros
-        let zero = Tensor::zeros((out_each, rank), DType::F32, &device).unwrap();
-        let rows = [
-            Tensor::cat(&[&b[0], &zero, &zero], 1).unwrap(),
-            Tensor::cat(&[&zero, &b[1], &zero], 1).unwrap(),
-            Tensor::cat(&[&zero, &zero, &b[2]], 1).unwrap(),
-        ];
-        let fused_b = Tensor::cat(&[&rows[0], &rows[1], &rows[2]], 0).unwrap();
-        assert_eq!(fused_b.dims(), &[3 * out_each, 3 * rank]);
+            // concat A on the rank axis
+            let fused_rank = ranks.iter().sum::<usize>();
+            let fused_a = Tensor::cat(&[&a[0], &a[1], &a[2]], 0).unwrap();
+            assert_eq!(fused_a.dims(), &[fused_rank, in_features]);
 
-        // alpha multiplied by three keeps alpha/rank unchanged
-        let fused_scale = (alpha * 3.0) / (rank * 3) as f32;
-        assert_eq!(fused_scale, scale);
+            // block-diagonal B: [3*out_each, sum(ranks)], with each block's own
+            // width, so the zeros route each projection to its own output slab.
+            let zero =
+                |columns: usize| Tensor::zeros((out_each, columns), DType::F32, &device).unwrap();
+            let rows = [
+                Tensor::cat(&[&b[0], &zero(ranks[1]), &zero(ranks[2])], 1).unwrap(),
+                Tensor::cat(&[&zero(ranks[0]), &b[1], &zero(ranks[2])], 1).unwrap(),
+                Tensor::cat(&[&zero(ranks[0]), &zero(ranks[1]), &b[2]], 1).unwrap(),
+            ];
+            let fused_b = Tensor::cat(&[&rows[0], &rows[1], &rows[2]], 0).unwrap();
+            assert_eq!(fused_b.dims(), &[3 * out_each, fused_rank]);
 
-        let x = ramp(4, in_features, 31, &device);
-        let fused = delta_of(&fused_a, &fused_b, fused_scale)
-            .delta(&x)
-            .unwrap()
-            .to_vec2::<f32>()
-            .unwrap();
+            let x = ramp(4, in_features, 31, &device);
+            let fused_delta = delta_of(&fused_a, &fused_b, scale);
+            assert_eq!(fused_delta.rank(), fused_rank);
+            let fused = fused_delta.delta(&x).unwrap().to_vec2::<f32>().unwrap();
 
-        let independent = (0..3)
-            .map(|index| {
-                delta_of(&a[index], &b[index], scale)
-                    .delta(&x)
-                    .unwrap()
-                    .to_vec2::<f32>()
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
+            let independent = (0..3)
+                .map(|index| {
+                    delta_of(&a[index], &b[index], scale)
+                        .delta(&x)
+                        .unwrap()
+                        .to_vec2::<f32>()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
 
-        for row in 0..4 {
-            for part in 0..3 {
-                for column in 0..out_each {
-                    let observed = fused[row][part * out_each + column];
-                    let expected = independent[part][row][column];
-                    assert!(
-                        (observed - expected).abs() < 1e-5,
-                        "row {row} part {part} col {column}: {observed} vs {expected}"
-                    );
+            for row in 0..4 {
+                for part in 0..3 {
+                    for column in 0..out_each {
+                        let observed = fused[row][part * out_each + column];
+                        let expected = independent[part][row][column];
+                        assert!(
+                            (observed - expected).abs() < 1e-5,
+                            "{ranks:?} row {row} part {part} col {column}: {observed} vs {expected}"
+                        );
+                    }
                 }
             }
         }
@@ -1307,8 +1320,9 @@ mod tests {
             .expect("published geometry");
         let mut matrix_elements = 0u64;
         for module in modules.values() {
-            matrix_elements += (module.rank * module.in_features) as u64;
-            matrix_elements += (module.out_features * module.rank) as u64;
+            let rank = module.rank.bound();
+            matrix_elements += (rank * module.in_features) as u64;
+            matrix_elements += (module.out_features * rank) as u64;
         }
         let matrix_bytes = matrix_elements * 2; // BF16
 
@@ -1391,6 +1405,173 @@ mod tests {
             for (value, want) in row.iter().zip(expected_row.iter()) {
                 assert!((value - want).abs() < 1e-5, "{value} vs {want}");
             }
+        }
+    }
+
+    /// A resized adapter loads through the SAME path as a rank-uniform one:
+    /// no runtime branch, no per-shape loader, no second scale authority.
+    ///
+    /// Its scale is exactly `1.0` — the source `alpha / rank` is already
+    /// inside `lora_B`, so `affine(1.0, 0.0)` is the identity and applying the
+    /// pinned `baked_scale` here would apply it twice. `H3TurboLoraDelta::new`
+    /// still refuses a non-positive scale, so "baked" can never become "zero".
+    #[test]
+    fn a_dynamic_adapter_loads_with_unit_scale_and_per_module_ranks() {
+        let tier = H3TurboLoraTier::Fl2v8StepV10Rank21;
+        let (_directory, path, pinned) = fixtures::pinned_dynamic();
+        let ranks = fixtures::dynamic_module_ranks(&pinned);
+        let payload_bytes = std::fs::metadata(&path).unwrap().len()
+            - 8
+            - u64::from_le_bytes(std::fs::read(&path).unwrap()[..8].try_into().unwrap());
+
+        // At the file's own BF16 width the resident cost IS the payload: a
+        // resized adapter has no alpha scalars to subtract.
+        let resident = H3TurboLoraRuntime::open_against(
+            &path,
+            &pinned,
+            tier,
+            &Device::Cpu,
+            DType::BF16,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap();
+        assert_eq!(resident.device_bytes(), payload_bytes);
+        assert_eq!(resident.scale(), 1.0);
+
+        let runtime = H3TurboLoraRuntime::open_against(
+            &path,
+            &pinned,
+            tier,
+            &Device::Cpu,
+            DType::F32,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap();
+        assert_eq!(runtime.tier(), tier);
+        assert_eq!(runtime.scale(), 1.0);
+        assert_eq!(runtime.block_count(), 2);
+        assert_eq!(runtime.token_refiner_block_count(), 1);
+
+        // Every block delta carries the rank the header declared for it, and
+        // the ranks are genuinely different from one another.
+        let mut observed = std::collections::BTreeSet::new();
+        for (prefix, deltas) in [
+            ("blocks.0", runtime.main_block(0).unwrap()),
+            ("blocks.1", runtime.main_block(1).unwrap()),
+            (
+                "token_refiner.blocks.0",
+                runtime.token_refiner_block(0).unwrap(),
+            ),
+        ] {
+            for kind in H3TurboLoraModuleKind::ALL {
+                let key = format!("diffusion_model.{prefix}.{}", kind.suffix());
+                let delta = deltas.kind(kind);
+                assert_eq!(delta.rank(), ranks[&key], "{key}");
+                assert_eq!(delta.scale(), 1.0, "{key}");
+                observed.insert(delta.rank());
+            }
+        }
+        assert!(observed.len() > 2, "{observed:?} is not a varied rank set");
+
+        // The delta is exactly `x @ (B @ A)ᵀ` — no baked scale re-applied.
+        let name = "diffusion_model.blocks.0.mlp.fc2";
+        let rank = ranks[name];
+        let down = expected_matrix(&format!("{name}.lora_A.weight"), rank, 256);
+        let up = expected_matrix(&format!("{name}.lora_B.weight"), 256, rank);
+        let x = ramp(3, 256, 77, &Device::Cpu);
+        let merged = up.matmul(&down).unwrap();
+        let expected = x
+            .matmul(&merged.t().unwrap().contiguous().unwrap())
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        let observed = runtime
+            .main_block(0)
+            .unwrap()
+            .fc2
+            .delta(&x)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        for (row, expected_row) in observed.iter().zip(expected.iter()) {
+            for (value, want) in row.iter().zip(expected_row.iter()) {
+                assert!((value - want).abs() < 1e-4, "{value} vs {want}");
+            }
+        }
+    }
+
+    /// The three byte figures a resized tier charges are DERIVED from its own
+    /// checked-in golden header, so a loader change that moved the charge
+    /// would have to move these too.
+    ///
+    /// `resident` is the whole payload (no alpha scalars to subtract);
+    /// `device_staging_peak` is the widest single module, because
+    /// `H3TurboLoraDelta::new` builds both transposes while the originals are
+    /// still live; `host_staging_peak` is twice the widest single matrix.
+    #[test]
+    fn dynamic_tier_bytes_derive_from_the_golden_headers() {
+        for (tier, resident, widest_module, host_staging) in [
+            (
+                H3TurboLoraTier::Fl2v768p4StepV10Rank21,
+                298_124_288u64,
+                5_053_440u64,
+                8_085_504u64,
+            ),
+            (
+                H3TurboLoraTier::Fl2v8StepV10Rank21,
+                326_982_656,
+                8_440_320,
+                13_504_512,
+            ),
+            (
+                H3TurboLoraTier::Ref2v4StepV10Rank21,
+                326_882_304,
+                9_461_760,
+                15_138_816,
+            ),
+        ] {
+            let modules = super::super::turbo_lora::published_dynamic_header_modules(tier);
+            assert_eq!(
+                modules.len(),
+                super::super::turbo_lora::H3_TURBO_LORA_MODULE_COUNT,
+                "{tier:?}"
+            );
+            let derived_resident = modules.values().map(module_delta_bytes).sum::<u64>();
+            assert_eq!(derived_resident, resident, "{tier:?}");
+            // Resident == payload exactly, because there are no alphas.
+            assert_eq!(
+                derived_resident,
+                tier.file_bytes() - 8 - tier.header_len(),
+                "{tier:?}"
+            );
+            assert_eq!(
+                modules.values().map(module_delta_bytes).max().unwrap(),
+                widest_module,
+                "{tier:?}"
+            );
+            assert_eq!(
+                modules
+                    .values()
+                    .flat_map(|module| [&module.lora_a, &module.lora_b])
+                    .map(tensor_ref_bytes)
+                    .max()
+                    .unwrap()
+                    * 2,
+                host_staging,
+                "{tier:?}"
+            );
+
+            // The reason the tier exists: about 1.6 GB less resident than the
+            // rank-uniform adapter it was resized from.
+            let source = tier.source_tier().unwrap();
+            let source_resident = super::super::turbo_lora::H3_TURBO_LORA_PAYLOAD_BYTES
+                - (super::super::turbo_lora::H3_TURBO_LORA_MODULE_COUNT as u64) * 4;
+            assert_eq!(source_resident, 1_956_118_528, "{source:?}");
+            assert!(
+                source_resident - derived_resident > 1_600_000_000,
+                "{tier:?} saves only {} bytes",
+                source_resident - derived_resident
+            );
         }
     }
 

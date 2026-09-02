@@ -185,6 +185,31 @@ Because a personal namespace can be deleted or relicensed without notice —
 a risk that does not exist for MiniMaxAI or Comfy-Org — the release checklist
 below requires re-confirming this source before every release that ships it.
 
+### The SVD-resized adapter source: a contract pin, not yet a reviewed source
+
+`drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` @
+`be8eb3ea3466cbb7def202ffec0d2fdc054256ac` is pinned in
+`crates/mold-candle/src/minimax_h3/turbo_lora.rs`
+(`H3_TURBO_LORA_DRBAPH_REPOSITORY` / `_SOURCE_REVISION`) as the provenance of
+three SVD-resized rank-21 Turbo adapters and their checked-in golden headers.
+It is deliberately **absent** from the third-party row in the decision table
+below, from the reviewed-source links above, and from
+`scripts/minimax-h3-conformance.py`'s `EXPECTED_REVISIONS` and the conformance
+manifest's `sources[]`, because it is **not a download path**: no manifest row,
+no model identity, and no `REVIEWED_TURBO_MANIFEST_TIERS` entry resolves to it,
+so nothing mold ships can pull a byte from it. The pin exists so the rank-
+dynamic adapter contract can be tested against real published headers, and so
+an operator holding such a file locally can select it under the
+`h3-private-uat` capture scope (`MOLD_H3_TURBO_TIER`) ahead of the quality
+gate.
+
+The license review of that repository, its third-party row here, its
+reviewed-source link, and its conformance-manifest and `EXPECTED_REVISIONS`
+entries land together with the manifest tags — not before. Until then the
+release checklist's "confirm every pinned third-party H3 source" item has
+nothing to confirm for it, because nothing acquires from it; the item applies
+from the release that first ships a tag naming it.
+
 ## Decision record
 
 The direct authorization correspondence is retained privately because it may

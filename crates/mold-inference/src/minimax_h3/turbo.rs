@@ -45,11 +45,15 @@ pub(crate) struct H3TurboTierContract {
 
 /// Every reviewed tier's contract.
 ///
-/// All five tiers select `KSamplerSelect: euler` over Comfy's
+/// All eight tiers select `KSamplerSelect: euler` over Comfy's
 /// `BasicScheduler("simple")` grid in their published reference workflows. Only
 /// the 768p-trained tiers move the video shift; which of those three shifts are
 /// transcribed upstream and which one mold infers is recorded on
 /// [`H3_TURBO_768P_VIDEO_SHIFT`] itself.
+///
+/// An SVD-resized tier repeats its SOURCE's triple exactly. A resize changes
+/// weights, never the schedule they were distilled for, so a row that differed
+/// from its source would be a transcription error rather than a decision.
 pub(crate) const REVIEWED_TURBO_TIERS: &[H3TurboTierContract] = &[
     H3TurboTierContract {
         tier: H3TurboLoraTier::Fl2v8StepV10,
@@ -80,6 +84,24 @@ pub(crate) const REVIEWED_TURBO_TIERS: &[H3TurboTierContract] = &[
         grid_points: 9,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_TURBO_768P_VIDEO_SHIFT,
+    },
+    H3TurboTierContract {
+        tier: H3TurboLoraTier::Fl2v768p4StepV10Rank21,
+        grid_points: 5,
+        sampler_kind: H3SamplerKind::ComfyEuler,
+        video_shift: H3_TURBO_768P_VIDEO_SHIFT,
+    },
+    H3TurboTierContract {
+        tier: H3TurboLoraTier::Fl2v8StepV10Rank21,
+        grid_points: 9,
+        sampler_kind: H3SamplerKind::ComfyEuler,
+        video_shift: H3_VIDEO_SHIFT,
+    },
+    H3TurboTierContract {
+        tier: H3TurboLoraTier::Ref2v4StepV10Rank21,
+        grid_points: 5,
+        sampler_kind: H3SamplerKind::ComfyEuler,
+        video_shift: H3_VIDEO_SHIFT,
     },
 ];
 
@@ -131,6 +153,9 @@ pub(crate) const fn short_tier_alias(tier: H3TurboLoraTier) -> &'static str {
         H3TurboLoraTier::Ref2v4StepV10 => "ref2v-4step",
         H3TurboLoraTier::Fl2v768p4StepV11 => "fl2v-4step-768p-v1.1",
         H3TurboLoraTier::Fl2v768p8StepV10 => "fl2v-8step-768p",
+        H3TurboLoraTier::Fl2v768p4StepV10Rank21 => "fl2v-4step-768p-r21",
+        H3TurboLoraTier::Fl2v8StepV10Rank21 => "fl2v-8step-r21",
+        H3TurboLoraTier::Ref2v4StepV10Rank21 => "ref2v-4step-r21",
     }
 }
 
@@ -455,6 +480,16 @@ mod tests {
                 9,
                 H3_TURBO_768P_VIDEO_SHIFT,
             ),
+            // A resize changes weights, never the schedule: each of these
+            // repeats its source tier's triple exactly, which the loop below
+            // asserts against the source rather than trusting the literal.
+            (
+                H3TurboLoraTier::Fl2v768p4StepV10Rank21,
+                5,
+                H3_TURBO_768P_VIDEO_SHIFT,
+            ),
+            (H3TurboLoraTier::Fl2v8StepV10Rank21, 9, H3_VIDEO_SHIFT),
+            (H3TurboLoraTier::Ref2v4StepV10Rank21, 5, H3_VIDEO_SHIFT),
         ];
         for (tier, grid_points, video_shift) in expected {
             let contract = turbo_tier_contract(tier).unwrap();
@@ -474,6 +509,25 @@ mod tests {
         }
         // Only the 768p-trained tiers move the shift.
         assert_ne!(H3_TURBO_768P_VIDEO_SHIFT, H3_VIDEO_SHIFT);
+
+        // A resized tier's whole distillation triple is its source's. This is
+        // the assertion that would fail if a future resized row were
+        // transcribed by hand and drifted from the adapter it approximates.
+        for tier in H3TurboLoraTier::ALL {
+            let Some(source) = tier.source_tier() else {
+                continue;
+            };
+            let resized = turbo_tier_contract(tier).unwrap();
+            let original = turbo_tier_contract(source).unwrap();
+            assert_eq!(resized.grid_points, original.grid_points, "{tier:?}");
+            assert_eq!(resized.sampler_kind, original.sampler_kind, "{tier:?}");
+            assert_eq!(
+                resized.video_shift.to_bits(),
+                original.video_shift.to_bits(),
+                "{tier:?}"
+            );
+            assert_eq!(source.task(), tier.task(), "{tier:?}");
+        }
     }
 
     #[test]
@@ -491,6 +545,8 @@ mod tests {
         assert!(error.contains("fl2v-8step"), "{error}");
         assert!(error.contains("fl2v-8step-768p"), "{error}");
         assert!(error.contains("fl2v-4step-768p-v1.1"), "{error}");
+        assert!(error.contains("fl2v-8step-r21"), "{error}");
+        assert!(error.contains("ref2v-4step-r21"), "{error}");
     }
 
     #[test]

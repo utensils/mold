@@ -18,6 +18,25 @@ fails the test rather than the download.
 | `ref2v-4step-v0.1.header` | `Comfy-Org/MiniMax-H3` | `dc559027db79c174125df4d827db55cd11178860` | `loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` | 2026-08-19 | ad hoc (pre-dates this script; #1172) | 73,632 | `53370bff715f074018793b9ebc71fa0ecd8bdfd8c5554a716ccf7bf5e6a6f745` | `5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c` |
 | `fl2v-4step-768p-v1.1.header` | `lightx2v/Minimax-h3-Turbo` | `05ef678438e84933c406131b59abbf86919b3aac` | `minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors` | 2026-09-01 | `scripts/fetch-minimax-h3-turbo-header.py` | 73,624 | `e7a5b995877b2997c0055cad77d1a1ef48a28bc8fd388f8b19be601249e7d27c` | `449d80f301ac571622c72e28b8fd72a4b3681b7a8df8a92f17c8f6ec43f56558` |
 | `fl2v-8step-768p-v1.0.header` | `lightx2v/Minimax-h3-Turbo` | `05ef678438e84933c406131b59abbf86919b3aac` | `minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors` | 2026-09-01 | `scripts/fetch-minimax-h3-turbo-header.py` | 73,632 | `0541a8b7d525096f45df5f6e8d076f49173cb2d3d58ad233e37e04a63677d78d` | `08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980` |
+| `fl2v-4step-768p-v1.0-r21.header` | `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` | `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` | `minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_resized_avg_rank_21_bf16.safetensors` | 2026-09-02 | `scripts/fetch-minimax-h3-turbo-header.py` | 52,928 | `e9a8cf11d436ab25df9667896a02c9768aca800ed5b8e5d794e80b7cb866f539` | `1b85da614014024a0c9507f12558917dcc69b6adb564e716324594f401723115` |
+| `fl2v-8step-v1.0-r21.header` | `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` | `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` | `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_resized_avg_rank_21_bf16.safetensors` | 2026-09-02 | `scripts/fetch-minimax-h3-turbo-header.py` | 52,944 | `f1bbb213d10d64aaf63d4e973d72887e43d356a3352ba73534e04aa317795f2a` | `a3208be61329c27a6754c53db9a21a3c86e2a285381700adf2d97e279c062840` |
+| `ref2v-4step-v0.1-r21.header` | `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` | `be8eb3ea3466cbb7def202ffec0d2fdc054256ac` | `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_resized_avg_rank_21_bf16.safetensors` | 2026-09-02 | `scripts/fetch-minimax-h3-turbo-header.py` | 52,952 | `3c1db66284973ee4eec4e9700e12b1fc587b1aa7f85af6a811daac0d15b4db6f` | `2c6abb194cff3e26c2295c87892913adf0c92d8f784f305238246759f9b333d0` |
+
+The last three rows are SVD-resized derivatives rather than published PEFT
+exports: 416 tensors instead of 624 (no `alpha` scalars), a per-module rank
+read from the header rather than one `training_rank` for the whole file, and a
+numeric `__metadata__.baked_scale` recording the source `alpha / rank` that was
+multiplied into `lora_B`. Each still declares `training_rank "128"` — the rank
+it was resized FROM — and a `resized_from` naming the exact published adapter
+it approximates; both are REQUIRED by `validate_turbo_metadata` and welded to
+the source tier by the golden test.
+`drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` publishes further rank-20/28/64 resizes
+at the same revision that are deliberately NOT pinned here, and the contract
+refuses them twice over: their `baked_scale` is an English sentence rather
+than a number, and they omit `resized_from` entirely. That second fact is why
+`resized_from` is required rather than checked only when present — a
+present-only check would let a different approximation of a different adapter
+through the metadata fence.
 
 Re-fetching any row is a straight rerun, e.g.:
 
