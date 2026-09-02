@@ -1357,8 +1357,8 @@ exactly). The paired resident saving is DERIVED, not measured: the adapter's
 own device residency is its file payload minus its F32 alphas
 (1,956,118,528 vs 298,124,288 / 326,982,656 / 326,882,304 device bytes, so
 1.658 / 1.629 / 1.629 GB); the gate below measured VRAM high water end to end
-and found 1.53-1.62 GB less resident per pair, across all three tiers and
-both canvases, so the derived figure is now an observation. Each is a lossy
+and found 1528-1622 MiB (1.60-1.70 GB) less resident per pair, across all
+three tiers and both canvases, bracketing the derived figure. Each is a lossy
 approximation, not a bit-identical repack: the
 publisher's own recorded average Frobenius retention against the source
 adapter is 94.95% (4-step 768p), 97.72% (8-step), and 98.33% (Ref2VA 4-step).
@@ -1369,9 +1369,10 @@ pine forest at dawn", seed 770021, 124 frames, 24 fps, guidance 0, one
 recorded source PNG), full-rank source tier against its `-r21` resize, at both
 768x768 and 1344x768, for all three pairs — `-turbo-4step-768p` vs
 `-turbo-4step-768p-r21`, `-turbo-8step` vs `-turbo-8step-r21`, and Ref2VA
-`-turbo-4step` vs `-turbo-4step-r21` (one image reference) — with the server
-restarted between the A and the B render of each pair so `VmHWM` and the
-`scheduler_estimates` row are per-print. Per render: wall clock POST to MP4
+`-turbo-4step` vs `-turbo-4step-r21` (one image reference) — the plan called
+for a server restart between the A and B render of each pair so `VmHWM` and
+the `scheduler_estimates` row would be per-print; see below for what actually
+ran. Per render: wall clock POST to MP4
 bytes, the `scheduler_estimates` row, a 1 Hz `nvidia-smi` peak, `VmHWM`,
 `ffprobe` facts with an output SHA-256 prefix, and a visual bullet after
 viewing frames 0, 40, 80, and 123. Each A/B pair is additionally scored by
@@ -1382,8 +1383,13 @@ SSIM), recording mean and minimum per-frame PSNR and mean block SSIM.
 The gate ran 2026-09-02 on host `plato`, GPU ordinal 1 (an L40S), against the
 scratch server on port 7681, binary
 `/storage/mold/uat-h3-fast/bin/mold-pr3b-3e13073d`, `MOLD_HOME=/storage/mold`
-(shared with production), with the server restarted between the A and B
-render of every pair as planned above. Evidence directory:
+(shared with production), in ONE server process (pid 1794503) that was never
+restarted, A immediately before B within each pair — the per-pair restart
+planned above did not happen, so the per-render GPU peak (the 1 Hz
+`nvidia-smi` trace returns to a ~0.6 GB baseline between renders) is the
+resident figure quoted below and `VmHWM`, which is campaign-cumulative, is
+not quoted per print; the binary predates the conditioner cache of #1551, so
+no cache interplay exists between A and B. Evidence directory:
 `/storage/mold/uat-h3-fast/evidence/pr3b/` (per render: `.json`, `.run.log`,
 `.gpu.csv` 1 Hz trace, `.vmhwm.txt`, `.ffprobe.json`, `.mp4`, frames
 f000/f040/f080/f123; per pair: `p<N>-<canvas>.json` from
@@ -1427,9 +1433,11 @@ with AAC audio present on every output.
 | P3-A | `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | 1344x768  |    285.3 |            13059 | `1ec8925d2f55` |
 | P3-B | `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`      | 1344x768  |    281.9 |            11469 | `5fe991a4b498` |
 
-P1-A at 768x768 (320.3 s) was the first render on a fresh server process and
-includes a cold conditioner load; the other paired wall clocks are within 5 s
-of each other, so r21 changes VRAM, not speed. P1-A 768x768 (sha
+P1-A at 768x768 (320.3 s) was the first render of the campaign on the fresh
+server process and includes a cold conditioner load; the other paired wall
+clocks are within 5 s of each other except the Ref2VA 768x768 pair (249.9 s vs
+223.5 s, the first render on the Ref2VA base stack), so r21 changes VRAM, not
+speed. P1-A 768x768 (sha
 `9d69e92114db`) and P1-A 1344x768 (sha `feba94524968`) are byte-identical to
 the earlier campaigns' renders of the same request.
 
@@ -1446,9 +1454,10 @@ candidate = r21 B; 124 frames each; RGB PSNR; 8x8 luma block SSIM):
 | P3 Ref2VA 4-step vs r21     | 1344x768  |            17.00 |    13.72 |    19.54 |           13.7 |              16.3 |      0.575 |    0.323 |                 1590 | none                      |
 
 Every FL2VA pair's per-frame PSNR starts at the pinned first frame (32-35 dB)
-and declines smoothly toward frame 123 as the two trajectories drift apart;
-there is no single-frame dip anywhere (a dip more than 3 dB below the local
-5-frame median would be a flicker/artifact candidate).
+and declines through the second half as the two trajectories drift apart; the
+8-step 1344x768 pair bottoms at frame 80 (18.20 dB) and recovers to 19.9 dB by
+frame 123; there is no single-frame dip anywhere (a dip more than 3 dB below
+the local 5-frame median would be a flicker/artifact candidate).
 
 **Motion-only control** (PSNR of frame t against frame t+1 / t+2 INSIDE the
 full-rank A video; ffmpeg `psnr` filter):
@@ -1491,9 +1500,9 @@ default drop):
 
 | Tier                    | 768x768                                             | 1344x768                                            | Visual  | Audio | VRAM saving  | Rule outcome |
 | ------------------------ | ----------------------------------------------------- | ----------------------------------------------------- | ------- | ----- | ------------- | ------------- |
-| fl2v 4-step 768p r21     | 21.10 dB (band); min 17.86 < 18; SSIM 0.780            | 22.93 dB (band); min 18.75; SSIM 0.825                 | parity  | yes   | 1.56-1.62 GB  | maintainer band at both canvases (one min-PSNR miss at 768x768) |
-| fl2v 8-step r21          | 29.16 dB, min 19.22, SSIM 0.923 — clears every threshold | 23.56 dB (band, 0.44 dB short); min 18.20; SSIM 0.789 | parity  | yes   | 1.53-1.59 GB  | clears every threshold at 768x768; maintainer band at 1344x768 |
-| ref2v 4-step r21         | 16.15 dB (< 20 -> rule says drop)                      | 17.00 dB (< 20 -> rule says drop)                      | parity  | yes   | 1.56-1.59 GB  | rule says drop on the PSNR clause; the motion-only control shows the clause's premise (composition differs) does not hold for this panning Ref2VA shot |
+| fl2v 4-step 768p r21     | 21.10 dB (band); min 17.86 < 18; SSIM 0.780            | 22.93 dB (band); min 18.75; SSIM 0.825                 | parity  | yes   | 1560-1622 MiB (1.64-1.70 GB)  | maintainer band at both canvases (one min-PSNR miss at 768x768) |
+| fl2v 8-step r21          | 29.16 dB, min 19.22, SSIM 0.923 — clears every threshold | 23.56 dB (band, 0.44 dB short); min 18.20; SSIM 0.789 | parity  | yes   | 1528-1590 MiB (1.60-1.67 GB)  | clears every threshold at 768x768; maintainer band at 1344x768 |
+| ref2v 4-step r21         | 16.15 dB (< 20 -> rule says drop)                      | 17.00 dB (< 20 -> rule says drop)                      | parity  | yes   | 1560-1590 MiB (1.64-1.67 GB)  | rule says drop on the PSNR clause; the motion-only control shows the clause's premise (composition differs) does not hold for this panning Ref2VA shot |
 
 **The gate has run** (2026-09-02, plato). Measured against the acceptance rule
 above: the 8-step r21 tier clears every threshold at 768x768 and lands in the
@@ -1505,11 +1514,11 @@ pan inside the full-rank video already costs about 20 dB at 1344x768 — so that
 clause's premise ("composition differs") is not what these numbers measure.
 Visual inspection of frames 0/40/80/123 of all twelve renders found the same
 shot, same motion, texture-only differences, no new artifact class, and audio
-present on every output; VRAM saving measured 1.53-1.62 GB on every pair. THE
-PER-TIER SHIP-OR-DROP DECISION IS PENDING THE MAINTAINER'S CALL, which is
-being made on this branch's pull request; until then all three tags remain
-registered on the branch, exactly as before this gate ran. A tier the
-maintainer drops is removed from `REVIEWED_TURBO_MANIFEST_TIERS` and every
+present on every output; VRAM saving measured 1528-1622 MiB (1.60-1.70 GB) on
+every pair. THE PER-TIER SHIP-OR-DROP DECISION IS PENDING THE MAINTAINER'S
+CALL, which is being made on this branch's pull request; until then all three
+tags remain registered on the branch, exactly as before this gate ran. A tier
+the maintainer drops is removed from `REVIEWED_TURBO_MANIFEST_TIERS` and every
 other enumeration before merge; a tier the maintainer ships carries the rows
 above as its evidence.
 

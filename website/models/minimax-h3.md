@@ -194,32 +194,34 @@ for the three lossy SVD-resized rank-21 tiers below — 298,177,224 bytes,
 - `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`: 5
   terminal-inclusive sampler grid points (4 model evaluations) — a lossy
   low-rank approximation of the reviewed adapter; about 1.66 GB less to
-  download, and about 1.66 GB less resident VRAM derived from the adapter
-  payload rather than measured; 94.95% average Frobenius retention against
-  the full-rank `-turbo-4step-768p` adapter it was resized from
+  download, and measured 1.60-1.70 GB less resident VRAM on an L40S
+  (2026-09-02), matching the about 1.66 GB (4-step 768p) derived from the
+  adapter payload; 94.95% average Frobenius retention against the full-rank
+  `-turbo-4step-768p` adapter it was resized from
 - `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`: 9 terminal-inclusive
   sampler grid points (8 model evaluations) — a lossy low-rank approximation
-  of the reviewed adapter; about 1.63 GB less to download, and about 1.63 GB
-  less resident VRAM derived from the adapter payload rather than measured;
-  97.72% average Frobenius retention against the full-rank
-  `-turbo-8step` adapter it was resized from
+  of the reviewed adapter; about 1.63 GB less to download, and measured
+  1.60-1.70 GB less resident VRAM on an L40S (2026-09-02), matching the about
+  1.63 GB (8-step) derived from the adapter payload; 97.72% average Frobenius
+  retention against the full-rank `-turbo-8step` adapter it was resized from
 - `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`: 5 terminal-inclusive
   sampler grid points (4 model evaluations)
 - `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`: 5 terminal-inclusive
   sampler grid points (4 model evaluations) — a lossy low-rank approximation
-  of the reviewed adapter; about 1.63 GB less to download, and about 1.63 GB
-  less resident VRAM derived from the adapter payload rather than measured;
-  98.33% average Frobenius retention against the full-rank
-  `-turbo-4step` adapter it was resized from
+  of the reviewed adapter; about 1.63 GB less to download, and measured
+  1.60-1.70 GB less resident VRAM on an L40S (2026-09-02), matching the about
+  1.63 GB (Ref2VA) derived from the adapter payload; 98.33% average Frobenius
+  retention against the full-rank `-turbo-4step` adapter it was resized from
 
 An adapter is reviewed for exactly one task partition, so a `ref2v` adapter
 can never mint an FL2VA qualification and vice versa. Each `-r21` tier
 carries pinned-identity evidence (size, SHA-256, and the full-rank adapter it
 was resized from) plus a measured A/B against that full-rank tier, run
-2026-09-02 on an L40S: about 1.5-1.6 GB less VRAM measured at both 768x768
-and 1344x768, with mean PSNR 21-29 dB on the FL2VA pairs (`-4step-768p-r21`,
-`-8step-r21`) and 16-17 dB on the panning Ref2VA pair (`-4step-r21`) against
-the full-rank source. The per-tier ship/drop decision is pending the
+2026-09-02 on an L40S: 1528-1622 MiB (1.60-1.70 GB) less VRAM measured at both
+768x768 and 1344x768, with mean PSNR 21-29 dB on the FL2VA pairs
+(`-4step-768p-r21`, `-8step-r21`) and 16-17 dB on the two panning Ref2VA
+pairs (`-4step-r21`) against the full-rank source. The per-tier ship/drop
+decision is pending the
 maintainer's call and is recorded, along with the full measured evidence, in
 `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers campaign
 (2026-09-02)".

@@ -103,8 +103,9 @@ The current decision permits:
   8-step r21 tier cleared the acceptance thresholds at 768x768 and sits in
   the 20-24 dB maintainer band at 1344x768; the 4-step 768p r21 tier sits in
   the band at both canvases; the Ref2VA r21 tier measured 16-17 dB with
-  visual parity), and the per-tier registration decision is pending the
-  maintainer's call on this branch's pull request (see
+  visual parity — below the rule's 20 dB drop clause), and the per-tier
+  registration decision is pending the maintainer's call on this branch's
+  pull request (see
   `docs/qualification/minimax-h3.md`, "The rank-21 Turbo tiers campaign") —
   from `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` at the repository root); and the
   pinned download-only tiers
@@ -215,8 +216,9 @@ exact full-rank tier each was resized from: the gate ran 2026-09-02 (the
 8-step r21 tier cleared the acceptance thresholds at 768x768 and sits in the
 20-24 dB maintainer band at 1344x768; the 4-step 768p r21 tier sits in the
 band at both canvases; the Ref2VA r21 tier measured 16-17 dB with visual
-parity). The per-tier registration decision is pending the maintainer's call
-on this branch's pull request; the gate, its per-tier acceptance rule, and
+parity — below the rule's 20 dB drop clause). The per-tier registration
+decision is pending the maintainer's call on this branch's pull request; the
+gate, its per-tier acceptance rule, and
 the measured evidence are in `docs/qualification/minimax-h3.md` ("The
 rank-21 Turbo tiers campaign (2026-09-02)").
 
