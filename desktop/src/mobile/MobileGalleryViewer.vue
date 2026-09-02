@@ -325,6 +325,13 @@ function beginSheetDrag(event: PointerEvent): void {
     0,
     (sheetRoot.value?.offsetHeight ?? 0) - (sheetHandle.value?.offsetHeight ?? 0),
   );
+  // Capture, so a finger that lifts over the media still finishes the drag
+  // here instead of stranding the sheet halfway open.
+  try {
+    sheetRoot.value?.setPointerCapture?.(event.pointerId);
+  } catch {
+    // A shell without pointer capture just keeps the default targeting.
+  }
 }
 
 function trackSheetDrag(event: PointerEvent): void {
@@ -362,6 +369,13 @@ function finishSheetDrag(event: PointerEvent): void {
 
 function resetSheetDrag(event?: PointerEvent): void {
   if (event && sheetPointerId !== event.pointerId) return;
+  if (sheetPointerId !== null) {
+    try {
+      sheetRoot.value?.releasePointerCapture?.(sheetPointerId);
+    } catch {
+      // Already released with the pointer; nothing to undo.
+    }
+  }
   sheetPointerId = null;
   sheetDrag.value = 0;
   sheetDragging.value = false;
