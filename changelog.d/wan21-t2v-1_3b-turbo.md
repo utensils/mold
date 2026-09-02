@@ -5,4 +5,5 @@
   UMT5 encoder and Wan 2.1 VAE. The ladder is the checkpoint's published
   schedule, so steps, guidance, sample solver, and flow shift are fixed: a
   request that sets one is refused by name rather than silently ignored.
-  `:bf16` is unchanged, and the bare `wan21-t2v-1.3b` still resolves to it.
+  `:bf16` is unchanged, and the bare `wan21-t2v-1.3b` still resolves to it
+  ([#1560](https://github.com/utensils/mold/pull/1560)).
