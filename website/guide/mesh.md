@@ -109,6 +109,51 @@ advertises what it can convert on `/api/capabilities.mesh.export_formats`.
 USDZ is tracked separately; it is the format Apple's AR Quick Look wants and it
 carries textures, so it belongs with the texturing work rather than here.
 
+## Share a turntable
+
+Nothing outside a 3-D tool opens a `.glb`, and the gallery poster shows one
+view. A **turntable** is that poster set spinning: the same camera, lighting
+and slate background, swept a full turn around the mesh and written as an
+animated GIF, APNG or WebP you can drop into a chat, a README or a browser.
+The first frame is the poster itself.
+
+```bash
+mold library export chair.glb --format gif                       # chair.gif: 36 frames, 10 fps, 512 px, loops
+mold library export chair.glb --format gif --playback bounce --repeat once
+mold library export chair.glb --format webp --frames 72 --fps 24 --max-dimension 768
+mold library export chair.glb --format apng -o chair-turntable.png
+```
+
+| Flag              | Values            | Default   | Meaning                                                                                    |
+| ----------------- | ----------------- | --------- | ------------------------------------------------------------------------------------------ |
+| `--playback`      | `loop`, `bounce`  | `loop`    | GIF only. `loop` is one seamless full turn; `bounce` sweeps half a turn and plays it back. |
+| `--repeat`        | `forever`, `once` | `forever` | GIF only. `once` plays through and rests on the final frame.                               |
+| `--max-dimension` | 240 to 2160       | 512       | Frame edge in pixels; frames are square like the poster.                                   |
+| `--frames`        | 8 to 180          | 36        | Views rendered around the mesh. 36 is a 10° step; 72 is smoother and twice the size.       |
+| `--fps`           | 1 to 30           | 10        | Playback rate. 36 frames at 10 fps is a 3.6 s turn.                                        |
+
+The two sweeps are shaped for how the encoders play them back. A **loop**
+renders one full turn whose last frame stops one step short of the first, so
+the wrap from last to first is a step like any other rather than the poster
+held twice. A **bounce** renders half a turn, first frame to last inclusive;
+the GIF encoder appends the interior frames in reverse, so the animation
+swings out to the far side and back, and the reversal reads as deliberate
+instead of a full turn snapping into reverse the moment it comes round.
+Bounce and `--repeat once` are GIF contracts — APNG and WebP always loop —
+exactly as they are for a video export. A turntable is a **render**, not the
+mesh: it carries no geometry, and the flags are refused on a geometry format
+rather than ignored.
+
+The same options are on `POST /api/gallery/export/:filename` (`playback`,
+`repeat`, `max_dimension`, `frames`, `fps`, the video export's own field
+names) and the `export_mesh` MCP tool. A host lists `gif`, `apng` and — on a
+build with the `webp` feature — `webp` in `capabilities.mesh.export_formats`
+beside the geometry containers, so a client learns what it can ask for
+without trying. Rendering is pure CPU on the serving host; 36 frames at 512 px
+take well under a second, and the frame buffer is capped at the same 256 MiB
+the video export allows, so 180 frames at the largest size is a `422` naming
+the two flags that bring it under.
+
 ## Piping
 
 `mold run` is pipe-friendly here as everywhere:
@@ -145,11 +190,16 @@ poster in the Preview panel, and captions it with
 
 In the **Library**, a `.glb` tile shows its poster (fetched from the owning
 machine's thumbnail route; never the geometry through a raster decoder), and
-`x` opens an export picker offering OBJ, STL and PLY — the list the owning
+`x` opens an export picker offering OBJ, STL, PLY and the turntable formats
+(GIF, APNG, and WebP on a build that encodes it) — the list the owning
 machine advertises on `capabilities.mesh.export_formats`, or every container
-for a print that lives only on this machine. The converted copy is written
-beside your other saves as `<print>.<ext>` and its path is shown when it
-lands; the gallery file is untouched.
+for a print that lives only on this machine, which is rendered in-process
+through the same code the server uses. The picker has no turntable knobs:
+it renders at the defaults (one full turn, 36 frames, 512 px, 10 fps,
+looping) and its hint says so, pointing at `mold library export` for bounce,
+once, or other sizes. The converted copy is written beside your other saves
+as `<print>.<ext>` (an APNG as `.png`) and its path is shown when it lands;
+the gallery file is untouched.
 
 ## In Discord
 

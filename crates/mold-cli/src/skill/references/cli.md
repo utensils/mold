@@ -107,7 +107,16 @@ omit them for the recipe's defaults.
 `export_mesh` converts one stored `.glb` into `obj`, `stl`, or `ply`; the CLI
 equivalent is `mold library export <file> --format stl`. Both are transcodes of
 geometry that already exists — the gallery file is never renamed or replaced —
-and `-o` on a 3-D render must still name a `.glb`.
+and `-o` on a 3-D render must still name a `.glb`. The same tool and command
+take `gif`, `apng`, or `webp` to render a **turntable**: the gallery poster's
+view spun a full turn around the mesh, the way to show a mesh anywhere a
+`.glb` cannot open. Its optional `playback` (`loop` | `bounce`), `repeat`
+(`forever` | `once`), `max_dimension` (240–2160, default 512), `frames`
+(8–180, default 36) and `fps` (1–30, default 10) mirror `--playback`,
+`--repeat`, `--max-dimension`, `--frames` and `--fps`; bounce and once are GIF
+only, and the flags are refused on a geometry format. Only the formats the
+host lists in `capabilities.mesh.export_formats` succeed (`webp` needs a build
+with the `webp` feature).
 
 For published CUDA images, use Mold's live distribution resolver rather than
 guessing an architecture tag. Its current contract includes B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported. B200 support

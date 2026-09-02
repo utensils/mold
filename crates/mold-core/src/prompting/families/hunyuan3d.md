@@ -68,6 +68,10 @@ mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
 
 # Export a saved mesh from the gallery as STL, OBJ, or PLY
 mold library export chair.glb --format stl -o chair.stl
+
+# Share a turntable: the poster spun a full turn as an animated GIF (or apng, webp)
+mold library export chair.glb --format gif
+mold library export chair.glb --format gif --playback bounce --repeat once --frames 24
 ```
 
 `--octree` (128 | 192 | 256 | 320 | 384, default 256) is the detail knob and
