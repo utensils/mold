@@ -19,7 +19,10 @@ hear the model output.
 
 **minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p**: 992x992, 124 frames,
 24 fps, seed 83009. The prompt uses H3's timed `<d>[English] ...</d>` dialogue
-grammar: _"With Mold, your ideas render right here."_
+grammar: _"With Mold, your ideas render right here."_ Those delimiters are real
+tokens in H3's vocabulary, alongside `<|cutoff|>`, `<|lyrics_start|>`,
+`<|lyrics_end|>`, `<|caption_start|>` and `<|caption_end|>` — write them
+verbatim and mold hands each to the model as a single token.
 
 </figure>
 <figure>

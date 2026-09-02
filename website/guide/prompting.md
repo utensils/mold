@@ -72,8 +72,8 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `wan22-ti2v-5b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md`, `models/wan22-ti2v-5b.md` | 80 | 657 |
 | `wan22-t2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 592 |
 | `wan22-i2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md` | 80 | 587 |
-| `minimax-h3-fl2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/base-modes.md` | 250 | 595 |
-| `minimax-h3-ref2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/ref2va.md` | 300 | 579 |
+| `minimax-h3-fl2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/base-modes.md` | 250 | 583 |
+| `minimax-h3-ref2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/ref2va.md` | 300 | 567 |
 | `real-esrgan-x4plus` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
 | `real-esrgan-x4plus-anime` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
 | `real-esrgan-anime-v3` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
@@ -1329,7 +1329,7 @@ and speed when medium and normal. Give each vocal source a stable id such as
 `<d>[English] ...</d>` put only the language tag and the verbatim words. For
 voiceover use the exact phrase "says in an off-screen voiceover", then state
 that the character's lips remain closed. Use `<scenetrans>` where a line
-crosses a cut and `<cutoff>` where speech is truncated by the ending. Quote
+crosses a cut and `<|cutoff|>` where speech is truncated by the ending. Quote
 visible on-screen text verbatim. Reference labels `<Picture n>`, `<Video n>`,
 and `<Audio n>` keep one meaning across every section.
 
@@ -1356,8 +1356,7 @@ non_diegetic_music: A soft acoustic-guitar pattern at a moderate tempo.
 
 Avoid plot summaries, unresolved labels, and timing that misses the duration.
 Expansion produces this grammar when given the H3 route. Check live runtime
-availability before promising speech; mold's tokenizer does not yet register
-the official dialogue tokens (issue #1430).
+availability before promising speech.
 
 #### CLI
 
