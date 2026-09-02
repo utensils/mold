@@ -1909,3 +1909,112 @@ describe("MobileGalleryViewer sheet review fixes", () => {
     );
   });
 });
+
+describe("MobileGalleryViewer sheet mechanics", () => {
+  /** A cancelled gesture must not leave the sheet holding the pointer. */
+  it("releases the pointer capture when a drag is cancelled", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+    const element = sheet.element as HTMLElement;
+    const capture = vi.fn();
+    const release = vi.fn();
+    element.setPointerCapture = capture;
+    element.releasePointerCapture = release;
+
+    await sheet.trigger("pointerdown", {
+      pointerId: 51,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 600,
+    });
+    await sheet.trigger("pointermove", {
+      pointerId: 51,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 540,
+    });
+    await sheet.trigger("pointercancel", { pointerId: 51 });
+
+    expect(capture).toHaveBeenCalledWith(51);
+    expect(release).toHaveBeenCalledWith(51);
+    // A cancelled drag decides nothing.
+    expect(sheet.classes()).not.toContain("is-expanded");
+    expect(sheet.classes()).not.toContain("is-dragging");
+  });
+
+  /**
+   * A drag that turns out to be horizontal is not the sheet's. Dropping the
+   * dragging flag hands the transition back, so the sheet slides home instead
+   * of snapping.
+   */
+  it("animates the sheet home when a drag turns horizontal", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+
+    await sheet.trigger("pointerdown", {
+      pointerId: 52,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 600,
+    });
+    await sheet.trigger("pointermove", {
+      pointerId: 52,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 180,
+      clientY: 560,
+    });
+    expect(sheet.classes()).toContain("is-dragging");
+
+    await sheet.trigger("pointermove", {
+      pointerId: 52,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 20,
+      clientY: 590,
+    });
+    expect(sheet.classes()).not.toContain("is-dragging");
+  });
+
+  /** Reduced motion drops the animation, never the control. */
+  it("keeps the sheet toggling when the viewer prefers reduced motion", async () => {
+    const matchMedia = vi.fn((query: string) => ({
+      matches: query.includes("prefers-reduced-motion"),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      onchange: null,
+      dispatchEvent: vi.fn(),
+    }));
+    Object.defineProperty(window, "matchMedia", { value: matchMedia, configurable: true });
+    const view = mountViewer();
+    await flushPromises();
+    const handle = view.get("[data-test='gallery-viewer-sheet-handle']");
+
+    await handle.trigger("click");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).toContain("is-expanded");
+    await handle.trigger("click");
+    expect(view.get("[data-test='gallery-viewer-sheet']").classes()).not.toContain("is-expanded");
+  });
+
+  /** The sheet is a landmark of its own, and the handle says what it opens. */
+  it("names the details sheet and points the handle at its body", async () => {
+    const view = mountViewer();
+    await flushPromises();
+    const sheet = view.get("[data-test='gallery-viewer-sheet']");
+    const handle = view.get("[data-test='gallery-viewer-sheet-handle']");
+    const bodyId = view.get("[data-test='gallery-viewer-sheet-body']").attributes("id");
+
+    expect(sheet.attributes("role")).toBe("region");
+    expect(sheet.attributes("aria-label")).toBe("Print details");
+    expect(bodyId).toBeTruthy();
+    expect(handle.attributes("aria-controls")).toBe(bodyId);
+  });
+});

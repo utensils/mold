@@ -587,8 +587,11 @@ describe("mobile gallery viewer", () => {
     const expanded = css.match(/\.gallery-viewer-sheet\.is-expanded\s*\{([^}]*)\}/s);
     const handle = css.match(/\.gallery-viewer-sheet-handle\s*\{([^}]*)\}/s);
 
+    // 56px is the header's real height: a 44pt control plus its 6px padding
+    // on each side. A smaller inset would leave a band the stage paints under
+    // but the header eats, so a swipe there would reach nothing.
     expect(viewer?.[1]).toMatch(
-      /--viewer-header-inset:\s*calc\(52px \+ env\(safe-area-inset-top\)\)/,
+      /--viewer-header-inset:\s*calc\(56px \+ env\(safe-area-inset-top\)\)/,
     );
     expect(viewer?.[1]).toMatch(/--viewer-peek:\s*calc\(68px \+ env\(safe-area-inset-bottom\)\)/);
     expect(stage?.[1]).toMatch(/position:\s*absolute\s*;/);
@@ -635,6 +638,31 @@ describe("mobile gallery viewer", () => {
   it("shows the sheet body while the sheet is being dragged open", () => {
     expect(css).toMatch(
       /\.gallery-viewer-sheet\.is-dragging\s+\.gallery-viewer-details\s*\{\s*visibility:\s*visible;/,
+    );
+  });
+
+  /**
+   * The body stays mounted so every action keeps its identity across the
+   * toggle, which only works if the collapsed body is also out of the focus
+   * order — and the open sheet has to leave the media the larger half.
+   */
+  it("hides the collapsed body and leaves the media the larger half", () => {
+    const sheet = css.match(/(?:^|\n)\.gallery-viewer-sheet\s*\{([^}]*)\}/s);
+
+    expect(css).toMatch(
+      /\.gallery-viewer-sheet:not\(\.is-expanded\)\s+\.gallery-viewer-details\s*\{\s*visibility:\s*hidden;/,
+    );
+    const cap = Number(sheet?.[1]?.match(/max-height:\s*(\d+)%\s*;/)?.[1]);
+    expect(cap).toBeGreaterThanOrEqual(55);
+    expect(cap).toBeLessThanOrEqual(70);
+  });
+
+  /** The arrows belong to the picture, not to the box the picture sits in. */
+  it("centres the paging arrows on the media, not the padded stage", () => {
+    const nav = galleryViewerComponent.match(/\.gallery-viewer-nav\s*\{([^}]*)\}/s);
+
+    expect(nav?.[1]).toMatch(
+      /top:\s*calc\(\s*50% \+ \(var\(--viewer-header-inset\) - var\(--viewer-peek\)\) \/ 2\s*\)\s*;/,
     );
   });
 

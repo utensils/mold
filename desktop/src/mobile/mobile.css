@@ -3076,7 +3076,7 @@ button:disabled {
   /* The media is the page. The header floats over its top edge and the
      details sheet peeks over its bottom one, so both insets are named here
      and the stage keeps its whole picture clear of them. */
-  --viewer-header-inset: calc(52px + env(safe-area-inset-top));
+  --viewer-header-inset: calc(56px + env(safe-area-inset-top));
   --viewer-peek: calc(68px + env(safe-area-inset-bottom));
   box-sizing: border-box;
   overflow: hidden;

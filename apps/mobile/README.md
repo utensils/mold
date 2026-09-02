@@ -210,14 +210,19 @@ pushed screen opened from the header.
   action lives in a bottom sheet that peeks one line — the kind badge, what
   the print is measured in (a mesh's triangles and vertices once it loads, a
   clip's running time, a still's pixels), and the owning host. Tap the handle
-  or swipe up to expand it to about two-thirds of the screen, scroll it,
-  then swipe down or tap the dimmed media to put it away; it collapses on its
-  own when the gallery moves to another print, and `prefers-reduced-motion`
-  drops the spring, not the sheet. The sheet is the same for every kind and
-  only its actions differ, so an eight-button 3-D print no longer pushes its
-  own model off the screen. A drag that starts on the sheet moves the sheet
-  and never pages the gallery; a drag on the media still pages it, and a drag
-  on a mesh still orbits the model. It shows uncropped images, streams videos with native controls, plays
+  or swipe up to expand it to about two-thirds of the screen and scroll it;
+  swipe down, tap the dimmed media, or press Escape to put it away, and a
+  second Escape closes the viewer. It collapses on its own when the gallery
+  moves to another print, which also returns its scroll to the top, and
+  `prefers-reduced-motion` drops the spring rather than the sheet. One
+  exception to the downward swipe: a body scrolled away from its top owns
+  that drag, so the list scrolls back first — a pull on the grab handle
+  always closes, whatever the body is showing. The sheet is the same for
+  every kind and only its actions differ, so a 3-D print's export controls
+  can no longer push its own model off the screen. A drag that starts on the
+  sheet moves the sheet and never pages the gallery; a drag on the media
+  still pages it, and a drag on a mesh still orbits the model. The viewer
+  shows uncropped images, streams videos with native controls, plays
   audio-only prints (LTX-2 text-to-audio) as a waveform tile above a native
   transport, renders Hunyuan3D meshes in an orbitable WebGL viewer over the
   saved poster (`@studio/components/MeshViewer.vue`, shared with desktop and

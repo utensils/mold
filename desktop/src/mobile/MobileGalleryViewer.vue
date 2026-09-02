@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import MeshViewer from "@studio/components/MeshViewer.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, useId, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import VideoExportDialog, { type ExportDestination } from "@ui/components/VideoExportDialog.vue";
@@ -282,6 +282,8 @@ const peekSummary = computed(() =>
     durationMs: mediaDurationMs.value,
   }),
 );
+/** The handle points at the body it opens; two viewers must not collide. */
+const sheetBodyId = `gallery-viewer-sheet-body-${useId()}`;
 const sheetExpanded = ref(false);
 const sheetDragging = ref(false);
 const sheetDrag = ref(0);
@@ -294,6 +296,8 @@ let sheetStartY = 0;
 let sheetTravel = 0;
 let sheetSuppressClick = false;
 let sheetDragStartedInBody = false;
+/** The collapsed peek in px, measured once the sheet has been laid out. */
+let sheetPeek = 0;
 
 function collapseSheet(): void {
   if (!sheetExpanded.value) return;
@@ -317,6 +321,23 @@ function sheetDragBelongsToBody(): boolean {
   return sheetDragStartedInBody && (sheetBody.value?.scrollTop ?? 0) > 0;
 }
 
+/**
+ * How far the sheet can travel: its own height, less the whole collapsed
+ * peek. Measuring the peek from the collapsed geometry rather than from the
+ * handle alone keeps the safe-area band below it in the sum, so a drag ends
+ * exactly where the sheet rests instead of a home-indicator's worth short.
+ */
+function measureSheetTravel(): number {
+  const sheet = sheetRoot.value;
+  if (!sheet) return 0;
+  if (!sheetExpanded.value) {
+    const showing = Math.round(window.innerHeight - sheet.getBoundingClientRect().top);
+    if (showing > 0) sheetPeek = showing;
+  }
+  const peek = sheetPeek || (sheetHandle.value?.offsetHeight ?? 0);
+  return Math.max(0, sheet.offsetHeight - peek);
+}
+
 function beginSheetDrag(event: PointerEvent): void {
   sheetSuppressClick = false;
   if (
@@ -333,11 +354,7 @@ function beginSheetDrag(event: PointerEvent): void {
   sheetStartY = event.clientY;
   sheetDragStartedInBody =
     event.target instanceof Node && !!sheetBody.value?.contains(event.target);
-  // How far the sheet can travel: its own height, less the peek that stays.
-  sheetTravel = Math.max(
-    0,
-    (sheetRoot.value?.offsetHeight ?? 0) - (sheetHandle.value?.offsetHeight ?? 0),
-  );
+  sheetTravel = measureSheetTravel();
   // Capture, so a finger that lifts over the media still finishes the drag
   // here instead of stranding the sheet halfway open.
   try {
@@ -352,7 +369,10 @@ function trackSheetDrag(event: PointerEvent): void {
   const deltaX = event.clientX - sheetStartX;
   const deltaY = event.clientY - sheetStartY;
   if (Math.abs(deltaY) <= Math.abs(deltaX)) {
+    // Not the sheet's drag after all: hand the transition back so it slides
+    // home rather than snapping there.
     sheetDrag.value = 0;
+    sheetDragging.value = false;
     return;
   }
   if (sheetExpanded.value && sheetDragBelongsToBody()) return;
@@ -1224,6 +1244,8 @@ onBeforeUnmount(() => {
       ref="sheetRoot"
       class="gallery-viewer-sheet"
       :class="{ 'is-expanded': sheetExpanded, 'is-dragging': sheetDragging }"
+      role="region"
+      aria-label="Print details"
       :style="{ '--viewer-sheet-drag': `${sheetDrag}px` }"
       data-test="gallery-viewer-sheet"
       @pointerdown="beginSheetDrag"
@@ -1237,7 +1259,7 @@ onBeforeUnmount(() => {
         class="gallery-viewer-sheet-handle"
         type="button"
         :aria-expanded="sheetExpanded"
-        aria-controls="gallery-viewer-sheet-body"
+        :aria-controls="sheetBodyId"
         :aria-label="sheetExpanded ? 'Hide print details' : 'Show print details'"
         data-test="gallery-viewer-sheet-handle"
         @click="toggleSheet"
@@ -1251,7 +1273,7 @@ onBeforeUnmount(() => {
       </button>
 
       <div
-        id="gallery-viewer-sheet-body"
+        :id="sheetBodyId"
         ref="sheetBody"
         class="gallery-viewer-details"
         data-test="gallery-viewer-sheet-body"
@@ -1942,10 +1964,12 @@ onBeforeUnmount(() => {
   color: rgba(245, 239, 255, 0.84) !important;
 }
 
+/* Centred on the MEDIA, not on the padded stage: the header inset above and
+   the sheet's peek below are not part of the picture the arrows page. */
 .gallery-viewer-nav {
   position: absolute;
   z-index: 2;
-  top: 50%;
+  top: calc(50% + (var(--viewer-header-inset) - var(--viewer-peek)) / 2);
   display: grid;
   width: 48px;
   height: 56px;

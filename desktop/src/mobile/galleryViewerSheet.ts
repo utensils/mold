@@ -82,7 +82,6 @@ export type SheetGesture = "expand" | "collapse" | "none";
 
 /** A drag has to travel this far, and mean it, before the sheet moves. */
 const SHEET_SWIPE_DISTANCE = 40;
-const SHEET_VERTICAL_INTENT = 1;
 
 /**
  * A drag only moves the sheet when it is decisively vertical and points away
@@ -97,7 +96,7 @@ export function resolveSheetGesture(drag: {
 }): SheetGesture {
   const { deltaX, deltaY, expanded, scrolled } = drag;
   if (Math.abs(deltaY) < SHEET_SWIPE_DISTANCE) return "none";
-  if (Math.abs(deltaY) <= Math.abs(deltaX) * SHEET_VERTICAL_INTENT) return "none";
+  if (Math.abs(deltaY) <= Math.abs(deltaX)) return "none";
   if (deltaY < 0) return expanded ? "none" : "expand";
   if (!expanded || scrolled) return "none";
   return "collapse";
