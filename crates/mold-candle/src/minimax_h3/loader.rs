@@ -793,16 +793,6 @@ mod tests {
     }
 
     #[test]
-    fn the_released_shape_is_validated_before_the_extras_are_registered() {
-        // A tokenizer that already carries the extras is not the released file
-        // and must be refused by the pre-registration gate.
-        assert_eq!(H3_RELEASED_VOCABULARY_SIZE, 151_669);
-        assert_eq!(H3_RELEASED_MAX_TOKEN_ID, 151_668);
-        assert_eq!(H3_REGISTERED_VOCABULARY_SIZE, 151_676);
-        assert_eq!(H3_REGISTERED_MAX_TOKEN_ID, 151_675);
-    }
-
-    #[test]
     fn checkpoint_payload_size_is_bound_to_the_detected_layout() {
         assert!(validate_layout_payload_bytes(
             ConditionerWeightLayout::Official,

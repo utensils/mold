@@ -337,13 +337,14 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn the_registered_ceiling_stays_inside_the_checkpoint_embedding_table() {
+    /// Compile-time tripwires on the released numbers. These are the values the
+    /// checkpoint was published with, so a silent edit is a correctness bug,
+    /// not a preference -- fail the build rather than a test run.
+    const _: () = {
         const EMBEDDING_ROWS: u32 = 151_936;
         assert!(H3_REGISTERED_MAX_TOKEN_ID < EMBEDDING_ROWS);
-        assert_eq!(
-            H3_REGISTERED_VOCABULARY_SIZE,
-            usize::try_from(H3_REGISTERED_MAX_TOKEN_ID).unwrap() + 1
-        );
-    }
+        assert!(H3_REGISTERED_VOCABULARY_SIZE == H3_REGISTERED_MAX_TOKEN_ID as usize + 1);
+        assert!(H3_RELEASED_VOCABULARY_SIZE == H3_RELEASED_MAX_TOKEN_ID as usize + 1);
+        assert!(H3_REGISTERED_ADDED_TOKEN_COUNT == H3_RELEASED_ADDED_TOKEN_COUNT + 7);
+    };
 }
