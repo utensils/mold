@@ -1142,6 +1142,34 @@ describe("LibraryView header + NEW badges", () => {
     expect(wrapper.get('[data-test="media-kind-badge"]').text()).toBe("▶");
     wrapper.unmount();
   });
+
+  it("badges a mesh tile with the 3-D marker the iPhone Library already wears", async () => {
+    const { wrapper } = await mountView(undefined, (gallery) => {
+      const first = gallery.buckets.local?.items[0];
+      if (first) {
+        first.filename = "armchair-1a2b3c4d.glb";
+        first.format = "glb";
+      }
+    });
+
+    const badge = wrapper.get('[data-test="media-kind-badge"]');
+    expect(badge.text()).toBe("◈");
+    expect(badge.attributes("aria-label")).toBe("3-D mesh");
+    wrapper.unmount();
+  });
+
+  it("leaves a raster print without a media-kind badge", async () => {
+    const { wrapper } = await mountView(undefined, (gallery) => {
+      const first = gallery.buckets.local?.items[0];
+      if (first) {
+        first.filename = "still-1a2b3c4d.png";
+        first.format = "png";
+      }
+    });
+
+    expect(wrapper.find('[data-test="media-kind-badge"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
 });
 
 describe("LibraryView history drawer", () => {

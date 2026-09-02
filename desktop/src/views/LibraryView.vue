@@ -1758,6 +1758,7 @@ interface TileModel {
   purgeAt: number | null;
   video: boolean;
   audio: boolean;
+  mesh: boolean;
   upscaled: boolean;
   /** Media bytes are addressed differently for a host bucket and this Mac. */
   mediaPath: string;
@@ -1795,6 +1796,7 @@ const tileModels = computed<TileModel[]>(() => {
       purgeAt: org.purgeAt,
       video,
       audio: isAudioItem(item),
+      mesh: isMeshItem(item),
       upscaled: isUpscaledImage(item),
       mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
       // The tile is always a still thumbnail now; a local clip's poster comes
@@ -2777,9 +2779,16 @@ onUnmounted(() => {
               New
             </span>
             <!-- Upscaled + media kind share the top-right corner in one row so
-                 a Framewise-upscaled clip shows both instead of stacking them. -->
+                 a Framewise-upscaled clip shows both instead of stacking them.
+                 The kind glyphs (▶ / ♪ / ◈) are the ones the iPhone Library
+                 wears, over the same predicates as the kind chips. -->
             <span
-              v-if="(!selectMode && tile.model.upscaled) || tile.model.video || tile.model.audio"
+              v-if="
+                (!selectMode && tile.model.upscaled) ||
+                tile.model.video ||
+                tile.model.audio ||
+                tile.model.mesh
+              "
               class="absolute top-1.5 right-1.5 flex items-center gap-1"
             >
               <span
@@ -2790,11 +2799,12 @@ onUnmounted(() => {
                 Upscaled
               </span>
               <span
-                v-if="tile.model.video || tile.model.audio"
+                v-if="tile.model.video || tile.model.audio || tile.model.mesh"
                 data-test="media-kind-badge"
                 class="rounded-control bg-black/60 px-1 text-caption text-on-media"
+                :aria-label="tile.model.mesh ? '3-D mesh' : tile.model.audio ? 'Audio' : 'Video'"
               >
-                {{ tile.model.audio ? "♪" : "▶" }}
+                {{ tile.model.mesh ? "◈" : tile.model.audio ? "♪" : "▶" }}
               </span>
             </span>
             <span
