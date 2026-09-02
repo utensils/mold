@@ -135,7 +135,6 @@ export interface ExpandCapabilities {
   model?: string | null;
 }
 
-
 /** `/api/capabilities.mesh` — mirrors `mold_core::types::MeshCapabilities`. */
 export interface MeshServerCapabilities {
   generation: boolean;
