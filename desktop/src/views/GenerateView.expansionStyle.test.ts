@@ -265,7 +265,9 @@ describe("GenerateView style-aware expansion", () => {
     expect(form.stylePreset).toBe("");
     expect(form.negativePrompt).toBe("text, anime, cartoon, graphic, washed out");
 
-    wrapper.findComponent(ComposerCard).vm.$emit("prompt-authored", "yesterday's harbour", "recalled");
+    wrapper
+      .findComponent(ComposerCard)
+      .vm.$emit("prompt-authored", "yesterday's harbour", "recalled");
     await flushPromises();
 
     // The recalled prompt never absorbed the look, so the chip the bake

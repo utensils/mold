@@ -115,10 +115,12 @@ describe("VideoExportDialog", () => {
 
     const notice = wrapper.get("[data-test='video-export-error']");
     expect(notice.attributes("role")).toBe("alert");
-    expect(notice.get("[data-test='error-notice-message']").text()).toBe(message);
-    expect(notice.get("[data-test='error-notice-message']").classes()).toContain(
-      "[overflow-wrap:anywhere]",
+    expect(notice.get("[data-test='error-notice-message']").text()).toBe(
+      message,
     );
+    expect(
+      notice.get("[data-test='error-notice-message']").classes(),
+    ).toContain("[overflow-wrap:anywhere]");
     expect(notice.find("[data-test='copy-error-notice']").exists()).toBe(true);
   });
 });

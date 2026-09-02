@@ -443,7 +443,9 @@ describe("GenerateView prepared expansion batches", () => {
     expect(form.prompt).toBe("storm light");
     expect(form.originalPrompt).toBe("a lighthouse at dusk");
 
-    wrapper.findComponent(ComposerCard).vm.$emit("prompt-authored", "yesterday's harbour", "recalled");
+    wrapper
+      .findComponent(ComposerCard)
+      .vm.$emit("prompt-authored", "yesterday's harbour", "recalled");
     await flushPromises();
 
     expect(form.prompt).toBe("yesterday's harbour");

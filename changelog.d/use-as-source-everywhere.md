@@ -1,5 +1,3 @@
-### Added
-
 - **Use as source on every print, everywhere it is shown.** Right-clicking the
   finished render on the web Create canvas now opens the same print menu the
   Recent tiles have (Open, Reuse settings, Use as source, Delete), and the
