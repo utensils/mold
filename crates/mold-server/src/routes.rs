@@ -9032,7 +9032,8 @@ pub(crate) struct GalleryExportRequest {
     pub(crate) repeat: GalleryGifRepeat,
     /// Optional decoded-frame cap. The longest side is resized to this many
     /// pixels while decoding, before frames enter the animation buffer. For
-    /// a mesh turntable it is the rendered frame edge (default 512).
+    /// a mesh turntable it is the rendered frame edge (default 512, at most
+    /// 2048 — the rasterizer's ceiling, below the video export's 2160).
     pub(crate) max_dimension: Option<u32>,
     /// Optional target frame rate. The decoder samples without retaining
     /// skipped full-resolution frames. For a mesh turntable it is the
@@ -9495,12 +9496,7 @@ async fn export_gallery_media(
                 .map_err(|error| ApiError::internal(format!("mesh export task failed: {error}")))?
                 .map_err(ApiError::validation)?
         };
-        return Ok(mesh_export_response(
-            &clean_name,
-            mesh_format,
-            request.format.extension(),
-            bytes,
-        ));
+        return Ok(mesh_export_response(&clean_name, mesh_format, bytes));
     }
 
     let Some(output_format) = request.format.animation_format() else {
@@ -9591,14 +9587,16 @@ fn transcode_gallery_mesh(
     })
 }
 
-/// Resolve a turntable request's options against the same bounds the video
-/// export applies to `playback`, `repeat` and `max_dimension`, plus the
-/// turntable's own `frames` and `fps`. Every refusal is a 422 in the
-/// `max_dimension` message style, so a client learns the bound at once.
-fn turntable_options_for(
+/// Resolve a turntable request's options against the same contract the video
+/// export applies to `playback` and `repeat`, the rasterizer's own ceiling on
+/// `max_dimension`, and the turntable's own `frames` and `fps`. Every refusal
+/// is a 422 in the `max_dimension` message style, so a client learns the
+/// bound at once.
+pub(crate) fn turntable_options_for(
     request: &GalleryExportRequest,
     format: mold_core::MeshExportFormat,
 ) -> Result<mold_inference::hunyuan3d::turntable::TurntableOptions, ApiError> {
+    use mold_inference::hunyuan3d::poster::MAX_POSTER_SIZE;
     use mold_inference::hunyuan3d::turntable::{
         TurntableOptions, DEFAULT_FPS, DEFAULT_FRAMES, DEFAULT_SIZE, FPS_RANGE, FRAMES_RANGE,
     };
@@ -9608,13 +9606,16 @@ fn turntable_options_for(
             "bounce playback is only supported for GIF exports",
         ));
     }
+    // The poster rasterizer's own ceiling is the bound, not the video
+    // export's 2160: a frame the rasterizer cannot draw is refused with the
+    // figure every surface advertises, never clamped to it in silence.
     if request
         .max_dimension
-        .is_some_and(|dimension| !(240..=2160).contains(&dimension))
+        .is_some_and(|dimension| !(240..=MAX_POSTER_SIZE).contains(&dimension))
     {
-        return Err(ApiError::validation(
-            "max_dimension must be between 240 and 2160 pixels",
-        ));
+        return Err(ApiError::validation(format!(
+            "max_dimension must be between 240 and {MAX_POSTER_SIZE} pixels for a mesh turntable"
+        )));
     }
     if request.fps.is_some_and(|fps| !FPS_RANGE.contains(&fps)) {
         return Err(ApiError::validation(format!(
@@ -9634,11 +9635,7 @@ fn turntable_options_for(
     let options = TurntableOptions {
         frames: frames.unwrap_or(DEFAULT_FRAMES),
         fps: request.fps.unwrap_or(DEFAULT_FPS),
-        // The poster rasterizer has its own ceiling, below the video cap.
-        size: request
-            .max_dimension
-            .unwrap_or(DEFAULT_SIZE)
-            .min(mold_inference::hunyuan3d::poster::MAX_POSTER_SIZE),
+        size: request.max_dimension.unwrap_or(DEFAULT_SIZE),
         bounce,
         repeat_forever: matches!(request.repeat, GalleryGifRepeat::Forever),
     };
@@ -9671,12 +9668,12 @@ fn render_gallery_turntable(
 fn mesh_export_response(
     clean_name: &str,
     format: mold_core::MeshExportFormat,
-    extension: &str,
     bytes: Vec<u8>,
 ) -> Response {
     let download_name = format!(
-        "{}.{extension}",
-        export_download_stem(clean_name, "mold-mesh")
+        "{}.{}",
+        export_download_stem(clean_name, "mold-mesh"),
+        format.extension()
     );
     Response::builder()
         .status(StatusCode::OK)

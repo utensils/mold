@@ -113,7 +113,7 @@ and `-o` on a 3-D render must still name a `.glb`. The same tool and command
 take `gif`, `apng`, or `webp` to render a **turntable**: the gallery poster's
 view spun a full turn around the mesh, the way to show a mesh anywhere a
 `.glb` cannot open. Its optional `playback` (`loop` | `bounce`), `repeat`
-(`forever` | `once`), `max_dimension` (240–2160, default 512), `frames`
+(`forever` | `once`), `max_dimension` (240–2048, default 512), `frames`
 (8–180, default 36) and `fps` (1–30, default 10) mirror `--playback`,
 `--repeat`, `--max-dimension`, `--frames` and `--fps`; bounce and once are GIF
 only, and the flags are refused on a geometry format. Only the formats the

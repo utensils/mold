@@ -3276,7 +3276,7 @@ fn builtin_tool_definitions() -> Value {
                     "max_dimension": {
                         "type": "integer",
                         "minimum": 240,
-                        "maximum": 2160,
+                        "maximum": 2048,
                         "description": "Turntable frame edge in pixels. Default 512, the poster's size."
                     },
                     "frames": {
@@ -3695,7 +3695,7 @@ mod tests {
         assert_eq!(props["playback"]["enum"], json!(["loop", "bounce"]));
         assert_eq!(props["repeat"]["enum"], json!(["forever", "once"]));
         for (field, min, max) in [
-            ("max_dimension", 240, 2160),
+            ("max_dimension", 240, 2048),
             ("frames", 8, 180),
             ("fps", 1, 30),
         ] {
@@ -3879,6 +3879,49 @@ mod tests {
             unknown_field.contains("invalid arguments"),
             "{unknown_field}"
         );
+    }
+
+    /// A turntable knob on a geometry container is refused before any HTTP,
+    /// naming the formats it applies to — the same sentence the CLI's flags
+    /// get, because the server would silently ignore it.
+    #[tokio::test]
+    async fn export_mesh_refuses_turntable_knobs_on_a_geometry_format_before_any_request() {
+        let mcp = McpServer {
+            client: MoldClient::new("http://127.0.0.1:1"),
+            jobs: AsyncJobRegistry::default(),
+        };
+        for (arguments, format) in [
+            (
+                json!({ "filename": "chair.glb", "format": "stl", "frames": 24 }),
+                "stl",
+            ),
+            (
+                json!({ "filename": "chair.glb", "format": "obj", "playback": "bounce" }),
+                "obj",
+            ),
+            (
+                json!({ "filename": "chair.glb", "format": "glb", "max_dimension": 1024 }),
+                "glb",
+            ),
+            (
+                json!({ "filename": "chair.glb", "format": "ply", "fps": 12, "repeat": "once" }),
+                "ply",
+            ),
+        ] {
+            let refused = mcp.tool_export_mesh(arguments.clone()).await.unwrap_err();
+            assert!(
+                refused.contains("shape a turntable"),
+                "{arguments}: {refused}"
+            );
+            assert!(
+                refused.contains("gif, apng, or webp"),
+                "{arguments}: {refused}"
+            );
+            assert!(
+                refused.ends_with(&format!("not {format}")),
+                "{arguments}: {refused}"
+            );
+        }
     }
 
     /// The exported bytes come back as an embedded resource named for the

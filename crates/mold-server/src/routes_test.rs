@@ -16291,11 +16291,11 @@ mod tests {
             ),
             (
                 serde_json::json!({ "format": "gif", "max_dimension": 239 }),
-                "max_dimension must be between 240 and 2160 pixels",
+                "max_dimension must be between 240 and 2048 pixels for a mesh turntable",
             ),
             (
-                serde_json::json!({ "format": "gif", "max_dimension": 2161 }),
-                "max_dimension must be between 240 and 2160 pixels",
+                serde_json::json!({ "format": "gif", "max_dimension": 2049 }),
+                "max_dimension must be between 240 and 2048 pixels for a mesh turntable",
             ),
         ] {
             let refused = export_gallery_file_with(&app, "mesh.glb", body.clone()).await;
@@ -16303,6 +16303,40 @@ mod tests {
             let error = json_body(refused).await;
             assert_eq!(error["error"].as_str().unwrap(), message, "{body}");
         }
+
+        // The advertised ceiling IS the rasterizer's ceiling: the largest
+        // frame a client is told it may ask for resolves to that size, rather
+        // than being clamped to something smaller without a word. (Resolved
+        // through the route's own option builder rather than rendered: eight
+        // 2048 px frames through the GIF quantizer are most of a minute in a
+        // debug build, and the rasterizer's acceptance of MAX_POSTER_SIZE is
+        // the poster module's own test.)
+        assert_eq!(
+            mold_inference::hunyuan3d::poster::MAX_POSTER_SIZE,
+            2048,
+            "the turntable bound and every surface that documents it say 2048"
+        );
+        let at_ceiling: crate::routes::GalleryExportRequest = serde_json::from_value(
+            serde_json::json!({ "format": "gif", "frames": 8, "max_dimension": 2048 }),
+        )
+        .unwrap();
+        let options =
+            crate::routes::turntable_options_for(&at_ceiling, mold_core::MeshExportFormat::Gif)
+                .expect("2048 is inside the advertised bound");
+        assert_eq!(options.size, 2048, "not clamped below what was accepted");
+        assert_eq!(options.frames, 8);
+        let past_ceiling: crate::routes::GalleryExportRequest = serde_json::from_value(
+            serde_json::json!({ "format": "gif", "frames": 8, "max_dimension": 2049 }),
+        )
+        .unwrap();
+        let refused =
+            crate::routes::turntable_options_for(&past_ceiling, mold_core::MeshExportFormat::Gif)
+                .expect_err("2049 is past the rasterizer's ceiling");
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            refused.error,
+            "max_dimension must be between 240 and 2048 pixels for a mesh turntable"
+        );
 
         let over_budget = export_gallery_file_with(
             &app,
@@ -16317,6 +16351,50 @@ mod tests {
             message.contains("export budget") && message.contains("max_dimension"),
             "{message}"
         );
+    }
+
+    /// The video export keeps its OWN bounds — `fps` up to 60 and
+    /// `max_dimension` up to 2160 — untouched by the tighter mesh turntable
+    /// arm beside it, and refuses past them in the same message style.
+    #[tokio::test]
+    async fn video_export_bounds_are_the_video_s_own() {
+        let mp4 = base64::engine::general_purpose::STANDARD
+            .decode(include_str!("testdata/audio_muxed_final_mp4.b64").trim())
+            .unwrap();
+        let (app, _output_dir) = gallery_export_app(&[("clip.mp4", mp4)]);
+
+        for body in [
+            serde_json::json!({ "format": "gif", "fps": 60 }),
+            serde_json::json!({ "format": "gif", "max_dimension": 2160 }),
+        ] {
+            let accepted = export_gallery_file_with(&app, "clip.mp4", body.clone()).await;
+            assert_eq!(accepted.status(), StatusCode::OK, "{body}");
+            assert_eq!(
+                accepted.headers()[axum::http::header::CONTENT_TYPE],
+                "image/gif",
+                "{body}"
+            );
+        }
+
+        for (body, message) in [
+            (
+                serde_json::json!({ "format": "gif", "fps": 61 }),
+                "fps must be between 1 and 60",
+            ),
+            (
+                serde_json::json!({ "format": "gif", "fps": 0 }),
+                "fps must be between 1 and 60",
+            ),
+            (
+                serde_json::json!({ "format": "gif", "max_dimension": 2161 }),
+                "max_dimension must be between 240 and 2160 pixels",
+            ),
+        ] {
+            let refused = export_gallery_file_with(&app, "clip.mp4", body.clone()).await;
+            assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            let error = json_body(refused).await;
+            assert_eq!(error["error"].as_str().unwrap(), message, "{body}");
+        }
     }
 
     /// A video takes the animation group only, and a geometry container asked

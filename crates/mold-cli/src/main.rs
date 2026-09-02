@@ -1108,7 +1108,7 @@ pub struct TurntableArgs {
     /// frame.
     #[arg(long, value_name = "forever|once", help_heading = "Turntable")]
     repeat: Option<mold_core::MeshTurntableRepeat>,
-    /// Frame edge in pixels, 240 to 2160 (default 512, the poster's size).
+    /// Frame edge in pixels, 240 to 2048 (default 512, the poster's size).
     #[arg(long, value_name = "PIXELS", help_heading = "Turntable")]
     max_dimension: Option<u32>,
     /// Views rendered around the mesh, 8 to 180 (default 36, a 10° step).

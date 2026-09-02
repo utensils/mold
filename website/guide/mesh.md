@@ -144,7 +144,7 @@ mold library export chair.glb --format apng -o chair-turntable.png
 | ----------------- | ----------------- | --------- | ------------------------------------------------------------------------------------------ |
 | `--playback`      | `loop`, `bounce`  | `loop`    | GIF only. `loop` is one seamless full turn; `bounce` sweeps half a turn and plays it back. |
 | `--repeat`        | `forever`, `once` | `forever` | GIF only. `once` plays through and rests on the final frame.                               |
-| `--max-dimension` | 240 to 2160       | 512       | Frame edge in pixels; frames are square like the poster.                                   |
+| `--max-dimension` | 240 to 2048       | 512       | Frame edge in pixels; frames are square like the poster.                                   |
 | `--frames`        | 8 to 180          | 36        | Views rendered around the mesh. 36 is a 10° step; 72 is smoother and twice the size.       |
 | `--fps`           | 1 to 30           | 10        | Playback rate. 36 frames at 10 fps is a 3.6 s turn.                                        |
 

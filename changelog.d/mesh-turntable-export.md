@@ -5,7 +5,7 @@
   around the mesh, so the first frame IS the poster — and writes it as an
   animation you can drop into a chat, a README or a browser. The flags are the
   gallery video export's own: `--playback loop|bounce`, `--repeat forever|once`
-  and `--max-dimension` (240–2160, default 512), plus `--frames` (8–180,
+  and `--max-dimension` (240–2048, default 512), plus `--frames` (8–180,
   default 36, a 10° step) and `--fps` (1–30, default 10). A loop renders one
   full turn whose last frame stops one step short of the first, so the wrap is
   seamless; a bounce renders half a turn that the GIF encoder plays back, so

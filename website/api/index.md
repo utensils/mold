@@ -1163,7 +1163,7 @@ of its own:
 
 `playback` (`loop` | `bounce`) and `repeat` (`forever` | `once`) are GIF
 contracts exactly as for a video — bounce on `apng` or `webp` is the same
-`422`. `max_dimension` (240 to 2160, default 512) is the square frame edge.
+`422`. `max_dimension` (240 to 2048, default 512) is the square frame edge.
 `frames` (8 to 180, default 36) is how many views are rendered around the
 mesh: a loop renders one full turn whose last frame stops one step short of
 the first, so the wrap is seamless, and a bounce renders half a turn that the

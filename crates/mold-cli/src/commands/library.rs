@@ -948,6 +948,66 @@ mod tests {
         assert!(error.contains("not a gallery filename"), "{error}");
     }
 
+    /// A turntable flag on a geometry container is refused locally, naming
+    /// the formats it applies to, before the host is asked anything: the
+    /// server would ignore the flag, and a flag that silently does nothing
+    /// is worse than one that is refused.
+    #[tokio::test]
+    async fn library_export_refuses_turntable_flags_on_a_geometry_format() {
+        let unreachable = MoldClient::new("http://127.0.0.1:1");
+        for (format, turntable) in [
+            (
+                mold_core::MeshExportFormat::Stl,
+                mold_core::MeshTurntableOptions {
+                    frames: Some(24),
+                    ..Default::default()
+                },
+            ),
+            (
+                mold_core::MeshExportFormat::Obj,
+                mold_core::MeshTurntableOptions {
+                    playback: Some(mold_core::MeshTurntablePlayback::Bounce),
+                    ..Default::default()
+                },
+            ),
+            (
+                mold_core::MeshExportFormat::Glb,
+                mold_core::MeshTurntableOptions {
+                    max_dimension: Some(1024),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let error = library_export(&unreachable, "chair.glb", format, &turntable, None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("shape a turntable"), "{format}: {error}");
+            assert!(error.contains("gif, apng, or webp"), "{format}: {error}");
+            assert!(error.contains(&format.to_string()), "{format}: {error}");
+        }
+
+        // The same flags on an animated format are not what this guard is
+        // for: the request goes out, and the host answers.
+        let server = export_host(vec![mold_core::MeshExportFormat::Gif]).await;
+        let client = MoldClient::new(&server.uri());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("chair.gif");
+        library_export(
+            &client,
+            "chair.glb",
+            mold_core::MeshExportFormat::Gif,
+            &mold_core::MeshTurntableOptions {
+                frames: Some(24),
+                ..Default::default()
+            },
+            Some(out.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"solid");
+    }
+
     /// The bytes land where `-o` says, or under the print's stem with the
     /// new extension, or on stdout for `-o -`; the gallery file is untouched.
     #[tokio::test]
