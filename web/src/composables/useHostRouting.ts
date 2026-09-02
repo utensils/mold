@@ -1543,9 +1543,29 @@ export function useHostRouting(): HostRouting {
   };
 }
 
+/**
+ * The last capability snapshot for one host, WITHOUT joining the poll loop.
+ * For presentational components (the lightbox's export menu) that want to
+ * reuse what the shell already fetched rather than probe the host again on
+ * every arrow step; `undefined` when nothing has been read yet, in which case
+ * the caller asks the host itself.
+ */
+export function peekHostCapabilities(
+  hostId: string,
+): ServerCapabilities | undefined {
+  return capabilitiesByHost.value[hostId];
+}
+
 /** Reset the singleton between tests. */
 export const __testing__ = {
   POLL_INTERVAL_MS,
+  /** Plant a capability snapshot as if a poll had read it. */
+  seedCapabilities(hostId: string, capabilities: ServerCapabilities): void {
+    capabilitiesByHost.value = {
+      ...capabilitiesByHost.value,
+      [hostId]: capabilities,
+    };
+  },
   reset(): void {
     window.removeEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
     window.removeEventListener(

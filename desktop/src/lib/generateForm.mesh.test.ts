@@ -11,6 +11,7 @@ import { pruneRequestForFamily, recipeCapabilitiesSnapshot } from "./capabilitie
 import {
   applyMetadataToForm,
   applyModelDefaults,
+  applyPrefillToForm,
   applyRequestToForm,
   buildRequest,
   newGenerateForm,
@@ -93,6 +94,57 @@ describe("selecting a Hunyuan3D recipe", () => {
     expect(form.mesh).toEqual({ octreeResolution: null, threshold: null, targetFaces: null });
     expect(form.recipeCapabilities?.mesh).toBeNull();
     expect(form.recipeCapabilities?.canvasless).toBe(false);
+  });
+});
+
+/**
+ * ⌘K "Generate with <model>" and History → Use prompt take the scalar prefill
+ * path, which used to copy `model` and `family` and leave the capability
+ * snapshot behind — so after Hunyuan3D the SDXL request still carried the
+ * mesh recipe's pinned `glb`.
+ */
+describe("leaving a Hunyuan3D recipe through a scalar prefill", () => {
+  const scalar = (model: string) => ({
+    prompt: "a cat",
+    model,
+    seed: null,
+    width: 1024,
+    height: 1024,
+    steps: 30,
+    guidance: 7,
+  });
+
+  it("refreshes the capability snapshot so the raster model is not pinned to glb", () => {
+    const form = meshForm();
+    form.mesh.octreeResolution = 192;
+    applyPrefillToForm(form, scalar(sdxlModel().name), [hunyuanModel(), sdxlModel()]);
+    expect(form.family).toBe("sdxl");
+    expect(form.recipeCapabilities?.canvasless).toBe(false);
+    expect(form.recipeCapabilities?.mesh).toBeNull();
+    expect(form.mesh).toEqual({ octreeResolution: null, threshold: null, targetFaces: null });
+    expect(form.width).toBe(1024);
+    const request = buildRequest(form);
+    expect(request.output_format).toBe("png");
+    expect(request).not.toHaveProperty("mesh");
+  });
+
+  it("drops the mesh snapshot when the prefilled model is not installed anywhere", () => {
+    const form = meshForm();
+    applyPrefillToForm(form, scalar("sdxl-base:fp16"), [hunyuanModel()]);
+    expect(form.model).toBe("sdxl-base:fp16");
+    expect(form.family).toBe("");
+    expect(form.recipeCapabilities).toBeNull();
+    expect(buildRequest(form).output_format).not.toBe("glb");
+  });
+
+  it("takes the mesh recipe's zero canvas when entering it the same way", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, sdxlModel());
+    applyPrefillToForm(form, scalar(hunyuanModel().name), [hunyuanModel(), sdxlModel()]);
+    expect(form.family).toBe("hunyuan3d");
+    expect(form.recipeCapabilities?.canvasless).toBe(true);
+    expect(form.width).toBe(0);
+    expect(form.outputFormat).toBe("glb");
   });
 });
 

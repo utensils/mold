@@ -143,6 +143,19 @@ const thresholdValue = computed(
 );
 const thresholdNote = computed(() => controlNote(thresholdControl.value));
 const targetFacesValue = computed(() => meshForm.value.targetFaces);
+/** Advisory only, like the resolution warning: the server is the authority
+ * and refuses an out-of-range value at admission (422), so the rail says so
+ * here instead of letting Generate fail with no explanation. */
+const targetFacesWarning = computed(() => {
+  const profile = meshProfile.value;
+  const value = targetFacesValue.value;
+  if (!profile || value === null || value === undefined) return null;
+  if (value >= profile.target_faces_min && value <= profile.target_faces_max) {
+    return null;
+  }
+  const count = (n: number) => n.toLocaleString("en-US");
+  return `${count(value)} is outside this model's ${count(profile.target_faces_min)}–${count(profile.target_faces_max)} face range; the host will refuse it.`;
+});
 function patchMesh(next: Partial<MeshFormState>) {
   patch({ mesh: { ...meshForm.value, ...next } });
 }
@@ -486,6 +499,13 @@ function lockLastSeed() {
         Leave blank to keep the raw surface —
         {{ meshProfile.target_faces_min }}–{{ meshProfile.target_faces_max }}
         triangles when decimating.
+      </p>
+      <p
+        v-if="targetFacesWarning"
+        class="controls__hint controls__hint--warning"
+        data-test="mesh-target-faces-warning"
+      >
+        {{ targetFacesWarning }}
       </p>
     </div>
 

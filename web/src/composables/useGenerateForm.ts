@@ -1326,8 +1326,12 @@ export function useGenerateForm(): UseGenerateForm {
             ) ?? null)
           : null,
         model: s.model,
-        width: s.width,
-        height: s.height,
+        // A canvasless recipe renders no pixel canvas: like the format and
+        // the fit policy below, the size is decided here from the recipe, so
+        // a draft persisted with a raster canvas cannot ship 1024×1024 on a
+        // mesh request the user has no control to correct.
+        width: capabilities.canvasless ? 0 : s.width,
+        height: capabilities.canvasless ? 0 : s.height,
         steps: s.steps,
         guidance: effectiveGenerationGuidance(capabilities, s.guidance),
         seed: s.seedMode === "random" ? null : s.seed,

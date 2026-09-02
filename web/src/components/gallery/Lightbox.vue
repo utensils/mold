@@ -24,7 +24,12 @@ import {
 } from "@studio/lib/identityConditioning";
 import { downloadFilename } from "../../lib/libraryOrganization";
 import { imageUrl, thumbnailUrl } from "../../api";
-import { getHost } from "../../lib/hostRegistry";
+import { ORIGIN_HOST_ID, getHost } from "../../lib/hostRegistry";
+import { peekHostCapabilities } from "../../composables/useHostRouting";
+import {
+  meshExportFilename,
+  splitMeshExportFormats,
+} from "@studio/lib/meshExport";
 import {
   MediaUpgradeRequiredError,
   directMediaUrl,
@@ -151,33 +156,39 @@ const canExportVideo = computed(
 );
 
 // ── 3-D exports ────────────────────────────────────────────────────────
-// GLB is the only stored form; OBJ / STL / PLY (and any animated container a
-// future host advertises) are TRANSCODES the host performs on request. The
-// menu is therefore built from `/api/capabilities.mesh.export_formats` on the
-// host that holds THIS print — never a client constant.
-const ANIMATED_MESH_EXPORTS: ReadonlySet<string> = new Set([
-  "gif",
-  "apng",
-  "webp",
-]);
+// GLB is the only stored form; OBJ / STL / PLY are TRANSCODES and the
+// animated turntables are RENDERS the host performs on request. The menu is
+// therefore built from `/api/capabilities.mesh.export_formats` on the host
+// that holds THIS print — never a client constant — and split by the shared
+// studio policy (geometry files vs. turntables, the stored glb dropped).
 const meshExportFormats = ref<string[]>([]);
 /** Direct one-click transcodes: one menu entry each. */
-const meshFileExports = computed(() =>
-  meshExportFormats.value.filter(
-    (format) => !ANIMATED_MESH_EXPORTS.has(format),
-  ),
+const meshFileExports = computed(
+  () => splitMeshExportFormats(meshExportFormats.value).files,
 );
 /** Animated turntables share the video export sheet's playback options, so
  * they collapse into ONE entry that opens it with just these containers. */
-const meshAnimationExports = computed(() =>
-  meshExportFormats.value.filter((format) => ANIMATED_MESH_EXPORTS.has(format)),
+const meshAnimationExports = computed(
+  () => splitMeshExportFormats(meshExportFormats.value).animations,
 );
 let meshCapabilitiesGeneration = 0;
 
 async function resolveMeshExports() {
   const generation = ++meshCapabilitiesGeneration;
+  // An export refusal belonged to the print that is gone.
+  exportError.value = "";
   if (!isMeshFile.value) {
     meshExportFormats.value = [];
+    return;
+  }
+  // The shell already polls every host's capabilities; reuse that snapshot
+  // rather than probing the host again on every arrow step, and ask the host
+  // itself only when nothing has been read for it yet.
+  const hostId =
+    (props.item as { hostId?: string } | null)?.hostId ?? ORIGIN_HOST_ID;
+  const snapshot = peekHostCapabilities(hostId)?.mesh?.export_formats;
+  if (snapshot) {
+    meshExportFormats.value = snapshot;
     return;
   }
   try {
@@ -193,11 +204,6 @@ async function resolveMeshExports() {
     // still downloadable, which is the only thing this print always has.
     if (generation === meshCapabilitiesGeneration) meshExportFormats.value = [];
   }
-}
-
-function meshExportFilename(filename: string, format: string): string {
-  const stem = filename.replace(/\.[^.]+$/, "") || "mold-mesh";
-  return `${stem}.${format}`;
 }
 
 async function exportMesh(format: string) {
@@ -227,7 +233,7 @@ function openMeshAnimationExport() {
   exportError.value = "";
   exportCapabilities.value = {
     ...DEFAULT_VIDEO_EXPORT_CAPABILITIES,
-    formats: meshAnimationExports.value as VideoExportCapabilities["formats"],
+    formats: meshAnimationExports.value,
   };
   exportOpen.value = true;
 }
@@ -509,9 +515,9 @@ async function exportFetch(
     const payload = (await response.json().catch(() => null)) as {
       error?: string;
     } | null;
-    throw new Error(
-      payload?.error ?? `Video export failed (${response.status})`,
-    );
+    // Shared by the video sheet and the mesh transcodes, so the fallback
+    // names neither.
+    throw new Error(payload?.error ?? `Export failed (${response.status})`);
   }
   return response;
 }
@@ -1009,7 +1015,7 @@ async function performVideoExport(options: VideoExportOptions) {
                 </template>
                 <template v-else>
                   <button
-                    v-if="upscaleEnabled !== false"
+                    v-if="upscaleEnabled !== false && !isMeshFile"
                     role="menuitem"
                     @click="onUpscale"
                   >
@@ -1265,6 +1271,14 @@ async function performVideoExport(options: VideoExportOptions) {
           >
             Export format…
           </button>
+          <p
+            v-if="exportError && !exportOpen"
+            class="lb__blocked-body"
+            role="alert"
+            data-test="mesh-export-error"
+          >
+            {{ exportError }}
+          </p>
         </div>
       </div>
       <VideoExportDialog

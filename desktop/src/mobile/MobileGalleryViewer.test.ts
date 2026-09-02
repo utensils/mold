@@ -1222,20 +1222,50 @@ describe("MobileGalleryViewer mesh export", () => {
     );
   });
 
-  it("shares GLB itself natively, under the stored container's own name", async () => {
-    isNativeIOSRuntime.mockReturnValue(false);
-    isNativeAndroidRuntime.mockReturnValue(true);
-    invoke.mockResolvedValueOnce("shared");
-    const view = mountMesh(["glb", "obj"]);
+  /**
+   * The server lists the stored container first (`glb`) so a CLI can name it,
+   * but the phone already shares that exact file: an "Export as GLB" beside
+   * it would be a no-op transcode. The fixture is the list a current host
+   * actually sends.
+   */
+  it("never offers the stored GLB as an export, only the transcodes and the turntable", async () => {
+    const view = mountMesh(["glb", "obj", "stl", "ply", "gif", "apng", "webp"]);
+    await flushPromises();
+    expect(
+      view.findAll("[data-test^='gallery-viewer-mesh-export-']").map((button) => button.text()),
+    ).toEqual(["Export as OBJ", "Export as STL", "Export as PLY", "Export turntable…"]);
+    expect(view.find("[data-test='gallery-viewer-mesh-export-glb']").exists()).toBe(false);
+  });
+
+  /** A mesh has no raster to stage as conditioning, whatever the owner allows. */
+  it("never offers Use as source for a mesh print", async () => {
+    const view = mountMesh(["obj"]);
+    await view.setProps({ canUseAsSource: true });
+    await flushPromises();
+    expect(view.find("[data-test='gallery-viewer-use-source']").exists()).toBe(false);
+  });
+
+  /**
+   * A geometry export never opens the options sheet, so an error parked on
+   * that sheet's slot is invisible. The failure has to land in the footer
+   * status line the tap is already watching.
+   */
+  it("reports a failed geometry export in the footer status, not the hidden sheet", async () => {
+    invoke.mockRejectedValueOnce(new Error("Export failed: this host cannot write STL."));
+    const view = mountMesh(["obj", "stl"]);
     await flushPromises();
 
-    await view.get("[data-test='gallery-viewer-mesh-export-glb']").trigger("click");
+    await view.get("[data-test='gallery-viewer-mesh-export-stl']").trigger("click");
     await flushPromises();
 
-    expect(invoke).toHaveBeenCalledWith(
-      "share_exported_animation",
-      expect.objectContaining({ filename: "armchair 01.glb", request: { format: "glb" } }),
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Export failed: this host cannot write STL.",
     );
+    expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
+    // The button is live again for a retry.
+    expect(
+      view.get("[data-test='gallery-viewer-mesh-export-stl']").attributes(),
+    ).not.toHaveProperty("disabled");
   });
 
   it("keeps a cancelled native geometry share silent and retryable", async () => {

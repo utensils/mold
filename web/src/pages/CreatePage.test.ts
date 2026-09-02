@@ -5148,8 +5148,12 @@ describe("CreatePage 3-D mesh prints", () => {
     form.state.value.modelFamily = meshModel.family;
     await nextTick();
     const canvas = wrapper.getComponent({ name: "ResultCanvas" });
-    expect(canvas.props("promptIgnored")).toBe(true);
-    expect(canvas.props("promptOptional")).toBe(true);
+    // The page resolves the sentence through studio's `promptGuidance` and
+    // hands it down: the prompt-ignored wording, not the optional one.
+    expect(canvas.props("emptyGuidance")).toContain("reads no prompt");
+    expect(canvas.props("emptyGuidance")).not.toContain(
+      "animates what it sees",
+    );
   });
 
   it("keeps the zero canvas when a source image is attached", async () => {
@@ -5351,8 +5355,7 @@ function pageStubs() {
         "stage",
         "resultSrc",
         "resultMeshSrc",
-        "promptOptional",
-        "promptIgnored",
+        "emptyGuidance",
       ],
       template:
         '<div data-test="result-canvas" :data-count="(variations||[]).length" :data-caption="resultCaption" :data-preview-src="previewSrc" :data-stage="stage"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',

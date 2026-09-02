@@ -1,6 +1,7 @@
 import { ApiError, apiFetch, apiFetchTo, currentTarget, type ApiTarget } from "../api/client";
 import type { GalleryImage } from "../api/types";
 import { inTauri, ipc } from "../ipc";
+import { GLB_MIME_TYPE } from "@studio/lib/meshExport";
 import { thumbnailRenditionQuery } from "@studio/lib/thumbnailPersistentCache";
 
 /**
@@ -271,7 +272,7 @@ const MEDIA_MIME_BY_EXTENSION: Record<string, string> = {
   mp4: "video/mp4",
   webm: "video/webm",
   wav: "audio/wav",
-  glb: "model/gltf-binary",
+  glb: GLB_MIME_TYPE,
   obj: "model/obj",
 };
 

@@ -16,7 +16,12 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { GlbParseError, parseGlb, type ParsedMesh } from "../lib/glb";
-import { advanceAutoRotate, edgeIndices } from "../lib/meshViewerMath";
+import { meshStatsLabel } from "../lib/meshControls";
+import {
+  advanceAutoRotate,
+  edgeIndices,
+  meshHasEdges,
+} from "../lib/meshViewerMath";
 
 const props = defineProps<{
   /** GLB URL the caller has already authorized (media-token URLs included). */
@@ -31,9 +36,16 @@ const props = defineProps<{
   expandable?: boolean;
 }>();
 
+/** What the caption and the `ready` event report about the loaded mesh. */
+type MeshStats = {
+  vertexCount: number;
+  triangleCount: number;
+  bounds: ParsedMesh["bounds"];
+};
+
 const emit = defineEmits<{
   /** The mesh is on the GPU and the first frame has been drawn. */
-  ready: [stats: { vertexCount: number; triangleCount: number }];
+  ready: [stats: MeshStats];
   /** Rendering is impossible; the poster is showing instead. */
   fail: [message: string];
 }>();
@@ -42,11 +54,14 @@ type Status = "loading" | "ready" | "failed";
 
 const status = ref<Status>("loading");
 const note = ref("");
-const stats = ref<{ vertexCount: number; triangleCount: number } | null>(null);
+const stats = ref<MeshStats | null>(null);
 const canvas = ref<HTMLCanvasElement | null>(null);
 const root = ref<HTMLElement | null>(null);
 /** The edge overlay is a view option, not a property of the file. */
 const wireframe = ref(false);
+/** False for a mesh whose every triangle is degenerate: nothing to outline. */
+const hasEdges = ref(true);
+const WIREFRAME_UNAVAILABLE = "This mesh has no edges to outline.";
 /** True only while the mesh is actually turning on its own. */
 const autoRotating = ref(false);
 const fullscreen = ref(false);
@@ -58,11 +73,11 @@ const label = computed(() => {
   if (!autoRotating.value) return base;
   return `${base} It is rotating on its own until you interact with it.`;
 });
+// The one `tris · verts · bounds` caption every surface writes under a mesh.
 const summary = computed(() => {
   const value = stats.value;
   if (!value) return "";
-  const format = (n: number) => n.toLocaleString("en-US");
-  return `${format(value.triangleCount)} triangles · ${format(value.vertexCount)} vertices`;
+  return meshStatsLabel(value.vertexCount, value.triangleCount, value.bounds);
 });
 
 // ── Matrices (column-major, the order WebGL uniforms want) ─────────────────
@@ -360,6 +375,7 @@ function ensureEdges(): boolean {
 }
 
 function toggleWireframe(): void {
+  if (!hasEdges.value) return;
   if (wireframe.value) {
     wireframe.value = false;
   } else {
@@ -493,14 +509,35 @@ async function upload(mesh: ParsedMesh): Promise<void> {
     return;
   }
   gl.useProgram(program);
+  // Nothing below has reached `scene` yet, so `releaseGl` cannot see it: every
+  // exit before the assignment hands the program and buffers back here.
+  const abandon = (): void => {
+    for (const buffer of buffers) gl.deleteBuffer(buffer);
+    gl.deleteProgram(program);
+  };
 
-  attribute(gl, program, "aPosition", mesh.positions, 3, [0, 0, 0], buffers);
-  attribute(gl, program, "aNormal", mesh.normals, 3, [0, 0, 1], buffers);
-  attribute(gl, program, "aColor", mesh.colors, 3, [0.82, 0.82, 0.86], buffers);
-  attribute(gl, program, "aUv", mesh.uvs, 2, [0, 0], buffers);
+  try {
+    attribute(gl, program, "aPosition", mesh.positions, 3, [0, 0, 0], buffers);
+    attribute(gl, program, "aNormal", mesh.normals, 3, [0, 0, 1], buffers);
+    attribute(
+      gl,
+      program,
+      "aColor",
+      mesh.colors,
+      3,
+      [0.82, 0.82, 0.86],
+      buffers,
+    );
+    attribute(gl, program, "aUv", mesh.uvs, 2, [0, 0], buffers);
+  } catch (error) {
+    abandon();
+    fail(errorNote(error));
+    return;
+  }
 
   const indexBuffer = gl.createBuffer();
   if (!indexBuffer) {
+    abandon();
     fail("The GPU refused the mesh's index buffer.");
     return;
   }
@@ -526,8 +563,7 @@ async function upload(mesh: ParsedMesh): Promise<void> {
   // between the fetch and here must not upload into a dead context.
   if (controller?.signal.aborted) {
     bitmap?.close();
-    for (const buffer of buffers) gl.deleteBuffer(buffer);
-    gl.deleteProgram(program);
+    abandon();
     return;
   }
   if (bitmap) {
@@ -589,9 +625,11 @@ async function upload(mesh: ParsedMesh): Promise<void> {
     radius,
     uniforms,
   };
+  hasEdges.value = meshHasEdges(mesh.indices);
   stats.value = {
     vertexCount: mesh.vertexCount,
     triangleCount: mesh.triangleCount,
+    bounds: mesh.bounds,
   };
   status.value = "ready";
   note.value = "";
@@ -615,15 +653,27 @@ let interacted = false;
 /** A stalled tab hands back a huge delta; a jump is worse than a dropped frame. */
 const MAX_AUTO_STEP_MS = 100;
 
-function prefersReducedMotion(): boolean {
+function reducedMotionQuery(): MediaQueryList | null {
   // Absent in tests and in older WebViews: no query is not a preference.
   const query = typeof window !== "undefined" ? window.matchMedia : undefined;
-  if (typeof query !== "function") return false;
+  if (typeof query !== "function") return null;
   try {
-    return query.call(window, "(prefers-reduced-motion: reduce)").matches;
+    return query.call(window, "(prefers-reduced-motion: reduce)");
   } catch {
-    return false;
+    return null;
   }
+}
+
+function prefersReducedMotion(): boolean {
+  return reducedMotionQuery()?.matches === true;
+}
+
+/** Live for the mount: the tour parks or resumes as the OS setting changes. */
+let motionQuery: MediaQueryList | null = null;
+
+function onReducedMotionChange(event: { matches: boolean }): void {
+  if (event.matches) stopAutoRotate();
+  else startAutoRotate();
 }
 
 function stepAutoRotate(stamp: number): void {
@@ -776,6 +826,8 @@ onMounted(() => {
   document.addEventListener("visibilitychange", onPageVisibility);
   document.addEventListener("fullscreenchange", onFullscreenChange);
   window.addEventListener("resize", onWindowResize);
+  motionQuery = reducedMotionQuery();
+  motionQuery?.addEventListener?.("change", onReducedMotionChange);
   pageVisible = !document.hidden;
   void load();
 });
@@ -790,6 +842,8 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", onPageVisibility);
   document.removeEventListener("fullscreenchange", onFullscreenChange);
   window.removeEventListener("resize", onWindowResize);
+  motionQuery?.removeEventListener?.("change", onReducedMotionChange);
+  motionQuery = null;
   releaseGl();
   pointers.clear();
 });
@@ -970,6 +1024,8 @@ function onKeydown(event: KeyboardEvent): void {
           class="mesh-viewer__button"
           data-test="mesh-viewer-wireframe"
           :aria-pressed="wireframe ? 'true' : 'false'"
+          :disabled="!hasEdges"
+          :title="hasEdges ? undefined : WIREFRAME_UNAVAILABLE"
           @click="toggleWireframe"
         >
           Wireframe

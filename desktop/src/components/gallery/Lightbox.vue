@@ -265,8 +265,10 @@ const strengthCaption = computed(() => {
   return strengthSemanticsForModel(model, family).label;
 });
 const upscaled = computed(() => isUpscaledImage(props.item));
+// `POST /api/gallery/export/:filename` reads the LIVE gallery only; a trashed
+// print's bytes sit under `.trash`, where the route cannot see them.
 const canExportVideo = computed(
-  () => props.video && props.item.filename.toLowerCase().endsWith(".mp4"),
+  () => props.video && !fromTrash.value && props.item.filename.toLowerCase().endsWith(".mp4"),
 );
 
 /** Full LoRA stack; a legacy single `lora`/`lora_scale` pair becomes one row. */
@@ -407,12 +409,17 @@ async function saveMedia() {
 // The holding host is the authority on what it can transcode a stored GLB
 // into. Direct containers get one entry each; animated turntables share the
 // export sheet's playback options, so they collapse into one entry that opens
-// it with just those containers.
+// it with just those containers. The server lists the stored container
+// (`glb`) first so a CLI can name it; Save already hands over that exact
+// file, so it is not an export here. A trashed print is under `.trash`,
+// which the export route cannot read, so nothing is offered for it.
 const meshFileExports = computed(() =>
-  props.mesh ? meshFileExportFormats(props.meshExportFormats) : [],
+  props.mesh && !fromTrash.value
+    ? meshFileExportFormats(props.meshExportFormats).filter((format) => format !== "glb")
+    : [],
 );
 const meshAnimationExports = computed(() =>
-  props.mesh ? meshAnimationExportFormats(props.meshExportFormats) : [],
+  props.mesh && !fromTrash.value ? meshAnimationExportFormats(props.meshExportFormats) : [],
 );
 
 async function exportMesh(format: string) {
@@ -876,7 +883,7 @@ async function performVideoExport(options: VideoExportOptions) {
             type="button"
             data-test="lightbox-use-source"
             class="border-ce h-10 flex-1 rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
-            :disabled="audio"
+            :disabled="audio || mesh"
             @click="emit('useSource')"
           >
             Use as source

@@ -12,6 +12,11 @@ describe("mesh export menu", () => {
     expect(meshAnimationExportFormats(advertised)).toEqual(["gif", "apng", "webp"]);
   });
 
+  it("never offers the stored glb as an export", () => {
+    expect(meshFileExportFormats(["glb", "obj"])).toEqual(["obj"]);
+    expect(meshAnimationExportFormats(["glb", "gif"])).toEqual(["gif"]);
+  });
+
   it("keeps a container this client has never heard of as a direct transcode", () => {
     expect(meshFileExportFormats(["obj", "usdz"])).toEqual(["obj", "usdz"]);
   });

@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { hunyuan3dRecipe } from "@studio/lib/generationProfile.testFixtures";
 import { newGenerateForm } from "./generateForm";
 import {
   identityConditioningValidationError,
   inlineGenerationMediaBytes,
+  meshTargetFacesError,
+  meshTargetFacesValidationError,
   sourceConditioningValidationError,
   resolutionValidationWarning,
   resolutionValidationError,
@@ -133,6 +136,101 @@ describe("sourceConditioningValidationError — a continuation carries source fr
     const form = wanContinuation();
     form.family = "ltx-video";
     expect(sourceConditioningValidationError(form)).toMatch(/image-to-video only/);
+  });
+});
+
+/**
+ * A canvasless recipe (a 3-D mesh) reconstructs its source image; it is not
+ * an image-to-VIDEO checkpoint, and a fresh Hunyuan3D form's first blocker
+ * must not say it is. The snapshot is the authority; the family name is the
+ * fallback for a form restored before the profile landed.
+ */
+describe("sourceConditioningValidationError — a canvasless mesh recipe", () => {
+  function meshForm() {
+    const form = newGenerateForm();
+    form.family = "hunyuan3d";
+    form.model = "hunyuan3d-mini-turbo:fp16";
+    form.sourceImageCapability = "required";
+    form.recipeCapabilities = {
+      outputFormats: ["glb"],
+      defaultOutputFormat: "glb",
+      promptMode: "ignored",
+      supportsStrength: false,
+      canvasless: true,
+      mesh: null,
+    };
+    return form;
+  }
+
+  it("names the source image the model reconstructs, never a first frame", () => {
+    const error = sourceConditioningValidationError(meshForm());
+    expect(error).toBe("This model reconstructs a source image; attach one to generate.");
+  });
+
+  it("falls back to the family when no snapshot has landed yet", () => {
+    const form = meshForm();
+    form.recipeCapabilities = null;
+    expect(sourceConditioningValidationError(form)).toMatch(/reconstructs a source image/);
+  });
+
+  it("clears once a source image is attached", () => {
+    const form = meshForm();
+    form.sourceImage = "c291cmNl";
+    expect(sourceConditioningValidationError(form)).toBeNull();
+  });
+
+  it("leaves the image-to-video wording to video checkpoints", () => {
+    const form = newGenerateForm();
+    form.family = "wan";
+    form.model = "wan22-i2v-a14b:q8";
+    form.sourceImageCapability = "required";
+    expect(sourceConditioningValidationError(form)).toMatch(/image-to-video only/);
+  });
+});
+
+/**
+ * Target faces is optional, but a typed budget outside the recipe's advertised
+ * bounds is a 422 at admission. Name it inline, in the server's terms, the way
+ * `integerControlError` names Steps — never snap it silently.
+ */
+describe("meshTargetFacesError", () => {
+  // The advertised block exactly as a host sends it: faces 100–2,000,000.
+  const mesh = hunyuan3dRecipe().capabilities.mesh!;
+
+  it("accepts blank (the raw surface) and any whole number within the bounds", () => {
+    expect(meshTargetFacesError(null, mesh)).toBeNull();
+    expect(meshTargetFacesError(100, mesh)).toBeNull();
+    expect(meshTargetFacesError(50_000, mesh)).toBeNull();
+    expect(meshTargetFacesError(2_000_000, mesh)).toBeNull();
+  });
+
+  it("names the advertised bounds for a budget outside them", () => {
+    expect(meshTargetFacesError(10, mesh)).toBe(
+      "Target faces must be a whole number from 100 to 2000000.",
+    );
+    expect(meshTargetFacesError(9_000_000, mesh)).toMatch(/from 100 to 2000000/);
+    expect(meshTargetFacesError(150.5, mesh)).toMatch(/whole number/);
+  });
+
+  it("says nothing on a recipe with no mesh block", () => {
+    expect(meshTargetFacesError(10, null)).toBeNull();
+  });
+
+  it("reads the live form's snapshot and controls", () => {
+    const form = newGenerateForm();
+    form.mesh.targetFaces = 10;
+    expect(meshTargetFacesValidationError(form)).toBeNull();
+    form.recipeCapabilities = {
+      outputFormats: ["glb"],
+      defaultOutputFormat: "glb",
+      promptMode: "ignored",
+      supportsStrength: false,
+      canvasless: true,
+      mesh,
+    };
+    expect(meshTargetFacesValidationError(form)).toMatch(/from 100 to 2000000/);
+    form.mesh.targetFaces = null;
+    expect(meshTargetFacesValidationError(form)).toBeNull();
   });
 });
 

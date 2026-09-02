@@ -25,6 +25,7 @@ import {
   sourceFitPolicyForMode,
   type SourceFitMode,
 } from "@studio/lib/sourceFit";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import MobileImagePickerSheet, {
@@ -95,7 +96,10 @@ const strength = computed(() => strengthSemantics(props.form.family));
  * `source_fit` for such a request either, so offering the control would
  * promise a setting the wire drops.
  */
-const canvasless = computed(() => caps.value.canvasless);
+// The family is the legacy fallback for a form restored before the profile
+// landed — the same reading `buildRequest` takes, so the control and the
+// wire cannot disagree about whether a fit policy exists.
+const canvasless = computed(() => caps.value.canvasless || isMeshFamily(props.form.family));
 /** The model's own image-attachment shape — the single shared policy. */
 const plan = computed(() => sourceMediaPlan(caps.value));
 const isAttachmentMode = computed(() => plan.value.kind === "attachments");

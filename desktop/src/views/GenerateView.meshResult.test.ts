@@ -79,6 +79,14 @@ const profiledMeshModel: ModelEntry = {
   },
 } as unknown as ModelEntry;
 
+/**
+ * A REAL PNG header (signature + IHDR 1170 × 2532, base64), so the
+ * source-resolution watcher actually decodes it and reaches the canvas write
+ * it must not make. An arbitrary string decodes to nothing and lets the
+ * watcher return early, which is how the canvas guard used to pass vacuously.
+ */
+const PNG_1170x2532 = "iVBORw0KGgoAAAANSUhEUgAABJIAAAnk";
+
 function meshCompletion(overrides: Partial<CompleteEvent> = {}): CompleteEvent {
   return {
     image: "R0xURg==",
@@ -215,7 +223,9 @@ describe("GenerateView — mesh results", () => {
       entries.find((entry) => !("separator" in entry) && entry.label === label);
     expect(labelled("Copy image")).toMatchObject({ disabled: true });
     expect(labelled("Use as source")).toMatchObject({ disabled: true });
-    expect(labelled("Save image")).toMatchObject({ disabled: false });
+    // The save entry names what it saves: binary glTF, not an image.
+    expect(labelled("Save mesh")).toMatchObject({ disabled: false });
+    expect(labelled("Save image")).toBeUndefined();
   });
 
   it("releases the object URL when the canvas moves on", async () => {
@@ -237,11 +247,18 @@ describe("GenerateView — mesh results", () => {
     form.model = profiledMeshModel.name;
     form.family = "hunyuan3d";
     applyModelDefaults(form, profiledMeshModel);
-    form.sourceImage = "c291cmNl";
     form.prompt = "";
     const wrapper = mountView();
     await flushPromises();
+    // A decodable source runs the resolution watcher for real; the canvasless
+    // recipe's zero canvas must survive it, or Generate is blocked on a size
+    // the request never reads.
+    form.sourceImage = PNG_1170x2532;
+    form.sourceImageName = "armchair.png";
+    await flushPromises();
+    expect(form.sourceImageWidth).toBe(1170);
     expect(form.width).toBe(0);
+    expect(form.height).toBe(0);
     const composer = wrapper.findComponent({ name: "ComposerCard" });
     expect(composer.props("disabledReason")).toBeNull();
     expect(composer.props("disabled")).toBe(false);
@@ -263,7 +280,7 @@ describe("GenerateView — mesh results", () => {
     form.model = profiledMeshModel.name;
     form.family = "hunyuan3d";
     applyModelDefaults(form, profiledMeshModel);
-    form.sourceImage = "c291cmNl";
+    form.sourceImage = PNG_1170x2532;
     form.sourceImageName = "armchair.png";
     form.prompt = "";
     await flushPromises();
@@ -272,7 +289,11 @@ describe("GenerateView — mesh results", () => {
     await flushPromises();
     expect(applySourceFitPreprocess).not.toHaveBeenCalled();
     expect(submitBatch).toHaveBeenCalledTimes(1);
-    expect(submitBatch.mock.calls[0]![0].source_image).toBe("c291cmNl");
+    expect(submitBatch.mock.calls[0]![0]).toMatchObject({
+      source_image: PNG_1170x2532,
+      width: 0,
+      height: 0,
+    });
   });
 
   it("leaves a raster print on the ordinary still arm", async () => {

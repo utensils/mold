@@ -201,18 +201,25 @@ now — not only the CLI, TUI, and Discord.
    advertised bounds — leave it blank to keep the raw surface. The request
    sent to the server carries only the values that differ from the
    advertised defaults.
-4. **Generate.** The result renders in the same WebGL2 viewer the Library
+4. **Generate.** The result renders in the same WebGL viewer the Library
    uses, right in the Create result area: it auto-rotates until you touch
-   it, honours `prefers-reduced-motion`, and has fullscreen and wireframe
-   toggles, captioned `tris · verts · bounds`.
-5. **Find it again in the Library** through the 3D chip in the kind filter
-   (alongside Images, Video, and Audio) or the 3D badge on the tile itself.
+   it, honours `prefers-reduced-motion` (and parks or resumes the moment
+   that setting changes), and has fullscreen and wireframe toggles,
+   captioned `tris · verts · bounds`. Auto-rotate and fullscreen belong to
+   the Create result area only — the Lightbox and the viewer sheets open
+   the mesh still and framed — and fullscreen is unavailable inside the iOS
+   WKWebView, where the button never appears. The wireframe toggle is
+   disabled, with a reason, for a mesh with no edges to outline.
+5. **Find it again in the Library** through the 3D badge on the tile, or on
+   web and desktop through the 3D chip in the kind filter (alongside Images,
+   Video, and Audio); the iPhone Library has the badge only.
    Reuse settings restores the octree, threshold, and target faces recorded
    on the print rather than a form's leftovers, and **Use as source** is
    refused for a mesh — there is no raster to stage as conditioning.
 6. **Export** from the lightbox (web/desktop) or the viewer sheet (iPhone).
    An **Export as…** entry offers whatever the host advertises on
-   `capabilities.mesh.export_formats`: OBJ, STL and PLY are the one-click
+   `capabilities.mesh.export_formats` — never the stored GLB itself, which
+   Download already covers: OBJ, STL and PLY are the one-click
    transcodes described in [Export as OBJ, STL or PLY](#export-as-obj-stl-or-ply)
    above, and **Export turntable…** opens the video export's options sheet
    for the animated GIF, APNG or WebP described in

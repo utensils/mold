@@ -166,6 +166,22 @@ describe("useGenerateForm mesh recipes", () => {
     expect(form.toRequest(model).output_format).toBe("glb");
   });
 
+  // A draft persisted before the canvasless rule (hydration reapplies no
+  // defaults) still holds the raster canvas it was saved with. The request
+  // is built from the recipe, not the leftovers, so the user never ships a
+  // 1024×1024 they cannot see or fix.
+  it("sends a canvasless request at 0×0 even when a stale draft holds a canvas", () => {
+    const form = useGenerateForm();
+    const model = meshModel();
+    form.state.value.model = model.name;
+    form.state.value.modelFamily = model.family;
+    form.state.value.width = 1024;
+    form.state.value.height = 1024;
+    const request = form.toRequest(model);
+    expect(request.width).toBe(0);
+    expect(request.height).toBe(0);
+  });
+
   it("restores the mesh controls and the glb format from a mesh print", () => {
     const form = useGenerateForm();
     const next = applyMetadataToForm(

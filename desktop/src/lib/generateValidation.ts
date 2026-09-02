@@ -9,6 +9,7 @@ import {
 } from "@studio/lib/resolutions";
 import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
 import { identityValidationError } from "@studio/lib/identityConditioning";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isMinimaxH3Family } from "@studio/lib/minimaxH3Authoring";
 import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { submitsExtend } from "@studio/lib/extend";
@@ -20,6 +21,7 @@ import {
   generationRecipeSelectionError,
   integerControlError,
   resolutionProfileFinding,
+  type MeshCapabilitiesProfile,
 } from "@studio/lib/generationProfile";
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
@@ -29,6 +31,36 @@ export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 export const MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES = 45 * 1024 * 1024;
 export const MOBILE_MEDIA_BUDGET_ERROR =
   "Combined generation media must be 45 MiB or smaller on this phone.";
+/** The first blocker on a fresh 3-D form: the model has nothing to reconstruct. */
+export const MESH_SOURCE_IMAGE_REQUIRED_ERROR =
+  "This model reconstructs a source image; attach one to generate.";
+
+/**
+ * Why a typed Target faces budget would be refused, or `null`. Blank is the
+ * raw surface and always valid; a value is held to the recipe's advertised
+ * `target_faces_min`/`max` — the same block admission validates against — and
+ * named inline the way {@link integerControlError} names Steps, never snapped
+ * behind the user's back. No mesh block means the control is not shown.
+ */
+export function meshTargetFacesError(
+  targetFaces: number | null | undefined,
+  mesh: MeshCapabilitiesProfile | null | undefined,
+): string | null {
+  if (targetFaces == null || !mesh) return null;
+  if (
+    !Number.isInteger(targetFaces) ||
+    targetFaces < mesh.target_faces_min ||
+    targetFaces > mesh.target_faces_max
+  ) {
+    return `Target faces must be a whole number from ${mesh.target_faces_min} to ${mesh.target_faces_max}.`;
+  }
+  return null;
+}
+
+/** {@link meshTargetFacesError} over the live form's own recipe snapshot. */
+export function meshTargetFacesValidationError(form: GenerateForm): string | null {
+  return meshTargetFacesError(form.mesh?.targetFaces, form.recipeCapabilities?.mesh);
+}
 
 export type InlineGenerationMediaField =
   | "sourceImage"
@@ -273,6 +305,15 @@ export function sourceConditioningValidationError(
     (caps.sourceImageMode === "single"
       ? Boolean(form.sourceImage)
       : form.imageAttachments.length > 0);
+  // A canvasless recipe (a 3-D mesh) reconstructs its source image. It is not
+  // an image-to-VIDEO checkpoint, so the shared first-frame wording would
+  // misname the very thing the user has to attach. The snapshot is the
+  // authority; the family is the fallback for a form restored before it
+  // landed — the same reading `buildRequest` takes.
+  const canvasless = form.recipeCapabilities?.canvasless ?? isMeshFamily(form.family);
+  if (canvasless && caps.sourceImageCapability === "required" && !hasSourceImage) {
+    return MESH_SOURCE_IMAGE_REQUIRED_ERROR;
+  }
   return sourceImageValidationError({
     capability: caps.sourceImageCapability,
     hasSourceImage,

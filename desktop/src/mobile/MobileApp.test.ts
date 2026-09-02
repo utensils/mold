@@ -172,6 +172,13 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 installMemoryLocalStorage();
 
 const target = { baseUrl: "http://studio.tailnet.ts.net:7680", apiKey: "secret" };
+/**
+ * A REAL PNG header (signature + IHDR 1170 × 2532, base64): the
+ * source-resolution watcher decodes it and reaches the canvas write a
+ * canvasless recipe must survive. An arbitrary string decodes to nothing and
+ * lets that watcher return early.
+ */
+const PNG_1170x2532 = "iVBORw0KGgoAAAANSUhEUgAABJIAAAnk";
 const status: ServerStatus = {
   version: "0.18.0",
   models_loaded: [],
@@ -6413,9 +6420,14 @@ describe("MobileApp generation queue", () => {
     expect(liveForm.outputFormat).toBe("glb");
     // Canvasless: the recipe's own zero canvas, never a malformed size.
     expect(liveForm.width).toBe(0);
-    liveForm.sourceImage = btoa("armchair");
+    // A REAL PNG header, so the source-resolution watcher decodes it and
+    // reaches the canvas write it must not make on a canvasless recipe.
+    liveForm.sourceImage = PNG_1170x2532;
     liveForm.sourceImageName = "armchair.png";
     await flushPromises();
+    expect(liveForm.sourceImageWidth).toBe(1170);
+    expect(liveForm.width).toBe(0);
+    expect(liveForm.height).toBe(0);
 
     // The prompt is IGNORED by this family, so Develop is live without one.
     const develop = wrapper.get("[data-test='mobile-develop-button']");
@@ -6439,6 +6451,114 @@ describe("MobileApp generation queue", () => {
     expect(admittedRequests()[0]!.source_fit).toBeUndefined();
     // Nothing was fitted toward the zero canvas on the way out.
     expect(applySourceFitPreprocess).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A face budget outside the advertised bounds is a 422 at admission. The
+   * phone holds Develop with the bounds named, the way it holds a bad steps
+   * value, instead of spending a round trip to learn them.
+   */
+  it("holds Develop while Target faces is outside the recipe's bounds", async () => {
+    serveMeshModel();
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = PNG_1170x2532;
+    liveForm.sourceImageName = "armchair.png";
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
+    ).toBeUndefined();
+
+    liveForm.mesh.targetFaces = 10;
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+    expect(wrapper.get("[data-test='mobile-develop-blocker']").text()).toContain(
+      "Target faces must be a whole number from 100 to 2000000.",
+    );
+
+    liveForm.mesh.targetFaces = 50_000;
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  /**
+   * A mesh print's recorded `width`/`height` describe its 512 px POSTER, not
+   * a canvas. `applyMetadataToForm` zeroes the canvas for the canvasless
+   * recipe; the source-restore step that follows must not write the poster
+   * size back over it.
+   */
+  it("keeps the zero canvas when Use as prompt restores a mesh print's source", async () => {
+    const meshPrint: GalleryImage = {
+      ...print,
+      filename: "armchair.glb",
+      format: "glb",
+      metadata: {
+        prompt: "",
+        model: meshModel.name,
+        seed: 7,
+        steps: 5,
+        guidance: 5,
+        width: 512,
+        height: 512,
+        output_format: "glb",
+        source_image_name: "armchair.png",
+        source_image_sha256: "b".repeat(64),
+        mesh: { octree_resolution: 320, threshold: 0.55, target_faces: 40_000 },
+      },
+    };
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([meshModel]);
+      if (path === "/api/gallery") return Promise.resolve([meshPrint]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          ...durableQueueCapabilities,
+          mesh: {
+            generation: true,
+            formats: ["glb"],
+            export_formats: ["glb", "obj", "stl", "ply", "gif", "apng", "webp"],
+            textures: false,
+          },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return durableApiFallback(path, init, callTarget);
+    });
+    restoreGenerationSourceMedia.mockResolvedValue({
+      kind: "upload",
+      filename: "armchair.png",
+      base64: PNG_1170x2532,
+      width: 1170,
+      height: 2532,
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='gallery-viewer']").exists()).toBe(false),
+    );
+    await flushPromises();
+
+    expect(restoreGenerationSourceMedia).toHaveBeenCalledWith("b".repeat(64));
+    expect(liveForm.model).toBe(meshModel.name);
+    expect(liveForm.sourceImage).toBe(PNG_1170x2532);
+    expect(liveForm.sourceImageWidth).toBe(1170);
+    expect(liveForm.mesh).toEqual({ octreeResolution: 320, threshold: 0.55, targetFaces: 40_000 });
+    expect(liveForm.outputFormat).toBe("glb");
+    expect(liveForm.width).toBe(0);
+    expect(liveForm.height).toBe(0);
   });
 
   /**

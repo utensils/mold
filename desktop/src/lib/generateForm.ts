@@ -1699,5 +1699,17 @@ export function applyPrefillToForm(
   form.guidance = prefill.guidance;
   form.upscaleModel = prefill.upscaleModel ?? "";
   const m = findInstalledModel(models, prefill.model);
-  if (m) form.family = m.family;
+  if (m) {
+    // The named model's ADVERTISED recipe answers for the format, the canvas
+    // and the mesh controls. Copying only `family` left the previous model's
+    // snapshot behind, so a ⌘K "Generate with sdxl" after Hunyuan3D still
+    // pinned `glb` onto the raster request.
+    reconcileModelCapabilities(form, m);
+  } else {
+    // Nothing installed can answer for this model: a stale snapshot must not
+    // speak for it (the same reading `applyMetadataToForm` takes).
+    form.family = "";
+    form.recipeCapabilities = null;
+    form.mesh = emptyMeshForm();
+  }
 }

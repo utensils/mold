@@ -152,7 +152,9 @@ import {
   loraBindingMatchesRoute,
   loraHostBinding,
   normalizeLegacyNegativeSnapshot,
+  reconcileModelCapabilities,
 } from "../lib/generateForm";
+import { emptyMeshForm } from "@studio/lib/meshControls";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import { videoFramesError } from "@studio/lib/videoDuration";
 import {
@@ -161,6 +163,7 @@ import {
   cameraControlValidationError,
   fpsValidationError,
   identityConditioningValidationError,
+  meshTargetFacesValidationError,
   profileGuidanceValidationError,
   profileStepsValidationError,
   resolutionValidationError,
@@ -949,8 +952,9 @@ const formValidationError = computed(
   () =>
     // A canvasless recipe (a 3-D mesh) renders at 0 × 0 by contract, so the
     // whole-number canvas check would block every mesh submit on the exact
-    // size the recipe itself advertises.
-    (caps.value.canvasless
+    // size the recipe itself advertises. Read from the form's own snapshot,
+    // the same authority `buildRequest` submits under.
+    ((form.recipeCapabilities?.canvasless ?? isMeshFamily(form.family))
       ? null
       : resolutionValidationError(
           form.width,
@@ -964,6 +968,7 @@ const formValidationError = computed(
       selectedEntry.value,
       form.pipeline,
     ) ??
+    meshTargetFacesValidationError(form) ??
     (caps.value.supportsVideo
       ? videoFramesError(form.frames, selectedEntry.value ?? { family: form.family })
       : null) ??
@@ -1277,7 +1282,12 @@ function applyDecodedSourceResolution(
       if (preserveReplacement) canvasIntent.value = "manual";
       else if (canvasIntent.value !== "source-exact") canvasIntent.value = "source";
     }
-    if (nextResolution) {
+    // A canvasless recipe (a 3-D mesh) renders no pixel canvas: its zero
+    // canvas is the recipe's own answer, and a source's size is not a
+    // resolution to fit it to. The snapshot is the authority; the family is
+    // the fallback for a form restored before it landed (as `buildRequest`).
+    const canvasless = form.recipeCapabilities?.canvasless ?? isMeshFamily(form.family);
+    if (nextResolution && !canvasless) {
       form.width = nextResolution.width;
       form.height = nextResolution.height;
     }
@@ -2333,7 +2343,19 @@ async function loadTemplate(template: GenerationTemplate) {
   keepingPrintIdentity(form, () =>
     Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value)),
   );
-  if (form.model && !findInstalledModel(installedModels.value, form.model)) {
+  // A template is PARAMETERS, not a capability snapshot. One saved before the
+  // snapshot existed (or on another host) carries none, and applying it over
+  // a Hunyuan3D form left the mesh recipe's `glb` pin and zero canvas in
+  // place. The installed model's advertised recipe is the authority; nothing
+  // installed means nothing may answer for it.
+  const templateModel = form.model ? findInstalledModel(installedModels.value, form.model) : null;
+  if (templateModel) {
+    reconcileModelCapabilities(form, templateModel);
+  } else {
+    form.recipeCapabilities = null;
+    form.mesh = emptyMeshForm();
+  }
+  if (form.model && !templateModel) {
     toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
   }
   if (hydrated.missingMediaReferences.length > 0) {
@@ -2450,7 +2472,7 @@ function canvasMenu(): MenuEntry[] {
       },
     },
     {
-      label: "Save image",
+      label: isMeshResult(j) ? "Save mesh" : "Save image",
       disabled: !j.result || !!j.result.video_frames || isAudioResult(j) || !j.result.image,
       action: () => {
         if (!j.result?.image) return;

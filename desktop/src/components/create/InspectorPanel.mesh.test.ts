@@ -175,4 +175,26 @@ describe("InspectorPanel — Mesh group", () => {
     await faces.setValue("");
     expect(form.mesh.targetFaces).toBeNull();
   });
+
+  // A budget outside the advertised bounds is a 422 at admission; the
+  // inspector names the bounds inline (as it does for Steps) instead of
+  // letting Generate learn it from the host.
+  it("names the advertised bounds beside a Target faces value outside them", async () => {
+    const { form, wrapper } = mountFor(meshModel());
+    await flushPromises();
+    const faces = wrapper.get("[data-test='mesh-target-faces']");
+    expect(wrapper.find("[data-test='mesh-target-faces-error']").exists()).toBe(false);
+
+    await faces.setValue("10");
+    // The typed value stands — it is not snapped behind the user's back.
+    expect(form.mesh.targetFaces).toBe(10);
+    expect(wrapper.get("[data-test='mesh-target-faces-error']").text()).toBe(
+      "Target faces must be a whole number from 100 to 2000000.",
+    );
+    expect(faces.attributes("aria-invalid")).toBe("true");
+
+    await faces.setValue("50000");
+    expect(wrapper.find("[data-test='mesh-target-faces-error']").exists()).toBe(false);
+    expect(faces.attributes("aria-invalid")).toBeUndefined();
+  });
 });

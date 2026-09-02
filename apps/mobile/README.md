@@ -182,7 +182,10 @@ pushed screen opened from the header.
   only the mesh controls that differ from the advertised defaults; **Use as
   prompt** restores the recorded octree/threshold/face target from the
   print's `metadata.mesh`. A finished mesh mounts the same orbitable
-  `MeshViewer` the Library uses directly in the Create result area.
+  `MeshViewer` the Library uses directly in the Create result area, where it
+  auto-rotates until touched (the Library viewer sheet does not); the viewer's
+  fullscreen toggle is unavailable in iOS WKWebView, which exposes no
+  Fullscreen API to the page.
   **Continue a video** appears only when the selected model advertises additive
   `supports_extend`, so a host that predates continuation shows nothing rather
   than offering a request it would reject. The attached clip counts toward the
@@ -206,24 +209,26 @@ pushed screen opened from the header.
   audio-only prints (LTX-2 text-to-audio) as a waveform tile above a native
   transport, renders Hunyuan3D meshes in an orbitable WebGL viewer over the
   saved poster (`@studio/components/MeshViewer.vue`, shared with desktop and
-  web — auto-rotate until touched, `prefers-reduced-motion` honoured,
-  fullscreen and wireframe toggles, captioned `tris · verts · bounds`), swipes
+  web — `prefers-reduced-motion` honoured, wireframe toggle; auto-rotate and
+  fullscreen belong to the Create result area, not this viewer sheet), swipes
   horizontally between prints, explicitly copies or saves full-resolution
   stills through UIKit, saves original videos to Photos through a streaming
   native download, restores recorded prompt settings, and can use a still
   as the next source or Qwen edit target — **Use as source** is refused for a
   mesh, since there is no raster to stage as conditioning. The mesh viewer
-  offers **Export as…** OBJ, STL, PLY, or GLB from the host's advertised
+  offers **Export as…** OBJ, STL, or PLY from the host's advertised
   `capabilities.mesh.export_formats` (the same transcodes `mold library
-export` and the `export_mesh` MCP tool perform). Geometry takes the same
+  export` and the `export_mesh` MCP tool perform); the stored GLB is not
+  listed as an export, because Download already hands over that exact file.
+  Geometry takes the same
   native route a turntable does: the shell runs the export itself, checks the
   bytes against the container the filename claims, and opens the system share
   sheet, so the file reaches Files, AirDrop, or any app that accepts it —
   a WebView `navigator.share` has no media type for geometry and would fall
   back to an in-app download. Only the mobile UI opened in a plain browser
   downloads. A `.glb` tile carries the
-  same ◈ mesh badge as video and audio prints, and the Library's kind filter
-  gets a 3D entry alongside Images, Video, and Audio. On a print a sequence produced, **Use
+  same ◈ mesh badge as video and audio prints; the iPhone Library has no kind
+  filter, so the badge is how a mesh is told apart. On a print a sequence produced, **Use
   as prompt** reloads that sequence's recorded clips onto the Create clip rail
   as a new draft (raising any clip duration the selected model's motion tail no
   longer allows, and saying so); iPhone is reuse-only — **Edit sequence** stays
