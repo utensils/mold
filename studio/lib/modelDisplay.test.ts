@@ -66,6 +66,16 @@ describe("modelDisplayName", () => {
         name: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
       }),
     ).toBe("MiniMax H3 FL2VA Turbo 4-step 768p");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1",
+      }),
+    ).toBe("MiniMax H3 FL2VA Turbo 4-step 768p v1.1");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p",
+      }),
+    ).toBe("MiniMax H3 FL2VA Turbo 8-step 768p");
   });
 
   it("resolves a wire model id through the model inventory", () => {

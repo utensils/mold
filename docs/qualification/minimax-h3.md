@@ -142,8 +142,11 @@ gate.
 | [Diffusers](https://github.com/huggingface/diffusers/tree/9c6a68c32b3b2a64db91800b624d33cec6e25ab8)                                 | `9c6a68c32b3b2a64db91800b624d33cec6e25ab8` | Full-precision executable numerical oracle                        |
 | [ComfyUI](https://github.com/Comfy-Org/ComfyUI/tree/a464ac33588ae182f81a090d910cfbf21e255b73)                                       | `a464ac33588ae182f81a090d910cfbf21e255b73` | Pruned/quantized deployment implementation                        |
 | [Comfy H3 checkpoint repository](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/eb8a16107c595128b3a578f82d2ce2f75920c355)         | `eb8a16107c595128b3a578f82d2ce2f75920c355` | Pruned/quantized checkpoint schema and file identities            |
+| [Comfy-Org Turbo LoRA adapters](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/dc559027db79c174125df4d827db55cd11178860)          | `dc559027db79c174125df4d827db55cd11178860` | Turbo LoRA adapter identities (three reviewed tags)                |
 | [SGLang](https://github.com/sgl-project/sglang/tree/0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77)                                       | `0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77` | Conditioner/distributed performance reference only                |
 | [vLLM-Omni](https://github.com/vllm-project/vllm-omni/tree/3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc)                                | `3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc` | Loader, offload, and CUDA-kernel reference only                   |
+| [Abiray pruned NVFP4 checkpoints](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741) | `908eccad7e68751190d04c171956f163bfeed741` | Pruned NVFP4 transformer identities (download-only, no runtime arm) |
+| [lightx2v Turbo LoRA adapters](https://huggingface.co/lightx2v/Minimax-h3-Turbo/tree/05ef678438e84933c406131b59abbf86919b3aac)      | `05ef678438e84933c406131b59abbf86919b3aac` | Turbo LoRA adapter identities (v1.1 4-step 768p, v1.0 8-step 768p) |
 
 Only Diffusers' official BF16/FP32 mixed execution is the current numerical
 oracle. Performance references do not become correctness authorities merely

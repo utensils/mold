@@ -434,6 +434,17 @@ describe("MiniMax H3 Studio authority", () => {
     // adapter's property.
     expect(turbo.minFrames).toBe(107);
     expect(turbo.maxFrames).toBe(345);
+
+    // The v1.1 768p 4-step tier is a distinct adapter from the v1.0 tier at
+    // the same step count; its schedule length is still exactly 5.
+    const turboV11 = minimaxH3AuthoringCapabilities({
+      name: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1",
+      family: "minimax-h3",
+    })!;
+    expect(turboV11.minSteps).toBe(5);
+    expect(turboV11.maxSteps).toBe(5);
+    expect(turboV11.minFrames).toBe(107);
+    expect(turboV11.maxFrames).toBe(345);
   });
 
   it("keeps runtime and legal access as independent fail-closed authorities", () => {

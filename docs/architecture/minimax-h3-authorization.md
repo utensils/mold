@@ -14,7 +14,7 @@ like other supported model families. It does not require a per-user
 authorization file, private runtime record, location check, license-acceptance
 dialog, or H3-specific downstream control. Ordinary builds may advertise every
 registered H3 manifest identity — the two compact Comfy FL2VA and Ref2VA
-graphs, the three reviewed Turbo LoRA tags built on them, and the
+graphs, the five reviewed Turbo LoRA tags built on them, and the
 download-only `official-bf16` and `comfy-pruned-nvfp4` tags — download their
 exact revision-pinned files directly from Hugging Face, verify their recorded
 SHA-256 identities, retain them in the user's model store, and expose supported
@@ -84,19 +84,25 @@ configured models root and do not expose or copy that private evidence.
 The current decision permits:
 
 - public listing of every registered H3 manifest identity in Mold's Models
-  surfaces: the two compact Comfy FL2VA and Ref2VA graphs; the three reviewed
+  surfaces: the two compact Comfy FL2VA and Ref2VA graphs; the five reviewed
   Turbo tags built on them (`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`,
-  `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, and
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`,
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`,
+  `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, and
   `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, each the compact stack of
-  its own task plus one pinned adapter from `loras/` at
-  `COMFY_TURBO_LORA_REVISION`, stored once and shared); and the pinned
-  download-only tiers (`minimax-h3-{fl2va,ref2va}:official-bf16` and
-  `:comfy-pruned-nvfp4`), which acquire, verify, inventory, and remove normally
-  but are refused at generation as `MINIMAX_H3_RUNTIME_UNAVAILABLE`;
+  its own task plus one pinned adapter, stored once under
+  `shared/minimax-h3/loras/` and shared, from the adapter's own source: three
+  from `Comfy-Org/MiniMax-H3` `loras/` at `COMFY_TURBO_LORA_REVISION`, and the
+  v1.1 4-step 768p and 8-step 768p adapters from `lightx2v/Minimax-h3-Turbo`
+  at the repository root); and the pinned download-only tiers
+  (`minimax-h3-{fl2va,ref2va}:official-bf16` and `:comfy-pruned-nvfp4`), which
+  acquire, verify, inventory, and remove normally but are refused at
+  generation as `MINIMAX_H3_RUNTIME_UNAVAILABLE`;
 - user-initiated, upstream-direct download of their revision-pinned files from
   `Comfy-Org/MiniMax-H3` and required support files from
-  `MiniMaxAI/MiniMax-H3`, plus the pruned NVFP4 transformers from
-  `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`, with existing SHA-256
+  `MiniMaxAI/MiniMax-H3`, the pruned NVFP4 transformers from
+  `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`, and the two lightx2v Turbo LoRA
+  adapters from `lightx2v/Minimax-h3-Turbo`, with existing SHA-256
   verification and repair flows;
 - no raw repository, arbitrary live-catalog recipe, configured alias, or
   caller-authored manifest may substitute for those registered graphs;
@@ -140,6 +146,7 @@ The current decision does not permit Mold to:
 - [Official implementation, pinned revision](https://github.com/MiniMax-AI/MiniMax-H3/tree/8d8824efaf94586c0cc9ac7ad8d0723d4d6420ea)
 - [Authorization tracking issue](https://github.com/utensils/mold/issues/831)
 - [Third-party pruned NVFP4 transformers, pinned revision](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741)
+- [Third-party Turbo LoRA adapters, pinned revision](https://huggingface.co/lightx2v/Minimax-h3-Turbo/tree/05ef678438e84933c406131b59abbf86919b3aac)
 
 ### The pruned NVFP4 third-party source
 
@@ -190,14 +197,14 @@ not the private correspondence itself.
 | Decision               | All territories, users, Mold surfaces, local/remote/hosted execution, outputs, distribution, and redistribution are authorized; technical support remains capability-gated                               |
 | Decision owner         | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
 | Revocation owner       | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
-| Last review            | 2026-08-22                                                                                                                                                                                               |
+| Last review            | 2026-09-01                                                                                                                                                                                               |
 | License revision       | `bfc8ed0353f5a9733be73e6b2c98ec0948195b86`; LICENSE SHA-256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`                                                                           |
 | Authorization evidence | Maintainer attestation that MiniMax authorized H3 integration with Mold; corroborating image SHA-256 `8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d`; direct grant retained privately |
 | Scope approval         | Maintainer legal/compliance determination on 2026-08-14 that use is permitted everywhere and that the README plus H3 user guide satisfy the remaining obligations                                        |
 | Upstream review        | At upstream HEAD `42ed227ee7df40d41602854ae760620d6eb651fe`, LICENSE and Q&A hashes still match the pinned review; Q&A SHA-256 `c39dcfc5dc3e546918509b57709db826a9b1945311bffaa01e80501101b8abe4`        |
 | Qualification root     | Owner-only `/Volumes/ExternalStorage/mold/uat-h3`; validated external authorization record under its `compliance` directory; no evidence or model payload committed                                      |
 | Permitted artifacts    | Mold code/docs/manifests, upstream or transformed H3 artifacts, and generated outputs; private correspondence and owner-only qualification evidence remain confidential                                  |
-| Third-party sources    | `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot` @ `908eccad7e68751190d04c171956f163bfeed741`, pruned NVFP4 transformers only. Declares the reviewed MiniMax H3 Community License and `base_model: MiniMaxAI/MiniMax-H3`; ships no LICENSE file (404 at the pinned revision). Reviewed 2026-08-22; downloadable, no runtime arm |
+| Third-party sources    | `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot` @ `908eccad7e68751190d04c171956f163bfeed741`, pruned NVFP4 transformers only. Declares the reviewed MiniMax H3 Community License and `base_model: MiniMaxAI/MiniMax-H3`; ships no LICENSE file (404 at the pinned revision). Reviewed 2026-08-22; downloadable, no runtime arm. `lightx2v/Minimax-h3-Turbo` @ `05ef678438e84933c406131b59abbf86919b3aac`, Turbo LoRA adapters only (v1.1 4-step 768p, v1.0 8-step 768p). Declares `apache-2.0` for the adapters and `base_model: MiniMaxAI/MiniMax-H3`; its v1.0 files are byte-identical to Comfy-Org's re-host. Reviewed 2026-09-01; runnable on the FL2VA compact stack |
 | Permitted users        | Any person or organization in every territory, using local, remote-client, shared-server, hosted, or redistributed Mold/H3 paths                                                                         |
 | Prohibited scope       | Claiming technical support for an unimplemented runtime/task/device/envelope; publication of private correspondence or owner-only qualification evidence                                                 |
 | Expiry/revocation      | Immediate on MiniMax revocation, narrowed authority, license/Q&A change, loss of access control, or maintainer decision                                                                                  |

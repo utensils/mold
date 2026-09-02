@@ -2771,6 +2771,8 @@ mod tests {
             (crate::minimax_h3::REF2VA_COMFY, 21),
             (crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP, 9),
             (crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P, 5),
+            (crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11, 5),
+            (crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P, 9),
         ] {
             let turbo = crate::minimax_h3::turbo_tier_for_model(model).is_some();
             let mut h3_input = input(model, "minimax-h3");
@@ -3027,6 +3029,8 @@ mod tests {
             crate::minimax_h3::FL2VA_COMFY,
             crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
             crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+            crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11,
+            crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
         ] {
             let profile = resolve_generation_profile(input(model, "minimax-h3"));
             let recipe = profile.default_recipe().unwrap();
@@ -3086,6 +3090,30 @@ mod tests {
                 "Fixed by the 4-step Turbo tier: 5 terminal-inclusive sampler grid points \
                  (4 denoise intervals)."
             )
+        );
+
+        // The note explains the terminal-inclusive COUNT, not the tier, so
+        // two tiers with the same schedule length carry the same sentence by
+        // design — the tag and the display label are what tell them apart.
+        let four_v11 = resolve_generation_profile(input(
+            crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11,
+            "minimax-h3",
+        ));
+        let v11_steps = &four_v11.default_recipe().unwrap().steps;
+        assert_eq!(v11_steps.mode, ControlMode::Fixed);
+        assert_eq!(v11_steps.default, 5);
+        assert_eq!(v11_steps.note, steps.note);
+
+        let eight_768p = resolve_generation_profile(input(
+            crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
+            "minimax-h3",
+        ));
+        let eight_768p_steps = &eight_768p.default_recipe().unwrap().steps;
+        assert_eq!(eight_768p_steps.mode, ControlMode::Fixed);
+        assert_eq!(eight_768p_steps.default, 9);
+        assert_eq!(
+            eight_768p_steps.note.as_deref(),
+            eight.default_recipe().unwrap().steps.note.as_deref()
         );
     }
 

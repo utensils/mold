@@ -482,6 +482,8 @@ mod tests {
             "minimax-h3-fl2va:comfy-pruned-int8",
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p",
         ] {
             assert_eq!(
                 model_acquisition(identifier, Some("minimax-h3")),
@@ -679,6 +681,8 @@ mod tests {
             "minimax-h3-ref2va:comfy-pruned-int8",
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1",
+            "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p",
         ] {
             assert_eq!(
                 model_acquisition(reviewed, Some("minimax-h3")),

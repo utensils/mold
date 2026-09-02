@@ -44,10 +44,21 @@ use super::dit::{
 /// `loras/`. It postdates [`super::comfy_dit::H3_COMFY_ORG_SOURCE_REVISION`],
 /// whose tree carries no `loras/` directory at all.
 pub const H3_TURBO_LORA_SOURCE_REVISION: &str = "dc559027db79c174125df4d827db55cd11178860";
-/// Repository that publishes both the pruned base checkpoints and the adapters.
+/// Comfy-Org repository that publishes both the pruned base checkpoints and
+/// the adapters it re-hosts.
 pub const H3_TURBO_LORA_REPOSITORY: &str = "Comfy-Org/MiniMax-H3";
-/// Repository-relative directory holding every published adapter.
+/// Repository-relative directory holding every adapter Comfy-Org publishes.
+/// The lightx2v repository has no such directory — its files sit at the root —
+/// which is why the path is a per-tier fact.
 pub const H3_TURBO_LORA_DIRECTORY: &str = "loras";
+/// ModelTC/lightx2v repository publishing the 768p Turbo adapters Comfy-Org
+/// never re-hosted. Only ADAPTERS come from it; the base checkpoint a tier
+/// overlays stays [`H3_TURBO_LORA_REPOSITORY`]'s. Its copies of the v1.0
+/// adapters are byte-identical to Comfy-Org's, which is the provenance
+/// corroboration for pinning it at all.
+pub const H3_TURBO_LORA_LIGHTX2V_REPOSITORY: &str = "lightx2v/Minimax-h3-Turbo";
+/// Pinned lightx2v revision. Files there sit at the repository ROOT.
+pub const H3_TURBO_LORA_LIGHTX2V_SOURCE_REVISION: &str = "05ef678438e84933c406131b59abbf86919b3aac";
 /// Every ComfyUI-layout adapter key is namespaced under this prefix; the
 /// remainder is a base-checkpoint tensor name.
 pub const H3_TURBO_LORA_KEY_PREFIX: &str = "diffusion_model.";
@@ -56,7 +67,7 @@ pub const H3_TURBO_LORA_KEY_PREFIX: &str = "diffusion_model.";
 pub const H3_TURBO_LORA_TENSOR_COUNT: usize = 624;
 /// `52 blocks x 4 linear modules` — 50 main blocks plus 2 token-refiner blocks.
 pub const H3_TURBO_LORA_MODULE_COUNT: usize = 208;
-/// Tensor payload bytes shared by all three published adapters; only the JSON
+/// Tensor payload bytes shared by all five published adapters; only the JSON
 /// header length differs between them.
 pub const H3_TURBO_LORA_PAYLOAD_BYTES: u64 = 1_956_119_360;
 /// Rank of every non-fused module, and `training_rank` in the published
@@ -99,8 +110,9 @@ const CONTRACT_IDENTITY_DOMAIN: &[u8] = b"mold.minimax-h3.turbo-lora-contract.v1
 /// Binds the verified content digest; this is the artifact identity.
 const ADAPTER_IDENTITY_DOMAIN: &[u8] = b"mold.minimax-h3.turbo-lora-adapter.v2\0";
 
-/// One of the three reviewed published Turbo adapters. Detection never uses a
-/// filename: the independently parsed header must agree with this authority.
+/// One of the five reviewed published Turbo adapters. Detection never uses a
+/// filename: the independently parsed header must agree with this authority,
+/// and each tier names the repository and revision it was published at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum H3TurboLoraTier {
     /// FL2V Turbo, 8 transformer evaluations, v1.0, trained at 544p.
@@ -109,14 +121,22 @@ pub enum H3TurboLoraTier {
     Fl2v768p4StepV10,
     /// Ref2V Turbo, 4 transformer evaluations, v0.1.
     Ref2v4StepV10,
+    /// FL2V Turbo, 4 transformer evaluations, v1.1, trained at 768p. Published
+    /// by lightx2v only.
+    Fl2v768p4StepV11,
+    /// FL2V Turbo, 8 transformer evaluations, v1.0, trained at 768p. Published
+    /// by lightx2v only.
+    Fl2v768p8StepV10,
 }
 
 impl H3TurboLoraTier {
     /// Every reviewed tier, in a stable order.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 5] = [
         Self::Fl2v8StepV10,
         Self::Fl2v768p4StepV10,
         Self::Ref2v4StepV10,
+        Self::Fl2v768p4StepV11,
+        Self::Fl2v768p8StepV10,
     ];
 
     pub const fn stable_id(self) -> &'static str {
@@ -124,6 +144,8 @@ impl H3TurboLoraTier {
             Self::Fl2v8StepV10 => "minimax-h3.turbo-lora.fl2v-8step-v1.0.comfyui-bf16.v1",
             Self::Fl2v768p4StepV10 => "minimax-h3.turbo-lora.fl2v-4step-768p-v1.0.comfyui-bf16.v1",
             Self::Ref2v4StepV10 => "minimax-h3.turbo-lora.ref2v-4step-v0.1.comfyui-bf16.v1",
+            Self::Fl2v768p4StepV11 => "minimax-h3.turbo-lora.fl2v-4step-768p-v1.1.comfyui-bf16.v1",
+            Self::Fl2v768p8StepV10 => "minimax-h3.turbo-lora.fl2v-8step-768p-v1.0.comfyui-bf16.v1",
         }
     }
 
@@ -134,18 +156,54 @@ impl H3TurboLoraTier {
                 "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
             }
             Self::Ref2v4StepV10 => "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+            Self::Fl2v768p4StepV11 => {
+                "minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors"
+            }
+            Self::Fl2v768p8StepV10 => {
+                "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors"
+            }
         }
     }
 
-    /// Repository-relative path at [`H3_TURBO_LORA_SOURCE_REVISION`].
+    /// The repository this tier's adapter is published in.
+    pub const fn source_repository(self) -> &'static str {
+        match self {
+            Self::Fl2v8StepV10 | Self::Fl2v768p4StepV10 | Self::Ref2v4StepV10 => {
+                H3_TURBO_LORA_REPOSITORY
+            }
+            Self::Fl2v768p4StepV11 | Self::Fl2v768p8StepV10 => H3_TURBO_LORA_LIGHTX2V_REPOSITORY,
+        }
+    }
+
+    /// The pinned revision of [`Self::source_repository`] this tier's adapter
+    /// is published at.
+    pub const fn source_revision(self) -> &'static str {
+        match self {
+            Self::Fl2v8StepV10 | Self::Fl2v768p4StepV10 | Self::Ref2v4StepV10 => {
+                H3_TURBO_LORA_SOURCE_REVISION
+            }
+            Self::Fl2v768p4StepV11 | Self::Fl2v768p8StepV10 => {
+                H3_TURBO_LORA_LIGHTX2V_SOURCE_REVISION
+            }
+        }
+    }
+
+    /// Repository-relative path at [`Self::source_revision`]. Comfy-Org
+    /// publishes every adapter under [`H3_TURBO_LORA_DIRECTORY`]; lightx2v
+    /// publishes at the repository root, so the path is per-tier rather than
+    /// a shared prefix.
     pub fn repository_path(self) -> String {
-        format!("{H3_TURBO_LORA_DIRECTORY}/{}", self.file_name())
+        if self.source_repository() == H3_TURBO_LORA_LIGHTX2V_REPOSITORY {
+            self.file_name().to_owned()
+        } else {
+            format!("{H3_TURBO_LORA_DIRECTORY}/{}", self.file_name())
+        }
     }
 
     pub const fn file_bytes(self) -> u64 {
         match self {
-            Self::Fl2v8StepV10 | Self::Ref2v4StepV10 => 1_956_193_000,
-            Self::Fl2v768p4StepV10 => 1_956_192_992,
+            Self::Fl2v8StepV10 | Self::Ref2v4StepV10 | Self::Fl2v768p8StepV10 => 1_956_193_000,
+            Self::Fl2v768p4StepV10 | Self::Fl2v768p4StepV11 => 1_956_192_992,
         }
     }
 
@@ -160,14 +218,20 @@ impl H3TurboLoraTier {
             Self::Ref2v4StepV10 => {
                 "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c"
             }
+            Self::Fl2v768p4StepV11 => {
+                "449d80f301ac571622c72e28b8fd72a4b3681b7a8df8a92f17c8f6ec43f56558"
+            }
+            Self::Fl2v768p8StepV10 => {
+                "08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980"
+            }
         }
     }
 
     /// JSON header length, excluding the eight-byte safetensors length prefix.
     pub const fn header_len(self) -> u64 {
         match self {
-            Self::Fl2v8StepV10 | Self::Ref2v4StepV10 => 73_632,
-            Self::Fl2v768p4StepV10 => 73_624,
+            Self::Fl2v8StepV10 | Self::Ref2v4StepV10 | Self::Fl2v768p8StepV10 => 73_632,
+            Self::Fl2v768p4StepV10 | Self::Fl2v768p4StepV11 => 73_624,
         }
     }
 
@@ -184,12 +248,21 @@ impl H3TurboLoraTier {
             Self::Ref2v4StepV10 => {
                 "53370bff715f074018793b9ebc71fa0ecd8bdfd8c5554a716ccf7bf5e6a6f745"
             }
+            Self::Fl2v768p4StepV11 => {
+                "e7a5b995877b2997c0055cad77d1a1ef48a28bc8fd388f8b19be601249e7d27c"
+            }
+            Self::Fl2v768p8StepV10 => {
+                "0541a8b7d525096f45df5f6e8d076f49173cb2d3d58ad233e37e04a63677d78d"
+            }
         }
     }
 
     pub const fn task(self) -> H3TransformerTask {
         match self {
-            Self::Fl2v8StepV10 | Self::Fl2v768p4StepV10 => H3TransformerTask::T2VaFl2Va,
+            Self::Fl2v8StepV10
+            | Self::Fl2v768p4StepV10
+            | Self::Fl2v768p4StepV11
+            | Self::Fl2v768p8StepV10 => H3TransformerTask::T2VaFl2Va,
             Self::Ref2v4StepV10 => H3TransformerTask::Ref2Va,
         }
     }
@@ -198,8 +271,8 @@ impl H3TurboLoraTier {
     /// every non-fused module of this tier.
     pub const fn training_alpha(self) -> f32 {
         match self {
-            Self::Fl2v8StepV10 | Self::Ref2v4StepV10 => 8.0,
-            Self::Fl2v768p4StepV10 => 128.0,
+            Self::Fl2v8StepV10 | Self::Ref2v4StepV10 | Self::Fl2v768p8StepV10 => 8.0,
+            Self::Fl2v768p4StepV10 | Self::Fl2v768p4StepV11 => 128.0,
         }
     }
 
@@ -207,8 +280,8 @@ impl H3TurboLoraTier {
     /// file's own alphas and never substitutes this value.
     pub const fn training_scale(self) -> f32 {
         match self {
-            Self::Fl2v8StepV10 | Self::Ref2v4StepV10 => 0.0625,
-            Self::Fl2v768p4StepV10 => 1.0,
+            Self::Fl2v8StepV10 | Self::Ref2v4StepV10 | Self::Fl2v768p8StepV10 => 0.0625,
+            Self::Fl2v768p4StepV10 | Self::Fl2v768p4StepV11 => 1.0,
         }
     }
 
@@ -223,6 +296,8 @@ impl H3TurboLoraTier {
             content_sha256: Some(self.content_sha256().to_owned()),
             header_len: Some(self.header_len()),
             header_identity_sha256: Some(self.header_identity_sha256().to_owned()),
+            source_repository: self.source_repository().to_owned(),
+            source_revision: self.source_revision().to_owned(),
         }
     }
 }
@@ -240,6 +315,12 @@ pub struct H3TurboLoraExpectation {
     pub content_sha256: Option<String>,
     pub header_len: Option<u64>,
     pub header_identity_sha256: Option<String>,
+    /// The repository this adapter is published in. Reported verbatim on the
+    /// inspection so a two-source tier table cannot be flattened onto one
+    /// global provenance constant.
+    pub source_repository: String,
+    /// The pinned revision of [`Self::source_repository`].
+    pub source_revision: String,
 }
 
 impl H3TurboLoraExpectation {
@@ -518,6 +599,8 @@ pub struct H3TurboLoraModule {
 #[derive(Clone, Debug, PartialEq)]
 pub struct H3TurboLoraInspection {
     pub task: H3TransformerTask,
+    /// The repository the expectation named, never a global constant.
+    pub source_repository: String,
     pub source_repository_revision: String,
     pub file_bytes: u64,
     pub header_len: u64,
@@ -943,7 +1026,8 @@ fn build_inspection(
     let payload_bytes = parsed.file_len - parsed.header_len - 8;
     Ok(H3TurboLoraInspection {
         task: expectation.task,
-        source_repository_revision: H3_TURBO_LORA_SOURCE_REVISION.to_owned(),
+        source_repository: expectation.source_repository.clone(),
+        source_repository_revision: expectation.source_revision.clone(),
         file_bytes: parsed.file_len,
         header_len: parsed.header_len,
         header_identity_sha256: parsed.header_identity_sha256,
@@ -1639,6 +1723,8 @@ pub(super) mod fixtures {
             content_sha256: None,
             header_len: None,
             header_identity_sha256: None,
+            source_repository: H3_TURBO_LORA_REPOSITORY.to_owned(),
+            source_revision: H3_TURBO_LORA_SOURCE_REVISION.to_owned(),
         }
     }
 
@@ -1767,6 +1853,8 @@ impl H3TurboLoraTier {
             Self::Fl2v8StepV10 => "fl2v-8step-v1.0.header",
             Self::Fl2v768p4StepV10 => "fl2v-4step-768p-v1.0.header",
             Self::Ref2v4StepV10 => "ref2v-4step-v0.1.header",
+            Self::Fl2v768p4StepV11 => "fl2v-4step-768p-v1.1.header",
+            Self::Fl2v768p8StepV10 => "fl2v-8step-768p-v1.0.header",
         };
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("testdata/minimax_h3/turbo")
@@ -1906,9 +1994,24 @@ mod tests {
                 tier.expectation().scale(),
                 "{tier:?}"
             );
+            // Comfy-Org re-hosts every adapter under `loras/`; lightx2v
+            // publishes its own at the repository root. The path is derived
+            // from the tier's own source, never assumed.
+            let expected_path = if tier.source_repository() == H3_TURBO_LORA_REPOSITORY {
+                format!("{H3_TURBO_LORA_DIRECTORY}/{}", tier.file_name())
+            } else {
+                tier.file_name().to_owned()
+            };
+            assert_eq!(tier.repository_path(), expected_path, "{tier:?}");
             assert_eq!(
-                tier.repository_path(),
-                format!("loras/{}", tier.file_name())
+                tier.expectation().source_repository,
+                tier.source_repository(),
+                "{tier:?}"
+            );
+            assert_eq!(
+                tier.expectation().source_revision,
+                tier.source_revision(),
+                "{tier:?}"
             );
         }
 
@@ -1917,6 +2020,14 @@ mod tests {
             "dc559027db79c174125df4d827db55cd11178860"
         );
         assert_eq!(H3_TURBO_LORA_REPOSITORY, "Comfy-Org/MiniMax-H3");
+        assert_eq!(
+            H3_TURBO_LORA_LIGHTX2V_REPOSITORY,
+            "lightx2v/Minimax-h3-Turbo"
+        );
+        assert_eq!(
+            H3_TURBO_LORA_LIGHTX2V_SOURCE_REVISION,
+            "05ef678438e84933c406131b59abbf86919b3aac"
+        );
         assert_eq!(H3_TURBO_LORA_TENSOR_COUNT, H3_TURBO_LORA_MODULE_COUNT * 3);
     }
 
@@ -1928,16 +2039,61 @@ mod tests {
         let mut digests = BTreeSet::new();
         let mut headers = BTreeSet::new();
         let mut files = BTreeSet::new();
+        let mut sources = BTreeSet::new();
         for tier in H3TurboLoraTier::ALL {
             assert!(ids.insert(tier.stable_id()));
             assert!(digests.insert(tier.content_sha256()));
             assert!(headers.insert(tier.header_identity_sha256()));
+            // The basename is the on-disk key mold-core's storage rule
+            // flattens every adapter to, so two tiers may never share one.
             assert!(files.insert(tier.file_name()));
+            assert!(sources.insert((tier.source_repository(), tier.repository_path())));
             assert_eq!(tier.content_sha256().len(), 64);
             assert!(tier
                 .content_sha256()
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+        }
+    }
+
+    /// An inspection reports the source the EXPECTATION named, never a global
+    /// constant: with two publishing repositories a global would label every
+    /// lightx2v adapter as Comfy-Org's.
+    #[test]
+    fn inspection_provenance_is_the_tiers_own_source() {
+        for tier in H3TurboLoraTier::ALL {
+            let mut expectation = fixture_expectation();
+            expectation.task = tier.task();
+            expectation.source_repository = tier.source_repository().to_owned();
+            expectation.source_revision = tier.source_revision().to_owned();
+            let (header, data) = fixture_adapter(&expectation);
+            let (_directory, path) = write_adapter(&header, &data);
+            let inspection = inspect_h3_turbo_lora_adapter_against(&path, &expectation).unwrap();
+            assert_eq!(
+                inspection.source_repository,
+                tier.source_repository(),
+                "{tier:?}"
+            );
+            assert_eq!(
+                inspection.source_repository_revision,
+                tier.source_revision(),
+                "{tier:?}"
+            );
+        }
+        // Exactly two reviewed sources, and every tier names one of them.
+        for tier in H3TurboLoraTier::ALL {
+            match tier.source_repository() {
+                H3_TURBO_LORA_REPOSITORY => {
+                    assert_eq!(tier.source_revision(), H3_TURBO_LORA_SOURCE_REVISION);
+                }
+                H3_TURBO_LORA_LIGHTX2V_REPOSITORY => {
+                    assert_eq!(
+                        tier.source_revision(),
+                        H3_TURBO_LORA_LIGHTX2V_SOURCE_REVISION
+                    );
+                }
+                other => panic!("{tier:?} names unreviewed repository {other}"),
+            }
         }
     }
 

@@ -816,6 +816,8 @@ mod tests {
             minimax_h3::FL2VA_COMFY,
             minimax_h3::FL2VA_COMFY_TURBO_8STEP,
             minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+            minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11,
+            minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
         ] {
             let prepared = prepare_authoring(
                 model,

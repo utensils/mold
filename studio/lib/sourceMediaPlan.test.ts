@@ -64,6 +64,8 @@ describe("sourceMediaPlan", () => {
       "minimax-h3-fl2va:comfy-pruned-int8",
       "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
       "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+      "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1",
+      "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p",
       "minimax-h3-fl2va:comfy-pruned-nvfp4",
     ]) {
       expect(plan("minimax-h3", model)).toEqual({

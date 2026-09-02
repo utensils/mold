@@ -12056,7 +12056,8 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         use mold_core::minimax_h3::{
             RuntimeUnavailableReason, COMFY_REPO, FL2VA_COMFY, FL2VA_COMFY_NVFP4,
-            FL2VA_COMFY_TURBO_4STEP_768P, FL2VA_COMFY_TURBO_8STEP, FL2VA_OFFICIAL, NVFP4_REPO,
+            FL2VA_COMFY_TURBO_4STEP_768P, FL2VA_COMFY_TURBO_4STEP_768P_V11,
+            FL2VA_COMFY_TURBO_8STEP, FL2VA_COMFY_TURBO_8STEP_768P, FL2VA_OFFICIAL, NVFP4_REPO,
             OFFICIAL_REPO, REF2VA_COMFY, REF2VA_COMFY_NVFP4, REF2VA_COMFY_TURBO_4STEP,
             REF2VA_OFFICIAL,
         };
@@ -12084,6 +12085,20 @@ mod tests {
                 (FL2VA_COMFY_TURBO_8STEP, false, COMFY_REPO, fl2va.0, fl2va.1),
                 (
                     FL2VA_COMFY_TURBO_4STEP_768P,
+                    false,
+                    COMFY_REPO,
+                    fl2va.0,
+                    fl2va.1
+                ),
+                (
+                    FL2VA_COMFY_TURBO_4STEP_768P_V11,
+                    false,
+                    COMFY_REPO,
+                    fl2va.0,
+                    fl2va.1
+                ),
+                (
+                    FL2VA_COMFY_TURBO_8STEP_768P,
                     false,
                     COMFY_REPO,
                     fl2va.0,
@@ -13172,6 +13187,39 @@ mod tests {
         assert!(!components.is_empty());
         assert!(components.iter().all(|component| {
             component["repair_model"] == mold_core::minimax_h3::FL2VA_COMFY
+                && component["present"] == false
+        }));
+    }
+
+    /// `-v1.1` is the first H3 tag with a `.` after the colon (dots exist
+    /// only in family names today, e.g. `ltx-2.3-22b-distilled`). The colon
+    /// still needs percent-encoding in the URL path; the dot needs none. A
+    /// route that only ever exercised colon-encoding could silently mis-route
+    /// on the first dotted tag it saw.
+    #[tokio::test]
+    async fn dotted_turbo_tag_round_trips_through_the_components_route() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::get(
+                    "/api/models/minimax-h3-fl2va%3Acomfy-pruned-int8-turbo-4step-768p-v1.1/components",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert_eq!(
+            json["model"],
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11
+        );
+        let components = json["components"].as_array().unwrap();
+        assert!(!components.is_empty());
+        assert!(components.iter().all(|component| {
+            component["repair_model"] == mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11
                 && component["present"] == false
         }));
     }

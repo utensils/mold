@@ -2934,9 +2934,16 @@ mod tests {
         let capability = super::build_fl2va_capability(&models).unwrap();
         assert_eq!(capability.partitions.len(), 1, "one partition per task");
         let turbo = &capability.partitions[0].turbo;
+        // The partition is FL2VA-only, so its `turbo[]` excludes the
+        // Ref2VA-only Turbo tier(s) in the reviewed manifest table; count
+        // only the rows this task actually owns rather than the whole table.
         assert_eq!(
             turbo.len(),
-            mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS.len()
+            mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS
+                .iter()
+                .filter(|t| mold_core::minimax_h3::task_for_model(t.model)
+                    == Some(mold_core::minimax_h3::Task::Fl2va))
+                .count()
         );
         for variant in turbo {
             assert!(!variant.installed);

@@ -208,8 +208,8 @@ function roleValue(value: unknown): value is MiniMaxH3ComponentRole {
 }
 
 /** Client-side mirror of the compact FL2VA step DEFAULTS
- * (`mold_core::minimax_h3`): 21 for the base identity, 9/5 for the reviewed
- * Turbo tiers.
+ * (`mold_core::minimax_h3`): 21 for the base identity, 9 or 5 for each
+ * reviewed Turbo tier (the distilled adapter's own schedule length).
  *
  * For a Turbo tier this is still exact — the count is the distilled adapter's
  * own schedule length, so the advertised envelope must agree. For the base
@@ -221,6 +221,8 @@ export const MINIMAX_H3_REVIEWED_COMPACT_STEPS: Readonly<
   "minimax-h3-fl2va:comfy-pruned-int8": 21,
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step": 9,
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p": 5,
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1": 5,
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p": 9,
   "minimax-h3-ref2va:comfy-pruned-int8": 21,
   "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step": 5,
 };

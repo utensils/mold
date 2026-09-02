@@ -19,9 +19,10 @@ use candle_core::{DType, Tensor};
 pub(crate) const H3_DEFAULT_GRID_POINTS: usize = 50;
 pub(crate) const H3_VIDEO_SHIFT: f32 = 12.0;
 pub(crate) const H3_AUDIO_SHIFT: f32 = 3.0;
-/// Video shift for the published FL2V Turbo 4-step v1.0 768p tier, whose
-/// Diffusers documentation passes `--video-shift 6`. Every other reviewed tier
-/// keeps [`H3_VIDEO_SHIFT`].
+/// Video shift for the published 768p-trained FL2V Turbo tiers — 4-step v1.0,
+/// 4-step v1.1, and 8-step 768p — whose Diffusers documentation passes
+/// `--video-shift 6` and whose LightX2V 768p configs all use 6. Every
+/// 544p-trained reviewed tier keeps [`H3_VIDEO_SHIFT`].
 pub(crate) const H3_TURBO_768P_VIDEO_SHIFT: f32 = 6.0;
 /// Only meaningful for the RES-multistep carried-audio helpers, which is why a
 /// non-default video shift is refused for that integrator below.

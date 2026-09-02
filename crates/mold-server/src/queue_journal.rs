@@ -3274,6 +3274,8 @@ mod tests {
             mold_core::minimax_h3::REF2VA_COMFY,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
             mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
             mold_core::minimax_h3::REF2VA_COMFY_NVFP4,
         ];

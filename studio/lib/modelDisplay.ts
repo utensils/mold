@@ -23,6 +23,10 @@ const MINIMAX_H3_DISPLAY_NAMES: Readonly<Record<string, string>> = {
     "MiniMax H3 FL2VA Turbo 8-step",
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p":
     "MiniMax H3 FL2VA Turbo 4-step 768p",
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1":
+    "MiniMax H3 FL2VA Turbo 4-step 768p v1.1",
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p":
+    "MiniMax H3 FL2VA Turbo 8-step 768p",
   "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step":
     "MiniMax H3 Ref2VA Turbo 4-step",
 };
