@@ -16490,6 +16490,294 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
+    /// The bounding box of a binary STL, read back from the 50-byte facet
+    /// records so the assertion measures the FILE rather than the mesh the
+    /// writer was handed.
+    fn stl_bounds(bytes: &[u8]) -> ([f32; 3], [f32; 3]) {
+        assert!(bytes.len() >= 84, "binary STL header");
+        let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 84 + count * 50, "binary STL record size");
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for facet in 0..count {
+            let base = 84 + facet * 50;
+            for vertex in 0..3 {
+                for axis in 0..3 {
+                    let at = base + 12 + vertex * 12 + axis * 4;
+                    let value = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+                    min[axis] = min[axis].min(value);
+                    max[axis] = max[axis].max(value);
+                }
+            }
+        }
+        (min, max)
+    }
+
+    /// The bounding box of an OBJ, read back from its `v` lines.
+    fn obj_bounds(text: &str) -> ([f32; 3], [f32; 3]) {
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for line in text.lines().filter(|line| line.starts_with("v ")) {
+            let coords: Vec<f32> = line
+                .split_whitespace()
+                .skip(1)
+                .map(|value| value.parse().unwrap())
+                .collect();
+            assert_eq!(coords.len(), 3, "{line}");
+            for axis in 0..3 {
+                min[axis] = min[axis].min(coords[axis]);
+                max[axis] = max[axis].max(coords[axis]);
+            }
+        }
+        (min, max)
+    }
+
+    fn longest_axis(min: [f32; 3], max: [f32; 3]) -> f32 {
+        (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2])
+    }
+
+    /// A request that names no geometry keys still gets the per-format
+    /// defaults, because the stored GLB is normalized model space and a
+    /// verbatim transcode arrives in a slicer as a two-millimetre blob lying
+    /// on its side. STL and PLY are scaled to the default size, rotated `z`
+    /// up and rested on the floor; OBJ stays in model units and `y` up,
+    /// floored, because every DCC tool that reads OBJ converts the axis
+    /// itself and treats one unit as one metre.
+    #[tokio::test]
+    async fn a_geometry_export_with_no_options_applies_the_per_format_defaults() {
+        let (app, _output_dir) = gallery_export_app(&[("mesh.glb", gallery_glb_fixture())]);
+
+        let response =
+            export_gallery_file_with(&app, "mesh.glb", serde_json::json!({ "format": "stl" }))
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        let (min, max) = stl_bounds(&bytes);
+        assert!(
+            (longest_axis(min, max) as f64 - mold_core::validation::MESH_EXPORT_DEFAULT_SIZE_MM)
+                .abs()
+                < 1e-3,
+            "default STL measures the advertised default size: {min:?}..{max:?}"
+        );
+        assert!(min[2].abs() < 1e-4, "default STL rests on z = 0: {min:?}");
+        assert!(
+            (min[0] + max[0]).abs() < 1e-3 && (min[1] + max[1]).abs() < 1e-3,
+            "the other two axes stay centred: {min:?}..{max:?}"
+        );
+
+        let response =
+            export_gallery_file_with(&app, "mesh.glb", serde_json::json!({ "format": "obj" }))
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let (min, max) = obj_bounds(&text);
+        assert!(
+            (longest_axis(min, max) - 1.0).abs() < 1e-4,
+            "OBJ keeps the fixture's own model units: {min:?}..{max:?}"
+        );
+        assert!(min[1].abs() < 1e-4, "OBJ is floored on y: {min:?}");
+        assert!(
+            max[2].abs() < 1e-4 && min[2].abs() < 1e-4,
+            "OBJ is not rotated: {min:?}..{max:?}"
+        );
+    }
+
+    /// Every geometry key a request names overrides its format's default,
+    /// and `center` puts the bounding-box centre on the origin rather than
+    /// resting the mesh on the floor.
+    #[tokio::test]
+    async fn explicit_geometry_options_override_the_per_format_defaults() {
+        let (app, _output_dir) = gallery_export_app(&[("mesh.glb", gallery_glb_fixture())]);
+
+        let response = export_gallery_file_with(
+        &app,
+        "mesh.glb",
+        serde_json::json!({ "format": "stl", "size_mm": 120, "up_axis": "y", "origin": "center" }),
+    )
+    .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        let (min, max) = stl_bounds(&bytes);
+        assert!(
+            (longest_axis(min, max) - 120.0).abs() < 1e-3,
+            "size_mm is honoured: {min:?}..{max:?}"
+        );
+        for axis in 0..3 {
+            assert!(
+                (min[axis] + max[axis]).abs() < 1e-3,
+                "center puts the bounding box on the origin: {min:?}..{max:?}"
+            );
+        }
+        assert!(
+            (max[1] - min[1] - 120.0).abs() < 1e-3,
+            "up_axis y leaves the fixture's own y extent standing: {min:?}..{max:?}"
+        );
+    }
+
+    /// The geometry keys shape a geometry FILE. A `glb` is handed back byte
+    /// for byte, a turntable is a render through a fitted camera, and a video
+    /// is neither — so each refuses them by name at the door rather than
+    /// accepting a flag it would ignore.
+    #[tokio::test]
+    async fn geometry_options_are_refused_on_every_format_that_has_none() {
+        let mp4 = base64::engine::general_purpose::STANDARD
+            .decode(include_str!("testdata/audio_muxed_final_mp4.b64").trim())
+            .unwrap();
+        let (app, _output_dir) =
+            gallery_export_app(&[("mesh.glb", gallery_glb_fixture()), ("clip.mp4", mp4)]);
+
+        for (filename, body, format) in [
+            (
+                "mesh.glb",
+                serde_json::json!({ "format": "glb", "size_mm": 60 }),
+                mold_core::MeshExportFormat::Glb,
+            ),
+            (
+                "mesh.glb",
+                serde_json::json!({ "format": "gif", "up_axis": "z" }),
+                mold_core::MeshExportFormat::Gif,
+            ),
+            (
+                "clip.mp4",
+                serde_json::json!({ "format": "gif", "size_mm": 60 }),
+                mold_core::MeshExportFormat::Gif,
+            ),
+        ] {
+            let refused = export_gallery_file_with(&app, filename, body.clone()).await;
+            assert_eq!(
+                refused.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{filename} {body}"
+            );
+            let error = json_body(refused).await;
+            assert_eq!(
+                error["error"].as_str().unwrap(),
+                mold_core::validation::mesh_geometry_refusal(format),
+                "{filename} {body}"
+            );
+        }
+    }
+
+    /// A size outside the advertised bounds is a 422 that names BOTH ends, so
+    /// a user who guessed low or high learns the whole range in one answer.
+    #[tokio::test]
+    async fn size_mm_outside_the_advertised_bounds_names_both_ends() {
+        let (app, _output_dir) = gallery_export_app(&[("mesh.glb", gallery_glb_fixture())]);
+        for size in [0.5, 5000.0] {
+            let refused = export_gallery_file_with(
+                &app,
+                "mesh.glb",
+                serde_json::json!({ "format": "stl", "size_mm": size }),
+            )
+            .await;
+            assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{size}");
+            let error = json_body(refused).await;
+            let message = error["error"].as_str().unwrap().to_string();
+            assert!(
+                message.contains(&mold_core::validation::MESH_EXPORT_MIN_SIZE_MM.to_string())
+                    && message
+                        .contains(&mold_core::validation::MESH_EXPORT_MAX_SIZE_MM.to_string()),
+                "{size}: {message}"
+            );
+        }
+    }
+
+    /// The advertised block IS the core table. A client reads the defaults
+    /// from here to decide what to prefill, and the presence of the block is
+    /// the only gate it has, so the server must never spell a literal that
+    /// could disagree with what it enforces.
+    #[tokio::test]
+    async fn mesh_capabilities_advertise_the_geometry_block_from_the_core_table() {
+        let (app, _output_dir) = gallery_export_app(&[("mesh.glb", gallery_glb_fixture())]);
+        let capabilities = json_body(
+            app.oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            capabilities["mesh"]["export_geometry"],
+            serde_json::to_value(mold_core::validation::mesh_export_geometry_capabilities())
+                .unwrap()
+        );
+    }
+    /// Every schema the spec REFERS to must also be registered, or the
+    /// generated document has dangling `$ref`s and a generated client cannot
+    /// build. The geometry block reaches the spec through the capabilities
+    /// tree, so registering the request fields alone would not be enough.
+    #[tokio::test]
+    async fn the_openapi_spec_registers_every_schema_it_refers_to() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
+        let spec: serde_json::Value = json_body(
+            app.oneshot(
+                Request::get("/api/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+
+        let components = spec["components"]["schemas"]
+            .as_object()
+            .expect("the spec declares component schemas");
+        for name in [
+            "MeshExportGeometryCapabilities",
+            "MeshSizeControl",
+            "MeshExportGeometry",
+            "MeshUpAxis",
+            "MeshExportOrigin",
+        ] {
+            assert!(components.contains_key(name), "{name} is not registered");
+        }
+
+        fn collect_refs(value: &serde_json::Value, into: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let Some(serde_json::Value::String(target)) = map.get("$ref") {
+                        into.push(target.clone());
+                    }
+                    for nested in map.values() {
+                        collect_refs(nested, into);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for nested in items {
+                        collect_refs(nested, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut refs = Vec::new();
+        collect_refs(&spec, &mut refs);
+        assert!(!refs.is_empty(), "the spec should reference schemas at all");
+        for target in refs {
+            let name = target
+                .strip_prefix("#/components/schemas/")
+                .unwrap_or_else(|| panic!("unexpected $ref shape: {target}"));
+            assert!(
+                components.contains_key(name),
+                "{target} has no registered schema"
+            );
+        }
+    }
+
     /// A `.glb` that mold did not write is refused by NAME. The user is
     /// looking at a file in their own gallery, so "this reader does not cover
     /// that layout" has to be distinguishable from "that is not a mesh".

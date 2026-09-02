@@ -76,12 +76,16 @@ async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {
             format,
             output,
             turntable,
+            geometry,
         } => {
             library_export(
                 client,
                 &filename,
                 format,
-                &turntable.into(),
+                &mold_core::MeshExportOptions {
+                    turntable: turntable.into(),
+                    geometry: geometry.into(),
+                },
                 output.as_deref(),
             )
             .await
@@ -468,16 +472,22 @@ async fn library_export(
     client: &MoldClient,
     filename: &str,
     format: mold_core::MeshExportFormat,
-    turntable: &mold_core::MeshTurntableOptions,
+    options: &mold_core::MeshExportOptions,
     output: Option<&str>,
 ) -> Result<()> {
     let stem = export_stem(filename)?;
     // The server would ignore them, and a flag that silently does nothing is
     // worse than one that is refused with the formats it applies to.
-    if !format.is_animation() && *turntable != mold_core::MeshTurntableOptions::default() {
+    if !format.is_animation() && options.turntable != mold_core::MeshTurntableOptions::default() {
         bail!(
             "--playback, --repeat, --max-dimension, --frames and --fps shape a turntable; they apply to --format gif, apng, or webp, not {format}"
         );
+    }
+    let asked_for_geometry = options.geometry != mold_core::MeshGeometryOptions::default();
+    // Same rule from the other side: a millimetre size means nothing to a
+    // byte-for-byte `glb` download or to a render through a fitted camera.
+    if !format.takes_geometry_options() && asked_for_geometry {
+        bail!("{}", mold_core::validation::mesh_geometry_refusal(format));
     }
     let capabilities = client
         .capabilities()
@@ -508,9 +518,25 @@ async fn library_export(
             }
         );
     }
+    // The presence of the block is the ONLY gate. A host built before the
+    // geometry options existed parses the request, drops the three keys and
+    // answers 200 with an unscaled `y`-up file — there is no error to catch
+    // and nothing in the response that says so, so the flags are refused here
+    // rather than silently lost on the wire.
+    if asked_for_geometry
+        && capabilities
+            .mesh
+            .as_ref()
+            .is_none_or(|mesh| mesh.export_geometry.is_none())
+    {
+        bail!(
+            "{} does not advertise geometry export options; it would ignore them and hand back an unscaled mesh — upgrade the server or drop --size-mm/--up-axis/--origin",
+            client.host()
+        );
+    }
 
     let bytes = client
-        .export_gallery_mesh(filename, format, turntable)
+        .export_gallery_mesh(filename, format, options)
         .await
         .with_context(|| format!("could not export {filename} as {format}"))?;
 
@@ -864,12 +890,24 @@ mod tests {
     }
 
     async fn export_host(export_formats: Vec<mold_core::MeshExportFormat>) -> wiremock::MockServer {
+        export_host_advertising(export_formats, false).await
+    }
+
+    /// `geometry` mirrors the only gate a client has: a host that advertises
+    /// `mesh.export_geometry` honours the three keys, and one that does not
+    /// would drop them silently.
+    async fn export_host_advertising(
+        export_formats: Vec<mold_core::MeshExportFormat>,
+        geometry: bool,
+    ) -> wiremock::MockServer {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         let capabilities = ServerCapabilities {
             mesh: Some(mold_core::MeshCapabilities {
                 export_formats,
+                export_geometry: geometry
+                    .then(mold_core::validation::mesh_export_geometry_capabilities),
                 ..Default::default()
             }),
             ..Default::default()
@@ -898,7 +936,7 @@ mod tests {
             &client,
             "chair.glb",
             mold_core::MeshExportFormat::Stl,
-            &mold_core::MeshTurntableOptions::default(),
+            &mold_core::MeshExportOptions::default(),
             None,
         )
         .await
@@ -913,7 +951,7 @@ mod tests {
             &client,
             "chair.glb",
             mold_core::MeshExportFormat::Stl,
-            &mold_core::MeshTurntableOptions::default(),
+            &mold_core::MeshExportOptions::default(),
             None,
         )
         .await
@@ -928,7 +966,7 @@ mod tests {
             &unreachable,
             "cat.png",
             mold_core::MeshExportFormat::Stl,
-            &mold_core::MeshTurntableOptions::default(),
+            &mold_core::MeshExportOptions::default(),
             None,
         )
         .await
@@ -939,7 +977,7 @@ mod tests {
             &unreachable,
             "./chair.glb",
             mold_core::MeshExportFormat::Stl,
-            &mold_core::MeshTurntableOptions::default(),
+            &mold_core::MeshExportOptions::default(),
             None,
         )
         .await
@@ -978,7 +1016,11 @@ mod tests {
                 },
             ),
         ] {
-            let error = library_export(&unreachable, "chair.glb", format, &turntable, None)
+            let options = mold_core::MeshExportOptions {
+                turntable,
+                ..Default::default()
+            };
+            let error = library_export(&unreachable, "chair.glb", format, &options, None)
                 .await
                 .unwrap_err()
                 .to_string();
@@ -997,8 +1039,11 @@ mod tests {
             &client,
             "chair.glb",
             mold_core::MeshExportFormat::Gif,
-            &mold_core::MeshTurntableOptions {
-                frames: Some(24),
+            &mold_core::MeshExportOptions {
+                turntable: mold_core::MeshTurntableOptions {
+                    frames: Some(24),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             Some(out.to_str().unwrap()),
@@ -1006,6 +1051,111 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), b"solid");
+    }
+
+    /// A geometry flag on a format that has no geometry is refused locally,
+    /// in core's own words, before the host is asked anything.
+    #[tokio::test]
+    async fn library_export_refuses_geometry_flags_on_a_non_geometry_format() {
+        let unreachable = MoldClient::new("http://127.0.0.1:1");
+        for (format, geometry) in [
+            (
+                mold_core::MeshExportFormat::Glb,
+                mold_core::MeshGeometryOptions {
+                    size_mm: Some(60.0),
+                    ..Default::default()
+                },
+            ),
+            (
+                mold_core::MeshExportFormat::Gif,
+                mold_core::MeshGeometryOptions {
+                    up_axis: Some(mold_core::MeshUpAxis::Z),
+                    ..Default::default()
+                },
+            ),
+            (
+                mold_core::MeshExportFormat::Webp,
+                mold_core::MeshGeometryOptions {
+                    origin: Some(mold_core::MeshExportOrigin::Center),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let options = mold_core::MeshExportOptions {
+                geometry,
+                ..Default::default()
+            };
+            let error = library_export(&unreachable, "chair.glb", format, &options, None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                mold_core::validation::mesh_geometry_refusal(format),
+                "{format}"
+            );
+        }
+    }
+
+    /// A host that does not advertise the geometry block would PARSE the
+    /// request, drop the three keys and answer 200 with an unscaled mesh.
+    /// There is nothing in that answer to catch, so the flags are refused
+    /// here; on a host that does advertise it they go out on the wire.
+    #[tokio::test]
+    async fn library_export_refuses_geometry_flags_on_a_host_without_the_block() {
+        let shaped = mold_core::MeshExportOptions {
+            geometry: mold_core::MeshGeometryOptions {
+                size_mm: Some(120.0),
+                up_axis: Some(mold_core::MeshUpAxis::Y),
+                origin: Some(mold_core::MeshExportOrigin::Center),
+            },
+            ..Default::default()
+        };
+
+        let old = export_host_advertising(vec![mold_core::MeshExportFormat::Stl], false).await;
+        let client = MoldClient::new(&old.uri());
+        let error = library_export(
+            &client,
+            "chair.glb",
+            mold_core::MeshExportFormat::Stl,
+            &shaped,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("does not advertise geometry export options"),
+            "{error}"
+        );
+        assert!(error.contains("--size-mm"), "{error}");
+
+        let server = export_host_advertising(vec![mold_core::MeshExportFormat::Stl], true).await;
+        let client = MoldClient::new(&server.uri());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("chair.stl");
+        library_export(
+            &client,
+            "chair.glb",
+            mold_core::MeshExportFormat::Stl,
+            &shaped,
+            Some(out.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"solid");
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[1].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "format": "stl",
+                "size_mm": 120.0,
+                "up_axis": "y",
+                "origin": "center"
+            })
+        );
     }
 
     /// The bytes land where `-o` says, or under the print's stem with the
@@ -1021,7 +1171,7 @@ mod tests {
             &client,
             "chair.glb",
             mold_core::MeshExportFormat::Stl,
-            &mold_core::MeshTurntableOptions::default(),
+            &mold_core::MeshExportOptions::default(),
             Some(explicit.to_str().unwrap()),
         )
         .await
@@ -1043,7 +1193,7 @@ mod tests {
             &client,
             "chair.glb",
             mold_core::MeshExportFormat::Stl,
-            &mold_core::MeshTurntableOptions::default(),
+            &mold_core::MeshExportOptions::default(),
             Some("-"),
         )
         .await

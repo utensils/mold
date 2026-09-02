@@ -1546,11 +1546,22 @@ fn mesh_export_picker_lines(
         )),
         Line::from(""),
     ];
+    let mut hinted = false;
     if formats.iter().any(|format| format.is_animation()) {
         text.push(Line::from(Span::styled(
             mesh_turntable_picker_hint(),
             theme.dim(),
         )));
+        hinted = true;
+    }
+    if formats.iter().any(|format| format.takes_geometry_options()) {
+        text.push(Line::from(Span::styled(
+            mesh_geometry_picker_hint(),
+            theme.dim(),
+        )));
+        hinted = true;
+    }
+    if hinted {
         text.push(Line::from(""));
     }
     for (index, format) in formats.iter().enumerate() {
@@ -1647,6 +1658,17 @@ pub(crate) fn mesh_turntable_picker_hint() -> String {
     )
 }
 
+/// The same sentence for the geometry side: the picker has no size or axis
+/// knob either, so it states the per-format defaults it will write. Quoted
+/// from the core constants for the same reason the turntable hint is quoted
+/// from the renderer's — a stated default that drifts is worse than none.
+pub(crate) fn mesh_geometry_picker_hint() -> String {
+    use mold_core::validation::MESH_EXPORT_DEFAULT_SIZE_MM;
+    format!(
+        "OBJ / STL / PLY write geometry: STL and PLY at {MESH_EXPORT_DEFAULT_SIZE_MM} mm, Z-up, on the floor; OBJ as stored. Other sizes or axes: mold library export --size-mm ..."
+    )
+}
+
 /// What each export container carries, in the picker's own words — the
 /// same table `website/guide/mesh.md` documents.
 pub(crate) fn mesh_export_format_note(format: mold_core::MeshExportFormat) -> &'static str {
@@ -1655,8 +1677,12 @@ pub(crate) fn mesh_export_format_note(format: mold_core::MeshExportFormat) -> &'
         mold_core::MeshExportFormat::Obj => {
             "positions, normals, UVs; no materials (Blender, MeshLab)"
         }
-        mold_core::MeshExportFormat::Stl => "triangles only; no UVs or colour (3-D printing, CAD)",
-        mold_core::MeshExportFormat::Ply => "shared vertices with normals (point-and-mesh tooling)",
+        mold_core::MeshExportFormat::Stl => {
+            "triangles only; no UVs or colour; Z-up, bed-ready (CAD)"
+        }
+        mold_core::MeshExportFormat::Ply => {
+            "shared vertices with normals; Z-up, bed-ready (mesh tools)"
+        }
         mold_core::MeshExportFormat::Gif => "turntable animation (chat, README, anywhere)",
         mold_core::MeshExportFormat::Apng => "turntable animation, lossless; written as .png",
         mold_core::MeshExportFormat::Webp => "turntable animation, small (browsers)",
@@ -1748,6 +1774,28 @@ mod tests {
             "mold library export".to_string(),
         ] {
             assert!(hint.contains(&expected), "{expected} missing from {hint}");
+        }
+
+        // The geometry hint quotes the core constant for the same reason,
+        // and names the axis a slicer expects.
+        let geometry = super::mesh_geometry_picker_hint();
+        for expected in [
+            format!("{} mm", mold_core::validation::MESH_EXPORT_DEFAULT_SIZE_MM),
+            "Z-up".to_string(),
+            "floor".to_string(),
+            "OBJ as stored".to_string(),
+            "mold library export".to_string(),
+        ] {
+            assert!(
+                geometry.contains(&expected),
+                "{expected} missing from {geometry}"
+            );
+        }
+        for format in [Stl, Ply] {
+            assert!(
+                super::mesh_export_format_note(format).contains("Z-up, bed-ready"),
+                "{format}"
+            );
         }
     }
 

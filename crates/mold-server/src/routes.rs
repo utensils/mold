@@ -440,6 +440,11 @@ use crate::queue::clean_error_message;
         mold_core::PromptRequirement,
         mold_core::MeshCapabilitiesProfile,
         mold_core::MeshExportFormat,
+        mold_core::MeshExportGeometryCapabilities,
+        mold_core::MeshSizeControl,
+        mold_core::MeshExportGeometry,
+        mold_core::MeshUpAxis,
+        mold_core::MeshExportOrigin,
         mold_core::ProfileProvenance,
         mold_core::ProvenanceKind,
         mold_core::LoraInfo,
@@ -7866,6 +7871,9 @@ fn mesh_capabilities() -> mold_core::MeshCapabilities {
         // Geometry only. Flipped by the PBR paint stage, not before — a user
         // must not discover that a render is untextured after waiting for it.
         textures: false,
+        // Built by core from the same table the export route enforces, so the
+        // advertised defaults can never disagree with the written file.
+        export_geometry: Some(mold_core::validation::mesh_export_geometry_capabilities()),
     }
 }
 
@@ -9053,6 +9061,19 @@ pub(crate) struct GalleryExportRequest {
     /// (default 36, between 8 and 180). Meaningless for a video, whose frames
     /// already exist, and ignored there.
     pub(crate) frames: Option<u32>,
+    /// Geometry containers only: the longest bounding-box axis in
+    /// millimetres. Refused on `glb`, on a turntable, and on a video, none of
+    /// which carries a physical size.
+    #[serde(default)]
+    pub(crate) size_mm: Option<f64>,
+    /// Geometry containers only: which world axis points up in the written
+    /// file. Refused on `glb`, on a turntable, and on a video.
+    #[serde(default)]
+    pub(crate) up_axis: Option<mold_core::MeshUpAxis>,
+    /// Geometry containers only: where the origin sits relative to the
+    /// bounding box. Refused on `glb`, on a turntable, and on a video.
+    #[serde(default)]
+    pub(crate) origin: Option<mold_core::MeshExportOrigin>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -9489,6 +9510,7 @@ async fn export_gallery_media(
     // video export uses, with the same playback and repeat contract.
     if source_is_mesh {
         let mesh_format = request.format.mesh_format();
+        let geometry = geometry_options_for(&request, mesh_format)?;
         let bytes = if mesh_format.is_animation() {
             let options = turntable_options_for(&request, mesh_format)?;
             let output_format = mesh_format
@@ -9501,10 +9523,12 @@ async fn export_gallery_media(
             .map_err(|error| ApiError::internal(format!("mesh export task failed: {error}")))?
             .map_err(ApiError::validation)?
         } else {
-            tokio::task::spawn_blocking(move || transcode_gallery_mesh(&source, mesh_format))
-                .await
-                .map_err(|error| ApiError::internal(format!("mesh export task failed: {error}")))?
-                .map_err(ApiError::validation)?
+            tokio::task::spawn_blocking(move || {
+                transcode_gallery_mesh(&source, mesh_format, geometry)
+            })
+            .await
+            .map_err(|error| ApiError::internal(format!("mesh export task failed: {error}")))?
+            .map_err(ApiError::validation)?
         };
         return Ok(mesh_export_response(&clean_name, mesh_format, bytes));
     }
@@ -9515,6 +9539,12 @@ async fn export_gallery_media(
             request.format.extension()
         )));
     };
+    // A video has no geometry at all, so the same three keys are refused with
+    // the same sentence they get on a turntable. Asked here rather than left
+    // to the mesh arm because a client that sends `size_mm` with a video
+    // export has made a real mistake and must hear about it.
+    let _: Option<mold_core::MeshExportGeometry> =
+        geometry_options_for(&request, request.format.mesh_format())?;
     let bounce = matches!(request.playback, GalleryGifPlayback::Bounce);
     if bounce && !matches!(request.format, GalleryExportFormat::Gif) {
         return Err(ApiError::validation(
@@ -9572,6 +9602,7 @@ async fn export_gallery_media(
 fn transcode_gallery_mesh(
     source: &std::path::Path,
     format: mold_core::MeshExportFormat,
+    geometry: Option<mold_core::MeshExportGeometry>,
 ) -> Result<Vec<u8>, String> {
     let bytes = std::fs::read(source).map_err(|error| format!("cannot read the mesh: {error}"))?;
     // GLB is the STORED form, so exporting as GLB is the file itself. Parsing
@@ -9580,8 +9611,14 @@ fn transcode_gallery_mesh(
     if format == mold_core::MeshExportFormat::Glb {
         return Ok(bytes);
     }
-    let mesh = mold_inference::hunyuan3d::glb::read_glb(&bytes)
+    let mut mesh = mold_inference::hunyuan3d::glb::read_glb(&bytes)
         .map_err(|error| format!("cannot export this mesh: {error}"))?;
+    // The stored mesh is normalized model space. Every geometry container is
+    // written in the frame the resolved options name, so a default export is
+    // already the right size and the right way up.
+    if let Some(geometry) = geometry {
+        mesh.apply_export_geometry(&geometry);
+    }
     Ok(match format {
         mold_core::MeshExportFormat::Glb => unreachable!("returned above"),
         mold_core::MeshExportFormat::Obj => {
@@ -9595,6 +9632,26 @@ fn transcode_gallery_mesh(
             unreachable!("animation exports render a turntable instead")
         }
     })
+}
+
+/// Resolve a request's geometry options against the per-format defaults in
+/// core.
+///
+/// `Ok(None)` means the format takes none and the request named none: a `glb`
+/// passthrough, a turntable, or a video. A geometry key on such a format is a
+/// 422 rather than a silent drop, so a client that sends `size_mm` to a GIF
+/// hears about it instead of receiving an animation that ignored it.
+pub(crate) fn geometry_options_for(
+    request: &GalleryExportRequest,
+    format: mold_core::MeshExportFormat,
+) -> Result<Option<mold_core::MeshExportGeometry>, ApiError> {
+    let options = mold_core::MeshGeometryOptions {
+        size_mm: request.size_mm,
+        up_axis: request.up_axis,
+        origin: request.origin,
+    };
+    mold_core::validation::resolve_mesh_export_geometry(format, &options)
+        .map_err(ApiError::validation)
 }
 
 /// Resolve a turntable request's options against the same contract the video

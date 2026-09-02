@@ -1518,6 +1518,12 @@ pub(crate) fn mesh_export_target_path(
 /// An animated format renders the turntable through the same helper, at the
 /// server's defaults (a full turn, 36 frames, 512 px, 10 fps, looping):
 /// the picker offers no knobs, and says so.
+///
+/// A geometry container gets the per-format geometry defaults from core for
+/// the same reason. The picker cannot ask for a size or an axis, so "the
+/// defaults" is the whole contract here — and if this wrote raw model space
+/// while the server wrote 100 mm `z`-up, the same print would export as two
+/// different objects depending on which host held it.
 pub(crate) fn export_local_mesh(
     glb: &[u8],
     format: mold_core::MeshExportFormat,
@@ -1532,12 +1538,19 @@ pub(crate) fn export_local_mesh(
         )
         .map_err(|e| format!("{e:#}"));
     }
+    let shaped = || {
+        let mut mesh = read()?;
+        if let Some(geometry) = mold_core::validation::mesh_export_geometry_defaults(format) {
+            mesh.apply_export_geometry(&geometry);
+        }
+        Ok::<_, String>(mesh)
+    };
     Ok(match format {
         // The stored form: handed back as-is, not re-encoded.
         mold_core::MeshExportFormat::Glb => glb.to_vec(),
-        mold_core::MeshExportFormat::Obj => glb::write_obj(&read()?).into_bytes(),
-        mold_core::MeshExportFormat::Stl => glb::write_stl(&read()?),
-        mold_core::MeshExportFormat::Ply => glb::write_ply(&read()?),
+        mold_core::MeshExportFormat::Obj => glb::write_obj(&shaped()?).into_bytes(),
+        mold_core::MeshExportFormat::Stl => glb::write_stl(&shaped()?),
+        mold_core::MeshExportFormat::Ply => glb::write_ply(&shaped()?),
         mold_core::MeshExportFormat::Gif
         | mold_core::MeshExportFormat::Apng
         | mold_core::MeshExportFormat::Webp => unreachable!("rendered above"),
@@ -6979,13 +6992,14 @@ impl App {
                 Some(url) => {
                     let api_key = crate::hosts::api_key_for(&origin.host_id);
                     let client = crate::hosts::client_for(&url, api_key.as_deref());
-                    // The picker offers no turntable knobs; the host's
-                    // defaults are the same ones the local writer uses.
+                    // The picker offers no knobs at all; the host's defaults,
+                    // turntable and geometry alike, are the same ones the
+                    // local writer applies.
                     client
                         .export_gallery_mesh(
                             &filename,
                             format,
-                            &mold_core::MeshTurntableOptions::default(),
+                            &mold_core::MeshExportOptions::default(),
                         )
                         .await
                         .map_err(|e| e.to_string())
@@ -15510,7 +15524,7 @@ mod tests {
         let stl = export_local_mesh(&glb, Stl).unwrap();
         assert_eq!(stl.len(), 80 + 4 + 50, "one binary STL triangle");
         let obj = String::from_utf8(export_local_mesh(&glb, Obj).unwrap()).unwrap();
-        assert!(obj.contains("v 1"), "{obj}");
+        assert_eq!(obj.lines().filter(|line| line.starts_with("v ")).count(), 3);
         assert!(obj.contains("f 1 2 3") || obj.contains("f 1/"), "{obj}");
         assert!(!export_local_mesh(&glb, Ply).unwrap().is_empty());
         assert_eq!(export_local_mesh(&glb, Glb).unwrap(), glb);
@@ -15524,6 +15538,80 @@ mod tests {
             &export_local_mesh(&glb, Apng).unwrap()[..8],
             b"\x89PNG\r\n\x1a\n"
         );
+    }
+
+    /// The TUI's picker has no size or axis knob, so "the defaults" is its
+    /// whole geometry contract — and a local export must therefore write the
+    /// SAME frame the server's export route writes. If this wrote raw model
+    /// space while the server wrote 100 mm z-up, the same print would export
+    /// as two different objects depending on which host happened to hold it.
+    #[test]
+    fn a_local_export_applies_the_same_per_format_defaults_as_the_server() {
+        use mold_core::MeshExportFormat::{Obj, Stl};
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            normals: Some(vec![[0.0, 0.0, 1.0]; 4]),
+            uvs: None,
+            vertex_colors: None,
+        };
+        let glb = mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial::default(),
+            None,
+        )
+        .unwrap();
+
+        // Read the bounding box back out of the binary STL's own 50-byte
+        // facet records, so the assertion measures the FILE.
+        let stl = export_local_mesh(&glb, Stl).unwrap();
+        let count = u32::from_le_bytes(stl[80..84].try_into().unwrap()) as usize;
+        assert_eq!(stl.len(), 84 + count * 50);
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for facet in 0..count {
+            let base = 84 + facet * 50;
+            for vertex in 0..3 {
+                for axis in 0..3 {
+                    let at = base + 12 + vertex * 12 + axis * 4;
+                    let value = f32::from_le_bytes(stl[at..at + 4].try_into().unwrap());
+                    min[axis] = min[axis].min(value);
+                    max[axis] = max[axis].max(value);
+                }
+            }
+        }
+        let longest = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]);
+        assert!(
+            (longest as f64 - mold_core::validation::MESH_EXPORT_DEFAULT_SIZE_MM).abs() < 1e-3,
+            "a local STL is the advertised default size: {min:?}..{max:?}"
+        );
+        assert!(min[2].abs() < 1e-4, "and rests on z = 0: {min:?}");
+
+        let obj = String::from_utf8(export_local_mesh(&glb, Obj).unwrap()).unwrap();
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for line in obj.lines().filter(|line| line.starts_with("v ")) {
+            let coords: Vec<f32> = line
+                .split_whitespace()
+                .skip(1)
+                .map(|value| value.parse().unwrap())
+                .collect();
+            for axis in 0..3 {
+                min[axis] = min[axis].min(coords[axis]);
+                max[axis] = max[axis].max(coords[axis]);
+            }
+        }
+        let longest = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]);
+        assert!(
+            (longest - 1.0).abs() < 1e-4,
+            "a local OBJ keeps its model units: {min:?}..{max:?}"
+        );
+        assert!(min[1].abs() < 1e-4, "and is floored on y: {min:?}");
     }
 
     #[tokio::test]
@@ -15762,6 +15850,7 @@ mod tests {
                 formats: vec![OutputFormat::Glb],
                 export_formats: vec![Glb, Obj, Stl],
                 textures: false,
+                export_geometry: None,
             }),
             ..Default::default()
         };
