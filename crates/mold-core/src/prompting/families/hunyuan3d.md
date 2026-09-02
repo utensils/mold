@@ -50,6 +50,8 @@ ground and every other prop cropped away.
   read. An explicit `png` in a request is coerced to `glb`, not refused.
 - OBJ, STL, and PLY exist only as gallery exports of the stored glTF, never as
   generation targets, because each loses something the glTF carries.
+- The web, desktop, and mobile apps' export menu offers the same OBJ, STL,
+  and PLY exports as `mold library export` and the `export_mesh` MCP tool.
 - Texturing, the 2.1 shape model, multi-view input, and text-to-3D are not
   supported, so today's result is geometry only.
 - Detail is bought with the octree resolution and its cost is cubic.

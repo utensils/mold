@@ -11,6 +11,12 @@ than answered from an empty prompt.
 every surface reads it, so `mold run hunyuan3d-mini-turbo --image chair.png` is
 a complete request from the CLI, the API, the TUI, Discord and the apps alike.
 
+**Available in the web SPA, the desktop app, and the iPhone app**, not only
+the CLI. Picking this model in Create reshapes the form from its generation
+profile: the raster controls disappear and a **Mesh** control group (Octree,
+Iso threshold, Target faces) takes their place. See
+[3D Meshes → From the apps](/guide/mesh#from-the-apps) for the walkthrough.
+
 - **Developer**:
   [Tencent Hunyuan](https://github.com/Tencent-Hunyuan/Hunyuan3D-2)
 - **License**: Tencent Hunyuan 3D 2.0 Community License — see

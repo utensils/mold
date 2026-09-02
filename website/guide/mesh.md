@@ -118,6 +118,41 @@ mold run hunyuan3d-mini-turbo --image chair.png --output - > chair.glb
 cat chair.png | mold run hunyuan3d-mini-turbo --image - -o chair.glb
 ```
 
+## From the apps
+
+The web SPA, the desktop app, and the iPhone app all generate and view meshes
+now — not only the CLI, TUI, and Discord.
+
+1. **Pick a Hunyuan3D model** in Create. The form reshapes itself from the
+   model's own generation profile: Shape, Resolution, exact-size, Fit to
+   canvas, Strength, Mask, and Negative all disappear, because the profile is
+   canvasless, strengthless, maskless, and reads none of them.
+2. **Attach a source image.** It is still the only conditioning, so Generate
+   stays disabled without one. The prompt field becomes an optional note —
+   its placeholder explains the model has no text encoder and renders from
+   the image alone — and Generate is enabled with an empty prompt.
+3. **Set the Mesh controls** that took the raster controls' place: Octree
+   detail over the advertised allowlist (128/192/256/320/384, 256 default),
+   an Iso threshold slider, and an optional Target faces field within the
+   advertised bounds — leave it blank to keep the raw surface. The request
+   sent to the server carries only the values that differ from the
+   advertised defaults.
+4. **Generate.** The result renders in the same WebGL2 viewer the Library
+   uses, right in the Create result area: it auto-rotates until you touch
+   it, honours `prefers-reduced-motion`, and has fullscreen and wireframe
+   toggles, captioned `tris · verts · bounds`.
+5. **Find it again in the Library** through the 3D chip in the kind filter
+   (alongside Images, Video, and Audio) or the 3D badge on the tile itself.
+   Reuse settings restores the octree, threshold, and target faces recorded
+   on the print rather than a form's leftovers, and **Use as source** is
+   refused for a mesh — there is no raster to stage as conditioning.
+6. **Export as OBJ, STL, or PLY** from the lightbox (web/desktop) or the
+   viewer sheet (iPhone) — an **Export as…** entry offers whatever the host
+   advertises on `capabilities.mesh.export_formats`, the same conversions
+   described in [Export as OBJ, STL or PLY](#export-as-obj-stl-or-ply) above.
+   Desktop saves through its normal download path; iPhone hands the
+   converted file to the native share sheet.
+
 ## In the TUI
 
 Pick a Hunyuan3D model in `mold tui`'s Create form and the form reshapes
