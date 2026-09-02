@@ -37,11 +37,12 @@ const AUTHORIZATION_SOURCE_SHA256: &str =
 const CLAIM_MARKER: &str = "mold.minimax-h3.private-uat-transformer-capture.v1";
 const MODEL_REVISION: &str = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86";
 const LICENSE_SHA256: &str = "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44";
-// Repinned after #1319 added the third-party `nvfp4-checkpoints` source to
-// the reviewed capture manifest (previously repinned after #985 moved the H3
-// frame ceiling 362 -> 345). The adapter authenticates the manifest by digest
-// before it touches a weight, so a stale pin refuses every capture run.
-const MANIFEST_SHA256: &str = "257c47fda4a7859e6c0b6a42b2deaa3fe792ef7ce7bbde0870948721e5f31141";
+// Repinned after #1544 added the third-party `lightx2v-turbo-adapters` source
+// to the reviewed capture manifest (previously repinned after #1319 added
+// `nvfp4-checkpoints`, and after #985 moved the H3 frame ceiling 362 -> 345).
+// The adapter authenticates the manifest by digest before it touches a weight,
+// so a stale pin refuses every capture run.
+const MANIFEST_SHA256: &str = "878edb223a8145123ae64c60cf1dafbf08e5b582221e8aab094d04f269e781db";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_AUTHORIZATION_BYTES: u64 = 64 * 1024;
 

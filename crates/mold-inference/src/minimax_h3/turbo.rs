@@ -8,7 +8,9 @@
 //!
 //! Selection is by model identity: the reviewed Turbo manifest tags
 //! (`mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS`) name a tier and
-//! pin its adapter file inside the model's own manifest. The historical
+//! pin its adapter file inside the model's own manifest, together with the
+//! repository and revision that tier's adapter is published at — Comfy-Org's
+//! `loras/` re-hosts or lightx2v's repository root. The historical
 //! `MOLD_H3_TURBO_ADAPTER` (path) + `MOLD_H3_TURBO_TIER` (tier id) pair
 //! remains a capture-scope UAT override honored only under the
 //! `h3-private-uat` feature; ordinary builds refuse a set pair outright so
@@ -43,10 +45,11 @@ pub(crate) struct H3TurboTierContract {
 
 /// Every reviewed tier's contract.
 ///
-/// All three tiers select `KSamplerSelect: euler` over Comfy's
+/// All five tiers select `KSamplerSelect: euler` over Comfy's
 /// `BasicScheduler("simple")` grid in their published reference workflows. Only
-/// the 768p 4-step tier moves the video shift, which its own Diffusers
-/// documentation passes as `--video-shift 6`.
+/// the 768p-trained tiers move the video shift; which of those three shifts are
+/// transcribed upstream and which one mold infers is recorded on
+/// [`H3_TURBO_768P_VIDEO_SHIFT`] itself.
 pub(crate) const REVIEWED_TURBO_TIERS: &[H3TurboTierContract] = &[
     H3TurboTierContract {
         tier: H3TurboLoraTier::Fl2v8StepV10,
@@ -65,6 +68,18 @@ pub(crate) const REVIEWED_TURBO_TIERS: &[H3TurboTierContract] = &[
         grid_points: 5,
         sampler_kind: H3SamplerKind::ComfyEuler,
         video_shift: H3_VIDEO_SHIFT,
+    },
+    H3TurboTierContract {
+        tier: H3TurboLoraTier::Fl2v768p4StepV11,
+        grid_points: 5,
+        sampler_kind: H3SamplerKind::ComfyEuler,
+        video_shift: H3_TURBO_768P_VIDEO_SHIFT,
+    },
+    H3TurboTierContract {
+        tier: H3TurboLoraTier::Fl2v768p8StepV10,
+        grid_points: 9,
+        sampler_kind: H3SamplerKind::ComfyEuler,
+        video_shift: H3_TURBO_768P_VIDEO_SHIFT,
     },
 ];
 
@@ -114,6 +129,8 @@ pub(crate) const fn short_tier_alias(tier: H3TurboLoraTier) -> &'static str {
         H3TurboLoraTier::Fl2v8StepV10 => "fl2v-8step",
         H3TurboLoraTier::Fl2v768p4StepV10 => "fl2v-4step-768p",
         H3TurboLoraTier::Ref2v4StepV10 => "ref2v-4step",
+        H3TurboLoraTier::Fl2v768p4StepV11 => "fl2v-4step-768p-v1.1",
+        H3TurboLoraTier::Fl2v768p8StepV10 => "fl2v-8step-768p",
     }
 }
 
@@ -183,12 +200,18 @@ pub(crate) fn resolve_turbo_selection(
              manifest-selected Turbo model {model}; unset the environment pair — it is a \
              capture-scope UAT override honored only under the h3-private-uat feature"
         ),
+        // The tag list is formatted from the manifest tier table rather than
+        // written out, so a new tier can never leave this sentence stale (it
+        // already omitted the Ref2VA tag for a whole release).
         (None, Some(_)) => bail!(
             "{TURBO_ADAPTER_PATH_VARIABLE}/{TURBO_ADAPTER_TIER_VARIABLE} are a capture-scope \
              UAT override honored only under the h3-private-uat feature; select a reviewed \
-             Turbo model tag ({} or {}) instead",
-            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
-            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P
+             Turbo model tag ({}) instead",
+            mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS
+                .iter()
+                .map(|tier| tier.model)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }
@@ -422,6 +445,16 @@ mod tests {
                 H3_TURBO_768P_VIDEO_SHIFT,
             ),
             (H3TurboLoraTier::Ref2v4StepV10, 5, H3_VIDEO_SHIFT),
+            (
+                H3TurboLoraTier::Fl2v768p4StepV11,
+                5,
+                H3_TURBO_768P_VIDEO_SHIFT,
+            ),
+            (
+                H3TurboLoraTier::Fl2v768p8StepV10,
+                9,
+                H3_TURBO_768P_VIDEO_SHIFT,
+            ),
         ];
         for (tier, grid_points, video_shift) in expected {
             let contract = turbo_tier_contract(tier).unwrap();
@@ -439,7 +472,7 @@ mod tests {
                 usize::try_from(grid_points).unwrap() - 1
             );
         }
-        // Only the 768p tier moves the shift.
+        // Only the 768p-trained tiers move the shift.
         assert_ne!(H3_TURBO_768P_VIDEO_SHIFT, H3_VIDEO_SHIFT);
     }
 
@@ -456,6 +489,8 @@ mod tests {
         let error = parse_turbo_tier("fl2v-2step").unwrap_err().to_string();
         assert!(error.contains("not reviewed"), "{error}");
         assert!(error.contains("fl2v-8step"), "{error}");
+        assert!(error.contains("fl2v-8step-768p"), "{error}");
+        assert!(error.contains("fl2v-4step-768p-v1.1"), "{error}");
     }
 
     #[test]
@@ -507,6 +542,19 @@ mod tests {
             let tier = parse_turbo_tier(manifest_tier.tier_stable_id).unwrap();
             assert_eq!(tier.stable_id(), manifest_tier.tier_stable_id);
             assert_eq!(tier.repository_path(), manifest_tier.adapter_hf_filename);
+            // Provenance is per tier on BOTH sides: the acquisition row and
+            // the runtime tier must name the same repository and revision, or
+            // a download and an authentication describe different artifacts.
+            assert_eq!(
+                tier.source_repository(),
+                manifest_tier.adapter_hf_repo,
+                "{tier:?}"
+            );
+            assert_eq!(
+                tier.source_revision(),
+                manifest_tier.adapter_hf_revision,
+                "{tier:?}"
+            );
             assert_eq!(tier.file_bytes(), manifest_tier.adapter_size_bytes);
             assert_eq!(tier.content_sha256(), manifest_tier.adapter_sha256);
             let contract = turbo_tier_contract(tier).unwrap();
@@ -520,6 +568,14 @@ mod tests {
             mold_candle::minimax_h3::H3_TURBO_LORA_REPOSITORY,
             mold_core::minimax_h3::COMFY_REPO
         );
+        assert_eq!(
+            mold_candle::minimax_h3::H3_TURBO_LORA_LIGHTX2V_REPOSITORY,
+            mold_core::minimax_h3::LIGHTX2V_REPO
+        );
+        assert_eq!(
+            mold_candle::minimax_h3::H3_TURBO_LORA_LIGHTX2V_SOURCE_REVISION,
+            mold_core::minimax_h3::LIGHTX2V_REVISION
+        );
     }
 
     #[test]
@@ -532,9 +588,11 @@ mod tests {
             assert_eq!(tier.stable_id(), manifest_tier.tier_stable_id);
             assert_eq!(
                 path,
-                root.join("shared")
-                    .join("minimax-h3")
-                    .join(manifest_tier.adapter_hf_filename)
+                root.join("shared").join("minimax-h3").join("loras").join(
+                    std::path::Path::new(manifest_tier.adapter_hf_filename)
+                        .file_name()
+                        .unwrap()
+                )
             );
         }
         assert!(
@@ -580,10 +638,17 @@ mod tests {
             assert!(contradiction.contains("contradict"), "{contradiction}");
             let refused = env_only.unwrap_err().to_string();
             assert!(refused.contains("h3-private-uat"), "{refused}");
-            assert!(
-                refused.contains(mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP),
-                "{refused}"
-            );
+            // Every reviewed tag, not just the two the old literal sentence
+            // happened to name: the refusal is formatted from the manifest
+            // tier table precisely so it can never go stale again, and this
+            // loop is what would fail if it were written out by hand.
+            for tier in mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+                assert!(
+                    refused.contains(tier.model),
+                    "{} missing from {refused}",
+                    tier.model
+                );
+            }
         }
     }
 

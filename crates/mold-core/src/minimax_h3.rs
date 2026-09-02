@@ -43,6 +43,23 @@ pub const DIFFUSERS_REFERENCE_REVISION: &str = "9c6a68c32b3b2a64db91800b624d33ce
 /// re-pinned rather than silently accepted.
 pub const NVFP4_REPO: &str = "Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot";
 pub const NVFP4_REVISION: &str = "908eccad7e68751190d04c171956f163bfeed741";
+/// Third-party repository publishing the ModelTC/lightx2v Turbo LoRA adapters.
+///
+/// The second non-MiniMaxAI/non-Comfy-Org source mold pins, and only ADAPTERS
+/// come from it: the base stack every tag executes on still resolves to
+/// [`COMFY_REPO`] and [`OFFICIAL_REPO`]. Its files sit at the repository ROOT
+/// with no `loras/` directory, which is why a tier carries its own
+/// repository-relative path and its own revision rather than inheriting a
+/// repository-wide one.
+///
+/// The repository's v1.0 adapters are byte-identical (same SHA-256) to the
+/// copies Comfy-Org re-hosts at [`COMFY_TURBO_LORA_REVISION`], which is the
+/// provenance corroboration; the v1.1 4-step 768p and the 8-step 768p
+/// adapters exist only here. It declares `apache-2.0` for the adapters
+/// themselves, and the MiniMax H3 Community License still governs the base
+/// checkpoint a tag executes on.
+pub const LIGHTX2V_REPO: &str = "lightx2v/Minimax-h3-Turbo";
+pub const LIGHTX2V_REVISION: &str = "05ef678438e84933c406131b59abbf86919b3aac";
 pub const LICENSE_SHA256: &str = MINIMAX_H3_LICENSE_SHA256;
 
 pub const FL2VA_OFFICIAL: &str = "minimax-h3-fl2va:official-bf16";
@@ -53,6 +70,16 @@ pub const FL2VA_COMFY_TURBO_8STEP: &str = "minimax-h3-fl2va:comfy-pruned-int8-tu
 pub const FL2VA_COMFY_TURBO_4STEP_768P: &str =
     "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p";
 pub const REF2VA_COMFY_TURBO_4STEP: &str = "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step";
+/// lightx2v's v1.1 4-step 768p FL2VA distillation. The tag keeps the
+/// `comfy-pruned-int8` prefix because that names the BASE layout it executes
+/// on; the adapter's own origin is provenance carried by the manifest file
+/// row. `-v1.1` appears because a v1.0 4-step 768p tier already ships.
+pub const FL2VA_COMFY_TURBO_4STEP_768P_V11: &str =
+    "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1";
+/// lightx2v's 8-step 768p FL2VA distillation. No version suffix: there is no
+/// other 8-step 768p tier to disambiguate it from.
+pub const FL2VA_COMFY_TURBO_8STEP_768P: &str =
+    "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p";
 /// Pruned NVFP4 compact transformers. Deliberately absent from
 /// [`REVIEWED_COMPACT_MODELS`]: they download, verify, inventory, and remove
 /// like any other pinned model, but mold has no engine arm for the weight
@@ -69,6 +96,8 @@ pub const REVIEWED_COMPACT_MODELS: &[&str] = &[
     FL2VA_COMFY_TURBO_8STEP,
     FL2VA_COMFY_TURBO_4STEP_768P,
     REF2VA_COMFY_TURBO_4STEP,
+    FL2VA_COMFY_TURBO_4STEP_768P_V11,
+    FL2VA_COMFY_TURBO_8STEP_768P,
 ];
 
 /// Exact-identity membership test for [`REVIEWED_COMPACT_MODELS`]. This is
@@ -84,7 +113,9 @@ pub fn is_reviewed_compact_model(value: &str) -> bool {
 /// Pinned Comfy-Org repository revision that first published the reviewed
 /// Turbo LoRA adapters under `loras/`. The compact base stack stays pinned at
 /// [`COMFY_REVISION`]; the adapters do not exist at that older revision, so
-/// their manifest files resolve through [`file_revision`] instead.
+/// their manifest files resolve through [`file_revision`] instead. Tiers whose
+/// adapter comes from [`LIGHTX2V_REPO`] resolve through their own tier row
+/// rather than through this constant.
 pub const COMFY_TURBO_LORA_REVISION: &str = "dc559027db79c174125df4d827db55cd11178860";
 
 /// The manifest-facing contract of one reviewed Turbo LoRA tier.
@@ -102,7 +133,17 @@ pub struct TurboManifestTier {
     pub tier_stable_id: &'static str,
     /// Human-facing tier label ("Turbo 8-step").
     pub display_label: &'static str,
-    /// Repository-relative adapter path at [`COMFY_TURBO_LORA_REVISION`].
+    /// Repository publishing this tier's adapter: [`COMFY_REPO`] or
+    /// [`LIGHTX2V_REPO`]. The base stack is unaffected — a Turbo tag is the
+    /// compact stack of its own task plus this one file.
+    pub adapter_hf_repo: &'static str,
+    /// Pinned revision of [`Self::adapter_hf_repo`] this adapter is published
+    /// at. `file_revision` resolves the pair, so an adapter can never be
+    /// fetched from an unpinned `main`.
+    pub adapter_hf_revision: &'static str,
+    /// Repository-relative adapter path at [`Self::adapter_hf_revision`].
+    /// Comfy-Org publishes under `loras/`; lightx2v publishes at the
+    /// repository root.
     pub adapter_hf_filename: &'static str,
     pub adapter_size_bytes: u64,
     pub adapter_sha256: &'static str,
@@ -114,11 +155,20 @@ pub struct TurboManifestTier {
 /// partitions. Ref2VA's 4-step tier joined the list once Ref2VA execution
 /// landed; its adapter is the one `H3TurboLoraTier::Ref2v4StepV10` already
 /// pins, and selection stays by model identity.
+///
+/// Adapters come from two reviewed repositories: Comfy-Org's `loras/`
+/// re-hosts and, for the two adapters Comfy-Org never re-hosted,
+/// [`LIGHTX2V_REPO`] at its repository root. (768p training is not the
+/// distinction — `FL2VA_COMFY_TURBO_4STEP_768P` is 768p-trained too and comes
+/// from Comfy-Org.) Each row names its own source and revision, so acquisition
+/// never has to infer provenance from the tag.
 pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
     TurboManifestTier {
         model: FL2VA_COMFY_TURBO_8STEP,
         tier_stable_id: "minimax-h3.turbo-lora.fl2v-8step-v1.0.comfyui-bf16.v1",
         display_label: "Turbo 8-step",
+        adapter_hf_repo: COMFY_REPO,
+        adapter_hf_revision: COMFY_TURBO_LORA_REVISION,
         adapter_hf_filename: "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
         adapter_size_bytes: 1_956_193_000,
         adapter_sha256: "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e",
@@ -128,6 +178,8 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
         model: FL2VA_COMFY_TURBO_4STEP_768P,
         tier_stable_id: "minimax-h3.turbo-lora.fl2v-4step-768p-v1.0.comfyui-bf16.v1",
         display_label: "Turbo 4-step 768p",
+        adapter_hf_repo: COMFY_REPO,
+        adapter_hf_revision: COMFY_TURBO_LORA_REVISION,
         adapter_hf_filename: "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
         adapter_size_bytes: 1_956_192_992,
         adapter_sha256: "c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc",
@@ -137,10 +189,34 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
         model: REF2VA_COMFY_TURBO_4STEP,
         tier_stable_id: "minimax-h3.turbo-lora.ref2v-4step-v0.1.comfyui-bf16.v1",
         display_label: "Turbo 4-step",
+        adapter_hf_repo: COMFY_REPO,
+        adapter_hf_revision: COMFY_TURBO_LORA_REVISION,
         adapter_hf_filename: "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
         adapter_size_bytes: 1_956_193_000,
         adapter_sha256: "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
         steps: 5,
+    },
+    TurboManifestTier {
+        model: FL2VA_COMFY_TURBO_4STEP_768P_V11,
+        tier_stable_id: "minimax-h3.turbo-lora.fl2v-4step-768p-v1.1.comfyui-bf16.v1",
+        display_label: "Turbo 4-step 768p v1.1",
+        adapter_hf_repo: LIGHTX2V_REPO,
+        adapter_hf_revision: LIGHTX2V_REVISION,
+        adapter_hf_filename: "minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors",
+        adapter_size_bytes: 1_956_192_992,
+        adapter_sha256: "449d80f301ac571622c72e28b8fd72a4b3681b7a8df8a92f17c8f6ec43f56558",
+        steps: 5,
+    },
+    TurboManifestTier {
+        model: FL2VA_COMFY_TURBO_8STEP_768P,
+        tier_stable_id: "minimax-h3.turbo-lora.fl2v-8step-768p-v1.0.comfyui-bf16.v1",
+        display_label: "Turbo 8-step 768p",
+        adapter_hf_repo: LIGHTX2V_REPO,
+        adapter_hf_revision: LIGHTX2V_REVISION,
+        adapter_hf_filename: "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+        adapter_size_bytes: 1_956_193_000,
+        adapter_sha256: "08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980",
+        steps: 9,
     },
 ];
 
@@ -985,22 +1061,25 @@ pub fn repo_revision(repo: &str) -> Option<&'static str> {
         OFFICIAL_REPO => Some(OFFICIAL_REVISION),
         COMFY_REPO => Some(COMFY_REVISION),
         NVFP4_REPO => Some(NVFP4_REVISION),
+        LIGHTX2V_REPO => Some(LIGHTX2V_REVISION),
         _ => None,
     }
 }
 
 /// Pinned revision for one exact repository file.
 ///
-/// The reviewed Turbo adapters live in the same Comfy repository as the
-/// compact base stack but were published at a later revision; every other
+/// A reviewed Turbo adapter carries its own source: Comfy-Org publishes its
+/// re-hosts under `loras/` at a revision later than the compact base stack's,
+/// and lightx2v publishes the 768p tiers at its own repository root. The
+/// lookup keys on the exact `(repo, path)` pair the tier declares, so a
+/// same-named file in a different repository is not that adapter. Every other
 /// file keeps its repository-wide pinned revision.
 pub fn file_revision(repo: &str, filename: &str) -> Option<&'static str> {
-    if repo == COMFY_REPO
-        && REVIEWED_TURBO_MANIFEST_TIERS
-            .iter()
-            .any(|tier| tier.adapter_hf_filename == filename)
+    if let Some(tier) = REVIEWED_TURBO_MANIFEST_TIERS
+        .iter()
+        .find(|tier| tier.adapter_hf_repo == repo && tier.adapter_hf_filename == filename)
     {
-        return Some(COMFY_TURBO_LORA_REVISION);
+        return Some(tier.adapter_hf_revision);
     }
     repo_revision(repo)
 }
@@ -1064,6 +1143,10 @@ pub fn resolve_model_name(input: &str) -> Option<&'static str> {
         value if value == FL2VA_COMFY_TURBO_8STEP => Some(FL2VA_COMFY_TURBO_8STEP),
         value if value == FL2VA_COMFY_TURBO_4STEP_768P => Some(FL2VA_COMFY_TURBO_4STEP_768P),
         value if value == REF2VA_COMFY_TURBO_4STEP => Some(REF2VA_COMFY_TURBO_4STEP),
+        value if value == FL2VA_COMFY_TURBO_4STEP_768P_V11 => {
+            Some(FL2VA_COMFY_TURBO_4STEP_768P_V11)
+        }
+        value if value == FL2VA_COMFY_TURBO_8STEP_768P => Some(FL2VA_COMFY_TURBO_8STEP_768P),
         _ => None,
     }
 }
@@ -3366,7 +3449,7 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         let task = task_for_model(tier.model).expect("reviewed turbo tag resolves to a task");
         let mut files = comfy_files(task);
         files.push(file(
-            COMFY_REPO,
+            tier.adapter_hf_repo,
             tier.adapter_hf_filename,
             ModelComponent::DistilledLora,
             tier.adapter_size_bytes,
@@ -3587,6 +3670,8 @@ mod tests {
             FL2VA_COMFY_TURBO_8STEP,
             FL2VA_COMFY_TURBO_4STEP_768P,
             REF2VA_COMFY_TURBO_4STEP,
+            FL2VA_COMFY_TURBO_4STEP_768P_V11,
+            FL2VA_COMFY_TURBO_8STEP_768P,
         ] {
             assert_eq!(
                 source_fit_dimensions(model, 1024, 1024),
@@ -4606,6 +4691,8 @@ mod tests {
             FL2VA_COMFY_TURBO_8STEP,
             FL2VA_COMFY_TURBO_4STEP_768P,
             REF2VA_COMFY_TURBO_4STEP,
+            FL2VA_COMFY_TURBO_4STEP_768P_V11,
+            FL2VA_COMFY_TURBO_8STEP_768P,
         ] {
             for &(width, height) in REVIEWED_COMPACT_CANVASES {
                 assert!(
@@ -4895,6 +4982,18 @@ mod tests {
                 Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
                 REF2VA_MODES,
             ),
+            (
+                FL2VA_COMFY_TURBO_4STEP_768P_V11,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
+            (
+                FL2VA_COMFY_TURBO_8STEP_768P,
+                Task::Fl2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                FL2VA_MODES,
+            ),
         ];
         let mut observed_modes = Vec::new();
         for (model, task, layout, modes) in cases {
@@ -4960,6 +5059,8 @@ mod tests {
                 FL2VA_COMFY_TURBO_8STEP,
                 FL2VA_COMFY_TURBO_4STEP_768P,
                 REF2VA_COMFY_TURBO_4STEP,
+                FL2VA_COMFY_TURBO_4STEP_768P_V11,
+                FL2VA_COMFY_TURBO_8STEP_768P,
             ])
         );
         assert!(advertised
@@ -4976,6 +5077,8 @@ mod tests {
         let ref_comfy = find_manifest(REF2VA_COMFY).unwrap();
         let fl_turbo_8 = find_manifest(FL2VA_COMFY_TURBO_8STEP).unwrap();
         let fl_turbo_4 = find_manifest(FL2VA_COMFY_TURBO_4STEP_768P).unwrap();
+        let fl_turbo_4_v11 = find_manifest(FL2VA_COMFY_TURBO_4STEP_768P_V11).unwrap();
+        let fl_turbo_8_768p = find_manifest(FL2VA_COMFY_TURBO_8STEP_768P).unwrap();
         let fl_nvfp4 = find_manifest(FL2VA_COMFY_NVFP4).unwrap();
         let ref_nvfp4 = find_manifest(REF2VA_COMFY_NVFP4).unwrap();
         assert!(!fl_nvfp4.hidden);
@@ -4986,6 +5089,8 @@ mod tests {
         assert!(!ref_comfy.hidden);
         assert!(!fl_turbo_8.hidden);
         assert!(!fl_turbo_4.hidden);
+        assert!(!fl_turbo_4_v11.hidden);
+        assert!(!fl_turbo_8_768p.hidden);
         for manifest in [
             fl_official,
             ref_official,
@@ -4993,6 +5098,8 @@ mod tests {
             ref_comfy,
             fl_turbo_8,
             fl_turbo_4,
+            fl_turbo_4_v11,
+            fl_turbo_8_768p,
             fl_nvfp4,
             ref_nvfp4,
         ] {
@@ -5083,6 +5190,8 @@ mod tests {
                 FL2VA_COMFY_TURBO_8STEP,
                 FL2VA_COMFY_TURBO_4STEP_768P,
                 REF2VA_COMFY_TURBO_4STEP,
+                FL2VA_COMFY_TURBO_4STEP_768P_V11,
+                FL2VA_COMFY_TURBO_8STEP_768P,
             ])
         );
 
@@ -5184,17 +5293,26 @@ mod tests {
             let [adapter] = adapters.as_slice() else {
                 panic!("{} must pin exactly one Turbo adapter", tier.model);
             };
-            assert_eq!(adapter.hf_repo, COMFY_REPO);
+            assert_eq!(adapter.hf_repo, tier.adapter_hf_repo);
+            // An adapter repository with no pinned revision would reach
+            // `download`'s unpinned `main` fetch, so the source table and the
+            // revision table can never disagree.
+            assert!(
+                repo_revision(tier.adapter_hf_repo).is_some(),
+                "{} adapter repo has no pinned revision",
+                tier.model
+            );
             assert_eq!(adapter.hf_filename, tier.adapter_hf_filename);
             assert_eq!(adapter.size_bytes, tier.adapter_size_bytes);
             assert_eq!(adapter.sha256, Some(tier.adapter_sha256));
             assert_eq!(manifest.files.len(), base.files.len() + 1);
 
-            // The adapter downloads from the later revision that published
-            // `loras/`, while the base stack stays on the reviewed pin.
+            // The adapter downloads from its OWN pinned source revision —
+            // Comfy-Org's later `loras/` publication, or lightx2v's repository
+            // root — while the base stack stays on the reviewed pin.
             assert_eq!(
                 file_revision(&adapter.hf_repo, &adapter.hf_filename),
-                Some(COMFY_TURBO_LORA_REVISION)
+                Some(tier.adapter_hf_revision)
             );
             let transformer = manifest
                 .files
@@ -5206,13 +5324,19 @@ mod tests {
                 Some(COMFY_REVISION)
             );
 
-            // Both Turbo tags share one on-disk adapter copy under the
-            // family bucket, keyed by the tier-specific filename.
+            // Every Turbo tag shares one on-disk adapter copy under the
+            // family `loras/` bucket, keyed by the adapter's own basename
+            // whatever directory its upstream repository publishes it in.
             assert_eq!(
                 storage_path(manifest, adapter),
                 std::path::PathBuf::from("shared")
                     .join(FAMILY)
-                    .join(tier.adapter_hf_filename)
+                    .join("loras")
+                    .join(
+                        std::path::Path::new(tier.adapter_hf_filename)
+                            .file_name()
+                            .unwrap()
+                    )
             );
 
             // The adapter is reviewed for exactly its own task partition, so
@@ -5227,8 +5351,147 @@ mod tests {
                     FL2VA_ONLY
                 }
             );
-            assert_eq!(contract.identity.source_revision, COMFY_TURBO_LORA_REVISION);
+            assert_eq!(contract.identity.source_repo, tier.adapter_hf_repo);
+            assert_eq!(contract.identity.source_revision, tier.adapter_hf_revision);
             assert_eq!(contract.identity.sha256, tier.adapter_sha256);
+        }
+    }
+
+    /// Every reviewed adapter comes from one of exactly two reviewed
+    /// repositories, and the two publish at different depths: Comfy-Org under
+    /// `loras/`, lightx2v at the repository root. Nothing else may appear here
+    /// without a `repo_revision` arm, and no two tiers may collide on a
+    /// repository path, an on-disk basename, a digest, a stable id, or a tag.
+    #[test]
+    fn turbo_adapter_sources_are_exactly_the_two_reviewed_repositories() {
+        let mut repo_paths = std::collections::BTreeSet::new();
+        let mut basenames = std::collections::BTreeSet::new();
+        let mut digests = std::collections::BTreeSet::new();
+        let mut stable_ids = std::collections::BTreeSet::new();
+        let mut models = std::collections::BTreeSet::new();
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            match tier.adapter_hf_repo {
+                COMFY_REPO => {
+                    assert_eq!(
+                        tier.adapter_hf_revision, COMFY_TURBO_LORA_REVISION,
+                        "{}",
+                        tier.model
+                    );
+                    assert!(
+                        tier.adapter_hf_filename.starts_with("loras/"),
+                        "{} Comfy-Org adapter is not under loras/",
+                        tier.model
+                    );
+                }
+                LIGHTX2V_REPO => {
+                    assert_eq!(
+                        tier.adapter_hf_revision, LIGHTX2V_REVISION,
+                        "{}",
+                        tier.model
+                    );
+                    assert!(
+                        !tier.adapter_hf_filename.contains('/'),
+                        "{} lightx2v adapter is not at the repository root",
+                        tier.model
+                    );
+                }
+                other => panic!(
+                    "{} pins an unreviewed adapter repository {other}",
+                    tier.model
+                ),
+            }
+            assert!(
+                repo_revision(tier.adapter_hf_repo).is_some(),
+                "{} adapter repo has no pinned revision",
+                tier.model
+            );
+            let basename = std::path::Path::new(tier.adapter_hf_filename)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap();
+            assert!(
+                repo_paths.insert((tier.adapter_hf_repo, tier.adapter_hf_filename)),
+                "{} repeats a repository path",
+                tier.model
+            );
+            // The storage rule flattens every adapter to its basename, so two
+            // tiers sharing one basename would share one on-disk file with two
+            // different digests.
+            assert!(
+                basenames.insert(basename),
+                "{} repeats a basename",
+                tier.model
+            );
+            assert!(
+                digests.insert(tier.adapter_sha256),
+                "{} repeats a digest",
+                tier.model
+            );
+            assert!(
+                stable_ids.insert(tier.tier_stable_id),
+                "{} repeats a stable id",
+                tier.model
+            );
+            assert!(
+                models.insert(tier.model),
+                "{} repeats a model tag",
+                tier.model
+            );
+        }
+        assert_eq!(LIGHTX2V_REPO, "lightx2v/Minimax-h3-Turbo");
+        assert_eq!(
+            LIGHTX2V_REVISION,
+            "05ef678438e84933c406131b59abbf86919b3aac"
+        );
+        assert_eq!(repo_revision(LIGHTX2V_REPO), Some(LIGHTX2V_REVISION));
+    }
+
+    /// `file_revision` is the only thing standing between an adapter path and
+    /// an unpinned `main` fetch, so it resolves through the tier table on the
+    /// exact `(repo, path)` pair rather than on a repository special case.
+    #[test]
+    fn file_revision_pins_each_adapter_to_its_own_source() {
+        let lightx2v = REVIEWED_TURBO_MANIFEST_TIERS
+            .iter()
+            .find(|tier| tier.model == FL2VA_COMFY_TURBO_4STEP_768P_V11)
+            .unwrap();
+        let comfy = REVIEWED_TURBO_MANIFEST_TIERS
+            .iter()
+            .find(|tier| tier.model == FL2VA_COMFY_TURBO_8STEP)
+            .unwrap();
+        assert_eq!(
+            file_revision(LIGHTX2V_REPO, lightx2v.adapter_hf_filename),
+            Some(LIGHTX2V_REVISION)
+        );
+        assert_eq!(
+            file_revision(COMFY_REPO, comfy.adapter_hf_filename),
+            Some(COMFY_TURBO_LORA_REVISION)
+        );
+        // A Comfy-Org path that merely LOOKS like a lightx2v adapter is not
+        // one: the tier lookup keys on the pair, so this falls back to the
+        // repository-wide pin.
+        assert_eq!(
+            file_revision(COMFY_REPO, lightx2v.adapter_hf_filename),
+            Some(COMFY_REVISION)
+        );
+        assert_eq!(
+            file_revision("someone/else", lightx2v.adapter_hf_filename),
+            None
+        );
+
+        // Every file of every reviewed manifest resolves a revision; the only
+        // caller is the private `hf_file_repo`, which silently fetches `main`
+        // when this answers `None`.
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            let manifest = find_manifest(tier.model).unwrap();
+            for file in &manifest.files {
+                assert!(
+                    file_revision(&file.hf_repo, &file.hf_filename).is_some(),
+                    "{} file {} has no pinned revision",
+                    tier.model,
+                    file.hf_filename
+                );
+            }
         }
     }
 
@@ -6006,6 +6269,11 @@ mod tests {
         );
         assert_eq!(source_revision("comfyui"), COMFY_IMPLEMENTATION_REVISION);
         assert_eq!(source_revision("diffusers"), DIFFUSERS_REFERENCE_REVISION);
+        assert_eq!(source_revision("nvfp4-checkpoints"), NVFP4_REVISION);
+        assert_eq!(
+            source_revision("lightx2v-turbo-adapters"),
+            LIGHTX2V_REVISION
+        );
         assert_eq!(
             conformance["numerical_authority"]["precision"],
             "official-bf16-fp32-mixed"

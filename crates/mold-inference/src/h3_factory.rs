@@ -6859,6 +6859,14 @@ mod tests {
     const TURBO_4STEP_TIER: &str = "minimax-h3.turbo-lora.fl2v-4step-768p-v1.0.comfyui-bf16.v1";
     /// The 8-step tier, whose reviewed grid is 9 points at shift 12.
     const TURBO_8STEP_TIER: &str = "minimax-h3.turbo-lora.fl2v-8step-v1.0.comfyui-bf16.v1";
+    /// lightx2v's v1.1 4-step 768p tier: 5 points at shift 6, exactly like the
+    /// v1.0 768p tier it succeeds.
+    const TURBO_4STEP_768P_V11_TIER: &str =
+        "minimax-h3.turbo-lora.fl2v-4step-768p-v1.1.comfyui-bf16.v1";
+    /// lightx2v's 8-step 768p tier: 9 points, but at the 768p shift rather
+    /// than the 544p 8-step tier's 12.
+    const TURBO_8STEP_768P_TIER: &str =
+        "minimax-h3.turbo-lora.fl2v-8step-768p-v1.0.comfyui-bf16.v1";
 
     fn turbo_authority_for(tier_stable_id: &str) -> H3FactoryTurboAdapterAuthority {
         H3FactoryTurboAdapterAuthority::for_reviewed_tier(
@@ -7097,6 +7105,8 @@ mod tests {
         for mismatched in [
             contract::FL2VA_COMFY_TURBO_8STEP,
             contract::FL2VA_COMFY_TURBO_4STEP_768P,
+            contract::FL2VA_COMFY_TURBO_4STEP_768P_V11,
+            contract::FL2VA_COMFY_TURBO_8STEP_768P,
             contract::REF2VA_COMFY,
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
         ] {
@@ -7124,6 +7134,15 @@ mod tests {
         assert!(frozen
             .validate_engine_seam(contract::FL2VA_COMFY_TURBO_8STEP, 0, true)
             .is_err());
+        // Same grid points, same shift, different adapter: the v1.1 tag is a
+        // different artifact and the seam refuses it on the v1.0 authority.
+        assert!(frozen
+            .validate_engine_seam(contract::FL2VA_COMFY_TURBO_4STEP_768P_V11, 0, true)
+            .is_err());
+        assert!(!media_model_matches_h3_authority(
+            contract::FL2VA_COMFY_TURBO_4STEP_768P_V11,
+            &frozen
+        ));
         assert!(!media_model_matches_h3_authority(
             contract::FL2VA_COMFY_TURBO_8STEP,
             &frozen
@@ -7310,6 +7329,21 @@ mod tests {
         assert_eq!(eight_step.grid_points(), 9);
         assert_eq!(eight_step.video_shift(), 12.0);
         assert_eq!(eight_step.sampler_kind(), H3FactorySamplerKind::ComfyEuler);
+        let four_step_v11 = turbo_authority_for(TURBO_4STEP_768P_V11_TIER);
+        assert_eq!(four_step_v11.grid_points(), 5);
+        assert_eq!(four_step_v11.video_shift(), 6.0);
+        assert_eq!(
+            four_step_v11.sampler_kind(),
+            H3FactorySamplerKind::ComfyEuler
+        );
+        let eight_step_768p = turbo_authority_for(TURBO_8STEP_768P_TIER);
+        assert_eq!(eight_step_768p.grid_points(), 9);
+        // The 768p 8-step tier keeps the 768p shift, not the 544p tier's 12.
+        assert_eq!(eight_step_768p.video_shift(), 6.0);
+        assert_eq!(
+            eight_step_768p.sampler_kind(),
+            H3FactorySamplerKind::ComfyEuler
+        );
 
         let cases: [(&str, &str, &str, u64, u64, u64, &str); 6] = [
             (

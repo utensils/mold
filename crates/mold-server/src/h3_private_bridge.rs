@@ -2779,8 +2779,24 @@ mod tests {
         assert_eq!(row.defaults.default_width, 1344);
         assert_eq!(row.defaults.default_height, 768);
         assert_eq!(row.defaults.default_frames, Some(124));
-        assert_eq!(row.defaults.min_frames, Some(124));
-        assert_eq!(row.defaults.max_frames, Some(124));
+        // The frame BOUNDS follow the same runtime authority as the profile
+        // asserted below, which is why they are not the default: a stored-
+        // record build admits exactly the clip length it authenticated, while
+        // the public runtime advertises the family's `17n+5` grid and treats
+        // `default_frames` as a default rather than a ceiling.
+        let (bound_min_frames, bound_max_frames) = if super::private_h3_record_runtime() {
+            (
+                mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+                mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+            )
+        } else {
+            (
+                mold_core::minimax_h3::MIN_FRAMES,
+                mold_core::minimax_h3::MAX_FRAMES,
+            )
+        };
+        assert_eq!(row.defaults.min_frames, Some(bound_min_frames));
+        assert_eq!(row.defaults.max_frames, Some(bound_max_frames));
         assert_eq!(row.defaults.default_steps, 21);
         assert_eq!(
             row.source_image,
@@ -2934,9 +2950,29 @@ mod tests {
         let capability = super::build_fl2va_capability(&models).unwrap();
         assert_eq!(capability.partitions.len(), 1, "one partition per task");
         let turbo = &capability.partitions[0].turbo;
+        // The partition is FL2VA-only, so its `turbo[]` carries exactly the
+        // FL2VA Turbo tags and never the Ref2VA one. Assert the SET by name
+        // rather than a count recomputed with the production filter: a count
+        // derived from `task_for_model` moves in lockstep with the builder,
+        // so a wrong filter would satisfy both sides at once — which is the
+        // class of bug this assertion exists to catch.
+        let advertised = turbo
+            .iter()
+            .map(|variant| variant.model.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            turbo.len(),
-            mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS.len()
+            advertised,
+            std::collections::BTreeSet::from([
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11,
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
+            ]),
+            "the FL2VA partition advertises exactly the FL2VA Turbo tags"
+        );
+        assert!(
+            !advertised.contains(mold_core::minimax_h3::REF2VA_COMFY_TURBO_4STEP),
+            "a Ref2VA Turbo tag must never ride the FL2VA partition"
         );
         for variant in turbo {
             assert!(!variant.installed);
@@ -3522,8 +3558,22 @@ mod structural_tests {
         assert!(!debug.contains(&request.prompt));
     }
 
+    /// The idempotency subject binds whatever the BUILD GRAPH gives it, and
+    /// the two arms below are both deliberate (`private_ingress_subject_sha256`).
+    ///
+    /// - Without public `h3`, the boundary refuses to classify anything
+    ///   without an API key, so the subject binds the caller's restart-stable
+    ///   durable identity: one client keeps idempotency across a server
+    ///   restart, and two authenticated clients on one instance never share
+    ///   it.
+    /// - With public `h3`, the partition is reachable unauthenticated, so
+    ///   there is no key to bind and the subject binds the server instance
+    ///   instead: a keyless host offers ONE shared anonymous subject per
+    ///   process, and a restart deliberately starts a new one.
+    ///
+    /// The replay authority is exact in both graphs; only the subject moves.
     #[test]
-    fn idempotency_subject_is_stable_but_replay_authority_is_exact() {
+    fn idempotency_subject_is_whatever_the_build_graph_binds_and_replay_authority_is_exact() {
         let auth = authenticated();
         let request = request(mold_core::minimax_h3::FL2VA_COMFY);
         let admitted = super::classify_h3_private_ingress_with_runtime(
@@ -3547,11 +3597,27 @@ mod structural_tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(
-            admitted.idempotency_subject_sha256(),
-            same_client_other_instance.idempotency_subject_sha256(),
-            "client-operation idempotency must not conflict after a server restart"
-        );
+        // What the subject binds is a property of the BUILD GRAPH, and both
+        // arms are deliberate (`private_ingress_subject_sha256`). A build
+        // without public `h3` refuses to classify anything without an API key,
+        // so it binds the caller's restart-stable identity and one client
+        // keeps its idempotency across a restart. The public `h3` build has no
+        // key to bind — its partition is reachable unauthenticated — so it
+        // binds the server instance instead, and a restart deliberately starts
+        // a new subject.
+        if cfg!(feature = "h3") {
+            assert_ne!(
+                admitted.idempotency_subject_sha256(),
+                same_client_other_instance.idempotency_subject_sha256(),
+                "the public subject is the server instance, so a restart is a new one"
+            );
+        } else {
+            assert_eq!(
+                admitted.idempotency_subject_sha256(),
+                same_client_other_instance.idempotency_subject_sha256(),
+                "client-operation idempotency must not conflict after a server restart"
+            );
+        }
         // Admission fingerprints the operation BEFORE any child is resolved,
         // so it asks for the subject without a grant; it must be the same
         // subject the grant captured afterwards will carry.
@@ -3586,11 +3652,24 @@ mod structural_tests {
         )
         .unwrap()
         .unwrap();
-        assert_ne!(
-            admitted.idempotency_subject_sha256(),
-            other_client.idempotency_subject_sha256(),
-            "different authenticated clients must never share idempotency authority"
-        );
+        // The same build-graph split, seen from the other side. The private
+        // build separates two authenticated clients on ONE instance; the
+        // public build cannot, because it never reads the key — every caller
+        // on one public instance shares that instance's subject, which is the
+        // stable anonymous subject a keyless host has to offer.
+        if cfg!(feature = "h3") {
+            assert_eq!(
+                admitted.idempotency_subject_sha256(),
+                other_client.idempotency_subject_sha256(),
+                "the public subject is the instance, not the caller"
+            );
+        } else {
+            assert_ne!(
+                admitted.idempotency_subject_sha256(),
+                other_client.idempotency_subject_sha256(),
+                "different authenticated clients must never share idempotency authority"
+            );
+        }
 
         let envelope = admitted.durable_replay_envelope().unwrap();
         let restored = super::restore_durable_h3_private_ingress_with_runtime(

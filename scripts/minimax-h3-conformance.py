@@ -62,6 +62,9 @@ EXPECTED_REVISIONS = {
     "comfy-checkpoints": "eb8a16107c595128b3a578f82d2ce2f75920c355",
     # Third-party pruned NVFP4 transformers (#1319): downloadable, no runtime arm.
     "nvfp4-checkpoints": "908eccad7e68751190d04c171956f163bfeed741",
+    # Third-party Turbo LoRA adapters (v1.1 4-step 768p, v1.0 8-step 768p):
+    # runnable on the FL2VA compact stack.
+    "lightx2v-turbo-adapters": "05ef678438e84933c406131b59abbf86919b3aac",
     "sglang": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",
     "vllm-omni": "3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc",
 }

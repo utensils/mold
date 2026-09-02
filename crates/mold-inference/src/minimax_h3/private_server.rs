@@ -8452,11 +8452,13 @@ mod tests {
     /// count its own distillation was reviewed for.
     #[test]
     fn a_turbo_tier_moves_only_the_step_axis_of_the_reviewed_envelope() {
-        // Both FL2V tiers, so the default FL2VA task pin applies throughout.
-        for tier in [
-            mold_candle::minimax_h3::H3TurboLoraTier::Fl2v768p4StepV10,
-            mold_candle::minimax_h3::H3TurboLoraTier::Fl2v8StepV10,
-        ] {
+        // Every FL2V tier, so the default FL2VA task pin applies throughout.
+        // Iterating the table rather than a literal pair is what keeps a new
+        // tier from silently escaping the step-axis proof.
+        for tier in mold_candle::minimax_h3::H3TurboLoraTier::ALL
+            .into_iter()
+            .filter(|tier| tier.task() == mold_candle::minimax_h3::H3TransformerTask::T2VaFl2Va)
+        {
             let adapter = turbo_authority_for(tier);
             let reviewed_steps = adapter.grid_points();
             reviewed_envelope(reviewed_steps)
@@ -8798,6 +8800,9 @@ mod tests {
             } else {
                 assert!(outcome.is_err());
             }
+            // Every reviewed distillation is 4-step or 8-step, so the grid is
+            // 5 or 9 terminal-inclusive points. A future 6-step tier must
+            // widen this deliberately rather than pass by accident.
             assert!(matches!(contract_entry.grid_points, 5 | 9));
         }
     }

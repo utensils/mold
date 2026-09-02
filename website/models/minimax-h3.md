@@ -3,7 +3,7 @@
 MiniMax H3 is an audio-video generation family from
 [MiniMax](https://huggingface.co/MiniMaxAI/MiniMax-H3). Mold can discover,
 download, verify, repair, inventory, and remove two task partitions across
-seven compact Comfy tags, plus two official BF16 qualification references. The
+nine compact Comfy tags, plus two official BF16 qualification references. The
 files are downloaded directly from their pinned Hugging Face repositories;
 Mold does not bundle or mirror the weights.
 
@@ -83,15 +83,17 @@ speed one.
 
 ## Compact variants
 
-| Model                                                 | Task                                              | Total pull | Runtime status                       |
-| ----------------------------------------------------- | ------------------------------------------------- | ---------: | ------------------------------------ |
-| `minimax-h3-fl2va:comfy-pruned-int8`                  | First/last-frame conditioning with audio          |  42.482 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`      | FL2VA + reviewed Turbo 8-step LoRA (9 steps)      |  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps) |  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`     | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)     |  44.438 GB | CUDA generation; reference profile   |
-| `minimax-h3-ref2va:comfy-pruned-int8`                 | Reference media to video with audio               |  42.482 GB | CUDA generation; ordered references  |
-| `minimax-h3-fl2va:comfy-pruned-nvfp4`                 | First/last-frame conditioning with audio          |  34.040 GB | Downloadable; execution unavailable  |
-| `minimax-h3-ref2va:comfy-pruned-nvfp4`                | Reference media to video with audio               |  34.040 GB | Downloadable; execution unavailable  |
+| Model                                                      | Task                                                   | Total pull | Runtime status                       |
+| ---------------------------------------------------------- | ------------------------------------------------------ | ---------: | ------------------------------------ |
+| `minimax-h3-fl2va:comfy-pruned-int8`                       | First/last-frame conditioning with audio               |  42.482 GB | CUDA generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`           | FL2VA + reviewed Turbo 8-step LoRA (9 steps)           |  44.438 GB | CUDA generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`      | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps)      |  44.438 GB | CUDA generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` | FL2VA + reviewed Turbo 4-step 768p v1.1 LoRA (5 steps) |  44.438 GB | CUDA generation; first-frame profile |
+| `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`      | FL2VA + reviewed Turbo 8-step 768p LoRA (9 steps)      |  44.438 GB | CUDA generation; first-frame profile |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`          | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)          |  44.438 GB | CUDA generation; reference profile   |
+| `minimax-h3-ref2va:comfy-pruned-int8`                      | Reference media to video with audio                    |  42.482 GB | CUDA generation; ordered references  |
+| `minimax-h3-fl2va:comfy-pruned-nvfp4`                      | First/last-frame conditioning with audio               |  34.040 GB | Downloadable; execution unavailable  |
+| `minimax-h3-ref2va:comfy-pruned-nvfp4`                     | Reference media to video with audio                    |  34.040 GB | Downloadable; execution unavailable  |
 
 The official `minimax-h3-fl2va:official-bf16` and
 `minimax-h3-ref2va:official-bf16` identities are also visible downloads. They
@@ -154,6 +156,8 @@ Studio:
 mold pull minimax-h3-fl2va:comfy-pruned-int8
 mold pull minimax-h3-fl2va:comfy-pruned-nvfp4
 mold pull minimax-h3-fl2va:comfy-pruned-int8-turbo-8step
+mold pull minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1
+mold pull minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p
 mold pull minimax-h3-ref2va:comfy-pruned-int8
 ```
 
@@ -167,14 +171,18 @@ A Turbo tier is a reviewed LoRA adapter overlaid on the **same** compact INT8
 checkpoint of its own task; nothing about the base artifact contract relaxes,
 and the only request axis a tier moves is its fixed step count. Each Turbo
 model tag pulls the complete base stack of its task plus one pinned adapter
-(1,956,193,000 bytes for FL2VA 8-step and Ref2VA 4-step, 1,956,192,992 bytes
-for FL2VA 4-step 768p, stored once under `shared/minimax-h3/loras/` and shared
-by every tag that names one):
+(1,956,193,000 bytes for FL2VA 8-step, Ref2VA 4-step, and FL2VA 8-step 768p,
+1,956,192,992 bytes for FL2VA 4-step 768p and its v1.1 successor, stored once
+under `shared/minimax-h3/loras/` and shared by every tag that names one):
 
 - `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`: 9 terminal-inclusive
   sampler grid points (8 model evaluations)
 - `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`: 5 terminal-inclusive
   sampler grid points (4 model evaluations)
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`: 5
+  terminal-inclusive sampler grid points (4 model evaluations)
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`: 9 terminal-inclusive
+  sampler grid points (8 model evaluations)
 - `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`: 5 terminal-inclusive
   sampler grid points (4 model evaluations)
 
@@ -230,6 +238,19 @@ A Turbo tag adds one adapter to this graph:
 `-turbo-4step-768p`), bringing one complete Turbo variant to 44,438,283,318 or
 44,438,283,310 bytes (44.438 GB).
 
+The `-turbo-4step-768p-v1.1` and `-turbo-8step-768p` tags pull their adapter
+from a second third-party source instead:
+[`lightx2v/Minimax-h3-Turbo`](https://huggingface.co/lightx2v/Minimax-h3-Turbo/tree/05ef678438e84933c406131b59abbf86919b3aac)
+at the repository ROOT (no `loras/` directory) at pinned revision
+`05ef678438e84933c406131b59abbf86919b3aac` — `minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors`
+(1,956,192,992 bytes) and `minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors`
+(1,956,193,000 bytes), bringing those Turbo variants to 44,438,283,310 and
+44,438,283,318 bytes (44.438 GB) respectively. lightx2v declares `apache-2.0`
+for the adapters themselves; the MiniMax H3 Community License still governs
+the base checkpoint each tag executes on. Every adapter, whichever source it
+comes from, lands at the same `shared/minimax-h3/loras/` path keyed by its own
+basename.
+
 The encoder, VAEs, and common support files are shared between every compact
 variant, INT8 and NVFP4 alike. After one complete variant is installed, adding
 another downloads only its transformer (20.970 GB for an INT8 tag, 12.529 GB
@@ -254,8 +275,9 @@ The current compact implementation supports this request profile:
 - 107 to 345 frames on the `17n+5` grid at 24 fps (124 is the default)
 - 2 to 50 terminal-inclusive sampler grid points for the base model (21 is the
   default); a reviewed Turbo tag instead requires exactly its tier's own count
-  (9 for `-turbo-8step`, 5 for `-turbo-4step-768p`), because that count is the
-  distilled adapter's own schedule length
+  (9 for `-turbo-8step` and `-turbo-8step-768p`, 5 for `-turbo-4step-768p` and
+  `-turbo-4step-768p-v1.1`), because that count is the distilled adapter's own
+  schedule length
 - one required first-frame image; the current compact runtime refuses a
   closing endpoint
 - MP4 output with synchronized generated audio

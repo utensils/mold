@@ -429,15 +429,26 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     }
 
     // H3's reviewed Turbo adapters are keyed by their own task-specific
-    // filenames (`loras/minimax_h3_fl2v_turbo_...`), so both Turbo tags — and
-    // any future tier — share one on-disk copy under the family bucket
-    // instead of duplicating ~1.8 GB per manifest name.
+    // basenames (`minimax_h3_fl2v_turbo_...`), so every Turbo tag — and any
+    // future tier — shares one on-disk copy under the family `loras/` bucket
+    // instead of duplicating ~1.96 GB per manifest name. The upstream
+    // directory is deliberately dropped: Comfy-Org publishes under `loras/`
+    // and lightx2v at its repository root, and both belong in the one bucket
+    // the docs promise. For the Comfy-Org adapters the derivation is
+    // byte-identical to joining `hf_filename`, so installed files stay valid.
+    // A tier-basename distinctness test in `minimax_h3` is what keeps two
+    // adapters from colliding on one on-disk name.
     if manifest.family == crate::minimax_h3::FAMILY
         && file.component == ModelComponent::DistilledLora
     {
         return PathBuf::from("shared")
             .join(crate::minimax_h3::FAMILY)
-            .join(&file.hf_filename);
+            .join("loras")
+            .join(
+                std::path::Path::new(&file.hf_filename)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new(&file.hf_filename)),
+            );
     }
 
     if is_model_specific_component(file.component) {
@@ -8747,7 +8758,71 @@ mod tests {
         // many files are ONE manifest. It exists so the Tencent 2.1 terms —
         // a separate document from the 2.0 shape terms — are required by
         // something and can therefore be accepted on every surface.
-        assert_eq!(known_manifests().len(), 195);
+        // lightx2v Turbo bump: +2. `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`
+        // and `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p` — two FL2VA
+        // Turbo adapters from `lightx2v/Minimax-h3-Turbo` beside the same FL2VA
+        // compact base stack, so each contributes exactly one manifest.
+        assert_eq!(known_manifests().len(), 197);
+    }
+
+    /// Every reviewed H3 Turbo adapter lands in the one family `loras/`
+    /// bucket, keyed by its own basename, whatever directory its upstream
+    /// repository publishes it in. Comfy-Org publishes under `loras/` and
+    /// lightx2v at the repository root; both flatten to the same rule, so the
+    /// three adapters already installed keep their exact paths.
+    #[test]
+    fn h3_turbo_adapters_store_under_the_family_loras_directory_whatever_the_upstream_path() {
+        use crate::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS;
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            let manifest = find_manifest(tier.model).unwrap();
+            let adapter = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::DistilledLora)
+                .unwrap();
+            let basename = std::path::Path::new(tier.adapter_hf_filename)
+                .file_name()
+                .unwrap();
+            assert_eq!(
+                storage_path(manifest, adapter),
+                PathBuf::from("shared")
+                    .join(crate::minimax_h3::FAMILY)
+                    .join("loras")
+                    .join(basename),
+                "{}",
+                tier.model
+            );
+        }
+
+        // The three adapters installed before the derivation changed keep
+        // their exact on-disk paths; a moved file is a silent re-download of
+        // ~1.96 GB and an orphan beside it.
+        for (model, expected) in [
+            (
+                crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+                "shared/minimax-h3/loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+            ),
+            (
+                crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+                "shared/minimax-h3/loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+            ),
+            (
+                crate::minimax_h3::REF2VA_COMFY_TURBO_4STEP,
+                "shared/minimax-h3/loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+            ),
+        ] {
+            let manifest = find_manifest(model).unwrap();
+            let adapter = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::DistilledLora)
+                .unwrap();
+            assert_eq!(
+                storage_path(manifest, adapter),
+                PathBuf::from(expected),
+                "{model}"
+            );
+        }
     }
 
     #[test]

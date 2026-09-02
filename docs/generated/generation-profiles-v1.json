@@ -23597,6 +23597,11 @@
           "model": "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
           "family": "minimax-h3",
           "hidden": false
+        },
+        {
+          "model": "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1",
+          "family": "minimax-h3",
+          "hidden": false
         }
       ],
       "profile": {
@@ -23830,6 +23835,11 @@
       "models": [
         {
           "model": "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+          "family": "minimax-h3",
+          "hidden": false
+        },
+        {
+          "model": "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p",
           "family": "minimax-h3",
           "hidden": false
         }

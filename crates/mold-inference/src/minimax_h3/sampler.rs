@@ -19,9 +19,24 @@ use candle_core::{DType, Tensor};
 pub(crate) const H3_DEFAULT_GRID_POINTS: usize = 50;
 pub(crate) const H3_VIDEO_SHIFT: f32 = 12.0;
 pub(crate) const H3_AUDIO_SHIFT: f32 = 3.0;
-/// Video shift for the published FL2V Turbo 4-step v1.0 768p tier, whose
-/// Diffusers documentation passes `--video-shift 6`. Every other reviewed tier
-/// keeps [`H3_VIDEO_SHIFT`].
+/// Video shift for the 768p-trained FL2V Turbo tiers. Two of the three are
+/// TRANSCRIBED upstream facts; the third is an inference, and the difference
+/// is deliberately recorded here rather than flattened.
+///
+/// - `4-step v1.0 768p` and `8-step v1.0 768p`: ModelTC's Turbo model-specs
+///   table lists `6 / 3` as both tiers' training shifts, and LightX2V's own
+///   `configs/minimax_h3/dmd/minimax_h3_fp8_8step.json` and
+///   `minimax_h3_int8_convrot_8step.json` run the 8-step tier at
+///   `video_flow_shift: 6.0` / `audio_flow_shift: 3.0` (with `infer_steps: 9`,
+///   the same terminal-inclusive count mold ships).
+/// - `4-step v1.1 768p`: UNDOCUMENTED upstream. It has no row in ModelTC's
+///   spec table, and no LightX2V config names its file. Mold INHERITS 6 from
+///   its v1.0 768p predecessor — same 768p training resolution, same
+///   rank/alpha/scale header metadata — pending the A/B recorded in
+///   `docs/qualification/minimax-h3.md`. Treat 6.0 for that one tier as mold's
+///   choice, never as a transcribed upstream value.
+///
+/// Every 544p-trained reviewed tier keeps [`H3_VIDEO_SHIFT`].
 pub(crate) const H3_TURBO_768P_VIDEO_SHIFT: f32 = 6.0;
 /// Only meaningful for the RES-multistep carried-audio helpers, which is why a
 /// non-default video shift is refused for that integrator below.

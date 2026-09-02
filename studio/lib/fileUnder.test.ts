@@ -614,6 +614,18 @@ const DOWNLOAD_FILE_NAME_FIXTURES: ReadonlyArray<
     },
     "minimax-h3-fl2va-comfy-pruned-int8-turbo-4step-768p__s5.mp4",
   ],
+  // `-v1.1` is the first H3 tag with a `.` after the colon: both the colon
+  // and the dot fall outside `[a-z0-9]`, so both become `-` and the digits
+  // straddling the dot stay adjacent rather than colliding into one run.
+  [
+    {
+      title: null,
+      model: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1",
+      seed: 5,
+      ext: "mp4",
+    },
+    "minimax-h3-fl2va-comfy-pruned-int8-turbo-4step-768p-v1-1__s5.mp4",
+  ],
   // Rust's own fixtures, copied verbatim from print_title.rs's tests.
   [
     {
