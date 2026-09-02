@@ -74,8 +74,15 @@ impl Default for TurntableOptions {
 ///
 /// The message names both knobs because either brings it under: 180 frames
 /// fit at the default size, and the largest size fits at a short sweep.
+///
+/// Public, so it is safe in ANY call order: a caller that has not yet
+/// checked `frames` or `size` against their ranges gets a refusal, never an
+/// overflow, because the product saturates instead of wrapping.
 pub fn check_frame_budget(options: &TurntableOptions) -> std::result::Result<(), String> {
-    let bytes = options.frames as u64 * options.size as u64 * options.size as u64 * 3;
+    let bytes = (options.frames as u64)
+        .saturating_mul(u64::from(options.size))
+        .saturating_mul(u64::from(options.size))
+        .saturating_mul(3);
     if bytes > MAX_TURNTABLE_RGB_BYTES {
         return Err(format!(
             "{} frames at {} px need {} MiB of frame buffer, over the {} MiB export budget; lower frames or max_dimension",
@@ -404,6 +411,15 @@ mod tests {
             error.contains("frames") && error.contains("max_dimension"),
             "{error}"
         );
+        // Unranged input is refused, not overflowed: the budget check is
+        // public and must not depend on the caller having checked the
+        // ranges first.
+        assert!(check_frame_budget(&TurntableOptions {
+            frames: usize::MAX,
+            size: u32::MAX,
+            ..TurntableOptions::default()
+        })
+        .is_err());
         let error = render_turntable(
             &cube(),
             &TurntableOptions {
