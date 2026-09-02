@@ -24,6 +24,14 @@ import {
   MAX_LORA_STACK,
   type BaseGenerationCapabilities,
 } from "@studio/lib/generationCapabilities";
+import {
+  recipeIsCanvasless,
+  type GenerationRecipeProfile,
+  type MeshCapabilitiesProfile,
+  type PromptRequirement,
+} from "@studio/lib/generationProfile";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
+import { coerceOutputFormatForRecipe, type OutputFormatRecipe } from "@studio/lib/outputFormat";
 import type { GenerateRequest, OutputFormat, Scheduler } from "./api/types";
 
 export type { SourceImageMode } from "@studio/lib/generationCapabilities";
@@ -70,6 +78,85 @@ export function generationCapabilitiesForFamily(
   };
 }
 
+/**
+ * The recipe-derived facts the request builder needs after the model row is
+ * out of scope. Snapshotted onto the form when a model or pipeline is
+ * applied, exactly like `guidanceCapabilities` and `sourceImageCapability`,
+ * so `buildRequest(form)` and `pruneRequestForFamily` read the advertised
+ * contract rather than the family heuristic. `null` is an older host that
+ * advertises no recipe, where the legacy rules answer.
+ */
+export interface RecipeCapabilitiesSnapshot {
+  outputFormats: OutputFormat[];
+  defaultOutputFormat: OutputFormat;
+  promptMode: PromptRequirement;
+  supportsStrength: boolean;
+  /** The recipe renders no pixel canvas (a 3-D mesh). */
+  canvasless: boolean;
+  /** The recipe's 3-D controls, or `null` when `mesh` is refused. */
+  mesh: MeshCapabilitiesProfile | null;
+}
+
+export function recipeCapabilitiesSnapshot(
+  recipe: GenerationRecipeProfile | null | undefined,
+  family = "",
+  model = "",
+  pipeline: string | null = null,
+  advertisedSourceImage?: string | null,
+): RecipeCapabilitiesSnapshot | null {
+  if (!recipe) return null;
+  const caps = baseGenerationCapabilities(
+    family,
+    model,
+    pipeline,
+    null,
+    advertisedSourceImage,
+    recipe,
+  );
+  return {
+    outputFormats: caps.outputFormats as OutputFormat[],
+    defaultOutputFormat: caps.defaultOutputFormat as OutputFormat,
+    promptMode: caps.promptMode,
+    supportsStrength: caps.supportsStrength,
+    canvasless: recipeIsCanvasless(recipe),
+    mesh: caps.mesh ?? null,
+  };
+}
+
+/** The snapshot as the shared format coercion reads a recipe. */
+export function asOutputFormatRecipe(
+  snapshot: RecipeCapabilitiesSnapshot | null | undefined,
+): OutputFormatRecipe | null {
+  if (!snapshot) return null;
+  return {
+    capabilities: {
+      mesh: snapshot.mesh,
+      output: {
+        formats: snapshot.outputFormats,
+        default_format: snapshot.defaultOutputFormat,
+      },
+    },
+  };
+}
+
+/**
+ * The format a request for this family/recipe may carry: the shared rule
+ * (`@studio/lib/outputFormat`) applied against the snapshot when one is
+ * known and the family list otherwise.
+ */
+export function coerceFormOutputFormat(
+  format: OutputFormat | null | undefined,
+  family: string,
+  snapshot: RecipeCapabilitiesSnapshot | null | undefined,
+): OutputFormat | undefined {
+  return coerceOutputFormatForRecipe(
+    asOutputFormatRecipe(snapshot),
+    family,
+    format,
+    outputFormatsForFamily(family),
+  );
+}
+
 /** LTX-2 advanced video gate: pipeline mode, keyframes, spatial/temporal
  * upscale, retake range, and source video. `ltx-video` returns false. */
 export function supportsAdvancedVideo(family: string): boolean {
@@ -97,6 +184,9 @@ export function outputFormatsForFamily(
   // `t2a` pipeline, which sets the format itself. Offering it as a free choice
   // would let a video request pick a container the server rejects.
   if (isMinimaxH3Family(family)) return ["mp4"];
+  // A mesh family stores binary glTF and nothing else; OBJ/STL/PLY are
+  // gallery exports, never generation targets.
+  if (isMeshFamily(family)) return ["glb"];
   return isVideoFamily(family) ? ["mp4", "gif", "apng", "webp"] : ["png", "jpeg", "webp"];
 }
 
@@ -118,6 +208,7 @@ export function pruneRequestForFamily(
   family: string,
   model = "",
   advertisedSourceImage?: string | null,
+  recipe?: RecipeCapabilitiesSnapshot | null,
 ): GenerateRequest {
   const caps = generationCapabilitiesForFamily(family, model, null, null, advertisedSourceImage);
   const next: GenerateRequest = { ...req };
@@ -228,11 +319,24 @@ export function pruneRequestForFamily(
     }
   }
 
-  // Keep the output format valid for the family (png stays out of video, etc.).
-  const formats = outputFormatsForFamily(family);
-  if (next.output_format && !formats.includes(next.output_format)) {
-    next.output_format = formats[0]!;
+  // Keep the output format valid for the recipe (png stays out of video, a
+  // mesh recipe is pinned to glb, a glb never rides a raster recipe).
+  const format = coerceFormOutputFormat(next.output_format, family, recipe);
+  if (format === undefined) delete next.output_format;
+  else next.output_format = format;
+
+  // The 3-D controls are refused at admission on a recipe with no mesh block,
+  // and a canvasless recipe reads neither strength nor a repaint mask; a
+  // legacy host without a recipe gets the family rule.
+  const meshRecipe = recipe ? recipe.mesh !== null : isMeshFamily(family);
+  if (!meshRecipe) delete next.mesh;
+  const canvasless = recipe ? recipe.canvasless : isMeshFamily(family);
+  if (canvasless) {
+    delete next.strength;
+    delete next.mask_image;
+    delete next.source_fit;
   }
+  if (recipe && !recipe.supportsStrength) delete next.strength;
 
   return next;
 }
