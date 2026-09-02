@@ -24,6 +24,12 @@ use super::model::H3Layer50StreamingConditioner;
 use super::presentation::{
     H3_IMAGE_PAD_TOKEN_ID, H3_VIDEO_PAD_TOKEN_ID, H3_VISION_END_TOKEN_ID, H3_VISION_START_TOKEN_ID,
 };
+use super::special_tokens::{
+    register_extra_special_tokens, H3_BASE_VOCABULARY_SIZE, H3_EXTRA_SPECIAL_TOKENS,
+    H3_REGISTERED_MAX_TOKEN_ID, H3_REGISTERED_VOCABULARY_SIZE,
+    H3_RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT, H3_RELEASED_MAX_TOKEN_ID,
+    H3_RELEASED_VOCABULARY_SIZE,
+};
 
 #[derive(Debug, Error)]
 pub enum H3LoadError {
@@ -234,10 +240,16 @@ pub fn prepare_conditioner_assets_with_progress(
     let tokenizer_artifact = artifacts
         .get(&ArtifactRole::Tokenizer)
         .ok_or(ArtifactError::MissingRole(ArtifactRole::Tokenizer))?;
-    let tokenizer = Tokenizer::from_file(tokenizer_artifact.path())
-        .map(Arc::new)
+    let mut tokenizer = Tokenizer::from_file(tokenizer_artifact.path())
+        .map_err(|error| H3LoadError::Tokenizer(error.to_string()))?;
+    // Validate the file's own shape before registering, so a swapped
+    // tokenizer.json is still caught, then register the configured extras and
+    // validate the shape they produce.
+    validate_released_tokenizer_shape(&tokenizer)?;
+    register_extra_special_tokens(&mut tokenizer, &tokenizer_config)
         .map_err(|error| H3LoadError::Tokenizer(error.to_string()))?;
     validate_tokenizer(&tokenizer, config.text_config.vocab_size)?;
+    let tokenizer = Arc::new(tokenizer);
 
     let checkpoint_paths = artifacts
         .checkpoint_shards()
@@ -366,6 +378,18 @@ fn validate_tokenizer_config(bytes: &[u8]) -> Result<(), H3LoadError> {
             "config is not the released raw Qwen2 tokenizer contract".into(),
         ));
     }
+    // The extra special tokens are read from this field, so the released
+    // contract has to cover it too -- otherwise "this is the released config"
+    // and "this config has no additional_special_tokens" can both be true.
+    let declared = value
+        .get("additional_special_tokens")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len);
+    if declared != Some(H3_RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT) {
+        return Err(H3LoadError::Tokenizer(format!(
+            "config declares {declared:?} additional special tokens, expected {H3_RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT}"
+        )));
+    }
     Ok(())
 }
 
@@ -394,25 +418,55 @@ fn validate_tokenizer(
             )));
         }
     }
+    for (token, expected) in H3_EXTRA_SPECIAL_TOKENS {
+        let found = tokenizer.token_to_id(token);
+        if found != Some(expected) {
+            return Err(H3LoadError::Tokenizer(format!(
+                "{token} resolves to {found:?}, expected {expected}"
+            )));
+        }
+    }
     Ok(())
 }
 
+/// The shape of `tokenizer.json` as released, before the configured extra
+/// special tokens are registered. Checked first so a swapped file is still
+/// refused at its own fingerprint.
+fn validate_released_tokenizer_shape(tokenizer: &Tokenizer) -> Result<(), H3LoadError> {
+    let base_vocabulary_size = tokenizer.get_vocab_size(false);
+    let vocabulary_size = tokenizer.get_vocab_size(true);
+    if base_vocabulary_size != H3_BASE_VOCABULARY_SIZE
+        || vocabulary_size != H3_RELEASED_VOCABULARY_SIZE
+    {
+        return Err(H3LoadError::Tokenizer(format!(
+            "released vocabulary has {base_vocabulary_size} base and {vocabulary_size} total entries, expected {H3_BASE_VOCABULARY_SIZE} and {H3_RELEASED_VOCABULARY_SIZE}"
+        )));
+    }
+    let maximum_token_id = tokenizer.get_vocab(true).values().copied().max();
+    if maximum_token_id != Some(H3_RELEASED_MAX_TOKEN_ID) {
+        return Err(H3LoadError::Tokenizer(format!(
+            "released token IDs end at {maximum_token_id:?}, expected {H3_RELEASED_MAX_TOKEN_ID}"
+        )));
+    }
+    Ok(())
+}
+
+/// The shape after `register_extra_special_tokens`, which is what the runtime
+/// actually encodes with.
 fn validate_tokenizer_capacity(
     base_vocabulary_size: usize,
     vocabulary_size_with_added_tokens: usize,
     maximum_token_id: Option<u32>,
     model_embedding_capacity: usize,
 ) -> Result<(), H3LoadError> {
-    const BASE_VOCABULARY_SIZE: usize = 151_643;
-    const VOCABULARY_SIZE_WITH_ADDED_TOKENS: usize = 151_669;
-    if base_vocabulary_size != BASE_VOCABULARY_SIZE
-        || vocabulary_size_with_added_tokens != VOCABULARY_SIZE_WITH_ADDED_TOKENS
+    if base_vocabulary_size != H3_BASE_VOCABULARY_SIZE
+        || vocabulary_size_with_added_tokens != H3_REGISTERED_VOCABULARY_SIZE
     {
         return Err(H3LoadError::Tokenizer(format!(
-            "vocabulary has {base_vocabulary_size} base and {vocabulary_size_with_added_tokens} total entries, expected {BASE_VOCABULARY_SIZE} and {VOCABULARY_SIZE_WITH_ADDED_TOKENS}"
+            "vocabulary has {base_vocabulary_size} base and {vocabulary_size_with_added_tokens} total entries, expected {H3_BASE_VOCABULARY_SIZE} and {H3_REGISTERED_VOCABULARY_SIZE}"
         )));
     }
-    if maximum_token_id.map(|value| value as usize) != Some(VOCABULARY_SIZE_WITH_ADDED_TOKENS - 1)
+    if maximum_token_id != Some(H3_REGISTERED_MAX_TOKEN_ID)
         || model_embedding_capacity != 151_936
         || vocabulary_size_with_added_tokens > model_embedding_capacity
     {
@@ -730,18 +784,70 @@ mod tests {
         assert!(error.to_string().contains("patch-16"));
     }
 
+    /// The public conditioner path had no registration coverage at all: its
+    /// only tokenizer test was a pure function over four integers. These drive
+    /// the real validators against a real `Tokenizer`.
     #[test]
-    fn official_tokenizer_vocabulary_is_distinct_from_embedding_capacity() {
-        validate_tokenizer_capacity(151_643, 151_669, Some(151_668), 151_936).unwrap();
+    fn the_loader_validators_bracket_registration() {
+        use super::super::special_tokens::test_fixtures::{
+            released_config, released_shape_tokenizer,
+        };
+
+        let mut tokenizer = released_shape_tokenizer();
+
+        // As released: the pre-check accepts it, and the post-check must not --
+        // an unregistered tokenizer reaching the runtime is exactly #1430.
+        validate_released_tokenizer_shape(&tokenizer).unwrap();
+        let skipped = validate_tokenizer(&tokenizer, 151_936).unwrap_err();
+        assert!(
+            skipped.to_string().contains("151669"),
+            "a skipped registration must name the missing vocabulary, got {skipped}"
+        );
+
+        register_extra_special_tokens(&mut tokenizer, &released_config()).unwrap();
+
+        // Registered: the post-check accepts it, and the pre-check must not --
+        // a tokenizer.json that already carries the extras is not the released
+        // file, so the swap guard still has teeth.
+        validate_tokenizer(&tokenizer, 151_936).unwrap();
+        assert!(validate_released_tokenizer_shape(&tokenizer).is_err());
+        for (token, expected) in H3_EXTRA_SPECIAL_TOKENS {
+            assert_eq!(tokenizer.token_to_id(token), Some(expected));
+        }
+    }
+
+    #[test]
+    fn a_config_without_the_declared_special_tokens_is_not_the_released_contract() {
+        let released = br#"{"tokenizer_class":"Qwen2Tokenizer","add_bos_token":false,
+            "bos_token":null,"model_max_length":262144,"pad_token":"<|endoftext|>",
+            "eos_token":"<|im_end|>","additional_special_tokens":["a","b","c","d","e","f","g",
+            "h","i","j","k","l","m","n","o","p","q","r","s","t"]}"#;
+        validate_tokenizer_config(released).unwrap();
+
+        let stripped = br#"{"tokenizer_class":"Qwen2Tokenizer","add_bos_token":false,
+            "bos_token":null,"model_max_length":262144,"pad_token":"<|endoftext|>",
+            "eos_token":"<|im_end|>"}"#;
+        let error = validate_tokenizer_config(stripped).unwrap_err();
+        assert!(error.to_string().contains("additional special tokens"));
+    }
+
+    #[test]
+    fn registered_tokenizer_vocabulary_is_distinct_from_embedding_capacity() {
+        // The registered shape: 151_643 base + 26 released added + the seven
+        // configured extras, ending at 151_675, inside a 151_936-row table.
+        validate_tokenizer_capacity(151_643, 151_676, Some(151_675), 151_936).unwrap();
         for invalid in [
-            (151_642, 151_669, Some(151_668), 151_936),
-            (151_643, 151_670, Some(151_669), 151_936),
-            (151_643, 151_669, Some(151_936), 151_936),
-            (151_643, 151_669, Some(151_668), 151_935),
-            (151_643, 151_669, None, 151_936),
+            (151_642, 151_676, Some(151_675), 151_936),
+            // The released shape, i.e. the extras were never registered.
+            (151_643, 151_669, Some(151_668), 151_936),
+            (151_643, 151_677, Some(151_676), 151_936),
+            (151_643, 151_676, Some(151_936), 151_936),
+            (151_643, 151_676, Some(151_675), 151_935),
+            (151_643, 151_676, None, 151_936),
         ] {
             assert!(
-                validate_tokenizer_capacity(invalid.0, invalid.1, invalid.2, invalid.3).is_err()
+                validate_tokenizer_capacity(invalid.0, invalid.1, invalid.2, invalid.3).is_err(),
+                "{invalid:?} must be refused"
             );
         }
     }

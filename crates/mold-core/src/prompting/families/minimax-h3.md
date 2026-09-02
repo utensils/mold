@@ -51,8 +51,7 @@ non_diegetic_music: A soft acoustic-guitar pattern at a moderate tempo.
 
 Avoid plot summaries, unresolved labels, and timing that misses the duration.
 Expansion produces this grammar when given the H3 route. Check live runtime
-availability before promising speech; mold's tokenizer does not yet register
-the official dialogue tokens (issue #1430).
+availability before promising speech.
 
 ## CLI
 

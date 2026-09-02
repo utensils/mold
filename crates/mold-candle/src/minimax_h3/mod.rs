@@ -17,6 +17,7 @@ mod presentation;
 mod private_runtime_observation;
 mod processor;
 mod qwen_nvfp4;
+mod special_tokens;
 // The private-artifact runtime is intentionally not wired into a public
 // factory until the separate compliance activation lands.
 #[allow(dead_code)]
@@ -159,6 +160,13 @@ pub use qwen_quant::{
     H3QwenInt8MemoryAccounting, H3QwenInt8PolicyError, H3QwenInt8WeightOnlyPolicy,
     H3QwenLinearExecution, H3QwenTensorDType, H3QwenTensorSpec,
     H3_QWEN_INT8_QUANTIZED_LINEAR_COUNT, H3_QWEN_INT8_WEIGHT_ONLY_STABLE_ID,
+};
+pub use special_tokens::{
+    register_extra_special_tokens, H3SpecialTokenError, H3_BASE_VOCABULARY_SIZE,
+    H3_EXTRA_SPECIAL_TOKENS, H3_REGISTERED_ADDED_TOKEN_COUNT, H3_REGISTERED_MAX_TOKEN_ID,
+    H3_REGISTERED_VOCABULARY_SIZE, H3_RELEASED_ADDED_TOKEN_COUNT,
+    H3_RELEASED_ADDITIONAL_SPECIAL_TOKEN_COUNT, H3_RELEASED_MAX_TOKEN_ID,
+    H3_RELEASED_VOCABULARY_SIZE,
 };
 pub use turbo_lora::{
     authenticate_h3_turbo_lora_adapter, inspect_h3_turbo_lora_adapter, H3TurboLoraContract,
