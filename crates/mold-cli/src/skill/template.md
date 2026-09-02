@@ -19,9 +19,10 @@ mold server status
 - For a 3-D mesh (`hunyuan3d`), the input is one image and the output is a
   GLB: there is no prompt to write, and `mold expand` / `mold remix` answer
   with image advice instead of a rewrite. OBJ, STL and PLY are gallery-side
-  exports of the stored GLB, never generation targets; a turntable GIF, APNG
-  or WebP (`mold library export <file> --format gif`) is a render of it for
-  sharing where no viewer opens a GLB.
+  exports of the stored GLB, never generation targets, and take optional
+  `--size-mm`/`--up-axis`/`--origin` to make the export print-ready; a
+  turntable GIF, APNG or WebP (`mold library export <file> --format gif`) is
+  a render of it for sharing where no viewer opens a GLB.
 - For model selection and current capabilities, use `mold list`, `mold info
 <model>`, or the selected server's `/api/models` data. These live surfaces are
   authoritative; this skill intentionally does not duplicate changing model
