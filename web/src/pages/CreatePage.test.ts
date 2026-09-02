@@ -5125,10 +5125,13 @@ describe("CreatePage 3-D mesh prints", () => {
     form.state.value.model = rasterModel.name;
     form.state.value.modelFamily = rasterModel.family;
     form.state.value.prompt = "a lighthouse";
+    // The expansion context rides the prepared-batch path only.
+    form.state.value.batchSize = 3;
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
+    expect(expandPromptMock).toHaveBeenCalledTimes(1);
     const [payload] = expandPromptMock.mock.calls[0] as unknown as [
       { context?: { prompt_mode?: string } },
     ];
