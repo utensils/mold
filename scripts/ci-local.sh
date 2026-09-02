@@ -254,6 +254,12 @@ if wants rust; then
     cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns,pulid
   step "rust: MiniMax H3 private foundations" \
     cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3
+  # The conditioner cache is INERT under `h3-private-uat`, so the lane above
+  # never exercises an enabled cache. Module-filtered because the unfiltered
+  # `--features h3` graph carries private-UAT-only fixtures that only the
+  # capture feature satisfies.
+  step "rust: MiniMax H3 conditioner cache (enabled)" \
+    cargo test -p mold-ai-inference --lib --features h3 minimax_h3::conditioner_cache
   for bin in h3_artifact_qualification h3_qwen_layer50_capture \
              h3_transformer_capture; do
     step "rust: clippy $bin" \

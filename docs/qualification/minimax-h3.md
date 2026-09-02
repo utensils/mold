@@ -1085,9 +1085,18 @@ the runtime-bound observation and the `PromptEncode` scheduler-estimate
 sample for that render instead of fabricating either, and is disclosed as
 `prompt conditioning [cache hit]`.
 
+What a hit is worth is TWO numbers, and only one of them generalizes. The
+conditioner LOAD is shape-independent: 53.6 s in row `a″`. The ENCODE scales
+with the conditioned patch count — row `a″`'s single 2048-square reference is
+16,384 vision patches and encoded in 24.6 s on the CUDA route (2,405.6 s for
+the same reference on row `a′`'s host route), while an FL2VA endpoint is 4,032
+patches and encodes proportionally faster. Quote the row, never row `a″`'s
+total as if it were every render's saving.
+
 **The measured hit/miss rows for this cache — back-to-back renders on plato,
 `scheduler_estimates` before and after, and the paired MP4 SHA-256 check —
-are pending the plato UAT run and are not recorded here yet.**
+are pending the plato UAT run and are not recorded here yet. The planned run
+is FL2VA-only, so its encode half will be far below row `a″`'s.**
 
 ### What is derived, and how
 

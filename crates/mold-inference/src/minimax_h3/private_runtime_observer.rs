@@ -541,6 +541,15 @@ fn build_observation(
     mut state: ObservationState,
     workspace: H3PrivateWorkspaceObservation,
 ) -> Result<Option<H3PrivateRuntimeBoundObservation>> {
+    // A boundary failure is fatal on EVERY exit, withheld ones included. This
+    // is the error `synchronize_boundary` records when a captured phase could
+    // not fence the device, and a render that could not fence its own phases
+    // is not a render whose print may be published just because its
+    // conditioner came from the cache.
+    if let Some(error) = state.first_error.take() {
+        finish_open_probes(&mut state);
+        bail!(error)
+    }
     // Withhold, never synthesize. A hit ran no conditioner, so there is no
     // Qwen workspace peak to report; and on Ref2VA the outer `QwenEncode`
     // boundary still brackets `construct_vaes`, so a probe read here would
@@ -555,10 +564,6 @@ fn build_observation(
                 .context("private H3 withheld runtime-bound capture could not fence its exit")?;
         }
         return Ok(None);
-    }
-    if let Some(error) = state.first_error.take() {
-        finish_open_probes(&mut state);
-        bail!(error)
     }
     if !state.phases.is_empty() || !state.host_phase_entry.is_empty() {
         finish_open_probes(&mut state);
@@ -738,6 +743,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "cuda"))]
     fn cached_conditioner_withholds_the_observation_and_rearms_cleanly() {
+        let depth_before = crate::device::open_probe_depth();
         let capture = H3PrivateRuntimeBoundCapture::begin(
             &Device::Cpu,
             false,
@@ -764,6 +770,15 @@ mod tests {
                 .is_none(),
             "a served conditioner produces no runtime-bound observation"
         );
+        // The floor stack is the only durable trace of an unclosed probe, and
+        // the second `begin()` below would succeed either way: `finish` takes
+        // ACTIVE unconditionally. This is the assertion that actually proves
+        // the withheld path ran `finish_open_probes`.
+        assert_eq!(
+            crate::device::open_probe_depth(),
+            depth_before,
+            "the withheld path must close the overall probe and the open phase probe"
+        );
 
         let second = H3PrivateRuntimeBoundCapture::begin(
             &Device::Cpu,
@@ -789,6 +804,28 @@ mod tests {
         assert!(
             !error.contains("incomplete phase lifecycle"),
             "the second attempt must not inherit the first attempt's open probes: {error}"
+        );
+    }
+
+    /// A withheld observation is not a withheld FAILURE. `synchronize_boundary`
+    /// records `first_error` at every captured-phase boundary — VaeLoad, the
+    /// Ref2VA outer QwenEncode, the visual encoders, both decoders, Mux — and a
+    /// device that could not be fenced there is fatal whether or not the
+    /// conditioner came from the cache. Before this ordering the flag swallowed
+    /// it and the print was published.
+    #[test]
+    fn a_withheld_observation_still_reports_a_boundary_failure() {
+        let state = ObservationState {
+            qwen_conditioning_cached: true,
+            first_error: Some("private H3 VaeLoad exit synchronization failed: device lost".into()),
+            ..ObservationState::default()
+        };
+        let error = build_observation(state, H3PrivateWorkspaceObservation::default())
+            .expect_err("a boundary failure is fatal on a cache hit too")
+            .to_string();
+        assert!(
+            error.contains("VaeLoad exit synchronization failed"),
+            "the withheld path must surface the recorded boundary failure: {error}"
         );
     }
 

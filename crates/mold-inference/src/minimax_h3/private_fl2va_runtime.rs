@@ -2104,6 +2104,27 @@ where
         Ok(())
     }
 
+    /// The fence the MISS path keeps inside the adapter.
+    ///
+    /// On a miss `encode_fl2va`/`encode_ref2va` call `require_task`, which
+    /// compares the support's task AND the authority's. A hit never opens the
+    /// adapter, so this is where the same question gets asked: the request
+    /// variant must be the task this backend was admitted for, and the frozen
+    /// canonical model must be that task's base compact identity (it is the
+    /// base for every Turbo tier — the adapter never reaches the conditioner).
+    fn require_conditioner_task(&self, request: &H3ConditionerRequest<'_>) -> Result<()> {
+        let requested = match request {
+            H3ConditionerRequest::Fl2va { .. } => Task::Fl2va,
+            H3ConditionerRequest::Ref2va { .. } => Task::Ref2va,
+        };
+        if self.admitted.task != requested
+            || self.admitted.canonical_model != contract::base_compact_model_for_task(requested)
+        {
+            bail!("private H3 conditioner phase reached a backend admitted for another task")
+        }
+        Ok(())
+    }
+
     fn validate_continuing_authority(&self) -> Result<()> {
         validate_private_continuing_authority(
             &self.authority,
@@ -2314,6 +2335,7 @@ where
         request: H3ConditionerRequest<'_>,
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<H3TextConditioning> {
+        self.require_conditioner_task(&request)?;
         self.validate_continuing_authority()?;
         let identity = self.conditioner_cache_identity();
         let served = identity
@@ -3458,6 +3480,36 @@ mod tests {
                 "{request} must be constructed at a delegation site"
             );
         }
+        // The miss path's task fence lives inside the adapter
+        // (`require_task`), which a hit never opens. The helper must therefore
+        // ask the same question itself, and BEFORE it derives a key or takes a
+        // slot.
+        let fence = format!("self.require_conditioner{}", "_task(&request)?");
+        let fence_at = body.find(fence.as_str()).expect("the task fence");
+        assert!(
+            fence_at < lookup_at && fence_at < load_at,
+            "the task fence must run before either conditioner path"
+        );
+    }
+
+    /// Both faces of the fence, on the frozen values the runtime compares.
+    #[test]
+    fn the_conditioner_task_fence_pairs_each_request_with_its_base_compact_model() {
+        for (task, model) in [
+            (Task::Fl2va, contract::FL2VA_COMFY),
+            (Task::Ref2va, contract::REF2VA_COMFY),
+        ] {
+            assert_eq!(
+                contract::base_compact_model_for_task(task),
+                model,
+                "the fence compares against the base compact model for the task"
+            );
+        }
+        assert_ne!(
+            contract::base_compact_model_for_task(Task::Fl2va),
+            contract::base_compact_model_for_task(Task::Ref2va),
+            "a crossed request and admission can never satisfy the fence"
+        );
     }
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

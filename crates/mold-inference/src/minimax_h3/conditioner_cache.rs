@@ -49,6 +49,12 @@ use super::pipeline::H3TextConditioning;
 /// floor, so a full cache never moves an admission decision.
 pub(crate) const H3_CONDITIONER_CACHE_DEFAULT_BUDGET_BYTES: u64 = 512 << 20;
 pub(crate) const H3_CONDITIONER_CACHE_ENV: &str = "MOLD_H3_CONDITIONER_CACHE";
+/// Ceiling on the parsed budget. A byte bound that no entry can ever reach is
+/// not a bound: `u64::MAX` MiB saturates, and after that neither the per-entry
+/// refusal nor the eviction loop can fire again. 64 GiB is far above any
+/// conditioning set the family can produce (a nine-image Ref2VA presentation
+/// is ~380 MB) and far below a host budget worth silently claiming.
+pub(crate) const H3_CONDITIONER_CACHE_MAX_BUDGET_MIB: u64 = 65_536;
 /// The one conditioner state width the H3 pipeline accepts.
 const H3_CONDITIONER_STATE_WIDTH: usize = 5_120;
 const H3_CONDITIONER_CACHE_KEY_DOMAIN: &[u8] = b"mold.minimax-h3.conditioner-cache.v1\0";
@@ -341,7 +347,8 @@ impl H3ConditionerCache {
     }
 }
 
-/// `unset` -> 512 MiB, `0|off|false|no` -> disabled, `<n>` -> n MiB.
+/// `unset` -> 512 MiB, `0|off|false|no|disabled` -> disabled, `<n>` -> n MiB
+/// clamped to [`H3_CONDITIONER_CACHE_MAX_BUDGET_MIB`].
 ///
 /// An unparseable value keeps the default rather than silently disabling the
 /// cache: a typo must not change residency without saying so.
@@ -358,7 +365,16 @@ pub(crate) fn budget_from_env(value: Option<&str>) -> Option<u64> {
     }
     match value.parse::<u64>() {
         Ok(0) => None,
-        Ok(mib) => Some(mib.saturating_mul(1 << 20)),
+        Ok(mib) if mib > H3_CONDITIONER_CACHE_MAX_BUDGET_MIB => {
+            tracing::warn!(
+                target: "mold::minimax_h3::conditioner_cache",
+                requested_mib = mib,
+                clamped_mib = H3_CONDITIONER_CACHE_MAX_BUDGET_MIB,
+                "{H3_CONDITIONER_CACHE_ENV} exceeds the accepted ceiling; clamping"
+            );
+            Some(H3_CONDITIONER_CACHE_MAX_BUDGET_MIB << 20)
+        }
+        Ok(mib) => Some(mib << 20),
         Err(_) => {
             tracing::warn!(
                 target: "mold::minimax_h3::conditioner_cache",
@@ -402,17 +418,19 @@ fn locked() -> std::sync::MutexGuard<'static, H3ConditionerCache> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The map's OWN budget is the one authority on what it holds.
+///
+/// A disabled process (env `off`, or any `h3-private-uat` build) initializes
+/// the global with a zero budget, and [`H3ConditionerCache::insert`] refuses
+/// every entry against it — [`H3CachedConditioning::capture`] refuses a
+/// zero-row state, so no entry can ever weigh zero. Reading the budget here
+/// rather than re-deriving `enabled()` is what lets a test install a known
+/// budget on the global map instead of depending on the developer's shell.
 pub(crate) fn lookup(key: &str) -> Option<Arc<H3CachedConditioning>> {
-    if !enabled() {
-        return None;
-    }
     locked().get(key)
 }
 
 pub(crate) fn insert(key: String, entry: H3CachedConditioning) {
-    if !enabled() {
-        return;
-    }
     let bytes = entry.bytes;
     if locked().insert(key, entry) {
         tracing::debug!(
@@ -435,8 +453,39 @@ pub fn h3_conditioner_cache_clear() -> u64 {
     locked().clear()
 }
 
-pub fn h3_conditioner_cache_resident_bytes() -> u64 {
+/// What the process-global map currently holds.
+///
+/// Crate-visible on purpose: the server's reclaim paths call
+/// [`h3_conditioner_cache_clear`], which already reports the bytes it handed
+/// back, so exporting a second reader that nothing calls would advertise an
+/// operator surface that does not exist.
+pub(crate) fn h3_conditioner_cache_resident_bytes() -> u64 {
     locked().resident_bytes
+}
+
+/// Serialize every test that drives the PROCESS-GLOBAL map.
+///
+/// Holding this guard is what keeps such a test from racing a sibling; it
+/// deliberately does not touch the budget, so a capture-scope build's inert
+/// map stays inert while it is held.
+#[cfg(test)]
+pub(crate) fn process_global_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Install a known budget on the process-global map and empty it.
+///
+/// `budget_bytes()` resolves the environment once per process through a
+/// `OnceLock`, so a test that wants the global map enabled cannot get there by
+/// setting an environment variable — and one that asserts on absolute resident
+/// bytes must not inherit whatever the developer's shell says. Call under
+/// [`process_global_test_guard`].
+#[cfg(test)]
+pub(crate) fn install_process_global_budget_for_test(budget_bytes: u64) {
+    let mut cache = locked();
+    cache.clear();
+    cache.budget_bytes = budget_bytes;
 }
 
 #[cfg(test)]
@@ -808,9 +857,39 @@ mod tests {
         );
     }
 
+    /// A budget nothing can reach is not a budget: at `u64::MAX` bytes neither
+    /// the per-entry refusal nor the eviction loop can fire again, so an
+    /// operator typo turns a bounded cache into an unbounded one.
+    #[test]
+    fn an_over_large_budget_is_clamped_rather_than_saturated() {
+        assert_eq!(
+            budget_from_env(Some("99999999999")),
+            Some(H3_CONDITIONER_CACHE_MAX_BUDGET_MIB << 20),
+            "a huge MiB count clamps to the ceiling instead of saturating to ~u64::MAX"
+        );
+        assert_eq!(
+            budget_from_env(Some(&u64::MAX.to_string())),
+            Some(H3_CONDITIONER_CACHE_MAX_BUDGET_MIB << 20)
+        );
+        assert_eq!(
+            budget_from_env(Some("65536")),
+            Some(H3_CONDITIONER_CACHE_MAX_BUDGET_MIB << 20),
+            "the ceiling itself is accepted unchanged"
+        );
+        let ceiling = budget_from_env(Some("99999999999")).expect("clamped, not disabled");
+        let mut cache = H3ConditionerCache::with_budget(ceiling);
+        assert!(cache.resident_bytes.checked_add(ceiling).is_some());
+        cache.insert("held".into(), entry(1));
+        assert_eq!(cache.resident_bytes, ROW_BYTES);
+    }
+
+    /// Capture scope is inert whatever the environment says, and the inertness
+    /// is structural: the global map is built with a zero budget, which every
+    /// entry exceeds because `capture` refuses a zero-row state.
     #[test]
     #[cfg(feature = "h3-private-uat")]
     fn cache_is_inert_in_capture_builds() {
+        let _serialized = process_global_test_guard();
         assert_eq!(
             budget_bytes(),
             None,
@@ -823,13 +902,19 @@ mod tests {
         assert_eq!(h3_conditioner_cache_clear(), 0);
     }
 
-    /// The only test that touches the process-global map, so it can assert on
-    /// absolute resident bytes without racing a sibling.
+    /// `lookup`, `insert` and `h3_conditioner_cache_clear` address ONE map.
+    ///
+    /// The budget is installed explicitly rather than inherited from the
+    /// environment: `budget_bytes()` resolves `MOLD_H3_CONDITIONER_CACHE` once
+    /// per process through a `OnceLock`, so a developer with the knob set to
+    /// `off` would otherwise fail this test, and a later test driving the same
+    /// map would race it.
     #[test]
     #[cfg(not(feature = "h3-private-uat"))]
     fn process_global_reuse_serves_and_clears() {
-        assert!(enabled());
-        assert_eq!(h3_conditioner_cache_clear(), 0);
+        let _serialized = process_global_test_guard();
+        install_process_global_budget_for_test(ROW_BYTES * 4);
+        assert_eq!(h3_conditioner_cache_resident_bytes(), 0);
         insert("process-global".into(), entry(1));
         let served = lookup("process-global").expect("a stored entry is served back");
         assert_eq!(served.text_rows(), 1);
@@ -837,5 +922,18 @@ mod tests {
         assert_eq!(h3_conditioner_cache_clear(), ROW_BYTES);
         assert!(lookup("process-global").is_none());
         assert_eq!(h3_conditioner_cache_resident_bytes(), 0);
+    }
+
+    /// A zero budget refuses every entry, which is how the disabled process and
+    /// every capture-scope build stay inert without a second `enabled()` gate
+    /// inside `lookup`/`insert`.
+    #[test]
+    fn a_zero_budget_map_holds_nothing() {
+        let _serialized = process_global_test_guard();
+        install_process_global_budget_for_test(0);
+        insert("disabled".into(), entry(1));
+        assert!(lookup("disabled").is_none());
+        assert_eq!(h3_conditioner_cache_resident_bytes(), 0);
+        assert_eq!(h3_conditioner_cache_clear(), 0);
     }
 }

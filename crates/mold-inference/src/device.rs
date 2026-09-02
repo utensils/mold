@@ -2798,6 +2798,17 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// How many probes this thread currently holds open.
+///
+/// The floor stack is the only durable trace a `PhaseVramProbe` leaves, so it
+/// is the one signal that says whether a phase probe was actually closed. A
+/// caller that returns without finishing its probes leaves this above where it
+/// started, and the next phase on the same worker thread inherits the frame.
+#[cfg(test)]
+pub(crate) fn open_probe_depth() -> usize {
+    PROBE_PEAK_FLOORS.with(|floors| floors.borrow().len())
+}
+
 fn raise_open_probe_floor(used: Option<u64>, reserved: Option<u64>) {
     let (Some(used), reserved) = (used, reserved.unwrap_or(0)) else {
         return;
