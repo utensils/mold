@@ -24,6 +24,10 @@ const props = defineProps<{
   poster?: string;
   /** Describes the subject for assistive technology. */
   alt?: string;
+  /** Slowly yaw the mesh until the first user interaction. */
+  autoRotate?: boolean;
+  /** Offer a fullscreen button in the controls. */
+  expandable?: boolean;
 }>();
 
 const emit = defineEmits<{
