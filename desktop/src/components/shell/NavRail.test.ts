@@ -579,6 +579,30 @@ describe("NavRail developing jobs", () => {
     expect(refresh).toHaveBeenCalledWith(13);
   });
 
+  it("renews a finished print's result URL when it is re-selected, not only when it is missing", async () => {
+    const wrapper = await mountAt("/create");
+    const generation = useGenerationStore();
+    const refresh = vi.spyOn(generation, "refreshRemoteResultUrl").mockResolvedValue();
+    generation.jobs = [
+      {
+        clientId: 15,
+        model: "hunyuan3d:fp16",
+        prompt: "",
+        status: "complete",
+        // A media ticket minted an hour ago: present, but no longer valid.
+        resultUrl: "http://hal9000:7680/api/gallery/image/mesh.glb?media_token=old&expires=1",
+        resultUrlExpiresAt: 1_000,
+        result: { filename: "mesh.glb", image: "" },
+        request: { prompt: "", model: "hunyuan3d:fp16" },
+      } as never,
+    ];
+    await flushPromises();
+
+    await wrapper.get("[data-test='developing-print']").trigger("click");
+    // The store decides whether the URL is still fresh; the rail always asks.
+    expect(refresh).toHaveBeenCalledWith(15);
+  });
+
   it("shows the authenticated Library thumbnail for a completed video", async () => {
     const wrapper = await mountAt("/create");
     const generation = useGenerationStore();

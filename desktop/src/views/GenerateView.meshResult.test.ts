@@ -24,14 +24,26 @@ vi.mock("../lib/api/client", () => ({
     status = 0;
   },
 }));
+/** The native bridge, switchable per test: outside Tauri the canvas falls
+ * back to the host URL; inside it the Library's byte route serves the GLB. */
+const native = vi.hoisted(() => ({
+  inTauri: false,
+  fetchGalleryMedia: vi.fn<(...args: unknown[]) => Promise<ArrayBuffer | null>>(),
+  authedMediaUrl: vi.fn<(...args: unknown[]) => Promise<string>>(),
+}));
 vi.mock("../lib/ipc", () => ({
-  inTauri: () => false,
+  inTauri: () => native.inTauri,
   ipc: {
     appSettingsGet: vi.fn().mockResolvedValue({}),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
     saveMediaBytes: vi.fn(),
     revealSavedMedia: vi.fn(),
+    fetchGalleryMedia: (...args: unknown[]) => native.fetchGalleryMedia(...args),
   },
+}));
+vi.mock("../lib/gallery/media", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/gallery/media")>()),
+  authedMediaUrl: (...args: unknown[]) => native.authedMediaUrl(...args),
 }));
 vi.mock("../lib/api/sse", () => ({ sseStream: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("../lib/api/history", () => ({ fetchHistory: vi.fn(() => Promise.resolve([])) }));
@@ -327,6 +339,12 @@ describe("GenerateView — mesh results", () => {
    * identical print opened correctly from the Library seconds later.
    */
   describe("a completion synthesized from a durable batch child", () => {
+    beforeEach(() => {
+      native.inTauri = false;
+      native.fetchGalleryMedia.mockReset();
+      native.authedMediaUrl.mockReset().mockRejectedValue(new Error("no thumbnail"));
+    });
+
     it("mounts the viewer on the print's own media URL", async () => {
       const job = primeMeshJob(durableMeshCompletion());
       job.resultUrl = "https://halcyon.test/api/gallery/image/mesh.glb";
@@ -343,6 +361,86 @@ describe("GenerateView — mesh results", () => {
       // No poster was published either; the viewer says so itself rather than
       // showing a still that does not exist.
       expect(viewer.props("poster")).toBe("");
+    });
+
+    /**
+     * The Library has always opened the same file through the native media
+     * bridge (bytes from the Tauri side in a blob URL) and rendered it, while
+     * the canvas handed the viewer the host's raw http URL and let the
+     * webview fetch it — the one bare cross-host fetch in the app, and the
+     * one place a finished print re-selected from the rail came back as
+     * "The 3-D view couldn't start, so here's the poster" over a black
+     * canvas with no poster at all. Inside Tauri the canvas now loads the
+     * GLB the Library's way and takes the host's thumbnail as its poster.
+     */
+    it("loads the GLB over the native bridge and takes the host thumbnail as the poster", async () => {
+      native.inTauri = true;
+      native.fetchGalleryMedia.mockResolvedValue(new Uint8Array([0x67, 0x6c, 0x54, 0x46]).buffer);
+      native.authedMediaUrl.mockResolvedValue("blob:poster-1");
+      const job = primeMeshJob(durableMeshCompletion());
+      job.hostId = "hal9000";
+      job.resultUrl = "http://100.123.198.98:7680/api/gallery/image/mesh.glb";
+      const wrapper = mountView();
+      await flushPromises();
+
+      const viewer = wrapper.findComponent(MeshViewer);
+      expect(viewer.exists()).toBe(true);
+      const filename = durableMeshCompletion().filename!;
+      expect(native.fetchGalleryMedia).toHaveBeenCalledWith(
+        { baseUrl: "http://127.0.0.1:7680", apiKey: "k" },
+        filename,
+      );
+      expect(viewer.props("src")).toBe("blob:mesh-1");
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      expect((createObjectURL.mock.calls[0]![0] as Blob).type).toBe("model/gltf-binary");
+      expect(native.authedMediaUrl).toHaveBeenCalledWith(
+        `/api/gallery/thumbnail/${encodeURIComponent(filename)}`,
+        { target: { baseUrl: "http://127.0.0.1:7680", apiKey: "k" }, cacheKey: "hal9000" },
+      );
+      expect(viewer.props("poster")).toBe("blob:poster-1");
+    });
+
+    it("keeps the host thumbnail as the poster when the native byte route refuses", async () => {
+      native.inTauri = true;
+      native.fetchGalleryMedia.mockResolvedValue(null);
+      native.authedMediaUrl.mockResolvedValue("blob:poster-2");
+      const job = primeMeshJob(durableMeshCompletion());
+      job.resultUrl = "https://halcyon.test/api/gallery/image/mesh.glb";
+      const wrapper = mountView();
+      await flushPromises();
+
+      const viewer = wrapper.findComponent(MeshViewer);
+      // The ticketed/direct URL remains the fallback the viewer fetches.
+      expect(viewer.props("src")).toBe(job.resultUrl);
+      expect(viewer.props("poster")).toBe("blob:poster-2");
+    });
+
+    it("renews the result URL once when the viewer fails, then leaves the poster standing", async () => {
+      const job = primeMeshJob(durableMeshCompletion());
+      job.resultUrl = "https://halcyon.test/api/gallery/image/mesh.glb?media_token=expired";
+      const generation = useGenerationStore();
+      // The store renews the URL on its own (reactive) job row, as the real
+      // action does when it re-mints an expired media ticket.
+      const refresh = vi
+        .spyOn(generation, "refreshRemoteResultUrl")
+        .mockImplementation(async () => {
+          generation.jobs[0]!.resultUrl =
+            "https://halcyon.test/api/gallery/image/mesh.glb?media_token=fresh";
+        });
+      const wrapper = mountView();
+      await flushPromises();
+
+      wrapper.findComponent(MeshViewer).vm.$emit("fail", "The 3-D view couldn't start.");
+      await flushPromises();
+      expect(refresh).toHaveBeenCalledWith(1, true);
+      expect(wrapper.findComponent(MeshViewer).props("src")).toBe(
+        "https://halcyon.test/api/gallery/image/mesh.glb?media_token=fresh",
+      );
+
+      wrapper.findComponent(MeshViewer).vm.$emit("fail", "The 3-D view couldn't start.");
+      await flushPromises();
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(wrapper.findComponent(MeshViewer).exists()).toBe(true);
     });
 
     it("never draws the glTF through the still arm", async () => {

@@ -247,12 +247,20 @@ import { startCatalogDownload } from "../lib/api/catalog";
 import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
 import { modelDisplayNameForId } from "../lib/models";
-import { galleryMediaPath, localMediaPath, mediaPath } from "../lib/gallery/media";
+import {
+  authedMediaUrl,
+  fullSizeMediaUrl,
+  galleryMediaPath,
+  localMediaPath,
+  mediaPath,
+  thumbnailPath,
+} from "../lib/gallery/media";
 import { sequenceStageMediaUrl } from "../lib/sequenceMedia";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
 import { ipc } from "../lib/ipc";
+import type { ApiTarget } from "../lib/api/client";
 import { applyDesktopImageDrop } from "../lib/desktopImageDrop";
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { useGalleryStore } from "../stores/gallery";
@@ -2404,13 +2412,87 @@ function isMeshResult(job: { result: CompleteEvent | null } | null): boolean {
 }
 
 /** The rendered PNG a mesh print carries — its only raster, and the viewer's
- * poster while the geometry loads (and forever, if it cannot). */
+ * poster while the geometry loads (and forever, if it cannot). A completion
+ * synthesized from a durable batch child carries no poster inline, so the
+ * host's own thumbnail (the poster it rendered at save time) stands in. */
 const resultMeshPoster = computed(() => {
   const result = job.value?.result;
-  return isMeshArtifact(result) && result?.mesh_poster
-    ? `data:image/png;base64,${result.mesh_poster}`
-    : "";
+  if (!isMeshArtifact(result)) return "";
+  if (result?.mesh_poster) return `data:image/png;base64,${result.mesh_poster}`;
+  return durableMeshPoster.value;
 });
+
+/** The host the finished print lives on: the frozen generation target, or
+ * the primary connection for a job whose target the store no longer holds. */
+function resultHostTarget(clientId: number): ApiTarget | null {
+  const frozen = generation.targetForJob(clientId);
+  if (frozen) return frozen;
+  const info = conn.info;
+  return info?.baseUrl ? { baseUrl: info.baseUrl, apiKey: info.apiKey ?? null } : null;
+}
+
+/**
+ * A durable completion names a FILE on its host. The Library opens that same
+ * file through the native media bridge (bytes from the Tauri side, wrapped in
+ * a blob URL) and has always rendered it; the canvas used to hand the viewer
+ * the host's raw http URL and let the webview fetch it itself, which is the
+ * one place in the app that did so — and the one place a finished mesh came
+ * back as "the 3-D view couldn't start". Load it the Library's way, keep the
+ * ticketed/direct URL as the fallback, and fetch the poster beside it.
+ */
+const durableMeshSrc = ref("");
+const durableMeshPoster = ref("");
+const durableMeshAttempt = ref(0);
+let durableMeshEpoch = 0;
+watch(
+  () =>
+    [
+      job.value?.clientId ?? null,
+      job.value?.result?.filename ?? null,
+      isMeshArtifact(job.value?.result) && !job.value?.result?.image,
+      durableMeshAttempt.value,
+    ] as const,
+  async ([clientId, filename, durableMesh]) => {
+    const epoch = ++durableMeshEpoch;
+    durableMeshSrc.value = "";
+    durableMeshPoster.value = "";
+    if (!durableMesh || clientId === null || !filename) return;
+    const target = resultHostTarget(clientId);
+    if (!target) return;
+    const cacheKey = job.value?.hostId ?? `job-${clientId}`;
+    const options = { target, cacheKey };
+    const [src, poster] = await Promise.all([
+      fullSizeMediaUrl(galleryMediaPath(filename, "host"), {
+        ...options,
+        // A mesh is fetched whole by the viewer, exactly as the Library's
+        // AuthedMedia loads it: never the legacy image blob path.
+        allowLegacyBlob: false,
+      }).catch(() => ""),
+      authedMediaUrl(thumbnailPath(filename), options).catch(() => ""),
+    ]);
+    if (epoch !== durableMeshEpoch) return;
+    durableMeshSrc.value = src;
+    durableMeshPoster.value = poster;
+  },
+  { immediate: true },
+);
+
+/** One renewed attempt per print: a ticket that expired while the print sat
+ * in the rail is re-minted and the viewer remounted; a second failure stays
+ * on the poster with the viewer's own note. */
+const durableMeshRetried = new Set<number>();
+function onResultMeshFail(): void {
+  const j = job.value;
+  if (!j || !isMeshArtifact(j.result) || j.result?.image) return;
+  if (durableMeshRetried.has(j.clientId)) return;
+  durableMeshRetried.add(j.clientId);
+  void generation
+    .refreshRemoteResultUrl(j.clientId, true)
+    .catch(() => undefined)
+    .finally(() => {
+      if (job.value?.clientId === j.clientId) durableMeshAttempt.value += 1;
+    });
+}
 
 /**
  * The GLB the viewer loads from INLINE bytes, as an object URL.
@@ -2463,6 +2545,7 @@ onBeforeUnmount(() => {
  */
 const resultMeshSrc = computed(() => {
   if (inlineMeshSrc.value) return inlineMeshSrc.value;
+  if (durableMeshSrc.value) return durableMeshSrc.value;
   const j = job.value;
   return isMeshArtifact(j?.result) && j?.resultUrl ? j.resultUrl : "";
 });
@@ -4735,6 +4818,7 @@ onBeforeUnmount(() => {
                      its binary glTF as a picture. The poster is its still. -->
                 <MeshViewer
                   v-if="resultMeshSrc"
+                  :key="`${resultMeshSrc}#${durableMeshAttempt}`"
                   class="absolute inset-0"
                   data-test="preview-mesh"
                   :src="resultMeshSrc"
@@ -4743,6 +4827,7 @@ onBeforeUnmount(() => {
                   auto-rotate
                   expandable
                   @ready="onResultMeshReady"
+                  @fail="onResultMeshFail"
                 />
                 <!-- Audio is checked next: an audio print has no frames, so
                      the video probe falls through and the <img> below renders

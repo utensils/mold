@@ -359,13 +359,17 @@ function selectPrint(job: Job) {
   draft.output = "single";
   const request = job.request;
   if (request) composer.set({ request });
-  if (job.status === "complete" && !job.resultUrl) {
+  if (job.status === "complete") {
     if (job.result?.filename) {
+      // The store no-ops on a fresh URL and re-mints an expired media
+      // ticket, so a print re-selected an hour later opens on the canvas
+      // instead of failing its fetch against a dead URL.
       void generation.refreshRemoteResultUrl(job.clientId).catch(() => {
+        if (job.resultUrl) return;
         toasts.push("Open this older print in Library");
         void router.push("/library");
       });
-    } else {
+    } else if (!job.resultUrl) {
       toasts.push("Open this older print in Library");
       void router.push("/library");
       return;
