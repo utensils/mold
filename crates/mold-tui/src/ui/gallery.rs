@@ -490,14 +490,14 @@ pub(crate) mod tests {
     /// Scoped `MOLD_HOME`, so the thumbnail cache lands in a temp dir.
     /// Holds the env lock for the whole body (single-threaded runtime, so
     /// holding it across the awaits is sound).
-    struct ScopedHome {
+    pub(crate) struct ScopedHome {
         _guard: std::sync::MutexGuard<'static, ()>,
         previous: Option<String>,
-        dir: tempfile::TempDir,
+        pub(crate) dir: tempfile::TempDir,
     }
 
     impl ScopedHome {
-        fn enter() -> Self {
+        pub(crate) fn enter() -> Self {
             crate::test_env::disable_db_for_non_isolated_tests();
             let guard = crate::test_env::enter_test_scope();
             let dir = tempfile::tempdir().unwrap();

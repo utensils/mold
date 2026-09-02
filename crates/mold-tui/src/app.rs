@@ -235,6 +235,12 @@ pub enum BackgroundEvent {
     /// A Library mesh export failed, with the host's or the writer's own
     /// sentence.
     MeshExportFailed(String),
+    /// Reuse settings asked the print's host for its retained source image;
+    /// this is the answer, keyed by the print so a stale one is ignored.
+    SourceImageRestored {
+        filename: String,
+        outcome: crate::source_media::SourceRestore,
+    },
     /// Periodic server status update (remote resource info).
     /// `None` means the server became unreachable — clear stale status.
     ServerStatusUpdate(Option<Box<ServerStatus>>),
@@ -1632,6 +1638,10 @@ pub struct GenerateState {
     /// the Preview caption. `None` after a raster or video completion, so a
     /// mesh summary never captions a picture.
     pub last_mesh_summary: Option<String>,
+    /// The gallery filename whose retained source image is being fetched
+    /// for the Source row after a reuse. An answer for any other print, or
+    /// one that lands after the row was cleared, is dropped.
+    pub source_restore_pending: Option<String>,
 }
 
 /// One held child this client can retry.
@@ -2860,6 +2870,7 @@ impl App {
                 held_batch: None,
                 prompt_transform_token: 0,
                 last_mesh_summary: None,
+                source_restore_pending: None,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -6628,13 +6639,16 @@ impl App {
         // leaves the rows at the recipe's defaults rather than carrying the
         // previous form's values into a print they never shaped.
         self.generate.params.mesh = meta.mesh.clone().unwrap_or_default();
-        // The print's source image cannot be brought back here (the TUI has
-        // no client for the host's retained source media, and a local
-        // input may be gone), so the row says "attach again" with the
-        // recorded name rather than showing the previous form's file — or
-        // nothing — as if it were this print's.
+        // The print's own source image, never the previous form's file: the
+        // row starts as "attach again" with the recorded name, and the
+        // restore below replaces that with the file when the host (or the
+        // directory beside a local print) still has it.
         self.generate.params.source_image_path = None;
         self.generate.params.source_image_recall = meta.source_image_name.clone();
+        self.generate.source_restore_pending = None;
+        if let Some(name) = meta.source_image_name.clone() {
+            self.restore_source_image_for(&entry, &name);
+        }
         if let Some(ref lora) = meta.lora {
             self.generate.params.lora_path = Some(lora.clone());
             self.generate.params.lora_scale = meta.lora_scale.unwrap_or(1.0);
@@ -6646,6 +6660,43 @@ impl App {
         // Switch to Generate view
         self.active_view = View::Create;
         self.generate.focus = GenerateFocus::Prompt;
+    }
+
+    /// Bring a recalled print's source image back onto the Source row.
+    ///
+    /// A remote print's host is the only authority on what it retained, so
+    /// it is ASKED — off the UI thread, the answer arriving as
+    /// [`BackgroundEvent::SourceImageRestored`] — and an `available` source
+    /// member is downloaded into the TUI cache. An in-process print recorded
+    /// only the file's name, so the one place it can still be is beside the
+    /// print; if it is, that path is the row's, else "attach again" stands.
+    fn restore_source_image_for(&mut self, entry: &GalleryEntry, name: &str) {
+        let origin = entry.primary_origin();
+        match origin.url {
+            None => {
+                let beside_print = entry
+                    .path
+                    .parent()
+                    .map(|dir| dir.join(name))
+                    .filter(|path| path.is_file());
+                if let Some(path) = beside_print {
+                    self.generate.params.source_image_path =
+                        Some(path.to_string_lossy().into_owned());
+                    self.generate.params.source_image_recall = None;
+                }
+            }
+            Some(url) => {
+                let filename = entry.filename();
+                self.generate.source_restore_pending = Some(filename.clone());
+                let host_id = origin.host_id.clone();
+                let tx = self.bg_tx.clone();
+                self.tokio_handle.spawn(async move {
+                    let outcome =
+                        crate::source_media::restore_source_image(&url, &host_id, &filename).await;
+                    let _ = tx.send(BackgroundEvent::SourceImageRestored { filename, outcome });
+                });
+            }
+        }
     }
 
     /// Replace the gallery with a fresh scan result, preserving the user's
@@ -10379,6 +10430,50 @@ impl App {
                         });
                     }
                 }
+                BackgroundEvent::SourceImageRestored { filename, outcome } => {
+                    use crate::source_media::SourceRestore;
+                    if self.generate.source_restore_pending.as_deref() != Some(filename.as_str()) {
+                        continue;
+                    }
+                    self.generate.source_restore_pending = None;
+                    // The row was cleared (x) while the host was answering:
+                    // the user's clear wins over the late file.
+                    let Some(name) = self.generate.params.source_image_recall.clone() else {
+                        continue;
+                    };
+                    let (message, style) = match outcome {
+                        SourceRestore::Restored(path) => {
+                            if self.generate.params.source_image_path.is_some() {
+                                continue;
+                            }
+                            self.generate.params.source_image_path =
+                                Some(path.to_string_lossy().into_owned());
+                            self.generate.params.source_image_recall = None;
+                            (
+                                format!("Restored source image {name} from the print's host"),
+                                ProgressStyle::Done,
+                            )
+                        }
+                        SourceRestore::Unavailable(word) => (
+                            format!("Source image {name}: {word}"),
+                            ProgressStyle::Warning,
+                        ),
+                        SourceRestore::NoSourceMember => (
+                            format!(
+                                "Source image {name}: the host retained no source image for \
+                                 this print; attach it again"
+                            ),
+                            ProgressStyle::Warning,
+                        ),
+                        SourceRestore::Failed(error) => (
+                            format!("Source image {name} could not be restored: {error}"),
+                            ProgressStyle::Warning,
+                        ),
+                    };
+                    self.generate
+                        .progress
+                        .push_log(ProgressLogEntry { message, style });
+                }
                 BackgroundEvent::MeshExportFailed(message) => {
                     self.generate.error_message = Some(format!("Export failed: {message}"));
                     self.generate.progress.push_log(ProgressLogEntry {
@@ -12006,6 +12101,7 @@ mod tests {
                 held_batch: None,
                 prompt_transform_token: 0,
                 last_mesh_summary: None,
+                source_restore_pending: None,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -16147,6 +16243,282 @@ mod tests {
             .contains("1788307390610"));
     }
 
+    /// Drive the background restore to a conclusion: pump events until the
+    /// pending marker clears (or give up after a few seconds).
+    async fn settle_source_restore(app: &mut App) {
+        for _ in 0..200 {
+            app.process_background_events();
+            if app.generate.source_restore_pending.is_none() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the source restore never settled");
+    }
+
+    fn remote_print_with_source(url: &str) -> GalleryEntry {
+        let mut entry = make_test_entry_with_name("chair.glb");
+        entry.metadata.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        entry.metadata.source_image_name = Some("armchair.png".into());
+        entry.origins = vec![GalleryOrigin::remote_from_url(url)];
+        entry
+    }
+
+    fn app_with_remote_print(url: &str) -> App {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.gallery.entries = vec![remote_print_with_source(url)];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+        app.active_view = View::Library;
+        app.gallery.selected = 0;
+        app
+    }
+
+    fn timeline_has(app: &App, needle: &str) -> bool {
+        app.generate
+            .progress
+            .log
+            .iter()
+            .any(|entry| entry.message.contains(needle))
+    }
+
+    /// Reuse on a remote print asks the host what it retained, downloads the
+    /// source-image member into the TUI cache, and puts that file on the
+    /// Source row — a keyless host needs no header for it.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn reuse_restores_the_retained_source_image_from_the_host() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let home = crate::ui::gallery::tests::ScopedHome::enter();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "availability": "available",
+                "members": [
+                    {"member_id": "mask-1", "role": "mask_image", "display_name": "mask.png", "size_bytes": 3},
+                    {"member_id": "src-1", "role": "source_image", "display_name": "armchair.png", "size_bytes": 8}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb/src-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"png-bytes".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut app = app_with_remote_print(&server.uri());
+        app.load_gallery_into_generate();
+        assert_eq!(app.active_view, View::Create);
+        assert_eq!(
+            app.generate.source_restore_pending.as_deref(),
+            Some("chair.glb"),
+            "the restore is in flight right after reuse"
+        );
+        assert_eq!(
+            app.generate.params.source_image_recall.as_deref(),
+            Some("armchair.png"),
+            "until the host answers, the row says attach again"
+        );
+        settle_source_restore(&mut app).await;
+
+        let expected = crate::source_media::cache_path("chair.glb", "armchair.png");
+        assert!(expected.starts_with(home.dir.path()), "{expected:?}");
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(expected.to_string_lossy().as_ref())
+        );
+        assert_eq!(std::fs::read(&expected).unwrap(), b"png-bytes");
+        assert_eq!(app.generate.params.source_image_recall, None);
+        assert_eq!(
+            app.generate.params.display_value(&ParamField::SourceImage),
+            "armchair.png"
+        );
+        assert!(timeline_has(&app, "Restored source image armchair.png"));
+        // The restored file rides the request as bytes like any picked path.
+        let request = crate::backend::build_request(&app.generate.params, "", &None).unwrap();
+        assert_eq!(request.source_image.as_deref(), Some(&b"png-bytes"[..]));
+        assert_eq!(request.source_image_name.as_deref(), Some("armchair.png"));
+    }
+
+    /// An older print the host never retained keeps the attach-again marker
+    /// and says why on the timeline.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn reuse_on_a_legacy_print_keeps_attach_again_and_names_the_reason() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _home = crate::ui::gallery::tests::ScopedHome::enter();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "availability": "unavailable_legacy"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut app = app_with_remote_print(&server.uri());
+        app.load_gallery_into_generate();
+        settle_source_restore(&mut app).await;
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(
+            app.generate.params.source_image_recall.as_deref(),
+            Some("armchair.png")
+        );
+        assert_eq!(
+            app.generate.params.display_value(&ParamField::SourceImage),
+            "\u{27e8}none\u{27e9} \u{00b7} attach again (armchair.png)"
+        );
+        assert!(timeline_has(&app, "source not retained on this host"));
+        assert!(
+            !crate::source_media::cache_path("chair.glb", "armchair.png").exists(),
+            "nothing is written when nothing was retained"
+        );
+    }
+
+    /// A keyed host releases private media only with its key: with the key
+    /// remembered for the host the member downloads; without it the row
+    /// keeps attach-again and the timeline names the API key.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn reuse_on_a_keyed_host_restores_with_the_key_and_discloses_without() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let _home = crate::ui::gallery::tests::ScopedHome::enter();
+        let server = MockServer::start().await;
+        // Keyed answers.
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "availability": "available",
+                "members": [
+                    {"member_id": "src-1", "role": "source_image", "display_name": "armchair.png", "size_bytes": 8}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb/src-1"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"keyed".to_vec()))
+            .mount(&server)
+            .await;
+        // Keyless answers: the middleware's 401.
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/chair.glb"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "API key required"
+            })))
+            .mount(&server)
+            .await;
+
+        let host_id = crate::hosts::host_id_from_url(&server.uri());
+        crate::hosts::set_session_api_key(&host_id, "sekrit");
+        let mut app = app_with_remote_print(&server.uri());
+        app.load_gallery_into_generate();
+        settle_source_restore(&mut app).await;
+        crate::hosts::clear_session_api_key(&host_id);
+        let expected = crate::source_media::cache_path("chair.glb", "armchair.png");
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(expected.to_string_lossy().as_ref())
+        );
+        assert_eq!(std::fs::read(&expected).unwrap(), b"keyed");
+        std::fs::remove_file(&expected).unwrap();
+
+        let mut app = app_with_remote_print(&server.uri());
+        app.load_gallery_into_generate();
+        settle_source_restore(&mut app).await;
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(
+            app.generate.params.source_image_recall.as_deref(),
+            Some("armchair.png")
+        );
+        assert!(timeline_has(&app, "API key"));
+        assert!(!expected.exists());
+    }
+
+    /// A restore that lands after the user already cleared the row (x) does
+    /// not put a file back on it; an in-process print restores from beside
+    /// the print when the recorded name still exists there.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn late_restores_and_local_prints_respect_the_row() {
+        let _home = crate::ui::gallery::tests::ScopedHome::enter();
+        let mut app = make_settings_test_app();
+        app.generate.source_restore_pending = Some("chair.glb".into());
+        app.generate.params.source_image_recall = None;
+        app.bg_tx
+            .send(BackgroundEvent::SourceImageRestored {
+                filename: "chair.glb".into(),
+                outcome: crate::source_media::SourceRestore::Restored("/late/armchair.png".into()),
+            })
+            .unwrap();
+        app.process_background_events();
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(app.generate.source_restore_pending, None);
+
+        // An answer for a different print is not this reuse's answer.
+        app.generate.source_restore_pending = Some("chair.glb".into());
+        app.generate.params.source_image_recall = Some("armchair.png".into());
+        app.bg_tx
+            .send(BackgroundEvent::SourceImageRestored {
+                filename: "other.glb".into(),
+                outcome: crate::source_media::SourceRestore::Restored("/late/other.png".into()),
+            })
+            .unwrap();
+        app.process_background_events();
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(
+            app.generate.source_restore_pending.as_deref(),
+            Some("chair.glb")
+        );
+
+        // Local print: the recorded name beside the print is the file.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("armchair.png"), b"local").unwrap();
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        let mut entry = make_test_entry_with_name("chair.glb");
+        entry.path = dir.path().join("chair.glb");
+        entry.metadata.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        entry.metadata.source_image_name = Some("armchair.png".into());
+        entry.origins = vec![GalleryOrigin::local()];
+        app.gallery.entries = vec![entry];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+        app.active_view = View::Library;
+        app.load_gallery_into_generate();
+        assert_eq!(app.generate.source_restore_pending, None, "no host to ask");
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(dir.path().join("armchair.png").to_string_lossy().as_ref())
+        );
+        assert_eq!(app.generate.params.source_image_recall, None);
+
+        // Gone from beside the print: attach again.
+        std::fs::remove_file(dir.path().join("armchair.png")).unwrap();
+        app.active_view = View::Library;
+        app.load_gallery_into_generate();
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(
+            app.generate.params.source_image_recall.as_deref(),
+            Some("armchair.png")
+        );
+    }
+
     #[tokio::test]
     #[serial_test::serial(mold_env)]
     async fn h3_switch_away_and_back_cannot_restore_invalid_preferences() {
@@ -17541,6 +17913,7 @@ mod tests {
             held_batch: None,
             prompt_transform_token: 0,
             last_mesh_summary: None,
+            source_restore_pending: None,
         };
 
         // Simulate receiving first image — still 2 more to go
@@ -17609,6 +17982,7 @@ mod tests {
             held_batch: None,
             prompt_transform_token: 0,
             last_mesh_summary: None,
+            source_restore_pending: None,
         };
 
         // Simulate error mid-batch
@@ -17658,6 +18032,7 @@ mod tests {
             held_batch: None,
             prompt_transform_token: 0,
             last_mesh_summary: None,
+            source_restore_pending: None,
         };
 
         // Simulate setting batch to 4 and starting generation

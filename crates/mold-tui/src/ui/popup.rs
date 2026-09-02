@@ -1907,6 +1907,7 @@ mod tests {
                 held_batch: None,
                 prompt_transform_token: 0,
                 last_mesh_summary: None,
+                source_restore_pending: None,
             },
             gallery: crate::app::GalleryState::default(),
             models: crate::app::ModelsState {
