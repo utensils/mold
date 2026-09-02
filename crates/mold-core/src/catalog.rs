@@ -720,23 +720,28 @@ mod tests {
     /// count — a laundered 20 there is a guaranteed 422.
     #[test]
     fn a_stale_model_pref_cannot_reach_a_fixed_step_wan_row() {
-        let ladder =
-            crate::manifest::wan_dmd_ladder("wan21-t2v-1.3b:turbo").expect("tier is laddered");
-        let mut config = crate::Config::default();
-        config.models.insert(
-            "wan21-t2v-1.3b:turbo".to_string(),
-            crate::config::ModelConfig {
-                default_steps: Some(20),
-                ..Default::default()
-            },
-        );
+        for tier in ["wan21-t2v-1.3b:turbo", "wan22-ti2v-5b:dmd"] {
+            let ladder = crate::manifest::wan_dmd_ladder(tier).expect("tier is laddered");
+            let mut config = crate::Config::default();
+            config.models.insert(
+                tier.to_string(),
+                crate::config::ModelConfig {
+                    default_steps: Some(20),
+                    ..Default::default()
+                },
+            );
 
-        let catalog = super::build_model_catalog(&config, None, false);
-        let row = catalog
-            .iter()
-            .find(|row| row.info.name == "wan21-t2v-1.3b:turbo")
-            .expect("the DMD turbo row is always catalogued");
-        assert_eq!(row.defaults.default_steps, ladder.len() as u32);
+            let catalog = super::build_model_catalog(&config, None, false);
+            let row = catalog
+                .iter()
+                .find(|row| row.info.name == tier)
+                .expect("every DMD row is always catalogued");
+            assert_eq!(
+                row.defaults.default_steps,
+                ladder.rungs.len() as u32,
+                "{tier}"
+            );
+        }
 
         // The base tier's steps stay adjustable, so its preference survives.
         let mut base_config = crate::Config::default();

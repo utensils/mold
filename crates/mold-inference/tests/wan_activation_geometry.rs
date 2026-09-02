@@ -68,6 +68,7 @@ fn gguf_and_safetensors_checkpoints_both_yield_geometry() {
         ("wan22-t2v-a14b-q8", 5120, WanVaeGeneration::V21),
         ("wan22-ti2v-5b-fp16", 3072, WanVaeGeneration::V22),
         ("wan22-ti2v-5b-q8", 3072, WanVaeGeneration::V22),
+        ("wan22-ti2v-5b-dmd", 3072, WanVaeGeneration::V22),
     ];
 
     let mut checked = 0;

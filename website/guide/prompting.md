@@ -1263,6 +1263,8 @@ TI2V identities or any source frame.
 mold run wan21-t2v-1.3b "a red fox trotting through snow" --frames 81 --fps 16
 # 3-step DMD distill of the same 1.3B (no CFG; steps/solver/shift are pinned)
 mold run wan21-t2v-1.3b:turbo "a red fox trotting through snow" --frames 81 --fps 16
+# Wan 2.2 5B, 3-step DMD distill on its own shift-5 table (no CFG; steps/solver/shift pinned)
+mold run wan22-ti2v-5b:dmd "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 # Wan 2.1 14B, the dense 2.1 quality tier (a bare name resolves :q8)
 mold run wan21-t2v-14b "a red fox trotting through snow"
 # Wan 2.2 A14B, 4-step Lightning tier (two experts, one resident at a time)
@@ -2046,6 +2048,7 @@ the 16 fps tiers. Keep a `:turbo` prompt to one simple idea.
 mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" --frames 100 --clip-frames 49
 mold run wan22-ti2v-5b:turbo "waves on a black sand beach" --width 1280 --height 704
+mold run wan22-ti2v-5b:dmd "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 mold run wan22-ti2v-5b:q8 "the balloon lifts off" --image balloon.png --frames 49
 ```
 

@@ -2935,15 +2935,17 @@ fn validate_generate_request_after_activation_with(
                 "sample_shift must be finite and positive, got {shift}"
             ));
         }
-        // A DMD distill's shift is upstream's own constant: the ladder's rungs
-        // are timesteps on THAT table, so moving the shift moves the rungs off
-        // the schedule the student was trained on. Refuse it by name rather
-        // than accept a value the engine must ignore.
+        // A DMD distill's shift is the one it was distilled on: the ladder's
+        // rungs are timesteps on THAT table, so moving the shift moves the
+        // rungs off the schedule the student was trained against. Refuse it
+        // by name rather than accept a value the engine must ignore, and name
+        // the tier's own table — the shipped distills do not share one.
         let canonical = crate::manifest::resolve_model_name(&req.model);
-        if crate::manifest::wan_dmd_ladder(&canonical).is_some() {
+        if let Some(ladder) = crate::manifest::wan_dmd_ladder(&canonical) {
             return Err(format!(
-                "{canonical} walks a fixed DMD rung ladder on upstream's own shift table; \
-                 sample_shift is part of that published schedule and cannot be set"
+                "{canonical} walks a fixed DMD rung ladder on FastVideo's shift-{:.0} sigma \
+                 table; sample_shift is part of that published schedule and cannot be set",
+                ladder.table_shift
             ));
         }
     }
@@ -6262,43 +6264,69 @@ mod tests {
     }
 
     /// A DMD-distilled Wan tier walks the rungs `manifest::wan_dmd_ladder`
-    /// pins, on the shift table upstream published with them. The solver and
-    /// the flow shift are therefore part of the schedule, not knobs: a
-    /// silently ignored one would look like the knob failing, so admission
-    /// names them instead. Every other Wan tier keeps both controls.
+    /// pins, on the shift table it was distilled against. The solver and the
+    /// flow shift are therefore part of the schedule, not knobs: a silently
+    /// ignored one would look like the knob failing, so admission names them
+    /// instead — and names the tier's OWN table, since the two shipped
+    /// distills sit on different ones. Every other Wan tier keeps both
+    /// controls.
     #[test]
     fn wan_dmd_ladder_tiers_refuse_the_sampler_knobs() {
         use crate::Scheduler;
 
-        let mut turbo = valid_req();
-        turbo.model = "wan21-t2v-1.3b:turbo".to_string();
-        turbo.width = 832;
-        turbo.height = 480;
-        turbo.frames = Some(81);
-        turbo.fps = Some(16);
-        turbo.output_format = Some(OutputFormat::Mp4);
-        assert!(validate_generate_request(&turbo).is_ok());
+        for (tier, base_tier, width, height, frames, fps) in [
+            (
+                "wan21-t2v-1.3b:turbo",
+                "wan21-t2v-1.3b:bf16",
+                832,
+                480,
+                81,
+                16,
+            ),
+            (
+                "wan22-ti2v-5b:dmd",
+                "wan22-ti2v-5b:fp16",
+                1280,
+                704,
+                121,
+                24,
+            ),
+        ] {
+            let ladder = crate::manifest::wan_dmd_ladder(tier).expect("tier is laddered");
+            let mut dmd = valid_req();
+            dmd.model = tier.to_string();
+            dmd.width = width;
+            dmd.height = height;
+            dmd.frames = Some(frames);
+            dmd.fps = Some(fps);
+            dmd.output_format = Some(OutputFormat::Mp4);
+            assert!(validate_generate_request(&dmd).is_ok(), "{tier}");
 
-        turbo.sample_shift = Some(8.0);
-        let err = validate_generate_request(&turbo).unwrap_err();
-        assert!(err.contains("sample_shift"), "got: {err}");
-        assert!(err.contains("wan21-t2v-1.3b:turbo"), "got: {err}");
-        turbo.sample_shift = None;
+            dmd.sample_shift = Some(8.0);
+            let err = validate_generate_request(&dmd).unwrap_err();
+            assert!(err.contains("sample_shift"), "{tier}: {err}");
+            assert!(err.contains(tier), "{tier}: {err}");
+            assert!(
+                err.contains(&format!("shift-{:.0}", ladder.table_shift)),
+                "{tier}: the refusal must name the tier's own table: {err}"
+            );
+            dmd.sample_shift = None;
 
-        for solver in [Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp] {
-            turbo.scheduler = Some(solver);
-            let err = validate_generate_request(&turbo).unwrap_err();
-            assert!(err.contains("wan21-t2v-1.3b:turbo"), "{solver}: {err}");
-            assert!(err.contains("DMD"), "{solver}: {err}");
+            for solver in [Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp] {
+                dmd.scheduler = Some(solver);
+                let err = validate_generate_request(&dmd).unwrap_err();
+                assert!(err.contains(tier), "{tier} {solver}: {err}");
+                assert!(err.contains("DMD"), "{tier} {solver}: {err}");
+            }
+            dmd.scheduler = None;
+
+            // The base tier is untouched — both controls still admit.
+            let mut base = dmd.clone();
+            base.model = base_tier.to_string();
+            base.sample_shift = Some(8.0);
+            base.scheduler = Some(Scheduler::UniPc);
+            assert!(validate_generate_request(&base).is_ok(), "{base_tier}");
         }
-        turbo.scheduler = None;
-
-        // The base tier is untouched — both controls still admit.
-        let mut base = turbo.clone();
-        base.model = "wan21-t2v-1.3b:bf16".to_string();
-        base.sample_shift = Some(8.0);
-        base.scheduler = Some(Scheduler::UniPc);
-        assert!(validate_generate_request(&base).is_ok());
     }
 
     /// #782 / #795: the wan recipe knobs are admitted for wan and rejected —

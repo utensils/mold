@@ -17,6 +17,7 @@ the 16 fps tiers. Keep a `:turbo` prompt to one simple idea.
 mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" --frames 100 --clip-frames 49
 mold run wan22-ti2v-5b:turbo "waves on a black sand beach" --width 1280 --height 704
+mold run wan22-ti2v-5b:dmd "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 mold run wan22-ti2v-5b:q8 "the balloon lifts off" --image balloon.png --frames 49
 ```
 

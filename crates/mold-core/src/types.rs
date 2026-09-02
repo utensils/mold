@@ -8087,10 +8087,13 @@ mod tests {
     /// Every other Wan tier keeps ordinary adjustable CFG.
     #[test]
     fn wan_dmd_ladder_tiers_pin_guidance_at_one() {
-        assert_eq!(
-            GuidanceCapabilities::for_recipe("wan", "wan21-t2v-1.3b:turbo", None),
-            GuidanceCapabilities::FIXED_ONE,
-        );
+        for laddered in ["wan21-t2v-1.3b:turbo", "wan22-ti2v-5b:dmd"] {
+            assert_eq!(
+                GuidanceCapabilities::for_recipe("wan", laddered, None),
+                GuidanceCapabilities::FIXED_ONE,
+                "{laddered}",
+            );
+        }
         // The bare name still resolves to the base tier, which keeps CFG.
         assert_eq!(
             GuidanceCapabilities::for_recipe("wan", "wan21-t2v-1.3b", None),
@@ -8100,7 +8103,9 @@ mod tests {
             "wan21-t2v-1.3b:bf16",
             "wan22-ti2v-5b:fp16",
             // The Self-Forcing 5B distill runs at guidance 1.0 by DEFAULT but
-            // is not rung-pinned, so its scale stays adjustable.
+            // is not rung-pinned, so its scale stays adjustable. Its
+            // rung-pinned sibling on the same checkpoint is
+            // `wan22-ti2v-5b:dmd`, asserted above.
             "wan22-ti2v-5b:turbo",
             "wan22-t2v-a14b:q8",
         ] {

@@ -153,7 +153,7 @@ Post-generation image upscale persists distinct `-original` and `-upscaled` entr
 - Wuerstchen: `wuerstchen-v2:fp16`.
 - LTX-Video: `ltx-video-0.9.6`, `-0.9.6-distilled`, `-0.9.8-2b-distilled`, `-0.9.8-13b-dev`, `-0.9.8-13b-distilled` (`bf16`).
 - LTX-2: `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`; LTX-2.3 `ltx-2.3-22b-dev`/`-distilled` (`bf16`/`fp8`); LTX-2.5 `ltx-2.5-22b-dev`/`-distilled` (`bf16`, `bf16-conv`, `int8-conv`) plus the distilled GGUF tiers `q3`, `q3-k-s`, `q4`, `q4-k-s`, `q5`, `q6`, `q8`.
-- Wan: `wan21-t2v-1.3b:bf16/turbo`, `wan21-t2v-14b:q5/q8`, `wan22-t2v-a14b:q4/q5/q8`, `wan22-i2v-a14b:q4/q5/q8`, `wan22-ti2v-5b:fp16/q8/turbo`.
+- Wan: `wan21-t2v-1.3b:bf16/turbo`, `wan21-t2v-14b:q5/q8`, `wan22-t2v-a14b:q4/q5/q8`, `wan22-i2v-a14b:q4/q5/q8`, `wan22-ti2v-5b:fp16/q8/turbo/dmd`.
 - MiniMax H3: `minimax-h3-fl2va` and `minimax-h3-ref2va` — reviewed runnable `comfy-pruned-int8` plus the Turbo LoRA tags, and the download-only `official-bf16` / `comfy-pruned-nvfp4` tiers (see the model-policy notes in CLAUDE.md).
 - ControlNet: `controlnet-canny-sd15`, `-depth-sd15`, `-openpose-sd15` (`fp16`).
 - Upscalers: `real-esrgan-x4plus`, `real-esrgan-x2plus`, `real-esrgan-x4plus-anime` (each `fp16` and `fp32`) plus `real-esrgan-anime-v3:fp32` — seven entries.

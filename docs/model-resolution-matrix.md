@@ -2744,7 +2744,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan21-t2v-1.3b:turbo`
 
-Schema 1 · hash `9b250fa313ea41e65cf6f972567c86abb2b2b276c3cc5cda8aabc882b8ce63de` · default recipe `default`
+Schema 1 · hash `9ddb6576d4ea223183e9ab082ae90f79086443de06985b77b86b83bae91e8649` · default recipe `default`
 
 Models: `wan21-t2v-1.3b:turbo`.
 
@@ -2913,6 +2913,26 @@ Models: `wan22-t2v-a14b:q8`.
 | `15:26` | `480x832` (recommended) |
 | `16:9` | `1280x720` (recommended) |
 | `9:16` | `720x1280` (recommended) |
+
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### `wan22-ti2v-5b:dmd`
+
+Schema 1 · hash `89177a7704caefa497e01ef32a4a8692f5b5256836eb359945a7fd109f846f2b` · default recipe `default`
+
+Models: `wan22-ti2v-5b:dmd`.
+
+#### Default (`default`)
+
+- Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `1280x704`, 3 steps, guidance 1.
+- Steps: 3–3 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–257 on `4n+1` (default 121); FPS 1–120 by 1, default 24; duration limit none.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `20:11` | `1280x704` (recommended) |
+| `11:20` | `704x1280` (recommended) |
 
 Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 

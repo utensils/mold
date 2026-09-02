@@ -42,6 +42,7 @@ a separate Wan S2V pipeline and is not implied by these model rows.
 | `wan22-ti2v-5b:fp16`   | 20    | ~22.8 GB          | 720p24 text- and image-to-video                                                               |
 | `wan22-ti2v-5b:q8`     | 20    | ~18 GB            | Q8_0 5B; 8-12 GB cards at reduced settings                                                    |
 | `wan22-ti2v-5b:turbo`  | 4     | ~22.8 GB          | Self-Forcing 4-step distill, no CFG                                                           |
+| `wan22-ti2v-5b:dmd`    | 3     | ~22.8 GB          | FastVideo DMD 3-step distill, text-to-video only, no CFG; steps/solver/shift pinned           |
 | `wan22-t2v-a14b:q5`    | 4     | ~36 GB            | 480p16 text-to-video, 4-step Lightning tier                                                   |
 | `wan22-t2v-a14b:q8`    | 20    | ~42 GB            | Same weights at Q8_0, no distill                                                              |
 | `wan22-t2v-a14b:q4`    | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use                                                  |
@@ -120,6 +121,10 @@ mold run wan22-ti2v-5b "aerial view of waves breaking on a black sand beach" \
 # The same clip on the 4-step distill: 4 steps at guidance 1.0, so 4 forwards
 # instead of 20 x 2. Image-to-video works the same way.
 mold run wan22-ti2v-5b:turbo "aerial view of waves breaking on a black sand beach"
+
+# The same clip on the 3-step DMD distill: 3 forwards instead of 20 x 2.
+# Steps, solver, and flow shift are pinned to FastVideo's published schedule.
+mold run wan22-ti2v-5b:dmd "aerial view of waves breaking on a black sand beach"
 
 # Wan 2.2 A14B, 4-step Lightning tier
 mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
@@ -655,6 +660,77 @@ an experiment, not a promise.
 
 Per-rung noise is derived from the request seed, so a render is deterministic
 for a given seed on a given machine — but it is not bit-identical to
+FastVideo's own output, which draws from PyTorch's generator.
+
+### DMD 5B
+
+`wan22-ti2v-5b:dmd` is FastVideo's DMD distill of the same 2.2 TI2V-5B
+transformer (`FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers`, Apache-2.0).
+It walks the same three integer rungs as the 1.3B distill, but on **its own
+shift-5 flow-match table**, not the family's shift-8:
+
+| Rung | Timestep |
+| ---- | -------- |
+| 1    | 1000     |
+| 2    | 757      |
+| 3    | 522      |
+
+FastVideo's own inference code hardcodes shift-8 for every DMD tier it ships,
+which contradicts this checkpoint's own config (`flow_shift = 5.0`) and the
+shift its distillation recipe actually trained against (`--flow_shift 5`).
+mold follows the training shift, not the inference-stage bug, so
+`--sample-shift` is refused by name against 5, not 8 — do not read this as
+the same table the 1.3B distill uses.
+
+Steps, guidance, sample solver and flow shift are all **fixed**, and mold
+refuses a request that sets any of them, for the same reason as the 1.3B
+distill: a DMD student predicts the clean latent x0 at each rung and is
+re-noised to the next, so the rungs are the schedule the network was trained
+to answer. Everything else is the base checkpoint's: 1280x704, 121 frames at
+24 fps, and the shared UMT5 encoder and 2.2 VAE. The checkpoint itself is a
+single 9.3 GiB bf16 transformer file carrying the base checkpoint's exact
+architecture and key set — distilled weights only, no image embedder added.
+
+Against the base tier's 20 steps with CFG, that is `(20 x 2) / 3` ≈ **13.3x
+fewer transformer forwards** per clip.
+
+Image-to-video is refused on this tier, where the other three 5B tiers accept
+it. Upstream ships no image branch for this checkpoint: the DMD stage has none,
+the distillation was data-free on text-to-video trajectories with a scalar
+timestep, and the model card says text-to-video. mold's TI2V latent-inpaint
+path does run on it — latent frame 0 is pinned and re-imposed after every rung,
+and it comes back bit-exact — but the student never saw a per-token `t=0` and
+does not treat that pinned frame as where the clip starts. Measured against
+`:turbo` from the same stills, prompts, and seeds on an L40S, it lurches to a
+tighter, more saturated framing within about four frames, and on a person it
+changes clothing and build while doing so, leaving the pinned frame an orphan;
+`:turbo` holds the same sources across the whole clip. Use `:turbo`, `:fp16`,
+or `:q8` for image-to-video on this checkpoint.
+
+Measured on an NVIDIA L40S (CUDA, math attention, no flash-attn), 1280x704 x
+121 frames at 24 fps, one prompt and seed, the base tier run with
+`MOLD_WAN_STEP_CACHE=off` (a 20-step 5B run engages the same auto cache that
+collapsed the 1.3B base, see #1559):
+
+| Tier                  | Forwards | Pipeline total | Of which denoise |
+| --------------------- | -------- | -------------- | ---------------- |
+| `wan22-ti2v-5b:fp16`  | 40       | 258.2 s        | ~194 s           |
+| `wan22-ti2v-5b:turbo` | 4        | 80.9 s         | ~25 s            |
+| `wan22-ti2v-5b:dmd`   | 3        | 85.0 s         | ~21 s            |
+
+That is 3.0x on the whole run and ~9x on the denoise loop against the base
+tier. The denoise column is derived by subtracting the reported load, encode,
+and decode phases from the total, so read it as approximate. The pipeline
+totals are much closer than the loop times because a 121-frame 720p clip
+spends ~38 s in the VAE decode and ~11 s loading and running the text encoder
+whatever the tier does; the DMD run above also paid a 13.5 s cold transformer
+load, and repeated warm at 75.6 s. At 832x480 x 81 frames the same three
+tiers come in at 78.4 s, 39.0 s, and 36.8 s.
+
+Same seed, same machine, the tier renders byte-identical output on a rerun.
+
+Per-rung noise is derived from the request seed, so a render is deterministic
+for a given seed on a given machine, but it is not bit-identical to
 FastVideo's own output, which draws from PyTorch's generator.
 
 ## Recipe controls
