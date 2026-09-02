@@ -21,7 +21,10 @@
   wireframe toggle beside its `tris · verts · bounds` caption. The recent strip
   and the Library carry a 3D badge and a "3D" kind filter alongside Images,
   Video, and Audio on every surface, and the lightbox refuses **Use as
-  source** for a mesh — there is no raster to stage as conditioning. A
+  source** and offers no **Upscale** for a mesh — there is no raster to
+  stage as conditioning or to enlarge. The empty Create canvas explains
+  such a model in its own words (prepare the source image) instead of the
+  optional-prompt wording about motion. A
   reloaded web page hydrates a mesh print from its poster and recorded counts
   exactly like any other kind.
 - **Export as OBJ, STL, or PLY without leaving the app.** The lightbox and the

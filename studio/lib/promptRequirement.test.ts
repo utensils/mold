@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { hunyuan3dRecipe, sdxlRecipe } from "./generationProfile.testFixtures";
 import {
   IGNORED_PROMPT_PLACEHOLDER,
+  IGNORED_PROMPT_GUIDANCE,
   OPTIONAL_PROMPT_GUIDANCE,
+  promptGuidance,
   OPTIONAL_PROMPT_PLACEHOLDER,
   familyAllowsEmptyPrompt,
   hasVisualConditioning,
@@ -246,6 +248,29 @@ describe("copy helpers", () => {
       ),
     ).toBe(IGNORED_PROMPT_PLACEHOLDER);
     expect(IGNORED_PROMPT_PLACEHOLDER.toLowerCase()).toContain("note");
+  });
+
+  it("explains the empty canvas from the prompt rule, never the optional wording for an ignored prompt", () => {
+    const required = "Describe an image below and press Generate.";
+    expect(promptGuidance({ family: "flux" }, required)).toBe(required);
+    expect(
+      promptGuidance({ family: "ltx2", sourceImage: "b64" }, required),
+    ).toBe(OPTIONAL_PROMPT_GUIDANCE);
+    expect(
+      promptGuidance(
+        { family: "hunyuan3d", recipe: hunyuan3dRecipe() },
+        required,
+      ),
+    ).toBe(IGNORED_PROMPT_GUIDANCE);
+    expect(
+      promptGuidance({ family: "sdxl", recipe: sdxlRecipe() }, required),
+    ).toBe(required);
+    // The ignored wording is about the image, not motion, and never claims
+    // the model reads anything typed.
+    expect(IGNORED_PROMPT_GUIDANCE.toLowerCase()).toContain("source image");
+    expect(IGNORED_PROMPT_GUIDANCE.toLowerCase()).toContain("no prompt");
+    expect(IGNORED_PROMPT_GUIDANCE.toLowerCase()).not.toContain("animates");
+    expect(IGNORED_PROMPT_GUIDANCE).not.toBe(OPTIONAL_PROMPT_GUIDANCE);
   });
 
   // Two things the copy must never imply: that a blank prompt saves memory

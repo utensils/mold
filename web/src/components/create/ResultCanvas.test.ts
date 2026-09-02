@@ -25,6 +25,19 @@ describe("ResultCanvas", () => {
     expect(wrapper.text()).not.toContain("Describe an image below");
   });
 
+  // A recipe that ignores the prompt has nothing to animate and nothing to
+  // describe: the guidance is about the source image, never the optional
+  // wording's "animates what it sees".
+  it("explains the source image, not the prompt, when the recipe ignores it", () => {
+    const wrapper = mount(ResultCanvas, {
+      props: { mode: "empty", promptOptional: true, promptIgnored: true },
+    });
+    expect(wrapper.text()).toContain("reads no prompt");
+    expect(wrapper.text()).toContain("source image");
+    expect(wrapper.text()).not.toContain("animates what it sees");
+    expect(wrapper.text()).not.toContain("Describe an image below");
+  });
+
   it("renders the generating bed with the stage line", () => {
     const wrapper = mount(ResultCanvas, {
       props: { mode: "generating", progress: 42, stage: "Developing 12 / 28" },

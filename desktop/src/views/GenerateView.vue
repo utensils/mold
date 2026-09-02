@@ -70,7 +70,7 @@ import {
   modelsForOutput,
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
-import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequirement";
+import { promptGuidance, promptRequired } from "@studio/lib/promptRequirement";
 import { promptInputForForm } from "../lib/promptRecipe";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isMeshCompletion } from "@studio/lib/meshCompletion";
@@ -3510,10 +3510,15 @@ const composerWarningReason = computed<string | null>(() =>
       ),
 );
 
+// The shared rule picks the sentence: the surface's own wording while the
+// prompt is required, the optional wording once conditioning makes it
+// optional, and the image-preparation wording for a recipe that never reads
+// it (a mesh model has no text encoder, so nothing here "animates").
 const emptyCanvasGuidance = computed(() =>
-  promptRequired(promptInputForForm(form))
-    ? "Describe an image below, pick a look, and press Generate. Everything runs on your own machine."
-    : OPTIONAL_PROMPT_GUIDANCE,
+  promptGuidance(
+    promptInputForForm(form),
+    "Describe an image below, pick a look, and press Generate. Everything runs on your own machine.",
+  ),
 );
 
 async function generate() {

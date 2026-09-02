@@ -57,6 +57,7 @@ import { useUiStore } from "../stores/ui";
 import { applyModelDefaults } from "../lib/generateForm";
 import { hunyuan3dRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
 import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
+import { IGNORED_PROMPT_GUIDANCE } from "@studio/lib/promptRequirement";
 import type { ModelEntry } from "../lib/api/types";
 
 enableAutoUnmount(afterEach);
@@ -240,5 +241,16 @@ describe("GenerateView — a recipe that ignores the prompt", () => {
     wrapper.findComponent(ComposerCard).vm.$emit("expand");
     await flushPromises();
     expect(expandPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains the source image on the empty canvas instead of the optional-prompt wording", async () => {
+    primeHost([meshModel]);
+    selectModel(meshModel, "");
+    const wrapper = mountView();
+    await flushPromises();
+    const empty = wrapper.findComponent({ name: "EmptyStateBlock" });
+    expect(empty.exists()).toBe(true);
+    expect(empty.props("guidance")).toBe(IGNORED_PROMPT_GUIDANCE);
+    expect(String(empty.props("guidance"))).not.toContain("animates");
   });
 });

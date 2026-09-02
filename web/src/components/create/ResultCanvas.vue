@@ -17,7 +17,10 @@ import ProgressRing from "@ui/components/ProgressRing.vue";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import MeshViewer from "@studio/components/MeshViewer.vue";
 import type { DevelopPhase } from "@ui/lib/grain";
-import { OPTIONAL_PROMPT_GUIDANCE } from "@studio/lib/promptRequirement";
+import {
+  IGNORED_PROMPT_GUIDANCE,
+  OPTIONAL_PROMPT_GUIDANCE,
+} from "@studio/lib/promptRequirement";
 
 const props = withDefaults(
   defineProps<{
@@ -62,6 +65,8 @@ const props = withDefaults(
     queueingVariations?: boolean;
     /** empty — the attached conditioning makes the prompt optional. */
     promptOptional?: boolean;
+    /** empty — the recipe never reads the prompt (no text encoder). */
+    promptIgnored?: boolean;
   }>(),
   {
     progress: 0,
@@ -70,6 +75,7 @@ const props = withDefaults(
     variations: () => [],
     queueingVariations: false,
     promptOptional: false,
+    promptIgnored: false,
   },
 );
 
@@ -89,9 +95,11 @@ const grainOpacity = computed(() =>
 // The empty state is the only place that tells a first-time user what to do,
 // so it must not insist on a prompt the server would not require.
 const emptyGuidance = computed(() =>
-  props.promptOptional
-    ? OPTIONAL_PROMPT_GUIDANCE
-    : "Describe an image below, pick a look, and press Generate. Everything runs on your own machine.",
+  props.promptIgnored
+    ? IGNORED_PROMPT_GUIDANCE
+    : props.promptOptional
+      ? OPTIONAL_PROMPT_GUIDANCE
+      : "Describe an image below, pick a look, and press Generate. Everything runs on your own machine.",
 );
 
 const bedStyle = computed(() =>

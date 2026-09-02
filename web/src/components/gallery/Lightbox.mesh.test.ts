@@ -118,6 +118,31 @@ describe("Lightbox 3-D prints", () => {
     expect(wrapper.emitted("use-source")).toBeUndefined();
   });
 
+  // A mesh has no raster to upscale: the overflow never offers it, and the
+  // handler is a no-op even if something reaches it.
+  it("offers no Upscale entry for a mesh print", async () => {
+    mockCapabilities([]);
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    const labels = wrapper
+      .findAll("[role='menuitem']")
+      .map((entry) => entry.text());
+    expect(labels.some((label) => /upscale/i.test(label))).toBe(false);
+    expect(wrapper.emitted("upscale")).toBeUndefined();
+  });
+
+  it("keeps the Upscale entry for a raster print", async () => {
+    mockCapabilities([]);
+    const wrapper = mountWide({ item: still });
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    const labels = wrapper
+      .findAll("[role='menuitem']")
+      .map((entry) => entry.text());
+    expect(labels.some((label) => /upscale/i.test(label))).toBe(true);
+  });
+
   it("keeps Use as source for a raster print", async () => {
     mockCapabilities([]);
     const wrapper = mountWide({ item: still });

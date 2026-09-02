@@ -100,6 +100,26 @@ describe("Lightbox — mesh exports", () => {
     expect(wrapper.find("[data-test='mesh-export-stl']").exists()).toBe(true);
   });
 
+  // A mesh has no raster to upscale, so the button is not offered at all.
+  it("offers no Upscale for a mesh print", () => {
+    const wrapper = mountMesh(["obj"]);
+    expect(wrapper.find("[data-test='lightbox-upscale']").exists()).toBe(false);
+  });
+
+  it("keeps Upscale for a raster print", () => {
+    const wrapper = mount(Lightbox, {
+      props: {
+        item: { ...meshItem, filename: "print-0001.png", format: "png" },
+        index: 0,
+        count: 1,
+        video: false,
+        target,
+      },
+      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+    });
+    expect(wrapper.find("[data-test='lightbox-upscale']").exists()).toBe(true);
+  });
+
   it("keeps every export off a raster print", () => {
     const wrapper = mount(Lightbox, {
       props: {

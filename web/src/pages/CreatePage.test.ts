@@ -5101,6 +5101,18 @@ describe("CreatePage 3-D mesh prints", () => {
     );
   });
 
+  it("tells the empty canvas the recipe ignores the prompt", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = meshModel.name;
+    form.state.value.modelFamily = meshModel.family;
+    await nextTick();
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    expect(canvas.props("promptIgnored")).toBe(true);
+    expect(canvas.props("promptOptional")).toBe(true);
+  });
+
   it("keeps the zero canvas when a source image is attached", async () => {
     mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -5300,6 +5312,8 @@ function pageStubs() {
         "stage",
         "resultSrc",
         "resultMeshSrc",
+        "promptOptional",
+        "promptIgnored",
       ],
       template:
         '<div data-test="result-canvas" :data-count="(variations||[]).length" :data-caption="resultCaption" :data-preview-src="previewSrc" :data-stage="stage"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',

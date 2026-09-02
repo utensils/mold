@@ -892,7 +892,7 @@ async function performVideoExport(options: VideoExportOptions) {
           </button>
         </div>
         <button
-          v-if="upscaleEnabled && !audio && !trashed"
+          v-if="upscaleEnabled && !audio && !mesh && !trashed"
           type="button"
           data-test="lightbox-upscale"
           class="border-ce mt-2.5 h-10 w-full rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"

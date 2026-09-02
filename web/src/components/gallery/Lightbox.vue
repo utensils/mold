@@ -471,6 +471,8 @@ function onMediaContextMenu(event: MouseEvent) {
   });
 }
 function onUpscale() {
+  // A mesh has no raster to upscale; the menu entry is not offered either.
+  if (isMeshFile.value) return;
   menuOpen.value = false;
   if (props.item && props.upscaleEnabled !== false) emit("upscale", props.item);
 }
@@ -679,7 +681,7 @@ async function performVideoExport(options: VideoExportOptions) {
                   </template>
                   <template v-else>
                     <button
-                      v-if="upscaleEnabled !== false"
+                      v-if="upscaleEnabled !== false && !isMeshFile"
                       role="menuitem"
                       @click="onUpscale"
                     >

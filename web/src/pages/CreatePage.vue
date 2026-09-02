@@ -257,6 +257,7 @@ import {
   promptOptional,
   promptPlaceholder,
   promptRequired,
+  promptRequirementFor,
 } from "@studio/lib/promptRequirement";
 import { isMeshCompletion } from "@studio/lib/meshCompletion";
 import { meshStatsLabel } from "@studio/lib/meshControls";
@@ -1768,6 +1769,10 @@ const promptConditioning = computed(() => ({
 // so the composer says so instead of implying a prompt is mandatory. Nothing
 // here gates submit: `validateSubmit` never required a prompt.
 const canSkipPrompt = computed(() => promptOptional(promptConditioning.value));
+/** The recipe never reads the prompt: the empty canvas explains the image. */
+const promptIgnored = computed(
+  () => promptRequirementFor(promptConditioning.value) === "ignored",
+);
 /**
  * Why Expand and Remix are unavailable, or `null` when they are.
  *
@@ -5931,6 +5936,7 @@ onBeforeUnmount(() => {
             v-else
             :mode="canvasMode"
             :prompt-optional="canSkipPrompt"
+            :prompt-ignored="promptIgnored"
             :progress="genProgress"
             :stage="genStage"
             :preview-src="

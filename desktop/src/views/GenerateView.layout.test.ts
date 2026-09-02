@@ -104,9 +104,9 @@ describe("GenerateView layout", () => {
     expect(viewSource).toContain(':disabled-reason="composerBlockerReason"');
   });
 
-  it("softens the blank-canvas guidance when the prompt is optional", () => {
+  it("takes the blank-canvas guidance from the shared prompt rule", () => {
     expect(viewSource).toContain(':guidance="emptyCanvasGuidance"');
-    expect(viewSource).toContain("OPTIONAL_PROMPT_GUIDANCE");
+    expect(viewSource).toContain("promptGuidance(");
   });
 
   it("aspect-fits the settled sequence video inside the canvas instead of clipping it", () => {
