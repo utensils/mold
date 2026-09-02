@@ -336,10 +336,13 @@ fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Confi
 /// time (#772). The probe outranks the manifest's task-structure answer for
 /// a downloaded checkpoint because `ModelPaths` honors config/env path
 /// overrides: the artifacts actually loaded can differ from what the
-/// manifest was assembled from. Cold (not-yet-downloaded) tiers keep the
-/// manifest classification, and an unclassifiable downloaded entry falls
-/// back to it too; entries neither can classify stay `None`, which clients
-/// must read as "unknown", never as one of the three contracts.
+/// manifest was assembled from. It cannot overturn a manifest REFUSAL, which
+/// is a tier's policy rather than a guess about its weights —
+/// `SourceImageCapability::resolve` owns that asymmetry. Cold
+/// (not-yet-downloaded) tiers keep the manifest classification, and an
+/// unclassifiable downloaded entry falls back to it too; entries neither can
+/// classify stay `None`, which clients must read as "unknown", never as one
+/// of the three contracts.
 fn annotate_source_image_capabilities(catalog: &mut [ModelInfoExtended], config: &Config) {
     for entry in catalog {
         if !entry.downloaded || entry.info.family != "wan" {
@@ -348,14 +351,16 @@ fn annotate_source_image_capabilities(catalog: &mut [ModelInfoExtended], config:
         let probed = ModelPaths::resolve(&entry.info.name, config).and_then(|paths| {
             mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
         });
-        entry.source_image = probed.or(entry.source_image);
+        entry.source_image = mold_core::SourceImageCapability::resolve(entry.source_image, probed);
         // Extend continues a clip by seeding it with the source's final frame,
         // so it is available exactly when the checkpoint conditions on an
         // image (#783). Re-derive it from the contract we just resolved rather
         // than leaving the manifest's cold guess in place: a config path
         // override can point the same manifest name at a different checkpoint,
         // and advertising extend on a text-to-video one promises a
-        // continuation it has no channel to accept.
+        // continuation it has no channel to accept. `resolve` is what keeps
+        // the probe from running the other way and handing extend back to a
+        // tier whose manifest refuses conditioning outright.
         entry.supports_extend = Some(mold_core::catalog::extend_capable_model(
             &entry.info.family,
             entry.source_image,
@@ -2249,6 +2254,72 @@ mod tests {
     use std::path::PathBuf;
 
     const GB: u64 = 1_000_000_000;
+
+    /// `wan22-ti2v-5b:dmd` carries the base TI2V-5B geometry exactly, so the
+    /// header probe classifies it `Optional` like its three siblings. Its
+    /// manifest refuses conditioning anyway, because the DMD student abandons
+    /// the pinned frame within a few frames. When the probe was allowed to win
+    /// this row, `/api/models` advertised the image, first/last frame,
+    /// keyframes and extend, and a conditioned render was ADMITTED over HTTP
+    /// while the CLI refused the identical request.
+    #[test]
+    fn a_probe_cannot_hand_image_conditioning_back_to_a_tier_that_refuses_it() {
+        let config = Config::default();
+        let mut catalog = build_model_catalog(&config, None, false);
+        let row = catalog
+            .iter_mut()
+            .find(|entry| entry.info.name == "wan22-ti2v-5b:dmd")
+            .expect("the 5B DMD tier ships");
+
+        // Stand in for a downloaded checkpoint whose headers read Optional:
+        // that is what this tier's own weights probe as.
+        row.downloaded = true;
+        row.source_image = mold_core::SourceImageCapability::resolve(
+            Some(mold_core::SourceImageCapability::Unsupported),
+            Some(mold_core::SourceImageCapability::Optional),
+        );
+        row.supports_extend = Some(mold_core::catalog::extend_capable_model(
+            &row.info.family,
+            row.source_image,
+        ));
+        assert_eq!(
+            row.source_image,
+            Some(mold_core::SourceImageCapability::Unsupported)
+        );
+        assert_eq!(row.supports_extend, Some(false));
+
+        synchronize_generation_profile_capabilities(&mut catalog);
+        let row = catalog
+            .iter()
+            .find(|entry| entry.info.name == "wan22-ti2v-5b:dmd")
+            .expect("the 5B DMD tier ships");
+        for recipe in &row.generation_profile.as_ref().expect("profile").recipes {
+            assert_eq!(
+                recipe.capabilities.source_image,
+                Some(mold_core::SourceImageCapability::Unsupported)
+            );
+            assert!(!recipe.capabilities.wan_recipe.supports_first_last_frame);
+            assert_eq!(
+                recipe.capabilities.keyframes.mode,
+                mold_core::ControlMode::Hidden
+            );
+        }
+
+        // The sibling it is easy to confuse this with keeps all of it: same
+        // transformer geometry, same probe answer, no manifest refusal.
+        assert_eq!(
+            mold_core::manifest::find_manifest("wan22-ti2v-5b:turbo")
+                .and_then(|m| m.defaults.source_image),
+            Some(mold_core::SourceImageCapability::Optional)
+        );
+        assert_eq!(
+            mold_core::SourceImageCapability::resolve(
+                Some(mold_core::SourceImageCapability::Optional),
+                Some(mold_core::SourceImageCapability::Optional)
+            ),
+            Some(mold_core::SourceImageCapability::Optional)
+        );
+    }
 
     #[test]
     fn ltx25_incomplete_pack_is_not_ready_or_duration_capable() {

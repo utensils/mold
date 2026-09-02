@@ -2015,7 +2015,7 @@ impl WanEngine {
         }
         if let Some(ladder) = dmd_ladder {
             progress.info(&format!(
-                "DMD distill: walking the fixed rungs {:?} on FastVideo's shift-{:.1} \
+                "DMD distill: walking the fixed rungs {:?} on FastVideo's shift-{:.0} \
                  sigma table (one conditional forward per rung, re-noised between them)",
                 ladder.rungs, ladder.table_shift
             ));

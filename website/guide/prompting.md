@@ -69,7 +69,7 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `ltx-2.5-22b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md`, `models/ltx-2.5.md` | 200 | 539 |
 | `wan21-t2v-1.3b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 592 |
 | `wan21-t2v-14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 592 |
-| `wan22-ti2v-5b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md`, `models/wan22-ti2v-5b.md` | 80 | 657 |
+| `wan22-ti2v-5b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md`, `models/wan22-ti2v-5b.md` | 80 | 684 |
 | `wan22-t2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 592 |
 | `wan22-i2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md` | 80 | 587 |
 | `minimax-h3-fl2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/base-modes.md` | 250 | 595 |
@@ -1263,8 +1263,6 @@ TI2V identities or any source frame.
 mold run wan21-t2v-1.3b "a red fox trotting through snow" --frames 81 --fps 16
 # 3-step DMD distill of the same 1.3B (no CFG; steps/solver/shift are pinned)
 mold run wan21-t2v-1.3b:turbo "a red fox trotting through snow" --frames 81 --fps 16
-# Wan 2.2 5B, 3-step DMD distill on its own shift-5 table (no CFG; steps/solver/shift pinned)
-mold run wan22-ti2v-5b:dmd "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 # Wan 2.1 14B, the dense 2.1 quality tier (a bare name resolves :q8)
 mold run wan21-t2v-14b "a red fox trotting through snow"
 # Wan 2.2 A14B, 4-step Lightning tier (two experts, one resident at a time)
@@ -1278,6 +1276,8 @@ mold run wan22-t2v-a14b:fp8 "storm waves crash over the lighthouse"
 mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 # Q8_0 5B reaches smaller cards
 mold run wan22-ti2v-5b:q8 "waves on a black sand beach" --width 1280 --height 704
+# 3-step DMD distill of the same 5B, text-to-video only (steps/solver/shift pinned, shift-5 table)
+mold run wan22-ti2v-5b:dmd "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 # Sequences: past the per-clip envelope this auto-chains and stitches one MP4
 # delivering exactly the requested total (keep --frames on the 4k+1 grid).
 # The seam continues only on an image-conditioned checkpoint; clips are 4k+1.
@@ -2034,8 +2034,10 @@ Models: `wan22-ti2v-5b`.
 #### Generation context
 
 The family's 720p path: 1280x704 at 24 fps, 4k+1 frames, both dimensions a
-multiple of 32. One checkpoint serves text-to-video and image-conditioned work,
-so a chain seam continues on it and a long sequence keeps one motion.
+multiple of 32. The `fp16`, `q8` and `turbo` tiers serve text-to-video and
+image-conditioned work from one checkpoint, so a chain seam continues on them
+and a long sequence keeps one motion. The `dmd` tier is text-to-video only: it
+refuses a source image, so write its prompt to carry the whole shot.
 
 #### Pitfalls
 

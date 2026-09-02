@@ -413,10 +413,13 @@ Wan checkpoints split three ways, and `/api/models` advertises which through
 the additive per-model `source_image` field so every surface offers exactly
 what the checkpoint accepts:
 
-- **`unsupported`** — `wan21-t2v-1.3b:*`, `wan21-t2v-14b:*`, `wan22-t2v-a14b:*`:
-  pure text-to-video; a supplied image is rejected at admission.
-- **`optional`** — `wan22-ti2v-5b:*`: text-to-video, or the source pinned as
-  frame 0 through latent inpainting.
+- **`unsupported`** — `wan21-t2v-1.3b:*`, `wan21-t2v-14b:*`,
+  `wan22-t2v-a14b:*`, and `wan22-ti2v-5b:dmd`: a supplied image is rejected at
+  admission. The DMD tier is the one that refuses by policy rather than by
+  architecture — its weights would take the frame, but the distilled student
+  does not follow it.
+- **`optional`** — `wan22-ti2v-5b:fp16`, `:q8`, `:turbo`: text-to-video, or the
+  source pinned as frame 0 through latent inpainting.
 - **`required`** — `wan22-i2v-a14b:*`: the image is half the model input;
   admission rejects a request without one.
 
@@ -443,9 +446,10 @@ image-conditioned checkpoint accepts.
 
 | Checkpoint                        | Seam              | Why                                               |
 | --------------------------------- | ----------------- | ------------------------------------------------- |
-| `wan22-ti2v-5b:*`                 | Continues         | The latent inpaint pins the seeded frame          |
+| `wan22-ti2v-5b:fp16/q8/turbo`     | Continues         | The latent inpaint pins the seeded frame          |
 | `wan22-i2v-a14b:*`                | Continues         | The 36-channel mask+latent concat takes the frame |
 | `wan21-t2v-*`, `wan22-t2v-a14b:*` | Join / Cut / Fade | No conditioning channel at all                    |
+| `wan22-ti2v-5b:dmd`               | Join / Cut / Fade | Refuses the source frame, so nothing to continue  |
 
 That classification is exactly the `source_image` contract `/api/models`
 already advertises, so a picker can never offer a seam the checkpoint would
@@ -723,8 +727,9 @@ tier. The denoise column is derived by subtracting the reported load, encode,
 and decode phases from the total, so read it as approximate. The pipeline
 totals are much closer than the loop times because a 121-frame 720p clip
 spends ~38 s in the VAE decode and ~11 s loading and running the text encoder
-whatever the tier does; the DMD run above also paid a 13.5 s cold transformer
-load, and repeated warm at 75.6 s. At 832x480 x 81 frames the same three
+whatever the tier does. The DMD run above was also the cold one, paying 13.5 s
+to load the transformer where the warm `:turbo` run beside it paid 4.4 s; the
+same DMD render repeated warm in 75.6 s. At 832x480 x 81 frames the same three
 tiers come in at 78.4 s, 39.0 s, and 36.8 s.
 
 Same seed, same machine, the tier renders byte-identical output on a rerun.

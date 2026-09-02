@@ -6306,7 +6306,8 @@ fn wan_manifests() -> Vec<ModelManifest> {
     // clothing and build while it does so, leaving the pinned frame an
     // orphan. `:turbo` holds the same sources across the whole clip. So the
     // conditioning is refused at admission rather than shipped half-working;
-    // this one field also turns off first/last frame, keyframes and extend.
+    // this one field also turns off first/last frame and extend, and the
+    // server's own capability sync hides keyframes with them.
     let defaults_ti2v_dmd = ManifestDefaults {
         steps: 3,
         guidance: 1.0,
@@ -6556,7 +6557,7 @@ fn wan_manifests() -> Vec<ModelManifest> {
                 // FastVideo's DMD distill of the same 5B transformer
                 // (`FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers`,
                 // apache-2.0, ungated), published as one unsharded diffusers
-                // file — all 825 tensors bf16, 9.3 GB, the same on-disk size
+                // file — all 825 tensors bf16, 9.3 GiB, the same on-disk size
                 // as the base fp16 tier.
                 //
                 // Its tensor key set is EXACTLY the base

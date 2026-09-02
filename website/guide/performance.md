@@ -14,23 +14,24 @@ loaded.
 
 Reference hardware: RTX 4090 class GPU, warm model cache, default resolution.
 
-| Model                               | Typical Steps | Ballpark Time | Notes                                                                                       |
-| ----------------------------------- | ------------- | ------------- | ------------------------------------------------------------------------------------------- |
-| `flux-schnell:q8`                   | 4             | ~8-12s        | Fastest high-quality default                                                                |
-| `flux-dev:q4`                       | 25            | ~20-40s       | Better quality, slower denoising                                                            |
-| `z-image-turbo:q8`                  | 9             | ~10-20s       | Strong quality/speed trade-off                                                              |
-| `sdxl-turbo:fp16`                   | 4             | ~3-8s         | Very fast when you want 1024 output                                                         |
-| `sd15:fp16`                         | 25            | ~5-15s        | Lightest full-featured family                                                               |
-| `ltx-video-0.9.6-distilled:bf16`    | 8             | ~30-90s       | Recommended current video default                                                           |
-| `ltx-video-0.9.8-2b-distilled:bf16` | 7+3           | ~30-90s       | Newer checkpoint family, full multiscale refine                                             |
-| `ltx-2-19b-distilled:fp8`           | 8             | ~2-6 min      | Joint audio-video; native Rust FP8 path                                                     |
-| `ltx-2.3-22b-distilled:fp8`         | 8             | ~3-8 min      | Larger native joint audio-video path                                                        |
-| `wan21-t2v-1.3b:bf16`               | 30            | ~3.5 min      | 480p16; measured 209 s at 33 frames                                                         |
-| `wan21-t2v-1.3b:turbo`              | 3             | ~40 s         | 480p16 DMD distill; measured 40.8 s at 81 frames on an L40S (base: 196 s)                   |
-| `wan21-t2v-14b:q8`                  | 30            | ~15 min       | 480p16; measured 877 s at 33 frames, 20.4 GB                                                |
-| `wan22-ti2v-5b:fp16`                | 20            | ~2-4 min      | Measured 246 s T2V 720p24 / 105 s I2V 480p, 49f                                             |
-| `wan22-ti2v-5b:dmd`                 | 3             | ~85 s         | 720p24 DMD distill, shift-5 table; measured 85.0 s at 121 frames on an L40S (base: 258.2 s) |
-| `wan22-i2v-a14b:q5`                 | 4             | ~3.5 min      | Two-expert Lightning tier; 199 s at 53 frames                                               |
+| Model                               | Typical Steps | Ballpark Time | Notes                                                                                    |
+| ----------------------------------- | ------------- | ------------- | ---------------------------------------------------------------------------------------- |
+| `flux-schnell:q8`                   | 4             | ~8-12s        | Fastest high-quality default                                                             |
+| `flux-dev:q4`                       | 25            | ~20-40s       | Better quality, slower denoising                                                         |
+| `z-image-turbo:q8`                  | 9             | ~10-20s       | Strong quality/speed trade-off                                                           |
+| `sdxl-turbo:fp16`                   | 4             | ~3-8s         | Very fast when you want 1024 output                                                      |
+| `sd15:fp16`                         | 25            | ~5-15s        | Lightest full-featured family                                                            |
+| `ltx-video-0.9.6-distilled:bf16`    | 8             | ~30-90s       | Recommended current video default                                                        |
+| `ltx-video-0.9.8-2b-distilled:bf16` | 7+3           | ~30-90s       | Newer checkpoint family, full multiscale refine                                          |
+| `ltx-2-19b-distilled:fp8`           | 8             | ~2-6 min      | Joint audio-video; native Rust FP8 path                                                  |
+| `ltx-2.3-22b-distilled:fp8`         | 8             | ~3-8 min      | Larger native joint audio-video path                                                     |
+| `wan21-t2v-1.3b:bf16`               | 30            | ~3.5 min      | 480p16; measured 209 s at 33 frames                                                      |
+| `wan21-t2v-1.3b:turbo`              | 3             | ~40 s         | 480p16 DMD distill; measured 40.8 s at 81 frames on an L40S (base: 196 s)                |
+| `wan21-t2v-14b:q8`                  | 30            | ~15 min       | 480p16; measured 877 s at 33 frames, 20.4 GB                                             |
+| `wan22-ti2v-5b:fp16`                | 20            | ~2-4 min      | 246 s T2V 720p24 (4090) / 105 s I2V 480p, 49f; 258.2 s T2V on an L40S with the cache off |
+| `wan22-ti2v-5b:turbo`               | 4             | ~80 s         | 720p24 Self-Forcing distill; measured 80.9 s at 121 frames on an L40S                    |
+| `wan22-ti2v-5b:dmd`                 | 3             | ~85 s         | 720p24 DMD distill, text-to-video only, shift-5 table; 85.0 s at 121 frames on an L40S   |
+| `wan22-i2v-a14b:q5`                 | 4             | ~3.5 min      | Two-expert Lightning tier; 199 s at 53 frames                                            |
 
 ## What Slows Things Down
 
@@ -61,7 +62,8 @@ FastVideo DMD 3-step distills: `wan21-t2v-1.3b:turbo` (the 2.1 1.3B) and
 `wan22-ti2v-5b:dmd` (the 2.2 TI2V-5B). The DMD pair is the strictest of the
 group: each walks exactly three published rungs (timesteps 1000 / 757 / 522)
 on its own flow-match table — shift-8 for the 1.3B, shift-5 for the 5B, since
-each distillation trained against a different table — and on both, steps,
+each distillation trained against a different one; the 5B's shift-5 is the
+distill's own table, not the flow shift 8.0 the rest of the family renders at — and on both, steps,
 guidance, sample solver, and flow shift are all fixed; a request that sets
 any of them is refused rather than silently ignored, because a DMD student
 is re-noised between rungs and a UniPC or Euler pass over it is a different

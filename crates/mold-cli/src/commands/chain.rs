@@ -1348,11 +1348,10 @@ pub(crate) fn resolve_chain_model_authority(
     // artifacts that will actually load; path overrides can point one manifest
     // name at a different checkpoint.
     let source_image = if family == "wan" {
-        mold_core::ModelPaths::resolve(model, config)
-            .and_then(|paths| {
-                mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
-            })
-            .or(manifest_contract)
+        let probed = mold_core::ModelPaths::resolve(model, config).and_then(|paths| {
+            mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+        });
+        mold_core::SourceImageCapability::resolve(manifest_contract, probed)
     } else {
         manifest_contract
     };
