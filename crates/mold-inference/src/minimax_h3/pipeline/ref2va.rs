@@ -1482,6 +1482,83 @@ mod tests {
         assert!(error.contains("5248 vision rows for 5254"), "{error}");
     }
 
+    /// A served conditioner never re-runs the presentation builder, so fence 2
+    /// only holds if the cache stores the modality tags VERBATIM. Anything
+    /// that normalized or re-derived them would be refused here with the same
+    /// message #1418 produced.
+    #[test]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    fn a_cached_ref2va_hit_passes_the_vision_row_fence_with_its_stored_tags() {
+        use crate::h3_factory::H3FactoryConditionerPlacement;
+        use crate::minimax_h3::conditioner_cache::{
+            H3CachedConditioning, H3ConditionerRouteIdentity,
+        };
+
+        let references = vec![
+            H3ReferencePresentation {
+                index: 1,
+                presentation: RefPresentation {
+                    kind: RefPresentationKind::Image { vision_tokens: 4 },
+                    has_audio: false,
+                },
+            },
+            H3ReferencePresentation {
+                index: 2,
+                presentation: RefPresentation {
+                    kind: RefPresentationKind::Video {
+                        blocks: vec![
+                            VideoPresentationBlock {
+                                timestamp_seconds: 0.5,
+                                vision_tokens: 3,
+                            },
+                            VideoPresentationBlock {
+                                timestamp_seconds: 1.5,
+                                vision_tokens: 3,
+                            },
+                        ],
+                    },
+                    has_audio: true,
+                },
+            },
+            H3ReferencePresentation {
+                index: 3,
+                presentation: RefPresentation {
+                    kind: RefPresentationKind::Audio,
+                    has_audio: true,
+                },
+            },
+        ];
+        let mut tags = vec![H3ModalityTag::Text; 2];
+        tags.extend(std::iter::repeat_n(
+            H3ModalityTag::Vision,
+            4 + VISION_SPAN_MARKER_ROWS + 2 * (3 + VISION_SPAN_MARKER_ROWS),
+        ));
+        tags.push(H3ModalityTag::Text);
+        let rows = tags.len();
+        let encoded = H3TextConditioning {
+            states: Tensor::zeros((1, rows, 5_120), DType::BF16, &Device::Cpu).unwrap(),
+            tags,
+            lifetime_probe: None,
+        };
+        validate_text_vision_rows(&encoded, &references)
+            .expect("the encoded tags satisfy the fence");
+
+        let entry = H3CachedConditioning::capture(
+            &encoded,
+            rows as u64,
+            0,
+            H3ConditionerRouteIdentity {
+                placement: H3FactoryConditionerPlacement::AssignedCudaThenDrop,
+                device_id: "cuda:0".into(),
+            },
+        )
+        .unwrap();
+        let restored = entry.restore(&Device::Cpu).unwrap();
+        assert_eq!(restored.tags, encoded.tags);
+        validate_text_vision_rows(&restored, &references)
+            .expect("cached tags are stored verbatim and pass the same fence");
+    }
+
     fn request() -> GenerateRequest {
         GenerateRequest {
             mesh: None,

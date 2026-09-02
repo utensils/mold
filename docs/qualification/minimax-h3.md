@@ -1069,6 +1069,26 @@ neither see nor clean up — invisible and unowned, not harmless-and-managed —
 until that service upgrades to a release carrying the tags, after which
 `mold rm` of the tags is the ordinary cleanup path.
 
+### The conditioner cache
+
+A repeated prompt against the same first-frame (FL2VA) or reference set and
+frame count (Ref2VA), on the same conditioner route and device, now serves
+the prior render's Qwen3-VL conditioning from a process-local, byte-bounded
+cache (`crates/mold-inference/src/minimax_h3/conditioner_cache.rs`, default
+512 MiB, `MOLD_H3_CONDITIONER_CACHE=off|<MiB>`) instead of reloading and
+re-encoding the 15.7 GB checkpoint that rows `a′`/`a″` above measured. The key
+spans the prompt, the endpoint or reference bytes (crop included), the Ref2VA
+frame count, the conditioner placement and device id, and every artifact and
+support identity that produced the bytes, so a hit restores the exact BF16
+tensor a miss would have produced rather than an approximation; it withholds
+the runtime-bound observation and the `PromptEncode` scheduler-estimate
+sample for that render instead of fabricating either, and is disclosed as
+`prompt conditioning [cache hit]`.
+
+**The measured hit/miss rows for this cache — back-to-back renders on plato,
+`scheduler_estimates` before and after, and the paired MP4 SHA-256 check —
+are pending the plato UAT run and are not recorded here yet.**
+
 ### What is derived, and how
 
 Since the canvas and the clip length became rules, the envelope and the memory

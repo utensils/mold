@@ -489,6 +489,10 @@ pub(crate) struct H3EngineProgressObserver<'a> {
     started: HashMap<H3PipelinePhase, Instant>,
     last_completed: HashMap<H3PipelinePhase, usize>,
     denoise_step_started: Option<Instant>,
+    /// Set by `H3PipelinePhase::QwenConditioningCached`. While it is set the
+    /// outer prompt-encode boundary closes as an untyped stage, so a render
+    /// that encoded nothing contributes no sample to `ewma_prompt_encode_ms`.
+    prompt_conditioning_cached: bool,
 }
 
 impl<'a> H3EngineProgressObserver<'a> {
@@ -498,6 +502,7 @@ impl<'a> H3EngineProgressObserver<'a> {
             started: HashMap::new(),
             last_completed: HashMap::new(),
             denoise_step_started: None,
+            prompt_conditioning_cached: false,
         }
     }
 }
@@ -535,6 +540,16 @@ impl H3PipelineObserver for H3EngineProgressObserver<'_> {
                 .remove(&event.phase)
                 .map_or(Duration::ZERO, |started| started.elapsed());
             match event.phase {
+                H3PipelinePhase::QwenConditioningCached => {
+                    self.progress.cache_hit("prompt conditioning");
+                    self.prompt_conditioning_cached = true;
+                }
+                H3PipelinePhase::QwenEncode | H3PipelinePhase::PromptEncode
+                    if self.prompt_conditioning_cached =>
+                {
+                    self.progress
+                        .stage_done(pipeline_phase_name(event.phase), elapsed)
+                }
                 H3PipelinePhase::QwenEncode | H3PipelinePhase::PromptEncode => {
                     self.progress.phase_done(
                         ProgressPhase::PromptEncode,
@@ -587,6 +602,7 @@ fn pipeline_phase_name(phase: H3PipelinePhase) -> &'static str {
         H3PipelinePhase::QwenLoadChunk => "Loading MiniMax H3 Qwen tensor",
         H3PipelinePhase::QwenEncode => "Encoding MiniMax H3 multimodal conditioning",
         H3PipelinePhase::QwenEncodeChunk => "Encoding MiniMax H3 conditioning chunk",
+        H3PipelinePhase::QwenConditioningCached => "Reusing cached MiniMax H3 prompt conditioning",
         H3PipelinePhase::PromptEncode => "Encoding MiniMax H3 prompt",
         H3PipelinePhase::VisualConditionEncode => "Encoding MiniMax H3 visual conditions",
         H3PipelinePhase::VisualConditionEncodeChunk => "Encoding MiniMax H3 visual condition chunk",
@@ -1969,6 +1985,104 @@ mod tests {
             event,
             ProgressEvent::DenoiseStep { elapsed, .. } if *elapsed > Duration::ZERO
         )));
+    }
+
+    /// A served conditioner did no prompt-encode work, so it must not feed
+    /// `ewma_prompt_encode_ms`: the outer boundary closes as an untyped stage
+    /// instead of `PhaseDone{PromptEncode}`. Same rule `IdentityExtract`
+    /// already follows — the phase is emitted only by the sibling that did the
+    /// work.
+    #[test]
+    fn cached_prompt_conditioning_emits_a_cache_hit_and_no_prompt_encode_sample() {
+        for outer in [H3PipelinePhase::PromptEncode, H3PipelinePhase::QwenEncode] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&events);
+            let mut progress = ProgressReporter::default();
+            progress.set_callback(Box::new(move |event| {
+                captured.lock().unwrap().push(event);
+            }));
+            let mut observer = H3EngineProgressObserver::new(&progress);
+
+            observer.observe(H3PipelineEvent {
+                phase: outer,
+                completed: 0,
+                total: 1,
+            });
+            observer.observe(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenConditioningCached,
+                completed: 1,
+                total: 1,
+            });
+            observer.observe(H3PipelineEvent {
+                phase: outer,
+                completed: 1,
+                total: 1,
+            });
+
+            let events = events.lock().unwrap();
+            let hits = events
+                .iter()
+                .filter(|event| {
+                    matches!(event, ProgressEvent::CacheHit { resource } if resource == "prompt conditioning")
+                })
+                .count();
+            assert_eq!(hits, 1, "{outer:?} shape must disclose exactly one hit");
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    ProgressEvent::PhaseDone {
+                        phase: ProgressPhase::PromptEncode,
+                        ..
+                    }
+                )),
+                "{outer:?} shape must record no prompt-encode timing sample"
+            );
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    ProgressEvent::StageDone { name, .. }
+                        if name == pipeline_phase_name(outer)
+                )),
+                "{outer:?} shape must still close its stage for display"
+            );
+        }
+    }
+
+    #[test]
+    fn uncached_prompt_conditioning_still_records_its_phase_sample() {
+        for outer in [H3PipelinePhase::PromptEncode, H3PipelinePhase::QwenEncode] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&events);
+            let mut progress = ProgressReporter::default();
+            progress.set_callback(Box::new(move |event| {
+                captured.lock().unwrap().push(event);
+            }));
+            let mut observer = H3EngineProgressObserver::new(&progress);
+            observer.observe(H3PipelineEvent {
+                phase: outer,
+                completed: 0,
+                total: 1,
+            });
+            observer.observe(H3PipelineEvent {
+                phase: outer,
+                completed: 1,
+                total: 1,
+            });
+            let events = events.lock().unwrap();
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    ProgressEvent::PhaseDone {
+                        phase: ProgressPhase::PromptEncode,
+                        ..
+                    }
+                )),
+                "{outer:?} without a hit keeps feeding the prompt-encode EWMA"
+            );
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, ProgressEvent::CacheHit { .. })));
+        }
     }
 
     #[test]

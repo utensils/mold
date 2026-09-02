@@ -2325,10 +2325,20 @@ pub(crate) fn release_host_memory_after_unload(state: &AppState) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .release_unreferenced_cpu_tensors();
+    // MiniMax H3 never enters `ModelCache`, so its conditioner-output cache is
+    // not reachable through the shared pool. Release it here too: this is the
+    // path `host_reclaim::reclaim_headroom` and `DELETE /api/models/unload`
+    // both run, and an unload that leaves host RAM held is exactly the bug
+    // #1273 fixed for the pool.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    let h3_conditioner_released = mold_inference::h3_conditioner_cache_clear();
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
+    let h3_conditioner_released = 0_u64;
     let rss_pre_trim = crate::gpu_worker::trim_malloc_arenas();
     let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
     tracing::info!(
         shared_pool_released_mb = released / 1_000_000,
+        h3_conditioner_cache_released_mb = h3_conditioner_released / 1_000_000,
         rss_pre_trim_mb = rss_pre_trim.map(|value| value / 1_000_000).unwrap_or(0),
         rss_after_mb = rss_after / 1_000_000,
         "released host memory after model unload"

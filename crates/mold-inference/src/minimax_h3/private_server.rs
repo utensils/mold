@@ -4649,12 +4649,21 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             progress.checkpoint()?;
             let output = private_run_output(output, owner, &consumption_binding, started)?;
             if let Some(runtime_bound_capture) = runtime_bound_capture {
-                let runtime_bound_observation = runtime_bound_capture.finish()?;
-                tracing::info!(
-                    target: "mold::minimax_h3::private_runtime_bound",
-                    observation = %serde_json::to_string(&runtime_bound_observation)?,
-                    "captured private MiniMax H3 runtime bounds"
-                );
+                // `None` is the deliberate withheld answer for an attempt that
+                // served its conditioner from the in-process cache: it ran no
+                // Qwen encode, so there is no runtime bound to describe and a
+                // synthesized one would be a lie in the qualification record.
+                match runtime_bound_capture.finish()? {
+                    Some(runtime_bound_observation) => tracing::info!(
+                        target: "mold::minimax_h3::private_runtime_bound",
+                        observation = %serde_json::to_string(&runtime_bound_observation)?,
+                        "captured private MiniMax H3 runtime bounds"
+                    ),
+                    None => tracing::info!(
+                        target: "mold::minimax_h3::private_runtime_bound",
+                        "runtime-bound observation withheld: conditioner output served from the in-process cache"
+                    ),
+                }
             }
             Ok(output)
         })

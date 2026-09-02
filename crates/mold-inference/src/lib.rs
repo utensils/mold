@@ -45,6 +45,13 @@ pub(crate) use mold_candle::metal_reduce;
 // future pipeline to consume.
 #[allow(dead_code)]
 pub(crate) mod minimax_h3;
+/// Release every cached MiniMax H3 conditioner output, reporting the host
+/// bytes handed back. The server's reclaim paths call this; see
+/// `minimax_h3::conditioner_cache` for the reclaim contract.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub use minimax_h3::conditioner_cache::{
+    h3_conditioner_cache_clear, h3_conditioner_cache_resident_bytes,
+};
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub use minimax_h3::pipeline::placeholder_endpoint_png as h3_placeholder_endpoint_png;
 #[cfg(any(all(feature = "h3", feature = "dev-bins"), feature = "h3-private-uat"))]

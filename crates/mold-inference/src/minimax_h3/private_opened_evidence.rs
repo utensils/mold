@@ -1227,6 +1227,16 @@ impl H3PrivatePreparedFl2VaRetention {
         &self.factory_attempt.target_budget.identity_sha256
     }
 
+    /// The frozen normalized request the attempt was admitted for.
+    ///
+    /// The conditioner cache keys on it: model, task, mode, prompt digest,
+    /// conditioning and reference fingerprints, row counts, and (for Ref2VA)
+    /// the presentation frame count all live here, and every one of them is
+    /// already proved by `revalidate` against the recomputed attempt identity.
+    pub(crate) fn prepared_request_input(&self) -> &H3FactoryPreparedRequestInput {
+        &self.factory_attempt.request
+    }
+
     pub(crate) fn denoise_forward_count(&self) -> Result<usize> {
         usize::try_from(self.factory_attempt.request.denoise_forward_count)
             .map_err(|_| anyhow!("private H3 retained denoise count exceeds usize"))

@@ -1341,6 +1341,37 @@ fn validate_prepared_authority(
     Ok(())
 }
 
+/// Fence for a conditioner output served from the in-process cache.
+///
+/// Sibling of [`validate_prepared_authority`] for the path that runs no
+/// encode. Two things still have to be true, and nothing else can be: the
+/// cached rows are the rows admission froze, and the restored BF16 states fit
+/// inside the frozen activation grant. Only the OUTPUT half of
+/// [`prepared_qwen_activation_floor`] applies — on a hit there is no prepared
+/// input tensor and no model holding one.
+pub(crate) fn validate_cached_conditioning_authority(
+    authority: &FrozenH3FactoryAuthority,
+    text_rows: u64,
+    vision_rows: u64,
+) -> Result<()> {
+    if text_rows != authority.qwen_output_text_rows() || vision_rows != authority.qwen_vision_rows()
+    {
+        bail!(
+            "private H3 cached conditioner rows ({text_rows} text, {vision_rows} vision) differ from frozen admission ({}, {})",
+            authority.qwen_output_text_rows(),
+            authority.qwen_vision_rows()
+        )
+    }
+    let output_bytes = released_h3_private_qwen_output_tensor_bytes(text_rows)?;
+    if authority.qwen_activation_workspace_bytes() < output_bytes {
+        bail!(
+            "private H3 Qwen activation authority is undercharged: {} bytes frozen, {output_bytes} bytes of cached conditioner output must be live",
+            authority.qwen_activation_workspace_bytes()
+        )
+    }
+    Ok(())
+}
+
 /// Exact unavoidable live storage at the encode boundary: all prepared input
 /// tensors plus the returned BF16 `[1, sequence, 5120]` states, which coexist.
 /// This is a lower bound, not a claim about measured peak allocator or kernel
@@ -2459,6 +2490,52 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("differ from frozen admission"));
+    }
+
+    #[test]
+    fn cached_conditioning_authority_requires_frozen_rows_and_output_charge() {
+        let facts = released_h3_qwen_nvfp4_runtime_memory_facts(&Device::Cpu).unwrap();
+        let text_rows = 19_u64;
+        let vision_rows = 20_u64;
+        let output_bytes = released_h3_private_qwen_output_tensor_bytes(text_rows).unwrap();
+        let exact = test_authority(
+            facts.effective_parameter_bytes,
+            output_bytes,
+            text_rows,
+            vision_rows,
+        );
+        validate_cached_conditioning_authority(&exact, text_rows, vision_rows).unwrap();
+
+        assert!(
+            validate_cached_conditioning_authority(&exact, text_rows + 1, vision_rows)
+                .unwrap_err()
+                .to_string()
+                .contains("differ from frozen admission"),
+            "a cached entry may not move the frozen text rows"
+        );
+        assert!(
+            validate_cached_conditioning_authority(&exact, text_rows, vision_rows + 1)
+                .unwrap_err()
+                .to_string()
+                .contains("differ from frozen admission"),
+            "a cached entry may not move the frozen vision rows"
+        );
+
+        // Only the OUTPUT-state half of the encode floor applies on a hit:
+        // there is no prepared input tensor and no model to hold it.
+        let undercharged = test_authority(
+            facts.effective_parameter_bytes,
+            output_bytes - 1,
+            text_rows,
+            vision_rows,
+        );
+        assert!(
+            validate_cached_conditioning_authority(&undercharged, text_rows, vision_rows)
+                .unwrap_err()
+                .to_string()
+                .contains("undercharged"),
+            "the restored states must fit the frozen activation grant"
+        );
     }
 
     #[test]

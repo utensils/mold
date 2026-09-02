@@ -243,6 +243,10 @@ pub(crate) enum H3PipelinePhase {
     QwenLoadChunk,
     QwenEncode,
     QwenEncodeChunk,
+    /// The conditioner output was served from the in-process cache. It
+    /// REPLACES `QwenLoad`/`QwenEncode` on a hit rather than joining them, so
+    /// nothing downstream can mistake a served answer for a real encode.
+    QwenConditioningCached,
     PromptEncode,
     VisualConditionEncode,
     VisualConditionEncodeChunk,
@@ -1943,6 +1947,9 @@ mod tests {
         condition_rows_to_watch: usize,
         observed_condition_rows: Vec<Vec<f32>>,
         text_lifetime: Option<Weak<()>>,
+        /// Stand in for a conditioner output served from the in-process
+        /// cache: one `QwenConditioningCached` event and no encode at all.
+        conditioning_from_cache: bool,
     }
 
     impl SyntheticBackend {
@@ -1963,6 +1970,7 @@ mod tests {
                 condition_rows_to_watch: 0,
                 observed_condition_rows: Vec::new(),
                 text_lifetime: None,
+                conditioning_from_cache: false,
             }
         }
 
@@ -1993,8 +2001,12 @@ mod tests {
             checkpoint: &mut dyn H3PipelineCheckpoint,
         ) -> Result<H3TextConditioning> {
             checkpoint.checkpoint(H3PipelineEvent {
-                phase: H3PipelinePhase::PromptEncode,
-                completed: 0,
+                phase: if self.conditioning_from_cache {
+                    H3PipelinePhase::QwenConditioningCached
+                } else {
+                    H3PipelinePhase::PromptEncode
+                },
+                completed: if self.conditioning_from_cache { 1 } else { 0 },
                 total: 1,
             })?;
             let mut tags = vec![H3ModalityTag::Text];
@@ -2363,6 +2375,79 @@ mod tests {
         assert_eq!(staged.provenance.sampler, "official-euler");
         assert!(!staged.video_only_mp4.is_empty());
         assert!(!staged.thumbnail_png.is_empty());
+    }
+
+    #[test]
+    fn cached_conditioning_stages_without_a_conditioner_encode() {
+        let prepared = prepared(&request());
+        let mut backend = SyntheticBackend::new();
+        backend.conditioning_from_cache = true;
+        let mut observer = RecordingObserver::default();
+        let staged = execute_staged(
+            &prepared,
+            &mut backend,
+            &ProgressReporter::default(),
+            &mut observer,
+        )
+        .unwrap();
+        assert!(!staged.video_only_mp4.is_empty());
+        assert!(backend.text_was_dropped());
+
+        let cached = observer
+            .events
+            .iter()
+            .filter(|event| event.phase == H3PipelinePhase::QwenConditioningCached)
+            .collect::<Vec<_>>();
+        assert_eq!(cached.len(), 1, "the hit is disclosed exactly once");
+        assert_eq!((cached[0].completed, cached[0].total), (1, 1));
+        assert!(
+            !observer.events.iter().any(|event| matches!(
+                event.phase,
+                H3PipelinePhase::QwenLoad | H3PipelinePhase::QwenEncode
+            )),
+            "a served conditioner loads nothing and encodes nothing"
+        );
+        assert!(
+            observer
+                .events
+                .iter()
+                .any(|event| event.phase == H3PipelinePhase::PromptEncode && event.completed == 1),
+            "the outer FL2VA prompt-encode boundary still closes"
+        );
+    }
+
+    /// The restored tensor must satisfy the same gate the pipeline applies to
+    /// a freshly encoded one — same shape, same BF16 dtype, same device.
+    #[test]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    fn cached_conditioning_restores_a_tensor_the_pipeline_accepts() {
+        use crate::h3_factory::H3FactoryConditionerPlacement;
+        use crate::minimax_h3::conditioner_cache::{
+            H3CachedConditioning, H3ConditionerRouteIdentity,
+        };
+
+        let device = Device::Cpu;
+        let rows = 3;
+        let encoded = H3TextConditioning {
+            states: Tensor::zeros((1, rows, TEXT_STATE_WIDTH), DType::BF16, &device).unwrap(),
+            tags: vec![H3ModalityTag::Text; rows],
+            lifetime_probe: None,
+        };
+        encoded.validate(&device).unwrap();
+        let entry = H3CachedConditioning::capture(
+            &encoded,
+            rows as u64,
+            0,
+            H3ConditionerRouteIdentity {
+                placement: H3FactoryConditionerPlacement::AssignedCudaThenDrop,
+                device_id: "cuda:0".into(),
+            },
+        )
+        .unwrap();
+        let restored = entry.restore(&device).unwrap();
+        restored.validate(&device).unwrap();
+        assert_eq!(restored.states.dtype(), DType::BF16);
+        assert_eq!(restored.tags, encoded.tags);
     }
 
     #[test]

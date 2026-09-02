@@ -214,6 +214,11 @@ mod tests {
     fn logging_dump_and_preview_switches_are_not_engine_shaping_authority() {
         for diagnostic in [
             "MOLD_FLUX2_DUMP_LATENT",
+            // Residency and wall clock only: a MiniMax H3 conditioner hit
+            // restores the same BF16 tensor the encode would have produced,
+            // and the cache key already carries every artifact and route
+            // identity. It must never join the engine fingerprint.
+            "MOLD_H3_CONDITIONER_CACHE",
             "MOLD_LTX2_DEBUG_TIMINGS",
             "MOLD_QWEN_DEBUG",
             "MOLD_SD3_DEBUG",

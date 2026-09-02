@@ -231,6 +231,10 @@ struct ObservationState {
     host_phase_entry: HashMap<H3PipelinePhase, u64>,
     host_phase_peak_growth: HashMap<H3PipelinePhase, u64>,
     reports: HashMap<H3PipelinePhase, PhaseVramReport>,
+    /// Set when the attempt served its conditioner output from the in-process
+    /// cache. There is then no conditioner run to describe, so the record is
+    /// withheld rather than synthesized (see `build_observation`).
+    qwen_conditioning_cached: bool,
     encoded_video_host_bytes: u64,
     thumbnail_host_bytes: u64,
     mux_output_host_bytes: u64,
@@ -288,7 +292,10 @@ impl H3PrivateRuntimeBoundCapture {
         })
     }
 
-    pub(crate) fn finish(mut self) -> Result<H3PrivateRuntimeBoundObservation> {
+    /// `Ok(None)` means the attempt served its conditioner from the cache and
+    /// the observation is deliberately withheld; every probe is still closed
+    /// and the device still fenced before returning.
+    pub(crate) fn finish(mut self) -> Result<Option<H3PrivateRuntimeBoundObservation>> {
         let workspace = self
             .workspace
             .take()
@@ -371,6 +378,9 @@ pub(crate) fn observe_event(event: H3PipelineEvent) {
         let Some(state) = active.as_mut() else {
             return;
         };
+        if event.phase == H3PipelinePhase::QwenConditioningCached {
+            state.qwen_conditioning_cached = true;
+        }
         if !captured_phase(event.phase) {
             return;
         }
@@ -530,7 +540,22 @@ fn process_peak_resident_bytes() -> Result<u64> {
 fn build_observation(
     mut state: ObservationState,
     workspace: H3PrivateWorkspaceObservation,
-) -> Result<H3PrivateRuntimeBoundObservation> {
+) -> Result<Option<H3PrivateRuntimeBoundObservation>> {
+    // Withhold, never synthesize. A hit ran no conditioner, so there is no
+    // Qwen workspace peak to report; and on Ref2VA the outer `QwenEncode`
+    // boundary still brackets `construct_vaes`, so a probe read here would
+    // attribute VAE construction bytes to the conditioner. Every exit from
+    // this function first closes the probes the state owns, and this one
+    // fences the device exactly as the terminal sample does.
+    if state.qwen_conditioning_cached {
+        finish_open_probes(&mut state);
+        if let Some(device) = state.device.as_ref() {
+            device
+                .synchronize()
+                .context("private H3 withheld runtime-bound capture could not fence its exit")?;
+        }
+        return Ok(None);
+    }
     if let Some(error) = state.first_error.take() {
         finish_open_probes(&mut state);
         bail!(error)
@@ -624,7 +649,7 @@ fn build_observation(
             zero_fields.join(", ")
         )
     }
-    Ok(observation)
+    Ok(Some(observation))
 }
 
 fn routed_qwen_workspace(
@@ -652,6 +677,145 @@ mod tests {
         assert!(!captured_phase(H3PipelinePhase::ReferenceVisualEncodeChunk));
         assert!(!captured_phase(H3PipelinePhase::Denoise));
         assert!(!captured_phase(H3PipelinePhase::Complete));
+        assert!(
+            !captured_phase(H3PipelinePhase::QwenConditioningCached),
+            "a served conditioner has no workspace to attribute"
+        );
+    }
+
+    fn test_envelope() -> H3PrivateRuntimeEnvelopeObservation {
+        H3PrivateRuntimeEnvelopeObservation {
+            width: 768,
+            height: 768,
+            frames: 124,
+            fps: 24,
+            batch_size: 1,
+            steps: 5,
+            endpoint_count: 1,
+            endpoint_anchor: "first".into(),
+            qwen_output_text_rows: 1_024,
+            qwen_vision_rows: 4_096,
+            condition_visual_rows: 1,
+            target_video_rows: 2,
+            target_audio_rows: 3,
+            total_packed_rows: 4,
+        }
+    }
+
+    fn test_authority() -> H3PrivateRuntimeAuthorityObservation {
+        H3PrivateRuntimeAuthorityObservation {
+            bootstrap_record_sha256: "0".repeat(64),
+            runtime_qualification_identity_sha256: "1".repeat(64),
+            device_id: "cuda:0".into(),
+            device_ordinal: 0,
+            compute_capability: [8, 9],
+            attention_runtime_identity_sha256: "2".repeat(64),
+            attention_kernel_identity: "kernel".into(),
+            attention_qualification_sha256: "3".repeat(64),
+            process: H3PrivateRuntimeProcessObservation {
+                process_id: 1,
+                process_start_time_ticks: 1,
+                linux_boot_id_sha256: "4".repeat(64),
+                executable_device: 1,
+                executable_inode: 1,
+                executable_bytes: 1,
+                executable_sha256: "5".repeat(64),
+                launch_argv_sha256: "6".repeat(64),
+                launch_environment_sha256: "7".repeat(64),
+                cuda_driver_version: 1,
+                cuda_toolkit_version: 1,
+            },
+        }
+    }
+
+    /// A hit has no conditioner run to describe, so the record is WITHHELD
+    /// rather than synthesized: `build_observation` would otherwise attribute
+    /// the Ref2VA outer boundary's VAE construction to "Qwen activation
+    /// workspace", or hard-fail a print that is already muxed.
+    ///
+    /// `cfg(not(cuda))` because `PhaseVramProbe::enter` retains a CUDA context
+    /// on a CUDA build, and a unit test must not claim a device.
+    #[test]
+    #[cfg(not(feature = "cuda"))]
+    fn cached_conditioner_withholds_the_observation_and_rearms_cleanly() {
+        let capture = H3PrivateRuntimeBoundCapture::begin(
+            &Device::Cpu,
+            false,
+            test_envelope(),
+            test_authority(),
+        )
+        .expect("capture begins on the host device");
+        // Leave one phase probe OPEN on purpose: the withheld path must still
+        // close it, or the next attempt on this worker thread inherits it.
+        observe_event(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenEncode,
+            completed: 0,
+            total: 1,
+        });
+        observe_event(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenConditioningCached,
+            completed: 1,
+            total: 1,
+        });
+        assert!(
+            capture
+                .finish()
+                .expect("withholding is not a failure")
+                .is_none(),
+            "a served conditioner produces no runtime-bound observation"
+        );
+
+        let second = H3PrivateRuntimeBoundCapture::begin(
+            &Device::Cpu,
+            false,
+            test_envelope(),
+            test_authority(),
+        )
+        .expect("the withheld attempt released the capture slot");
+        observe_event(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenEncode,
+            completed: 0,
+            total: 1,
+        });
+        observe_event(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenEncode,
+            completed: 1,
+            total: 1,
+        });
+        let error = second
+            .finish()
+            .expect_err("a host-only probe has no device baseline to report")
+            .to_string();
+        assert!(
+            !error.contains("incomplete phase lifecycle"),
+            "the second attempt must not inherit the first attempt's open probes: {error}"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "cuda"))]
+    fn a_conditioner_encode_still_produces_an_observation_attempt() {
+        let capture = H3PrivateRuntimeBoundCapture::begin(
+            &Device::Cpu,
+            false,
+            test_envelope(),
+            test_authority(),
+        )
+        .expect("capture begins on the host device");
+        observe_event(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenEncode,
+            completed: 0,
+            total: 1,
+        });
+        observe_event(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenEncode,
+            completed: 1,
+            total: 1,
+        });
+        assert!(
+            capture.finish().is_err(),
+            "without the cached flag the record is still demanded, not withheld"
+        );
     }
 
     #[test]
