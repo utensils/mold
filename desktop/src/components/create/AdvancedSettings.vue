@@ -114,7 +114,16 @@ const props = withDefaults(
   defineProps<{
     form: GenerateForm;
     routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
-    /** The picked model, used by Reset to restore its defaults. */
+    /**
+     * The row that answers for the CHECKPOINT'S CONTRACT — its advertised
+     * recipe drives every control below, and Reset restores its defaults.
+     *
+     * The parent resolves it from whichever machine has the checkpoint, not
+     * only from the one Create is aimed at: a contract belongs to the
+     * checkpoint and the target will advertise the same one once it has
+     * downloaded it. `null` means no machine has it, and the family rules in
+     * `generationCapabilitiesForFamily` answer instead.
+     */
     selectedModel?: ModelEntry | null;
     upscalers?: ModelEntry[];
     controlAdapters?: Ltx2ControlAdapterInfo[];

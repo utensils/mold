@@ -53,8 +53,17 @@ import ReferenceCropModal from "./ReferenceCropModal.vue";
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
-    /** The picked model row; its advertised contract wins over the form's
-     * snapshot so this component and its mount gate share one derivation. */
+    /**
+     * The row that answers for the CHECKPOINT'S CONTRACT; its advertised
+     * recipe wins over the form's snapshot so this component and its mount
+     * gate share one derivation.
+     *
+     * The parent resolves it from whichever machine has the checkpoint, not
+     * only from the one Create is aimed at — otherwise aiming at a machine
+     * that must download it first put a Denoise slider and an Edit-mask
+     * control on a 3-D print. `null` means no machine has it, and the family
+     * rules answer instead.
+     */
     selectedModel?: ModelEntry | null;
   }>(),
   { selectedModel: null },

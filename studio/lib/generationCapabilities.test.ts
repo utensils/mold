@@ -528,6 +528,91 @@ describe("prompt mode, strength, and mesh from the advertised recipe", () => {
     expect(caps.mesh).toBeUndefined();
   });
 
+  /**
+   * The canvas was only the first thing the family rule had to answer. A 3-D
+   * engine denoises nothing, repaints nothing, has no unconditional branch to
+   * steer, and stores exactly one container — so with no recipe in hand the
+   * legacy rules must say all four, or the panel offers a Denoise slider, an
+   * Edit-mask control, a Negative-prompt field and a png/jpeg/webp format
+   * picker for a print that is none of those things.
+   */
+  it("refuses strength, mask and a negative prompt for a mesh family with no recipe", () => {
+    const caps = baseGenerationCapabilities(
+      "hunyuan3d",
+      "hunyuan3d-mini-turbo:fp16",
+      null,
+      null,
+      "required",
+      null,
+    );
+    expect(caps.supportsStrength).toBe(false);
+    expect(caps.supportsMask).toBe(false);
+    expect(caps.supportsNegativePrompt).toBe(false);
+  });
+
+  it("stores only the glTF container for a mesh family with no recipe", () => {
+    const caps = baseGenerationCapabilities(
+      "hunyuan3d",
+      "hunyuan3d-mini-turbo:fp16",
+      null,
+      null,
+      "required",
+      null,
+    );
+    expect(caps.outputFormats).toEqual(["glb"]);
+    expect(caps.defaultOutputFormat).toBe("glb");
+  });
+
+  /**
+   * The whole point of the fallback is that a client aimed at a machine
+   * without the checkpoint shows the SAME contract as one aimed at a machine
+   * that has it. Only the advertised mesh block, which nothing can invent,
+   * may differ.
+   */
+  it("agrees with the advertised recipe on every contract the panel renders", () => {
+    const advertised = baseGenerationCapabilities(
+      "hunyuan3d",
+      "hunyuan3d-mini-turbo:fp16",
+      null,
+      null,
+      "required",
+      hunyuan3dRecipe(),
+    );
+    const fallback = baseGenerationCapabilities(
+      "hunyuan3d",
+      "hunyuan3d-mini-turbo:fp16",
+      null,
+      null,
+      "required",
+      null,
+    );
+    for (const key of [
+      "canvasless",
+      "supportsStrength",
+      "supportsMask",
+      "supportsNegativePrompt",
+      "defaultOutputFormat",
+    ] as const) {
+      expect(fallback[key], key).toEqual(advertised[key]);
+    }
+    expect(fallback.outputFormats).toEqual(advertised.outputFormats);
+  });
+
+  it("leaves a raster family's strength, mask, negative and formats alone", () => {
+    const caps = baseGenerationCapabilities(
+      "sdxl",
+      "cyberrealistic-pony:fp16",
+      null,
+      null,
+      null,
+      null,
+    );
+    expect(caps.supportsStrength).toBe(true);
+    expect(caps.supportsMask).toBe(true);
+    expect(caps.supportsNegativePrompt).toBe(true);
+    expect(caps.outputFormats).toEqual(["png", "jpeg", "webp"]);
+  });
+
   it("keeps a raster family's canvas when no recipe is advertised", () => {
     const caps = baseGenerationCapabilities(
       "sdxl",

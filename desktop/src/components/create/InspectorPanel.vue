@@ -396,8 +396,16 @@ const selectedPickerModel = computed<ModelEntry | null>(
  * is the authority on it. This only decides who answers when it has none.
  * `selectedModel` remains the answer for questions that really are about the
  * holding machine (its runtime readiness, its on-disk size, its LoRAs).
+ *
+ * EVERY contract question reads this one row, including the ones the child
+ * panels ask. Handing `SourceImageWell` and `AdvancedSettings` the target's
+ * row instead is what left a Denoise slider, an Edit-mask control, a
+ * Negative-prompt field and a `png`/`jpeg`/`webp` picker on a 3-D print after
+ * the canvas itself had already been fixed.
  */
-const contractModel = computed<ModelEntry | null>(() => selectedPickerModel.value);
+const contractModel = computed<ModelEntry | null>(() =>
+  hostModels.contractEntryForTarget(props.form.model, stickyTarget.value),
+);
 
 /**
  * The form's model when no machine has it installed. Restoring a print whose
@@ -796,7 +804,7 @@ function resetSettings() {
       <!-- Source media — primary-form image conditioning; the model dictates
            whether (and how) it renders, exactly like resolutions. -->
       <div v-if="showSourceMedia" class="ms-field" data-test="inspector-source-media">
-        <SourceImageWell :form="form" :selected-model="selectedModel" />
+        <SourceImageWell :form="form" :selected-model="contractModel" />
       </div>
 
       <!-- Identity photo — face conditioning is its own partition, not source
@@ -989,10 +997,10 @@ function resetSettings() {
           v-if="!form.predictDuration"
           :frames="form.frames"
           :fps="form.fps"
-          :model="selectedModel"
+          :model="contractModel"
           :family="form.family"
           :model-name="form.model"
-          :source-image-capability="selectedModel?.source_image ?? form.sourceImageCapability"
+          :source-image-capability="contractModel?.source_image ?? form.sourceImageCapability"
           :routing-request="durationRoutingRequest"
           @update:frames="form.frames = $event"
         />
@@ -1171,7 +1179,7 @@ function resetSettings() {
         v-else-if="advancedExpanded"
         id="desktop-inline-advanced"
         :form="form"
-        :selected-model="selectedModel"
+        :selected-model="contractModel"
         :routing-request="durationRoutingRequest"
         :upscalers="models.upscalers"
         :control-adapters="controlAdapters"

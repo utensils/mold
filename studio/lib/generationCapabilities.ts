@@ -18,6 +18,7 @@ import {
   isMeshFamily,
   isQwenImageEditFamily,
   isWanFamily,
+  LEGACY_MESH_OUTPUT_FORMATS,
   legacyPromptRequirementForFamily,
   legacySupportsStrength,
 } from "./legacyRecipeRules";
@@ -318,6 +319,11 @@ export function baseGenerationCapabilities(
   const h3 = isMinimaxH3Identity(normalized, model);
   const h3Ref2va = h3 && isMinimaxH3Ref2vaModel(model);
   const wan = isWanFamily(normalized);
+  // The pre-profile 3-D rule. It answers ONLY where no recipe is in hand —
+  // a client aimed at a machine that must download the checkpoint first, or
+  // a host that advertises no profile at all — and every question it settles
+  // below is one the advertised recipe would otherwise settle the same way.
+  const mesh = isMeshFamily(normalized);
   const profileCaps = advertisedRecipe?.legacy_adapter
     ? undefined
     : advertisedRecipe?.capabilities;
@@ -367,9 +373,11 @@ export function baseGenerationCapabilities(
       : inferredFixedGuidance;
   const profileControlVisible = (mode: string | undefined) =>
     mode === "adjustable" || mode === "fixed";
-  const legacyOutputFormats = supportsVideo
-    ? ["mp4", "gif", "apng", "webp"]
-    : ["png", "jpeg", "webp"];
+  const legacyOutputFormats = mesh
+    ? LEGACY_MESH_OUTPUT_FORMATS.slice()
+    : supportsVideo
+      ? ["mp4", "gif", "apng", "webp"]
+      : ["png", "jpeg", "webp"];
   return {
     supportsNegativePrompt:
       (profileCaps
@@ -377,7 +385,11 @@ export function baseGenerationCapabilities(
         : advertisedDefault?.supports_negative_prompt) ??
       ((!NO_NEGATIVE_PROMPT_FAMILIES.has(normalized) ||
         isFlux2BaseModel(model)) &&
-        !fixedGuidance),
+        !fixedGuidance &&
+        // A 3-D engine has no unconditional branch a negative prompt could
+        // steer. Its recipe says `ADJUSTABLE_NO_NEGATIVE`, so guidance alone
+        // does not settle it and the family rule must.
+        !mesh),
     guidanceAdjustable: !fixedGuidance,
     fixedGuidance: fixedGuidance
       ? h3
@@ -453,7 +465,7 @@ export function baseGenerationCapabilities(
     // strength — the engine rejects the former and never reads the latter.
     supportsMask: profileCaps
       ? profileControlVisible(profileCaps.mask.mode)
-      : !h3 && !qwenEdit && !flux2Dev && !wan,
+      : !h3 && !qwenEdit && !flux2Dev && !wan && !mesh,
     // A host that sends `supports_strength` is the authority. An older host's
     // recipe never carried it, and its serde default would be `false` — not
     // an assertion that strength is unsupported — so absence falls back to
@@ -469,9 +481,7 @@ export function baseGenerationCapabilities(
     // recipe is in hand, and reading absence as "has a canvas" is what let a
     // Shape and Resolution pair bind to a mesh model's 0 × 0 — a `NaN×NaN px`
     // control under a validation error no user could clear.
-    canvasless: advertisedRecipe
-      ? recipeIsCanvasless(advertisedRecipe)
-      : isMeshFamily(normalized),
+    canvasless: advertisedRecipe ? recipeIsCanvasless(advertisedRecipe) : mesh,
     mesh: profileCaps?.mesh ?? undefined,
     forcesBatchSizeOne: h3 || qwenEdit,
   };

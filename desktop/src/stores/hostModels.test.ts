@@ -292,4 +292,53 @@ describe("hostModels store", () => {
     expect(store.installedEntryForTarget("flux-dev:q8", "hal9000-7680")?.default_steps).toBe(36);
     expect(store.installedEntryForTarget("missing", "hal9000-7680")).toBeNull();
   });
+
+  /**
+   * A checkpoint's advertised contract belongs to the checkpoint. Create
+   * aimed at a machine that must download it first has no row there, and
+   * reading that absence as "this model advertises nothing" is what replaced
+   * a 3-D print's settings with raster ones.
+   */
+  describe("contractEntryForTarget", () => {
+    it("prefers the target host's own row", () => {
+      addExtra("hal9000-7680", "http://hal9000:7680");
+      const store = useHostModelsStore();
+      store.byHost.local = {
+        entries: [model("flux-dev:q8", { default_steps: 20 })],
+        fetchedAt: Date.now(),
+        error: null,
+      };
+      store.byHost["hal9000-7680"] = {
+        entries: [model("flux-dev:q8", { default_steps: 36 })],
+        fetchedAt: Date.now(),
+        error: null,
+      };
+      expect(store.contractEntryForTarget("flux-dev:q8", "hal9000-7680")?.default_steps).toBe(36);
+    });
+
+    it("falls back to a machine that has the checkpoint", () => {
+      addExtra("hal9000-7680", "http://hal9000:7680");
+      addExtra("plato-7680", "http://plato:7680");
+      const store = useHostModelsStore();
+      store.byHost["hal9000-7680"] = {
+        entries: [model("hunyuan3d-mini-turbo:fp16", { default_steps: 5 })],
+        fetchedAt: Date.now(),
+        error: null,
+      };
+      store.byHost["plato-7680"] = { entries: [], fetchedAt: Date.now(), error: null };
+
+      expect(store.installedEntryForTarget("hunyuan3d-mini-turbo:fp16", "plato-7680")).toBeNull();
+      expect(
+        store.contractEntryForTarget("hunyuan3d-mini-turbo:fp16", "plato-7680")?.default_steps,
+      ).toBe(5);
+    });
+
+    it("is null when no machine has it, so the family rules answer", () => {
+      addExtra("plato-7680", "http://plato:7680");
+      const store = useHostModelsStore();
+      store.byHost["plato-7680"] = { entries: [], fetchedAt: Date.now(), error: null };
+      expect(store.contractEntryForTarget("never-downloaded:fp16", "plato-7680")).toBeNull();
+      expect(store.contractEntryForTarget("", "plato-7680")).toBeNull();
+    });
+  });
 });
