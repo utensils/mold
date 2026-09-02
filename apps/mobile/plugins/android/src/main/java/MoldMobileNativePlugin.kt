@@ -72,6 +72,8 @@ private const val LEGACY_MEDIA_WRITE = "legacyMediaWrite"
 private sealed interface PendingLegacyMedia {
     data class Image(val dataB64: String) : PendingLegacyMedia
     data class Video(val url: String) : PendingLegacyMedia
+    /** A Mold-folder save on a release that still writes public Downloads directly. */
+    data class Export(val args: ShareExportArgs) : PendingLegacyMedia
 }
 
 @TauriPlugin(
@@ -164,7 +166,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
             return
         }
         if (getPermissionState(LEGACY_MEDIA_WRITE) !== PermissionState.GRANTED) {
-            invoke.reject("Photos access is required to save media on this Android version")
+            invoke.reject("Storage access is required to save media on this Android version")
             return
         }
         saveMedia(invoke, pending)
@@ -199,6 +201,18 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
                 )
             }
         }.start()
+    }
+
+    /**
+     * The other half of the export pair: the same arguments as the share,
+     * filed under `Downloads/Mold` instead of handed to a chooser. Only a
+     * pre-29 release needs the storage permission for it; MediaStore's
+     * Downloads collection asks for none.
+     */
+    @Command
+    fun saveExportToMoldFolder(invoke: Invoke) {
+        val args = invoke.parseArgs(ShareExportArgs::class.java)
+        runWithLegacyMediaPermission(invoke, PendingLegacyMedia.Export(args))
     }
 
     @Command
@@ -326,7 +340,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
         }
         synchronized(this) {
             if (pendingLegacyMedia != null) {
-                invoke.reject("another media save is waiting for Photos access")
+                invoke.reject("another media save is waiting for storage access")
                 return
             }
             pendingLegacyMedia = pending
@@ -340,7 +354,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
         } catch (error: Exception) {
             synchronized(this) { pendingLegacyMedia = null }
             invoke.reject(
-                "could not request Photos access: ${error.message ?: error.javaClass.simpleName}",
+                "could not request storage access: ${error.message ?: error.javaClass.simpleName}",
             )
         }
     }
@@ -354,6 +368,22 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
             is PendingLegacyMedia.Video -> runAsync(invoke, "save video") {
                 media.saveVideo(pending.url)
                 invoke.resolve()
+            }
+            is PendingLegacyMedia.Export -> runAsync(invoke, "save into the Mold folder") {
+                val args = pending.args
+                val saved = media.saveExportToMoldFolder(
+                    args.url,
+                    args.apiKey,
+                    args.requestJson,
+                    args.filename,
+                    args.mimeType,
+                    args.reuseKey,
+                )
+                invoke.resolve(JSObject().apply {
+                    put("filename", saved.filename)
+                    put("location", saved.location)
+                    put("label", saved.label)
+                })
             }
         }
     }

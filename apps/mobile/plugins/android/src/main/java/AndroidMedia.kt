@@ -114,6 +114,83 @@ internal class AndroidMedia(context: Context) {
         return Intent.createChooser(send, "Share Mold export")
     }
 
+    /**
+     * The other half of the export pair: the same download, cache and byte
+     * check as [prepareExportShare], but the file is filed under the public
+     * `Downloads/Mold` folder instead of handed to a chooser. API 29+ goes
+     * through MediaStore's Downloads collection (no storage permission, and
+     * the system numbers a collision itself); earlier releases write the
+     * public Downloads directory directly, with the app's own external files
+     * directory as the fallback when that volume is unavailable.
+     */
+    fun saveExportToMoldFolder(
+        url: String,
+        apiKey: String?,
+        requestJson: String,
+        filename: String,
+        mimeType: String,
+        reuseKey: String,
+    ): SavedExport {
+        val safeName = File(filename).name
+        require(safeName == filename && safeName.isNotBlank()) { "invalid export filename" }
+        require(mimeType.isNotBlank()) { "the export does not name a media type" }
+        val cached = exportCache[reuseKey]?.takeIf { it.isFile }
+        val file = cached ?: downloadExport(url, apiKey, requestJson, safeName).also {
+            exportCache[reuseKey] = it
+        }
+        requireMatchingExport(file)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            saveExportThroughMediaStore(file, safeName, mimeType)
+        } else {
+            saveExportToPublicDownloads(file, safeName)
+        }
+    }
+
+    private fun saveExportThroughMediaStore(file: File, name: String, mimeType: String): SavedExport {
+        val uri = file.inputStream().use { input ->
+            writeMediaStream(
+                input,
+                name,
+                mimeType,
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                Environment.DIRECTORY_DOWNLOADS,
+            )
+        }
+        // MediaStore numbers a collision itself (`chair (1).stl`), so the
+        // name the toast shows is read back rather than assumed.
+        val displayName = context.contentResolver.query(
+            uri,
+            arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        } ?: name
+        return SavedExport(displayName, uri.toString(), "$MOLD_FOLDER_LABEL/$displayName")
+    }
+
+    @Suppress("DEPRECATION")
+    private fun saveExportToPublicDownloads(file: File, name: String): SavedExport {
+        requireLegacyStoragePermission("Storage access is required to save into the Mold folder")
+        val public = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), MOLD_FOLDER_NAME)
+        val directory = if (public.isDirectory || public.mkdirs()) {
+            public
+        } else {
+            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), MOLD_FOLDER_NAME).also {
+                check(it.isDirectory || it.mkdirs()) { "could not create the Mold folder" }
+            }
+        }
+        val destination = uniqueDestination(directory, name)
+        file.inputStream().use { input -> FileOutputStream(destination).use { output -> input.copyTo(output) } }
+        val label = if (directory == public) {
+            "$MOLD_FOLDER_LABEL/${destination.name}"
+        } else {
+            "${destination.parentFile?.name ?: MOLD_FOLDER_NAME}/${destination.name}"
+        }
+        return SavedExport(destination.name, Uri.fromFile(destination).toString(), label)
+    }
+
     private fun downloadExport(
         url: String,
         apiKey: String?,
@@ -202,11 +279,15 @@ internal class AndroidMedia(context: Context) {
     }
 
     private fun requireModernStoragePermission() {
+        requireLegacyStoragePermission("Photos access is required on this Android version")
+    }
+
+    private fun requireLegacyStoragePermission(message: String) {
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
             check(
                 ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
                     PackageManager.PERMISSION_GRANTED,
-            ) { "Photos access is required on this Android version" }
+            ) { message }
         }
     }
 
@@ -299,6 +380,13 @@ internal class AndroidMedia(context: Context) {
 
     internal data class PreparedImageClip(val uri: Uri)
 
+    /**
+     * Where a Mold-folder save landed: the final name (numbered on a
+     * collision), the `content://` or `file://` location, and the
+     * `Downloads/Mold/<name>` label the toast shows.
+     */
+    internal data class SavedExport(val filename: String, val location: String, val label: String)
+
     private data class ImageData(val bytes: ByteArray, val mimeType: String, val extension: String)
 
     companion object {
@@ -312,5 +400,28 @@ internal class AndroidMedia(context: Context) {
         /** The statements a Wavefront OBJ may legally open with. */
         private val OBJ_LINE_PREFIXES = listOf("#", "v ", "vn ", "vt ", "f ", "o ", "g ", "mtllib")
         private val exportCache = ConcurrentHashMap<String, File>()
+        /** The on-device folder every "Save to Mold folder" export lands in. */
+        internal const val MOLD_FOLDER_NAME = "Mold"
+        /** How the toast names that folder: MediaStore's Downloads plus ours. */
+        internal const val MOLD_FOLDER_LABEL = "Downloads/$MOLD_FOLDER_NAME"
+
+        /**
+         * The first free name for [filename] inside [directory]: the name
+         * itself, then `name (2).ext`, `name (3).ext`, … so a second export
+         * of the same print never overwrites the first. Mirrors the iPhone
+         * shell's numbering; only the pre-29 path needs it, because
+         * MediaStore numbers collisions itself.
+         */
+        internal fun uniqueDestination(directory: File, filename: String): File {
+            val candidate = File(directory, filename)
+            if (!candidate.exists()) return candidate
+            val stem = filename.substringBeforeLast('.', filename)
+            val extension = if (filename.contains('.')) filename.substringAfterLast('.') else ""
+            return generateSequence(2) { it + 1 }
+                .map { number ->
+                    File(directory, if (extension.isEmpty()) "$stem ($number)" else "$stem ($number).$extension")
+                }
+                .first { !it.exists() }
+        }
     }
 }

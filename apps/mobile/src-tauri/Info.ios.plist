@@ -16,6 +16,12 @@
   <string>Scan a one-time Mold host pairing code.</string>
   <key>UIViewControllerBasedStatusBarAppearance</key>
   <true/>
+  <!-- "Save to Mold folder" writes <Documents>/Mold; these two keys are what
+       make that folder appear in Files ▸ On My iPhone ▸ Mold. -->
+  <key>UIFileSharingEnabled</key>
+  <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key>
+  <true/>
   <key>NSAppTransportSecurity</key>
   <dict>
     <key>NSAllowsLocalNetworking</key>

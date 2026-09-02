@@ -106,6 +106,56 @@ class AndroidMediaInstrumentedTest {
         }
     }
 
+    /**
+     * "Save to Mold folder" is the share's twin: the same one-shot host, the
+     * same byte check, but the glTF lands under Downloads/Mold as a readable
+     * MediaStore item and the label names that place for the toast.
+     */
+    @Test
+    fun filesMeshGeometryUnderTheDownloadsMoldFolder() {
+        val glb = "glTF".toByteArray() + byteArrayOf(2, 0, 0, 0)
+        val host = startExportHost(glb, "model/gltf-binary")
+        var location: Uri? = null
+        try {
+            val saved = media.saveExportToMoldFolder(
+                "http://127.0.0.1:${host.server.localPort}/api/gallery/export/armchair.glb",
+                null,
+                "{\"format\":\"glb\"}",
+                "armchair-${System.nanoTime()}.glb",
+                "model/gltf-binary",
+                "uat-mold-folder-${System.nanoTime()}",
+            )
+            host.responder.join(5_000)
+            location = Uri.parse(saved.location)
+
+            assertTrue(saved.filename.endsWith(".glb"))
+            assertEquals("Downloads/Mold/${saved.filename}", saved.label)
+            val written = context.contentResolver.openInputStream(location)!!.use { it.readBytes() }
+            assertArrayEquals(glb, written)
+            assertTrue(host.requestText.get().endsWith("{\"format\":\"glb\"}"))
+        } finally {
+            host.server.close()
+            location?.let { context.contentResolver.delete(it, null, null) }
+        }
+    }
+
+    /** A second export of the same print gets a numbered name, never an overwrite. */
+    @Test
+    fun numbersAMoldFolderCollisionInsteadOfOverwriting() {
+        val directory = java.io.File(context.cacheDir, "mold-folder-test-${System.nanoTime()}").apply { mkdirs() }
+        try {
+            assertEquals("chair.stl", AndroidMedia.uniqueDestination(directory, "chair.stl").name)
+            java.io.File(directory, "chair.stl").writeText("solid chair")
+            assertEquals("chair (2).stl", AndroidMedia.uniqueDestination(directory, "chair.stl").name)
+            java.io.File(directory, "chair (2).stl").writeText("solid chair")
+            assertEquals("chair (3).stl", AndroidMedia.uniqueDestination(directory, "chair.stl").name)
+            java.io.File(directory, "armchair.v2.glb").writeText("glTF")
+            assertEquals("armchair.v2 (2).glb", AndroidMedia.uniqueDestination(directory, "armchair.v2.glb").name)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
     private class ExportHost(
         val server: ServerSocket,
         val responder: Thread,

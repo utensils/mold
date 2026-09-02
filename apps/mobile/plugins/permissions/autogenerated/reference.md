@@ -170,6 +170,32 @@ Denies the pick_identity_photo command without any pre-configured scope.
 <tr>
 <td>
 
+`mold-mobile-native:allow-save-export-to-mold-folder`
+
+</td>
+<td>
+
+Enables the save_export_to_mold_folder command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mold-mobile-native:deny-save-export-to-mold-folder`
+
+</td>
+<td>
+
+Denies the save_export_to_mold_folder command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `mold-mobile-native:allow-save-image-to-photos`
 
 </td>

@@ -216,17 +216,32 @@ pushed screen opened from the header.
   native download, restores recorded prompt settings, and can use a still
   as the next source or Qwen edit target — **Use as source** is refused for a
   mesh, since there is no raster to stage as conditioning. The mesh viewer
-  offers **Export as…** OBJ, STL, or PLY from the host's advertised
-  `capabilities.mesh.export_formats` (the same transcodes `mold library
-  export` and the `export_mesh` MCP tool perform); the stored GLB is not
-  listed as an export, because Download already hands over that exact file.
-  Geometry takes the same
-  native route a turntable does: the shell runs the export itself, checks the
-  bytes against the container the filename claims, and opens the system share
-  sheet, so the file reaches Files, AirDrop, or any app that accepts it —
-  a WebView `navigator.share` has no media type for geometry and would fall
-  back to an in-app download. Only the mobile UI opened in a plain browser
-  downloads. A `.glb` tile carries the
+  offers every container the host advertises on
+  `capabilities.mesh.export_formats` — the stored GLB itself, the OBJ, STL,
+  and PLY transcodes (`mold library export` and the `export_mesh` MCP tool
+  perform the same ones), and an **Export turntable…** entry for the animated
+  GIF / APNG / WebP — and each one goes out two ways: **Share GLB…** /
+  **Share OBJ…** / … opens the system share sheet, and **Save GLB to Mold
+  folder** / **Save OBJ to Mold folder** / … writes the file into an
+  on-device folder the user can browse. The turntable's options sheet carries
+  the same Share / Save to Mold folder choice as a Destination row. Both
+  doors run the same native export: the shell performs the
+  `POST /api/gallery/export/:filename` itself, checks the bytes against the
+  container the filename claims, and only then shares or files them — a
+  WebView `navigator.share` has no media type for geometry and would fall
+  back to an in-app download. A download staged for a share the user backed
+  out of is saved without a second fetch (same `reuse_key`). The Mold folder
+  is `<Documents>/Mold` on iPhone, which `UIFileSharingEnabled` +
+  `LSSupportsOpeningDocumentsInPlace` expose as **Files ▸ On My iPhone ▸
+  Mold**; on Android it is **Downloads/Mold** through MediaStore's Downloads
+  collection (API 29+, no storage permission), or the public Downloads
+  directory (with the app's external files directory as the fallback) behind
+  the legacy `WRITE_EXTERNAL_STORAGE` prompt before that. A second export of
+  the same print is numbered (`chair (2).stl`) rather than overwritten, and
+  the footer status names the saved path (`Saved to Files ▸ Mold ▸ chair.stl`
+  / `Saved to Downloads/Mold/chair.stl`); a failure lands in the same line.
+  Only the mobile UI opened in a plain browser downloads, and it never lists
+  the stored GLB, which a browser fetches directly. A `.glb` tile carries the
   same ◈ mesh badge as video and audio prints; the iPhone Library has no kind
   filter, so the badge is how a mesh is told apart. On a print a sequence produced, **Use
   as prompt** reloads that sequence's recorded clips onto the Create clip rail
@@ -734,8 +749,11 @@ the master icon:
 ```
 
 Keep `apps/mobile/src-tauri/Info.ios.plist`, the generated Apple plist, and
-`gen/apple/project.yml` aligned when native capabilities change. Simulator
-builds must retain Xcode's ad-hoc signature so Keychain access works.
+`gen/apple/project.yml` aligned when native capabilities change (the
+`UIFileSharingEnabled` / `LSSupportsOpeningDocumentsInPlace` pair that exposes
+the Mold folder in Files lives in all three). Simulator builds must retain
+Xcode's ad-hoc signature so Keychain access works. On the simulator the Mold
+folder is `$(xcrun simctl get_app_container booted com.utensils.mold data)/Documents/Mold/`.
 
 ## CI and distribution
 

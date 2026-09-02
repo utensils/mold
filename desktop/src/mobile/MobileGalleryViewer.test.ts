@@ -1211,9 +1211,14 @@ describe("MobileGalleryViewer mesh export", () => {
 
     const view = mountMesh(["obj", "stl", "ply"]);
     await flushPromises();
+    // On a native shell every export is a PAIR: the system share sheet, and
+    // the on-device Mold folder the Files app (or Downloads) can browse.
     expect(
       view.findAll("[data-test^='gallery-viewer-mesh-export-']").map((button) => button.text()),
-    ).toEqual(["Export as OBJ", "Export as STL", "Export as PLY"]);
+    ).toEqual(["Share OBJ…", "Share STL…", "Share PLY…"]);
+    expect(
+      view.findAll("[data-test^='gallery-viewer-mesh-save-']").map((button) => button.text()),
+    ).toEqual(["Save OBJ to Mold folder", "Save STL to Mold folder", "Save PLY to Mold folder"]);
     // A stored mesh is not a raster: Photos and the clipboard take neither.
     expect(view.find("[data-test='gallery-viewer-copy']").exists()).toBe(false);
     expect(view.find("[data-test='gallery-viewer-save']").exists()).toBe(false);
@@ -1260,18 +1265,159 @@ describe("MobileGalleryViewer mesh export", () => {
   });
 
   /**
-   * The server lists the stored container first (`glb`) so a CLI can name it,
-   * but the phone already shares that exact file: an "Export as GLB" beside
-   * it would be a no-op transcode. The fixture is the list a current host
-   * actually sends.
+   * The server lists the stored container first (`glb`) so a CLI can name
+   * it. A phone has no Download, so the stored GLB leaves the app the same
+   * two ways a transcode does — Share GLB… and Save GLB to Mold folder —
+   * and only when the host advertises it. The fixture is the list a current
+   * host actually sends.
    */
-  it("never offers the stored GLB as an export, only the transcodes and the turntable", async () => {
+  it("offers the stored GLB the same two ways as a transcode, then the turntable", async () => {
     const view = mountMesh(["glb", "obj", "stl", "ply", "gif", "apng", "webp"]);
     await flushPromises();
     expect(
       view.findAll("[data-test^='gallery-viewer-mesh-export-']").map((button) => button.text()),
-    ).toEqual(["Export as OBJ", "Export as STL", "Export as PLY", "Export turntable…"]);
-    expect(view.find("[data-test='gallery-viewer-mesh-export-glb']").exists()).toBe(false);
+    ).toEqual(["Share GLB…", "Share OBJ…", "Share STL…", "Share PLY…", "Export turntable…"]);
+    expect(
+      view.findAll("[data-test^='gallery-viewer-mesh-save-']").map((button) => button.text()),
+    ).toEqual([
+      "Save GLB to Mold folder",
+      "Save OBJ to Mold folder",
+      "Save STL to Mold folder",
+      "Save PLY to Mold folder",
+    ]);
+  });
+
+  /**
+   * Saving is the share's twin: the identical export request and reuse key
+   * (a download staged for a share the user backed out of is saved without
+   * a second fetch), answered with where the file went so the status names
+   * the place in the Files app's own words.
+   */
+  it("saves a geometry transcode into the Mold folder and names where it went", async () => {
+    invoke.mockResolvedValueOnce({
+      filename: "armchair 01.stl",
+      location: "/private/var/mobile/Containers/Data/Application/X/Documents/Mold/armchair 01.stl",
+      label: "Files ▸ Mold ▸ armchair 01.stl",
+    });
+    const view = mountMesh(["obj", "stl", "ply"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-save-stl']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("save_export_to_mold_folder", {
+      url: "http://studio.tailnet.ts.net:7680/api/gallery/export/armchair%2001.glb",
+      apiKey: "secret",
+      request: { format: "stl" },
+      filename: "armchair 01.stl",
+      reuseKey: 'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"stl"}',
+    });
+    expect(invoke).not.toHaveBeenCalledWith("share_exported_animation", expect.anything());
+    expect(apiFetchTo).not.toHaveBeenCalledWith(
+      target,
+      "/api/gallery/export/armchair%2001.glb",
+      expect.anything(),
+    );
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Saved to Files ▸ Mold ▸ armchair 01.stl",
+    );
+  });
+
+  it("saves the stored GLB itself into the Mold folder", async () => {
+    invoke.mockResolvedValueOnce({
+      filename: "armchair 01 (2).glb",
+      location: "/Documents/Mold/armchair 01 (2).glb",
+      label: "Files ▸ Mold ▸ armchair 01 (2).glb",
+    });
+    const view = mountMesh(["glb", "obj"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-save-glb']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "save_export_to_mold_folder",
+      expect.objectContaining({ request: { format: "glb" }, filename: "armchair 01.glb" }),
+    );
+    // The name the shell settled on (numbered past a collision) is the one shown.
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Saved to Files ▸ Mold ▸ armchair 01 (2).glb",
+    );
+  });
+
+  it("shares the stored GLB through the native share sheet", async () => {
+    invoke.mockResolvedValueOnce("shared");
+    const view = mountMesh(["glb", "obj"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-export-glb']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "share_exported_animation",
+      expect.objectContaining({ request: { format: "glb" }, filename: "armchair 01.glb" }),
+    );
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Export ready to share",
+    );
+  });
+
+  /** Android names its folder the MediaStore way; the status repeats it verbatim. */
+  it("names the Android Downloads folder the way the plugin reports it", async () => {
+    isNativeIOSRuntime.mockReturnValue(false);
+    isNativeAndroidRuntime.mockReturnValue(true);
+    invoke.mockResolvedValueOnce({
+      filename: "armchair 01.ply",
+      location: "content://media/external/downloads/42",
+      label: "Downloads/Mold/armchair 01.ply",
+    });
+    const view = mountMesh(["ply"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-save-ply']").trigger("click");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "save_export_to_mold_folder",
+      expect.objectContaining({ filename: "armchair 01.ply" }),
+    );
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Saved to Downloads/Mold/armchair 01.ply",
+    );
+  });
+
+  /** A failed save lands in the footer status the tap is watching, and the button comes back. */
+  it("reports a failed Mold folder save in the footer status", async () => {
+    invoke.mockRejectedValueOnce(new Error("could not create the Mold folder: read-only"));
+    const view = mountMesh(["obj"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-save-obj']").trigger("click");
+    await flushPromises();
+
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "could not create the Mold folder: read-only",
+    );
+    expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
+    expect(view.get("[data-test='gallery-viewer-mesh-save-obj']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
+  });
+
+  /**
+   * Outside a native shell there is no Mold folder and no share sheet: the
+   * browser build keeps its single Export as… download, and never lists the
+   * stored GLB, which the browser can fetch directly.
+   */
+  it("offers neither the Mold folder nor the stored GLB in a plain browser", async () => {
+    isNativeIOSRuntime.mockReturnValue(false);
+    isNativeAndroidRuntime.mockReturnValue(false);
+    const view = mountMesh(["glb", "obj", "stl", "gif"]);
+    await flushPromises();
+    expect(
+      view.findAll("[data-test^='gallery-viewer-mesh-export-']").map((button) => button.text()),
+    ).toEqual(["Export as OBJ", "Export as STL", "Export turntable…"]);
+    expect(view.findAll("[data-test^='gallery-viewer-mesh-save-']")).toHaveLength(0);
   });
 
   /** A mesh has no raster to stage as conditioning, whatever the owner allows. */
@@ -1380,5 +1526,83 @@ describe("MobileGalleryViewer mesh export", () => {
         request: expect.objectContaining({ format: "gif" }),
       }),
     );
+  });
+
+  /**
+   * The turntable's options sheet is where its destination is chosen: the
+   * same two places a geometry export offers, defaulting to the share sheet
+   * so the existing flow is unchanged until the user picks the folder.
+   */
+  it("saves a turntable into the Mold folder from the options sheet", async () => {
+    invoke.mockResolvedValueOnce({
+      filename: "armchair 01.gif",
+      location: "/Documents/Mold/armchair 01.gif",
+      label: "Files ▸ Mold ▸ armchair 01.gif",
+    });
+    const view = mountMesh(["obj", "gif", "apng"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-export-animation']").trigger("click");
+    await flushPromises();
+    expect(
+      view
+        .findAll("[data-test='video-export-dialog'] input[name='export-destination']")
+        .map((radio) => (radio.element as HTMLInputElement).value),
+    ).toEqual(["share", "folder"]);
+    await view
+      .get("[data-test='video-export-dialog'] input[name='export-destination'][value='folder']")
+      .setValue(true);
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    expect(invoke).toHaveBeenCalledWith("save_export_to_mold_folder", {
+      url: "http://studio.tailnet.ts.net:7680/api/gallery/export/armchair%2001.glb",
+      apiKey: "secret",
+      request: { format: "gif", playback: "loop", repeat: "forever", max_dimension: 720, fps: 12 },
+      filename: "armchair 01.gif",
+      reuseKey:
+        'http://studio.tailnet.ts.net:7680\narmchair 01.glb\n{"format":"gif","playback":"loop","repeat":"forever","max_dimension":720,"fps":12}',
+    });
+    expect(invoke).not.toHaveBeenCalledWith("share_exported_animation", expect.anything());
+    expect(view.find("[data-test='video-export-dialog']").exists()).toBe(false);
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe(
+      "Saved to Files ▸ Mold ▸ armchair 01.gif",
+    );
+  });
+
+  /** A failed folder save keeps the sheet open with the reason, like a failed share. */
+  it("keeps the turntable sheet open when the Mold folder save fails", async () => {
+    invoke.mockRejectedValueOnce(new Error("the export exceeds the 2 GB iPhone limit"));
+    const view = mountMesh(["gif"]);
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-mesh-export-animation']").trigger("click");
+    await flushPromises();
+    await view
+      .get("[data-test='video-export-dialog'] input[name='export-destination'][value='folder']")
+      .setValue(true);
+    await view.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    expect(view.get("[data-test='video-export-dialog']").isVisible()).toBe(true);
+    // The sheet's own alert: the stage may carry its own (the mesh viewer
+    // cannot start in jsdom), so the selector must not race it.
+    expect(view.get("[data-test='video-export-dialog'] [role='alert']").text()).toContain(
+      "the export exceeds the 2 GB iPhone limit",
+    );
+  });
+
+  /** A clip's export sheet is unchanged: video exports have no Mold folder. */
+  it("offers no destination choice for a video clip's export", async () => {
+    const view = mountViewer({ ...image, filename: "developed clip.mp4", format: "mp4" });
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-export']").trigger("click");
+    await flushPromises();
+
+    expect(
+      view.find("[data-test='video-export-dialog'] input[name='export-destination']").exists(),
+    ).toBe(false);
+    expect(view.findAll("[data-test^='gallery-viewer-mesh-save-']")).toHaveLength(0);
   });
 });

@@ -2,7 +2,7 @@
 import MeshViewer from "@studio/components/MeshViewer.vue";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
+import VideoExportDialog, { type ExportDestination } from "@ui/components/VideoExportDialog.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { GalleryImage } from "../lib/api/types";
 import { blobToBase64 } from "../lib/image";
@@ -149,13 +149,32 @@ const canSaveVideo = computed(() => props.exportEnabled && video.value);
 const meshExports = computed(() =>
   props.exportEnabled && mesh.value ? props.meshExportFormats : [],
 );
-// The server lists the stored container (`glb`) first so a CLI can name it;
-// the phone already shares that exact file, so it is not an export here.
+/**
+ * On a native shell every 3-D export is a PAIR: the system share sheet, and
+ * "Save to Mold folder", which writes the file into an on-device folder the
+ * user can browse (Files ▸ On My iPhone ▸ Mold; Downloads/Mold on Android).
+ * The browser build has neither, so it keeps its single download.
+ */
+const nativeShell = computed(() => isNativeIOSRuntime() || isNativeAndroidRuntime());
+// The server lists the stored container (`glb`) first so a CLI can name it.
+// A phone has no Download, so on a native shell the stored GLB leaves the
+// app the same two ways a transcode does — but only when the host advertises
+// it. A browser fetches that file directly, so it is not an export there.
 const meshGeometryExports = computed(() =>
-  meshExports.value.filter((format) => format !== "glb" && !isAnimatedMeshExportFormat(format)),
+  meshExports.value.filter(
+    (format) => (format !== "glb" || nativeShell.value) && !isAnimatedMeshExportFormat(format),
+  ),
 );
 const meshAnimationExports = computed(
   () => meshExports.value.filter(isAnimatedMeshExportFormat) as VideoExportFormat[],
+);
+/** The two places a turntable can go on a phone; none elsewhere. */
+const MESH_EXPORT_DESTINATIONS: ExportDestination[] = [
+  { value: "share", label: "Share…" },
+  { value: "folder", label: "Save to Mold folder" },
+];
+const exportDestinations = computed(() =>
+  mesh.value && nativeShell.value ? MESH_EXPORT_DESTINATIONS : [],
 );
 const pipeline = computed(() => (video.value ? (props.item.metadata.pipeline ?? null) : null));
 const canReuse = computed(() => !props.item.metadata_synthetic);
@@ -579,9 +598,37 @@ async function performVideoSave(): Promise<void> {
   }
 }
 
+/** Where a "Save to Mold folder" export landed, as the shell reports it. */
+interface MoldFolderSave {
+  /** The final name, numbered past a collision. */
+  filename: string;
+  /** Absolute path (iOS) or `content://` URI (Android). */
+  location: string;
+  /** `Files ▸ Mold ▸ chair.stl` or `Downloads/Mold/chair.stl`. */
+  label: string;
+}
+
 /**
- * One geometry transcode of the stored GLB. The body is the bare format — a
- * mesh export has no playback options.
+ * The one export request a native shell runs for a print, whichever door it
+ * leaves through. `share_exported_animation` opens the system share sheet;
+ * `save_export_to_mold_folder` writes the on-device Mold folder. Both take
+ * the identical arguments and reuse key, so a download staged for a share the
+ * user backed out of is saved without a second fetch, and the shell checks
+ * the bytes against the container the filename claims on either path.
+ */
+function nativeExportArguments(filename: string, request: Record<string, unknown>) {
+  return {
+    url: `${props.target.baseUrl}${videoExportPath(props.item.filename)}`,
+    apiKey: props.target.apiKey,
+    request,
+    filename,
+    reuseKey: `${props.target.baseUrl}\n${props.item.filename}\n${JSON.stringify(request)}`,
+  };
+}
+
+/**
+ * One geometry transcode of the stored GLB — or, on a phone, the stored GLB
+ * itself. The body is the bare format: a mesh export has no playback options.
  *
  * On the native shells this is the SAME command a turntable takes: the shell
  * runs the export itself, checks the bytes against the container the filename
@@ -600,14 +647,11 @@ async function performMeshExport(format: string): Promise<void> {
     const path = videoExportPath(props.item.filename);
     const filename = meshExportFilename(props.item.filename, format);
     const request = { format };
-    if (isNativeIOSRuntime() || isNativeAndroidRuntime()) {
-      const outcome = await invoke<"shared" | "cancelled">("share_exported_animation", {
-        url: `${props.target.baseUrl}${path}`,
-        apiKey: props.target.apiKey,
-        request,
-        filename,
-        reuseKey: `${props.target.baseUrl}\n${props.item.filename}\n${JSON.stringify(request)}`,
-      });
+    if (nativeShell.value) {
+      const outcome = await invoke<"shared" | "cancelled">(
+        "share_exported_animation",
+        nativeExportArguments(filename, request),
+      );
       if (outcome === "cancelled") return;
       actionStatus.value = "Export ready to share";
       return;
@@ -623,6 +667,29 @@ async function performMeshExport(format: string): Promise<void> {
     // A geometry export never opens the options sheet, so `exportError` (the
     // sheet's own slot) would be invisible here: the footer status line the
     // tap is watching is where the failure has to land.
+    actionStatus.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
+/**
+ * The other half of the pair: the same transcode, written into the Mold
+ * folder instead of handed to the share sheet. The status names where it
+ * went in the words the shell's own file browser uses.
+ */
+async function performMeshSave(format: string): Promise<void> {
+  if (exportBusy.value || !nativeShell.value) return;
+  exportBusy.value = true;
+  exportError.value = "";
+  actionStatus.value = "";
+  try {
+    const saved = await invoke<MoldFolderSave>(
+      "save_export_to_mold_folder",
+      nativeExportArguments(meshExportFilename(props.item.filename, format), { format }),
+    );
+    actionStatus.value = `Saved to ${saved.label}`;
+  } catch (error) {
     actionStatus.value = error instanceof Error ? error.message : String(error);
   } finally {
     exportBusy.value = false;
@@ -653,22 +720,36 @@ async function openVideoExport(): Promise<void> {
   }
 }
 
-async function performVideoExport(options: VideoExportOptions): Promise<void> {
+/**
+ * `destination` is the sheet's pick when it offered one (a mesh turntable on
+ * a phone): `folder` writes the Mold folder, anything else shares. A clip's
+ * sheet offers none and shares as before.
+ */
+async function performVideoExport(
+  options: VideoExportOptions,
+  destination?: string,
+): Promise<void> {
   if (exportBusy.value) return;
   exportBusy.value = true;
   exportError.value = "";
   try {
     const path = videoExportPath(props.item.filename);
     const filename = videoExportFilename(props.item.filename, options.format);
-    const native = isNativeIOSRuntime() || isNativeAndroidRuntime();
+    const native = nativeShell.value;
+    if (native && destination === "folder") {
+      const saved = await invoke<MoldFolderSave>(
+        "save_export_to_mold_folder",
+        nativeExportArguments(filename, { ...options }),
+      );
+      exportOpen.value = false;
+      actionStatus.value = `Saved to ${saved.label}`;
+      return;
+    }
     if (native) {
-      const outcome = await invoke<"shared" | "cancelled">("share_exported_animation", {
-        url: `${props.target.baseUrl}${path}`,
-        apiKey: props.target.apiKey,
-        request: options,
-        filename,
-        reuseKey: `${props.target.baseUrl}\n${props.item.filename}\n${JSON.stringify(options)}`,
-      });
+      const outcome = await invoke<"shared" | "cancelled">(
+        "share_exported_animation",
+        nativeExportArguments(filename, { ...options }),
+      );
       if (outcome === "cancelled") return;
     } else {
       const response = await apiFetchTo(props.target, path, {
@@ -939,18 +1020,32 @@ onBeforeUnmount(() => {
           Export format…
         </button>
         <!-- 3-D: GLB is the only stored container; these are transcodes of
-             it, built from what THIS host advertises. -->
-        <button
-          v-for="format in meshGeometryExports"
-          :key="format"
-          class="secondary-button gallery-viewer-export"
-          type="button"
-          :data-test="`gallery-viewer-mesh-export-${format}`"
-          :disabled="!!actionBusy || exportBusy"
-          @click="performMeshExport(format)"
-        >
-          Export as {{ format.toUpperCase() }}
-        </button>
+             it (and, on a phone, the stored file itself), built from what
+             THIS host advertises. A native shell offers each one twice:
+             the system share sheet, and the on-device Mold folder. -->
+        <template v-for="format in meshGeometryExports" :key="format">
+          <button
+            class="secondary-button gallery-viewer-export"
+            type="button"
+            :data-test="`gallery-viewer-mesh-export-${format}`"
+            :disabled="!!actionBusy || exportBusy"
+            @click="performMeshExport(format)"
+          >
+            {{
+              nativeShell ? `Share ${format.toUpperCase()}…` : `Export as ${format.toUpperCase()}`
+            }}
+          </button>
+          <button
+            v-if="nativeShell"
+            class="secondary-button gallery-viewer-export"
+            type="button"
+            :data-test="`gallery-viewer-mesh-save-${format}`"
+            :disabled="!!actionBusy || exportBusy"
+            @click="performMeshSave(format)"
+          >
+            Save {{ format.toUpperCase() }} to Mold folder
+          </button>
+        </template>
         <button
           v-if="meshAnimationExports.length"
           class="secondary-button gallery-viewer-export"
@@ -1025,6 +1120,7 @@ onBeforeUnmount(() => {
       :open="exportOpen"
       :filename="item.filename"
       :formats="exportCapabilities.formats"
+      :destinations="exportDestinations"
       :busy="exportBusy"
       :error="exportError"
       @close="exportOpen = false"

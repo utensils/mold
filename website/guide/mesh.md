@@ -224,7 +224,10 @@ now — not only the CLI, TUI, and Discord.
    above, and **Export turntable…** opens the video export's options sheet
    for the animated GIF, APNG or WebP described in
    [Share a turntable](#share-a-turntable). Desktop saves through its normal
-   download path; iPhone hands the converted file to the native share sheet.
+   download path; on iPhone and Android every entry — the stored GLB too —
+   offers both **Share…** (the native share sheet) and **Save to Mold
+   folder**, which files it under Files ▸ On My iPhone ▸ Mold or
+   Downloads/Mold and names the saved path.
 
 ## In the TUI
 

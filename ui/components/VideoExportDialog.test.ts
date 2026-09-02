@@ -32,6 +32,55 @@ describe("VideoExportDialog", () => {
     ]);
   });
 
+  /**
+   * A caller that offers more than one place for the export (the phone's
+   * share sheet or its Mold folder) lists them; the choice rides beside the
+   * options rather than inside them, so the request body posted to the host
+   * never carries a client-side destination.
+   */
+  it("offers destinations only when asked, and emits the chosen one beside the options", async () => {
+    const wrapper = mount(VideoExportDialog, {
+      props: {
+        open: true,
+        filename: "armchair.glb",
+        formats: ["gif", "apng"],
+        destinations: [
+          { value: "share", label: "Share…" },
+          { value: "folder", label: "Save to Mold folder" },
+        ],
+      },
+    });
+
+    expect(
+      wrapper
+        .findAll('input[name="export-destination"]')
+        .map((radio) => (radio.element as HTMLInputElement).value),
+    ).toEqual(["share", "folder"]);
+    expect(wrapper.text()).toContain("Save to Mold folder");
+    await wrapper
+      .get('input[name="export-destination"][value="folder"]')
+      .setValue(true);
+    await wrapper.get("form").trigger("submit");
+
+    expect(wrapper.emitted("export")?.[0]).toEqual([
+      {
+        format: "gif",
+        playback: "loop",
+        repeat: "forever",
+        max_dimension: 720,
+        fps: 12,
+      },
+      "folder",
+    ]);
+
+    const plain = mount(VideoExportDialog, {
+      props: { open: true, filename: "rain.mp4", formats: ["gif"] },
+    });
+    expect(plain.find('input[name="export-destination"]').exists()).toBe(false);
+    await plain.get("form").trigger("submit");
+    expect(plain.emitted("export")?.[0]).toHaveLength(1);
+  });
+
   it("hides GIF-only controls for APNG", async () => {
     const wrapper = mount(VideoExportDialog, {
       props: { open: true, filename: "rain.mp4", formats: ["gif", "apng"] },

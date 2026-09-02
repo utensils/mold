@@ -63,6 +63,7 @@ pub fn run() {
             media::save_image_to_photos,
             media::save_video_to_photos,
             media::share_exported_animation,
+            media::save_export_to_mold_folder,
             pairing_scanner::scan_android_pairing_code,
             pairing_scanner::cancel_android_pairing_scan,
             viewport::restore_mobile_viewport,
@@ -115,6 +116,19 @@ mod tests {
         let plist = include_str!("../Info.ios.plist");
         assert!(plist.contains("<key>NSPhotoLibraryAddUsageDescription</key>"));
         assert!(plist.contains("Save generated images and videos"));
+    }
+
+    /// "Save to Mold folder" writes `<Documents>/Mold`; without these two
+    /// keys the folder exists but never appears in Files ▸ On My iPhone, so
+    /// the save would be real and invisible.
+    #[test]
+    fn ios_exposes_the_documents_folder_in_the_files_app() {
+        let plist = include_str!("../Info.ios.plist");
+        assert!(plist.contains("<key>UIFileSharingEnabled</key>\n  <true/>"));
+        assert!(plist.contains("<key>LSSupportsOpeningDocumentsInPlace</key>\n  <true/>"));
+        let generated_plist = include_str!("../gen/apple/mold-mobile_iOS/Info.plist");
+        assert!(generated_plist.contains("<key>UIFileSharingEnabled</key>"));
+        assert!(generated_plist.contains("<key>LSSupportsOpeningDocumentsInPlace</key>"));
     }
 
     #[test]

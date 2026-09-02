@@ -71,6 +71,16 @@ pub struct ShareExportResponse {
     pub outcome: String,
 }
 
+/// Where a "Save to Mold folder" export landed: the final display name
+/// (MediaStore may have numbered a collision), the `content://` URI or file
+/// path, and the `Downloads/Mold/<name>` label the toast shows.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SavedExportResponse {
+    pub filename: String,
+    pub location: String,
+    pub label: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AppearanceRequest {
     pub appearance: String,
