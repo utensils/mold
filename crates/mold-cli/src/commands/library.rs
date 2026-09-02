@@ -75,7 +75,17 @@ async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {
             filename,
             format,
             output,
-        } => library_export(client, &filename, format, output.as_deref()).await,
+            turntable,
+        } => {
+            library_export(
+                client,
+                &filename,
+                format,
+                &turntable.into(),
+                output.as_deref(),
+            )
+            .await
+        }
         LibraryAction::Grid { .. } => unreachable!("grid handled before creating a client"),
     }
 }
@@ -445,8 +455,9 @@ async fn library_trash(client: &MoldClient, filenames: &[String]) -> Result<()> 
     Ok(())
 }
 
-/// `mold library export <file> --format obj|stl|ply` — transcode one stored
-/// mesh and write the result locally.
+/// `mold library export <file> --format obj|stl|ply|gif|apng|webp` —
+/// transcode one stored mesh (or render its turntable) and write the result
+/// locally.
 ///
 /// HTTP to `$MOLD_HOST` with no local fallback, like every other non-grid
 /// `mold library` command: the print lives on the serving host, and reading
@@ -457,6 +468,7 @@ async fn library_export(
     client: &MoldClient,
     filename: &str,
     format: mold_core::MeshExportFormat,
+    turntable: &mold_core::MeshTurntableOptions,
     output: Option<&str>,
 ) -> Result<()> {
     if !std::path::Path::new(filename)
@@ -464,6 +476,13 @@ async fn library_export(
         .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
     {
         bail!("only stored .glb prints can be exported; '{filename}' is not one");
+    }
+    // The server would ignore them, and a flag that silently does nothing is
+    // worse than one that is refused with the formats it applies to.
+    if !format.is_animation() && *turntable != mold_core::MeshTurntableOptions::default() {
+        bail!(
+            "--playback, --repeat, --max-dimension, --frames and --fps shape a turntable; they apply to --format gif, apng, or webp, not {format}"
+        );
     }
     let capabilities = client
         .capabilities()
@@ -496,7 +515,7 @@ async fn library_export(
     }
 
     let bytes = client
-        .export_gallery_mesh(filename, format)
+        .export_gallery_mesh(filename, format, turntable)
         .await
         .with_context(|| format!("could not export {filename} as {format}"))?;
 

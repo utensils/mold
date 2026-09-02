@@ -3,7 +3,7 @@
 //! Shared by the server's `POST /api/gallery/export/:filename` route and the
 //! TUI's in-process export of a local print, so a `.glb` exports to the same
 //! bytes whichever machine renders it. Frames come from
-//! [`super::poster::render_frame_rgb`] over [`super::poster::turntable_cameras`]
+//! [`super::poster::render_sequence_frame_rgb`] over [`super::poster::turntable_cameras`]
 //! and go into the animation encoders every other mold export uses
 //! (`ltx_video::video_enc`), so a mesh GIF and a video GIF share one
 //! quantizer, one loop/bounce contract and one repeat contract.
@@ -17,7 +17,7 @@ use anyhow::{bail, Result};
 use image::RgbImage;
 
 use crate::hunyuan3d::mesh::Mesh;
-use crate::hunyuan3d::poster::{render_frame_rgb, turntable_cameras, MAX_POSTER_SIZE};
+use crate::hunyuan3d::poster::{render_sequence_frame_rgb, turntable_cameras, MAX_POSTER_SIZE};
 use crate::ltx_video::video_enc;
 
 /// Frames in a turntable unless the request says otherwise: a 10° step, which
@@ -109,7 +109,7 @@ pub fn render_turntable(mesh: &Mesh, options: &TurntableOptions) -> Result<Vec<R
     }
     turntable_cameras(options.frames, options.bounce)
         .iter()
-        .map(|camera| render_frame_rgb(mesh, camera, options.size))
+        .map(|camera| render_sequence_frame_rgb(mesh, camera, options.size))
         .collect()
 }
 
@@ -289,6 +289,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(gif_frame_count(&bounce_once), 15);
+    }
+
+    /// A flat mesh passes through edge-on views on its way round, and those
+    /// frames are blank by rights; the turntable must not fail on them.
+    #[test]
+    fn a_flat_mesh_turns_through_its_edge_on_views() {
+        let plane = Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![[0, 1, 2]],
+            ..Default::default()
+        };
+        let frames = render_turntable(
+            &plane,
+            &TurntableOptions {
+                frames: 36,
+                size: 32,
+                ..TurntableOptions::default()
+            },
+        )
+        .expect("a plane still turns");
+        assert_eq!(frames.len(), 36);
+        // The poster view (frame 0) sees the face; the frame at azimuth 90°
+        // (index 6, 30° + 6 * 10°) sees the edge and is background only.
+        assert!(frames[0].pixels().any(|p| p[0] > 100));
+        assert!(frames[6].pixels().all(|p| p[0] < 0x20));
     }
 
     #[test]

@@ -80,6 +80,32 @@ pub fn render_poster_from(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Re
 /// `ltx_video::video_enc` — so the first frame of a looping GIF is
 /// pixel-identical to the gallery poster.
 pub fn render_frame_rgb(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Result<RgbImage> {
+    render_frame(mesh, camera, size, false)
+}
+
+/// [`render_frame_rgb`] for one frame of a sequence: a view from which the
+/// mesh projects to nothing is a background-only frame, not an error.
+///
+/// A single poster of nothing is a failure worth reporting (the caller's
+/// fallback is the placeholder). A turntable of a flat mesh — a relief, a
+/// plane, a cut-out — necessarily passes through edge-on views, and those
+/// frames are CORRECT: the object really does vanish there. Failing the whole
+/// export for them would refuse exactly the meshes a turntable helps with.
+/// An empty mesh and an out-of-range size are still errors.
+pub fn render_sequence_frame_rgb(
+    mesh: &Mesh,
+    camera: &Camera,
+    size: u32,
+) -> anyhow::Result<RgbImage> {
+    render_frame(mesh, camera, size, true)
+}
+
+fn render_frame(
+    mesh: &Mesh,
+    camera: &Camera,
+    size: u32,
+    allow_empty_view: bool,
+) -> anyhow::Result<RgbImage> {
     if mesh.is_empty() {
         bail!("cannot render a poster: the mesh has no geometry");
     }
@@ -89,7 +115,7 @@ pub fn render_frame_rgb(mesh: &Mesh, camera: &Camera, size: u32) -> anyhow::Resu
 
     let ss = size * SUPERSAMPLE;
     let gb = render_gbuffers(mesh, camera, ss, ss);
-    if gb.covered_pixels() == 0 {
+    if gb.covered_pixels() == 0 && !allow_empty_view {
         bail!("cannot render a poster: the mesh projects to nothing from this view");
     }
 
@@ -478,6 +504,38 @@ mod tests {
         assert_eq!(decode(&png), frame);
         assert!(render_frame_rgb(&Mesh::default(), &camera, 96).is_err());
         assert!(render_frame_rgb(&mesh, &camera, MAX_POSTER_SIZE + 1).is_err());
+    }
+
+    /// A flat mesh seen edge-on projects to nothing. For a poster that is an
+    /// error (the placeholder is the better answer); for a frame of a
+    /// sequence it is a correct, background-only frame, because a turntable
+    /// of a plane really does pass through that view.
+    #[test]
+    fn a_sequence_frame_of_an_edge_on_mesh_is_background_not_an_error() {
+        let plane = Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![[0, 1, 2]],
+            ..Default::default()
+        };
+        // The plane lies in XY; an eye on +X at zero elevation sees its edge.
+        let edge_on = Camera::orthographic(90.0, 0.0);
+        assert!(render_frame_rgb(&plane, &edge_on, 32).is_err());
+        let frame = render_sequence_frame_rgb(&plane, &edge_on, 32).expect("blank frame");
+        assert_eq!((frame.width(), frame.height()), (32, 32));
+        let top = frame.get_pixel(0, 0);
+        assert_eq!([top[0], top[1], top[2]], BG_TOP);
+        assert!(
+            frame.pixels().all(|p| p[0] <= BG_TOP[0] + 1),
+            "an edge-on frame must be background only"
+        );
+        // The same view of a mesh that is NOT flat still renders it.
+        assert!(render_sequence_frame_rgb(&cube(0.5), &edge_on, 32)
+            .unwrap()
+            .pixels()
+            .any(|p| p[0] > 100));
+        // The lenient path keeps the real refusals.
+        assert!(render_sequence_frame_rgb(&Mesh::default(), &edge_on, 32).is_err());
+        assert!(render_sequence_frame_rgb(&plane, &edge_on, 0).is_err());
     }
 
     /// A looping turntable is ONE full turn whose last frame stops one step

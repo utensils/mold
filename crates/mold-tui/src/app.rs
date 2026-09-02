@@ -1386,13 +1386,24 @@ pub(crate) fn next_target_faces(
     }
 }
 
-/// Every export container the in-process writer offers for a LOCAL `.glb`.
-/// GLB itself is the stored form, not an export, so it is never listed.
-pub(crate) const LOCAL_MESH_EXPORT_FORMATS: [mold_core::MeshExportFormat; 3] = [
-    mold_core::MeshExportFormat::Obj,
-    mold_core::MeshExportFormat::Stl,
-    mold_core::MeshExportFormat::Ply,
-];
+/// Every export container the in-process writer offers for a LOCAL `.glb`:
+/// the geometry transcodes, then the turntable renders this build can
+/// encode (WebP only with the `webp` feature, exactly as the server
+/// advertises it). GLB itself is the stored form, not an export, so it is
+/// never listed.
+pub(crate) fn local_mesh_export_formats() -> Vec<mold_core::MeshExportFormat> {
+    let mut formats = vec![
+        mold_core::MeshExportFormat::Obj,
+        mold_core::MeshExportFormat::Stl,
+        mold_core::MeshExportFormat::Ply,
+        mold_core::MeshExportFormat::Gif,
+        mold_core::MeshExportFormat::Apng,
+    ];
+    if cfg!(feature = "webp") {
+        formats.push(mold_core::MeshExportFormat::Webp);
+    }
+    formats
+}
 
 /// The containers the export picker lists: the owning host's advertised
 /// `capabilities.mesh.export_formats` minus GLB, or the local writer's set
@@ -1406,7 +1417,7 @@ pub(crate) fn mesh_export_formats_for(
             .copied()
             .filter(|format| *format != mold_core::MeshExportFormat::Glb)
             .collect(),
-        None => LOCAL_MESH_EXPORT_FORMATS.to_vec(),
+        None => local_mesh_export_formats(),
     }
 }
 
@@ -1427,20 +1438,34 @@ pub(crate) fn mesh_export_target_path(
 
 /// Transcode local `.glb` bytes with the same writer the server's export
 /// route uses, so a local print exports byte-for-byte as a served one would.
+/// An animated format renders the turntable through the same helper, at the
+/// server's defaults (a full turn, 36 frames, 512 px, 10 fps, looping):
+/// the picker offers no knobs, and says so.
 pub(crate) fn export_local_mesh(
     glb: &[u8],
     format: mold_core::MeshExportFormat,
 ) -> Result<Vec<u8>, String> {
-    use mold_inference::hunyuan3d::glb;
+    use mold_inference::hunyuan3d::{glb, turntable};
     if format == mold_core::MeshExportFormat::Glb {
         return Ok(glb.to_vec());
     }
     let mesh = glb::read_glb(glb).map_err(|e| e.to_string())?;
+    if let Some(output_format) = format.animation_output_format() {
+        return turntable::export_turntable(
+            &mesh,
+            output_format,
+            &turntable::TurntableOptions::default(),
+        )
+        .map_err(|e| format!("{e:#}"));
+    }
     Ok(match format {
         mold_core::MeshExportFormat::Glb => unreachable!("returned above"),
         mold_core::MeshExportFormat::Obj => glb::write_obj(&mesh).into_bytes(),
         mold_core::MeshExportFormat::Stl => glb::write_stl(&mesh),
         mold_core::MeshExportFormat::Ply => glb::write_ply(&mesh),
+        mold_core::MeshExportFormat::Gif
+        | mold_core::MeshExportFormat::Apng
+        | mold_core::MeshExportFormat::Webp => unreachable!("rendered above"),
     })
 }
 
@@ -6695,8 +6720,14 @@ impl App {
                 Some(url) => {
                     let api_key = crate::hosts::api_key_for(&origin.host_id);
                     let client = crate::hosts::client_for(&url, api_key.as_deref());
+                    // The picker offers no turntable knobs; the host's
+                    // defaults are the same ones the local writer uses.
                     client
-                        .export_gallery_mesh(&filename, format)
+                        .export_gallery_mesh(
+                            &filename,
+                            format,
+                            &mold_core::MeshTurntableOptions::default(),
+                        )
                         .await
                         .map_err(|e| e.to_string())
                 }
@@ -15045,12 +15076,18 @@ mod tests {
     /// goes through the same writer the server's export route uses.
     #[test]
     fn mesh_export_helpers_name_the_target_and_transcode_locally() {
-        use mold_core::MeshExportFormat::{Glb, Obj, Ply, Stl};
-        assert_eq!(mesh_export_formats_for(None), vec![Obj, Stl, Ply]);
+        use mold_core::MeshExportFormat::{Apng, Gif, Glb, Obj, Ply, Stl, Webp};
+        let local = mesh_export_formats_for(None);
+        assert_eq!(&local[..5], &[Obj, Stl, Ply, Gif, Apng]);
         assert_eq!(
-            mesh_export_formats_for(Some(&[Glb, Obj, Stl, Ply])),
-            vec![Obj, Stl, Ply],
-            "the stored GLB is never an export"
+            local.contains(&Webp),
+            cfg!(feature = "webp"),
+            "a local print offers WebP exactly when this build encodes it"
+        );
+        assert_eq!(
+            mesh_export_formats_for(Some(&[Glb, Obj, Stl, Ply, Gif])),
+            vec![Obj, Stl, Ply, Gif],
+            "the stored GLB is never an export; the host's turntables are"
         );
         assert_eq!(mesh_export_formats_for(Some(&[Glb])), Vec::<_>::new());
 
@@ -15059,6 +15096,11 @@ mod tests {
         assert_eq!(
             target,
             std::path::PathBuf::from("/out/mold-hunyuan3d-1.stl")
+        );
+        // An APNG is written as `.png`, the extension every viewer opens.
+        assert_eq!(
+            mesh_export_target_path(std::path::Path::new("/out"), "chair.glb", Apng),
+            std::path::PathBuf::from("/out/chair.png")
         );
 
         let mesh = mold_inference::hunyuan3d::mesh::Mesh {
@@ -15082,6 +15124,15 @@ mod tests {
         assert!(!export_local_mesh(&glb, Ply).unwrap().is_empty());
         assert_eq!(export_local_mesh(&glb, Glb).unwrap(), glb);
         assert!(export_local_mesh(b"not a glb", Stl).is_err());
+        // A local turntable goes through the same renderer the server's
+        // route uses, at the same defaults: a real GIF with the default
+        // frame count.
+        let gif = export_local_mesh(&glb, Gif).unwrap();
+        assert_eq!(&gif[..6], b"GIF89a");
+        assert_eq!(
+            &export_local_mesh(&glb, Apng).unwrap()[..8],
+            b"\x89PNG\r\n\x1a\n"
+        );
     }
 
     #[tokio::test]
@@ -15123,7 +15174,7 @@ mod tests {
                 filename, formats, ..
             }) => {
                 assert_eq!(filename, "chair.glb");
-                assert_eq!(formats, &LOCAL_MESH_EXPORT_FORMATS.to_vec());
+                assert_eq!(formats, &local_mesh_export_formats());
             }
             other => panic!("expected the export picker, got {}", other.is_some()),
         }

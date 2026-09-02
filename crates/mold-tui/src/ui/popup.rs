@@ -1457,7 +1457,7 @@ fn render_mesh_export_picker(frame: &mut Frame, app: &App) {
     else {
         return;
     };
-    let area = centered_rect(frame.area(), 55, 30);
+    let area = centered_rect(frame.area(), 60, 45);
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1474,9 +1474,16 @@ fn render_mesh_export_picker(frame: &mut Frame, app: &App) {
         )),
         Line::from(""),
     ];
+    if formats.iter().any(|format| format.is_animation()) {
+        text.push(Line::from(Span::styled(
+            MESH_TURNTABLE_PICKER_HINT,
+            theme.dim(),
+        )));
+        text.push(Line::from(""));
+    }
     for (index, format) in formats.iter().enumerate() {
         let note = mesh_export_format_note(*format);
-        let label = format!("{:<4} {note}", format.extension().to_ascii_uppercase());
+        let label = format!("{:<4} {note}", format.as_str().to_ascii_uppercase());
         let style = if index == *selected {
             theme.param_selected()
         } else {
@@ -1508,6 +1515,11 @@ fn render_mesh_export_picker(frame: &mut Frame, app: &App) {
     );
 }
 
+/// The picker offers no turntable knobs, and says so: the defaults are the
+/// server's (and the local writer's), and `mold library export` has the
+/// flags for anything else.
+pub(crate) const MESH_TURNTABLE_PICKER_HINT: &str = "GIF / APNG / WebP render a turntable at the defaults: one full turn, 36 frames, 512 px, 10 fps, looping. For bounce, once, or other sizes use mold library export --format gif --playback bounce ...";
+
 /// What each export container carries, in the picker's own words — the
 /// same table `website/guide/mesh.md` documents.
 pub(crate) fn mesh_export_format_note(format: mold_core::MeshExportFormat) -> &'static str {
@@ -1518,6 +1530,9 @@ pub(crate) fn mesh_export_format_note(format: mold_core::MeshExportFormat) -> &'
         }
         mold_core::MeshExportFormat::Stl => "triangles only; no UVs or colour (3-D printing, CAD)",
         mold_core::MeshExportFormat::Ply => "shared vertices with normals (point-and-mesh tooling)",
+        mold_core::MeshExportFormat::Gif => "turntable animation (chat, README, anywhere)",
+        mold_core::MeshExportFormat::Apng => "turntable animation, lossless; written as .png",
+        mold_core::MeshExportFormat::Webp => "turntable animation, small (browsers)",
     }
 }
 
@@ -1576,6 +1591,36 @@ fn render_settings_input(frame: &mut Frame, app: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    /// Every container the host can advertise has a note, the animated ones
+    /// say they are turntables, and the picker's hint states the fixed
+    /// defaults and where the knobs live — the picker deliberately has none.
+    #[test]
+    fn mesh_export_picker_names_turntables_and_their_fixed_defaults() {
+        use mold_core::MeshExportFormat::{Apng, Gif, Glb, Obj, Ply, Stl, Webp};
+        for format in [Gif, Apng, Webp] {
+            assert!(
+                super::mesh_export_format_note(format).contains("turntable"),
+                "{format}"
+            );
+        }
+        for format in [Glb, Obj, Stl, Ply] {
+            assert!(
+                !super::mesh_export_format_note(format).contains("turntable"),
+                "{format}"
+            );
+        }
+        let hint = super::MESH_TURNTABLE_PICKER_HINT;
+        for expected in [
+            "36 frames",
+            "512 px",
+            "10 fps",
+            "looping",
+            "mold library export",
+        ] {
+            assert!(hint.contains(expected), "{expected} missing from {hint}");
+        }
+    }
+
     #[test]
     fn confirm_popup_hint_lists_enter_as_default_confirm() {
         // Prior hint read `y Confirm  n Cancel` — Enter wasn't in the

@@ -1060,17 +1060,22 @@ pub enum LibraryAction {
         #[arg(required = true, value_name = "FILENAME")]
         filenames: Vec<String>,
     },
-    /// Export one stored 3-D print as OBJ, STL, or PLY
+    /// Export one stored 3-D print as OBJ, STL, PLY, or a turntable GIF/APNG/WebP
     ///
     /// The gallery keeps its `.glb`; this writes a converted copy beside it or
-    /// wherever `--output` names. Each container loses something the stored
-    /// glTF carries — OBJ has no materials, STL has no shared vertices or
-    /// UVs — which is why none of them is a generation target.
+    /// wherever `--output` names. Each geometry container loses something the
+    /// stored glTF carries — OBJ has no materials, STL has no shared vertices
+    /// or UVs — which is why none of them is a generation target. An animated
+    /// format is a TURNTABLE: the gallery poster's view rendered around the
+    /// mesh, so the first frame is the poster itself.
     #[command(after_long_help = "\
 Examples:
   mold library export mold-hunyuan3d-1700000000000.glb --format stl
   mold library export chair.glb --format obj -o ~/prints/chair.obj
-  mold library export chair.glb --format ply --output -   Write to stdout")]
+  mold library export chair.glb --format ply --output -   Write to stdout
+  mold library export chair.glb --format gif              36 frames, 10 fps, 512 px, loops
+  mold library export chair.glb --format gif --playback bounce --repeat once
+  mold library export chair.glb --format webp --frames 72 --fps 24 --max-dimension 768")]
     Export {
         #[arg(value_name = "FILENAME")]
         filename: String,
@@ -1081,7 +1086,47 @@ Examples:
         /// stdout.
         #[arg(long, short = 'o', value_name = "PATH")]
         output: Option<String>,
+        #[command(flatten)]
+        turntable: TurntableArgs,
     },
+}
+
+/// Turntable controls for `mold library export --format gif|apng|webp`. The
+/// names are the gallery video export's own (`playback`, `repeat`,
+/// `max_dimension`) plus the two only a render has, and every one is optional
+/// so an absent flag means the server's default. Ignored by a geometry
+/// export.
+#[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TurntableArgs {
+    /// GIF only: `loop` is one seamless full turn; `bounce` sweeps half a
+    /// turn and plays it back.
+    #[arg(long, value_name = "loop|bounce", help_heading = "Turntable")]
+    playback: Option<mold_core::MeshTurntablePlayback>,
+    /// GIF only: `forever` loops; `once` plays through and rests on the final
+    /// frame.
+    #[arg(long, value_name = "forever|once", help_heading = "Turntable")]
+    repeat: Option<mold_core::MeshTurntableRepeat>,
+    /// Frame edge in pixels, 240 to 2160 (default 512, the poster's size).
+    #[arg(long, value_name = "PIXELS", help_heading = "Turntable")]
+    max_dimension: Option<u32>,
+    /// Views rendered around the mesh, 8 to 180 (default 36, a 10° step).
+    #[arg(long, value_name = "N", help_heading = "Turntable")]
+    frames: Option<u32>,
+    /// Playback rate, 1 to 30 (default 10).
+    #[arg(long, value_name = "N", help_heading = "Turntable")]
+    fps: Option<u32>,
+}
+
+impl From<TurntableArgs> for mold_core::MeshTurntableOptions {
+    fn from(args: TurntableArgs) -> Self {
+        Self {
+            playback: args.playback,
+            repeat: args.repeat,
+            max_dimension: args.max_dimension,
+            frames: args.frames,
+            fps: args.fps,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -4271,6 +4316,9 @@ mod tests {
             ("obj", mold_core::MeshExportFormat::Obj),
             ("stl", mold_core::MeshExportFormat::Stl),
             ("ply", mold_core::MeshExportFormat::Ply),
+            ("gif", mold_core::MeshExportFormat::Gif),
+            ("apng", mold_core::MeshExportFormat::Apng),
+            ("webp", mold_core::MeshExportFormat::Webp),
         ] {
             match parse(&["library", "export", "chair.glb", "--format", flag]).command {
                 Commands::Library {
@@ -4279,11 +4327,17 @@ mod tests {
                             filename,
                             format,
                             output,
+                            turntable,
                         },
                 } => {
                     assert_eq!(filename, "chair.glb");
                     assert_eq!(format, expected);
                     assert_eq!(output, None);
+                    assert_eq!(
+                        mold_core::MeshTurntableOptions::from(turntable),
+                        mold_core::MeshTurntableOptions::default(),
+                        "no turntable flag means the server's defaults"
+                    );
                 }
                 _ => panic!("expected Library export"),
             }
@@ -4306,6 +4360,66 @@ mod tests {
                 action: LibraryAction::Export { output, .. },
             } => assert_eq!(output.as_deref(), Some("-")),
             _ => panic!("expected Library export"),
+        }
+    }
+
+    /// The turntable flags are the video export's own names (`playback`,
+    /// `repeat`, `max_dimension`) plus `frames` and `fps`, parsed by the wire
+    /// enums so a spelling the server would refuse never leaves the shell.
+    #[test]
+    fn library_export_turntable_flags_parse_by_the_wire_types() {
+        match parse(&[
+            "library",
+            "export",
+            "chair.glb",
+            "--format",
+            "gif",
+            "--playback",
+            "bounce",
+            "--repeat",
+            "once",
+            "--max-dimension",
+            "480",
+            "--frames",
+            "24",
+            "--fps",
+            "12",
+        ])
+        .command
+        {
+            Commands::Library {
+                action: LibraryAction::Export { turntable, .. },
+            } => assert_eq!(
+                mold_core::MeshTurntableOptions::from(turntable),
+                mold_core::MeshTurntableOptions {
+                    playback: Some(mold_core::MeshTurntablePlayback::Bounce),
+                    repeat: Some(mold_core::MeshTurntableRepeat::Once),
+                    max_dimension: Some(480),
+                    frames: Some(24),
+                    fps: Some(12),
+                }
+            ),
+            _ => panic!("expected Library export"),
+        }
+        for bad in [
+            ["--playback", "pingpong"],
+            ["--repeat", "twice"],
+            ["--frames", "many"],
+            ["--fps", "-1"],
+        ] {
+            assert!(
+                try_parse(&[
+                    "library",
+                    "export",
+                    "chair.glb",
+                    "--format",
+                    "gif",
+                    bad[0],
+                    bad[1]
+                ])
+                .is_err(),
+                "{bad:?} must not parse"
+            );
         }
     }
 

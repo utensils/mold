@@ -1905,11 +1905,12 @@ impl MoldClient {
             .await?)
     }
 
-    /// Move one print to the host's trash (`DELETE /api/gallery/image/:name`
-    /// without `permanent`). On older servers without a trash this deletes
-    /// outright — check `capabilities.gallery.trash` first when that matters.
-    /// Transcode one stored gallery mesh into an export container
-    /// (`POST /api/gallery/export/:filename`) and return the bytes.
+    /// Export one stored gallery mesh (`POST /api/gallery/export/:filename`)
+    /// and return the bytes: a transcode for a geometry container, a rendered
+    /// turntable for an animated one, with `options` carrying the turntable's
+    /// playback, repeat, frame size, frame count and rate (all optional; a
+    /// geometry export ignores them, and an untouched value adds nothing to
+    /// the request).
     ///
     /// Downloads only: the gallery keeps its `.glb`, and the caller decides
     /// where the converted file lands. Every refusal comes back as the
@@ -1919,7 +1920,10 @@ impl MoldClient {
         &self,
         filename: &str,
         format: crate::MeshExportFormat,
+        options: &crate::MeshTurntableOptions,
     ) -> Result<Vec<u8>> {
+        let mut body = serde_json::to_value(options)?;
+        body["format"] = serde_json::Value::String(format.as_str().to_string());
         let resp = self
             .client
             .post(format!(
@@ -1927,13 +1931,16 @@ impl MoldClient {
                 self.base_url,
                 encode_path_segment(filename)
             ))
-            .json(&serde_json::json!({ "format": format.extension() }))
+            .json(&body)
             .send()
             .await?;
         let resp = error_for_status_with_body(resp).await?;
         Ok(resp.bytes().await?.to_vec())
     }
 
+    /// Move one print to the host's trash (`DELETE /api/gallery/image/:name`
+    /// without `permanent`). On older servers without a trash this deletes
+    /// outright — check `capabilities.gallery.trash` first when that matters.
     pub async fn trash_gallery_image(&self, filename: &str) -> Result<()> {
         let resp = self
             .client

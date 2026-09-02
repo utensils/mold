@@ -5669,6 +5669,80 @@ mod tests {
         assert!("png".parse::<MeshExportFormat>().is_err());
     }
 
+    /// A host newer than this client may advertise a container it has never
+    /// heard of. That entry is skipped; the ones it knows still arrive, and
+    /// the capabilities read as a whole does not fail.
+    #[test]
+    fn unknown_mesh_export_formats_are_skipped_not_fatal() {
+        let capabilities: MeshCapabilities = serde_json::from_value(serde_json::json!({
+            "generation": true,
+            "formats": ["glb"],
+            "export_formats": ["glb", "obj", "usdz", "gif"],
+            "textures": false
+        }))
+        .unwrap();
+        assert_eq!(
+            capabilities.export_formats,
+            vec![
+                MeshExportFormat::Glb,
+                MeshExportFormat::Obj,
+                MeshExportFormat::Gif
+            ]
+        );
+        let absent: MeshCapabilities = serde_json::from_value(serde_json::json!({
+            "generation": false,
+            "formats": [],
+            "textures": false
+        }))
+        .unwrap();
+        assert!(absent.export_formats.is_empty());
+    }
+
+    /// The turntable controls serialize to exactly the video export's field
+    /// names and spellings, and an untouched value serializes to NOTHING, so
+    /// a geometry export's request is byte-for-byte what it was before the
+    /// fields existed.
+    #[test]
+    fn mesh_turntable_options_use_the_video_export_wire_contract() {
+        assert_eq!(
+            serde_json::to_value(MeshTurntableOptions::default()).unwrap(),
+            serde_json::json!({})
+        );
+        let options = MeshTurntableOptions {
+            playback: Some(MeshTurntablePlayback::Bounce),
+            repeat: Some(MeshTurntableRepeat::Once),
+            max_dimension: Some(480),
+            frames: Some(24),
+            fps: Some(12),
+        };
+        assert_eq!(
+            serde_json::to_value(options).unwrap(),
+            serde_json::json!({
+                "playback": "bounce",
+                "repeat": "once",
+                "max_dimension": 480,
+                "frames": 24,
+                "fps": 12
+            })
+        );
+        for (raw, expected) in [
+            ("loop", MeshTurntablePlayback::Loop),
+            ("Bounce", MeshTurntablePlayback::Bounce),
+        ] {
+            assert_eq!(raw.parse::<MeshTurntablePlayback>().unwrap(), expected);
+            assert_eq!(expected.to_string(), raw.to_ascii_lowercase());
+        }
+        for (raw, expected) in [
+            ("forever", MeshTurntableRepeat::Forever),
+            ("ONCE", MeshTurntableRepeat::Once),
+        ] {
+            assert_eq!(raw.parse::<MeshTurntableRepeat>().unwrap(), expected);
+            assert_eq!(expected.to_string(), raw.to_ascii_lowercase());
+        }
+        assert!("pingpong".parse::<MeshTurntablePlayback>().is_err());
+        assert!("twice".parse::<MeshTurntableRepeat>().is_err());
+    }
+
     #[test]
     fn audio_only_pipeline_defaults_output_format_to_wav() {
         // The ltx2 family default is mp4, which the validator rejects for an
@@ -10708,13 +10782,28 @@ pub struct MeshCapabilities {
     /// Typed as [`MeshExportFormat`] rather than [`OutputFormat`] so an
     /// export-only container can never be named as a generation target. The
     /// wire spellings of `glb` and `obj` are unchanged, so an older client
-    /// reading this list keeps working; a client built before the animated
-    /// entries existed sees names it does not know and should skip them.
+    /// reading this list keeps working, and a name this client does not know
+    /// (a container added after it was built) is SKIPPED rather than failing
+    /// the whole capabilities read — the list is an offer, not a contract
+    /// the client must understand in full.
+    #[serde(default, deserialize_with = "known_mesh_export_formats")]
     pub export_formats: Vec<MeshExportFormat>,
     /// Whether generated PBR textures are available. False means geometry
     /// only, which is a materially different product and must not be
     /// discovered by a user after waiting for a render.
     pub textures: bool,
+}
+
+/// Deserialize `export_formats`, dropping any name this build does not know.
+fn known_mesh_export_formats<'de, D>(deserializer: D) -> Result<Vec<MeshExportFormat>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let names: Vec<String> = Vec::deserialize(deserializer)?;
+    Ok(names
+        .iter()
+        .filter_map(|name| name.parse::<MeshExportFormat>().ok())
+        .collect())
 }
 
 /// A container `POST /api/gallery/export/:filename` can transcode a stored
@@ -10833,6 +10922,108 @@ impl std::str::FromStr for MeshExportFormat {
             )),
         }
     }
+}
+
+/// How a turntable GIF plays: the `playback` field of
+/// `POST /api/gallery/export/:filename`, shared with the video export.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshTurntablePlayback {
+    /// One seamless full turn.
+    #[default]
+    Loop,
+    /// A half turn swept out and played back. GIF only.
+    Bounce,
+}
+
+/// Whether a turntable GIF repeats: the `repeat` field of
+/// `POST /api/gallery/export/:filename`, shared with the video export.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshTurntableRepeat {
+    #[default]
+    Forever,
+    /// Play once and rest on the final frame. GIF only.
+    Once,
+}
+
+impl MeshTurntablePlayback {
+    /// The wire spelling, which is also what the CLI flag accepts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Loop => "loop",
+            Self::Bounce => "bounce",
+        }
+    }
+}
+
+impl std::fmt::Display for MeshTurntablePlayback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MeshTurntablePlayback {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "loop" => Ok(Self::Loop),
+            "bounce" => Ok(Self::Bounce),
+            other => Err(format!(
+                "unknown playback '{other}' (expected loop or bounce)"
+            )),
+        }
+    }
+}
+
+impl MeshTurntableRepeat {
+    /// The wire spelling, which is also what the CLI flag accepts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Forever => "forever",
+            Self::Once => "once",
+        }
+    }
+}
+
+impl std::fmt::Display for MeshTurntableRepeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MeshTurntableRepeat {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "forever" => Ok(Self::Forever),
+            "once" => Ok(Self::Once),
+            other => Err(format!(
+                "unknown repeat '{other}' (expected forever or once)"
+            )),
+        }
+    }
+}
+
+/// The optional turntable controls of a mesh export request. Every field
+/// absent means the server's default, so an all-`None` value is exactly the
+/// request an older client sends, and a geometry export ignores all of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshTurntableOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<MeshTurntablePlayback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<MeshTurntableRepeat>,
+    /// Frame edge in pixels (the server's `max_dimension`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_dimension: Option<u32>,
+    /// Views rendered around the mesh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
