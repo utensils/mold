@@ -3161,6 +3161,76 @@ function openLatestResult() {
   if (latestDone.value) openJob(latestDone.value);
 }
 
+/**
+ * The finished render's gallery row, when the gallery has it.
+ *
+ * A completion carries no filename over SSE, so the row is matched on the two
+ * facts that identify a render: the model that made it and the seed it used.
+ * The newest match wins, because a re-run of the same seed on the same model
+ * is the print the canvas is showing.
+ */
+const canvasPrintRow = computed<GalleryImage | null>(() => {
+  const r = latestDone.value?.result;
+  if (!r) return null;
+  let best: GalleryImage | null = null;
+  for (const item of galleryEntries.value) {
+    if (item.metadata.seed !== r.seed_used || item.metadata.model !== r.model)
+      continue;
+    if (!best || item.timestamp > best.timestamp) best = item;
+  }
+  return best;
+});
+
+/** The MIME type a print's own bytes carry, for a print never fetched. */
+function galleryItemMimeType(item: GalleryImage): string {
+  const format = (item.format ?? item.filename.split(".").pop() ?? "")
+    .toLowerCase()
+    .replace("jpg", "jpeg");
+  const kind = mediaKind(item.format, item.filename);
+  if (kind === "video") return format ? `video/${format}` : "video/mp4";
+  if (kind === "audio") return format ? `audio/${format}` : "audio/wav";
+  if (kind === "mesh") return GLB_MIME_TYPE;
+  return format ? `image/${format}` : "application/octet-stream";
+}
+
+/**
+ * The finished render, as a print. Right-clicking the canvas opens the same
+ * menu a Recent tile does, on the same print — that is the whole point of it
+ * being one menu. Until the gallery lists the row, the job's own request and
+ * bytes stand in for it.
+ */
+function openCanvasContextMenu(event: MouseEvent) {
+  const job = latestDone.value;
+  const r = job?.result;
+  if (!job || !r) return;
+  const row = canvasPrintRow.value;
+  const item: GalleryImage = row ?? {
+    filename: `print-${r.seed_used}.${r.format}`,
+    timestamp:
+      Math.floor(job.startedAt / 1000) || Math.floor(Date.now() / 1000),
+    format: r.format,
+    metadata: {
+      prompt: "prompt" in job.request ? (job.request.prompt ?? "") : "",
+      model: r.model,
+      seed: r.seed_used,
+      steps: "steps" in job.request ? (job.request.steps ?? 0) : 0,
+      guidance: "guidance" in job.request ? (job.request.guidance ?? 0) : 0,
+      width: r.width,
+      height: r.height,
+      // The print has no saved row yet, so there is no server version to
+      // quote — this stands in only until the gallery answers.
+      version: "",
+    },
+  };
+  void openRecentContextMenu({
+    item,
+    x: event.clientX,
+    y: event.clientY,
+    trigger: (event.currentTarget as HTMLElement | null) ?? null,
+    inlineBase64: row ? null : (r.image ?? null),
+  });
+}
+
 // ── Source preprocessing / fitting (desktop/mobile parity) ────────────
 type PreparedStillSource = {
   source: SourceImageState | null;
@@ -4966,6 +5036,13 @@ const recentContextMenu = ref<{
   x: number;
   y: number;
   trigger: HTMLElement | null;
+  /**
+   * The print's own bytes, present only for the finished render on the canvas
+   * while its gallery row is still unknown. It is what lets "Use as source"
+   * work on a print nothing can address by filename yet, and what tells the
+   * row-scoped actions (Open, Delete) to stand down.
+   */
+  inlineBase64?: string | null;
 } | null>(null);
 const recentContextMenuElement = ref<HTMLElement | null>(null);
 const RECENT_CONTEXT_WIDTH = 182;
@@ -4991,18 +5068,39 @@ const recentContextPosition = computed(() => {
     )}px`,
   };
 });
-const recentSourceDisabled = computed(() => {
+/**
+ * Why this print cannot condition the next render, or `null` when it can.
+ * One rule for the Recent tiles and the finished render on the canvas: a mesh
+ * is geometry rather than pixels (the Library lightbox refuses it in the same
+ * words), and a sequence's opening media has to be an image.
+ */
+const recentSourceDisabledReason = computed<string | null>(() => {
   const item = recentContextMenu.value?.item;
-  if (!item || !sequenceMode.value) return false;
+  if (!item) return null;
   const kind = mediaKind(item.format, item.filename);
-  return kind === "video" || kind === "audio";
+  if (kind === "mesh")
+    return "A 3-D mesh cannot condition a render — source images are pixels.";
+  if (sequenceMode.value && (kind === "video" || kind === "audio"))
+    return "Sequence opening media must be an image.";
+  return null;
 });
+const recentSourceDisabled = computed(
+  () => recentSourceDisabledReason.value !== null,
+);
+/** A canvas print whose gallery row is not known yet: nothing can open,
+ *  reuse-from-row, or delete it by filename until the gallery catches up. */
+const recentContextUnfiled = computed(
+  () => (recentContextMenu.value?.inlineBase64 ?? null) !== null,
+);
+const RECENT_CONTEXT_UNFILED_REASON =
+  "This print is still being filed — it isn't in the gallery yet.";
 
 async function openRecentContextMenu(payload: {
   item: GalleryImage;
   x: number;
   y: number;
   trigger?: HTMLElement | null;
+  inlineBase64?: string | null;
 }) {
   recentContextMenu.value = { ...payload, trigger: payload.trigger ?? null };
   await nextTick();
@@ -5019,7 +5117,12 @@ function closeRecentContextMenu(restoreFocus = false) {
 
 async function useRecentAsSource(item: GalleryImage) {
   if (recentSourceDisabled.value) return;
-  await onLightboxUseSource(item);
+  // Read the bytes off the menu BEFORE closing it — closing drops the entry
+  // that carries them.
+  const inline = recentContextMenu.value?.inlineBase64 ?? null;
+  closeRecentContextMenu();
+  if (!(await attachLightboxSource(item, inline))) return;
+  closeDrawer();
 }
 
 function openItem(item: GalleryImage) {
@@ -5252,19 +5355,39 @@ function onLightboxReuse(item: GalleryImage) {
   closeDrawer();
 }
 
-async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
+/**
+ * Attach one print as this render's source.
+ *
+ * `inlineBase64` is the print's own bytes, handed in when the caller already
+ * holds them — the finished render on the canvas, whose gallery row may not
+ * have landed yet. Those bytes are an upload, not a gallery reference: a
+ * reference is restored later by filename, and a filename nobody has yet
+ * would restore nothing.
+ */
+async function attachLightboxSource(
+  item: GalleryImage,
+  inlineBase64?: string | null,
+): Promise<boolean> {
   try {
-    const res = await fetch(imageUrl(item.filename));
-    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-    const blob = await res.blob();
-    const base64 = await blobToBase64(blob);
+    let base64: string;
+    let mime: string;
+    if (inlineBase64) {
+      base64 = inlineBase64;
+      mime = galleryItemMimeType(item);
+    } else {
+      const res = await fetch(imageUrl(item.filename));
+      if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+      const blob = await res.blob();
+      base64 = await blobToBase64(blob);
+      mime = blob.type;
+    }
     const kind = mediaKind(item.format, item.filename);
     if (kind === "video") {
       form.state.value.sourceVideo = {
         kind: "upload",
         filename: item.filename,
         base64,
-        mime: blob.type || null,
+        mime: mime || null,
       };
       form.state.value.sourceVideoPath = "";
     } else if (kind === "audio") {
@@ -5272,7 +5395,7 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
         kind: "upload",
         filename: item.filename,
         base64,
-        mime: blob.type || null,
+        mime: mime || null,
       };
       form.state.value.audioFilePath = "";
     } else {
@@ -5299,7 +5422,7 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
         };
         const image = {
           filename: item.filename,
-          mimeType: blob.type || `image/${item.format}`,
+          mimeType: mime || `image/${item.format}`,
           width: dimensions.width,
           height: dimensions.height,
           data: base64,
@@ -5319,7 +5442,11 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
         );
       } else {
         state.imageAttachments = [
-          { kind: "gallery", filename: item.filename, base64 },
+          {
+            kind: inlineBase64 ? "upload" : "gallery",
+            filename: item.filename,
+            base64,
+          },
         ];
         state.sourceFitPolicy = defaultSourceFitPolicy();
       }
@@ -6008,6 +6135,7 @@ onBeforeUnmount(() => {
             @use-variation="useVariation"
             @discard="discardVariations"
             @queue="queueVariations"
+            @context-menu="openCanvasContextMenu"
             @click="canvasMode === 'result' ? openLatestResult() : undefined"
           />
         </template>
@@ -6299,6 +6427,11 @@ onBeforeUnmount(() => {
       <button
         type="button"
         role="menuitem"
+        data-test="recent-context-open"
+        :disabled="recentContextUnfiled"
+        :title="
+          recentContextUnfiled ? RECENT_CONTEXT_UNFILED_REASON : undefined
+        "
         @click="openItem(recentContextMenu.item)"
       >
         Open
@@ -6316,11 +6449,7 @@ onBeforeUnmount(() => {
         role="menuitem"
         data-test="recent-context-source"
         :disabled="recentSourceDisabled"
-        :title="
-          recentSourceDisabled
-            ? 'Sequence opening media must be an image.'
-            : undefined
-        "
+        :title="recentSourceDisabledReason ?? undefined"
         @click="useRecentAsSource(recentContextMenu.item)"
       >
         Use as source
@@ -6330,6 +6459,10 @@ onBeforeUnmount(() => {
         role="menuitem"
         class="recent-context__danger"
         data-test="recent-context-delete"
+        :disabled="recentContextUnfiled"
+        :title="
+          recentContextUnfiled ? RECENT_CONTEXT_UNFILED_REASON : undefined
+        "
         @click="handleDelete(recentContextMenu.item)"
       >
         Delete

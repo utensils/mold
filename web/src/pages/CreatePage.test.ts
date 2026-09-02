@@ -1074,6 +1074,194 @@ describe("CreatePage layout and behavior", () => {
     globalThis.fetch = originalFetch;
   });
 
+  // ── Finished render on the canvas (the print the user is looking at) ────
+  // The Recent tiles, the Library grid, and the lightbox all answer a
+  // right-click with the print's actions. The finished render on the Create
+  // canvas is the same print, so it opens the same menu. A web completion
+  // carries no filename, so its gallery row is matched on the two facts that
+  // identify a render: the model that made it and the seed it used.
+  function finishedCanvasJob(result: Record<string, unknown> = {}): Job {
+    return {
+      id: "canvas-done",
+      request: {
+        model: entry.metadata.model,
+        prompt: entry.metadata.prompt,
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        guidance: 3.5,
+        batch_size: 1,
+        output_format: "png",
+      },
+      startedAt: 10,
+      controller: new AbortController(),
+      progress: {
+        stage: "complete",
+        step: 20,
+        totalSteps: 20,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: 4_000,
+      },
+      result: {
+        type: "complete",
+        image: "image-bytes",
+        format: "png",
+        seed_used: entry.metadata.seed,
+        model: entry.metadata.model,
+        width: 1024,
+        height: 1024,
+        generation_time_ms: 4_000,
+        ...result,
+      },
+      error: null,
+      state: "done",
+      settledAt: Date.now(),
+      chain: null,
+      lastProgressAt: Date.now(),
+      workStarted: true,
+      hostId: null,
+      hostLabel: null,
+      target: null,
+      serverId: "canvas-server-job",
+      previewUrl: null,
+      seedVisual: String(entry.metadata.seed),
+    } as Job;
+  }
+
+  function canvasContextStubs(): Record<string, Component> {
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.ResultCanvas = defineComponent({
+      name: "ResultCanvas",
+      props: ["mode"],
+      template:
+        '<div data-test="result-canvas" :data-mode="mode"><button data-test="canvas-context" @contextmenu.prevent="$emit(\'context-menu\', $event)">canvas</button></div>',
+    });
+    return stubs;
+  }
+
+  it("offers the print actions when the finished render is right-clicked", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["image"], { type: "image/png" }),
+    })) as never;
+    streamJobsRef.value = [finishedCanvasJob()];
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: canvasContextStubs() },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-test="canvas-context"]').trigger("contextmenu");
+    const menu = wrapper.get('[data-test="recent-context-menu"]');
+    expect(menu.text()).toContain("Open");
+    expect(menu.text()).toContain("Reuse settings");
+    expect(menu.text()).toContain("Use as source");
+    expect(menu.text()).toContain("Delete");
+    // The canvas print resolved to its gallery row, so every row-scoped
+    // action is live.
+    expect(
+      wrapper.get('[data-test="recent-context-delete"]').attributes("disabled"),
+    ).toBeUndefined();
+
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(useGenerateForm().state.value.imageAttachments[0]).toMatchObject({
+      filename: entry.filename,
+    });
+    expect(wrapper.find('[data-test="recent-context-menu"]').exists()).toBe(
+      false,
+    );
+    wrapper.unmount();
+    globalThis.fetch = originalFetch;
+  });
+
+  // A print whose gallery row has not landed yet still has its bytes in hand,
+  // so the attach reads those instead of round-tripping to a host for a
+  // filename nobody knows. The row-scoped actions say they are not ready.
+  it("uses the finished render's own bytes when its gallery row is unknown", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => {
+      throw new Error("the canvas print must not be re-fetched");
+    });
+    globalThis.fetch = fetchMock as never;
+    streamJobsRef.value = [
+      finishedCanvasJob({ seed_used: 999, image: "fresh-bytes" }),
+    ];
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: canvasContextStubs() },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-test="canvas-context"]').trigger("contextmenu");
+    expect(
+      wrapper.get('[data-test="recent-context-delete"]').attributes("disabled"),
+    ).toBeDefined();
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(useGenerateForm().state.value.imageAttachments[0]).toMatchObject({
+      kind: "upload",
+      base64: "fresh-bytes",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("routes a finished video render into the source-video field", async () => {
+    streamJobsRef.value = [
+      finishedCanvasJob({
+        seed_used: 999,
+        image: "clip-bytes",
+        format: "mp4",
+        video_frames: 97,
+      }),
+    ];
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: canvasContextStubs() },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-test="canvas-context"]').trigger("contextmenu");
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(useGenerateForm().state.value.sourceVideo).toMatchObject({
+      base64: "clip-bytes",
+      mime: "video/mp4",
+    });
+    expect(useGenerateForm().state.value.imageAttachments).toHaveLength(0);
+    wrapper.unmount();
+  });
+
+  // Binary glTF is not conditioning — the lightbox already says so, and the
+  // canvas menu says the same thing rather than attaching a broken source.
+  it("refuses a finished mesh as a source and says why", async () => {
+    streamJobsRef.value = [
+      finishedCanvasJob({
+        seed_used: 999,
+        // Valid base64: the mesh canvas decodes these bytes into a Blob URL.
+        image: "Z2xiLWJ5dGVz",
+        format: "glb",
+        mesh_vertices: 1_000,
+        mesh_faces: 2_000,
+      }),
+    ];
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: canvasContextStubs() },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-test="canvas-context"]').trigger("contextmenu");
+    const action = wrapper.get('[data-test="recent-context-source"]');
+    expect(action.attributes("disabled")).toBeDefined();
+    expect(action.attributes("title")).toContain("mesh");
+    wrapper.unmount();
+  });
+
   it("restores a recent normal print into One shot while Sequence is active", async () => {
     const stubs: Record<string, Component> = pageStubs();
     stubs.RecentGrid = defineComponent({
@@ -3149,9 +3337,9 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.originalPrompt).toBeNull();
     expect(form.state.value.stylePreset).toBe("cinematic");
     expect(form.state.value.negativePrompt).toBe("text");
-    expect(wrapper.find("[data-test='web-quick-expansion-stale']").exists()).toBe(
-      false,
-    );
+    expect(
+      wrapper.find("[data-test='web-quick-expansion-stale']").exists(),
+    ).toBe(false);
     expect(wrapper.find("[data-test='composer-undo']").exists()).toBe(false);
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
@@ -3197,7 +3385,11 @@ describe("CreatePage layout and behavior", () => {
 
     wrapper
       .getComponent({ name: "ComposerCard" })
-      .vm.$emit("update:prompt", "storm light over the harbor, edited", "typed");
+      .vm.$emit(
+        "update:prompt",
+        "storm light over the harbor, edited",
+        "typed",
+      );
     await nextTick();
 
     expect(form.state.value.originalPrompt).toBe("a lighthouse");

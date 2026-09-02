@@ -10336,6 +10336,47 @@ describe("MobileApp gallery", () => {
     });
   });
 
+  // The Library viewer offers a print as the next render's source; the
+  // viewer that opens on a finished render shows the same print, so it must
+  // offer the same thing rather than a viewer with one action missing.
+  it("offers the finished render in the Create viewer as the next source", async () => {
+    serveStillModel();
+    admitCompletedPrints("reuse-this-result.png");
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/gallery") {
+        return Promise.resolve([
+          {
+            filename: "reuse-this-result.png",
+            timestamp: Math.floor(Date.now() / 1000) + 5,
+            format: "png",
+            metadata: { prompt: "reuse this result", model: stillModel.name },
+          },
+        ]);
+      }
+      return base(callTarget, path, init);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("reuse this result");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    await vi.waitFor(() =>
+      expect(wrapper!.find("[data-test='mobile-generated-result']").exists()).toBe(true),
+    );
+    await wrapper.get("[data-test='mobile-generated-result']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='gallery-viewer-use-source']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper!.getComponent(MobileSourceControls).props("form")).toMatchObject({
+        sourceImageName: "reuse-this-result.png",
+      }),
+    );
+  });
+
   it("shows New and Upscaled indicators on mobile Library tiles", async () => {
     localStorage.setItem(
       "mold.mobile.library-seen-at.v1",

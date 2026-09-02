@@ -17,11 +17,14 @@ vi.mock("../../lib/api/history", async (importOriginal) => {
     clearHistoryOn: (...a: unknown[]) => clearHistoryOn(...a),
   };
 });
+// The run rows read their bytes through the same origin-aware helper the
+// Library tiles do, so "Use as source" needs a real Response here.
+const apiFetchTo = vi.hoisted(() => vi.fn().mockResolvedValue(new Response()));
 vi.mock("../../lib/api/client", () => ({
   ApiError: class ApiError extends Error {},
   apiFetch: vi.fn().mockRejectedValue(new Error("no network in tests")),
   apiJson: vi.fn().mockRejectedValue(new Error("no network in tests")),
-  apiFetchTo: vi.fn(),
+  apiFetchTo,
   apiJsonTo: vi.fn(),
   currentTarget: () => ({ baseUrl: "http://x", apiKey: null }),
 }));
@@ -37,6 +40,8 @@ import { useConnectionStore } from "../../stores/connection";
 import { useGalleryStore } from "../../stores/gallery";
 import { useHostsStore } from "../../stores/hosts";
 import { useComposerStore } from "../../stores/composer";
+import { useContextMenuStore } from "../../stores/contextMenu";
+import { useGenerateFormStore } from "../../stores/generateForm";
 import { useChainJobsStore } from "../../stores/chainJobs";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import type { GalleryImage } from "../../lib/api/types";
@@ -213,6 +218,57 @@ describe("HistoryDrawer runs", () => {
     const rows = wrapper.findAll("[data-test='run-row']");
     expect(rows).toHaveLength(1);
     expect(rows[0]!.text()).toContain("a stoic owl");
+  });
+
+  // Every desktop surface that shows a print offers the same right-click
+  // actions on it. A History run is a print, so its menu carries "Use as
+  // source" and attaches through the one shared rule.
+  it("offers a past run as the next render's source", async () => {
+    apiFetchTo.mockResolvedValue(new Response(new Uint8Array([65, 66, 67])));
+    const wrapper = await mountDrawer();
+    const menu = useContextMenuStore();
+
+    await wrapper.get("[data-test='run-row']").trigger("contextmenu");
+    const entries = menu.entries;
+    expect(entries.map((e) => ("separator" in e ? "—" : e.label))).toContain("Use as source");
+    const source = entries.find((e) => !("separator" in e) && e.label === "Use as source")!;
+    expect(source).toMatchObject({ disabled: false });
+    menu.activate(source);
+    await flushPromises();
+
+    const form = useGenerateFormStore().form;
+    expect(form.sourceImage).toBe("QUJD");
+    expect(form.sourceImageName).toBe("a.png");
+    expect(router.currentRoute.value.path).toBe("/create");
+    wrapper.unmount();
+  });
+
+  it("attaches a run's video as source video and refuses an audio run", async () => {
+    apiFetchTo.mockResolvedValue(
+      new Response(new Uint8Array([65, 66, 67]), {
+        headers: { "Content-Type": "video/mp4" },
+      }),
+    );
+    const wrapper = await mountDrawer();
+    const gallery = useGalleryStore();
+    gallery.buckets["local"]!.items = [
+      { ...run("clip.mp4", "a drifting clip", 1_700_000_200), format: "mp4" },
+      { ...run("score.wav", "a slow score", 1_700_000_150), format: "wav" },
+    ];
+    await flushPromises();
+    const menu = useContextMenuStore();
+
+    const rows = wrapper.findAll("[data-test='run-row']");
+    await rows[0]!.trigger("contextmenu");
+    const video = menu.entries.find((e) => !("separator" in e) && e.label === "Use as source")!;
+    menu.activate(video);
+    await flushPromises();
+    expect(useGenerateFormStore().form.sourceVideo).toMatchObject({ filename: "clip.mp4" });
+
+    await rows[1]!.trigger("contextmenu");
+    const audio = menu.entries.find((e) => !("separator" in e) && e.label === "Use as source")!;
+    expect(audio).toMatchObject({ disabled: true });
+    wrapper.unmount();
   });
 
   it("loads the prompt log only when that tab is opened", async () => {

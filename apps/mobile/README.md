@@ -275,7 +275,10 @@ pushed screen opened from the header.
   as a new draft (raising any clip duration the selected model's motion tail no
   longer allows, and saying so); iPhone is reuse-only — **Edit sequence** stays
   a desktop/web action until mobile has a chain-detail recovery route.
-  Generated media opens the same viewer on tap. Press and hold a Library image
+  Generated media opens the same viewer on tap, with the same **Use as
+  source** action as a Library print — offered only for a still on a model
+  that conditions on one, and only while the machine that rendered it is
+  connected, since the bytes are read back from that host's gallery. Press and hold a Library image
   to keep the native iOS Share, Save to Photos, Copy, Copy Subject, and Look Up
   menu, plus **Upscale…** (or **Framewise upscale…** for video) and **Select**.
   Android and iOS selection mode exposes the same Upscale action when exactly

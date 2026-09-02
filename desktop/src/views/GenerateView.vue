@@ -50,7 +50,7 @@ import {
   resolveQueueWait,
 } from "@studio/lib/queuePosition";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
-import { attachPickedImage } from "../lib/sourceAttachment";
+import { attachPickedImage, attachPickedVideo } from "../lib/sourceAttachment";
 import {
   resolveDefaultSourceResolution,
   resolveSourceConditioningTarget,
@@ -2557,15 +2557,13 @@ function canvasMenu(): MenuEntry[] {
       label: "Use as source",
       // Binary glTF is not conditioning: a mesh print cannot be fed back in
       // as a source image, exactly as the Library lightbox already refuses.
-      disabled:
-        j.status !== "complete" ||
-        !j.result?.image ||
-        !!j.result.video_frames ||
-        isAudioResult(j) ||
-        isMeshResult(j),
+      // An audio print has no pixels either. A finished CLIP is a source,
+      // though — the Library takes one back in as LTX source video, and this
+      // print is no different for sitting on the canvas.
+      disabled: j.status !== "complete" || !j.result?.image || isAudioResult(j) || isMeshResult(j),
       action: () => {
         if (!j.result?.image) return;
-        attachPickedImage(form, {
+        const picked = {
           filename:
             j.result.filename ??
             suggestOutputFilename(
@@ -2575,7 +2573,13 @@ function canvasMenu(): MenuEntry[] {
               j.submittedAtUnixMs,
             ),
           base64: j.result.image,
-        });
+        };
+        if (j.result.video_frames) {
+          attachPickedVideo(form, picked);
+          toasts.push("Loaded as source video");
+          return;
+        }
+        attachPickedImage(form, picked);
         toasts.push("Loaded as source");
       },
     },

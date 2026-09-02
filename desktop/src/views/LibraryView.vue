@@ -23,7 +23,6 @@ import {
   loadGalleryThumbnailSize,
   saveGalleryThumbnailSize,
 } from "@studio/lib/galleryThumbnailSize";
-import { blobToBase64 } from "@studio/lib/base64";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import BulkBar from "../components/library/BulkBar.vue";
@@ -90,15 +89,8 @@ import { allowsNativeContextMenu, allowsNativeSelectAll, isSelectAllChord } from
 import { modelDisplayNameForId } from "../lib/models";
 import type { GalleryImage } from "../lib/api/types";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
-import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { readGalleryMediaBase64, readGalleryMediaBlob } from "../lib/gallery/sourceMedia";
-import { attachPickedImage, attachPickedVideo } from "../lib/sourceAttachment";
-import {
-  appendMinimaxH3GalleryImageReference,
-  isMinimaxH3Identity,
-  minimaxH3TaskForModel,
-  setMinimaxH3GalleryImageFirstFrame,
-} from "@studio/lib/minimaxH3Authoring";
+import { applyGalleryEntryAsSource, canUseGalleryEntryAsSource } from "../lib/gallery/useAsSource";
 import {
   createFramewiseUpscale,
   findRecoverableFramewiseUpscale,
@@ -1293,7 +1285,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     },
     {
       label: "Use as source",
-      disabled: isAudio(item),
+      disabled: !canUseGalleryEntryAsSource(item),
       action: () => void useAsSource(entry),
     },
     {
@@ -2272,58 +2264,14 @@ function removeSelected() {
  * prefill watcher can't clobber the source we just attached.
  */
 async function useAsSource(entry: MergedPrint) {
-  try {
-    const blob = await fetchItemBlob(entry);
-    const base64 = await blobToBase64(blob);
-    const form = generateForm.form;
-    if (isVideo(entry.item)) {
-      attachPickedVideo(form, { filename: entry.item.filename, base64 });
-      lightboxOpen.value = false;
-      toasts.push("Loaded as source video");
-      void router.push("/create");
-      return;
-    }
-    const h3Task = minimaxH3TaskForModel(form.model);
-    if (h3Task) {
-      const dimensions = imageDimensionsFromBase64(base64) ?? {
-        width: entry.item.metadata.width,
-        height: entry.item.metadata.height,
-      };
-      const image = {
-        filename: entry.item.filename,
-        mimeType: galleryImageMimeType(entry.item, blob.type),
-        width: dimensions.width,
-        height: dimensions.height,
-        data: base64,
-      };
-      const result =
-        h3Task === "ref2va"
-          ? await appendMinimaxH3GalleryImageReference(form.h3Authoring, image)
-          : setMinimaxH3GalleryImageFirstFrame(form.h3Authoring, image);
-      if (!result.ok) throw new Error(result.error);
-      form.h3Authoring = result.state;
-    } else if (isMinimaxH3Identity(form.family, form.model)) {
-      throw new Error(
-        "Choose an explicit MiniMax H3 FL2VA or Ref2VA model before adding a source.",
-      );
-    } else {
-      attachPickedImage(form, { filename: entry.item.filename, base64 });
-    }
-    lightboxOpen.value = false;
-    toasts.push(h3Task === "ref2va" ? "Added as ordered reference" : "Loaded as source");
-    void router.push("/create");
-  } catch (error) {
-    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  const outcome = await applyGalleryEntryAsSource(entry, generateForm.form, fetchItemBlob);
+  if (!outcome.ok) {
+    toasts.push(outcome.error, "error");
+    return;
   }
-}
-
-function galleryImageMimeType(item: GalleryImage, declared: string): string {
-  const mime = declared.split(";", 1)[0]!.trim().toLowerCase();
-  if (mime.startsWith("image/")) return mime;
-  const format = (item.format ?? item.filename.split(".").pop() ?? "")
-    .toLowerCase()
-    .replace("jpg", "jpeg");
-  return format ? `image/${format}` : "application/octet-stream";
+  lightboxOpen.value = false;
+  toasts.push(outcome.message);
+  void router.push("/create");
 }
 
 async function useSelectedAsSource() {

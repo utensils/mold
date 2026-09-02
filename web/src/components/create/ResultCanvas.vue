@@ -99,6 +99,10 @@ const emit = defineEmits<{
   "use-variation": [index: number];
   discard: [];
   queue: [];
+  /** result — a right-click on the finished print. The parent owns which
+   *  print that is and what its menu offers; the bed only reports the event
+   *  so the same actions a Recent tile has reach the render on the canvas. */
+  "context-menu": [event: MouseEvent];
 }>();
 
 function editVariation(index: number, value: string) {
@@ -201,6 +205,7 @@ watch(
       v-else-if="mode === 'result'"
       class="canvas__result ms-fade-up"
       data-test="canvas-result"
+      @contextmenu.prevent="emit('context-menu', $event)"
     >
       <MeshViewer
         v-if="resultMeshSrc"

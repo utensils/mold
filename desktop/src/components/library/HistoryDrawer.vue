@@ -38,11 +38,17 @@ import {
   type HostHistoryEntry,
 } from "../../lib/api/history";
 import { galleryMediaPath } from "../../lib/gallery/media";
+import { readGalleryMediaBlob } from "../../lib/gallery/sourceMedia";
+import {
+  applyGalleryEntryAsSource,
+  canUseGalleryEntryAsSource,
+} from "../../lib/gallery/useAsSource";
 import { modelDisplayNameForId } from "../../lib/models";
 import { useChainJobsStore } from "../../stores/chainJobs";
 import { useConnectionStore } from "../../stores/connection";
 import { useComposerStore } from "../../stores/composer";
 import { useGalleryStore } from "../../stores/gallery";
+import { useGenerateFormStore } from "../../stores/generateForm";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
@@ -64,6 +70,7 @@ const chains = useChainJobsStore();
 const conn = useConnectionStore();
 const composer = useComposerStore();
 const gallery = useGalleryStore();
+const generateForm = useGenerateFormStore();
 const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const models = useModelStore();
@@ -178,9 +185,34 @@ function useRun(img: GalleryImage) {
   void router.push("/create");
 }
 
-function runMenu(img: GalleryImage): MenuEntry[] {
+/**
+ * "Use as source" on a past run — the same rule the Library tile menu and the
+ * Lightbox use, reading this row's bytes from its own origin. Deliberately
+ * not `composer.set`: that is a settings prefill and would clobber the source
+ * this just attached.
+ */
+async function useRunAsSource(entry: MergedPrint) {
+  const outcome = await applyGalleryEntryAsSource(entry, generateForm.form, (target) =>
+    readGalleryMediaBlob(target, gallery),
+  );
+  if (!outcome.ok) {
+    toasts.push(outcome.error, "error");
+    return;
+  }
+  toasts.push(outcome.message);
+  emit("close");
+  void router.push("/create");
+}
+
+function runMenu(entry: MergedPrint): MenuEntry[] {
+  const img = entry.item;
   return [
     { label: "Reuse settings", action: () => useRun(img) },
+    {
+      label: "Use as source",
+      disabled: !canUseGalleryEntryAsSource(img),
+      action: () => void useRunAsSource(entry),
+    },
     {
       label: "Copy prompt",
       action: () => {
@@ -638,7 +670,7 @@ async function cleanUpDiskConfirmed() {
             data-test="run-row"
             class="group flex w-full items-center gap-3 rounded-control px-2 py-1.5 text-left hover:bg-bath"
             @click="useRun(entry.item)"
-            @contextmenu="contextMenu.open($event, runMenu(entry.item))"
+            @contextmenu="contextMenu.open($event, runMenu(entry))"
           >
             <div
               class="h-12 w-12 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"

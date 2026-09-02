@@ -292,6 +292,53 @@ describe("GenerateView — sequence output", () => {
     expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "crop-fill" });
   });
 
+  // The Library has always taken a rendered clip back in as LTX source video;
+  // the finished render on the canvas is the same print, so its menu offers
+  // the same thing instead of graying the item out.
+  it("offers a completed video render as source video", async () => {
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const job = newJob({
+      prompt: "a plane crosses the runway",
+      model: videoModel.name,
+      width: 1024,
+      height: 576,
+      steps: 31,
+    });
+    job.clientId = 1;
+    job.status = "complete";
+    job.resultUrl = "blob:clip";
+    job.result = {
+      image: "dmlkZW8=",
+      format: "mp4",
+      width: 1024,
+      height: 576,
+      seed_used: 11,
+      generation_time_ms: 10,
+      model: videoModel.name,
+      filename: "remote-clip.mp4",
+      video_frames: 97,
+    };
+    const generation = useGenerationStore();
+    generation.jobs = [job];
+    generation.selectedClientId = 1;
+
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get("[data-test='preview-frame']").trigger("contextmenu");
+    const useAsSource = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Use as source",
+    );
+    expect(useAsSource).toMatchObject({ disabled: false });
+    useContextMenuStore().activate(useAsSource!);
+    expect(useGenerateFormStore().form.sourceVideo).toMatchObject({
+      filename: "remote-clip.mp4",
+      base64: "dmlkZW8=",
+    });
+    expect(useGenerateFormStore().form.sourceImage).toBeNull();
+  });
+
   it.each([
     {
       kind: "image",
