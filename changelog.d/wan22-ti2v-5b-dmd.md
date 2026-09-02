@@ -14,4 +14,4 @@
   within about four frames instead of continuing from it. Use `:turbo`,
   `:fp16`, or `:q8` for image-to-video. `:fp16`,
   `:q8`, and `:turbo` are unchanged, and the bare `wan22-ti2v-5b` still
-  resolves to `:fp16` ([#TBD](https://github.com/utensils/mold/pull/TBD)).
+  resolves to `:fp16` ([#1562](https://github.com/utensils/mold/pull/1562)).
