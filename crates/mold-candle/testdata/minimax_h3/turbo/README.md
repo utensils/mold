@@ -28,10 +28,15 @@ read from the header rather than one `training_rank` for the whole file, and a
 numeric `__metadata__.baked_scale` recording the source `alpha / rank` that was
 multiplied into `lora_B`. Each still declares `training_rank "128"` — the rank
 it was resized FROM — and a `resized_from` naming the exact published adapter
-it approximates, both of which the golden test welds to the source tier.
-`drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` publishes further rank-28/64 resizes
-that are deliberately NOT pinned here: their `baked_scale` is an English
-sentence rather than a number, which the contract refuses by design.
+it approximates; both are REQUIRED by `validate_turbo_metadata` and welded to
+the source tier by the golden test.
+`drbaph/MiniMax-H3-Turbo-Lora-ComfyUI` publishes further rank-20/28/64 resizes
+at the same revision that are deliberately NOT pinned here, and the contract
+refuses them twice over: their `baked_scale` is an English sentence rather
+than a number, and they omit `resized_from` entirely. That second fact is why
+`resized_from` is required rather than checked only when present — a
+present-only check would let a different approximation of a different adapter
+through the metadata fence.
 
 Re-fetching any row is a straight rerun, e.g.:
 

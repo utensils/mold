@@ -117,6 +117,19 @@ pub const H3_TURBO_LORA_FUSED_QKV_MULTIPLE: usize = 3;
 pub const H3_TURBO_LORA_TARGET_FORMAT: &str = "ComfyUI generic LoRA";
 /// Published `__metadata__.source_format`.
 pub const H3_TURBO_LORA_SOURCE_FORMAT: &str = "Diffusers PEFT LoRA";
+/// Published `__metadata__.base_model`. Every reviewed adapter declares the
+/// same one — both tasks, both shapes, all three publishing repositories —
+/// because the Ref2VA adapters overlay that same fused FL2VA export.
+pub const H3_TURBO_LORA_BASE_MODEL: &str = "Comfy-Org/MiniMax-H3 minimax_h3_fl2va_bf16.safetensors";
+/// Published `__metadata__.qkv_fusion` of a rank-uniform export. This is the
+/// only header-level declaration of the block-diagonal `lora_B` layout the
+/// fused-QKV delta math depends on, so it is CHECKED rather than merely read.
+pub const H3_TURBO_LORA_UNIFORM_QKV_FUSION: &str =
+    "block diagonal B; concat A; alpha multiplied by 3";
+/// Published `__metadata__.qkv_fusion` of an SVD-resized export: the same
+/// block-diagonal layout, with a per-projection rank and no alpha.
+pub const H3_TURBO_LORA_DYNAMIC_QKV_FUSION: &str =
+    "block diagonal B; concat A; per-projection dynamic ranks; alpha dropped";
 /// Published `lora_A` / `lora_B` storage dtype.
 pub const H3_TURBO_LORA_WEIGHT_DTYPE: &str = "BF16";
 /// Published `alpha` storage dtype; every entry is a rank-0 scalar.
@@ -155,7 +168,11 @@ const STRUCTURE_IDENTITY_DOMAIN_DYNAMIC: &[u8] =
 /// exactly the file this contract has to refuse.
 const METADATA_BAKED_SCALE_KEY: &str = "baked_scale";
 /// `__metadata__` key naming the published file a resized adapter was derived
-/// from. When present it must be the source tier's own file name.
+/// from. It is REQUIRED on a rank-dynamic file and must be the source tier's
+/// own file name: the same repository publishes other resized exports at the
+/// same revision that omit the key entirely, so accepting an absent one would
+/// let a different approximation of a DIFFERENT adapter satisfy a pinned
+/// tier's metadata.
 const METADATA_RESIZED_FROM_KEY: &str = "resized_from";
 /// Header + structure only. Deliberately NOT an artifact identity.
 const CONTRACT_IDENTITY_DOMAIN: &[u8] = b"mold.minimax-h3.turbo-lora-contract.v1\0";
@@ -206,11 +223,17 @@ impl H3TurboLoraShape {
         match self {
             Self::Uniform { training_rank, .. } => *training_rank,
             // Deliberately one level deep: `validate` refuses a Dynamic tier
-            // whose source is itself Dynamic, so this arm is unreachable for
-            // any reviewed tier and must not recurse.
+            // whose source is itself Dynamic, so this arm must not recurse —
+            // and must not invent a bound either. Answering
+            // `H3_TURBO_LORA_TRAINING_RANK` here would let a misconstructed
+            // shape build fixtures and derive module tables against a
+            // fabricated rank ceiling on the paths that skip `validate`.
             Self::Dynamic { source, .. } => match source.shape() {
                 Self::Uniform { training_rank, .. } => training_rank,
-                Self::Dynamic { .. } => H3_TURBO_LORA_TRAINING_RANK,
+                Self::Dynamic { .. } => unreachable!(
+                    "validate refuses a resized adapter whose source is itself resized; \
+                     see H3TurboLoraExpectation::validate"
+                ),
             },
         }
     }
@@ -241,6 +264,14 @@ impl H3TurboLoraShape {
         match self {
             Self::Uniform { .. } => 3,
             Self::Dynamic { .. } => 2,
+        }
+    }
+
+    /// The `__metadata__.qkv_fusion` declaration a file of this shape carries.
+    pub const fn qkv_fusion(&self) -> &'static str {
+        match self {
+            Self::Uniform { .. } => H3_TURBO_LORA_UNIFORM_QKV_FUSION,
+            Self::Dynamic { .. } => H3_TURBO_LORA_DYNAMIC_QKV_FUSION,
         }
     }
 
@@ -642,27 +673,10 @@ impl H3TurboLoraExpectation {
                 ),
             ));
         }
-        let training_rank = self.training_rank();
-        if training_rank == 0 || training_rank > MAX_TURBO_TRAINING_RANK {
-            return Err(failure(
-                H3TurboLoraErrorCode::ConfigMismatch,
-                format!("H3 Turbo training rank {training_rank} is outside 1..={MAX_TURBO_TRAINING_RANK}"),
-            ));
-        }
-        if let Some(training_alpha) = self.training_alpha() {
-            if !training_alpha.is_finite() || training_alpha <= 0.0 {
-                return Err(failure(
-                    H3TurboLoraErrorCode::ConfigMismatch,
-                    format!("H3 Turbo training alpha {training_alpha} must be finite and positive"),
-                ));
-            }
-        }
-        if !self.scale().is_finite() || self.scale() <= 0.0 {
-            return Err(failure(
-                H3TurboLoraErrorCode::ConfigMismatch,
-                "H3 Turbo training alpha/rank must resolve to a finite positive scale",
-            ));
-        }
+        // BEFORE `training_rank()`: a resized adapter's training rank is its
+        // SOURCE's, and `H3TurboLoraShape::source_training_rank` refuses to
+        // invent one for a chained source. This block is what makes that
+        // arm unreachable, so it has to run first.
         if let H3TurboLoraShape::Dynamic {
             source,
             baked_scale,
@@ -696,6 +710,27 @@ impl H3TurboLoraExpectation {
                     ),
                 ));
             }
+        }
+        let training_rank = self.training_rank();
+        if training_rank == 0 || training_rank > MAX_TURBO_TRAINING_RANK {
+            return Err(failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                format!("H3 Turbo training rank {training_rank} is outside 1..={MAX_TURBO_TRAINING_RANK}"),
+            ));
+        }
+        if let Some(training_alpha) = self.training_alpha() {
+            if !training_alpha.is_finite() || training_alpha <= 0.0 {
+                return Err(failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    format!("H3 Turbo training alpha {training_alpha} must be finite and positive"),
+                ));
+            }
+        }
+        if !self.scale().is_finite() || self.scale() <= 0.0 {
+            return Err(failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                "H3 Turbo training alpha/rank must resolve to a finite positive scale",
+            ));
         }
         // Both counts and the widest rank must be representable.
         self.tensor_count()?;
@@ -1661,19 +1696,36 @@ fn validate_turbo_metadata(
                 baked_scale.to_string(),
             ));
         }
-        if let Some(declared) = metadata.get(METADATA_RESIZED_FROM_KEY) {
-            if declared != source.file_name() {
-                return Err(mismatch(
-                    METADATA_RESIZED_FROM_KEY,
-                    declared,
-                    source.file_name().to_owned(),
-                ));
-            }
+        // REQUIRED, exactly as `baked_scale` is. drbaph publishes rank-20,
+        // rank-28, and rank-64 exports at this same pinned revision that omit
+        // the key entirely, so a present-only check would let one of those —
+        // a different approximation, of a different adapter — pass the
+        // metadata fence and be caught only by the content digest.
+        let Some(declared) = metadata.get(METADATA_RESIZED_FROM_KEY) else {
+            return Err(failure(
+                H3TurboLoraErrorCode::InvalidMetadata,
+                format!(
+                    "H3 Turbo resized adapter must name {METADATA_RESIZED_FROM_KEY:?} = {:?}",
+                    source.file_name()
+                ),
+            ));
+        };
+        if declared != source.file_name() {
+            return Err(mismatch(
+                METADATA_RESIZED_FROM_KEY,
+                declared,
+                source.file_name().to_owned(),
+            ));
         }
     }
+    // `qkv_fusion` is the file's own declaration of the block-diagonal
+    // `lora_B` layout every fused-QKV delta assumes, and it differs by shape;
+    // `base_model` names the export all eight adapters overlay.
     for (key, expected) in [
         ("target_format", H3_TURBO_LORA_TARGET_FORMAT),
         ("source_format", H3_TURBO_LORA_SOURCE_FORMAT),
+        ("base_model", H3_TURBO_LORA_BASE_MODEL),
+        ("qkv_fusion", expectation.shape.qkv_fusion()),
     ] {
         if let Some(declared) = metadata.get(key) {
             if declared != expected {
@@ -1847,6 +1899,19 @@ pub(super) fn expected_turbo_modules(
         // Both shapes derive the rank axis from the SAME source rank; only
         // whether it is a pin or a ceiling differs.
         let source_rank = kind.checked_rank(expectation.training_rank())?;
+        // A resized module is an EXACT compact SVD of one base weight, so its
+        // rank can never exceed the smaller side of that weight either — per
+        // PROJECTION for the fused Q/K/V module, whose `lora_A` stacks three
+        // factors of an `[in_features, out_features / 3]` block. The ceiling
+        // is the tighter of the two; on the published geometry the source rank
+        // is always the binding one, which is exactly why the geometric bound
+        // has to be derived rather than assumed away.
+        let projection_out_features = if kind.fuses_qkv() {
+            target.out_features / H3_TURBO_LORA_FUSED_QKV_MULTIPLE
+        } else {
+            target.out_features
+        };
+        let exact_svd_rank = kind.checked_rank(target.in_features.min(projection_out_features))?;
         let previous = expected.insert(
             format!("{H3_TURBO_LORA_KEY_PREFIX}{}", target.module),
             ExpectedModule {
@@ -1855,7 +1920,9 @@ pub(super) fn expected_turbo_modules(
                 base_weight_name: target.weight_name,
                 rank: match expectation.shape {
                     H3TurboLoraShape::Uniform { .. } => ExpectedRank::Exact(source_rank),
-                    H3TurboLoraShape::Dynamic { .. } => ExpectedRank::AtMost(source_rank),
+                    H3TurboLoraShape::Dynamic { .. } => {
+                        ExpectedRank::AtMost(source_rank.min(exact_svd_rank))
+                    }
                 },
                 in_features: target.in_features,
                 out_features: target.out_features,
@@ -2298,12 +2365,13 @@ pub(super) mod fixtures {
         expectation: &H3TurboLoraExpectation,
     ) -> BTreeMap<String, usize> {
         let (expected, _) = expected_turbo_modules(expectation).unwrap();
-        let source_rank = expectation.training_rank();
         expected
             .iter()
             .enumerate()
             .map(|(index, (module_key, module))| {
-                let bound = module.kind.checked_rank(source_rank).unwrap();
+                // The CONTRACT's own ceiling, so the "sits exactly on its
+                // bound" edge stays on the edge if that ceiling ever tightens.
+                let bound = module.rank.bound();
                 let rank = match index {
                     0 => bound,
                     1 => 1,
@@ -2823,18 +2891,22 @@ mod tests {
         let mut headers = BTreeSet::new();
         let mut files = BTreeSet::new();
         let mut sources = BTreeSet::new();
-        let mut resized_sources = BTreeSet::new();
         for tier in H3TurboLoraTier::ALL {
             assert!(ids.insert(tier.stable_id()));
             assert!(digests.insert(tier.content_sha256()));
             assert!(headers.insert(tier.header_identity_sha256()));
-            // A resized tier is a DIFFERENT artifact from its source, and two
-            // resized tiers never share one source: sharing one would mean two
-            // tags claiming the same approximation of the same adapter.
+            // A resized tier is a DIFFERENT artifact from its source, its
+            // source is never itself resized, and a resize never crosses
+            // tasks. Two resized tiers MAY share one source — two ranks are
+            // two different approximations of the same adapter, and drbaph
+            // publishes exactly that pair (rank 20/28/64 beside the pinned
+            // rank 21) — so uniqueness is carried by the stable id, content
+            // digest, header identity, and file-name sets, never by the
+            // source.
             if let Some(source) = tier.source_tier() {
                 assert_ne!(tier, source);
                 assert!(!source.shape().is_dynamic(), "{tier:?}");
-                assert!(resized_sources.insert(source), "{tier:?} repeats a source");
+                assert_eq!(source.task(), tier.task(), "{tier:?}");
             }
             // The basename is the on-disk key mold-core's storage rule
             // flattens every adapter to, so two tiers may never share one.
@@ -3270,7 +3342,8 @@ mod tests {
         inspect_h3_turbo_lora_adapter_against(&path, expectation)
     }
 
-    /// The published `baked_scale` of drbaph's v1.1 exports, verbatim. It is a
+    /// The published `baked_scale` of drbaph's OTHER resized exports (rank
+    /// 20, 28, and 64, at the same pinned revision), verbatim. It is a
     /// SENTENCE, not a number, which is the whole reason a resized adapter's
     /// scale has to be parsed and compared rather than trusted as present.
     const NON_NUMERIC_BAKED_SCALE: &str =
@@ -3443,14 +3516,70 @@ mod tests {
         );
     }
 
-    /// A full-rank file offered for a resized tier is named by its COUNT.
+    /// `resized_from` is REQUIRED, not checked-when-present.
     ///
-    /// The tensor-count check runs before any shape check on purpose: 624
-    /// tensors against 416 is one clear sentence, where shape-first would
-    /// produce "module X has rank 128, expected 1..=128" — a refusal that
-    /// reads like a rank problem and is not one.
+    /// drbaph publishes rank-20, rank-28, and rank-64 exports at the SAME
+    /// pinned revision that omit the key entirely, so a present-only check
+    /// would let one of them — a different approximation, of a different
+    /// adapter — pass every metadata fence. All three pinned files declare it,
+    /// so requiring it costs nothing and refuses those by name.
     #[test]
-    fn a_full_rank_file_offered_for_a_rank21_tier_is_a_tensor_count_mismatch() {
+    fn a_resized_adapter_that_omits_resized_from_is_refused() {
+        let expectation = dynamic_expectation();
+        let (mut header, data) = fixture_adapter(&expectation);
+        header["__metadata__"]
+            .as_object_mut()
+            .unwrap()
+            .remove(METADATA_RESIZED_FROM_KEY)
+            .unwrap();
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::InvalidMetadata);
+        assert!(
+            error.message.contains(METADATA_RESIZED_FROM_KEY)
+                && error
+                    .message
+                    .contains(H3TurboLoraTier::Fl2v8StepV10.file_name()),
+            "{}",
+            error.message
+        );
+    }
+
+    /// `qkv_fusion` is the file's own declaration of the block-diagonal
+    /// `lora_B` layout every fused-QKV delta assumes, and it differs by shape;
+    /// `base_model` names the export all eight adapters overlay. Both are
+    /// declared by every published header, so both are checked.
+    #[test]
+    fn a_disagreeing_qkv_fusion_or_base_model_is_refused() {
+        for (key, wrong) in [
+            ("qkv_fusion", H3_TURBO_LORA_UNIFORM_QKV_FUSION),
+            ("base_model", "MiniMaxAI/MiniMax-H3"),
+        ] {
+            let expectation = dynamic_expectation();
+            assert_eq!(
+                expectation.shape.qkv_fusion(),
+                H3_TURBO_LORA_DYNAMIC_QKV_FUSION
+            );
+            let (mut header, data) = fixture_adapter(&expectation);
+            header["__metadata__"][key] = serde_json::json!(wrong);
+            let error = inspect_against(&header, &data, &expectation).unwrap_err();
+            assert_eq!(error.code, H3TurboLoraErrorCode::InvalidMetadata, "{key}");
+            assert!(error.message.contains(key), "{key}: {}", error.message);
+        }
+    }
+
+    /// Classification names a full-rank file by its COUNT, before any shape.
+    ///
+    /// The count check runs first on purpose: 624 tensors against 416 is one
+    /// clear sentence, where shape-first would produce "module X has rank 128,
+    /// expected 1..=128" — a refusal that reads like a rank problem and is not
+    /// one. This is the CLASSIFIER's ordering, not the whole path: the real
+    /// published rank-128 file offered for an r21 tier never reaches here,
+    /// because `build_inspection` checks the pinned size, header length,
+    /// header identity, and metadata first and refuses it as
+    /// `SourceSizeMismatch`. The end-to-end half below therefore feeds a file
+    /// those earlier fences accept.
+    #[test]
+    fn classification_names_a_full_rank_file_by_its_tensor_count_before_any_shape() {
         let full_rank = H3TurboLoraTier::Fl2v768p4StepV10;
         let resized = H3TurboLoraTier::Fl2v768p4StepV10Rank21;
         assert_eq!(resized.source_tier(), Some(full_rank));
@@ -3460,6 +3589,36 @@ mod tests {
         assert_eq!(error.code, H3TurboLoraErrorCode::TensorCountMismatch);
         assert!(
             error.message.contains("624") && error.message.contains("416"),
+            "{}",
+            error.message
+        );
+
+        // End to end, with size, header, and metadata all agreeing: a resized
+        // file that still carries one alpha per module is refused by the
+        // COUNT, not by the alpha rule that would otherwise claim it.
+        let expectation = dynamic_expectation();
+        let (mut header, _) = fixture_adapter(&expectation);
+        let modules = header
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter_map(|name| name.strip_suffix(LORA_A_SUFFIX).map(str::to_owned))
+            .collect::<Vec<_>>();
+        let module_count = modules.len();
+        assert_eq!(module_count * 2, expectation.tensor_count().unwrap());
+        for module in modules {
+            header[format!("{module}{ALPHA_SUFFIX}")] = serde_json::json!({
+                "dtype": H3_TURBO_LORA_ALPHA_DTYPE,
+                "shape": [],
+                "data_offsets": [0, ALPHA_BYTES],
+            });
+        }
+        let data = relayout(&mut header);
+        let error = inspect_against(&header, &data, &expectation).unwrap_err();
+        assert_eq!(error.code, H3TurboLoraErrorCode::TensorCountMismatch);
+        assert!(
+            error.message.contains(&(module_count * 3).to_string())
+                && error.message.contains(&(module_count * 2).to_string()),
             "{}",
             error.message
         );
@@ -3935,6 +4094,14 @@ mod tests {
             contract.inspection().structure_identity_sha256,
             "86970563baa338bab96d112566e2a951a9fe6350cf5f28930b904241a8567553"
         );
+        // A LITERAL, because recomputing it through `turbo_adapter_identity`
+        // would keep this assertion green through a change to that function's
+        // domain or field order — the one thing it exists to catch.
+        assert_eq!(
+            contract.adapter_identity_sha256(),
+            "6789ae11c472da81743171366537a5be4647ac4cf2d3053927d19ab40023c4d9"
+        );
+        // The derivation, kept beside it so the fold is documented.
         assert_eq!(
             contract.adapter_identity_sha256(),
             turbo_adapter_identity(
