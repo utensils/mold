@@ -273,16 +273,18 @@ export function expansionContextForRequest(
   if (references.length > 0) context.references = references;
   if (loras.length > 0) context.loras = loras;
   if (recipe) {
+    // Desktop and mobile compile with `exactOptionalPropertyTypes`, so an
+    // absent field is `null`, never `undefined`.
     context.prompt_mode = promptRequirementFor({
       recipe,
-      family,
-      model: request.model,
-      sourceImage: request.source_image,
-      keyframes: request.keyframes,
-      sourceVideo: request.source_video,
-      sourceVideoPath: request.source_video_path,
-      extendVideo: request.extend_video,
-      extendVideoPath: request.extend_video_path,
+      family: family ?? null,
+      model: request.model ?? null,
+      sourceImage: request.source_image ?? null,
+      keyframes: request.keyframes ?? null,
+      sourceVideo: request.source_video ?? null,
+      sourceVideoPath: request.source_video_path ?? null,
+      extendVideo: request.extend_video ?? null,
+      extendVideoPath: request.extend_video_path ?? null,
     });
   }
   return context;
