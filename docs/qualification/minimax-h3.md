@@ -1515,12 +1515,35 @@ clause's premise ("composition differs") is not what these numbers measure.
 Visual inspection of frames 0/40/80/123 of all twelve renders found the same
 shot, same motion, texture-only differences, no new artifact class, and audio
 present on every output; VRAM saving measured 1528-1622 MiB (1.60-1.70 GB) on
-every pair. THE PER-TIER SHIP-OR-DROP DECISION IS PENDING THE MAINTAINER'S
-CALL, which is being made on this branch's pull request; until then all three
-tags remain registered on the branch, exactly as before this gate ran. A tier
-the maintainer drops is removed from `REVIEWED_TURBO_MANIFEST_TIERS` and every
-other enumeration before merge; a tier the maintainer ships carries the rows
-above as its evidence.
+every pair.
+
+**Decision** (2026-09-02, PR #1555,
+https://github.com/utensils/mold/pull/1555): the maintainer (James Brink)
+shipped all three rank-21 tiers. Basis: visual parity on all six A/B pairs
+(same shot, same motion, texture-only differences, no flicker or single-frame
+PSNR dip, audio present on every output) and the measured 1528-1622 MiB
+(1.60-1.70 GB) resident-VRAM saving on every pair; the PSNR figures are
+recorded as measured and NOT as a pass of the 24 dB threshold — the 8-step
+r21 tier cleared every threshold at 768x768 and sits in the 20-24 dB band at
+1344x768, the 4-step 768p r21 tier sits in the band at both canvases (min
+17.86 dB at 768x768), and the Ref2VA r21 tier measured 16-17 dB, below the
+rule's 20 dB clause, shipped on the maintainer's judgement that the
+motion-only control (one frame of camera pan inside the full-rank video
+costs ~20 dB at 1344x768) shows that clause's premise does not hold for a
+panning Ref2VA shot. All three remain lossy approximations; a user who wants
+the reviewed adapter's exact output picks the full-rank tag. No tier was
+dropped; all three stay in `REVIEWED_TURBO_MANIFEST_TIERS` and every other
+enumeration.
+
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21` — Decision: SHIP
+  (maintainer call, 2026-09-02, PR #1555; measured band 21.10 dB at 768x768 /
+  22.93 dB at 1344x768).
+- `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21` — Decision: SHIP
+  (maintainer call, 2026-09-02, PR #1555; measured band clears every
+  threshold at 768x768 (29.16 dB) / 23.56 dB at 1344x768).
+- `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21` — Decision: SHIP
+  (maintainer call, 2026-09-02, PR #1555; measured band 16.15 dB at 768x768 /
+  17.00 dB at 1344x768).
 
 ### What is derived, and how
 
