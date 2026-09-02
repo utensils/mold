@@ -2193,6 +2193,18 @@ impl GuidanceCapabilities {
                     Self::FIXED_ONE
                 }
             }
+            // A DMD-distilled Wan tier walks a fixed rung ladder, predicting
+            // x0 at each rung and re-noising to the next
+            // (`manifest::wan_dmd_ladder`, FastVideo's `DmdDenoisingStage`).
+            // There is no unconditional branch to weight, so the scale is
+            // pinned at 1.0 and there is no negative prompt to encode. Every
+            // other Wan tier keeps ordinary CFG.
+            "wan"
+                if crate::manifest::wan_dmd_ladder(&crate::manifest::resolve_model_name(model))
+                    .is_some() =>
+            {
+                Self::FIXED_ONE
+            }
             // The undistilled FLUX.2 [klein] base checkpoints are the one
             // Flux.2 tier that runs a real unconditional branch, so they are
             // the one that can use a negative prompt. Every distilled tier —
@@ -7915,6 +7927,37 @@ mod tests {
             ),
             GuidanceCapabilities::FIXED_ONE,
         );
+    }
+
+    /// A DMD-distilled Wan tier predicts x0 at each pinned rung and is
+    /// re-noised to the next; there is no unconditional branch to weight, so
+    /// the scale is pinned at 1.0 and there is no negative prompt to encode.
+    /// Every other Wan tier keeps ordinary adjustable CFG.
+    #[test]
+    fn wan_dmd_ladder_tiers_pin_guidance_at_one() {
+        assert_eq!(
+            GuidanceCapabilities::for_recipe("wan", "wan21-t2v-1.3b:turbo", None),
+            GuidanceCapabilities::FIXED_ONE,
+        );
+        // The bare name still resolves to the base tier, which keeps CFG.
+        assert_eq!(
+            GuidanceCapabilities::for_recipe("wan", "wan21-t2v-1.3b", None),
+            GuidanceCapabilities::ADJUSTABLE_CFG,
+        );
+        for guided in [
+            "wan21-t2v-1.3b:bf16",
+            "wan22-ti2v-5b:fp16",
+            // The Self-Forcing 5B distill runs at guidance 1.0 by DEFAULT but
+            // is not rung-pinned, so its scale stays adjustable.
+            "wan22-ti2v-5b:turbo",
+            "wan22-t2v-a14b:q8",
+        ] {
+            assert_eq!(
+                GuidanceCapabilities::for_recipe("wan", guided, None),
+                GuidanceCapabilities::ADJUSTABLE_CFG,
+                "{guided}",
+            );
+        }
     }
 
     /// Only the undistilled FLUX.2 [klein] base checkpoints run an

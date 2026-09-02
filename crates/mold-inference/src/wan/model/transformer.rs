@@ -572,6 +572,22 @@ pub(crate) fn clip_vision_branch_markers() -> Vec<String> {
     markers
 }
 
+/// `blocks.<n>.to_gate_compress.{weight,bias}` — FastVideo's per-block Video
+/// Sparse Attention gate projection, matched exactly rather than by prefix so
+/// no other unmapped `blocks.<n>.*` key rides in beside it.
+fn is_vsa_gate_projection(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("blocks.") else {
+        return false;
+    };
+    let Some((index, leaf)) = rest.split_once('.') else {
+        return false;
+    };
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    matches!(leaf, "to_gate_compress.weight" | "to_gate_compress.bias")
+}
+
 /// Refuse a diffusers-layout checkpoint carrying tensors the rename tables do
 /// not cover, naming the class of what it found.
 ///
@@ -582,11 +598,34 @@ pub(crate) fn clip_vision_branch_markers() -> Vec<String> {
 /// CLIP adapter, VACE control blocks), and loading the covered subset around it
 /// builds the rest from `VarBuilder` defaults and renders, wrongly.
 fn ensure_diffusers_keys_covered(bare_names: &[String], origin: &Path) -> Result<()> {
-    let mut uncovered: Vec<&str> = bare_names
+    let uncovered: Vec<&str> = bare_names
         .iter()
         .map(String::as_str)
         .filter(|name| diffusers_to_original(name).is_none())
         .collect();
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+    // FastVideo's distills ship one extra projection per block. It feeds the
+    // Video Sparse Attention kernel's `compress_attn_weight` argument and
+    // nothing else (`fastvideo/models/dits/wanvideo.py:458` declares it,
+    // `:542` computes `gate_compress` from it, and
+    // `fastvideo/attention/backends/video_sparse_attn.py:310-342` is the only
+    // consumer). Dense attention — which is all mold implements — never reads
+    // it, so a file carrying it is a complete checkpoint for this port, not a
+    // truncated one. Tolerated by exact shape rather than by prefix: this is
+    // the one architecture extension that is genuinely inert, and the arms
+    // below exist precisely because most are not.
+    let (gate_projections, mut uncovered): (Vec<&str>, Vec<&str>) = uncovered
+        .into_iter()
+        .partition(|name| is_vsa_gate_projection(name));
+    if !gate_projections.is_empty() {
+        tracing::debug!(
+            count = gate_projections.len(),
+            origin = %origin.display(),
+            "wan: ignoring FastVideo VSA gate projections (dense attention does not read them)"
+        );
+    }
     if uncovered.is_empty() {
         return Ok(());
     }
@@ -3430,6 +3469,56 @@ mod tests {
             };
             assert!(err.contains(needle), "{file}: expected {needle:?} in {err}");
         }
+    }
+
+    /// FastVideo's DMD distills carry a Video Sparse Attention gate projection
+    /// per block. The VSA kernel is the only thing that reads it
+    /// (`fastvideo/attention/backends/video_sparse_attn.py:310-342`), so a
+    /// dense-attention port has a complete checkpoint and must load — while
+    /// still failing closed on anything else the tables miss, which is the
+    /// half that makes the tolerance safe rather than a hole.
+    #[test]
+    fn fastvideo_vsa_gate_projections_are_tolerated_but_nothing_else_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tiny_config();
+
+        // The keys really are unmapped — if the rename table ever grew an
+        // entry for them the tolerance would be dead code.
+        assert!(diffusers_to_original("blocks.0.to_gate_compress.weight").is_none());
+        assert!(diffusers_to_original("blocks.0.to_gate_compress.bias").is_none());
+
+        // Thirty blocks' worth, the FastWan2.1-T2V-1.3B layer count.
+        let gate_keys: Vec<String> = (0..30)
+            .flat_map(|block| {
+                [
+                    format!("blocks.{block}.to_gate_compress.weight"),
+                    format!("blocks.{block}.to_gate_compress.bias"),
+                ]
+            })
+            .collect();
+        assert_eq!(gate_keys.len(), 60);
+        let extras: Vec<&str> = gate_keys.iter().map(String::as_str).collect();
+        let path = write_diffusers_checkpoint(dir.path(), "fastwan-vsa.safetensors", &extras);
+        WanTransformer::from_safetensors(&[path], config.clone(), &Device::Cpu, DType::F32)
+            .expect("a FastVideo distill's gate projections must not block a dense load");
+
+        // One stray key that is not a gate projection still fails closed, even
+        // surrounded by sixty that are.
+        let mut with_stray = extras.clone();
+        with_stray.push("blocks.0.mystery.weight");
+        let path = write_diffusers_checkpoint(dir.path(), "fastwan-stray.safetensors", &with_stray);
+        let err = match WanTransformer::from_safetensors(
+            &[path],
+            config.clone(),
+            &Device::Cpu,
+            DType::F32,
+        ) {
+            Ok(_) => panic!("an uncovered key beside the gate projections must still refuse"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("blocks.0.mystery.weight"), "{err}");
+        // The refusal counts only the genuinely uncovered key.
+        assert!(err.contains("1 tensor(s)"), "{err}");
     }
 
     /// Write a *genuinely* fp8-scaled checkpoint in the diffusers spelling: the

@@ -6139,6 +6139,31 @@ pub fn default_negative_prompt_for_family(family: &str) -> Option<&'static str> 
 /// constant is what makes that contract hold.
 pub const WAN_A14B_QUALITY_GUIDANCE: f64 = 3.5;
 
+/// Denoising ladder for `wan21-t2v-1.3b:turbo`: FastVideo's FastWan2.1 DMD
+/// distill walks exactly these three rungs, no more and no fewer
+/// (`fastvideo/configs/pipelines/wan.py:117-123`,
+/// `FastWan2_1_T2V_480P_Config.dmd_denoising_steps`, at commit `40b93784`).
+pub const FASTWAN_1_3B_LADDER: [u32; 3] = [1000, 757, 522];
+
+/// The fixed denoising ladder of a DMD-distilled Wan tier, or `None` for a
+/// tier that walks an ordinary `(steps, shift)` schedule.
+///
+/// This is the ONE authority for "this checkpoint is a rung-ladder distill":
+/// the generation profile pins `steps` to the ladder's length and guidance to
+/// 1.0 and empties the scheduler list, admission refuses anything else, and
+/// the Wan engine builds its DMD solver from the same rungs. A DMD student
+/// predicts x0 at each rung and is re-noised to the next
+/// (`fastvideo/pipelines/stages/denoising.py`, `DmdDenoisingStage`); walking
+/// it with UniPC or Euler, or at any other step count, is not a slower
+/// render but a different, worse one, which is why nothing here is a user
+/// preference.
+pub fn wan_dmd_ladder(model_name: &str) -> Option<&'static [u32]> {
+    match model_name {
+        "wan21-t2v-1.3b:turbo" => Some(&FASTWAN_1_3B_LADDER),
+        _ => None,
+    }
+}
+
 /// Shared Wan component files: the UMT5-XXL text encoder (identical across
 /// every Wan 2.1/2.2 variant — Comfy-Org's safetensors repack of upstream's
 /// `models_t5_umt5-xxl-enc-bf16.pth`) and its SentencePiece tokenizer in
@@ -6210,6 +6235,17 @@ fn wan_manifests() -> Vec<ModelManifest> {
         guidance: 1.0,
         ..defaults_ti2v.clone()
     };
+    // FastVideo's DMD distill of the 1.3B differs from the base tier only in
+    // the denoise budget: 3 rungs, and guidance 1.0 so `needs_cfg_pass` drops
+    // the unconditional forward. That is (30 x 2) / 3 = 20x fewer transformer
+    // forwards for the same clip. Everything else — 832x480, 81 frames at
+    // 16 fps, the tuned negative prompt, and `SourceImageCapability::
+    // Unsupported` (it is the same pure-T2V DiT) — is the base's.
+    let defaults_480p_turbo = ManifestDefaults {
+        steps: 3,
+        guidance: 1.0,
+        ..defaults_480p.clone()
+    };
 
     vec![
         ModelManifest {
@@ -6242,6 +6278,64 @@ fn wan_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: defaults_480p.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "wan21-t2v-1.3b:turbo".to_string(),
+            family: "wan".to_string(),
+            description:
+                "Wan 2.1 T2V 1.3B Turbo — 3-step 480p text-to-video (FastVideo DMD distill)"
+                    .to_string(),
+            files: {
+                let mut files = shared_wan_files();
+                // FastVideo's DMD distill of the same 1.3B transformer,
+                // published as a single-file diffusers checkpoint
+                // (`FastVideo/FastWan2.1-T2V-1.3B-Diffusers`, apache-2.0,
+                // ungated). It is stored F32 — 5.96 GB on disk against the
+                // base bf16's 2.84 GB — and mold casts to bf16 lazily at
+                // load, so it costs ~3 GB in VRAM. VRAM admission prices a
+                // transformer by file length, which over-reserves here;
+                // harmless at 1.3B scale, and the alternative would be a
+                // second authority on dtype.
+                //
+                // Its `transformer/config.json` is the base checkpoint's
+                // geometry exactly — dim 1536, 30 layers, in/out 16, ffn
+                // 8960, patch [1,2,2] — so mold's shape-driven detection
+                // needs no new arm. The extra 60
+                // `blocks.N.to_gate_compress.{weight,bias}` sparse-attention
+                // gate tensors are tolerated by the loader.
+                //
+                // The distill is the whole delta, and none of it is a user
+                // preference: the ladder is pinned by `wan_dmd_ladder`, and
+                // the solver is DMD (predict x0, re-noise to the next rung),
+                // not UniPC — which is why the generation profile fixes
+                // steps, guidance, scheduler and shift rather than defaulting
+                // them.
+                files.push(ModelFile {
+                    hf_repo: "FastVideo/FastWan2.1-T2V-1.3B-Diffusers".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model.safetensors".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_959_377_056,
+                    gated: false,
+                    sha256: Some(
+                        "b01c847916349edb53f93338142b78077277140a8247332e354bcf6a00840b49",
+                    ),
+                });
+                // VAE and UMT5 are unchanged copies of the base 2.1 stack, so
+                // the turbo tier shares them byte for byte.
+                files.push(ModelFile {
+                    hf_repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged".to_string(),
+                    hf_filename: "split_files/vae/wan_2.1_vae.safetensors".to_string(),
+                    component: ModelComponent::Vae,
+                    size_bytes: 253_815_318,
+                    gated: false,
+                    sha256: Some(
+                        "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
+                    ),
+                });
+                files
+            },
+            defaults: defaults_480p_turbo,
             hidden: false,
         },
         wan21_t2v_14b_manifest(Wan21T2v14bTier::Compact, defaults_480p.clone()),
@@ -8768,7 +8862,10 @@ mod tests {
         // derivatives of three already-shipped adapters, published by
         // `drbaph/MiniMax-H3-Turbo-Lora-ComfyUI`. Two ride the FL2VA compact
         // base stack and one the Ref2VA one; each is one manifest.
-        assert_eq!(known_manifests().len(), 200);
+        // Wan DMD bump: +1. `wan21-t2v-1.3b:turbo` — FastVideo's 3-rung DMD
+        // distill of the same 1.3B transformer, on the same shared UMT5 and
+        // 2.1 VAE, so it contributes exactly one manifest.
+        assert_eq!(known_manifests().len(), 201);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`
@@ -8913,10 +9010,154 @@ mod tests {
         assert!(!turbo.hidden);
     }
 
+    /// The 1.3B DMD tier's whole reason to exist is the denoise budget: 3
+    /// rungs at guidance 1.0, where `needs_cfg_pass` skips the unconditional
+    /// forward, against the base tier's 30 steps with CFG. That is a 20x
+    /// reduction in transformer forwards, and it is the only thing that may
+    /// differ — the clip shape, timing, and conditioning capability are the
+    /// base checkpoint's, because it *is* the base checkpoint distilled.
+    #[test]
+    fn the_1_3b_turbo_tier_changes_only_the_denoise_budget() {
+        let base = find_manifest("wan21-t2v-1.3b:bf16").expect("base tier ships");
+        let turbo = find_manifest("wan21-t2v-1.3b:turbo").expect("turbo tier ships");
+
+        assert_eq!(turbo.defaults.steps, 3);
+        assert_eq!(turbo.defaults.guidance, 1.0);
+        assert!(
+            turbo.defaults.guidance <= 1.0,
+            "guidance above 1.0 would reinstate the unconditional forward the distill removes",
+        );
+        let forwards = |d: &ManifestDefaults| d.steps * if d.guidance > 1.0 { 2 } else { 1 };
+        assert_eq!(
+            forwards(&base.defaults) / forwards(&turbo.defaults),
+            20,
+            "the tier exists for a 20x forward-count reduction",
+        );
+        assert_eq!(
+            wan_dmd_ladder("wan21-t2v-1.3b:turbo").map(<[u32]>::len),
+            Some(turbo.defaults.steps as usize),
+            "the pinned ladder is what the advertised step count means",
+        );
+
+        // Everything else is the base checkpoint's.
+        assert_eq!(turbo.family, base.family);
+        assert_eq!(turbo.defaults.width, base.defaults.width);
+        assert_eq!(turbo.defaults.height, base.defaults.height);
+        assert_eq!(turbo.defaults.frames, base.defaults.frames);
+        assert_eq!(turbo.defaults.fps, base.defaults.fps);
+        assert_eq!(turbo.defaults.source_image, base.defaults.source_image);
+        assert_eq!(
+            turbo.defaults.negative_prompt,
+            base.defaults.negative_prompt
+        );
+        assert_eq!(turbo.defaults.scheduler, base.defaults.scheduler);
+        assert_eq!(turbo.defaults.is_schnell, base.defaults.is_schnell);
+
+        // FastVideo publishes one unsharded diffusers file, so the tier
+        // carries a single `Transformer` rather than a shard pair.
+        assert_eq!(
+            turbo
+                .files
+                .iter()
+                .filter(|f| f.component == ModelComponent::Transformer)
+                .count(),
+            1,
+        );
+        assert!(!turbo
+            .files
+            .iter()
+            .any(|f| f.component == ModelComponent::TransformerShard));
+        for component in [
+            ModelComponent::Vae,
+            ModelComponent::TextEncoder,
+            ModelComponent::TextTokenizer,
+        ] {
+            assert!(
+                turbo.files.iter().any(|f| f.component == component),
+                "turbo missing {component:?}"
+            );
+        }
+        for file in &turbo.files {
+            assert!(
+                file.sha256.is_some(),
+                "turbo: {} must carry a SHA-256",
+                file.hf_filename
+            );
+        }
+        assert!(!turbo.hidden);
+    }
+
+    /// `wan_dmd_ladder` is the ONE authority for "this tier walks a fixed rung
+    /// ladder", so the manifest it names must agree with it: as many steps as
+    /// rungs, no CFG, and a strictly descending ladder inside the flow-match
+    /// timestep range. Every other Wan tier must answer `None` — a laddered
+    /// tier the profile does not know about would advertise adjustable
+    /// controls the engine ignores.
+    #[test]
+    fn wan_dmd_ladders_agree_with_their_manifests() {
+        let mut laddered = 0;
+        for manifest in known_manifests().iter().filter(|m| m.family == "wan") {
+            let Some(ladder) = wan_dmd_ladder(&manifest.name) else {
+                continue;
+            };
+            laddered += 1;
+            assert_eq!(
+                manifest.defaults.steps as usize,
+                ladder.len(),
+                "{}: the advertised step count is the ladder length",
+                manifest.name
+            );
+            assert!(
+                manifest.defaults.guidance <= 1.0,
+                "{}: a DMD student runs one forward per rung",
+                manifest.name
+            );
+            for window in ladder.windows(2) {
+                assert!(
+                    window[0] > window[1],
+                    "{}: rungs must strictly descend, got {ladder:?}",
+                    manifest.name
+                );
+            }
+            for &rung in ladder {
+                assert!(
+                    (1..=1000).contains(&rung),
+                    "{}: rung {rung} is outside the flow-match timestep range",
+                    manifest.name
+                );
+            }
+        }
+        assert_eq!(laddered, 1, "only the FastWan 1.3B distill is laddered");
+
+        for manifest in known_manifests()
+            .iter()
+            .filter(|m| m.family == "wan" && m.name != "wan21-t2v-1.3b:turbo")
+        {
+            assert!(
+                wan_dmd_ladder(&manifest.name).is_none(),
+                "{} walks an ordinary (steps, shift) schedule",
+                manifest.name
+            );
+        }
+    }
+
     /// exists — a listed model that cannot load is worse than none.
     #[test]
     fn wan_manifests_resolve_and_carry_full_component_sets() {
         assert_eq!(resolve_model_name("wan21-t2v-1.3b"), "wan21-t2v-1.3b:bf16");
+        // The FastVideo DMD distill is reachable only by its own tag: the
+        // bare-name ladder is `:q8 -> :fp16 -> :bf16 -> :fp8`, so adding
+        // `:turbo` cannot re-point anyone's existing `wan21-t2v-1.3b` at a
+        // 3-step checkpoint. The dashed spelling resolves like every other
+        // family's.
+        assert_eq!(
+            resolve_model_name("wan21-t2v-1.3b:turbo"),
+            "wan21-t2v-1.3b:turbo"
+        );
+        assert_eq!(
+            resolve_model_name("wan21-t2v-1.3b-turbo"),
+            "wan21-t2v-1.3b:turbo"
+        );
         // The bare 5B name must stay on the fp16 default even though a `:q8`
         // small-card tag now exists — the generic tag loop tries `:q8` first,
         // so this is pinned explicitly in `resolve_model_name` (#794).
@@ -8947,6 +9188,7 @@ mod tests {
 
         for name in [
             "wan21-t2v-1.3b:bf16",
+            "wan21-t2v-1.3b:turbo",
             "wan21-t2v-14b:q5",
             "wan21-t2v-14b:q8",
             "wan22-ti2v-5b:fp16",

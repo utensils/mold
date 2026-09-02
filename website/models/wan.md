@@ -33,22 +33,23 @@ a separate Wan S2V pipeline and is not implied by these model rows.
 
 ## Variants
 
-| Model                 | Steps | Approx total pull | Notes                                                                                         |
-| --------------------- | ----- | ----------------- | --------------------------------------------------------------------------------------------- |
-| `wan21-t2v-1.3b:bf16` | 30    | ~14.5 GB          | 480p text-to-video; smallest, fastest pull                                                    |
-| `wan21-t2v-14b:q5`    | 30    | ~23 GB            | Q5_K_M 2.1 14B; 480p text-to-video                                                            |
-| `wan21-t2v-14b:q8`    | 30    | ~27.5 GB          | Q8_0 2.1 14B; the 2.1 quality tier                                                            |
-| `wan22-ti2v-5b:fp16`  | 20    | ~22.8 GB          | 720p24 text- and image-to-video                                                               |
-| `wan22-ti2v-5b:q8`    | 20    | ~18 GB            | Q8_0 5B; 8-12 GB cards at reduced settings                                                    |
-| `wan22-ti2v-5b:turbo` | 4     | ~22.8 GB          | Self-Forcing 4-step distill, no CFG                                                           |
-| `wan22-t2v-a14b:q5`   | 4     | ~36 GB            | 480p16 text-to-video, 4-step Lightning tier                                                   |
-| `wan22-t2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill                                                              |
-| `wan22-t2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use                                                  |
-| `wan22-i2v-a14b:q5`   | 4     | ~36 GB            | 480p16 image-to-video, 4-step Lightning tier                                                  |
-| `wan22-i2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill                                                              |
-| `wan22-i2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use                                                  |
-| `wan22-t2v-a14b:fp8`  | 20    | ~40.5 GB          | Comfy-Org fp8-scaled experts; ~2.6 GB more VRAM headroom than `:q8`, refuses LoRAs, CUDA-only |
-| `wan22-i2v-a14b:fp8`  | 20    | ~40.5 GB          | fp8-scaled image-to-video pair; same recipe and constraints                                   |
+| Model                  | Steps | Approx total pull | Notes                                                                                         |
+| ---------------------- | ----- | ----------------- | --------------------------------------------------------------------------------------------- |
+| `wan21-t2v-1.3b:bf16`  | 30    | ~14.5 GB          | 480p text-to-video; smallest, fastest pull                                                    |
+| `wan21-t2v-1.3b:turbo` | 3     | ~17.6 GB          | FastVideo DMD 3-step distill of the same 1.3B, no CFG; steps, solver and shift pinned         |
+| `wan21-t2v-14b:q5`     | 30    | ~23 GB            | Q5_K_M 2.1 14B; 480p text-to-video                                                            |
+| `wan21-t2v-14b:q8`     | 30    | ~27.5 GB          | Q8_0 2.1 14B; the 2.1 quality tier                                                            |
+| `wan22-ti2v-5b:fp16`   | 20    | ~22.8 GB          | 720p24 text- and image-to-video                                                               |
+| `wan22-ti2v-5b:q8`     | 20    | ~18 GB            | Q8_0 5B; 8-12 GB cards at reduced settings                                                    |
+| `wan22-ti2v-5b:turbo`  | 4     | ~22.8 GB          | Self-Forcing 4-step distill, no CFG                                                           |
+| `wan22-t2v-a14b:q5`    | 4     | ~36 GB            | 480p16 text-to-video, 4-step Lightning tier                                                   |
+| `wan22-t2v-a14b:q8`    | 20    | ~42 GB            | Same weights at Q8_0, no distill                                                              |
+| `wan22-t2v-a14b:q4`    | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use                                                  |
+| `wan22-i2v-a14b:q5`    | 4     | ~36 GB            | 480p16 image-to-video, 4-step Lightning tier                                                  |
+| `wan22-i2v-a14b:q8`    | 20    | ~42 GB            | Same weights at Q8_0, no distill                                                              |
+| `wan22-i2v-a14b:q4`    | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use                                                  |
+| `wan22-t2v-a14b:fp8`   | 20    | ~40.5 GB          | Comfy-Org fp8-scaled experts; ~2.6 GB more VRAM headroom than `:q8`, refuses LoRAs, CUDA-only |
+| `wan22-i2v-a14b:fp8`   | 20    | ~40.5 GB          | fp8-scaled image-to-video pair; same recipe and constraints                                   |
 
 Totals include the shared UMT5-XXL encoder (~11.4 GB), tokenizer, and the
 variant's VAE. The encoder is shared across every Wan model under
@@ -107,6 +108,10 @@ the tier's speed comes from.
 ```bash
 # 480p, 81 frames @ 16 fps (defaults)
 mold run wan21-t2v-1.3b "a red fox trotting through fresh snow, golden hour"
+
+# The same clip on the 3-step DMD distill: 3 forwards instead of 30 x 2.
+# Steps, guidance, solver and flow shift are the published schedule's.
+mold run wan21-t2v-1.3b:turbo "a red fox trotting through fresh snow, golden hour"
 
 # 720p24, 121 frames — Wan 2.2 5B
 mold run wan22-ti2v-5b "aerial view of waves breaking on a black sand beach" \
@@ -403,7 +408,7 @@ Wan checkpoints split three ways, and `/api/models` advertises which through
 the additive per-model `source_image` field so every surface offers exactly
 what the checkpoint accepts:
 
-- **`unsupported`** — `wan21-t2v-1.3b`, `wan21-t2v-14b:*`, `wan22-t2v-a14b:*`:
+- **`unsupported`** — `wan21-t2v-1.3b:*`, `wan21-t2v-14b:*`, `wan22-t2v-a14b:*`:
   pure text-to-video; a supplied image is rejected at admission.
 - **`optional`** — `wan22-ti2v-5b:*`: text-to-video, or the source pinned as
   frame 0 through latent inpainting.
@@ -593,6 +598,64 @@ and the refusal points either side of them; larger cards simply pass a bigger
 The sampler schedule matches the one lightx2v's Lightning distills were
 trained against (diffusers' flow-UniPC grid), so the 4-step tier reproduces
 its published timesteps exactly.
+
+### Turbo 1.3B
+
+`wan21-t2v-1.3b:turbo` is FastVideo's DMD distill of the same 2.1 1.3B
+transformer (`FastVideo/FastWan2.1-T2V-1.3B-Diffusers`, Apache-2.0). It walks
+exactly three rungs on the family's shift-8 flow-match table:
+
+| Rung | Timestep |
+| ---- | -------- |
+| 1    | 1000     |
+| 2    | 757      |
+| 3    | 522      |
+
+Steps, guidance, sample solver and flow shift are all **fixed**, and mold
+refuses a request that sets any of them. That is not conservatism: a DMD
+student predicts the clean latent x0 at each rung and is re-noised to the
+next, so the rungs are the schedule the network was trained to answer. Asking
+for four steps leaves a rung with nothing to walk, guidance above 1.0 asks for
+an unconditional branch the distill removed, and running UniPC or Euler over
+it produces a different — and worse — render, not a slower one. Everything
+else is the base checkpoint's: 832x480, 81 frames at 16 fps, the same tuned
+negative prompt (unused at guidance 1.0), and text-to-video only.
+
+Against the base tier's 30 steps with CFG, that is `(30 x 2) / 3` = **20x
+fewer transformer forwards** per clip.
+
+Measured on an NVIDIA L40S (CUDA, math attention, no flash-attn), 832x480 x 81
+frames at 16 fps, one prompt and seed, the base tier run with
+`MOLD_WAN_STEP_CACHE=off` (see #1559 for why):
+
+| Tier                   | Forwards | Pipeline total | Of which denoise |
+| ---------------------- | -------- | -------------- | ---------------- |
+| `wan21-t2v-1.3b:bf16`  | 60       | 196.0 s        | ~170 s           |
+| `wan21-t2v-1.3b:turbo` | 3        | 40.8 s         | ~14 s            |
+
+That is 4.8x on the whole run and about 12x on the denoise loop; the rest is
+UMT5 encoding, VAE decode and MP4 encoding, which the distill cannot shrink.
+The first run in a fresh process pays kernel warm-up (56.8 s), and a server
+with the text encoder already resident answers the same clip in 33.2 s.
+121 frames rendered in 54.4 s and stayed coherent end to end, past the
+checkpoint's 61-frame training length; treat longer clips as an experiment.
+Per-rung noise is drawn from the request seed, so a seed reproduces its clip
+byte-for-byte on the same hardware, but not FastVideo's own generator stream.
+
+The checkpoint ships F32 — a 5.96 GB transformer file against the base bf16's
+2.84 GB — and mold casts to bf16 lazily at load, so it costs about 3 GB in
+VRAM. VRAM admission prices a transformer by its file length, which
+over-reserves here; at 1.3B scale that is harmless.
+
+FastVideo trained at 61 frames and 448x832, and its model card notes the
+checkpoint "supports any resolution, quality may degrade" away from that. The
+81-frame 832x480 default is the card's own inference shape rather than its
+training shape, so it is well-travelled; longer clips and larger canvases are
+an experiment, not a promise.
+
+Per-rung noise is derived from the request seed, so a render is deterministic
+for a given seed on a given machine — but it is not bit-identical to
+FastVideo's own output, which draws from PyTorch's generator.
 
 ## Recipe controls
 
