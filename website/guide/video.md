@@ -24,11 +24,12 @@ wan has no latent motion tail, so its smooth handoff is last-frame image
 conditioning. `wan22-ti2v-5b` and `wan22-i2v-a14b` continue across the seam;
 a text-to-video checkpoint concatenates independent clips (Join / Cut /
 Crossfade). Clip lengths sit on wan's `4k+1` grid, and `--frames` past the
-per-clip envelope auto-chains instead of failing.
+per-clip envelope auto-chains instead of failing — the last clip is sized so
+the stitched video delivers exactly the frames you asked for.
 
 ```bash
 mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
-  --frames 100 --clip-frames 49
+  --frames 97 --clip-frames 49
 ```
 
 ## Single-clip generation
@@ -318,6 +319,17 @@ to each frame. It is durable, checkpointed, pausable, resumable, cancellable,
 and publishes a new gallery MP4 without replacing the source. It preserves and
 verifies constant FPS, frame count, duration, and a codec-compatible primary
 audio track. Temporal flicker may remain.
+
+The published MP4 is H.264 at level 5.2 or below, so it decodes on phones,
+in browsers, and in the Library thumbnailer. Real-ESRGAN always runs at its
+native factor; when the enlarged frame would exceed that level (more than
+36 864 macroblocks, more than 2 073 600 macroblocks per second at the source
+frame rate, or an edge over 4096 px) the encoder resamples it to the largest
+frame of the same aspect ratio that fits. A 960×960 clip upscaled ×4 at 24 fps
+therefore publishes at 3072×3072 rather than 3840×3840, and the print's
+metadata records the published size beside the source size. A job paused
+before this fit existed re-renders from frame 0 on resume rather than
+stitching checkpoints of two sizes.
 
 The MVP rejects rather than discards VFR timing, HDR/high-bit-depth video,
 subtitles, chapters, multiple audio tracks, and incompatible audio codecs.

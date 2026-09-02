@@ -36,6 +36,69 @@ fn guide_config(family: &str, model: Option<&str>, task: ExpandTask) -> (u32, St
     }
 }
 
+/// The answer every prompt-transform surface gives for a family whose
+/// prompt is [`PromptRequirement::Ignored`]: there is no text encoder, so no
+/// language model is called and the "expansion" is the guide's own advice on
+/// preparing the image.
+///
+/// [`PromptRequirement::Ignored`]: crate::generation_profile::PromptRequirement::Ignored
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredPromptAdvice {
+    /// The manifest family that ignores its prompt.
+    pub family: &'static str,
+    /// The one-line explanation a user sees first.
+    pub headline: String,
+    /// The family guide's `Generation context` section, rendered from the
+    /// corpus exactly as the skill bundle and the website render it.
+    pub preparation: String,
+}
+
+impl IgnoredPromptAdvice {
+    /// Headline and preparation advice as one text, which is what the wire
+    /// `expanded` array and the MCP tools carry.
+    pub fn text(&self) -> String {
+        if self.preparation.is_empty() {
+            self.headline.clone()
+        } else {
+            format!("{}\n\n{}", self.headline, self.preparation)
+        }
+    }
+}
+
+/// The ONE decision behind every expand and remix door: whether `family`
+/// reads its prompt at all, answered by
+/// [`crate::generation_profile::prompt_requirement_for_family`] (the same
+/// rule admission and every generation profile use), and if not, what the
+/// user is told instead of an LLM rewrite.
+///
+/// A conditioned request is the case that can differ, and it is the only
+/// case where an `Ignored` answer exists, so the rule is asked for one. The
+/// CLI, `/api/expand`, `/api/remix`, the MCP tools, the TUI, and the shared
+/// expansion driver all ask this function and nothing else, so a family
+/// that ignores its prompt is never handed to a language model anywhere.
+pub fn ignored_prompt_advice(family: &str) -> Option<IgnoredPromptAdvice> {
+    // The guide registry normalises spelling and aliases; the rule is then
+    // asked about the manifest family id, exactly as admission asks it.
+    let route = prompting::route(family, None, None).ok()?;
+    let family = route.family.family;
+    if !crate::generation_profile::prompt_requirement_for_family(Some(family), true).is_ignored() {
+        return None;
+    }
+    let preparation = prompting::section_excerpt(
+        route.family.contents,
+        "Generation context",
+        route.word_limit(),
+    )
+    .unwrap_or_default();
+    Some(IgnoredPromptAdvice {
+        family,
+        headline: format!(
+            "{family} reads no prompt: the image is the whole conditioning, so there is nothing to expand or remix. Prepare the image instead."
+        ),
+        preparation,
+    })
+}
+
 fn guide_notes(route: &prompting::PromptingRoute, word_limit: u32) -> String {
     format!(
         "MODEL PROMPTING GUIDE ({} family):\n{}",
@@ -318,6 +381,14 @@ fn resolve_task_family_config_with_hints(
     let word_limit = overrides
         .and_then(|value| value.word_limit)
         .unwrap_or(default_limit);
+    // A family with no text encoder gets no guide and no style notes: the
+    // only thing worth saying is how to prepare the image. The surfaces
+    // answer before any backend is created, so this is what a caller that
+    // still builds the messages sees rather than a guide that says "write
+    // no prompt" handed to a model asked to write one.
+    if let Some(advice) = ignored_prompt_advice(family) {
+        return (word_limit, advice.text());
+    }
     if let Some(notes) = overrides.and_then(|value| value.style_notes.clone()) {
         return (word_limit, notes);
     }
@@ -643,6 +714,105 @@ mod tests {
                 guide.family
             );
         }
+    }
+
+    // ── prompt-Ignored families ──────────────────────────────────────────
+
+    #[test]
+    fn a_prompt_ignored_family_answers_with_the_guides_image_advice() {
+        use crate::generation_profile::{prompt_requirement_for_family, PromptRequirement};
+        for guide in prompting::FAMILY_GUIDES {
+            let advice = ignored_prompt_advice(guide.family);
+            let ignored = prompt_requirement_for_family(Some(guide.family), true)
+                == PromptRequirement::Ignored;
+            assert_eq!(advice.is_some(), ignored, "{}", guide.family);
+        }
+        let advice = ignored_prompt_advice("hunyuan3d").expect("hunyuan3d ignores the prompt");
+        assert_eq!(advice.family, "hunyuan3d");
+        assert!(
+            advice.headline.contains("reads no prompt"),
+            "{}",
+            advice.headline
+        );
+        // The preparation advice is the guide's own Generation context
+        // section, rendered from the corpus rather than typed again in Rust.
+        let route = prompting::route("hunyuan3d", None, None).unwrap();
+        let section = prompting::section_excerpt(
+            route.family.contents,
+            "Generation context",
+            route.word_limit(),
+        )
+        .unwrap();
+        assert_eq!(advice.preparation, section);
+        assert!(advice.preparation.contains("three-quarter"));
+        assert!(!advice.preparation.contains("## "));
+        assert!(!advice.preparation.contains("```"));
+        assert!(advice.text().starts_with(&advice.headline));
+        assert!(advice.text().ends_with(&advice.preparation));
+        assert!(
+            ignored_prompt_advice("HUNYUAN3D").is_some(),
+            "case-insensitive"
+        );
+        assert!(ignored_prompt_advice("flux").is_none());
+        assert!(ignored_prompt_advice("some-future-model").is_none());
+    }
+
+    #[test]
+    fn a_prompt_ignored_family_short_circuits_the_guide_notes() {
+        let advice = ignored_prompt_advice("hunyuan3d").unwrap();
+        let (limit, notes) =
+            resolve_task_family_config("hunyuan3d", None, ExpandTask::TextToImage, None);
+        assert_eq!(
+            limit,
+            prompting::family_guide("hunyuan3d").unwrap().word_limit
+        );
+        assert_eq!(notes, advice.text());
+        assert!(!notes.contains("MODEL PROMPTING GUIDE"));
+        let ov = FamilyOverride {
+            word_limit: Some(12),
+            style_notes: Some("ignored style notes".into()),
+        };
+        let (limit, notes) =
+            resolve_task_family_config("hunyuan3d", None, ExpandTask::TextToImage, Some(&ov));
+        assert_eq!(limit, 12, "the word limit override is still honoured");
+        assert_eq!(
+            notes,
+            advice.text(),
+            "style notes cannot revive a prompt nothing reads"
+        );
+    }
+
+    #[test]
+    fn generation_context_states_when_the_prompt_is_not_read() {
+        use crate::generation_profile::PromptRequirement;
+        let context = ExpandContext {
+            model: Some("hunyuan3d-mini-turbo:fp16".into()),
+            prompt_mode: Some(PromptRequirement::Ignored),
+            references: vec![crate::ExpandReference::image(
+                crate::ExpandReferenceRole::Source,
+            )],
+            ..ExpandContext::default()
+        };
+        let rendered =
+            prompting::render_generation_context("hunyuan3d", ExpandTask::TextToImage, &context);
+        assert!(
+            rendered.contains("Prompt: not read by this model"),
+            "{rendered}"
+        );
+        let optional = ExpandContext {
+            prompt_mode: Some(PromptRequirement::Optional),
+            ..ExpandContext::default()
+        };
+        let rendered =
+            prompting::render_generation_context("ltx2", ExpandTask::ImageToVideo, &optional);
+        assert!(rendered.contains("Prompt: optional"), "{rendered}");
+        let required = ExpandContext {
+            prompt_mode: Some(PromptRequirement::Required),
+            ..ExpandContext::default()
+        };
+        let rendered =
+            prompting::render_generation_context("flux", ExpandTask::TextToImage, &required);
+        assert!(!rendered.contains("Prompt:"), "{rendered}");
     }
 
     #[test]

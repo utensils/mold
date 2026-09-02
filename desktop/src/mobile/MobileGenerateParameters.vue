@@ -836,7 +836,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         class="mobile-generate-callout"
         data-test="mobile-chain-cue"
       >
-        Will render as {{ chainDecision.stageCount }} chained clips of
+        Will render as {{ chainDecision.stageCount }} chained clips of up to
         {{ chainDecision.clipFrames }} frames with a {{ chainDecision.motionTail }}-frame motion
         tail.
       </p>

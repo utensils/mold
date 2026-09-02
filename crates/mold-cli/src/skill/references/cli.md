@@ -102,10 +102,12 @@ poster plus mesh statistics; the glTF itself lands in the gallery and is
 fetched by filename. Its optional `octree` (the advertised allowlist; cost is
 cubic), `threshold` (0–1 iso-level, ComfyUI `VoxelToMesh` scale), and
 `target_faces` mirror `--octree`, `--mesh-threshold`, and `--target-faces`;
-omit them for the recipe's defaults.
+omit them for the recipe's defaults. The older `octree_resolution` and
+`mesh_threshold` names are declared in the schema as deprecated aliases.
 
-`export_mesh` converts one stored `.glb` into `obj`, `stl`, or `ply`; the CLI
-equivalent is `mold library export <file> --format stl`. Both are transcodes of
+`export_mesh` converts one stored `.glb` into `obj`, `stl`, or `ply` (`glb`
+returns the stored bytes unchanged); the CLI equivalent is
+`mold library export <file> --format stl`. Both are transcodes of
 geometry that already exists — the gallery file is never renamed or replaced —
 and `-o` on a 3-D render must still name a `.glb`. The same tool and command
 take `gif`, `apng`, or `webp` to render a **turntable**: the gallery poster's
@@ -117,6 +119,12 @@ view spun a full turn around the mesh, the way to show a mesh anywhere a
 only, and the flags are refused on a geometry format. Only the formats the
 host lists in `capabilities.mesh.export_formats` succeed (`webp` needs a build
 with the `webp` feature).
+
+`expand_prompt` and `remix_prompt` on a Hunyuan3D model (or `mold expand` /
+`mold remix --model hunyuan3d-mini-turbo`) do not call a language model: the
+one result is the family guide's advice on preparing the source image,
+because the profile advertises `prompt.mode: ignored`. Do not retry it with a
+different backend; improve the image instead.
 
 For published CUDA images, use Mold's live distribution resolver rather than
 guessing an architecture tag. Its current contract includes B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported. B200 support

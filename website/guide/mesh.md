@@ -21,10 +21,12 @@ acceptance. See [Licence](/models/hunyuan3d#licence).
 ## What makes a good input
 
 There is **no text encoder in this family**. The image is the entire
-conditioning, and the prompt — if you pass one — is recorded as provenance and
-never read. **You do not need to write one**: every surface reads the prompt
-requirement off the model's own generation profile, so an empty prompt is
-admitted here and refused everywhere it still means something.
+conditioning, and nothing typed in the prompt field reaches the model. **You
+do not need to write one** on the CLI, the API, the TUI, Discord or MCP: each
+reads the prompt requirement off the model's own generation profile, so an
+empty prompt is admitted here and refused everywhere it still means something.
+The web, desktop and mobile apps still apply the legacy prompt rule until the
+GUI release wires the profile in.
 
 ```bash
 mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb   # no prompt
@@ -39,6 +41,21 @@ matters more than usual:
 - A three-quarter view, not a straight-on one.
 
 A request without a source image is refused rather than answered from nothing.
+
+Prompt expansion follows the same rule. `mold expand`, `mold remix`, the
+Expand and Remix controls on every surface, and the MCP `expand_prompt` /
+`remix_prompt` tools do not call a language model for this family: the one
+answer is the guide's advice above on preparing the image, and `--expand` on
+a mesh run is skipped rather than rewriting the recorded prompt.
+
+The same picture also meshes differently here than in ComfyUI. mold prepares
+the image the way Tencent's `ImageProcessorV2` does — crop to the alpha
+bounding box, then letterbox on a white square, so nothing is cut away —
+while ComfyUI's `clip_preprocess` drops the alpha channel and, with CLIP
+Vision Encode's default `crop: center`, centre-crops the shorter side to a
+square (`crop: none` squashes to a square instead, distorting rather than
+cropping). An off-centre or wide subject loses its edges there and keeps them
+here.
 
 ## Controls
 
@@ -102,8 +119,9 @@ mold library export chair.glb --format ply --output -    # to stdout
 | `ply`  | Positions and per-vertex normals, vertices shared.  | Point-and-mesh tooling, research code. |
 
 The gallery file is never renamed or replaced — an export writes a copy where
-you asked for it. The same conversions are available on every surface: the API
-(`POST /api/gallery/export/:filename`) and the `export_mesh` MCP tool. A host
+you asked for it. The same conversions are available from the API
+(`POST /api/gallery/export/:filename`), the TUI's export picker, and the
+`export_mesh` MCP tool. A host
 advertises what it can convert on `/api/capabilities.mesh.export_formats`.
 
 USDZ is tracked separately; it is the format Apple's AR Quick Look wants and it
@@ -192,10 +210,10 @@ In the **Library**, a `.glb` tile shows its poster (fetched from the owning
 machine's thumbnail route; never the geometry through a raster decoder), and
 `x` opens an export picker offering OBJ, STL, PLY and the turntable formats
 (GIF, APNG, and WebP on a build that encodes it) — the list the owning
-machine advertises on `capabilities.mesh.export_formats`, or every container
-for a print that lives only on this machine, which is rendered in-process
-through the same code the server uses. The picker has no turntable knobs:
-it renders at the defaults (one full turn, 36 frames, 512 px, 10 fps,
+machine advertises on `capabilities.mesh.export_formats`, or the same set
+from the in-process writer for a print that lives only on this machine,
+rendered through the same code the server uses. The picker has no turntable
+knobs: it renders at the defaults (one full turn, 36 frames, 512 px, 10 fps,
 looping) and its hint says so, pointing at `mold library export` for bounce,
 once, or other sizes. The converted copy is written beside your other saves
 as `<print>.<ext>` (an APNG as `.png`) and its path is shown when it lands;

@@ -17,6 +17,8 @@ mod motion;
 mod palette;
 mod prefs;
 mod session;
+mod source_image;
+mod source_media;
 #[cfg(test)]
 pub(crate) mod test_env;
 mod thumbnails;

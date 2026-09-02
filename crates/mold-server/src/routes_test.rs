@@ -18180,6 +18180,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expand_and_remix_answer_a_prompt_ignored_family_without_a_backend() {
+        let state = AppState::for_tests();
+        {
+            // An unreachable API backend: any completion attempt fails loudly.
+            let mut config = state.config.write().await;
+            config.expand.backend = "http://127.0.0.1:9".to_string();
+        }
+        let app = app_with_state(state);
+        let advice = mold_core::ignored_prompt_advice("hunyuan3d").unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/expand")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "prompt": "a dining chair",
+                            "model_family": "hunyuan3d",
+                            "variations": 3,
+                            "context": { "model": "hunyuan3d-mini-turbo:fp16" }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["original"], "a dining chair");
+        assert_eq!(body["expanded"], serde_json::json!([advice.text()]));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/remix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "source_prompt": "a dining chair",
+                            "model_family": "hunyuan3d",
+                            "variations": 3,
+                            "dimensions": ["movement"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["task"], "text-to-image");
+        assert_eq!(
+            body["variants"],
+            serde_json::json!([{ "prompt": advice.text(), "dimensions": [] }])
+        );
+
+        // Every other family still needs the backend, and says so.
+        let response = app
+            .oneshot(
+                Request::post("/api/expand")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "prompt": "a dining chair", "model_family": "flux" })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = json_body(response).await;
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("prompt expansion failed"), "{body}");
+    }
+
+    #[tokio::test]
     async fn post_api_downloads_enqueues_job() {
         let state = AppState::empty(
             mold_core::Config::default(),

@@ -458,6 +458,13 @@ pub struct ExpandContext {
     /// LoRA adapter names (file stems), so trigger words can be honoured.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loras: Vec<String>,
+    /// Whether the target reads the prompt at all, from the ONE profile rule
+    /// (`generation_profile::prompt_requirement_for_family`) resolved against
+    /// this request's conditioning. `Ignored` means the text conditions
+    /// nothing and the expander is never called. Additive: absent from old
+    /// clients, and then the family alone decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_mode: Option<crate::generation_profile::PromptRequirement>,
 }
 
 impl ExpandContext {
@@ -576,6 +583,10 @@ impl ExpandContext {
                 loras.push(lora_display_name(&lora.path));
             }
         }
+        let prompt_mode = Some(crate::generation_profile::prompt_requirement_for_family(
+            Some(family),
+            crate::validation::has_visual_conditioning(req),
+        ));
         Self {
             model: Some(req.model.clone()),
             width: (req.width > 0).then_some(req.width),
@@ -587,6 +598,7 @@ impl ExpandContext {
             audio: req.enable_audio,
             references,
             loras,
+            prompt_mode,
         }
     }
 
@@ -3035,7 +3047,15 @@ impl OutputMetadata {
             generation_width: Some(req.width),
             mesh: MeshRequestOptions::provenance_for_request(req),
             generation_height: Some(req.height),
-            strength: req.source_image.as_ref().map(|_| req.strength),
+            // A mesh request carries a source image but no latent to
+            // partially denoise, and its profile advertises
+            // `supports_strength: false`; recording the wire default would
+            // describe a knob nothing read.
+            strength: req
+                .source_image
+                .as_ref()
+                .filter(|_| !req.output_format.is_some_and(|format| format.is_mesh()))
+                .map(|_| req.strength),
             source_image_name: req
                 .source_image
                 .as_ref()
@@ -3203,8 +3223,9 @@ pub enum OutputFormat {
     Glb,
     /// Wavefront OBJ. **Export-only** — a `.obj` is never the stored artifact
     /// because it cannot carry its own material or textures, so mold serves it
-    /// as a transcode alongside the `.mtl` and texture files rather than
-    /// publishing a file that is incomplete on its own.
+    /// as a transcode of the stored GLB (positions, UVs and normals as text,
+    /// no `mtllib`) rather than publishing a file that is incomplete on its
+    /// own.
     Obj,
 }
 
@@ -5942,6 +5963,53 @@ mod tests {
     }
 
     #[test]
+    fn expand_context_reads_the_prompt_mode_from_the_profile_rule() {
+        use crate::generation_profile::PromptRequirement;
+        let request = |model: &str, source_image: bool| -> GenerateRequest {
+            let mut value = serde_json::json!({
+                "model": model,
+                "prompt": "a chair",
+                "width": 1024,
+                "height": 1024,
+                "steps": 4
+            });
+            if source_image {
+                value["source_image"] = serde_json::Value::String("AQID".into());
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let mesh = ExpandContext::for_generation(
+            "hunyuan3d",
+            &request("hunyuan3d-mini-turbo", true),
+            None,
+        );
+        assert_eq!(mesh.prompt_mode, Some(PromptRequirement::Ignored));
+        let conditioned = ExpandContext::for_generation(
+            "ltx2",
+            &request("ltx-2.3-22b-distilled:fp8", true),
+            None,
+        );
+        assert_eq!(conditioned.prompt_mode, Some(PromptRequirement::Optional));
+        let bare = ExpandContext::for_generation(
+            "ltx2",
+            &request("ltx-2.3-22b-distilled:fp8", false),
+            None,
+        );
+        assert_eq!(bare.prompt_mode, Some(PromptRequirement::Required));
+        let image = ExpandContext::for_generation("flux", &request("flux-schnell", false), None);
+        assert_eq!(image.prompt_mode, Some(PromptRequirement::Required));
+        // Additive on the wire: absent for old clients, lowercase when sent.
+        let old_wire: ExpandContext = serde_json::from_str(r#"{"model":"flux-schnell"}"#).unwrap();
+        assert_eq!(old_wire.prompt_mode, None);
+        assert!(!serde_json::to_string(&old_wire)
+            .unwrap()
+            .contains("prompt_mode"));
+        assert!(serde_json::to_string(&mesh)
+            .unwrap()
+            .contains(r#""prompt_mode":"ignored""#));
+    }
+
+    #[test]
     fn expand_request_old_client_missing_style_is_none() {
         // Old clients don't know about `style` — the field must default to None.
         let back: ExpandRequest = serde_json::from_str(r#"{"prompt":"a cat"}"#).unwrap();
@@ -6855,9 +6923,9 @@ mod tests {
         assert!(metadata.source_preprocessing.is_some());
     }
 
-    #[test]
-    fn output_metadata_omits_strength_without_source_image() {
-        let req = GenerateRequest {
+    /// A plain text-to-image request every metadata test can start from.
+    fn text_to_image_request() -> GenerateRequest {
+        GenerateRequest {
             mesh: None,
             video_only: None,
             collection: None,
@@ -6927,7 +6995,12 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
-        };
+        }
+    }
+
+    #[test]
+    fn output_metadata_omits_strength_without_source_image() {
+        let req = text_to_image_request();
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
         assert_eq!(metadata.strength, None);
@@ -6942,6 +7015,32 @@ mod tests {
         let json = serde_json::to_string(&metadata).unwrap();
         assert!(!json.contains("source_image_name"));
         assert!(!json.contains("source_image_sha256"));
+    }
+
+    /// The strength field is recorded only where it was read. A raster
+    /// img2img request records it; a mesh request carries a source image
+    /// too, but its profile advertises `supports_strength: false` and the
+    /// engine never reads the field, so the print must not claim one.
+    #[test]
+    fn output_metadata_omits_strength_for_a_mesh_request_with_a_source_image() {
+        let mut raster = text_to_image_request();
+        raster.source_image = Some(vec![0x89, b'P', b'N', b'G']);
+        let metadata = OutputMetadata::from_generate_request(&raster, 7, None, "0.1.0");
+        assert_eq!(metadata.strength, Some(0.75));
+
+        let mut mesh = text_to_image_request();
+        mesh.model = crate::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        mesh.prompt = String::new();
+        mesh.width = 0;
+        mesh.height = 0;
+        mesh.source_image = Some(vec![0x89, b'P', b'N', b'G']);
+        mesh.output_format = Some(OutputFormat::Glb);
+        let metadata = OutputMetadata::from_generate_request(&mesh, 7, None, "0.1.0");
+        assert_eq!(metadata.strength, None);
+        assert!(
+            metadata.source_image_sha256.is_some(),
+            "the image is still provenance"
+        );
     }
 
     /// Identity conditioning rides the wire additively: present fields

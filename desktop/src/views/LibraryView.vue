@@ -2764,18 +2764,26 @@ onUnmounted(() => {
             >
               New
             </span>
+            <!-- Upscaled + media kind share the top-right corner in one row so
+                 a Framewise-upscaled clip shows both instead of stacking them. -->
             <span
-              v-if="!selectMode && tile.model.upscaled"
-              data-test="upscaled-badge"
-              class="ms-lib-upscaled absolute top-2 right-2"
+              v-if="(!selectMode && tile.model.upscaled) || tile.model.video || tile.model.audio"
+              class="absolute top-1.5 right-1.5 flex items-center gap-1"
             >
-              Upscaled
-            </span>
-            <span
-              v-if="tile.model.video || tile.model.audio"
-              class="absolute top-1.5 right-1.5 rounded-control bg-black/60 px-1 text-caption text-on-media"
-            >
-              {{ tile.model.audio ? "♪" : "▶" }}
+              <span
+                v-if="!selectMode && tile.model.upscaled"
+                data-test="upscaled-badge"
+                class="ms-lib-upscaled"
+              >
+                Upscaled
+              </span>
+              <span
+                v-if="tile.model.video || tile.model.audio"
+                data-test="media-kind-badge"
+                class="rounded-control bg-black/60 px-1 text-caption text-on-media"
+              >
+                {{ tile.model.audio ? "♪" : "▶" }}
+              </span>
             </span>
             <span
               v-if="selectMode"

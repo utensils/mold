@@ -75,6 +75,18 @@ pub async fn run(
         "flux".to_string() // Default to FLUX-style prompts
     };
 
+    // A family that reads no prompt has nothing to expand. Answer before an
+    // expansion model is created (or pulled): the guide's image advice is
+    // the whole answer, and no language model runs.
+    if let Some(advice) = mold_core::ignored_prompt_advice(&model_family) {
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&[advice.text()])?);
+        } else {
+            print_ignored_prompt_advice(&advice);
+        }
+        return Ok(());
+    }
+
     let mut expand_config = expand_settings.to_expand_config(&model_family, variations);
     if let Some(task) = task_override {
         expand_config.task = task
@@ -114,6 +126,14 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// `mold expand` / `mold remix` on a family whose profile ignores the prompt:
+/// the one-line reason goes to stderr like every other status line, and the
+/// guide's image-preparation advice is the stdout answer.
+pub(crate) fn print_ignored_prompt_advice(advice: &mold_core::IgnoredPromptAdvice) {
+    status!("{} {}", theme::icon_info(), advice.headline);
+    println!("{}", advice.preparation);
 }
 
 /// Create the appropriate expander based on settings.
@@ -247,6 +267,7 @@ pub(crate) fn context_from_flags(
         audio: None,
         references: parsed,
         loras: Vec::new(),
+        prompt_mode: None,
     }))
 }
 

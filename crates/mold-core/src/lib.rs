@@ -17,6 +17,7 @@ pub mod expand_prompts;
 pub mod format;
 pub mod generation_profile;
 pub mod gguf_probe;
+pub mod glb_summary;
 pub mod identity;
 pub mod install_error;
 pub mod lambda;
@@ -134,4 +135,7 @@ pub use video_upscale::*;
 pub use expand::{
     ApiExpander, ExpandConfig, ExpandResult, ExpandSettings, FamilyOverride, PromptExpander,
 };
-pub use expand_prompts::{build_batch_messages, build_single_messages, format_chatml};
+pub use expand_prompts::{
+    build_batch_messages, build_single_messages, format_chatml, ignored_prompt_advice,
+    IgnoredPromptAdvice,
+};

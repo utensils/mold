@@ -68,20 +68,6 @@ export function promptRequirementForRecipe(
 }
 
 /**
- * @deprecated Read `promptRequirementForRecipe` (or `promptRequirementFor`
- * with the recipe on the input) instead: the family allowlist this used to
- * hold is gone, and the host advertises the answer. Pass the resolved recipe
- * whenever one is in scope; without it this is the pre-profile family rule.
- */
-export function familyAllowsEmptyPrompt(
-  family: string | null | undefined,
-  recipe?: PromptRecipe | null,
-): boolean {
-  if (recipe) return promptRequirementForRecipe(recipe, true) !== "required";
-  return legacyPromptRequirementForFamily(family) !== "required";
-}
-
-/**
  * The request/form fields the rule reads. Structurally satisfied by desktop's
  * `GenerateForm` (`family`, `sourceImage`) and web's form state
  * (`modelFamily`, `imageAttachments`) alike, so neither surface needs an

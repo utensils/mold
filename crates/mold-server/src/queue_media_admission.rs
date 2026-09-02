@@ -1,6 +1,6 @@
 //! Canonical encrypted-media admission shared by batch and direct routes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::sync::Arc;
 
@@ -452,6 +452,12 @@ impl DurableMediaAdmission {
         // child's OWN resolution failure — an unknown handle, a digest that
         // drifted — spends sessions, and that child has to be re-staged anyway.
         let mut validated = Vec::with_capacity(body.requests.len());
+        // Resolving a generation profile builds the whole model catalog and
+        // scans the models directory, so a batch pays for it ONCE per model
+        // name rather than once per request; preparation resolves it again
+        // after the acknowledgement, which is one more, not N more.
+        let mut profiles_by_model: HashMap<String, Option<mold_core::GenerationProfileSet>> =
+            HashMap::new();
         for (offset, mut request) in body.requests.into_iter().enumerate() {
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
@@ -540,13 +546,24 @@ impl DurableMediaAdmission {
             // adds a refusal rather than reordering the existing ones.
             if !private_ingress {
                 if let Some(output_format) = request.output_format {
-                    let canonical = mold_core::manifest::resolve_model_name(&request.model);
-                    if let Some(profile) = crate::routes::resolved_generation_profile(
-                        state,
-                        &request.model,
-                        &canonical,
-                    )
-                    .await
+                    if !profiles_by_model.contains_key(&request.model) {
+                        let canonical = mold_core::manifest::resolve_model_name(&request.model);
+                        let profile = crate::routes::resolved_generation_profile(
+                            state,
+                            &request.model,
+                            &canonical,
+                        )
+                        .await;
+                        profiles_by_model.insert(request.model.clone(), profile);
+                    }
+                    // The door checks the recipe the request's own `pipeline`
+                    // names (the default one when it names none); preparation
+                    // may later pick IcLora or LipDub through
+                    // `plan_builtin_ltx2_control`, whose format lists match the
+                    // default's today.
+                    if let Some(profile) = profiles_by_model
+                        .get(&request.model)
+                        .and_then(Option::as_ref)
                     {
                         if let Some(recipe) = profile.recipe_for_pipeline(request.pipeline) {
                             mold_core::validate_output_format_against_generation_profile(

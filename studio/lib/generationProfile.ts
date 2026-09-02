@@ -403,7 +403,7 @@ function isPromptCapabilities(
 function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
   if (!isRecord(value)) return false;
   const { octree_resolutions, octree_default, target_faces_min } = value;
-  const { target_faces_max, export_formats } = value;
+  const { target_faces_max } = value;
   return (
     Array.isArray(octree_resolutions) &&
     octree_resolutions.length > 0 &&
@@ -414,11 +414,7 @@ function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
     positiveIntegerValue(target_faces_min) &&
     positiveIntegerValue(target_faces_max) &&
     target_faces_min <= target_faces_max &&
-    isFeatureControl(value.texture) &&
-    (export_formats === undefined ||
-      export_formats === null ||
-      (Array.isArray(export_formats) &&
-        export_formats.every((format) => typeof format === "string")))
+    isFeatureControl(value.texture)
   );
 }
 

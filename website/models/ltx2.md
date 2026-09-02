@@ -854,9 +854,10 @@ the model allows it; attention cost grows with the square of the token count,
 so a 481-frame render at 1216x704 needs far more VRAM than most cards have.
 The validator permits it; auto-chaining stays at 97-frame clips by default.
 
-When the final clip over-produces (stage math rarely lands exactly on
-`total_frames`), mold trims from the tail so the user-anchored starting image
-at the head stays intact.
+The final clip is sized so the stitched video lands exactly on
+`total_frames` whenever the frame grid allows it; a total the grid cannot
+express is rounded up by at most one grid step and disclosed before
+rendering. The user-anchored starting image at the head always stays intact.
 
 ### v1 constraints
 

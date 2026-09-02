@@ -1352,7 +1352,14 @@ async fn prepare_generation_inner(
         mold_core::minimax_h3::validate_reference_descriptors(references)
             .map_err(ApiError::reference)?;
     }
-    if request.expand == Some(true) && !request.prompt.trim().is_empty() {
+    // The activation gate is asked only for an expansion that will happen:
+    // an empty prompt and a family whose profile ignores its prompt are both
+    // cleared by `maybe_expand_prompt` below without touching a model, so a
+    // mesh run must not be refused for an expansion model it will never use.
+    if request.expand == Some(true)
+        && !request.prompt.trim().is_empty()
+        && !generation_prompt_ignored(request, family.as_deref())
+    {
         let settings = state
             .config
             .read()
@@ -3659,6 +3666,24 @@ pub(crate) async fn apply_default_metadata_setting(
     req.embed_metadata = Some(config.effective_embed_metadata(None));
 }
 
+/// Whether the request's family ignores its prompt (no text encoder), from
+/// the ONE profile rule resolved against this request's conditioning. The
+/// family hint is the catalog-resolved one when the caller has it; the
+/// manifest answers otherwise.
+fn generation_prompt_ignored(
+    req: &mold_core::GenerateRequest,
+    resolved_family: Option<&str>,
+) -> bool {
+    let family = resolved_family
+        .map(str::to_owned)
+        .or_else(|| mold_core::manifest::find_manifest(&req.model).map(|m| m.family.clone()));
+    mold_core::prompt_requirement_for_family(
+        family.as_deref(),
+        mold_core::validation::has_visual_conditioning(req),
+    )
+    .is_ignored()
+}
+
 /// Apply prompt expansion if `expand: true` is set on a generate request.
 async fn maybe_expand_prompt(
     state: &AppState,
@@ -3678,6 +3703,13 @@ async fn maybe_expand_prompt(
     // when it plans the PromptExpansion dependency stage, so leaving it set
     // would hand "" to the expander one layer down.
     if req.prompt.trim().is_empty() {
+        req.expand = Some(false);
+        return Ok(());
+    }
+    // A family whose profile ignores the prompt has nothing to expand either:
+    // the text conditions nothing, so an expansion would only rewrite the
+    // recorded prompt. Cleared for the same scheduler reason as above.
+    if generation_prompt_ignored(req, resolved_family) {
         req.expand = Some(false);
         return Ok(());
     }
@@ -3814,6 +3846,15 @@ async fn expand_prompt(
     Json(req): Json<mold_core::ExpandRequest>,
 ) -> Result<Json<mold_core::ExpandResponse>, ApiError> {
     validate_expand_variations(req.variations)?;
+    // A family that reads no prompt is answered from the guide, before an
+    // expansion model is required, activated, or scheduled: one text
+    // whatever `variations` says, because there is exactly one thing to say.
+    if let Some(advice) = mold_core::ignored_prompt_advice(&req.model_family) {
+        return Ok(Json(mold_core::ExpandResponse {
+            original: req.prompt,
+            expanded: vec![advice.text()],
+        }));
+    }
 
     let config = state.config.read().await;
     let expand_settings = config.expand.clone().with_env_overrides();
@@ -3879,6 +3920,20 @@ async fn remix_prompt(
     let task = req
         .task
         .unwrap_or_else(|| mold_core::ExpandTask::for_family(&req.model_family));
+    // Same door as `/api/expand`: a family that reads no prompt gets the
+    // guide's image advice as its one alternative, varying nothing.
+    if let Some(advice) = mold_core::ignored_prompt_advice(&req.model_family) {
+        return Ok(Json(mold_core::RemixResponse {
+            source_prompt: req.source_prompt,
+            root_prompt: req.root_prompt,
+            source_kind: req.source_kind,
+            task,
+            variants: vec![mold_core::RemixVariant {
+                prompt: advice.text(),
+                dimensions: Vec::new(),
+            }],
+        }));
+    }
     let dimensions = mold_core::expand::resolve_remix_dimensions(
         &req.dimensions,
         task,
@@ -13001,6 +13056,65 @@ mod tests {
         assert!(request.original_prompt.is_none());
         // Cleared so scheduler-owned local expansion doesn't re-plan it.
         assert_eq!(request.expand, Some(false));
+    }
+
+    #[tokio::test]
+    async fn expansion_skipped_for_a_prompt_ignored_family() {
+        // A mesh family has no text encoder: expanding "a chair" would only
+        // rewrite the recorded prompt, so the door clears the flag without
+        // creating, activating, or calling an expansion backend.
+        let state = AppState::for_tests();
+        state.config.write().await.expand.backend = "http://127.0.0.1:9".to_string();
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a chair",
+            "model": "hunyuan3d-mini-turbo",
+            "width": 0,
+            "height": 0,
+            "steps": 5,
+            "guidance": 5.0,
+            "batch_size": 1,
+            "source_image": "AQID",
+            "expand": true
+        }))
+        .unwrap();
+        assert!(generation_prompt_ignored(&request, Some("hunyuan3d")));
+        assert!(
+            generation_prompt_ignored(&request, None),
+            "manifest resolves the family"
+        );
+
+        maybe_expand_prompt(&state, &mut request, None, Some("hunyuan3d"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(request.prompt, "a chair");
+        assert!(request.original_prompt.is_none());
+        assert_eq!(request.expand, Some(false));
+
+        // A family that reads its prompt still reaches the backend and fails
+        // on it, so the skip above is the family rule and not a dead backend.
+        let mut flux: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a chair",
+            "model": "flux-schnell:q8",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1,
+            "expand": true
+        }))
+        .unwrap();
+        assert!(!generation_prompt_ignored(&flux, Some("flux")));
+        let error = maybe_expand_prompt(&state, &mut flux, None, Some("flux"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            error.error.contains("prompt expansion failed"),
+            "{}",
+            error.error
+        );
+        assert_eq!(flux.expand, Some(true));
     }
 
     #[tokio::test]

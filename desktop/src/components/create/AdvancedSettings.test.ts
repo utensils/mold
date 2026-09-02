@@ -503,7 +503,9 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     form.frames = 241;
     const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
-    expect(wrapper.get("[data-test='chain-cue']").text()).toContain("chained clips of 97 frames");
+    expect(wrapper.get("[data-test='chain-cue']").text()).toContain(
+      "chained clips of up to 97 frames",
+    );
   });
 
   it("explains when advanced settings keep a long request single-shot", async () => {

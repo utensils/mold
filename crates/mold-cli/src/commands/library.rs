@@ -455,9 +455,9 @@ async fn library_trash(client: &MoldClient, filenames: &[String]) -> Result<()> 
     Ok(())
 }
 
-/// `mold library export <file> --format obj|stl|ply|gif|apng|webp` —
-/// transcode one stored mesh (or render its turntable) and write the result
-/// locally.
+/// `mold library export <file> --format glb|obj|stl|ply|gif|apng|webp` —
+/// transcode one stored mesh (or download the stored `.glb` unchanged, or
+/// render its turntable) and write the result locally.
 ///
 /// HTTP to `$MOLD_HOST` with no local fallback, like every other non-grid
 /// `mold library` command: the print lives on the serving host, and reading
@@ -471,12 +471,7 @@ async fn library_export(
     turntable: &mold_core::MeshTurntableOptions,
     output: Option<&str>,
 ) -> Result<()> {
-    if !std::path::Path::new(filename)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
-    {
-        bail!("only stored .glb prints can be exported; '{filename}' is not one");
-    }
+    let stem = export_stem(filename)?;
     // The server would ignore them, and a flag that silently does nothing is
     // worse than one that is refused with the formats it applies to.
     if !format.is_animation() && *turntable != mold_core::MeshTurntableOptions::default() {
@@ -519,16 +514,9 @@ async fn library_export(
         .await
         .with_context(|| format!("could not export {filename} as {format}"))?;
 
-    let destination = output.map(str::to_string).unwrap_or_else(|| {
-        format!(
-            "{}.{}",
-            std::path::Path::new(filename)
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("mold-mesh"),
-            format.extension()
-        )
-    });
+    let destination = output
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{stem}.{}", format.extension()));
     if destination == "-" {
         io::stdout()
             .write_all(&bytes)
@@ -546,6 +534,33 @@ async fn library_export(
         bytes.len()
     );
     Ok(())
+}
+
+/// The stem an export is named after, once the argument is a gallery
+/// filename this command can act on.
+///
+/// Two refusals, both LOCAL: a print that is not a stored `.glb` has nothing
+/// to transcode, and a path — `./chair.glb`, `prints/chair.glb` — is not a
+/// gallery filename at all. The latter used to be percent-encoded into a
+/// route the server answers 422 for; the argument is the bare name
+/// `mold library list` prints.
+fn export_stem(filename: &str) -> Result<&str> {
+    if filename.contains(['/', '\\']) {
+        bail!(
+            "'{filename}' is a path, not a gallery filename; pass the bare name shown by `mold library list`"
+        );
+    }
+    let path = std::path::Path::new(filename);
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+    {
+        bail!("only stored .glb prints can be exported; '{filename}' is not one");
+    }
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("'{filename}' has no name before its .glb extension"))
 }
 
 async fn require_organize(client: &MoldClient) -> Result<ServerCapabilities> {
@@ -824,6 +839,156 @@ mod tests {
             "collections": []
         }))
         .unwrap()
+    }
+
+    /// Both export refusals answer locally, and the stem is what the
+    /// default output is named after.
+    #[test]
+    fn export_stem_guards_the_extension_and_refuses_paths() {
+        assert_eq!(export_stem("chair.glb").unwrap(), "chair");
+        assert_eq!(
+            export_stem("mold-hunyuan3d-1700000000000.GLB").unwrap(),
+            "mold-hunyuan3d-1700000000000"
+        );
+        let not_a_mesh = export_stem("cat.png").unwrap_err().to_string();
+        assert!(
+            not_a_mesh.contains("only stored .glb prints"),
+            "{not_a_mesh}"
+        );
+        assert!(export_stem("chair").is_err());
+        for path in ["./chair.glb", "prints/chair.glb", "C:\\prints\\chair.glb"] {
+            let error = export_stem(path).unwrap_err().to_string();
+            assert!(error.contains("not a gallery filename"), "{path}: {error}");
+            assert!(error.contains("mold library list"), "{path}: {error}");
+        }
+    }
+
+    async fn export_host(export_formats: Vec<mold_core::MeshExportFormat>) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let capabilities = ServerCapabilities {
+            mesh: Some(mold_core::MeshCapabilities {
+                export_formats,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/chair.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"solid".to_vec()))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// A container the host does not advertise is refused before the export
+    /// request, naming what the host does offer; an older host with no mesh
+    /// block at all reads as "nothing".
+    #[tokio::test]
+    async fn library_export_refuses_a_container_the_host_does_not_advertise() {
+        let server = export_host(vec![mold_core::MeshExportFormat::Obj]).await;
+        let client = MoldClient::new(&server.uri());
+        let error = library_export(
+            &client,
+            "chair.glb",
+            mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("does not export meshes as stl"), "{error}");
+        assert!(error.contains("this host offers obj"), "{error}");
+
+        let bare = export_host(Vec::new()).await;
+        let client = MoldClient::new(&bare.uri());
+        let error = library_export(
+            &client,
+            "chair.glb",
+            mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("does not export meshes as stl"), "{error}");
+        assert!(!error.contains("this host offers"), "{error}");
+
+        // The local guards answer before any request at all.
+        let unreachable = MoldClient::new("http://127.0.0.1:1");
+        let error = library_export(
+            &unreachable,
+            "cat.png",
+            mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("only stored .glb prints"), "{error}");
+        let error = library_export(
+            &unreachable,
+            "./chair.glb",
+            mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not a gallery filename"), "{error}");
+    }
+
+    /// The bytes land where `-o` says, or under the print's stem with the
+    /// new extension, or on stdout for `-o -`; the gallery file is untouched.
+    #[tokio::test]
+    async fn library_export_writes_the_transcode_where_asked() {
+        let server = export_host(vec![mold_core::MeshExportFormat::Stl]).await;
+        let client = MoldClient::new(&server.uri());
+        let dir = tempfile::tempdir().unwrap();
+
+        let explicit = dir.path().join("armchair.stl");
+        library_export(
+            &client,
+            "chair.glb",
+            mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
+            Some(explicit.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&explicit).unwrap(), b"solid");
+
+        // The default name is `<stem>.<ext>` in the working directory.
+        assert_eq!(
+            format!(
+                "{}.{}",
+                export_stem("chair.glb").unwrap(),
+                mold_core::MeshExportFormat::Stl.extension()
+            ),
+            "chair.stl"
+        );
+
+        // `-o -` streams the bytes and writes no file.
+        library_export(
+            &client,
+            "chair.glb",
+            mold_core::MeshExportFormat::Stl,
+            &mold_core::MeshTurntableOptions::default(),
+            Some("-"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -64,14 +64,13 @@ scripts/tui-uat.sh db-model-assert <model> <col> <v> # Pass/fail on a single `mo
 
 ## How to Run a UAT Session
 
-> **Always trap cleanup.** Wrap every UAT flow so the Ghostty window is
-> closed even if an assertion fails or the script is interrupted.
-> `cleanup` is safe to call repeatedly and will reap orphan windows
-> whose state file was lost:
->
-> ```bash
-> trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
-> ```
+> **Never close Ghostty.** Ghostty is the user's terminal (cmux is built on
+> it), so a UAT flow must never quit the app, close its windows, or kill its
+> processes — not on success, not on failure, not from a trap. `quit` and
+> `cleanup` exist for a human at the keyboard; an agent does not call them.
+> When a flow ends, exit `mold tui` normally (its quit key, so the shell
+> prompt returns) and leave the window open. Killing a `mold serve` you
+> started yourself is fine.
 
 ### 1. Launch
 
@@ -135,9 +134,10 @@ Screenshots are taken with `screencapture -l<windowID>` — capturing the actual
 
 ### 6. Tear Down
 
-```bash
-scripts/tui-uat.sh quit
-```
+Exit the TUI from inside it (`q` from Nav mode, or `ctrl+c`) so the shell
+prompt returns in the same window, then stop. Do not run `quit` or `cleanup`:
+they close Ghostty windows, and the window stays open by rule (see the note
+at the top of this section).
 
 ## TUI Views and Landmarks
 
