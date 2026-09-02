@@ -3035,7 +3035,15 @@ impl OutputMetadata {
             generation_width: Some(req.width),
             mesh: MeshRequestOptions::provenance_for_request(req),
             generation_height: Some(req.height),
-            strength: req.source_image.as_ref().map(|_| req.strength),
+            // A mesh request carries a source image but no latent to
+            // partially denoise, and its profile advertises
+            // `supports_strength: false`; recording the wire default would
+            // describe a knob nothing read.
+            strength: req
+                .source_image
+                .as_ref()
+                .filter(|_| !req.output_format.is_some_and(|format| format.is_mesh()))
+                .map(|_| req.strength),
             source_image_name: req
                 .source_image
                 .as_ref()
@@ -3203,8 +3211,9 @@ pub enum OutputFormat {
     Glb,
     /// Wavefront OBJ. **Export-only** — a `.obj` is never the stored artifact
     /// because it cannot carry its own material or textures, so mold serves it
-    /// as a transcode alongside the `.mtl` and texture files rather than
-    /// publishing a file that is incomplete on its own.
+    /// as a transcode of the stored GLB (positions, UVs and normals as text,
+    /// no `mtllib`) rather than publishing a file that is incomplete on its
+    /// own.
     Obj,
 }
 
@@ -6720,9 +6729,9 @@ mod tests {
         assert!(metadata.source_preprocessing.is_some());
     }
 
-    #[test]
-    fn output_metadata_omits_strength_without_source_image() {
-        let req = GenerateRequest {
+    /// A plain text-to-image request every metadata test can start from.
+    fn text_to_image_request() -> GenerateRequest {
+        GenerateRequest {
             mesh: None,
             video_only: None,
             collection: None,
@@ -6792,7 +6801,12 @@ mod tests {
             id_image_names: None,
             true_cfg: None,
             cfg_start_step: None,
-        };
+        }
+    }
+
+    #[test]
+    fn output_metadata_omits_strength_without_source_image() {
+        let req = text_to_image_request();
 
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
         assert_eq!(metadata.strength, None);
@@ -6807,6 +6821,32 @@ mod tests {
         let json = serde_json::to_string(&metadata).unwrap();
         assert!(!json.contains("source_image_name"));
         assert!(!json.contains("source_image_sha256"));
+    }
+
+    /// The strength field is recorded only where it was read. A raster
+    /// img2img request records it; a mesh request carries a source image
+    /// too, but its profile advertises `supports_strength: false` and the
+    /// engine never reads the field, so the print must not claim one.
+    #[test]
+    fn output_metadata_omits_strength_for_a_mesh_request_with_a_source_image() {
+        let mut raster = text_to_image_request();
+        raster.source_image = Some(vec![0x89, b'P', b'N', b'G']);
+        let metadata = OutputMetadata::from_generate_request(&raster, 7, None, "0.1.0");
+        assert_eq!(metadata.strength, Some(0.75));
+
+        let mut mesh = text_to_image_request();
+        mesh.model = crate::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        mesh.prompt = String::new();
+        mesh.width = 0;
+        mesh.height = 0;
+        mesh.source_image = Some(vec![0x89, b'P', b'N', b'G']);
+        mesh.output_format = Some(OutputFormat::Glb);
+        let metadata = OutputMetadata::from_generate_request(&mesh, 7, None, "0.1.0");
+        assert_eq!(metadata.strength, None);
+        assert!(
+            metadata.source_image_sha256.is_some(),
+            "the image is still provenance"
+        );
     }
 
     /// Identity conditioning rides the wire additively: present fields

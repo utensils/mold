@@ -37,6 +37,21 @@ pub fn human_bytes_compact(bytes: u64) -> String {
     }
 }
 
+/// `49152` → `49,152`. Triangle and vertex counts run to six or seven
+/// digits, where an unseparated number stops being readable at a glance.
+/// Shared by the Discord embed and the TUI caption so the two cannot drift.
+pub fn group_thousands(value: u32) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Human-readable display name for a model family identifier, shared by the
 /// CLI (`mold list`, run banners) and the TUI (Models tables/details) so the
 /// two terminal surfaces can never disagree about how a family is presented
@@ -88,6 +103,16 @@ mod tests {
     fn unknown_families_have_no_label_so_callers_keep_their_fallback() {
         assert_eq!(family_display_label("companion"), None);
         assert_eq!(family_display_label(""), None);
+    }
+
+    #[test]
+    fn group_thousands_separates_every_three_digits() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1_000), "1,000");
+        assert_eq!(group_thousands(49_152), "49,152");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
+        assert_eq!(group_thousands(u32::MAX), "4,294,967,295");
     }
 
     #[test]

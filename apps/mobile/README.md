@@ -161,7 +161,8 @@ pushed screen opened from the header.
   carries visual conditioning (source image, keyframes, source video, or a
   continuation): Develop enables, the pre-submit guard stops requiring text, and
   the prompt placeholder says so. Every other model — including image families
-  with a source image — still requires a prompt. This follows the shared
+  with a source image, and Hunyuan3D until the GUI release reads the profile's
+  `ignored` prompt mode — still requires a prompt here. This follows the shared
   `@studio/lib/promptRequirement` rule and its shared copy, so iPhone, desktop,
   and web cannot set different expectations; `MobileSequenceComposer` applies
   the same rule to clip rails through `SequenceLimits.promptOptional`. A blank

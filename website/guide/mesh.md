@@ -22,9 +22,11 @@ acceptance. See [Licence](/models/hunyuan3d#licence).
 
 There is **no text encoder in this family**. The image is the entire
 conditioning, and the prompt — if you pass one — is recorded as provenance and
-never read. **You do not need to write one**: every surface reads the prompt
-requirement off the model's own generation profile, so an empty prompt is
-admitted here and refused everywhere it still means something.
+never read. **You do not need to write one** on the CLI, the API, the TUI,
+Discord or MCP: each reads the prompt requirement off the model's own
+generation profile, so an empty prompt is admitted here and refused everywhere
+it still means something. The web, desktop and mobile apps still apply the
+legacy prompt rule until the GUI release wires the profile in.
 
 ```bash
 mold run hunyuan3d-mini-turbo --image chair.png -o chair.glb   # no prompt
@@ -102,8 +104,9 @@ mold library export chair.glb --format ply --output -    # to stdout
 | `ply`  | Positions and per-vertex normals, vertices shared.  | Point-and-mesh tooling, research code. |
 
 The gallery file is never renamed or replaced — an export writes a copy where
-you asked for it. The same conversions are available on every surface: the API
-(`POST /api/gallery/export/:filename`) and the `export_mesh` MCP tool. A host
+you asked for it. The same conversions are available from the API
+(`POST /api/gallery/export/:filename`), the TUI's export picker, and the
+`export_mesh` MCP tool. A host
 advertises what it can convert on `/api/capabilities.mesh.export_formats`.
 
 USDZ is tracked separately; it is the format Apple's AR Quick Look wants and it
@@ -146,8 +149,9 @@ poster in the Preview panel, and captions it with
 In the **Library**, a `.glb` tile shows its poster (fetched from the owning
 machine's thumbnail route; never the geometry through a raster decoder), and
 `x` opens an export picker offering OBJ, STL and PLY — the list the owning
-machine advertises on `capabilities.mesh.export_formats`, or every container
-for a print that lives only on this machine. The converted copy is written
+machine advertises on `capabilities.mesh.export_formats`, or OBJ, STL and
+PLY from the in-process writer for a print that lives only on this machine.
+The converted copy is written
 beside your other saves as `<print>.<ext>` and its path is shown when it
 lands; the gallery file is untouched.
 

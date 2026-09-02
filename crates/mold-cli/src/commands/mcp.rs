@@ -69,37 +69,36 @@ fn reconciliation_key(authority: &GenerationBatchAuthority, job_id: &str) -> Str
     .join("|")
 }
 
+/// One accepted durable output, read back as the response shape the tool
+/// handlers consume, plus the gallery filename it was published under —
+/// which is the only handle an agent has on a mesh, since MCP has no mesh
+/// content type.
+struct CanonicalOutput {
+    response: GenerateResponse,
+    filename: String,
+}
+
 async fn generate_canonically(
     client: &MoldClient,
     req: GenerateRequest,
-) -> std::result::Result<GenerateResponse, String> {
+) -> std::result::Result<CanonicalOutput, String> {
     let artifact = canonical_singleton_artifact(client, &req)
         .await
         .map_err(|error| format!("mold durable generation failed: {error:#}"))?;
-    let image = image::load_from_memory(&artifact.bytes)
-        .map_err(|error| format!("could not decode durable output: {error}"))?;
-    let (width, height) = image.dimensions();
-    let format = artifact
-        .filename
-        .rsplit_once('.')
-        .and_then(|(_, extension)| extension.parse::<OutputFormat>().ok())
-        .unwrap_or_else(|| artifact.request.resolved_output_format());
-    Ok(GenerateResponse {
-        mesh: None,
-        images: vec![mold_core::ImageData {
-            data: artifact.bytes,
-            format,
-            width,
-            height,
-            index: 0,
-        }],
-        video: None,
-        audio: None,
-        generation_time_ms: artifact.result.generation_time_ms.unwrap_or_default(),
-        model: artifact.metadata.model,
-        seed_used: artifact.metadata.seed,
-        gpu: artifact.result.gpu,
-        request_warnings: Vec::new(),
+    let fallback_format = artifact.request.resolved_output_format();
+    let response = response_from_canonical_bytes(
+        client,
+        artifact.bytes,
+        &artifact.filename,
+        artifact.metadata,
+        Some(fallback_format),
+        artifact.result.generation_time_ms.unwrap_or_default(),
+        artifact.result.gpu,
+    )
+    .await?;
+    Ok(CanonicalOutput {
+        response,
+        filename: artifact.filename,
     })
 }
 
@@ -111,23 +110,83 @@ async fn hydrate_canonical_outcome(
     let artifact = hydrate_canonical_artifact(client, child)
         .await
         .map_err(|error| format!("{error:#}"))?;
-    let image = image::load_from_memory(&artifact.bytes)
+    response_from_canonical_bytes(
+        client,
+        artifact.bytes,
+        &artifact.filename,
+        artifact.metadata,
+        None,
+        terminal.generation_time_ms.unwrap_or_default(),
+        terminal.gpu,
+    )
+    .await
+}
+
+/// Read one hydrated gallery artifact back as a [`GenerateResponse`].
+///
+/// A mesh is recognised by its container BEFORE the bytes reach the raster
+/// decoder, which cannot read binary glTF and used to fail every
+/// `generate_mesh` call with "could not decode durable output". The gallery
+/// row records the controls that shaped the mesh but not what came out, so
+/// the counts and bounds are read off the glTF's own JSON chunk, and the
+/// poster is the thumbnail the server rendered at save time.
+async fn response_from_canonical_bytes(
+    client: &MoldClient,
+    bytes: Vec<u8>,
+    filename: &str,
+    metadata: mold_core::OutputMetadata,
+    fallback_format: Option<OutputFormat>,
+    generation_time_ms: u64,
+    gpu: Option<usize>,
+) -> std::result::Result<GenerateResponse, String> {
+    let format = filename
+        .rsplit_once('.')
+        .and_then(|(_, extension)| extension.parse::<OutputFormat>().ok());
+    if let Some(format) = format.filter(OutputFormat::is_mesh) {
+        let summary = mold_core::glb_summary::summarize_glb(&bytes).ok_or_else(|| {
+            format!("accepted output {filename} is not a binary glTF mold can summarise")
+        })?;
+        // Best effort: a missing poster is a tool result without a picture,
+        // not a failed render.
+        let poster = client
+            .get_gallery_thumbnail(filename)
+            .await
+            .unwrap_or_default();
+        return Ok(GenerateResponse {
+            images: Vec::new(),
+            video: None,
+            audio: None,
+            mesh: Some(mold_core::MeshData {
+                data: bytes,
+                format,
+                vertex_count: summary.vertex_count,
+                face_count: summary.face_count,
+                bounds_min: summary.bounds_min,
+                bounds_max: summary.bounds_max,
+                textured: summary.textured,
+                poster,
+                // `width`/`height` describe the poster on a mesh row, exactly
+                // as they describe the waveform on an audio one.
+                poster_width: metadata.width,
+                poster_height: metadata.height,
+            }),
+            generation_time_ms,
+            model: metadata.model,
+            seed_used: metadata.seed,
+            gpu,
+            request_warnings: Vec::new(),
+        });
+    }
+    let image = image::load_from_memory(&bytes)
         .map_err(|error| format!("could not decode durable output: {error}"))?;
     let (width, height) = image.dimensions();
-    let format = artifact
-        .filename
-        .rsplit_once('.')
-        .and_then(|(_, extension)| extension.parse::<OutputFormat>().ok())
-        .ok_or_else(|| {
-            format!(
-                "accepted output {} has no supported file extension",
-                artifact.filename
-            )
-        })?;
+    let format = format
+        .or(fallback_format)
+        .ok_or_else(|| format!("accepted output {filename} has no supported file extension"))?;
     Ok(GenerateResponse {
         mesh: None,
         images: vec![mold_core::ImageData {
-            data: artifact.bytes,
+            data: bytes,
             format,
             width,
             height,
@@ -135,10 +194,10 @@ async fn hydrate_canonical_outcome(
         }],
         video: None,
         audio: None,
-        generation_time_ms: terminal.generation_time_ms.unwrap_or_default(),
-        model: artifact.metadata.model,
-        seed_used: artifact.metadata.seed,
-        gpu: terminal.gpu,
+        generation_time_ms,
+        model: metadata.model,
+        seed_used: metadata.seed,
+        gpu,
         request_warnings: Vec::new(),
     })
 }
@@ -476,7 +535,7 @@ impl McpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let loras = self.resolve_loras(args.loras.take()).await?;
         let req = build_generate_request(args, loras)?;
-        let response = generate_canonically(&self.client, req).await?;
+        let CanonicalOutput { response, .. } = generate_canonically(&self.client, req).await?;
         let image = response
             .images
             .first()
@@ -515,21 +574,23 @@ impl McpServer {
     /// Generate a 3-D mesh from one image.
     ///
     /// MCP has no mesh content type, so the result is the poster image plus
-    /// text naming the gallery filename. An agent that wants the geometry
-    /// fetches it by that filename; base64ing a multi-megabyte glTF into a
-    /// tool result would blow the context window for no benefit.
+    /// text and `structuredContent.filename` naming the gallery file. An
+    /// agent that wants the geometry passes that filename to `export_mesh`;
+    /// base64ing a multi-megabyte glTF into a tool result would blow the
+    /// context window for no benefit.
     async fn tool_generate_mesh(&self, arguments: Value) -> std::result::Result<Value, String> {
         let args: GenerateMeshArgs =
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let req = build_generate_mesh_request(args)?;
-        let response = generate_canonically(&self.client, req).await?;
+        let CanonicalOutput { response, filename } =
+            generate_canonically(&self.client, req).await?;
         let mesh = response
             .mesh
             .as_ref()
             .ok_or_else(|| "mold did not return a mesh".to_string())?;
 
         let mut details = format!(
-            "Generated a {} mesh with {} vertices and {} triangles using {}; seed {}",
+            "Generated a {} mesh with {} vertices and {} triangles using {}; seed {}; saved to the gallery as {filename}",
             mesh.format.extension(),
             mesh.vertex_count,
             mesh.face_count,
@@ -557,6 +618,7 @@ impl McpServer {
         Ok(json!({
             "content": content,
             "structuredContent": {
+                "filename": filename,
                 "format": mesh.format.extension(),
                 "vertex_count": mesh.vertex_count,
                 "face_count": mesh.face_count,
@@ -758,7 +820,14 @@ impl McpServer {
         };
 
         let format = gallery_format(&selected);
-        let use_thumbnail = args.thumbnail.unwrap_or(format == Some(OutputFormat::Mp4));
+        // A mesh has no raster to return: MCP has no mesh content type, and
+        // handing back a `.glb` as `type: "image"` would mislabel megabytes
+        // of geometry. Its poster is served under the thumbnail key, so a
+        // mesh defaults to the thumbnail exactly as an MP4 does.
+        let is_mesh = format.is_some_and(|format| format.is_mesh());
+        let use_thumbnail = args
+            .thumbnail
+            .unwrap_or(format == Some(OutputFormat::Mp4) || is_mesh);
         let (data, mime_type, returned_thumbnail) = if use_thumbnail {
             (
                 self.client
@@ -772,6 +841,12 @@ impl McpServer {
             if format == Some(OutputFormat::Mp4) {
                 return Err(
                     "selected gallery item is an MP4 video; set thumbnail=true to fetch a preview"
+                        .to_string(),
+                );
+            }
+            if is_mesh {
+                return Err(
+                    "selected gallery item is a 3-D mesh; set thumbnail=true for its rendered poster, or call export_mesh for the geometry"
                         .to_string(),
                 );
             }
@@ -832,12 +907,16 @@ impl McpServer {
             .export_gallery_mesh(&args.filename, format)
             .await
             .map_err(|e| format!("failed to export mesh: {e}"))?;
+        // The blob IS the export, so the resource is named for the exported
+        // file — the CLI's own `<stem>.<ext>` — never for the stored `.glb`,
+        // which lives in the gallery and is a different set of bytes.
+        let export_filename = mesh_export_filename(&args.filename, format);
         Ok(json!({
             "content": [
                 {
                     "type": "text",
                     "text": format!(
-                        "Exported {} as {format} ({} bytes)",
+                        "Exported {} as {format} ({} bytes) — {export_filename}",
                         args.filename,
                         bytes.len()
                     )
@@ -845,7 +924,7 @@ impl McpServer {
                 {
                     "type": "resource",
                     "resource": {
-                        "uri": format!("mold://gallery/{}", args.filename),
+                        "uri": format!("mold://export/{export_filename}"),
                         "mimeType": format.content_type(),
                         "blob": general_purpose::STANDARD.encode(&bytes)
                     }
@@ -853,6 +932,7 @@ impl McpServer {
             ],
             "structuredContent": {
                 "filename": args.filename,
+                "export_filename": export_filename,
                 "format": format.extension(),
                 "bytes": bytes.len()
             }
@@ -2311,10 +2391,22 @@ fn parse_gallery_format(format: &str) -> std::result::Result<OutputFormat, Strin
         "apng" => Ok(OutputFormat::Apng),
         "webp" => Ok(OutputFormat::Webp),
         "mp4" => Ok(OutputFormat::Mp4),
+        "glb" => Ok(OutputFormat::Glb),
         other => Err(format!(
-            "unsupported format '{other}'; use png, jpeg, gif, apng, webp, or mp4"
+            "unsupported format '{other}'; use png, jpeg, gif, apng, webp, mp4, or glb"
         )),
     }
+}
+
+/// The name an export is delivered under: the stored print's stem with the
+/// export container's extension, exactly as `mold library export` names the
+/// file it writes.
+fn mesh_export_filename(stored: &str, format: mold_core::MeshExportFormat) -> String {
+    let stem = std::path::Path::new(stored)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(stored);
+    format!("{stem}.{}", format.extension())
 }
 
 fn gallery_format(image: &GalleryImage) -> Option<OutputFormat> {
@@ -2506,16 +2598,12 @@ fn build_generate_mesh_request(
 
     let mut req = build_generate_request(
         GenerateImageArgs {
-            // The prompt is recorded as provenance and never read; a space
-            // would be dishonest, so it stays empty and the mesh validator —
-            // not the image one — decides whether the request is complete.
+            // Placeholders that satisfy the shared image builder's own
+            // checks (a non-empty prompt, a 16-aligned canvas) and are
+            // replaced below: the wire request is the SAME canonical mesh
+            // request the CLI sends.
             prompt: "3d mesh".to_string(),
             model: Some(model),
-            // A mesh has no canvas, and the engine never reads these. They
-            // exist only to satisfy the shared image builder's 16-alignment
-            // check, which is why they are a fixed 512 rather than the
-            // manifest's conditioning size — the mini tier conditions at
-            // 1022, and 1022 is not a multiple of 16.
             width: Some(512),
             height: Some(512),
             steps: args.steps,
@@ -2528,6 +2616,14 @@ fn build_generate_mesh_request(
         },
         None,
     )?;
+    // The prompt is recorded as provenance and never read, so it stays
+    // empty rather than inventing text; the mesh validator — not the image
+    // one — decides whether the request is complete. A mesh has no canvas:
+    // the ENGINE letterboxes the source to the checkpoint's own conditioning
+    // size, so the request submits 0x0 exactly as `mold run` does.
+    req.prompt = String::new();
+    req.width = 0;
+    req.height = 0;
     req.output_format = Some(OutputFormat::Glb);
     req.source_image = Some(image);
     req.mesh = Some(mesh);
@@ -3033,7 +3129,7 @@ fn builtin_tool_definitions() -> Value {
         {
             "name": "generate_mesh",
             "description": format!(
-                "Generate a 3D mesh from ONE image using the Hunyuan3D family. There is no prompt; the image is the whole conditioning (the family has no text encoder, and the profile advertises prompt.mode = ignored). Best results come from one object, centred, filling most of the frame, on a plain or removed background, seen from a three-quarter angle. The stored artifact is always GLB. Returns a rendered poster image plus mesh statistics; the glTF itself lands in the gallery and is fetched by filename. To get OBJ, STL, or PLY, call export_mesh with that gallery filename — exports are transcodes of the stored GLB, never generation targets. Defaults: model {}, octree {}, threshold {}.",
+                "Generate a 3D mesh from ONE image using the Hunyuan3D family. There is no prompt; the image is the whole conditioning (the family has no text encoder, and the profile advertises prompt.mode = ignored). Best results come from one object, centred, filling most of the frame, on a plain or removed background, seen from a three-quarter angle. The stored artifact is always GLB. Returns a rendered poster image plus mesh statistics, and structuredContent.filename names the glTF in the gallery. To get OBJ, STL, or PLY, call export_mesh with that filename — exports are transcodes of the stored GLB, never generation targets. Defaults: model {}, octree {}, threshold {}.",
                 mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
                 mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION,
                 mold_core::validation::MESH_DEFAULT_THRESHOLD
@@ -3076,6 +3172,24 @@ fn builtin_tool_definitions() -> Value {
                         "minimum": mold_core::validation::MESH_MIN_TARGET_FACES,
                         "maximum": mold_core::validation::MESH_MAX_TARGET_FACES,
                         "description": "Decimate to approximately this many triangles. Omit to keep the raw surface-net output, which is dense and regular."
+                    },
+                    // The earlier spellings. `additionalProperties: false`
+                    // means a schema-validating host refuses anything not
+                    // declared here, so an alias that lived only in serde
+                    // was accepted by mold and rejected by the host in
+                    // front of it.
+                    "octree_resolution": {
+                        "type": "integer",
+                        "enum": mold_core::validation::MESH_OCTREE_RESOLUTIONS,
+                        "deprecated": true,
+                        "description": "Deprecated alias for octree."
+                    },
+                    "mesh_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "deprecated": true,
+                        "description": "Deprecated alias for threshold."
                     }
                 },
                 "required": ["image"],
@@ -3084,7 +3198,7 @@ fn builtin_tool_definitions() -> Value {
         },
         {
             "name": "export_mesh",
-            "description": "Export one stored 3-D print as OBJ, STL, or PLY. The gallery keeps its GLB; this returns a converted copy. Each container loses something the stored glTF carries — OBJ has no materials, STL has no shared vertices or UVs — which is why none of them is a generation target.",
+            "description": "Export one stored 3-D print as OBJ, STL, or PLY (or fetch the stored GLB unchanged). The gallery keeps its GLB; this returns a converted copy as an embedded resource named <stem>.<ext>, the same name mold library export writes. Each container loses something the stored glTF carries — OBJ has no materials, STL has no shared vertices or UVs — which is why none of them is a generation target.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3447,6 +3561,11 @@ mod tests {
             req.source_image.as_deref(),
             Some(&[0x89, b'P', b'N', b'G'][..])
         );
+        // The SAME canonical mesh request the CLI sends: no prompt (the
+        // family never reads one) and no canvas (the engine letterboxes the
+        // source to the checkpoint's own conditioning size).
+        assert_eq!(req.prompt, "");
+        assert_eq!((req.width, req.height), (0, 0));
         let mesh = req.mesh.expect("mesh options travel with the request");
         assert_eq!(mesh.octree_resolution, Some(320));
         assert_eq!(mesh.threshold, Some(0.55));
@@ -3532,6 +3651,285 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.octree, Some(192));
         assert_eq!(legacy.threshold, Some(0.5));
+        // ...and the schema DECLARES them, because `additionalProperties:
+        // false` means a schema-validating host refuses any undeclared name
+        // before serde ever sees it. Same bounds as the canonical spellings.
+        assert_eq!(mesh["inputSchema"]["additionalProperties"], json!(false));
+        assert_eq!(props["octree_resolution"]["enum"], props["octree"]["enum"]);
+        assert_eq!(props["octree_resolution"]["deprecated"], json!(true));
+        assert!(props["octree_resolution"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Deprecated alias for octree"));
+        assert_eq!(
+            props["mesh_threshold"]["minimum"],
+            props["threshold"]["minimum"]
+        );
+        assert_eq!(
+            props["mesh_threshold"]["maximum"],
+            props["threshold"]["maximum"]
+        );
+        assert_eq!(props["mesh_threshold"]["deprecated"], json!(true));
+        assert!(props["mesh_threshold"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Deprecated alias for threshold"));
+    }
+
+    /// `export_mesh` is registered with the four containers and the stored
+    /// print's filename as its only inputs.
+    #[test]
+    fn the_export_tool_is_registered_with_the_containers_and_the_filename() {
+        let tools = tool_definitions();
+        let export = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("export_mesh"))
+            .expect("export_mesh must be registered");
+        let required = export["inputSchema"]["required"].as_array().unwrap();
+        assert_eq!(required, &[Value::from("filename"), Value::from("format")]);
+        let formats = export["inputSchema"]["properties"]["format"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(formats, ["glb", "obj", "stl", "ply"]);
+        assert_eq!(export["inputSchema"]["additionalProperties"], json!(false));
+        assert_eq!(
+            mesh_export_filename("chair.glb", mold_core::MeshExportFormat::Stl),
+            "chair.stl"
+        );
+        assert_eq!(
+            mesh_export_filename(
+                "mold-hunyuan3d-1700000000000.glb",
+                mold_core::MeshExportFormat::Obj
+            ),
+            "mold-hunyuan3d-1700000000000.obj"
+        );
+    }
+
+    /// The `.glb` guard and the format parse both answer before any HTTP:
+    /// an unreachable host never gets asked about a print that cannot be
+    /// exported or a container mold does not write.
+    #[tokio::test]
+    async fn export_mesh_refuses_non_glb_prints_and_unknown_formats_before_any_request() {
+        let mcp = McpServer {
+            client: MoldClient::new("http://127.0.0.1:1"),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let not_a_mesh = mcp
+            .tool_export_mesh(json!({ "filename": "cat.png", "format": "stl" }))
+            .await
+            .unwrap_err();
+        assert!(
+            not_a_mesh.contains("only stored .glb prints"),
+            "{not_a_mesh}"
+        );
+        let bad_format = mcp
+            .tool_export_mesh(json!({ "filename": "chair.glb", "format": "fbx" }))
+            .await
+            .unwrap_err();
+        assert!(bad_format.contains("fbx"), "{bad_format}");
+        let unknown_field = mcp
+            .tool_export_mesh(json!({ "filename": "chair.glb", "format": "stl", "mode": 1 }))
+            .await
+            .unwrap_err();
+        assert!(
+            unknown_field.contains("invalid arguments"),
+            "{unknown_field}"
+        );
+    }
+
+    /// The exported bytes come back as an embedded resource named for the
+    /// EXPORTED file, never for the stored `.glb` those bytes are not.
+    #[tokio::test]
+    async fn export_mesh_returns_the_transcode_as_a_resource_named_for_the_export() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/export/chair.glb"))
+            .and(wiremock::matchers::body_json(json!({ "format": "stl" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "model/stl")
+                    .set_body_bytes(b"solid".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let result = mcp
+            .tool_export_mesh(json!({ "filename": "chair.glb", "format": "stl" }))
+            .await
+            .unwrap();
+        let resource = &result["content"][1]["resource"];
+        assert_eq!(resource["uri"], "mold://export/chair.stl");
+        assert_eq!(resource["mimeType"], "model/stl");
+        assert_eq!(resource["blob"], general_purpose::STANDARD.encode(b"solid"));
+        assert_eq!(result["structuredContent"]["filename"], "chair.glb");
+        assert_eq!(result["structuredContent"]["export_filename"], "chair.stl");
+        assert_eq!(result["structuredContent"]["format"], "stl");
+        assert_eq!(result["structuredContent"]["bytes"], 5);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("chair.stl"));
+    }
+
+    /// A `.glb` in the gallery answers with its poster — served under the
+    /// thumbnail key — because MCP has no mesh content type and a glTF
+    /// labelled `type: "image"` would be a lie. Asking for the raw bytes
+    /// explicitly is refused with the two honest routes.
+    #[tokio::test]
+    async fn get_gallery_image_returns_the_poster_for_a_mesh_and_refuses_the_geometry() {
+        let server = MockServer::start().await;
+        let mut row = test_gallery_image(
+            "chair.glb",
+            mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
+            "",
+            1_700_000_000,
+        );
+        row.format = Some(OutputFormat::Glb);
+        Mock::given(method("GET"))
+            .and(path("/api/gallery"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([row])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/thumbnail/chair.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"\x89PNG".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let result = mcp
+            .tool_get_gallery_image(json!({ "filename": "chair.glb" }))
+            .await
+            .unwrap();
+        assert_eq!(result["content"][1]["mimeType"], "image/png");
+        assert_eq!(
+            result["content"][1]["data"],
+            general_purpose::STANDARD.encode(b"\x89PNG")
+        );
+        assert_eq!(result["structuredContent"]["thumbnail"], json!(true));
+        assert_eq!(result["structuredContent"]["image"]["format"], "glb");
+
+        let refused = mcp
+            .tool_get_gallery_image(json!({ "filename": "chair.glb", "thumbnail": false }))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.contains("3-D mesh") && refused.contains("export_mesh"),
+            "{refused}"
+        );
+    }
+
+    /// A binary glTF whose JSON chunk says what the summary reads; the BIN
+    /// chunk is empty because nothing here decodes geometry.
+    fn glb_with_counts(vertices: u64, indices: u64) -> Vec<u8> {
+        let json = json!({
+            "asset": { "version": "2.0" },
+            "accessors": [
+                { "type": "VEC3", "componentType": 5126, "count": vertices,
+                  "min": [-0.5, -0.4, -0.3], "max": [0.5, 0.4, 0.3] },
+                { "type": "SCALAR", "componentType": 5125, "count": indices }
+            ],
+            "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 }, "indices": 1 }] }]
+        });
+        let mut json_bytes = serde_json::to_vec(&json).unwrap();
+        json_bytes.extend(std::iter::repeat_n(b' ', (4 - (json_bytes.len() % 4)) % 4));
+        let total = 12 + 8 + json_bytes.len() + 8;
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
+        out.extend_from_slice(&json_bytes);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0x004E_4942u32.to_le_bytes());
+        out
+    }
+
+    /// The canonical (durable) path reads a mesh back by its container
+    /// BEFORE the bytes reach the raster decoder, which cannot read binary
+    /// glTF — every `generate_mesh` call used to die there with "could not
+    /// decode durable output". Counts and bounds come off the glTF's own
+    /// JSON chunk; the poster is the gallery thumbnail.
+    #[tokio::test]
+    async fn canonical_hydration_recognises_a_mesh_before_the_raster_decoder() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/thumbnail/chair.glb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"\x89PNG".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+
+        let mut metadata = test_gallery_image(
+            "chair.glb",
+            mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
+            "",
+            1_700_000_000,
+        )
+        .metadata;
+        metadata.width = 512;
+        metadata.height = 384;
+        let glb = glb_with_counts(24_576, 147_456);
+
+        let response = response_from_canonical_bytes(
+            &client,
+            glb.clone(),
+            "chair.glb",
+            metadata.clone(),
+            None,
+            4_000,
+            Some(1),
+        )
+        .await
+        .unwrap();
+        assert!(response.images.is_empty());
+        let mesh = response.mesh.expect("a .glb hydrates as a mesh");
+        assert_eq!(mesh.data, glb);
+        assert_eq!(mesh.format, OutputFormat::Glb);
+        assert_eq!((mesh.vertex_count, mesh.face_count), (24_576, 49_152));
+        assert_eq!((mesh.poster_width, mesh.poster_height), (512, 384));
+        assert_eq!(mesh.poster, b"\x89PNG");
+        assert_eq!(mesh.bounds_max, [0.5, 0.4, 0.3]);
+        assert!(!mesh.textured);
+        assert_eq!(response.generation_time_ms, 4_000);
+        assert_eq!(response.gpu, Some(1));
+        assert_eq!(response.model, mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL);
+
+        // A `.glb` that is not a glTF is named, not decoded as a picture.
+        let error = response_from_canonical_bytes(
+            &client,
+            b"not a glb".to_vec(),
+            "chair.glb",
+            metadata,
+            None,
+            0,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("binary glTF"), "{error}");
+
+        // A raster row still goes through the decoder and fails honestly on
+        // bytes that are not an image.
+        let raster = test_gallery_image("cat.png", "flux-schnell:q8", "a cat", 1).metadata;
+        let error = response_from_canonical_bytes(&client, glb, "cat.png", raster, None, 0, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("could not decode durable output"), "{error}");
     }
 
     use super::*;
