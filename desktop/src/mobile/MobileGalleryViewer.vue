@@ -732,6 +732,8 @@ async function performVideoExport(
   if (exportBusy.value) return;
   exportBusy.value = true;
   exportError.value = "";
+  // A stale "Saved to …" from an earlier export must not outlive this one.
+  actionStatus.value = "";
   try {
     const path = videoExportPath(props.item.filename);
     const filename = videoExportFilename(props.item.filename, options.format);
