@@ -40,6 +40,19 @@ matters more than usual:
 
 A request without a source image is refused rather than answered from nothing.
 
+Prompt expansion follows the same rule. `mold expand`, `mold remix`, the
+Expand and Remix controls on every surface, and the MCP `expand_prompt` /
+`remix_prompt` tools do not call a language model for this family: the one
+answer is the guide's advice above on preparing the image, and `--expand` on
+a mesh run is skipped rather than rewriting the recorded prompt.
+
+The same picture also meshes differently here than in ComfyUI. mold prepares
+the image the way Tencent's `ImageProcessorV2` does — crop to the alpha
+bounding box, then letterbox on a white square, so nothing is cut away —
+while ComfyUI's `clip_preprocess` drops the alpha channel and centre-crops the
+shorter side to a square. An off-centre or wide subject loses its edges there
+and keeps them here.
+
 ## Controls
 
 ```bash
