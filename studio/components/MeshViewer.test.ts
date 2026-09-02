@@ -1,6 +1,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { triangleGlb } from "../lib/glbFixture";
+import { parseGlb } from "../lib/glb";
+import { assemble, buildDocument, triangleGlb } from "../lib/glbFixture";
+import { meshStatsLabel } from "../lib/meshControls";
 import MeshViewer from "./MeshViewer.vue";
 
 /*
@@ -205,11 +207,17 @@ interface GlRecorder {
   restore: () => void;
 }
 
-function stubWebgl(): GlRecorder {
+function stubWebgl(extra: Record<string, unknown> = {}): GlRecorder {
   const log: string[] = [];
   const modelViews: number[][] = [];
   const named = new Map<object, string>();
   const overrides: Record<string, unknown> = {
+    deleteBuffer: () => {
+      log.push("deleteBuffer");
+    },
+    deleteProgram: () => {
+      log.push("deleteProgram");
+    },
     getShaderParameter: () => true,
     getProgramParameter: () => true,
     getShaderInfoLog: () => "",
@@ -255,6 +263,7 @@ function stubWebgl(): GlRecorder {
     drawElements: (mode: number, count: number) => {
       log.push(`draw:${GL_NAMES.get(mode) ?? mode}:${count}`);
     },
+    ...extra,
   };
 
   const gl = new Proxy(
@@ -308,13 +317,68 @@ function stubRaf(): RafHarness {
   };
 }
 
-function stubReducedMotion(reduce: boolean): void {
-  vi.stubGlobal("matchMedia", (query: string) => ({
-    matches: reduce && query.includes("prefers-reduced-motion"),
-    media: query,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  }));
+interface ReducedMotionHarness {
+  /** Flip the preference and tell every listener, the way a browser does. */
+  set: (reduce: boolean) => void;
+  listeners: () => number;
+}
+
+function stubReducedMotion(reduce: boolean): ReducedMotionHarness {
+  let current = reduce;
+  const listeners = new Set<(event: { matches: boolean }) => void>();
+  vi.stubGlobal("matchMedia", (query: string) => {
+    const reducedMotion = query.includes("prefers-reduced-motion");
+    return {
+      get matches() {
+        return reducedMotion && current;
+      },
+      media: query,
+      addEventListener: (
+        type: string,
+        listener: (event: { matches: boolean }) => void,
+      ) => {
+        if (type === "change" && reducedMotion) listeners.add(listener);
+      },
+      removeEventListener: (
+        type: string,
+        listener: (event: { matches: boolean }) => void,
+      ) => {
+        if (type === "change") listeners.delete(listener);
+      },
+    };
+  });
+  return {
+    set(next) {
+      current = next;
+      for (const listener of listeners) listener({ matches: next });
+    },
+    listeners: () => listeners.size,
+  };
+}
+
+/**
+ * One triangle carrying every attribute the shader binds — positions, normals,
+ * colors and UVs — so `attribute()` builds four buffers and the index buffer
+ * is the FIFTH `createBuffer` call.
+ */
+function fullyAttributedGlb(): ArrayBuffer {
+  const { json, bin } = buildDocument({
+    positions: [0, 0, 0, 2, 0, 0, 0, 4, -1],
+    indices: [0, 1, 2],
+    normals: [0, 0, 1, 0, 0, 1, 0, 0, 1],
+    colors: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    uvs: [0, 0, 1, 0, 0, 1],
+  });
+  return assemble(json, bin);
+}
+
+/** A well-formed GLB whose one triangle is fully degenerate: no edges at all. */
+function edgelessGlb(): ArrayBuffer {
+  const { json, bin } = buildDocument({
+    positions: [0, 0, 0, 2, 0, 0, 0, 4, -1],
+    indices: [1, 1, 1],
+  });
+  return assemble(json, bin);
 }
 
 function stubFullscreen(enabled: boolean): { element: Element | null } {
@@ -466,6 +530,102 @@ describe("MeshViewer viewport controls", () => {
   });
 });
 
+describe("MeshViewer upload failures", () => {
+  // `attribute()` has built four buffers and `link()` a program by the time
+  // the index buffer is requested; a refusal there must hand all of them back
+  // rather than leaving them on a context the poster is about to cover.
+  it("releases the program and attribute buffers when the index buffer is refused", async () => {
+    let created = 0;
+    const gl = stubWebgl({
+      createBuffer: () => {
+        created += 1;
+        return created === 5 ? null : {};
+      },
+    });
+    stubFetch(() => ok(fullyAttributedGlb()));
+    const wrapper = mount(MeshViewer, {
+      props: { src: "/media/mesh.glb", poster: "/media/mesh.png" },
+    });
+    await flushPromises();
+
+    expect(
+      wrapper.get("[data-test=mesh-viewer]").attributes("data-status"),
+    ).toBe("failed");
+    expect(wrapper.get("[data-test=mesh-viewer-note]").text()).toBe(
+      "The GPU refused the mesh's index buffer.",
+    );
+    expect(gl.log.filter((entry) => entry === "deleteBuffer")).toHaveLength(4);
+    expect(gl.log.filter((entry) => entry === "deleteProgram")).toHaveLength(1);
+    expect(wrapper.emitted("fail")).toHaveLength(1);
+
+    gl.restore();
+    wrapper.unmount();
+  });
+});
+
+describe("MeshViewer caption", () => {
+  // Every surface writes the same `tris · verts · bounds` line under a mesh;
+  // the viewer's own caption is that line, not a second wording of it.
+  it("captions the mesh with the shared stats label, bounds included", async () => {
+    const gl = stubWebgl();
+    stubFetch(() => ok(triangleGlb()));
+    const wrapper = mount(MeshViewer, { props: { src: "/media/mesh.glb" } });
+    await flushPromises();
+
+    const parsed = parseGlb(triangleGlb());
+    const expected = meshStatsLabel(
+      parsed.vertexCount,
+      parsed.triangleCount,
+      parsed.bounds,
+    );
+    expect(expected).toContain("tris");
+    expect(expected).toContain("×");
+    expect(wrapper.get("[data-test=mesh-viewer-stats]").text()).toBe(expected);
+    expect(wrapper.emitted("ready")?.[0]?.[0]).toMatchObject({
+      vertexCount: parsed.vertexCount,
+      triangleCount: parsed.triangleCount,
+      bounds: parsed.bounds,
+    });
+
+    gl.restore();
+    wrapper.unmount();
+  });
+});
+
+describe("MeshViewer wireframe availability", () => {
+  it("disables the wireframe toggle, with a reason, for a mesh with no edges", async () => {
+    const gl = stubWebgl();
+    stubFetch(() => ok(edgelessGlb()));
+    const wrapper = mount(MeshViewer, { props: { src: "/media/mesh.glb" } });
+    await flushPromises();
+
+    expect(
+      wrapper.get("[data-test=mesh-viewer]").attributes("data-status"),
+    ).toBe("ready");
+    const button = wrapper.get("[data-test=mesh-viewer-wireframe]");
+    expect(button.attributes("disabled")).toBeDefined();
+    expect(button.attributes("title")).toContain("no edges");
+    await button.trigger("click");
+    expect(button.attributes("aria-pressed")).toBe("false");
+    expect(gl.log.some((entry) => entry.startsWith("draw:LINES"))).toBe(false);
+
+    gl.restore();
+    wrapper.unmount();
+  });
+
+  it("keeps the toggle enabled and untitled for an ordinary mesh", async () => {
+    const gl = stubWebgl();
+    stubFetch(() => ok(triangleGlb()));
+    const wrapper = mount(MeshViewer, { props: { src: "/media/mesh.glb" } });
+    await flushPromises();
+    const button = wrapper.get("[data-test=mesh-viewer-wireframe]");
+    expect(button.attributes("disabled")).toBeUndefined();
+    expect(button.attributes("title")).toBeUndefined();
+    gl.restore();
+    wrapper.unmount();
+  });
+});
+
 describe("MeshViewer auto-rotation", () => {
   it("yaws the camera on every frame while nobody has touched it", async () => {
     const gl = stubWebgl();
@@ -534,6 +694,41 @@ describe("MeshViewer auto-rotation", () => {
 
     gl.restore();
     wrapper.unmount();
+  });
+
+  it("parks the tour the moment the viewer turns reduced motion on", async () => {
+    const gl = stubWebgl();
+    const motion = stubReducedMotion(false);
+    const raf = stubRaf();
+    stubFetch(() => ok(triangleGlb()));
+    const wrapper = mount(MeshViewer, {
+      props: { src: "/media/mesh.glb", autoRotate: true },
+    });
+    await flushPromises();
+    raf.run(0);
+    raf.run(1000);
+    expect(motion.listeners()).toBe(1);
+
+    motion.set(true);
+    await flushPromises();
+    const parked = gl.modelViews.length;
+    raf.run(2000);
+    raf.run(3000);
+    expect(gl.modelViews.length).toBe(parked);
+    expect(
+      wrapper.get("[data-test=mesh-viewer-canvas]").attributes("aria-label"),
+    ).not.toContain("rotat");
+
+    // Turning the preference back off resumes the tour for an untouched
+    // viewer — the person never interacted, so it is still on offer.
+    motion.set(false);
+    raf.run(4000);
+    raf.run(5000);
+    expect(gl.modelViews.length).toBeGreaterThan(parked);
+
+    gl.restore();
+    wrapper.unmount();
+    expect(motion.listeners()).toBe(0);
   });
 
   it("cancels the auto-rotate frame on unmount", async () => {

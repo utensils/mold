@@ -2,12 +2,7 @@ import type { HostRoute } from "../stores/hosts";
 import { resolveStyleId, stylePresetLabel } from "./stylePresets";
 import { createUuid } from "@studio/lib/id";
 import type { ExpandContext, ExpandTask } from "@studio/lib/expandTask";
-import {
-  transformCountAccepted,
-  type RemixDimension,
-  type RemixSourceKind,
-  type TransformCountOptions,
-} from "@studio/lib/promptTransform";
+import { type RemixDimension, type RemixSourceKind } from "@studio/lib/promptTransform";
 import type { PromptTransformProvenance } from "./api/types";
 
 export type HostSelectionPolicy = string | null;
@@ -98,47 +93,9 @@ function modelLabel(name: string, labels?: ReadonlyMap<string, string>): string 
   return labels?.get(name) ?? name;
 }
 
-/**
- * Validate the expansion response as one indivisible batch. Whitespace is
- * normalized only after the response has proven it contains exactly the
- * requested number of non-empty prompts. A malformed response never changes
- * the requested batch size on the user's behalf.
- *
- * The one exception is a recipe that IGNORES the prompt: the host answers
- * such a transform with a single advisory result rather than N variations,
- * so `{ promptIgnored: true }` accepts exactly one — the same rule
- * `validateRemixVariants` applies, shared through `transformCountAccepted`.
- */
-export function validateExpandedPrompts(
-  prompts: readonly string[],
-  expected: number,
-  options?: TransformCountOptions,
-): string[] {
-  if (!transformCountAccepted(prompts.length, expected, options)) {
-    throw new Error(
-      `Expected exactly ${expected} non-empty prompts, but the host returned ${prompts.length}.`,
-    );
-  }
-  const normalized = prompts.map((prompt) => {
-    const trimmed = prompt.trim();
-    try {
-      const parsed: unknown = JSON.parse(trimmed);
-      if (Array.isArray(parsed) && parsed.length === 1 && typeof parsed[0] === "string") {
-        return parsed[0].trim();
-      }
-    } catch {
-      // Ordinary prompt text is not JSON and needs only edge trimming.
-    }
-    return trimmed;
-  });
-  const emptyIndex = normalized.findIndex((prompt) => !prompt);
-  if (emptyIndex >= 0) {
-    throw new Error(
-      `Prompt ${emptyIndex + 1} was empty. Expected exactly ${expected} non-empty prompts.`,
-    );
-  }
-  return normalized;
-}
+// The count-and-normalise rule is the shared studio helper; web and desktop
+// must agree on the messages and on unwrapping a one-string JSON array.
+export { validateExpandedPrompts } from "@studio/lib/expandedPrompts";
 
 export function createPreparedExpansionBatch(
   inputs: PreparedExpansionInputs,

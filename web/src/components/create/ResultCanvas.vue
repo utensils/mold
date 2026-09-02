@@ -17,10 +17,7 @@ import ProgressRing from "@ui/components/ProgressRing.vue";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import MeshViewer from "@studio/components/MeshViewer.vue";
 import type { DevelopPhase } from "@ui/lib/grain";
-import {
-  IGNORED_PROMPT_GUIDANCE,
-  OPTIONAL_PROMPT_GUIDANCE,
-} from "@studio/lib/promptRequirement";
+import { REQUIRED_PROMPT_GUIDANCE } from "./emptyCanvasGuidance";
 
 const props = withDefaults(
   defineProps<{
@@ -63,10 +60,10 @@ const props = withDefaults(
     variationBatchId?: string;
     /** variations — route revalidation owns the reviewed batch while true. */
     queueingVariations?: boolean;
-    /** empty — the attached conditioning makes the prompt optional. */
-    promptOptional?: boolean;
-    /** empty — the recipe never reads the prompt (no text encoder). */
-    promptIgnored?: boolean;
+    /** empty — the one resolved what-to-do sentence. The parent decides it
+     * through studio's `promptGuidance` (required / optional / prompt-ignored
+     * precedence lives there, once); this bed only renders it. */
+    emptyGuidance?: string;
   }>(),
   {
     progress: 0,
@@ -74,8 +71,7 @@ const props = withDefaults(
     progressFraction: 0,
     variations: () => [],
     queueingVariations: false,
-    promptOptional: false,
-    promptIgnored: false,
+    emptyGuidance: REQUIRED_PROMPT_GUIDANCE,
   },
 );
 
@@ -92,16 +88,6 @@ const grainOpacity = computed(() =>
     ? String(Math.max(0.18, 1 - clampedFraction.value * 0.9))
     : "1",
 );
-// The empty state is the only place that tells a first-time user what to do,
-// so it must not insist on a prompt the server would not require.
-const emptyGuidance = computed(() =>
-  props.promptIgnored
-    ? IGNORED_PROMPT_GUIDANCE
-    : props.promptOptional
-      ? OPTIONAL_PROMPT_GUIDANCE
-      : "Describe an image below, pick a look, and press Generate. Everything runs on your own machine.",
-);
-
 const bedStyle = computed(() =>
   props.printWidth && props.printHeight
     ? { aspectRatio: `${props.printWidth} / ${props.printHeight}` }

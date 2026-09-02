@@ -7,6 +7,7 @@ import { orientationLabel } from "../lib/resolutions";
 import type { ModelEntry } from "../lib/api/types";
 import { resolveSourceResolution, type SourceDimensions } from "@studio/lib/sourceResolution";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import {
   intentForCanvas,
   resolveOutputShape,
@@ -68,7 +69,9 @@ const outputShape = computed(() => resolveOutputShape(shapeInput.value));
  * the recipe's own answer, never malformed input, so validity stays true and
  * Develop is not blocked by a control the user cannot even see.
  */
-const canvasless = computed(() => outputShape.value.canvasless);
+// The family is the legacy fallback for a form restored before the profile
+// landed — the same reading `buildRequest` takes for the zero canvas.
+const canvasless = computed(() => outputShape.value.canvasless || isMeshFamily(props.family));
 const currentOrientation = computed(() => orientationLabel(width.value, height.value));
 const currentAspect = computed(() => outputShape.value.family.label);
 /** The active family has authored sizes; a lone custom entry is not a ladder. */

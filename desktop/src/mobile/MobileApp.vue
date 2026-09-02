@@ -292,6 +292,7 @@ import { percent } from "../lib/format";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
   identityConditioningValidationError,
+  meshTargetFacesValidationError,
   profileGuidanceValidationError,
   profileStepsValidationError,
   inlineGenerationMediaBytes,
@@ -301,6 +302,7 @@ import {
   sourceConditioningValidationError,
 } from "../lib/generateValidation";
 import { base64ToDataUrl, blobToBase64, isStillImageFile } from "../lib/image";
+import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { meshStatsLabel } from "@studio/lib/meshControls";
 import { isMobileMeshResult, meshResultBlob } from "./meshResult";
 import { parseMissingExpandModel } from "../lib/expandErrors";
@@ -1708,8 +1710,6 @@ watch(
  * cannot drift apart or carry a family allowlist of their own.
  */
 const promptTransformBlocked = computed(() => promptTransformBlockedReason(caps.value.promptMode));
-/** The host will answer a transform for this recipe with one advisory result. */
-const promptIgnored = computed(() => promptTransformBlocked.value !== null);
 const expansionMissingModel = computed(() => {
   const recovery = expansionRecovery.value;
   // Never offer to install an expander for a recipe that reads no prompt:
@@ -1981,12 +1981,36 @@ function applyMobileSourceResolution(
       if (preserveReplacement) canvasIntent.value = "manual";
       else if (canvasIntent.value !== "source-exact") canvasIntent.value = "source";
     }
-    if (nextResolution) {
+    // A canvasless recipe (a 3-D mesh) renders no pixel canvas: its zero
+    // canvas is the recipe's own answer, and a source's size is not a
+    // resolution to fit it to.
+    if (nextResolution && !formIsCanvasless()) {
       form.width = nextResolution.width;
       form.height = nextResolution.height;
     }
   }
   return { base64, resolution, automaticResolution };
+}
+
+/**
+ * Whether the live form renders no pixel canvas (a 3-D mesh). The recipe
+ * snapshot is the authority; the family is the fallback for a form restored
+ * before it landed — the same reading `buildRequest` takes.
+ */
+function formIsCanvasless(): boolean {
+  return form.recipeCapabilities?.canvasless ?? isMeshFamily(form.family);
+}
+
+/**
+ * Restore a reused print's generation canvas beside its source image. A
+ * mesh print's recorded `width`/`height` describe its POSTER, not a canvas,
+ * and `applyMetadataToForm` already zeroed the canvas for it — writing the
+ * poster size back would hand the request a size it never reads.
+ */
+function restoreReusedPrintCanvas(metadata: OutputMetadata): void {
+  if (formIsCanvasless()) return;
+  form.width = metadata.generation_width ?? metadata.width;
+  form.height = metadata.generation_height ?? metadata.height;
 }
 
 watch(
@@ -2160,7 +2184,11 @@ const guidanceError = computed(() =>
     form.pipeline,
   ),
 );
-const basicParametersValid = computed(() => !stepsError.value && !guidanceError.value);
+/** A face budget outside the recipe's advertised bounds is a 422 at admission. */
+const meshTargetFacesError = computed(() => meshTargetFacesValidationError(form));
+const basicParametersValid = computed(
+  () => !stepsError.value && !guidanceError.value && !meshTargetFacesError.value,
+);
 const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(form));
 // Desktop parity: a conditioned LTX-2 render may go out undescribed, so the
 // Develop button and the pre-submit guard both stop demanding a prompt the
@@ -2193,6 +2221,7 @@ const developBlockerReason = computed<string | null>(() => {
   if (!resolutionValid.value) return "Enter whole-number width and height.";
   if (stepsError.value) return stepsError.value;
   if (guidanceError.value) return guidanceError.value;
+  if (meshTargetFacesError.value) return meshTargetFacesError.value;
   if (mobileMediaBudgetError.value) return mobileMediaBudgetError.value;
   if (sourceConditioningError.value) return sourceConditioningError.value;
   if (identityError.value) return identityError.value;
@@ -5969,21 +5998,6 @@ function refusePromptTransform(): boolean {
   return true;
 }
 
-/**
- * `validateExpandedPrompts` with the recipe's prompt-ignored allowance: a
- * recipe that ignores the prompt is answered with exactly ONE result (the
- * guide's image-preparation advice) whatever count was requested, and the
- * shared validator accepts that single answer while every other short answer
- * still fails naming the count that was requested.
- */
-function validateExpandedPromptsForRecipe(
-  prompts: readonly string[],
-  expected: number,
-  promptIgnoredAnswer: boolean,
-): string[] {
-  return validateExpandedPrompts(prompts, expected, { promptIgnored: promptIgnoredAnswer });
-}
-
 async function expandForCurrentBatch(
   replacePrepared = false,
   routeOverride: HostRoute | null = null,
@@ -6038,7 +6052,10 @@ async function expandForCurrentBatch(
       expandOn.target,
     );
     if (!preparationGuard.isCurrent(token)) return;
-    const prompts = validateExpandedPromptsForRecipe(response.expanded, count, promptIgnored.value);
+    // Every entry point refused a prompt-ignored recipe before the request
+    // went out (`refusePromptTransform`), so the host's one-result answer for
+    // such a recipe never reaches this validator.
+    const prompts = validateExpandedPrompts(response.expanded, count);
     const currentHost = hosts.value.find((candidate) => candidate.id === route.hostId);
     const current = expansionInputs(count);
     if (
@@ -6154,9 +6171,7 @@ async function remixCurrent(
     ) {
       throw new Error("The host returned Remix provenance for a different source prompt.");
     }
-    const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS, {
-      promptIgnored: promptIgnored.value,
-    });
+    const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS);
     const current = remixInputs(remix.sourceKind);
     const currentHost = hosts.value.find((candidate) => candidate.id === route.hostId);
     if (
@@ -6647,9 +6662,7 @@ async function retryExpansionAfterPull(): Promise<void> {
     if (recovery.remix) {
       if (!("variants" in response))
         throw new Error("The host returned an invalid Remix response.");
-      const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS, {
-        promptIgnored: promptIgnored.value,
-      });
+      const variants = validateRemixVariants(response.variants, DEFAULT_REMIX_VARIATIONS);
       commitRemixReview(
         { ...recovery.inputs },
         {
@@ -6665,11 +6678,7 @@ async function retryExpansionAfterPull(): Promise<void> {
     } else {
       if (!("expanded" in response))
         throw new Error("The host returned an invalid expansion response.");
-      const prompts = validateExpandedPromptsForRecipe(
-        response.expanded,
-        recovery.inputs.requestedCount,
-        promptIgnored.value,
-      );
+      const prompts = validateExpandedPrompts(response.expanded, recovery.inputs.requestedCount);
       commitExpandedPrompts(
         { ...recovery.inputs },
         { ...recovery.route, target: { ...recovery.route.target } },
@@ -8506,8 +8515,7 @@ async function restoreOrdinaryReusedSource(
     if (!stillCurrent()) return null;
     form.sourceImageWidth = stored.width ?? null;
     form.sourceImageHeight = stored.height ?? null;
-    form.width = print.metadata.generation_width ?? print.metadata.width;
-    form.height = print.metadata.generation_height ?? print.metadata.height;
+    restoreReusedPrintCanvas(print.metadata);
     if (restoredSourceFit) form.sourceFit = restoredSourceFit;
     return retainedUnavailable ? retainedSourceMediaDisclosure(retainedUnavailable) : null;
   }
@@ -8532,8 +8540,7 @@ async function restoreOrdinaryReusedSource(
         const dimensions = imageDimensionsFromBase64(base64);
         form.sourceImageWidth = dimensions?.width ?? null;
         form.sourceImageHeight = dimensions?.height ?? null;
-        form.width = print.metadata.generation_width ?? print.metadata.width;
-        form.height = print.metadata.generation_height ?? print.metadata.height;
+        restoreReusedPrintCanvas(print.metadata);
         if (restoredSourceFit) form.sourceFit = restoredSourceFit;
         return null;
       }
@@ -8564,8 +8571,7 @@ async function restoreOrdinaryReusedSource(
       if (!stillCurrent()) return null;
       form.sourceImageWidth = source.dimensions?.width ?? null;
       form.sourceImageHeight = source.dimensions?.height ?? null;
-      form.width = print.metadata.generation_width ?? print.metadata.width;
-      form.height = print.metadata.generation_height ?? print.metadata.height;
+      restoreReusedPrintCanvas(print.metadata);
       if (restoredSourceFit) form.sourceFit = restoredSourceFit;
       return null;
     } catch {

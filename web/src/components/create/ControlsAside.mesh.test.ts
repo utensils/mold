@@ -201,6 +201,50 @@ describe("ControlsAside 3-D mesh", () => {
     expect(next.mesh?.targetFaces).toBeNull();
   });
 
+  // The bounds are the recipe's own; a value outside them is a 422 at
+  // admission, so the rail says so inline, the way the resolution warning
+  // does, instead of letting Generate fail with no advisory.
+  it("warns inline when target faces falls outside the advertised bounds", async () => {
+    const wrapper = mountMesh({
+      mesh: { octreeResolution: null, threshold: null, targetFaces: 10 },
+    });
+    const warning = wrapper.get("[data-test='mesh-target-faces-warning']");
+    expect(warning.text()).toContain("100");
+    expect(warning.text()).toContain("2,000,000");
+    expect(warning.text()).toContain("10");
+    expect(warning.classes()).toContain("controls__hint--warning");
+
+    await wrapper.setProps({
+      modelValue: baseForm({
+        model: "hunyuan3d-mini-turbo:fp16",
+        modelFamily: "hunyuan3d",
+        width: 0,
+        height: 0,
+        mesh: {
+          octreeResolution: null,
+          threshold: null,
+          targetFaces: 3_000_000,
+        },
+      }),
+    });
+    expect(
+      wrapper.get("[data-test='mesh-target-faces-warning']").text(),
+    ).toContain("3,000,000");
+  });
+
+  it("shows no target-faces warning inside the bounds or when blank", () => {
+    expect(
+      mountMesh({
+        mesh: { octreeResolution: null, threshold: null, targetFaces: 20_000 },
+      })
+        .find("[data-test='mesh-target-faces-warning']")
+        .exists(),
+    ).toBe(false);
+    expect(
+      mountMesh().find("[data-test='mesh-target-faces-warning']").exists(),
+    ).toBe(false);
+  });
+
   it("renders the server's own note for a fixed iso threshold", () => {
     const recipe = hunyuan3dRecipe();
     recipe.capabilities.mesh!.threshold = {

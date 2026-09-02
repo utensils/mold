@@ -36,35 +36,70 @@ export function advanceAutoRotate(
  * order, so a shared edge is drawn once rather than twice and the buffer is
  * stable across calls. Degenerate edges (a vertex joined to itself) and a
  * trailing partial triangle are dropped.
+ *
+ * One `Set` of packed `low * vertexCount + high` keys and one preallocated
+ * output buffer: a two-million-face mesh used to allocate a `Set` per vertex
+ * plus a growing array and freeze the tab for seconds on the first wireframe
+ * toggle. The packing is exact while `vertexCount²` fits a double's integer
+ * range, which every mesh under the viewer's 256 MiB cap does by orders of
+ * magnitude.
  */
 export function edgeIndices(
   indices: Uint32Array | ArrayLike<number>,
 ): Uint32Array {
-  const seen = new Map<number, Set<number>>();
-  const out: number[] = [];
   const triangles = indices.length - (indices.length % 3);
+  if (triangles === 0) return new Uint32Array(0);
 
-  const add = (a: number | undefined, b: number | undefined): void => {
-    if (a === undefined || b === undefined || a === b) return;
+  let maxIndex = 0;
+  for (let i = 0; i < triangles; i += 1) {
+    const value = indices[i] ?? 0;
+    if (value > maxIndex) maxIndex = value;
+  }
+  const vertexCount = maxIndex + 1;
+
+  const seen = new Set<number>();
+  // Three edges per triangle at most, two indices each.
+  const out = new Uint32Array(triangles * 2);
+  let count = 0;
+
+  const add = (a: number, b: number): void => {
+    if (a === b) return;
     const low = a < b ? a : b;
     const high = a < b ? b : a;
-    let partners = seen.get(low);
-    if (!partners) {
-      partners = new Set<number>();
-      seen.set(low, partners);
-    }
-    if (partners.has(high)) return;
-    partners.add(high);
-    out.push(low, high);
+    const key = low * vertexCount + high;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out[count] = low;
+    out[count + 1] = high;
+    count += 2;
   };
 
   for (let i = 0; i < triangles; i += 3) {
-    const a = indices[i];
-    const b = indices[i + 1];
-    const c = indices[i + 2];
+    const a = indices[i] ?? 0;
+    const b = indices[i + 1] ?? 0;
+    const c = indices[i + 2] ?? 0;
     add(a, b);
     add(b, c);
     add(a, c);
   }
-  return Uint32Array.from(out);
+  return out.slice(0, count);
+}
+
+/**
+ * Whether `edgeIndices` would emit anything at all: at least one complete
+ * triangle joins two distinct vertices. A linear scan with no allocation, so
+ * a viewer can decide whether to offer the wireframe toggle without paying
+ * for the edge list a person may never ask for.
+ */
+export function meshHasEdges(
+  indices: Uint32Array | ArrayLike<number>,
+): boolean {
+  const triangles = indices.length - (indices.length % 3);
+  for (let i = 0; i < triangles; i += 3) {
+    const a = indices[i];
+    const b = indices[i + 1];
+    const c = indices[i + 2];
+    if (a !== b || b !== c) return true;
+  }
+  return false;
 }

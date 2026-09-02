@@ -2,7 +2,9 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Lightbox from "./Lightbox.vue";
 import { __resetGalleryMediaForTests } from "../../lib/galleryMedia";
-import type { GalleryImage } from "../../types";
+import { __testing__ as routingTesting } from "../../composables/useHostRouting";
+import { ORIGIN_HOST_ID } from "../../lib/hostRegistry";
+import type { GalleryImage, ServerCapabilities } from "../../types";
 
 /**
  * A `.glb` print viewed in the lightbox: no "Use as source" (the engines read
@@ -28,6 +30,7 @@ const mesh: GalleryImage = {
 };
 
 const still: GalleryImage = { ...mesh, filename: "still.png", format: "png" };
+const secondMesh: GalleryImage = { ...mesh, filename: "table.glb" };
 
 function setViewportWidth(px: number) {
   Object.defineProperty(window, "innerWidth", {
@@ -49,6 +52,22 @@ const MeshViewerStub = {
   template: "<div data-test='mesh-viewer-stub' />",
 };
 
+function mountNarrow(props: Record<string, unknown> = {}) {
+  setViewportWidth(480);
+  return mount(Lightbox, {
+    props: {
+      item: mesh,
+      index: 0,
+      total: 1,
+      hasPrev: false,
+      hasNext: false,
+      muted: true,
+      ...props,
+    },
+    global: { stubs: { Transition: false, MeshViewer: MeshViewerStub } },
+  });
+}
+
 function mountWide(props: Record<string, unknown> = {}) {
   setViewportWidth(1200);
   return mount(Lightbox, {
@@ -68,10 +87,18 @@ function mountWide(props: Record<string, unknown> = {}) {
 const originalFetch = globalThis.fetch;
 let requests: { url: string; init?: RequestInit }[] = [];
 
-function mockCapabilities(exportFormats: string[]) {
+function mockCapabilities(
+  exportFormats: string[],
+  exportResponse: () => Promise<unknown> = async () => ({
+    ok: true,
+    status: 200,
+    blob: async () => new Blob(["MESH"], { type: "model/obj" }),
+  }),
+) {
   requests = [];
   globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
     requests.push({ url, init });
+    if (init?.method === "POST") return exportResponse();
     if (url.endsWith("/api/capabilities")) {
       return {
         ok: true,
@@ -97,6 +124,7 @@ function mockCapabilities(exportFormats: string[]) {
 beforeEach(() => {
   localStorage.clear();
   __resetGalleryMediaForTests();
+  routingTesting.reset();
   setViewportWidth(1200);
 });
 
@@ -201,6 +229,48 @@ describe("Lightbox 3-D prints", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows the host's own refusal and clears it on the next print", async () => {
+    mockCapabilities(["obj"], async () => ({
+      ok: false,
+      status: 422,
+      json: async () => ({ error: "This print has no geometry to convert." }),
+    }));
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-obj']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mesh-export-error']").text()).toBe(
+      "This print has no geometry to convert.",
+    );
+
+    // Arrowing on: the refusal belonged to the print that is gone.
+    await wrapper.setProps({ item: secondMesh });
+    await flushPromises();
+    expect(wrapper.find("[data-test='mesh-export-error']").exists()).toBe(
+      false,
+    );
+  });
+
+  // A mesh transcode is not a video export; a bare status must not say so.
+  it("falls back to a neutral export failure when the host sends no reason", async () => {
+    mockCapabilities(["obj"], async () => ({
+      ok: false,
+      status: 500,
+      json: async () => {
+        throw new Error("not json");
+      },
+    }));
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-obj']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mesh-export-error']").text()).toBe(
+      "Export failed (500)",
+    );
+  });
+
   it("routes an advertised animated container through the options sheet", async () => {
     mockCapabilities(["obj", "gif", "webp"]);
     const wrapper = mountWide();
@@ -215,6 +285,45 @@ describe("Lightbox 3-D prints", () => {
     expect(dialog.props("formats")).toEqual(["gif", "webp"]);
   });
 
+  // The server lists the stored container first so a client can see what it
+  // holds; "Export as GLB" beside Download is not an export.
+  it("never offers the stored glb as an export", async () => {
+    mockCapabilities(["glb", "obj", "gif"]);
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    const labels = wrapper
+      .findAll("[data-test^='mesh-export-']")
+      .map((entry) => entry.text());
+    expect(labels).toEqual(["Export as OBJ…", "Export turntable…"]);
+  });
+
+  // The shell already polls every host's capabilities; arrowing between
+  // prints must reuse that snapshot rather than probe the host per step.
+  it("builds the menu from the routing snapshot without probing the host", async () => {
+    mockCapabilities([]);
+    routingTesting.seedCapabilities(ORIGIN_HOST_ID, {
+      mesh: {
+        generation: true,
+        formats: ["glb"],
+        export_formats: ["glb", "stl", "ply"],
+        textures: false,
+      },
+    } as ServerCapabilities);
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.setProps({ item: secondMesh });
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    const labels = wrapper
+      .findAll("[data-test^='mesh-export-']")
+      .map((entry) => entry.text());
+    expect(labels).toEqual(["Export as STL…", "Export as PLY…"]);
+    expect(
+      requests.some((request) => request.url.endsWith("/api/capabilities")),
+    ).toBe(false);
+  });
+
   it("does not probe capabilities for a raster print", async () => {
     mockCapabilities(["obj"]);
     mountWide({ item: still });
@@ -222,5 +331,47 @@ describe("Lightbox 3-D prints", () => {
     expect(
       requests.some((request) => request.url.endsWith("/api/capabilities")),
     ).toBe(false);
+  });
+});
+
+describe("Lightbox 3-D prints (mobile full-screen)", () => {
+  it("offers no Upscale entry for a mesh print", async () => {
+    mockCapabilities(["obj"]);
+    const wrapper = mountNarrow();
+    await flushPromises();
+    expect(wrapper.find(".lb__full").exists()).toBe(true);
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    const labels = wrapper
+      .findAll("[role='menuitem']")
+      .map((entry) => entry.text());
+    expect(labels.some((label) => /upscale/i.test(label))).toBe(false);
+    expect(labels).toContain("Export as OBJ…");
+  });
+
+  it("keeps the Upscale entry for a raster print", async () => {
+    mockCapabilities([]);
+    const wrapper = mountNarrow({ item: still });
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    const labels = wrapper
+      .findAll("[role='menuitem']")
+      .map((entry) => entry.text());
+    expect(labels.some((label) => /upscale/i.test(label))).toBe(true);
+  });
+
+  it("shows an export refusal in the bottom sheet", async () => {
+    mockCapabilities(["obj"], async () => ({
+      ok: false,
+      status: 422,
+      json: async () => ({ error: "This print has no geometry to convert." }),
+    }));
+    const wrapper = mountNarrow();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-obj']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mesh-export-error']").text()).toBe(
+      "This print has no geometry to convert.",
+    );
   });
 });

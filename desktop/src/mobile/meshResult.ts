@@ -9,32 +9,18 @@
  * viewer can fetch it.
  */
 import { isMeshCompletion } from "@studio/lib/meshCompletion";
+import { GLB_MIME_TYPE, isAnimatedMeshExport, meshExportFilename } from "@studio/lib/meshExport";
 import type { CompleteEvent } from "../lib/api/types";
 
 /**
- * The advertised mesh export containers that are ANIMATED rather than a
- * geometry file: they carry the turntable options (playback, repeat, size,
- * frame rate) the existing export sheet already collects, so they route
- * through that sheet instead of exporting on a single tap.
+ * The export split and naming are the shared studio policy; the phone keeps
+ * its own names for them so `MobileGalleryViewer.vue` reads the same as before.
+ * Animated containers carry the turntable options (playback, repeat, size,
+ * frame rate) the export sheet already collects, so they route through that
+ * sheet instead of exporting on a single tap.
  */
-const ANIMATED_MESH_EXPORT_FORMATS: ReadonlySet<string> = new Set(["gif", "apng", "webp"]);
-
-export function isAnimatedMeshExportFormat(format: string): boolean {
-  return ANIMATED_MESH_EXPORT_FORMATS.has(format.trim().toLowerCase());
-}
-
-/**
- * The filename an exported mesh is shared or downloaded under: the print's own
- * stem with the requested container's extension. The advertised list is the
- * host's, never a client constant, so this deliberately does not validate it.
- */
-export function meshExportFilename(filename: string, format: string): string {
-  const stem = filename.replace(/\.[^.]+$/, "") || "mold-mesh";
-  return `${stem}.${format.trim().toLowerCase()}`;
-}
-
-/** The binary glTF media type, as the container's own registration spells it. */
-export const GLB_MIME_TYPE = "model/gltf-binary";
+export const isAnimatedMeshExportFormat = isAnimatedMeshExport;
+export { GLB_MIME_TYPE, meshExportFilename };
 
 /**
  * Whether this completion is a 3-D mesh.

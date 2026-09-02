@@ -149,15 +149,20 @@ const canSaveVideo = computed(() => props.exportEnabled && video.value);
 const meshExports = computed(() =>
   props.exportEnabled && mesh.value ? props.meshExportFormats : [],
 );
+// The server lists the stored container (`glb`) first so a CLI can name it;
+// the phone already shares that exact file, so it is not an export here.
 const meshGeometryExports = computed(() =>
-  meshExports.value.filter((format) => !isAnimatedMeshExportFormat(format)),
+  meshExports.value.filter((format) => format !== "glb" && !isAnimatedMeshExportFormat(format)),
 );
 const meshAnimationExports = computed(
   () => meshExports.value.filter(isAnimatedMeshExportFormat) as VideoExportFormat[],
 );
 const pipeline = computed(() => (video.value ? (props.item.metadata.pipeline ?? null) : null));
 const canReuse = computed(() => !props.item.metadata_synthetic);
-const canUseSource = computed(() => props.canUseAsSource && !video.value && !audio.value);
+// A mesh has no raster to stage as conditioning, whatever the owner allows.
+const canUseSource = computed(
+  () => props.canUseAsSource && !video.value && !audio.value && !mesh.value,
+);
 const actionLabel = computed(() =>
   props.reusing ? "Loading settings…" : canReuse.value ? "Reuse settings" : "Settings unavailable",
 );
@@ -607,7 +612,10 @@ async function performMeshExport(format: string): Promise<void> {
     downloadVideoExport(await response.blob(), filename);
     actionStatus.value = "Mesh exported";
   } catch (error) {
-    exportError.value = error instanceof Error ? error.message : String(error);
+    // A geometry export never opens the options sheet, so `exportError` (the
+    // sheet's own slot) would be invisible here: the footer status line the
+    // tap is watching is where the failure has to land.
+    actionStatus.value = error instanceof Error ? error.message : String(error);
   } finally {
     exportBusy.value = false;
   }

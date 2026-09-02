@@ -439,7 +439,7 @@ describe("MobileSharedParams mesh controls", () => {
     );
   });
 
-  it("keeps target faces optional and clamps a typed budget into the advertised bounds", async () => {
+  it("keeps target faces optional and names the advertised bounds for a budget outside them", async () => {
     const form = meshForm();
     const wrapper = mountMesh(form);
 
@@ -448,18 +448,39 @@ describe("MobileSharedParams mesh controls", () => {
     expect(faces.attributes("min")).toBe("100");
     expect(faces.attributes("max")).toBe("2000000");
     expect(form.mesh.targetFaces).toBeNull();
+    expect(wrapper.find("[data-test='mobile-mesh-target-faces-error']").exists()).toBe(false);
 
     faces.element.value = "25000";
     await faces.trigger("change");
     expect(form.mesh.targetFaces).toBe(25_000);
+    expect(wrapper.find("[data-test='mobile-mesh-target-faces-error']").exists()).toBe(false);
 
+    // The typed value stands — it is not snapped behind the user's back; the
+    // advisory names the bounds the host will hold it to.
     faces.element.value = "9000000";
     await faces.trigger("change");
-    expect(form.mesh.targetFaces).toBe(2_000_000);
+    expect(form.mesh.targetFaces).toBe(9_000_000);
+    expect(wrapper.get("[data-test='mobile-mesh-target-faces-error']").text()).toBe(
+      "Target faces must be a whole number from 100 to 2000000.",
+    );
+    expect(faces.attributes("aria-invalid")).toBe("true");
 
     faces.element.value = "";
     await faces.trigger("change");
     expect(form.mesh.targetFaces).toBeNull();
+    expect(wrapper.find("[data-test='mobile-mesh-target-faces-error']").exists()).toBe(false);
+  });
+
+  // The group must never reach into the prop to create its own slot: a form
+  // restored without one is initialised by the owner, and reading it here is
+  // side-effect free.
+  it("reads a form that carries no mesh slot without mutating it from a computed", () => {
+    const form = meshForm();
+    const legacy = form as unknown as { mesh?: unknown };
+    delete legacy.mesh;
+    const wrapper = mountMesh(form);
+    expect(wrapper.find("[data-test='mobile-mesh-controls']").exists()).toBe(true);
+    expect(legacy.mesh).toBeUndefined();
   });
 });
 

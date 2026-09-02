@@ -11,6 +11,7 @@ import { requestChoice, toast, undoableAction } from "../lib/toasts";
 import { useRoute, useRouter } from "vue-router";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
+import { REQUIRED_PROMPT_GUIDANCE } from "../components/create/emptyCanvasGuidance";
 import { generationProgressCopy } from "@studio/lib/generationProgress";
 import ControlsAside from "../components/create/ControlsAside.vue";
 import CreateModelPicker from "../components/create/CreateModelPicker.vue";
@@ -70,7 +71,7 @@ import {
   promptSource,
   promptTransformBlockedReason,
 } from "@studio/lib/promptTransform";
-import { validateExpandedPrompts } from "../lib/expandedPrompts";
+import { validateExpandedPrompts } from "@studio/lib/expandedPrompts";
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -254,12 +255,13 @@ import {
   submitsExtend,
 } from "@studio/lib/extend";
 import {
+  promptGuidance,
   promptOptional,
   promptPlaceholder,
   promptRequired,
-  promptRequirementFor,
 } from "@studio/lib/promptRequirement";
 import { isMeshCompletion } from "@studio/lib/meshCompletion";
+import { GLB_MIME_TYPE } from "@studio/lib/meshExport";
 import { meshStatsLabel } from "@studio/lib/meshControls";
 import {
   appendMinimaxH3PickedImageReferences,
@@ -1769,9 +1771,11 @@ const promptConditioning = computed(() => ({
 // so the composer says so instead of implying a prompt is mandatory. Nothing
 // here gates submit: `validateSubmit` never required a prompt.
 const canSkipPrompt = computed(() => promptOptional(promptConditioning.value));
-/** The recipe never reads the prompt: the empty canvas explains the image. */
-const promptIgnored = computed(
-  () => promptRequirementFor(promptConditioning.value) === "ignored",
+/** The empty canvas's one what-to-do sentence, resolved by studio's
+ * precedence (required / optional / prompt-ignored) and handed down whole:
+ * a recipe that never reads the prompt explains the source image instead. */
+const emptyCanvasGuidance = computed(() =>
+  promptGuidance(promptConditioning.value, REQUIRED_PROMPT_GUIDANCE),
 );
 /**
  * Why Expand and Remix are unavailable, or `null` when they are.
@@ -3106,9 +3110,7 @@ watch(
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-    const url = URL.createObjectURL(
-      new Blob([bytes], { type: "model/gltf-binary" }),
-    );
+    const url = URL.createObjectURL(new Blob([bytes], { type: GLB_MIME_TYPE }));
     resultMeshSrc.value = url;
     revokeResultMesh = () => URL.revokeObjectURL(url);
   },
@@ -5944,8 +5946,7 @@ onBeforeUnmount(() => {
           <ResultCanvas
             v-else
             :mode="canvasMode"
-            :prompt-optional="canSkipPrompt"
-            :prompt-ignored="promptIgnored"
+            :empty-guidance="emptyCanvasGuidance"
             :progress="genProgress"
             :stage="genStage"
             :preview-src="

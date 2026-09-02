@@ -12,30 +12,25 @@ describe("ResultCanvas", () => {
     expect(wrapper.text()).toContain("runs on your own machine");
   });
 
-  // The empty state is the only place a first-time user is told what to do,
-  // so it must not insist on a prompt the server would not require — while
-  // staying honest that a blank prompt costs the same memory and moves less.
-  it("swaps the empty-state guidance when the prompt is optional", () => {
+  // The empty state is the only place a first-time user is told what to do.
+  // Which sentence that is (required / optional / prompt-ignored) is decided
+  // once, by studio's `promptGuidance`, and handed in resolved: this
+  // component renders the string and owns no second copy of the precedence.
+  it("renders the resolved empty-state guidance it is handed", () => {
     const wrapper = mount(ResultCanvas, {
-      props: { mode: "empty", promptOptional: true },
+      props: {
+        mode: "empty",
+        emptyGuidance:
+          "With a source the prompt is optional — leave it blank and the model animates what it sees.",
+      },
     });
     expect(wrapper.text()).toContain("the prompt is optional");
-    expect(wrapper.text()).toContain("near-static motion");
-    expect(wrapper.text()).toContain("does not reduce memory use");
     expect(wrapper.text()).not.toContain("Describe an image below");
   });
 
-  // A recipe that ignores the prompt has nothing to animate and nothing to
-  // describe: the guidance is about the source image, never the optional
-  // wording's "animates what it sees".
-  it("explains the source image, not the prompt, when the recipe ignores it", () => {
-    const wrapper = mount(ResultCanvas, {
-      props: { mode: "empty", promptOptional: true, promptIgnored: true },
-    });
-    expect(wrapper.text()).toContain("reads no prompt");
-    expect(wrapper.text()).toContain("source image");
-    expect(wrapper.text()).not.toContain("animates what it sees");
-    expect(wrapper.text()).not.toContain("Describe an image below");
+  it("falls back to the required-prompt wording when handed none", () => {
+    const wrapper = mount(ResultCanvas, { props: { mode: "empty" } });
+    expect(wrapper.text()).toContain("Describe an image below");
   });
 
   it("renders the generating bed with the stage line", () => {

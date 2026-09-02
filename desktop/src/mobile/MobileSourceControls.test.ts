@@ -739,6 +739,35 @@ describe("MobileSourceControls on a canvasless recipe", () => {
 
     expect(wrapper.find("[data-test='mobile-source-fit']").exists()).toBe(true);
   });
+
+  // A form restored before the profile landed (no model row yet) still names
+  // the mesh family; `buildRequest` records no fit for it, so the control must
+  // not promise one — the same legacy fallback the request builder uses.
+  it("falls back to the family when no recipe has been resolved yet", () => {
+    const form = meshForm();
+    const wrapper = mount(MobileSourceControls, { props: { form } });
+
+    expect(wrapper.find("[data-test='mobile-source-preview']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mobile-source-fit']").exists()).toBe(false);
+  });
+
+  // The first blocker on a fresh 3-D form names what the model needs — a
+  // source image to reconstruct — not the video-only first-frame wording.
+  it("names the source image the model reconstructs while none is attached", () => {
+    const form = meshForm();
+    form.sourceImage = "";
+    form.sourceImageName = "";
+    form.sourceImageCapability = "required";
+    const wrapper = mount(MobileSourceControls, {
+      props: { form, model: meshModel },
+      global: { stubs: { MobileImagePickerSheet: true } },
+    });
+
+    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toBe(
+      "This model reconstructs a source image; attach one to generate.",
+    );
+    expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([false]);
+  });
 });
 
 describe("MobileSourceControls — H3 boundary media budget", () => {

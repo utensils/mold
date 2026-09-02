@@ -56,6 +56,7 @@ import {
 } from "@studio/lib/outputShape";
 import { resolveSourceResolution } from "@studio/lib/sourceResolution";
 import {
+  meshTargetFacesError,
   profileStepsValidationError,
   resolutionValidationError,
   resolutionValidationWarning,
@@ -295,6 +296,11 @@ function setTargetFaces(raw: string) {
   const value = Number(trimmed);
   props.form.mesh.targetFaces = Number.isFinite(value) && value > 0 ? Math.round(value) : null;
 }
+/** A budget outside the advertised bounds is a 422 at admission: name the
+ * bounds inline, as Steps does, instead of snapping the typed value. */
+const targetFacesError = computed(() =>
+  meshTargetFacesError(props.form.mesh.targetFaces, meshProfile.value),
+);
 // The sequence opening image is primary-form source media, so — exactly like
 // the one-shot source well — it never contributes to the Advanced badge.
 const advancedCount = computed(() =>
@@ -900,10 +906,19 @@ function resetSettings() {
             :max="meshProfile.target_faces_max"
             placeholder="keep raw surface"
             :value="form.mesh.targetFaces ?? ''"
+            :aria-invalid="targetFacesError ? 'true' : undefined"
             class="ms-seed__input data-mono"
             @input="setTargetFaces(($event.target as HTMLInputElement).value)"
           />
         </div>
+        <p
+          v-if="targetFacesError"
+          class="ms-field__error"
+          role="alert"
+          data-test="mesh-target-faces-error"
+        >
+          {{ targetFacesError }}
+        </p>
         <p class="ms-field__hint">
           Leave blank to keep the raw surface — {{ meshProfile.target_faces_min }}–{{
             meshProfile.target_faces_max

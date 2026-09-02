@@ -361,4 +361,17 @@ describe("MobileResolutionPicker", () => {
     expect(wrapper.find("[data-test='mobile-resolution-error']").exists()).toBe(false);
     expect(wrapper.emitted("validity-change")).toEqual([[true]]);
   });
+
+  // A form restored before the model row landed carries only the family; the
+  // request builder already reads the zero canvas off that family, so the
+  // picker must not block Develop on it in the meantime.
+  it("falls back to the mesh family when no recipe has been resolved yet", () => {
+    const wrapper = mount(MobileResolutionPicker, {
+      props: { family: "hunyuan3d", model: null, width: 0, height: 0 },
+    });
+
+    expect(wrapper.find(".mobile-resolution-picker").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-resolution-error']").exists()).toBe(false);
+    expect(wrapper.emitted("validity-change")).toEqual([[true]]);
+  });
 });

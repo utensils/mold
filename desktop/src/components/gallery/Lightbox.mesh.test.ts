@@ -94,6 +94,76 @@ describe("Lightbox — mesh exports", () => {
     expect(wrapper.find("[data-test='mesh-exports']").exists()).toBe(false);
   });
 
+  // The server lists the stored container first (`glb`) so a CLI can name it;
+  // Save already hands over that exact file, so "Export as GLB…" beside it
+  // would be a no-op transcode.
+  it("never offers the stored GLB as an export beside Save", () => {
+    const wrapper = mountMesh(["glb", "obj", "stl", "ply", "gif", "apng", "webp"]);
+    expect(wrapper.find("[data-test='mesh-export-glb']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mesh-export-obj']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mesh-export-animation']").exists()).toBe(true);
+  });
+
+  // The export route reads the live gallery only; a trashed print's bytes are
+  // under `.trash`, so every export control disappears with Upscale.
+  it("hides every export for a trashed mesh print", () => {
+    const wrapper = mount(Lightbox, {
+      props: {
+        item: meshItem,
+        index: 0,
+        count: 1,
+        video: false,
+        mesh: true,
+        trashed: true,
+        target,
+        meshExportFormats: ["glb", "obj", "stl", "ply", "gif", "apng", "webp"],
+      },
+      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+    });
+    expect(wrapper.find("[data-test='mesh-exports']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mesh-export-animation']").exists()).toBe(false);
+  });
+
+  it("hides Export format… for a trashed clip", () => {
+    const wrapper = mount(Lightbox, {
+      props: {
+        item: { ...meshItem, filename: "clip-0002.mp4", format: "mp4" },
+        index: 0,
+        count: 1,
+        video: true,
+        trashed: true,
+        target,
+      },
+      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+    });
+    expect(wrapper.find("[data-test='export-video']").exists()).toBe(false);
+  });
+
+  // A .glb has no raster to stage as conditioning: the primary button must
+  // agree with its context-menu twin, or the GLB bytes reach the source well.
+  it("disables the primary Use as source for a mesh print", () => {
+    const wrapper = mountMesh(["obj"]);
+    expect(wrapper.get("[data-test='lightbox-use-source']").attributes()).toHaveProperty(
+      "disabled",
+    );
+  });
+
+  it("keeps the primary Use as source live for a raster print", () => {
+    const wrapper = mount(Lightbox, {
+      props: {
+        item: { ...meshItem, filename: "print-0001.png", format: "png" },
+        index: 0,
+        count: 1,
+        video: false,
+        target,
+      },
+      global: { stubs: { AuthedMedia: { template: "<div />" } } },
+    });
+    expect(wrapper.get("[data-test='lightbox-use-source']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
+  });
+
   it("offers only what this host advertises, never a client list", () => {
     const wrapper = mountMesh(["stl"]);
     expect(wrapper.find("[data-test='mesh-export-obj']").exists()).toBe(false);

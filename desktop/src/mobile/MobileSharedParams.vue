@@ -7,7 +7,7 @@
  * drift from what the user could see.
  */
 import { computed } from "vue";
-import { fpsValidationError } from "../lib/generateValidation";
+import { fpsValidationError, meshTargetFacesError } from "../lib/generateValidation";
 import { buildRequest, type GenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
@@ -98,7 +98,14 @@ const fpsControl = computed(() => recipe.value?.temporal?.fps);
  * what renders (and what the print records).
  */
 const meshCaps = computed(() => guidanceCaps.value.mesh ?? null);
-const meshForm = computed(() => (props.form.mesh ??= emptyMeshForm()));
+/** Read-only view: a pre-mesh form restored without the slot reads as empty
+ * here, and only a user edit (below) creates the slot on the owner's form —
+ * a computed must never mutate its prop. */
+const meshForm = computed(() => props.form.mesh ?? emptyMeshForm());
+function writableMeshForm(): NonNullable<GenerateForm["mesh"]> {
+  props.form.mesh ??= emptyMeshForm();
+  return props.form.mesh;
+}
 const octreeSegments = computed(() =>
   (meshCaps.value?.octree_resolutions ?? []).map((resolution) => ({
     value: resolution,
@@ -116,37 +123,33 @@ const thresholdValue = computed(
 );
 
 function setOctreeResolution(value: string | number): void {
-  meshForm.value.octreeResolution = Number(value);
+  writableMeshForm().octreeResolution = Number(value);
 }
 
 function setThreshold(event: Event): void {
   if (thresholdControl.value?.mode === "fixed") return;
-  meshForm.value.threshold = Number((event.target as HTMLInputElement).value);
+  writableMeshForm().threshold = Number((event.target as HTMLInputElement).value);
 }
 
 /**
  * Blank is the raw decimated surface the engine produces on its own, which is
- * why this control is optional rather than pre-filled. A typed budget is
- * snapped into the advertised bounds here rather than shipped for the server
- * to refuse — the same self-correcting idiom the resolution fields use.
+ * why this control is optional rather than pre-filled. A typed budget stands
+ * as typed: one outside the advertised bounds is named inline (below) and
+ * holds Develop, the way a bad steps value does, rather than being snapped
+ * behind the user's back or shipped for the server to refuse.
  */
 function setTargetFaces(event: Event): void {
   const raw = (event.target as HTMLInputElement).value.trim();
-  const caps = meshCaps.value;
-  if (!raw || !caps) {
-    meshForm.value.targetFaces = null;
+  if (!raw) {
+    writableMeshForm().targetFaces = null;
     return;
   }
   const parsed = Math.round(Number(raw));
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    meshForm.value.targetFaces = null;
-    return;
-  }
-  meshForm.value.targetFaces = Math.min(
-    caps.target_faces_max,
-    Math.max(caps.target_faces_min, parsed),
-  );
+  writableMeshForm().targetFaces = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
+const targetFacesError = computed(() =>
+  meshTargetFacesError(meshForm.value.targetFaces, meshCaps.value),
+);
 
 const draft = useSequenceDraftStore();
 const sourceDimensions = computed(() => {
@@ -344,6 +347,7 @@ const sourceDimensions = computed(() => {
         :min="meshCaps.target_faces_min"
         :max="meshCaps.target_faces_max"
         step="1"
+        :aria-invalid="targetFacesError ? 'true' : undefined"
         data-test="mobile-mesh-target-faces"
         @change="setTargetFaces"
       />
@@ -353,6 +357,14 @@ const sourceDimensions = computed(() => {
         {{ meshCaps.target_faces_max.toLocaleString("en-US") }} triangles.
       </small>
     </label>
+    <p
+      v-if="targetFacesError"
+      class="mobile-generate-validation"
+      role="alert"
+      data-test="mobile-mesh-target-faces-error"
+    >
+      {{ targetFacesError }}
+    </p>
   </fieldset>
   <MobileSeedPicker
     :model-value="form.seed"
