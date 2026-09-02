@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mold_core::RetainedSourceMediaAvailability;
+use mold_core::{RetainedSourceMediaAvailability, RetainedSourceMediaMember};
 
 /// The member role the Source row restores. Other roles (masks, identity
 /// photos, keyframes, audio) have no row to land on in the TUI.
@@ -55,11 +55,10 @@ pub(crate) fn cache_dir() -> PathBuf {
         .join("source-media")
 }
 
-/// Where a restored member lands: `<cache>/<print filename>/<display name>`,
-/// so two prints conditioned on files of the same name never collide and
-/// the file keeps the name the row shows. Both segments are reduced to a
-/// plain file name first; the host's display name is already sanitized, and
-/// this makes sure of it locally.
+/// Where a restored member lands: `<cache>/<print filename>/<file name>`
+/// (the file name from [`restored_file_name`]), so two prints conditioned
+/// on files of the same name never collide and the file keeps the name the
+/// row shows. Both segments are reduced to a plain file name first.
 pub(crate) fn cache_path(print_filename: &str, display_name: &str) -> PathBuf {
     cache_dir()
         .join(file_name_only(print_filename))
@@ -67,6 +66,13 @@ pub(crate) fn cache_path(print_filename: &str, display_name: &str) -> PathBuf {
 }
 
 fn file_name_only(name: &str) -> String {
+    safe_file_name(name).unwrap_or_else(|| "member".to_string())
+}
+
+/// Reduce `name` to one plain file-name segment: the last path component,
+/// with separators and control characters replaced. `None` when nothing
+/// usable is left (empty, `.`, `..`, whitespace only).
+fn safe_file_name(name: &str) -> Option<String> {
     let base = Path::new(name)
         .file_name()
         .map(|part| part.to_string_lossy().to_string())
@@ -81,19 +87,55 @@ fn file_name_only(name: &str) -> String {
             }
         })
         .collect();
-    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
-        "member".to_string()
+    if cleaned.trim().is_empty() || cleaned == "." || cleaned == ".." {
+        None
     } else {
-        cleaned
+        Some(cleaned)
     }
 }
 
+/// The file name a restored source image is cached under and shown as on
+/// the Source row.
+///
+/// The print's recorded name (`OutputMetadata.source_image_name`, the name
+/// the reuse already shows as "attach again") comes first: it is the name
+/// the user attached. The host's `display_name` is only a fallback because
+/// it degrades to `<role>-<n>` (`source_image-1`) whenever the pin kept no
+/// usable name, and the opaque member id is the last resort. A recorded
+/// name without an extension borrows the member's, so the file still opens
+/// by type. Every candidate is reduced to a safe file name, and one that
+/// reduces to nothing falls through to the next.
+pub(crate) fn restored_file_name(
+    recorded_name: Option<&str>,
+    member: &RetainedSourceMediaMember,
+) -> String {
+    let display = safe_file_name(&member.display_name);
+    if let Some(recorded) = recorded_name.and_then(safe_file_name) {
+        if Path::new(&recorded).extension().is_some() {
+            return recorded;
+        }
+        return match display
+            .as_deref()
+            .and_then(|name| Path::new(name).extension())
+            .and_then(|ext| ext.to_str())
+        {
+            Some(ext) => format!("{recorded}.{ext}"),
+            None => recorded,
+        };
+    }
+    display
+        .or_else(|| safe_file_name(&member.member_id))
+        .unwrap_or_else(|| "member".to_string())
+}
+
 /// Ask `server_url` what it retained for `print_filename` and bring the
-/// source image back into the cache.
+/// source image back into the cache, named by [`restored_file_name`] from
+/// the print's `recorded_name`.
 pub(crate) async fn restore_source_image(
     server_url: &str,
     host_id: &str,
     print_filename: &str,
+    recorded_name: Option<&str>,
 ) -> SourceRestore {
     let api_key = crate::hosts::api_key_for(host_id);
     let client = crate::hosts::client_for(server_url, api_key.as_deref());
@@ -118,7 +160,7 @@ pub(crate) async fn restore_source_image(
         Ok(bytes) => bytes,
         Err(error) => return SourceRestore::Failed(error.to_string()),
     };
-    let target = cache_path(print_filename, &member.display_name);
+    let target = cache_path(print_filename, &restored_file_name(recorded_name, member));
     let write = async {
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -147,6 +189,77 @@ mod tests {
         assert!(hostile.ends_with("source-media/etc/x.png"), "{hostile:?}");
         let empty = cache_path("", "..");
         assert!(empty.ends_with("source-media/member/member"), "{empty:?}");
+    }
+
+    fn member(id: &str, display_name: &str) -> RetainedSourceMediaMember {
+        RetainedSourceMediaMember {
+            member_id: id.into(),
+            role: SOURCE_IMAGE_ROLE.into(),
+            display_name: display_name.into(),
+            size_bytes: 8,
+        }
+    }
+
+    /// The print's recorded file name wins; the host's display name is the
+    /// fallback (it is `<role>-<n>` whenever the pin kept no usable name),
+    /// and the opaque id is the last resort.
+    #[test]
+    fn restored_file_name_prefers_the_recorded_name_then_display_then_id() {
+        assert_eq!(
+            restored_file_name(
+                Some("armchair-cutout.png"),
+                &member("src-1", "source_image-1")
+            ),
+            "armchair-cutout.png"
+        );
+        assert_eq!(
+            restored_file_name(None, &member("src-1", "chair.webp")),
+            "chair.webp"
+        );
+        assert_eq!(restored_file_name(None, &member("src-1", "")), "src-1");
+        assert_eq!(
+            restored_file_name(Some("  "), &member("src-1", "   ")),
+            "src-1"
+        );
+        // A recorded name without an extension borrows the member's.
+        assert_eq!(
+            restored_file_name(Some("armchair"), &member("src-1", "source_image-1.png")),
+            "armchair.png"
+        );
+        assert_eq!(
+            restored_file_name(Some("armchair"), &member("src-1", "source_image-1")),
+            "armchair"
+        );
+    }
+
+    /// Whatever name wins, it is reduced to one plain file-name segment.
+    #[test]
+    fn restored_file_name_is_reduced_to_a_safe_file_name() {
+        assert_eq!(
+            restored_file_name(Some("../../etc/passwd\\x.png"), &member("src-1", "a.png")),
+            "passwd_x.png"
+        );
+        // A candidate that reduces to nothing falls through to the next.
+        assert_eq!(
+            restored_file_name(Some(".."), &member("src-1", "chair.png")),
+            "chair.png"
+        );
+        assert_eq!(
+            restored_file_name(Some("evil\nname.png"), &member("src-1", "a.png")),
+            "evil_name.png"
+        );
+        assert_eq!(restored_file_name(None, &member("../id", "../..")), "id");
+        let path = cache_path(
+            "chair.glb",
+            &restored_file_name(
+                Some("/tmp/armchair-cutout.png"),
+                &member("src-1", "source_image-1"),
+            ),
+        );
+        assert!(
+            path.ends_with("source-media/chair.glb/armchair-cutout.png"),
+            "{path:?}"
+        );
     }
 
     #[test]

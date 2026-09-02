@@ -2317,6 +2317,12 @@ pub enum Popup {
     SourceImageInput {
         input: String,
         error: Option<String>,
+        /// The pre-filled path is selected as a whole when the picker
+        /// opens on a row that already has a file: the first typed
+        /// character or Backspace replaces it (typing a new path over a
+        /// restored one must not append to it), Enter keeps it. Cleared
+        /// by the first edit; the renderer shows it reversed.
+        selected: bool,
     },
     /// One File-under editor (Title, Tags, or Collection). Invalid input
     /// stays visible and never reaches a generation request.
@@ -4618,7 +4624,11 @@ impl App {
                     }
                     _ => {}
                 },
-                Some(Popup::SourceImageInput { input, error }) => match key.code {
+                Some(Popup::SourceImageInput {
+                    input,
+                    error,
+                    selected,
+                }) => match key.code {
                     KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
                         // An emptied field clears the source: the way back
@@ -4637,6 +4647,18 @@ impl App {
                                 Err(message) => *error = Some(message),
                             }
                         }
+                    }
+                    // A selected pre-fill is replaced by the first edit.
+                    KeyCode::Char(c) if *selected => {
+                        input.clear();
+                        input.push(c);
+                        *selected = false;
+                        *error = None;
+                    }
+                    KeyCode::Backspace if *selected => {
+                        input.clear();
+                        *selected = false;
+                        *error = None;
                     }
                     KeyCode::Char(c)
                         if input.len() + c.len_utf8()
@@ -6714,10 +6736,16 @@ impl App {
                 let filename = entry.filename();
                 self.generate.source_restore_pending = Some(filename.clone());
                 let host_id = origin.host_id.clone();
+                let recorded_name = name.to_string();
                 let tx = self.bg_tx.clone();
                 self.tokio_handle.spawn(async move {
-                    let outcome =
-                        crate::source_media::restore_source_image(&url, &host_id, &filename).await;
+                    let outcome = crate::source_media::restore_source_image(
+                        &url,
+                        &host_id,
+                        &filename,
+                        Some(&recorded_name),
+                    )
+                    .await;
                     let _ = tx.send(BackgroundEvent::SourceImageRestored { filename, outcome });
                 });
             }
@@ -7437,7 +7465,12 @@ impl App {
                     .source_image_path
                     .clone()
                     .unwrap_or_default();
-                self.popup = Some(Popup::SourceImageInput { input, error: None });
+                let selected = !input.is_empty();
+                self.popup = Some(Popup::SourceImageInput {
+                    input,
+                    error: None,
+                    selected,
+                });
             }
             // File under — three validated one-line editors.
             ParamField::Title | ParamField::Tags | ParamField::Collection => {
@@ -16032,7 +16065,7 @@ mod tests {
 
         app.handle_crossterm_event(key(KeyCode::Enter));
         assert!(
-            matches!(&app.popup, Some(Popup::SourceImageInput { input, error: None }) if input.is_empty()),
+            matches!(&app.popup, Some(Popup::SourceImageInput { input, error: None, .. }) if input.is_empty()),
             "Enter on the Source row opens the picker, got {}",
             app.popup.is_some()
         );
@@ -16352,7 +16385,11 @@ mod tests {
                 "availability": "available",
                 "members": [
                     {"member_id": "mask-1", "role": "mask_image", "display_name": "mask.png", "size_bytes": 3},
-                    {"member_id": "src-1", "role": "source_image", "display_name": "armchair.png", "size_bytes": 8}
+                    // The host's display name is `<role>-<n>` whenever the
+                    // pin kept no usable file name; the print's own recorded
+                    // name must win over it (the live UAT saw
+                    // `source_image-1` on the row).
+                    {"member_id": "src-1", "role": "source_image", "display_name": "source_image-1", "size_bytes": 8}
                 ]
             })))
             .expect(1)
@@ -16366,6 +16403,7 @@ mod tests {
             .await;
 
         let mut app = app_with_remote_print(&server.uri());
+        app.gallery.entries[0].metadata.source_image_name = Some("armchair-cutout.png".into());
         app.load_gallery_into_generate();
         assert_eq!(app.active_view, View::Create);
         assert_eq!(
@@ -16375,13 +16413,17 @@ mod tests {
         );
         assert_eq!(
             app.generate.params.source_image_recall.as_deref(),
-            Some("armchair.png"),
+            Some("armchair-cutout.png"),
             "until the host answers, the row says attach again"
         );
         settle_source_restore(&mut app).await;
 
-        let expected = crate::source_media::cache_path("chair.glb", "armchair.png");
+        let expected = crate::source_media::cache_path("chair.glb", "armchair-cutout.png");
         assert!(expected.starts_with(home.dir.path()), "{expected:?}");
+        assert!(
+            expected.ends_with("chair.glb/armchair-cutout.png"),
+            "the cached file carries the print's recorded name, got {expected:?}"
+        );
         assert_eq!(
             app.generate.params.source_image_path.as_deref(),
             Some(expected.to_string_lossy().as_ref())
@@ -16390,13 +16432,99 @@ mod tests {
         assert_eq!(app.generate.params.source_image_recall, None);
         assert_eq!(
             app.generate.params.display_value(&ParamField::SourceImage),
-            "armchair.png"
+            "armchair-cutout.png",
+            "the Source row shows the recorded name, never the member id"
         );
-        assert!(timeline_has(&app, "Restored source image armchair.png"));
+        assert!(timeline_has(
+            &app,
+            "Restored source image armchair-cutout.png"
+        ));
         // The restored file rides the request as bytes like any picked path.
         let request = crate::backend::build_request(&app.generate.params, "", &None).unwrap();
         assert_eq!(request.source_image.as_deref(), Some(&b"png-bytes"[..]));
-        assert_eq!(request.source_image_name.as_deref(), Some("armchair.png"));
+        assert_eq!(
+            request.source_image_name.as_deref(),
+            Some("armchair-cutout.png")
+        );
+
+        // Reopening the picker on the restored file pre-selects its path, so
+        // a new path typed over it replaces rather than extends it.
+        select_source_row(&mut app);
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(matches!(
+            &app.popup,
+            Some(Popup::SourceImageInput { input, selected: true, .. })
+                if input == &expected.to_string_lossy().to_string()
+        ));
+        type_text(&mut app, "/nope/missing.png");
+        assert!(
+            matches!(&app.popup, Some(Popup::SourceImageInput { input, selected: false, .. }) if input == "/nope/missing.png"),
+            "typing replaces the pre-selected path, got {:?}",
+            app.popup.as_ref().map(|_| ())
+        );
+        app.handle_crossterm_event(key(KeyCode::Esc));
+    }
+
+    /// Enter on a Source row that already has a file opens the picker with
+    /// that path pre-selected: the first typed character or Backspace
+    /// replaces the whole text, Enter keeps it as-is.
+    #[tokio::test]
+    async fn source_picker_preselects_the_current_path_so_typing_replaces_it() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.generate.params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        app.sync_generate_capabilities();
+        assert!(app.generate.capabilities.supports_source_image);
+        select_source_row(&mut app);
+        let dir = tempfile::tempdir().unwrap();
+        let cat = dir.path().join("cat.png");
+        std::fs::write(&cat, IDENTITY_TEST_PNG).unwrap();
+        let cat_path = cat.to_string_lossy().to_string();
+
+        // Empty field: nothing to select.
+        assert_eq!(app.generate.params.source_image_path, None);
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(matches!(
+            &app.popup,
+            Some(Popup::SourceImageInput {
+                selected: false,
+                ..
+            })
+        ));
+        app.handle_crossterm_event(key(KeyCode::Esc));
+
+        // Pre-filled field: selected, and Enter accepts it unchanged.
+        app.generate.params.source_image_path = Some(cat_path.clone());
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(matches!(
+            &app.popup,
+            Some(Popup::SourceImageInput { input, selected: true, .. }) if input == &cat_path
+        ));
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(app.popup.is_none());
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some(cat_path.as_str())
+        );
+
+        // Typing replaces the selection instead of appending to it.
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        type_text(&mut app, "/nowhere/dog.png");
+        assert!(
+            matches!(&app.popup, Some(Popup::SourceImageInput { input, selected: false, .. }) if input == "/nowhere/dog.png")
+        );
+        app.handle_crossterm_event(key(KeyCode::Esc));
+
+        // Backspace on a selection empties the field in one stroke; Enter on
+        // the emptied field then clears the source.
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        app.handle_crossterm_event(key(KeyCode::Backspace));
+        assert!(
+            matches!(&app.popup, Some(Popup::SourceImageInput { input, selected: false, .. }) if input.is_empty())
+        );
+        app.handle_crossterm_event(key(KeyCode::Enter));
+        assert!(app.popup.is_none());
+        assert_eq!(app.generate.params.source_image_path, None);
     }
 
     /// An older print the host never retained keeps the attach-again marker
