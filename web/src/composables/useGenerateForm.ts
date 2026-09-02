@@ -48,8 +48,15 @@ import {
 import {
   effectiveGenerationRecipe,
   fixedRecipeControlOverrides,
+  recipeIsCanvasless,
 } from "@studio/lib/generationProfile";
 import { effectiveGenerationGuidance } from "@studio/lib/generationCapabilities";
+import { coerceOutputFormatForRecipe } from "@studio/lib/outputFormat";
+import {
+  emptyMeshForm,
+  meshFormFromMetadata,
+  meshRequestFromForm,
+} from "@studio/lib/meshControls";
 import {
   cameraMotionLoraPath,
   normalizeCameraMotionLoraState,
@@ -200,6 +207,7 @@ function defaultForm(): GenerateFormState {
     enableAudio: null,
     videoOnly: false,
     h3Authoring: emptyMinimaxH3AuthoringState(),
+    mesh: emptyMeshForm(),
   };
 }
 
@@ -262,16 +270,36 @@ export function cloneTemplateForm(state: GenerateFormState): GenerateFormState {
   return sanitizePersistedForm(state);
 }
 
+/**
+ * The HOST's own recipe, never the client-side legacy adapter.
+ *
+ * The adapter fills its `output` block from a pre-profile family rule that
+ * still says `png` for families `baseGenerationCapabilities` answers with
+ * video formats (MiniMax H3). Format coercion therefore reads only a
+ * server-authored recipe and falls back to the capability list otherwise —
+ * which is exactly what an old host behaved like before this existed.
+ */
+function advertisedRecipeOnly(
+  recipe: ReturnType<typeof effectiveGenerationRecipe>,
+): ReturnType<typeof effectiveGenerationRecipe> {
+  return recipe?.legacy_adapter ? null : recipe;
+}
+
 function modelDefaultsPatch(
   current: GenerateFormState,
   model: ModelInfoExtended,
 ): GenerateFormState {
+  const recipe = effectiveGenerationRecipe(model, null);
+  // A canvasless recipe (a 3-D mesh) advertises a zero canvas in its own
+  // `defaults`; the catalog row's `default_width` is a raster leftover that
+  // would put a size on the wire the render ignores.
+  const canvasless = recipeIsCanvasless(recipe);
   const next: GenerateFormState = {
     ...cloneFormState(current),
     model: model.name,
     modelFamily: model.family,
-    width: model.default_width,
-    height: model.default_height,
+    width: canvasless ? recipe!.defaults.width : model.default_width,
+    height: canvasless ? recipe!.defaults.height : model.default_height,
     steps: model.default_steps,
     guidance: model.default_guidance,
     guidanceCapabilities: model.guidance_capabilities ?? null,
@@ -281,10 +309,7 @@ function modelDefaultsPatch(
     sourceImageCapability: model.source_image ?? null,
     // Same reason: `toRequest` re-asks the resolved row when it has one, and
     // this snapshot is what answers when it does not.
-    identitySupported: supportsIdentity(
-      effectiveGenerationRecipe(model, null),
-      model,
-    ),
+    identitySupported: supportsIdentity(recipe, model),
     loras: [],
     icLoraControl: null,
   };
@@ -324,7 +349,7 @@ function modelDefaultsPatch(
     null,
     null,
     model.source_image,
-    effectiveGenerationRecipe(model, null),
+    recipe,
   );
   if (capabilities.supportsVideo) {
     next.frames = isMinimaxH3Family(model.family)
@@ -339,9 +364,22 @@ function modelDefaultsPatch(
     next.gifPreview = false;
   }
   const formats = capabilities.outputFormats as OutputFormat[];
-  if (!formats.includes(next.outputFormat)) {
-    next.outputFormat = formats[0];
-  }
+  // One coercion everywhere (`@studio/lib/outputFormat`): a raster format is
+  // PINNED to glb on a mesh recipe, and a glb left behind by the previous
+  // model falls back to the raster recipe's own default.
+  next.outputFormat =
+    coerceOutputFormatForRecipe(
+      advertisedRecipeOnly(recipe),
+      model.family,
+      next.outputFormat,
+      formats,
+    ) ?? next.outputFormat;
+  // The geometry controls belong to the recipe that advertises them; carrying
+  // an octree resolution onto SDXL would be a hidden setting the request
+  // cannot express.
+  next.mesh = capabilities.mesh
+    ? (next.mesh ?? emptyMeshForm())
+    : emptyMeshForm();
   next.enableAudio = capabilities.supportsAudio
     ? model.supports_audio !== false
     : null;
@@ -613,6 +651,16 @@ export function applyMetadataToForm(
         modelFamily: "",
         negativePromptDefault: "",
       };
+  const recipe = model ? effectiveGenerationRecipe(model, null) : null;
+  const canvasless = recipeIsCanvasless(recipe);
+  // A mesh print records its poster's pixels in `width`/`height`; restoring
+  // them would put a canvas on a request that renders geometry.
+  const restoredWidth = canvasless
+    ? next.width
+    : metadata.generation_width || metadata.width || next.width;
+  const restoredHeight = canvasless
+    ? next.height
+    : metadata.generation_height || metadata.height || next.height;
   const loras =
     metadata.loras?.map<LoraSelection>((l) => ({
       path: l.path,
@@ -664,8 +712,8 @@ export function applyMetadataToForm(
     negativeExplicitClear: restoredNegativeExplicitClear(
       metadata.negative_prompt,
     ),
-    width: metadata.generation_width || metadata.width || next.width,
-    height: metadata.generation_height || metadata.height || next.height,
+    width: restoredWidth,
+    height: restoredHeight,
     steps: metadata.steps || next.steps,
     guidance: metadata.guidance ?? next.guidance,
     seedMode: metadata.seed == null ? "random" : "static",
@@ -704,7 +752,20 @@ export function applyMetadataToForm(
     frames: metadata.frames ?? null,
     predictDuration: metadata.duration_prediction_requested === true,
     fps: metadata.fps ?? null,
-    outputFormat: outputFormat ?? next.outputFormat,
+    outputFormat:
+      coerceOutputFormatForRecipe(
+        advertisedRecipeOnly(recipe),
+        model?.family ?? next.modelFamily,
+        outputFormat ?? next.outputFormat,
+      ) ??
+      outputFormat ??
+      next.outputFormat,
+    // The print records the RESOLVED geometry controls, so a reuse restores
+    // exactly what the engine applied; a raster print has none and the
+    // form's mesh block stays empty (`modelDefaultsPatch` already cleared it).
+    mesh: recipe?.capabilities.mesh
+      ? meshFormFromMetadata(metadata.mesh)
+      : emptyMeshForm(),
     imageAttachments: [],
     // Saved keyframe metadata is name + sha256 with no payload, so a
     // first/last-frame render's closing still cannot be rebuilt from it. The
@@ -1164,6 +1225,12 @@ export function useGenerateForm(): UseGenerateForm {
       // multi-LoRA stacks reach the FLUX engine; older single-LoRA
       // clients still set `lora`, which the server coalesces.
       let loras = s.loras.map((l) => ({ path: l.path, scale: l.scale }));
+      // The resolved row's own recipe answers the prompt/strength/mask/mesh
+      // questions at submit time — the same authority `validateSubmit` and
+      // the rail read, so what the controls show and what travels agree.
+      const requestRecipe = model
+        ? effectiveGenerationRecipe(model, s.pipeline)
+        : null;
       const capabilities = generationCapabilitiesForFamily(
         selectedFamily(s),
         s.model,
@@ -1173,6 +1240,7 @@ export function useGenerateForm(): UseGenerateForm {
         // same way it is for `enable_audio`; the snapshot covers a form
         // restored before the inventory landed.
         model?.source_image ?? s.sourceImageCapability,
+        requestRecipe,
       );
       const attachmentMode = capabilities.sourceImageMode !== "single";
       const attachments = s.imageAttachments ?? [];
@@ -1264,7 +1332,17 @@ export function useGenerateForm(): UseGenerateForm {
         guidance: effectiveGenerationGuidance(capabilities, s.guidance),
         seed: s.seedMode === "random" ? null : s.seed,
         batch_size: requestForcesBatchSizeOne ? 1 : s.batchSize,
-        output_format: s.outputFormat,
+        output_format:
+          coerceOutputFormatForRecipe(
+            advertisedRecipeOnly(requestRecipe),
+            family,
+            s.outputFormat,
+          ) ?? s.outputFormat,
+        // Refused at admission on a recipe with no `mesh` block, and omitted
+        // entirely while every control still equals the advertised default.
+        mesh: capabilities.mesh
+          ? meshRequestFromForm(s.mesh ?? emptyMeshForm(), capabilities.mesh)
+          : undefined,
         cfg_plus: capabilities.supportsCfgPlus && s.cfgPlus ? true : undefined,
         // "default" is the picker's omit-sentinel, not a wire variant; a
         // stored sentinel must never reach serde (codex review).
@@ -1435,10 +1513,13 @@ export function useGenerateForm(): UseGenerateForm {
       // Crop provenance rides only when the wire actually carries fitted
       // source media (the server echoes it verbatim into OutputMetadata so
       // Reuse settings and running-job selection restore the crop controls).
+      // A canvasless recipe has no canvas to fit the source onto, so the
+      // policy is meaningless there and never travels.
       if (
-        finalized.source_image ||
-        finalized.edit_images?.length ||
-        finalized.keyframes?.length
+        !capabilities.canvasless &&
+        (finalized.source_image ||
+          finalized.edit_images?.length ||
+          finalized.keyframes?.length)
       ) {
         finalized.source_fit = s.sourceFitPolicy ?? defaultSourceFitPolicy();
       }

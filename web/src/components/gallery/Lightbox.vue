@@ -150,6 +150,88 @@ const canExportVideo = computed(
     isVideoFile.value && props.item?.filename.toLowerCase().endsWith(".mp4"),
 );
 
+// ── 3-D exports ────────────────────────────────────────────────────────
+// GLB is the only stored form; OBJ / STL / PLY (and any animated container a
+// future host advertises) are TRANSCODES the host performs on request. The
+// menu is therefore built from `/api/capabilities.mesh.export_formats` on the
+// host that holds THIS print — never a client constant.
+const ANIMATED_MESH_EXPORTS: ReadonlySet<string> = new Set([
+  "gif",
+  "apng",
+  "webp",
+]);
+const meshExportFormats = ref<string[]>([]);
+/** Direct one-click transcodes: one menu entry each. */
+const meshFileExports = computed(() =>
+  meshExportFormats.value.filter(
+    (format) => !ANIMATED_MESH_EXPORTS.has(format),
+  ),
+);
+/** Animated turntables share the video export sheet's playback options, so
+ * they collapse into ONE entry that opens it with just these containers. */
+const meshAnimationExports = computed(() =>
+  meshExportFormats.value.filter((format) => ANIMATED_MESH_EXPORTS.has(format)),
+);
+let meshCapabilitiesGeneration = 0;
+
+async function resolveMeshExports() {
+  const generation = ++meshCapabilitiesGeneration;
+  if (!isMeshFile.value) {
+    meshExportFormats.value = [];
+    return;
+  }
+  try {
+    const capabilities = (await (
+      await exportFetch("/api/capabilities")
+    ).json()) as {
+      mesh?: { export_formats?: string[] | null } | null;
+    };
+    if (generation !== meshCapabilitiesGeneration) return;
+    meshExportFormats.value = capabilities.mesh?.export_formats ?? [];
+  } catch {
+    // A host that cannot answer offers no transcodes; the stored GLB is
+    // still downloadable, which is the only thing this print always has.
+    if (generation === meshCapabilitiesGeneration) meshExportFormats.value = [];
+  }
+}
+
+function meshExportFilename(filename: string, format: string): string {
+  const stem = filename.replace(/\.[^.]+$/, "") || "mold-mesh";
+  return `${stem}.${format}`;
+}
+
+async function exportMesh(format: string) {
+  menuOpen.value = false;
+  if (!props.item || exportBusy.value) return;
+  exportBusy.value = true;
+  exportError.value = "";
+  try {
+    const response = await exportFetch(videoExportPath(props.item.filename), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ format }),
+    });
+    downloadVideoExport(
+      await response.blob(),
+      meshExportFilename(props.item.filename, format),
+    );
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
+function openMeshAnimationExport() {
+  menuOpen.value = false;
+  exportError.value = "";
+  exportCapabilities.value = {
+    ...DEFAULT_VIDEO_EXPORT_CAPABILITIES,
+    formats: meshAnimationExports.value as VideoExportCapabilities["formats"],
+  };
+  exportOpen.value = true;
+}
+
 /*
  * Full-size media is addressed on the host that owns the print. Keyless hosts
  * (the serving origin included) resolve synchronously to a plain URL. A keyed
@@ -226,6 +308,9 @@ function resolveMedia() {
 }
 
 watch(() => props.item, resolveMedia, { immediate: true });
+// The transcode menu belongs to the host that holds this print, so it is
+// re-read whenever the viewer moves to another one.
+watch(() => props.item, resolveMeshExports, { immediate: true });
 
 const blockedTitle = computed(() => {
   if (isVideoFile.value) return "Can't stream this clip";
@@ -370,7 +455,10 @@ function onReuse() {
   if (props.item) emit("reuse", props.item);
 }
 function onUseSource() {
-  if (props.item) emit("use-source", props.item);
+  // Every engine's source conditioning reads pixels; a GLB is geometry, so
+  // the control is disabled rather than handing the composer a file it
+  // cannot decode.
+  if (props.item && !isMeshFile.value) emit("use-source", props.item);
 }
 function onMediaContextMenu(event: MouseEvent) {
   if (!props.item || props.inTrash) return;
@@ -601,6 +689,26 @@ async function performVideoExport(options: VideoExportOptions) {
                           : "Upscale…"
                       }}
                     </button>
+                    <!-- Mesh transcodes, straight from the host's own
+                         `mesh.export_formats`. -->
+                    <button
+                      v-for="format in meshFileExports"
+                      :key="format"
+                      role="menuitem"
+                      :data-test="`mesh-export-${format}`"
+                      :disabled="exportBusy"
+                      @click="exportMesh(format)"
+                    >
+                      Export as {{ format.toUpperCase() }}…
+                    </button>
+                    <button
+                      v-if="meshAnimationExports.length > 0"
+                      role="menuitem"
+                      data-test="mesh-export-animation"
+                      @click="openMeshAnimationExport"
+                    >
+                      Export turntable…
+                    </button>
                     <button
                       role="menuitem"
                       class="lb__menu-danger"
@@ -784,7 +892,17 @@ async function performVideoExport(options: VideoExportOptions) {
             </button>
           </template>
           <div class="lb__pair">
-            <button class="lb__quiet" @click="onUseSource">
+            <button
+              class="lb__quiet"
+              :class="{ 'lb__quiet--off': isMeshFile }"
+              :disabled="isMeshFile"
+              :title="
+                isMeshFile
+                  ? 'A 3-D mesh cannot condition a render — source images are pixels.'
+                  : undefined
+              "
+              @click="onUseSource"
+            >
               Use as source
             </button>
             <a
@@ -806,6 +924,14 @@ async function performVideoExport(options: VideoExportOptions) {
           >
             Export format…
           </button>
+          <p
+            v-if="exportError && !exportOpen"
+            class="lb__blocked-body"
+            role="alert"
+            data-test="mesh-export-error"
+          >
+            {{ exportError }}
+          </p>
         </div>
       </div>
 
@@ -886,6 +1012,24 @@ async function performVideoExport(options: VideoExportOptions) {
                     @click="onUpscale"
                   >
                     {{ isVideoFile ? "Framewise upscale…" : "Upscale…" }}
+                  </button>
+                  <button
+                    v-for="format in meshFileExports"
+                    :key="format"
+                    role="menuitem"
+                    :data-test="`mesh-export-${format}`"
+                    :disabled="exportBusy"
+                    @click="exportMesh(format)"
+                  >
+                    Export as {{ format.toUpperCase() }}…
+                  </button>
+                  <button
+                    v-if="meshAnimationExports.length > 0"
+                    role="menuitem"
+                    data-test="mesh-export-animation"
+                    @click="openMeshAnimationExport"
+                  >
+                    Export turntable…
                   </button>
                   <button
                     role="menuitem"
@@ -1092,7 +1236,12 @@ async function performVideoExport(options: VideoExportOptions) {
             </button>
           </template>
           <div class="lb__pair">
-            <button class="lb__quiet" @click="onUseSource">
+            <button
+              class="lb__quiet"
+              :class="{ 'lb__quiet--off': isMeshFile }"
+              :disabled="isMeshFile"
+              @click="onUseSource"
+            >
               Use as source
             </button>
             <a

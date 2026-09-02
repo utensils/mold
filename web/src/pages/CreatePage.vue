@@ -250,7 +250,13 @@ import {
   serverExtendOverlapDefault,
   submitsExtend,
 } from "@studio/lib/extend";
-import { promptOptional, promptRequired } from "@studio/lib/promptRequirement";
+import {
+  promptOptional,
+  promptPlaceholder,
+  promptRequired,
+} from "@studio/lib/promptRequirement";
+import { isMeshCompletion } from "@studio/lib/meshCompletion";
+import { meshStatsLabel } from "@studio/lib/meshControls";
 import {
   appendMinimaxH3PickedImageReferences,
   appendMinimaxH3GalleryImageReference,
@@ -1634,6 +1640,11 @@ const currentFamily = computed(
     (isMinimaxH3Identity(null, form.state.value.model) ? "minimax-h3" : ""),
 );
 
+/** The selected model's resolved recipe — the ONE authority this page reads
+ * for the prompt rule, the canvas, and the mesh controls. */
+const activeRecipe = computed(() =>
+  effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline),
+);
 // The fifth argument is the selected row's advertised source-image contract
 // (#772). The persisted snapshot backs it up so a form restored before the
 // catalog resolves still resolves the same capability the submit gate will.
@@ -1644,7 +1655,7 @@ const capabilities = computed(() =>
     form.state.value.pipeline,
     null,
     currentModel.value?.source_image ?? form.state.value.sourceImageCapability,
-    effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline),
+    activeRecipe.value,
   ),
 );
 // ── Face identity (PuLID, #1224) ──────────────────────────────────────
@@ -1710,6 +1721,7 @@ const h3GenerationInputBlocker = computed<string | null>(() => {
   if (
     isMinimaxH3Identity(currentFamily.value, form.state.value.model) &&
     promptRequired({
+      recipe: activeRecipe.value,
       family: currentFamily.value,
       model: form.state.value.model,
       sourceImage: form.state.value.h3Authoring?.firstFrame,
@@ -1721,24 +1733,34 @@ const h3GenerationInputBlocker = computed<string | null>(() => {
   return null;
 });
 
+/** The prompt rule for the request being built. The resolved recipe is the
+ * authority when the host advertises one, so `ignored` (Hunyuan3D has no
+ * text encoder at all) and `optional` both reach the composer from the
+ * server rather than a client family list. */
+const promptConditioning = computed(() => ({
+  recipe: activeRecipe.value,
+  family: currentFamily.value,
+  model: form.state.value.model,
+  imageAttachments: form.state.value.imageAttachments,
+  keyframes: form.state.value.keyframes,
+  sourceVideo: form.state.value.sourceVideo,
+  sourceVideoPath: form.state.value.sourceVideoPath,
+  extendVideo: form.state.value.extendVideo,
+  extendVideoPath: form.state.value.extendVideoPath,
+}));
 // A conditioned LTX-2 render may go out undescribed — the server admits it,
 // so the composer says so instead of implying a prompt is mandatory. Nothing
 // here gates submit: `validateSubmit` never required a prompt.
-const canSkipPrompt = computed(() =>
-  promptOptional({
-    family: currentFamily.value,
-    imageAttachments: form.state.value.imageAttachments,
-    keyframes: form.state.value.keyframes,
-    sourceVideo: form.state.value.sourceVideo,
-    sourceVideoPath: form.state.value.sourceVideoPath,
-    extendVideo: form.state.value.extendVideo,
-    extendVideoPath: form.state.value.extendVideoPath,
-  }),
-);
+const canSkipPrompt = computed(() => promptOptional(promptConditioning.value));
 const requiredPromptPlaceholder = computed(() =>
   isMinimaxH3Identity(currentFamily.value, form.state.value.model)
     ? MINIMAX_H3_PROMPT_PLACEHOLDER
     : "Describe the image you want to create…",
+);
+/** The one resolved placeholder the prompt bed renders: required wording,
+ * the shared optional wording, or the "no text encoder" note. */
+const composerPromptPlaceholder = computed(() =>
+  promptPlaceholder(promptConditioning.value, requiredPromptPlaceholder.value),
 );
 
 // Continuation rides the selected model's own `/api/models` row, which the
@@ -2996,7 +3018,12 @@ const developPhase = computed<DevelopPhase>(() => {
 const resultSrc = computed(() => {
   const r = latestDone.value?.result;
   if (!r) return "";
-  // Audio first: an audio print's `image` is the WAV itself, so the still
+  // Mesh first: a mesh print's `image` is binary glTF, so any raster branch
+  // below would build `data:image/glb;…`. Its only raster is the poster.
+  if (isMeshCompletion(r)) {
+    return r.mesh_poster ? `data:image/png;base64,${r.mesh_poster}` : "";
+  }
+  // Audio next: an audio print's `image` is the WAV itself, so the still
   // branch below would build `data:image/wav;…` and render a broken canvas
   // at the end of a render that actually succeeded.
   if (isAudioCompletion(r)) {
@@ -3020,6 +3047,43 @@ const resultAudioSrc = computed(() => {
   if (!r || !isAudioCompletion(r) || !r.image) return "";
   return `data:audio/wav;base64,${r.image}`;
 });
+/**
+ * The GLB the viewer loads, as an object URL.
+ *
+ * A `data:model/gltf-binary` URL would re-encode tens of megabytes of
+ * geometry into the DOM on every render; a Blob keeps the bytes out of the
+ * document and is revoked the moment the canvas moves on, so a session of
+ * meshes cannot leak them.
+ */
+const resultMeshSrc = ref("");
+let revokeResultMesh: (() => void) | null = null;
+watch(
+  () => {
+    const r = latestDone.value?.result;
+    return r && isMeshCompletion(r) && r.image ? r.image : "";
+  },
+  (base64) => {
+    revokeResultMesh?.();
+    revokeResultMesh = null;
+    if (!base64) {
+      resultMeshSrc.value = "";
+      return;
+    }
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    const url = URL.createObjectURL(
+      new Blob([bytes], { type: "model/gltf-binary" }),
+    );
+    resultMeshSrc.value = url;
+    revokeResultMesh = () => URL.revokeObjectURL(url);
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => {
+  revokeResultMesh?.();
+  revokeResultMesh = null;
+});
 const resultCaption = computed(() => {
   const job = latestDone.value;
   const r = job?.result;
@@ -3027,7 +3091,18 @@ const resultCaption = computed(() => {
   const secs = Math.round(r.generation_time_ms / 1000);
   // Name the machine that actually rendered it — an unrouted job ran here.
   const where = job?.hostLabel ?? "this server";
-  return `${modelDisplayNameForId(r.model, models.value)} · seed ${r.seed_used} · ${secs}s · ${where}`;
+  // A mesh has no pixels to describe, so its geometry is the provenance:
+  // the one shared caption every surface writes under a 3-D print.
+  const mesh = isMeshCompletion(r)
+    ? meshStatsLabel(
+        r.mesh_vertices,
+        r.mesh_faces,
+        r.mesh_bounds_min,
+        r.mesh_bounds_max,
+      )
+    : "";
+  const base = `${modelDisplayNameForId(r.model, models.value)} · seed ${r.seed_used} · ${secs}s · ${where}`;
+  return mesh ? `${base} · ${mesh}` : base;
 });
 
 function openLatestResult() {
@@ -3065,6 +3140,11 @@ async function prepareStillSourceToRequest(
     : (form.state.value.imageAttachments[0] ?? null);
   const mask = override ? override.mask : form.state.value.maskImage;
   if (!source) return { source, mask };
+  // A canvasless recipe (a 3-D mesh) renders at no pixel size at all, so
+  // there is nothing to fit the source onto — fitting it against the 0×0
+  // canvas would resample the conditioning image out of existence. The
+  // request carries no `source_fit` for one either (`toRequest`).
+  if (capabilities.value.canvasless) return { source, mask };
 
   const configuredPolicy =
     override?.settings?.policy ??
@@ -3253,11 +3333,14 @@ function validateSubmit(): boolean {
   // Resolution constraints are advisory — the server is the authority and
   // its own refusal surfaces as the failed job's error. Only malformed
   // input that cannot form a request blocks the submit (recipe or not).
+  // A canvasless recipe renders at 0×0 by contract, so the whole-number
+  // gate would strand Generate on every 3-D model.
   if (
-    !Number.isInteger(form.state.value.width) ||
-    !Number.isInteger(form.state.value.height) ||
-    form.state.value.width < 1 ||
-    form.state.value.height < 1
+    !capabilities.value.canvasless &&
+    (!Number.isInteger(form.state.value.width) ||
+      !Number.isInteger(form.state.value.height) ||
+      form.state.value.width < 1 ||
+      form.state.value.height < 1)
   ) {
     composerError.value = "Width and height must be whole numbers.";
     return false;
@@ -5427,6 +5510,7 @@ onBeforeUnmount(() => {
               currentModel?.source_image ??
               form.state.value.sourceImageCapability
             "
+            :recipe="activeRecipe"
             :shared="sharedParams"
             :model-default-frames="currentModel?.default_frames ?? null"
             :target="sequenceTarget"
@@ -5591,6 +5675,7 @@ onBeforeUnmount(() => {
             :expanded="expanded"
             :prompt-optional="canSkipPrompt"
             :required-placeholder="requiredPromptPlaceholder"
+            :placeholder="composerPromptPlaceholder"
             :history="promptHistory"
             @update:prompt="onPromptAuthored"
             @submit="onSubmit"
@@ -5821,6 +5906,7 @@ onBeforeUnmount(() => {
             :result-src="resultSrc"
             :result-video-src="resultVideoSrc"
             :result-audio-src="resultAudioSrc"
+            :result-mesh-src="resultMeshSrc"
             :result-caption="resultCaption"
             :error="latestErrorMessage"
             :error-copy="latestErrorCopy"

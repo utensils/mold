@@ -15,6 +15,7 @@ import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
+import MeshViewer from "@studio/components/MeshViewer.vue";
 import type { DevelopPhase } from "@ui/lib/grain";
 import { OPTIONAL_PROMPT_GUIDANCE } from "@studio/lib/promptRequirement";
 
@@ -40,6 +41,11 @@ const props = withDefaults(
     resultSrc?: string;
     /** result — playable MP4 artifact. `resultSrc` may carry its poster. */
     resultVideoSrc?: string;
+    /** result — GLB object URL for a 3-D print; `resultSrc` is then the
+     * rendered poster the viewer falls back to. Empty for every other kind
+     * of print, and probed BEFORE the video arm because a mesh carries
+     * neither frames nor samples. */
+    resultMeshSrc?: string;
     /** result — playable WAV for an audio-only print; `resultSrc` is then the
      * rendered waveform. Empty for every other kind of print. */
     resultAudioSrc?: string;
@@ -202,8 +208,18 @@ watch(
       class="canvas__result ms-fade-up"
       data-test="canvas-result"
     >
+      <MeshViewer
+        v-if="resultMeshSrc"
+        class="canvas__mesh"
+        data-test="canvas-mesh"
+        :src="resultMeshSrc"
+        :poster="resultSrc"
+        alt="Generated 3-D mesh"
+        auto-rotate
+        expandable
+      />
       <video
-        v-if="resultVideoSrc"
+        v-else-if="resultVideoSrc"
         class="canvas__video"
         :src="resultVideoSrc"
         :poster="resultSrc || undefined"
@@ -445,6 +461,18 @@ watch(
   width: 100%;
   max-height: 70vh;
   object-fit: contain;
+  background: var(--print);
+}
+
+.canvas__mesh {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  aspect-ratio: 1;
+  margin: 0 auto;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--edge);
   background: var(--print);
 }
 

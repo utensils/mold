@@ -14,7 +14,10 @@ import type {
 import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { WanRecipeState } from "@studio/lib/wanRecipe";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
-import type { MeshRequestOptions } from "@studio/lib/meshControls";
+import type {
+  MeshFormState,
+  MeshRequestOptions,
+} from "@studio/lib/meshControls";
 
 export type { MeshRequestOptions } from "@studio/lib/meshControls";
 import type {
@@ -1254,6 +1257,11 @@ export interface GenerateFormState {
    * Kept separate from legacy edit/source fields so no surface can flatten
    * Ref2VA into image-only editing. */
   h3Authoring?: MinimaxH3AuthoringState;
+  /** 3-D geometry controls for a mesh recipe. `null` on every field means
+   * "use the profile default", which is what keeps an untouched control off
+   * the wire; cleared whenever the selected recipe has no `mesh` block.
+   * Optional so persisted pre-mesh drafts keep loading. */
+  mesh?: MeshFormState;
 }
 
 export interface Ltx2ControlAdapterInfo {

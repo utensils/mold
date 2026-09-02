@@ -44,6 +44,11 @@ const props = withDefaults(
     promptOptional?: boolean;
     /** Model-specific required-prompt wording. */
     requiredPlaceholder?: string;
+    /** Fully resolved prompt-bed placeholder from the page that holds the
+     * recipe (`promptPlaceholder`). It wins over the two props above, which
+     * remain the fallback for a caller with no recipe in scope — a recipe
+     * that IGNORES the prompt is neither "required" nor "optional" wording. */
+    placeholder?: string | null;
     /** Prompt history (newest first) for ↑/↓ recall. */
     history?: string[];
   }>(),
@@ -55,6 +60,7 @@ const props = withDefaults(
     disabledReason: null,
     promptOptional: false,
     requiredPlaceholder: "Describe the image you want to create…",
+    placeholder: null,
     history: () => [],
   },
 );
@@ -76,14 +82,22 @@ const activePreset = computed(() => stylePresetById(props.stylePreset));
 const styleLabel = computed(() => activePreset.value?.name ?? "None");
 
 const summaryLine = computed(() => {
-  const base = `${props.aspectLabel} · ${props.width}×${props.height} · ${props.steps} steps`;
+  // A canvasless recipe (a 3-D mesh) renders at no pixel size at all, so the
+  // shape/pixel clause is dropped rather than reading "3-D · 0×0".
+  const canvas =
+    props.width > 0 && props.height > 0
+      ? `${props.aspectLabel} · ${props.width}×${props.height} · `
+      : "";
+  const base = `${canvas}${props.steps} steps`;
   return props.batchSize > 1 ? `${base} · ×${props.batchSize}` : base;
 });
 
-const placeholder = computed(() =>
-  props.promptOptional
-    ? OPTIONAL_PROMPT_PLACEHOLDER
-    : props.requiredPlaceholder,
+const promptFieldPlaceholder = computed(
+  () =>
+    props.placeholder?.trim() ||
+    (props.promptOptional
+      ? OPTIONAL_PROMPT_PLACEHOLDER
+      : props.requiredPlaceholder),
 );
 
 const expandLabel = computed(() =>
@@ -176,7 +190,7 @@ watch(
       class="composer__prompt"
       data-test="composer-prompt"
       :value="prompt"
-      :placeholder="placeholder"
+      :placeholder="promptFieldPlaceholder"
       rows="2"
       @input="onInput"
       @keydown="onKeydown"

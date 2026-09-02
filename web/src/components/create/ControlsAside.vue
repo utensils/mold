@@ -23,6 +23,7 @@ import {
   effectiveGenerationRecipe,
   resolutionProfileFinding,
 } from "@studio/lib/generationProfile";
+import { emptyMeshForm, type MeshFormState } from "@studio/lib/meshControls";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import type { OutputMode } from "@studio/lib/sequence";
 import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
@@ -113,6 +114,49 @@ const activeRecipe = computed(() =>
  * pinned (an older server sends no note, and H3 is not a distilled FLUX). */
 const stepsNote = computed(() => controlNote(activeRecipe.value?.steps));
 const guidanceNote = computed(() => controlNote(activeRecipe.value?.guidance));
+
+// ── 3-D mesh (Hunyuan3D) ──────────────────────────────────────────────
+// Every control below is built from the recipe's own `capabilities.mesh`
+// block — the octree ladder, the iso-threshold bounds and the face bounds are
+// the server's, never a client constant, so a host that widens them widens
+// the rail with no client release.
+/** The recipe renders no pixel canvas: Shape and Resolution have nothing to
+ * bind to and are hidden rather than steering a size the request ignores. */
+const canvasless = computed(
+  () => capabilities.value.canvasless || outputShape.value.canvasless,
+);
+const meshProfile = computed(() => capabilities.value.mesh ?? null);
+const meshForm = computed(() => props.modelValue.mesh ?? emptyMeshForm());
+const octreeOptions = computed(() =>
+  (meshProfile.value?.octree_resolutions ?? []).map((value) => ({
+    value,
+    label: String(value),
+  })),
+);
+const octreeValue = computed(
+  () =>
+    meshForm.value.octreeResolution ?? meshProfile.value?.octree_default ?? 0,
+);
+const thresholdControl = computed(() => meshProfile.value?.threshold ?? null);
+const thresholdValue = computed(
+  () => meshForm.value.threshold ?? thresholdControl.value?.default ?? 0,
+);
+const thresholdNote = computed(() => controlNote(thresholdControl.value));
+const targetFacesValue = computed(() => meshForm.value.targetFaces);
+function patchMesh(next: Partial<MeshFormState>) {
+  patch({ mesh: { ...meshForm.value, ...next } });
+}
+function setTargetFaces(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    patchMesh({ targetFaces: null });
+    return;
+  }
+  const value = Number(trimmed);
+  patchMesh({
+    targetFaces: Number.isFinite(value) && value > 0 ? Math.round(value) : null,
+  });
+}
 /** Every size constraint is advisory — the server is the authority, so a
  * custom size renders a warning here rather than blocking Generate. */
 const resolutionWarning = computed(() => {
@@ -332,7 +376,7 @@ function lockLastSeed() {
       </p>
     </div>
 
-    <div class="controls__group">
+    <div v-if="!canvasless" class="controls__group">
       <div class="controls__label">Shape</div>
       <ShapePicker
         :model-value="aspectId"
@@ -343,7 +387,7 @@ function lockLastSeed() {
       />
     </div>
 
-    <div class="controls__group">
+    <div v-if="!canvasless" class="controls__group">
       <div class="controls__label">Resolution</div>
       <ResolutionSelector
         :model-value="selectedSizeId"
@@ -386,6 +430,62 @@ function lockLastSeed() {
       />
       <p v-if="stepsNote" class="controls__hint" data-test="fixed-steps-hint">
         {{ stepsNote }}
+      </p>
+    </div>
+
+    <!-- 3-D geometry. Built entirely from the recipe's advertised `mesh`
+         block, so a host that widens the octree ladder or the face bounds
+         widens this group with no client release. -->
+    <div v-if="meshProfile" class="controls__group" data-test="mesh-controls">
+      <div class="controls__label">Mesh</div>
+      <SegmentedControl
+        v-if="octreeOptions.length > 0"
+        data-test="mesh-octree"
+        wrap
+        :model-value="octreeValue"
+        :options="octreeOptions"
+        label="Octree detail"
+        @update:model-value="patchMesh({ octreeResolution: $event })"
+      />
+      <SliderRow
+        v-if="thresholdControl"
+        class="controls__mesh-slider"
+        label="Iso threshold"
+        :model-value="thresholdValue"
+        :min="thresholdControl.min"
+        :max="thresholdControl.max"
+        :step="thresholdControl.step"
+        :disabled="thresholdControl.mode === 'fixed'"
+        :value-label="thresholdValue.toFixed(2)"
+        @update:model-value="patchMesh({ threshold: $event })"
+      />
+      <p
+        v-if="thresholdNote"
+        class="controls__hint"
+        data-test="mesh-threshold-note"
+      >
+        {{ thresholdNote }}
+      </p>
+      <div class="controls__mesh-faces">
+        <label class="controls__label controls__label--inline" for="mesh-faces"
+          >Target faces</label
+        >
+        <input
+          id="mesh-faces"
+          class="controls__seed"
+          data-test="mesh-target-faces"
+          type="number"
+          :min="meshProfile.target_faces_min"
+          :max="meshProfile.target_faces_max"
+          placeholder="keep raw surface"
+          :value="targetFacesValue ?? ''"
+          @input="setTargetFaces(($event.target as HTMLInputElement).value)"
+        />
+      </div>
+      <p class="controls__hint">
+        Leave blank to keep the raw surface —
+        {{ meshProfile.target_faces_min }}–{{ meshProfile.target_faces_max }}
+        triangles when decimating.
       </p>
     </div>
 
@@ -670,6 +770,14 @@ function lockLastSeed() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.controls__mesh-slider {
+  margin-top: 12px;
+}
+
+.controls__mesh-faces {
+  margin-top: 12px;
 }
 
 .controls__seed-head {

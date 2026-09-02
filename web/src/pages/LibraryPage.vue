@@ -175,7 +175,7 @@ import {
 
 const WEB_LIBRARY_SCROLL_KEY = "web:library";
 
-type FilterKind = "all" | "images" | "video" | "audio";
+type FilterKind = "all" | "images" | "video" | "audio" | "mesh";
 type ViewMode = "feed" | "grid";
 type Scope = "prints" | "collections" | "trash";
 
@@ -248,6 +248,9 @@ const filterOptions: SegmentOption<FilterKind>[] = [
   { value: "images", label: "Images" },
   { value: "video", label: "Video" },
   { value: "audio", label: "Audio" },
+  // A mesh is neither a still nor a clip: without its own segment a `.glb`
+  // print would be invisible under Images and unreachable everywhere else.
+  { value: "mesh", label: "3D" },
 ];
 
 // Seed the search from the global nav's `?q=` and keep the two in sync.
@@ -1438,6 +1441,7 @@ const kindFiltered = computed(() => {
     const k = mediaKind(e.format, e.filename);
     if (filter.value === "video") return k === "video" || k === "animated";
     if (filter.value === "audio") return k === "audio";
+    if (filter.value === "mesh") return k === "mesh";
     return k === "image";
   });
 });

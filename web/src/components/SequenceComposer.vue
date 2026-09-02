@@ -38,7 +38,10 @@ import {
   transitionLabel,
   type SequenceStage,
 } from "@studio/lib/sequence";
-import { promptOptional } from "@studio/lib/promptRequirement";
+import {
+  promptOptional,
+  type PromptRecipe,
+} from "@studio/lib/promptRequirement";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import {
   fetchChainLimits,
@@ -61,6 +64,14 @@ const props = withDefaults(
      * the conservative independent-clip path.
      */
     sourceImage?: string | null;
+    /**
+     * The selected model's resolved generation recipe. It is the authority
+     * for the prompt rule (`capabilities.prompt.mode`), so the clip validator
+     * and the one-shot composer cannot disagree about whether a stage may go
+     * out undescribed. Absent means an older host and the legacy family rule
+     * answers, exactly as before.
+     */
+    recipe?: PromptRecipe | null;
     /** LIVE shared params from the generate form (submit + TOML export). */
     shared: SequenceSharedParams;
     /** `/api/models` default_frames for the selected model, when known. */
@@ -78,6 +89,7 @@ const props = withDefaults(
   }>(),
   {
     sourceImage: null,
+    recipe: null,
     modelDefaultFrames: null,
     chainLevelDirty: false,
     stageMediaByClipId: null,
@@ -257,7 +269,12 @@ const stages = computed<SequenceStage[]>(() =>
 );
 const maxStages = computed(() => limits.value?.max_stages ?? 16);
 const clipPromptOptional = computed(() =>
-  promptOptional({ family: props.family, sourceImage: draft.openingImage }),
+  promptOptional({
+    recipe: props.recipe,
+    family: props.family,
+    model: props.model,
+    sourceImage: draft.openingImage,
+  }),
 );
 const validationErrors = computed(() =>
   sequenceValidation(stages.value, {
