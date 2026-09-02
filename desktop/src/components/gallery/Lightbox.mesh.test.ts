@@ -36,6 +36,8 @@ vi.mock("../../lib/api/client", () => ({
 
 import Lightbox from "./Lightbox.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
+import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
+import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
 import type { GalleryImage } from "../../lib/api/types";
 
 const meshItem: GalleryImage = {
@@ -65,7 +67,26 @@ beforeEach(() => {
   apiJsonTo.mockReset().mockResolvedValue({});
 });
 
-function mountMesh(meshExportFormats: string[]) {
+/**
+ * The holding host's own geometry contract, exactly as
+ * `/api/capabilities.mesh.export_geometry` spells it. Its ABSENCE is the only
+ * gate: an older host never sees a geometry field.
+ */
+const geometry: MeshExportGeometryCapabilities = {
+  size_mm: { min: 1, max: 1000, default: 100 },
+  up_axes: ["y", "z"],
+  origins: ["center", "floor"],
+  defaults: {
+    obj: { size_mm: null, up_axis: "y", origin: "floor" },
+    stl: { size_mm: 100, up_axis: "z", origin: "floor" },
+    ply: { size_mm: 100, up_axis: "z", origin: "floor" },
+  },
+};
+
+function mountMesh(
+  meshExportFormats: string[],
+  meshExportGeometry: MeshExportGeometryCapabilities | null = null,
+) {
   return mount(Lightbox, {
     props: {
       item: meshItem,
@@ -75,6 +96,7 @@ function mountMesh(meshExportFormats: string[]) {
       mesh: true,
       target,
       meshExportFormats,
+      meshExportGeometry,
     },
     global: { stubs: { AuthedMedia: { template: "<div />" } } },
   });
@@ -244,5 +266,98 @@ describe("Lightbox — mesh exports", () => {
       repeat: "once",
       max_dimension: 512,
     });
+  });
+});
+
+/**
+ * The geometry knobs a stored mesh needs before a slicer can read it. They
+ * exist only where the holding host advertises `mesh.export_geometry`; its
+ * absence is the ONLY gate, because an older server silently DROPS unknown
+ * body fields rather than refusing them — so a client that guessed would post
+ * a size the host ignores and hand back the unscaled mesh the user thought
+ * they had resized.
+ */
+describe("Lightbox — mesh export geometry", () => {
+  it("opens the geometry sheet for a container the host scales", async () => {
+    const wrapper = mountMesh(["obj", "stl", "ply"], geometry);
+    expect(wrapper.findComponent(MeshExportDialog).props("open")).toBe(false);
+
+    await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
+    await flushPromises();
+
+    const dialog = wrapper.findComponent(MeshExportDialog);
+    expect(dialog.props("open")).toBe(true);
+    expect(dialog.props("format")).toBe("stl");
+    expect(dialog.props("capabilities")).toEqual(geometry);
+    // Nothing is exported until the user says so.
+    expect(saveGalleryMedia).not.toHaveBeenCalled();
+  });
+
+  it("posts the chosen geometry beside the format", async () => {
+    const wrapper = mountMesh(["obj", "stl", "ply"], geometry);
+    await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
+    await flushPromises();
+    // The sheet's own submit, so the posted body is the one its draft holds.
+    expect(wrapper.find("[data-test='mesh-export-submit']").exists()).toBe(true);
+    await wrapper.get("[data-test='mesh-export-dialog'] form").trigger("submit");
+    await flushPromises();
+
+    expect(saveGalleryMedia).toHaveBeenCalledTimes(1);
+    const [usedTarget, filename, outputName, options] = saveGalleryMedia.mock.calls[0]!;
+    expect(usedTarget).toEqual(target);
+    expect(filename).toBe("print-0007.glb");
+    expect(outputName.endsWith(".stl")).toBe(true);
+    // The host's own defaults for STL, which is what the sheet opened on.
+    expect(options).toEqual({
+      format: "stl",
+      size_mm: 100,
+      up_axis: "z",
+      origin: "floor",
+    });
+    expect(wrapper.findComponent(MeshExportDialog).props("open")).toBe(false);
+  });
+
+  // THE regression that matters: a host that predates the feature must keep
+  // receiving the body this client has always sent.
+  it("posts exactly { format } to a host that advertises no geometry", async () => {
+    const wrapper = mountMesh(["obj", "stl", "ply"]);
+    await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
+    await flushPromises();
+
+    // No contract, so the sheet is not even mounted.
+    expect(wrapper.findComponent(MeshExportDialog).exists()).toBe(false);
+    expect(saveGalleryMedia).toHaveBeenCalledTimes(1);
+    expect(saveGalleryMedia.mock.calls[0]![3]).toEqual({ format: "stl" });
+  });
+
+  // A format the host lists no defaults for is one it does not scale.
+  it("exports straight through for a container the host omits from defaults", async () => {
+    const wrapper = mountMesh(["obj", "stl", "3mf"], {
+      ...geometry,
+      defaults: { stl: geometry.defaults.stl! },
+    });
+    await wrapper.get("[data-test='mesh-export-3mf']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findComponent(MeshExportDialog).props("open")).toBe(false);
+    expect(saveGalleryMedia.mock.calls[0]![3]).toEqual({ format: "3mf" });
+  });
+
+  // A turntable is a render with playback options, not a geometry file: it
+  // keeps the video sheet even where geometry is advertised.
+  it("keeps the turntable on the playback sheet", async () => {
+    const wrapper = mountMesh(["obj", "gif", "webp"], geometry);
+    await wrapper.get("[data-test='mesh-export-animation']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findComponent(VideoExportDialog).props("open")).toBe(true);
+    expect(wrapper.findComponent(MeshExportDialog).props("open")).toBe(false);
+  });
+
+  // The stored container is never an export entry, so it can never reach the
+  // geometry sheet either.
+  it("still never offers the stored GLB", () => {
+    const wrapper = mountMesh(["glb", "obj"], geometry);
+    expect(wrapper.find("[data-test='mesh-export-glb']").exists()).toBe(false);
   });
 });

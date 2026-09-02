@@ -240,6 +240,15 @@ geometry transcodes (`glb`, `obj`, `stl`, `ply`) and the turntable renders
 (`gif`, `apng`, and `webp` on a build with the `webp` feature). A client
 should skip a name it does not know rather than fail the read.
 
+`capabilities.mesh.export_geometry`, present only on a build that supports
+the print-ready options below, carries `size_mm` (`{min, max, default}`),
+`up_axes`, `origins`, and `defaults` — one `{size_mm, up_axis, origin}` entry
+per geometry format (`obj`, `stl`, `ply`; a null `size_mm` means that format
+exports at model scale, unscaled). Its absence is the whole gate: a client
+offers the size, axis, and origin controls only when the block is present,
+exactly as it treats every other capabilities-advertised block on an older
+host.
+
 An explicit `output_format` a recipe does not advertise is a `422` at
 admission, named as `requests[N]: output format 'x' is not available for this
 recipe`, so a client learns at submit time rather than watching the job hold.
@@ -1145,10 +1154,13 @@ groups. Exporting it as `glb` returns the stored bytes unchanged; `obj` is
 `model/obj`, `stl` is `model/stl`, and `ply` is `application/x-ply`. Asking a
 `.glb` for `gif`, `apng` or `webp` renders a **turntable**: the gallery
 poster's own camera, lighting and background swept a full turn around the
-mesh (the first frame is the poster) and encoded by the same encoders a video
-export uses, as `image/gif`, `image/apng` (downloaded as `.png`) or
-`image/webp`. The request body takes the video export's own fields plus two
-of its own:
+mesh and encoded by the same encoders a video export uses, as `image/gif`,
+`image/apng` (downloaded as `.png`) or `image/webp`. The sweep's scale is
+fitted once, before the first frame renders, so the mesh holds one size for
+the whole turn instead of breathing frame to frame; frame 0 keeps the
+poster's own camera and lighting but is fit to that sweep-wide scale, not the
+poster's exact pixels — see [Share a turntable](/guide/mesh#share-a-turntable).
+The request body takes the video export's own fields plus two of its own:
 
 ```json
 {
@@ -1174,8 +1186,36 @@ whose frame buffer would exceed the 256 MiB budget the video export also
 holds to is refused before a frame renders, naming `frames` and
 `max_dimension` as the knobs. A `.glb` this build's reader does not cover — a
 foreign file dropped into the output directory — is a `422` naming what is
-unsupported rather than a corrupt download. One export runs at a time per
-server process. `PUT /api/gallery/import/:name` streams an
+unsupported rather than a corrupt download.
+
+Exporting a `.glb` as `obj`, `stl` or `ply` instead takes three geometry
+options of its own, each optional:
+
+```json
+{
+  "format": "stl",
+  "size_mm": 120,
+  "up_axis": "y",
+  "origin": "center"
+}
+```
+
+`size_mm` (1 to 1000) scales the export so its longest bounding-box axis
+measures that many millimetres. `up_axis` (`y` | `z`) rotates the geometry —
+and its normals, so lighting and facet direction stay correct — onto that
+axis. `origin` (`center` | `floor`) either puts the bounding-box centre at
+the origin or rests the mesh on the up-axis plane at `0`, bed-ready for a
+slicer. A key you omit takes the format's own default; the full table, and
+why each default is what it is, lives in
+[Print-ready exports](/guide/mesh#print-ready-exports), and
+`capabilities.mesh.export_geometry` mirrors it in wire form. The three keys
+are a `422` naming the format on a `glb` export (the stored bytes come back
+untouched) and on a `gif`, `apng` or `webp` turntable — never silently
+ignored — and a server that predates the feature advertises no
+`export_geometry` block, so a client offers the controls only when it is
+present.
+
+One export runs at a time per server process. `PUT /api/gallery/import/:name` streams an
 already-encoded print into the gallery using a fixed binary envelope —
 `u32 metadata_len`, `u64 file_len`, the metadata JSON, then exactly `file_len`
 bytes — so a native client can mirror a print with its metadata and

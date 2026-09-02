@@ -338,6 +338,57 @@ describe("baseGenerationCapabilities", () => {
     }
   });
 
+  it("offers no scheduler when a wan recipe advertises an empty list", () => {
+    // The DMD tiers pin their own sampler, so the recipe carries
+    // `schedulers: []` — and the server drops the key on the wire
+    // (`skip_serializing_if = "Vec::is_empty"`). A recipe IS in hand, so the
+    // missing key means "none", never the legacy-host solver fallback: every
+    // option the fallback would offer is a 422 on this tier.
+    const dmdRecipe = JSON.parse(
+      JSON.stringify({
+        capabilities: {
+          guidance: { adjustable: false, supports_negative_prompt: false },
+          negative_prompt: { mode: "hidden", required: false },
+          supports_audio: false,
+          source_video: { mode: "hidden", required: false },
+          mask: { mode: "hidden", required: false },
+          keyframes: { mode: "hidden", required: false },
+          audio: { mode: "hidden", required: false },
+          lora: { mode: "adjustable", max_count: 4 },
+          controlnet: { mode: "hidden", max_count: 0 },
+          output: {
+            default_format: "mp4",
+            formats: ["mp4"],
+            audio_requires_mp4: false,
+          },
+          wan_recipe: {
+            mode: "hidden",
+            supports_distill_strength: false,
+            supports_first_last_frame: false,
+          },
+          // `skip_serializing_if = "Vec::is_empty"` — the round-trip below
+          // removes the key exactly as the server's JSON does.
+          schedulers: undefined,
+        },
+      }),
+    ) as GenerationRecipeProfile;
+    expect(
+      "schedulers" in
+        (dmdRecipe.capabilities as unknown as Record<string, unknown>),
+    ).toBe(false);
+
+    const caps = baseGenerationCapabilities(
+      "wan",
+      "wan21-t2v-1.3b:turbo",
+      null,
+      null,
+      null,
+      dmdRecipe,
+    );
+    expect(caps.schedulerOptions).toEqual([]);
+    expect(caps.supportsScheduler).toBe(false);
+  });
+
   it("gates the wan recipe controls on family and distill tier", () => {
     // Flow shift and the solver apply to every wan checkpoint; the per-expert
     // distill strengths only to the A14B tiers that actually ship a Lightning

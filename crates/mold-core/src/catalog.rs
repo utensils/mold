@@ -151,9 +151,12 @@ pub fn declared_audio_capability(family: &str, model: &str) -> Option<bool> {
 ///
 /// `None` whenever the recipe leaves any of them adjustable — a preset on a
 /// dynamic canvas is a recommendation, and overriding a user's remembered
-/// size with it would be a regression, not a fix. Today only H3's reviewed
-/// compact envelope answers: a bucket domain that refuses off-bucket sizes,
-/// with fixed steps and a fixed frame count.
+/// size with it would be a regression, not a fix. Two recipes answer: H3's
+/// reviewed compact envelope (a bucket domain that refuses off-bucket sizes,
+/// with fixed steps and a fixed frame count) and any recipe whose `steps`
+/// control is `Fixed` — the Wan DMD ladder tiers, today. The second test is
+/// the recipe's own, not a family list: a fixed control means the RECIPE
+/// decided the number and admission refuses every other one.
 ///
 /// The canvas is the RECIPE's own default, never the remembered one, even
 /// when the remembered one names a valid bucket. `recipe()` derives
@@ -175,27 +178,30 @@ fn pinned_recipe_defaults(
     family: &str,
     model: &str,
 ) -> Option<(u32, u32, u32, Option<u32>)> {
-    // Only the compact H3 recipe overrides its own `input.default_*`, and it
-    // does so precisely because those arrive laundered through user
-    // `model_prefs`. Reading the recipe back here is what keeps the row and
-    // the profile — which a client reads in one response, and whose hash
-    // covers `recipe.defaults` — from disagreeing.
-    if !crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
-        return None;
-    }
+    // These recipes override their own `input.default_*` precisely because
+    // those arrive laundered through user `model_prefs`. Reading the recipe
+    // back here is what keeps the row and the profile — which a client reads
+    // in one response, and whose hash covers `recipe.defaults` — from
+    // disagreeing.
     let recipe = profile.default_recipe()?;
-    // Evidence, not trust: a recipe default that the compact rule or the
-    // family frame grid would refuse is not authority over anything.
-    let canvas = (recipe.defaults.width, recipe.defaults.height);
-    if !crate::minimax_h3::is_admitted_compact_canvas(canvas.0, canvas.1) {
+    let h3_compact = crate::minimax_h3::uses_reviewed_compact_envelope(family, model);
+    if !h3_compact && recipe.steps.mode != crate::ControlMode::Fixed {
         return None;
     }
+    let canvas = (recipe.defaults.width, recipe.defaults.height);
     let frames = recipe
         .temporal
         .as_ref()
         .map(|temporal| temporal.frames.default);
-    if frames.is_some_and(|frames| !crate::minimax_h3::valid_frame_count(frames)) {
-        return None;
+    if h3_compact {
+        // Evidence, not trust: a recipe default that the compact rule or the
+        // family frame grid would refuse is not authority over anything.
+        if !crate::minimax_h3::is_admitted_compact_canvas(canvas.0, canvas.1) {
+            return None;
+        }
+        if frames.is_some_and(|frames| !crate::minimax_h3::valid_frame_count(frames)) {
+            return None;
+        }
     }
     Some((canvas.0, canvas.1, recipe.defaults.steps, frames))
 }
@@ -705,6 +711,48 @@ mod tests {
             .expect("flux-dev:q8 is always catalogued");
         assert_eq!(flux_row.defaults.default_width, 768);
         assert_eq!(flux_row.defaults.default_height, 768);
+    }
+
+    /// The same rule, on the family that proved it is not H3's: a Wan DMD
+    /// ladder tier fixes its step count at the rung count, so a `model_prefs`
+    /// entry naming 20 steps must not reach the row. Clients seed their forms
+    /// from `default_steps`, and admission refuses anything but the rung
+    /// count — a laundered 20 there is a guaranteed 422.
+    #[test]
+    fn a_stale_model_pref_cannot_reach_a_fixed_step_wan_row() {
+        let ladder =
+            crate::manifest::wan_dmd_ladder("wan21-t2v-1.3b:turbo").expect("tier is laddered");
+        let mut config = crate::Config::default();
+        config.models.insert(
+            "wan21-t2v-1.3b:turbo".to_string(),
+            crate::config::ModelConfig {
+                default_steps: Some(20),
+                ..Default::default()
+            },
+        );
+
+        let catalog = super::build_model_catalog(&config, None, false);
+        let row = catalog
+            .iter()
+            .find(|row| row.info.name == "wan21-t2v-1.3b:turbo")
+            .expect("the DMD turbo row is always catalogued");
+        assert_eq!(row.defaults.default_steps, ladder.len() as u32);
+
+        // The base tier's steps stay adjustable, so its preference survives.
+        let mut base_config = crate::Config::default();
+        base_config.models.insert(
+            "wan21-t2v-1.3b:bf16".to_string(),
+            crate::config::ModelConfig {
+                default_steps: Some(20),
+                ..Default::default()
+            },
+        );
+        let base = super::build_model_catalog(&base_config, None, false);
+        let base_row = base
+            .iter()
+            .find(|row| row.info.name == "wan21-t2v-1.3b:bf16")
+            .expect("the base tier is always catalogued");
+        assert_eq!(base_row.defaults.default_steps, 20);
     }
 
     #[test]

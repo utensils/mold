@@ -14,6 +14,7 @@
  * the intent. Keyboard: ←/→ navigate, Esc closes.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import PrintOrganizer from "../library/PrintOrganizer.vue";
 import type { CollectionPickerRow } from "../library/CollectionPicker.vue";
@@ -28,7 +29,13 @@ import { ORIGIN_HOST_ID, getHost } from "../../lib/hostRegistry";
 import { peekHostCapabilities } from "../../composables/useHostRouting";
 import {
   meshExportFilename,
+  meshExportRequest,
+  meshGeometryDefaults,
   splitMeshExportFormats,
+  takesGeometryOptions,
+  type MeshBounds,
+  type MeshExportGeometryCapabilities,
+  type MeshGeometryOptions,
 } from "@studio/lib/meshExport";
 import {
   MediaUpgradeRequiredError,
@@ -171,14 +178,34 @@ const meshFileExports = computed(
 const meshAnimationExports = computed(
   () => splitMeshExportFormats(meshExportFormats.value).animations,
 );
+/**
+ * The same host's geometry contract, when it has one. A stored mesh is
+ * normalized model space, so a slicer reads it as a 2 mm blob lying on its
+ * side; OBJ / STL / PLY exports can carry a size, an up axis and an origin.
+ * The PRESENCE of this block is the only gate: an older server drops those
+ * keys instead of refusing them, so a client that guessed would promise a
+ * resize the host never performed. Null here means post the bare format.
+ */
+const meshExportGeometry = ref<MeshExportGeometryCapabilities | null>(null);
+/** The viewer's own bounding box, so the sheet can name real extents. */
+const meshBounds = ref<MeshBounds | null>(null);
+const meshGeometryOpen = ref(false);
+const meshGeometryFormat = ref("");
 let meshCapabilitiesGeneration = 0;
+
+function onMeshReady(stats: { bounds?: MeshBounds }) {
+  meshBounds.value = stats?.bounds ?? null;
+}
 
 async function resolveMeshExports() {
   const generation = ++meshCapabilitiesGeneration;
   // An export refusal belonged to the print that is gone.
   exportError.value = "";
+  meshGeometryOpen.value = false;
+  meshBounds.value = null;
   if (!isMeshFile.value) {
     meshExportFormats.value = [];
+    meshExportGeometry.value = null;
     return;
   }
   // The shell already polls every host's capabilities; reuse that snapshot
@@ -186,28 +213,59 @@ async function resolveMeshExports() {
   // itself only when nothing has been read for it yet.
   const hostId =
     (props.item as { hostId?: string } | null)?.hostId ?? ORIGIN_HOST_ID;
-  const snapshot = peekHostCapabilities(hostId)?.mesh?.export_formats;
-  if (snapshot) {
-    meshExportFormats.value = snapshot;
+  const snapshot = peekHostCapabilities(hostId)?.mesh;
+  if (snapshot?.export_formats) {
+    meshExportFormats.value = snapshot.export_formats;
+    meshExportGeometry.value = snapshot.export_geometry ?? null;
     return;
   }
   try {
     const capabilities = (await (
       await exportFetch("/api/capabilities")
     ).json()) as {
-      mesh?: { export_formats?: string[] | null } | null;
+      mesh?: {
+        export_formats?: string[] | null;
+        export_geometry?: MeshExportGeometryCapabilities | null;
+      } | null;
     };
     if (generation !== meshCapabilitiesGeneration) return;
     meshExportFormats.value = capabilities.mesh?.export_formats ?? [];
+    meshExportGeometry.value = capabilities.mesh?.export_geometry ?? null;
   } catch {
     // A host that cannot answer offers no transcodes; the stored GLB is
     // still downloadable, which is the only thing this print always has.
-    if (generation === meshCapabilitiesGeneration) meshExportFormats.value = [];
+    if (generation === meshCapabilitiesGeneration) {
+      meshExportFormats.value = [];
+      meshExportGeometry.value = null;
+    }
   }
 }
 
+/**
+ * A geometry container the host will scale opens the options sheet; anything
+ * else — the stored form, a turntable, a container this host lists no
+ * defaults for, or any host with no geometry block at all — is the one-click
+ * transcode this client has always performed.
+ */
 async function exportMesh(format: string) {
   menuOpen.value = false;
+  if (!props.item || exportBusy.value) return;
+  const geometry = takesGeometryOptions(format)
+    ? meshGeometryDefaults(meshExportGeometry.value, format)
+    : null;
+  if (geometry) {
+    exportError.value = "";
+    meshGeometryFormat.value = format;
+    meshGeometryOpen.value = true;
+    return;
+  }
+  await runMeshExport(format, null);
+}
+
+async function runMeshExport(
+  format: string,
+  geometry: MeshGeometryOptions | null,
+) {
   if (!props.item || exportBusy.value) return;
   exportBusy.value = true;
   exportError.value = "";
@@ -215,12 +273,13 @@ async function exportMesh(format: string) {
     const response = await exportFetch(videoExportPath(props.item.filename), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ format }),
+      body: JSON.stringify(meshExportRequest(format, geometry)),
     });
     downloadVideoExport(
       await response.blob(),
       meshExportFilename(props.item.filename, format),
     );
+    meshGeometryOpen.value = false;
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -585,6 +644,7 @@ async function performVideoExport(options: VideoExportOptions) {
             :poster="posterSrc"
             :alt="prompt || item.filename"
             class="lb__media"
+            @ready="onMeshReady"
           />
           <video
             v-else-if="isVideoFile && mediaSrc"
@@ -1066,6 +1126,7 @@ async function performVideoExport(options: VideoExportOptions) {
             :poster="posterSrc"
             :alt="prompt || item.filename"
             class="lb__media"
+            @ready="onMeshReady"
           />
           <video
             v-else-if="isVideoFile && mediaSrc"
@@ -1290,6 +1351,18 @@ async function performVideoExport(options: VideoExportOptions) {
         :error="exportError"
         @close="exportOpen = false"
         @export="performVideoExport"
+      />
+      <MeshExportDialog
+        v-if="item && meshExportGeometry"
+        :open="meshGeometryOpen"
+        :filename="item.filename"
+        :format="meshGeometryFormat"
+        :capabilities="meshExportGeometry"
+        :bounds="meshBounds"
+        :busy="exportBusy"
+        :error="exportError"
+        @close="meshGeometryOpen = false"
+        @export="(geometry) => runMeshExport(meshGeometryFormat, geometry)"
       />
     </div>
   </Transition>

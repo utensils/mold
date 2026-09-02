@@ -94,6 +94,8 @@ function mockCapabilities(
     status: 200,
     blob: async () => new Blob(["MESH"], { type: "model/obj" }),
   }),
+  /** `mesh.export_geometry`; omitted entirely for an older host. */
+  exportGeometry?: unknown,
 ) {
   requests = [];
   globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
@@ -108,6 +110,7 @@ function mockCapabilities(
             generation: true,
             formats: ["glb"],
             export_formats: exportFormats,
+            ...(exportGeometry ? { export_geometry: exportGeometry } : {}),
             textures: false,
           },
         }),
@@ -372,6 +375,191 @@ describe("Lightbox 3-D prints (mobile full-screen)", () => {
     await flushPromises();
     expect(wrapper.get("[data-test='mesh-export-error']").text()).toBe(
       "This print has no geometry to convert.",
+    );
+  });
+});
+
+/**
+ * Geometry options. A stored mesh is normalized model space, so an STL sent
+ * to a slicer verbatim is a 2 mm blob on its side. A host that advertises
+ * `mesh.export_geometry` lets the lightbox ask for a size, an up axis and an
+ * origin; a host that does not gets exactly the body this client always sent,
+ * because an older server DROPS unknown keys instead of refusing them.
+ */
+const GEOMETRY = {
+  size_mm: { min: 1, max: 1000, default: 100 },
+  up_axes: ["y", "z"],
+  origins: ["center", "floor"],
+  defaults: {
+    obj: { size_mm: null, up_axis: "y", origin: "floor" },
+    stl: { size_mm: 100, up_axis: "z", origin: "floor" },
+    ply: { size_mm: 100, up_axis: "z", origin: "floor" },
+  },
+};
+
+describe("Lightbox 3-D geometry options", () => {
+  it("opens the options sheet for a container the host will scale", async () => {
+    mockCapabilities(["obj", "stl", "gif"], undefined, GEOMETRY);
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
+    await flushPromises();
+
+    const dialog = wrapper.get("[data-test='mesh-export-dialog']");
+    expect(dialog.text()).toContain("Export as STL");
+    // Nothing is posted until the sheet is submitted.
+    expect(requests.some((request) => request.init?.method === "POST")).toBe(
+      false,
+    );
+  });
+
+  it("posts the three keys the user settled on", async () => {
+    mockCapabilities(["stl"], undefined, GEOMETRY);
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:export"),
+      revokeObjectURL: vi.fn(),
+    });
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-geometry-size-200']").setValue();
+    await wrapper.get("[data-test='mesh-geometry-origin-center']").setValue();
+    await wrapper
+      .get("[data-test='mesh-export-dialog'] form")
+      .trigger("submit");
+    await flushPromises();
+
+    const post = requests.find((request) => request.init?.method === "POST")!;
+    expect(post.url).toBe("/api/gallery/export/chair.glb");
+    expect(JSON.parse(String(post.init!.body))).toEqual({
+      format: "stl",
+      size_mm: 200,
+      up_axis: "z",
+      origin: "center",
+    });
+    expect(anchorClick).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  // The old-server contract, byte for byte: no block, no options, no keys.
+  it("posts the bare format when the host advertises no geometry block", async () => {
+    mockCapabilities(["stl"]);
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+      () => undefined,
+    );
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:export"),
+      revokeObjectURL: vi.fn(),
+    });
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mesh-export-dialog']").exists()).toBe(
+      false,
+    );
+    const post = requests.find((request) => request.init?.method === "POST")!;
+    expect(JSON.parse(String(post.init!.body))).toEqual({ format: "stl" });
+    vi.unstubAllGlobals();
+  });
+
+  // Geometry belongs to a file, not to a rendered animation.
+  it("keeps the turntable on the playback sheet", async () => {
+    mockCapabilities(["stl", "gif"], undefined, GEOMETRY);
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-animation']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mesh-export-dialog']").exists()).toBe(
+      false,
+    );
+    expect(
+      wrapper.getComponent({ name: "VideoExportDialog" }).props("open"),
+    ).toBe(true);
+  });
+
+  // The host's own defaults table is the authority; a container it does not
+  // name there is the one-click transcode it has always been.
+  it("posts the bare format for a container the host lists no defaults for", async () => {
+    mockCapabilities(["usdz"], undefined, GEOMETRY);
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+      () => undefined,
+    );
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:export"),
+      revokeObjectURL: vi.fn(),
+    });
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-usdz']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mesh-export-dialog']").exists()).toBe(
+      false,
+    );
+    const post = requests.find((request) => request.init?.method === "POST")!;
+    expect(JSON.parse(String(post.init!.body))).toEqual({ format: "usdz" });
+    vi.unstubAllGlobals();
+  });
+
+  it("reads the geometry block from the routing snapshot without probing", async () => {
+    mockCapabilities([]);
+    routingTesting.seedCapabilities(ORIGIN_HOST_ID, {
+      mesh: {
+        generation: true,
+        formats: ["glb"],
+        export_formats: ["stl"],
+        export_geometry: GEOMETRY,
+        textures: false,
+      },
+    } as unknown as ServerCapabilities);
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mesh-export-dialog']").exists()).toBe(
+      true,
+    );
+    expect(
+      requests.some((request) => request.url.endsWith("/api/capabilities")),
+    ).toBe(false);
+  });
+
+  it("shows the host's refusal inside the sheet and leaves it open", async () => {
+    mockCapabilities(
+      ["stl"],
+      async () => ({
+        ok: false,
+        status: 422,
+        json: async () => ({ error: "That size is out of range." }),
+      }),
+      GEOMETRY,
+    );
+    const wrapper = mountWide();
+    await flushPromises();
+    await wrapper.get("[aria-label='More actions']").trigger("click");
+    await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
+    await flushPromises();
+    await wrapper
+      .get("[data-test='mesh-export-dialog'] form")
+      .trigger("submit");
+    await flushPromises();
+    const dialog = wrapper.get("[data-test='mesh-export-dialog']");
+    expect(dialog.get("[role='alert']").text()).toBe(
+      "That size is out of range.",
     );
   });
 });

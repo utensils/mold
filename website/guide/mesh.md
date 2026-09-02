@@ -125,13 +125,50 @@ advertises what it can convert on `/api/capabilities.mesh.export_formats`.
 USDZ is tracked separately; it is the format Apple's AR Quick Look wants and it
 carries textures, so it belongs with the texturing work rather than here.
 
+### Print-ready exports
+
+The stored GLB is normalized model space — Hunyuan3D fits every mesh into a
+unit cube — so a slicer reads it as a 2 mm blob and refuses it ("object too
+small… may be in meters or inches"). Blender's STL and PLY importers take
+axes exactly as they come, so the mesh lands on its side, while Blender's OBJ
+importer converts Y-up itself and DCC tools already treat one unit as one
+metre. `--size-mm`, `--up-axis` and `--origin` on `obj`, `stl` and `ply` fix
+that at export time, each defaulting to what that format's tools expect:
+
+| Format | Size                                | Up axis | Origin  |
+| ------ | ----------------------------------- | ------- | ------- |
+| `obj`  | as stored (model units, no scaling) | `y`     | `floor` |
+| `stl`  | 100 mm                              | `z`     | `floor` |
+| `ply`  | 100 mm                              | `z`     | `floor` |
+
+`floor` centres the mesh on the up-axis plane and rests it on `0` — bed-ready
+for a slicer. `center` puts the bounding-box centre at the origin instead;
+reach for it when the tool on the other end places objects by their centre.
+The stored mesh is centred on Hunyuan3D's extraction grid, not on its own
+bounding box, so `center` genuinely recentres it.
+
+```bash
+mold library export chair.glb --format stl                       # 100 mm, Z-up, floor
+mold library export chair.glb --format stl --size-mm 120
+mold library export chair.glb --format obj --up-axis y --origin center
+```
+
+A key you leave out takes the table above. `--size-mm` (1 to 1000),
+`--up-axis` (`y` | `z`) and `--origin` (`center` | `floor`) are **refused**,
+not silently dropped, on `glb` and on a turntable, and both
+`mold library export` and the MCP `export_mesh` tool refuse them outright
+against a host that does not advertise `capabilities.mesh.export_geometry`.
+
 ## Share a turntable
 
 Nothing outside a 3-D tool opens a `.glb`, and the gallery poster shows one
 view. A **turntable** is that poster set spinning: the same camera, lighting
 and slate background, swept a full turn around the mesh and written as an
 animated GIF, APNG or WebP you can drop into a chat, a README or a browser.
-The first frame is the poster itself.
+The sweep's scale is fitted once, before the first frame renders, so the
+mesh holds one size for the whole turn instead of breathing and popping as
+it comes round. Frame 0 keeps the poster's own camera and lighting, but it is
+fit to that sweep-wide scale rather than the poster's exact pixels.
 
 ```bash
 mold library export chair.glb --format gif                       # chair.gif: 36 frames, 10 fps, 512 px, loops
@@ -219,16 +256,20 @@ now — not only the CLI, TUI, and Discord.
 6. **Export** from the lightbox (web/desktop) or the viewer sheet (iPhone).
    An **Export as…** entry offers whatever the host advertises on
    `capabilities.mesh.export_formats` — never the stored GLB itself, which
-   Download already covers: OBJ, STL and PLY are the one-click
-   transcodes described in [Export as OBJ, STL or PLY](#export-as-obj-stl-or-ply)
-   above, and **Export turntable…** opens the video export's options sheet
-   for the animated GIF, APNG or WebP described in
-   [Share a turntable](#share-a-turntable). Desktop saves through its normal
-   download path; on iPhone and Android every entry — the stored GLB too —
-   offers both **Share…** (the native share sheet) and **Save to Mold
-   folder**, which files it under Files ▸ On My iPhone ▸ Mold (the entry
-   appears after the first save) or Android's `Download/Mold` and names the
-   saved path.
+   Download already covers: OBJ, STL and PLY open a **print-ready** options
+   sheet — size in millimetres with a live width × depth × height readout
+   once the mesh is loaded, up axis, and origin, pre-filled from
+   `capabilities.mesh.export_geometry`'s per-format defaults described in
+   [Print-ready exports](#print-ready-exports) above — and **Export
+   turntable…** opens the video export's options sheet for the animated GIF,
+   APNG or WebP described in [Share a turntable](#share-a-turntable). Desktop
+   saves through its normal download path; on iPhone and Android every
+   entry — the stored GLB too — offers both **Share…** (the native share
+   sheet) and **Save to Mold folder**, which files it under Files ▸ On My
+   iPhone ▸ Mold (the entry appears after the first save) or Android's
+   `Download/Mold` and names the saved path. On iPhone the size, axis, and
+   origin fields sit inside the swipe-up sheet under the format picker,
+   never floating over the viewport.
 
 ## In the TUI
 
@@ -261,10 +302,14 @@ machine's thumbnail route; never the geometry through a raster decoder), and
 (GIF, APNG, and WebP on a build that encodes it) — the list the owning
 machine advertises on `capabilities.mesh.export_formats`, or the same set
 from the in-process writer for a print that lives only on this machine,
-rendered through the same code the server uses. The picker has no turntable
-knobs: it renders at the defaults (one full turn, 36 frames, 512 px, 10 fps,
-looping) and its hint says so, pointing at `mold library export` for bounce,
-once, or other sizes. The converted copy is written beside your other saves
+rendered through the same code the server uses. The picker has no knobs:
+a turntable renders at the defaults (one full turn, 36 frames, 512 px,
+10 fps, looping) and OBJ/STL/PLY export at their own per-format defaults
+(the [Print-ready exports](#print-ready-exports) table above) — its hint
+says so, pointing at `mold library export` for bounce, once, a different
+size, or a different axis and origin. A local export and the equivalent
+served one apply the identical defaults, so the bytes are the same either
+way. The converted copy is written beside your other saves
 as `<print>.<ext>` (an APNG as `.png`) and its path is shown when it lands;
 the gallery file is untouched.
 

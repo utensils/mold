@@ -19,6 +19,17 @@ use candle_core::{DType, Tensor};
 /// `num_train_timesteps` for every Wan checkpoint.
 pub(crate) const WAN_NUM_TRAIN_TIMESTEPS: usize = 1000;
 
+/// The flow shift FastVideo's DMD stage builds its *own* scheduler with —
+/// `FlowMatchEulerDiscreteScheduler(shift=8.0)`, hardcoded in
+/// `DmdDenoisingStage.__init__`
+/// (`fastvideo/pipelines/stages/denoising.py:1257`, commit `40b93784`).
+///
+/// This is a property of the distillation, not of the tier or the request: the
+/// student was trained against the sigmas this table produces, so it is never
+/// [`resolve_flow_shift`](crate::wan::pipeline)'s answer and never a user
+/// knob.
+pub(crate) const DMD_TABLE_SHIFT: f64 = 8.0;
+
 /// UniPC order. Wan ships 2 for guided sampling (`fm_solvers_unipc.py:82`).
 const SOLVER_ORDER: usize = 2;
 
@@ -160,6 +171,102 @@ impl WanSchedule {
 
         let timesteps = shifted.iter().map(|s| (s * train) as i64).collect();
         let mut sigmas: Vec<f64> = shifted.iter().map(|s| *s as f32 as f64).collect();
+        sigmas.push(0.0);
+
+        Ok(Self { sigmas, timesteps })
+    }
+
+    /// Build the grid for a DMD rung ladder — the schedule a distilled
+    /// student walks, which is a *lookup* into a fixed table rather than a
+    /// grid computed from a step count.
+    ///
+    /// FastVideo's `DmdDenoisingStage` never calls `set_timesteps`. It stands
+    /// up a full 1000-point `FlowMatchEulerDiscreteScheduler(shift=8.0)`
+    /// (`fastvideo/pipelines/stages/denoising.py:1257`) —
+    ///
+    /// ```text
+    /// timesteps = linspace(1, 1000, 1000)[::-1]
+    /// sigmas    = timesteps / 1000
+    /// sigmas    = shift * sigmas / (1 + (shift - 1) * sigmas)
+    /// timesteps = sigmas * 1000
+    /// ```
+    ///
+    /// (`fastvideo/models/schedulers/scheduling_flow_match_euler_discrete.py:141-149`)
+    ///
+    /// — and then, at each rung, looks the sigma up by nearest shifted
+    /// timestep: `timestep_id = argmin |scheduler.timesteps - t|`
+    /// (`fastvideo/models/utils.py:172-173`, mirrored in `add_noise` at
+    /// `scheduling_flow_match_euler_discrete.py:633`).
+    ///
+    /// Two consequences worth stating, because both look like bugs otherwise:
+    ///
+    /// 1. **The DiT receives the integer rung, not the table value.** `t` is
+    ///    `torch.tensor(dmd_denoising_steps, dtype=torch.long)`
+    ///    (`denoising.py:1318-1320`) and is handed to the transformer
+    ///    verbatim; the shifted table is consulted only to pick a sigma. So
+    ///    rung 757 conditions the network on 757 while the arithmetic uses
+    ///    sigma 0.7568.
+    /// 2. **The sigmas are not `rung / 1000`.** For the FastWan2.1 ladder
+    ///    `[1000, 757, 522]` the lookup lands on table indices 0, 720 and 880,
+    ///    giving `[1.0, 0.7567567567567568, 0.5217391304347826]`.
+    ///
+    /// Unlike [`Self::new`] and [`Self::dpmpp`] the whole table is kept in
+    /// `f64`. Upstream's is `float32`
+    /// (`scheduling_flow_match_euler_discrete.py:141-149`) and
+    /// `pred_noise_to_pred_video` then casts to double at
+    /// `fastvideo/models/utils.py:169`, so the two differ by roughly 1e-8 —
+    /// far too little to move the `argmin`, which is the only decision the
+    /// table drives here: adjacent entries near index 720 are ~9.1e-4 apart
+    /// in sigma (0.91 timestep units), so a tie would have to sit within
+    /// ~4.6e-4 of the midpoint for 1e-8 to move it.
+    pub fn from_rungs(rungs: &[u32], table_shift: f64) -> Result<Self> {
+        if rungs.is_empty() {
+            bail!("Wan sampler: a DMD ladder needs at least one rung");
+        }
+        if table_shift <= 0.0 || !table_shift.is_finite() {
+            bail!(
+                "Wan sampler: the DMD table shift must be finite and positive, got {table_shift}"
+            );
+        }
+        let train = WAN_NUM_TRAIN_TIMESTEPS;
+        let train_f = train as f64;
+
+        // The full training table, high sigma first.
+        let mut table: Vec<f64> = Vec::with_capacity(train);
+        for i in 0..train {
+            let raw = (train - i) as f64 / train_f;
+            table.push(table_shift * raw / (1.0 + (table_shift - 1.0) * raw));
+        }
+
+        let mut sigmas = Vec::with_capacity(rungs.len() + 1);
+        let mut timesteps = Vec::with_capacity(rungs.len());
+        let mut previous: Option<u32> = None;
+        for &rung in rungs {
+            if rung == 0 || rung as usize > train {
+                bail!("Wan sampler: DMD rung {rung} is outside the 1..={train} training range");
+            }
+            if let Some(previous) = previous {
+                if rung >= previous {
+                    bail!(
+                        "Wan sampler: DMD rungs must strictly descend, got {previous} then {rung}"
+                    );
+                }
+            }
+            previous = Some(rung);
+
+            let target = f64::from(rung);
+            let mut best = 0usize;
+            let mut best_distance = f64::INFINITY;
+            for (index, sigma) in table.iter().enumerate() {
+                let distance = (sigma * train_f - target).abs();
+                if distance < best_distance {
+                    best_distance = distance;
+                    best = index;
+                }
+            }
+            sigmas.push(table[best]);
+            timesteps.push(i64::from(rung));
+        }
         sigmas.push(0.0);
 
         Ok(Self { sigmas, timesteps })
@@ -716,6 +823,123 @@ impl FlowEuler {
     }
 }
 
+/// The DMD rung-ladder solver: FastVideo's `DmdDenoisingStage`
+/// (`fastvideo/pipelines/stages/denoising.py:1250-1400`, commit `40b93784`).
+///
+/// A DMD student is not a faster ODE integrator, it is a different sampling
+/// procedure. At each of its fixed rungs it does ONE forward (positive
+/// conditioning only — `batch.is_cfg_negative = False` at `denoising.py:1368`,
+/// there is no unconditional branch), converts the flow velocity to a clean
+/// latent, and then — on every rung but the last — throws that latent back
+/// into noise at the *next* rung's sigma:
+///
+/// ```text
+/// x0     = x - sigma_i * v                 # pred_noise_to_pred_video, utils.py:174
+/// x_next = (1 - sigma_i+1) * x0            # add_noise, scheduling_...:634
+///          + sigma_i+1 * randn()
+/// ```
+///
+/// The last rung returns `x0` unchanged (`denoising.py:1397`).
+///
+/// That re-noise is why this solver, alone among the four, cannot be driven
+/// through [`WanSolver::step`]: it needs a fresh Gaussian per rung, and no
+/// other Wan solver owns noise. See [`WanSolver::step_with_noise`].
+#[derive(Clone, Debug)]
+pub(crate) struct FlowDmd {
+    schedule: WanSchedule,
+    next_step_index: usize,
+    last_x0: Option<Tensor>,
+}
+
+impl FlowDmd {
+    pub fn new(schedule: WanSchedule) -> Self {
+        Self {
+            schedule,
+            next_step_index: 0,
+            last_x0: None,
+        }
+    }
+
+    pub fn schedule(&self) -> &WanSchedule {
+        &self.schedule
+    }
+
+    /// The clean-latent prediction the most recent rung produced — what
+    /// previews project, same contract as [`FlowUniPc::last_x0`], and always
+    /// F32. The terminal rung returns this same prediction, cast to the
+    /// sample's dtype, so in an F32 render the last preview and the finished
+    /// latent are bit-identical and in a BF16 one they agree to that cast.
+    pub fn last_x0(&self) -> Option<&Tensor> {
+        self.last_x0.as_ref()
+    }
+
+    /// Whether the rung at `step_index` is followed by another one, and so
+    /// needs a fresh Gaussian to be re-noised into.
+    pub fn wants_fresh_noise(&self, step_index: usize) -> bool {
+        step_index + 1 < self.schedule.steps()
+    }
+
+    /// Advance one rung. `noise` is required on every rung but the last and
+    /// ignored on the last; the caller decides where it comes from, exactly
+    /// as the initial latent does.
+    pub fn step_with_noise(
+        &mut self,
+        model_output: &Tensor,
+        step_index: usize,
+        sample: &Tensor,
+        noise: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        if step_index != self.next_step_index {
+            bail!(
+                "Wan sampler: FlowDmd walks its ladder in order — expected rung {}, got \
+                 {step_index}",
+                self.next_step_index
+            );
+        }
+        if step_index >= self.schedule.steps() {
+            bail!(
+                "Wan sampler: rung {step_index} is past the {}-rung DMD ladder",
+                self.schedule.steps()
+            );
+        }
+        let renoise = self.wants_fresh_noise(step_index);
+        // Checked before any state moves: a caller that forgot the noise gets
+        // a solver it can still drive after fixing the call.
+        let noise = match (renoise, noise) {
+            (true, None) => bail!(
+                "Wan sampler: DMD rung {step_index} of {} is re-noised into the next rung and \
+                 needs a fresh noise tensor",
+                self.schedule.steps()
+            ),
+            (true, Some(noise)) => Some(noise),
+            (false, _) => None,
+        };
+
+        let out_dtype = sample.dtype();
+        let sample32 = sample.to_dtype(DType::F32)?;
+        let model_output32 = model_output.to_dtype(DType::F32)?;
+
+        // `pred_noise_to_pred_video` (`fastvideo/models/utils.py:174`): the
+        // model output is a flow velocity, the same convention every other
+        // Wan solver's `convert_model_output` assumes.
+        let sigma = self.schedule.sigmas[step_index];
+        let x0 = sample32.sub(&model_output32.affine(sigma, 0.0)?)?;
+        self.last_x0 = Some(x0.clone());
+        self.next_step_index += 1;
+
+        let next = match noise {
+            Some(noise) => {
+                let sigma_next = self.schedule.sigmas[step_index + 1];
+                let noise32 = noise.to_dtype(DType::F32)?;
+                x0.affine(1.0 - sigma_next, 0.0)?
+                    .add(&noise32.affine(sigma_next, 0.0)?)?
+            }
+            None => x0,
+        };
+        Ok(next.to_dtype(out_dtype)?)
+    }
+}
+
 /// The solver a Wan denoise run drives — selected per request (#795),
 /// defaulting to [`FlowUniPc`], which preserves every existing render
 /// bit-for-bit.
@@ -724,6 +948,8 @@ pub(crate) enum WanSolver {
     UniPc(FlowUniPc),
     DpmPp(FlowDpmPp),
     Euler(FlowEuler),
+    /// The DMD rung ladder. Driven through [`Self::step_with_noise`] only.
+    Dmd(FlowDmd),
 }
 
 impl WanSolver {
@@ -732,6 +958,7 @@ impl WanSolver {
             Self::UniPc(solver) => solver.schedule(),
             Self::DpmPp(solver) => solver.schedule(),
             Self::Euler(solver) => solver.schedule(),
+            Self::Dmd(solver) => solver.schedule(),
         }
     }
 
@@ -740,6 +967,7 @@ impl WanSolver {
             Self::UniPc(solver) => solver.last_x0(),
             Self::DpmPp(solver) => solver.last_x0(),
             Self::Euler(solver) => solver.last_x0(),
+            Self::Dmd(solver) => solver.last_x0(),
         }
     }
 
@@ -753,6 +981,37 @@ impl WanSolver {
             Self::UniPc(solver) => solver.step(model_output, step_index, sample),
             Self::DpmPp(solver) => solver.step(model_output, step_index, sample),
             Self::Euler(solver) => solver.step(model_output, step_index, sample),
+            Self::Dmd(_) => bail!(
+                "Wan sampler: a DMD ladder is re-noised between rungs and must be driven \
+                 through step_with_noise, not step"
+            ),
+        }
+    }
+
+    /// Whether the solver needs a fresh Gaussian to advance past
+    /// `step_index`. Only the DMD ladder ever does, and only on a rung that
+    /// has a successor.
+    pub fn wants_fresh_noise(&self, step_index: usize) -> bool {
+        match self {
+            Self::UniPc(_) | Self::DpmPp(_) | Self::Euler(_) => false,
+            Self::Dmd(solver) => solver.wants_fresh_noise(step_index),
+        }
+    }
+
+    /// The one entry point the denoise loop drives. The ODE solvers ignore
+    /// `noise` entirely — they integrate a trajectory and never resample it —
+    /// so the loop can hand every solver the same call and let
+    /// [`Self::wants_fresh_noise`] decide whether to pay for the tensor.
+    pub fn step_with_noise(
+        &mut self,
+        model_output: &Tensor,
+        step_index: usize,
+        sample: &Tensor,
+        noise: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        match self {
+            Self::Dmd(solver) => solver.step_with_noise(model_output, step_index, sample, noise),
+            _ => self.step(model_output, step_index, sample),
         }
     }
 }
@@ -1792,6 +2051,226 @@ mod tests {
                      identity, max diff {max_diff}"
                 );
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // DMD rung ladder (FastVideo FastWan2.1-T2V-1.3B, commit `40b93784`)
+    // ------------------------------------------------------------------
+
+    /// The sigmas FastVideo's own `FlowMatchEulerDiscreteScheduler(shift=8.0)`
+    /// hands `pred_noise_to_pred_video` for the three DMD rungs — the table
+    /// entries at indices 0, 720 and 880 of the 1000-point grid.
+    const DMD_LADDER_SIGMAS: &[f64] = &[1.0, 0.7567567567567568, 0.5217391304347826];
+
+    #[test]
+    fn dmd_from_rungs_matches_the_fastvideo_shift8_table() {
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        assert_eq!(schedule.timesteps, vec![1000i64, 757, 522]);
+        assert_eq!(schedule.sigmas.len(), 4);
+        assert_eq!(schedule.sigmas[3], 0.0);
+        for (index, expected) in DMD_LADDER_SIGMAS.iter().enumerate() {
+            assert!(
+                (schedule.sigmas[index] - expected).abs() < 1e-9,
+                "rung {index}: got {}, want {expected}",
+                schedule.sigmas[index]
+            );
+        }
+        assert_eq!(schedule.steps(), 3);
+    }
+
+    /// The table shift is genuinely read. The nearest-timestep lookup means
+    /// every answer necessarily lands *near* `rung / 1000` — that is what
+    /// "nearest" buys — but the shift decides which grid points exist, so the
+    /// same rungs resolve to different table entries and different sigmas.
+    /// A `from_rungs` that ignored its shift argument, or that returned
+    /// `rung / 1000` outright, would fail here.
+    #[test]
+    fn dmd_from_rungs_uses_the_table_shift() {
+        let eight = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let five = WanSchedule::from_rungs(&[1000, 757, 522], 5.0).unwrap();
+        assert_eq!(eight.timesteps, five.timesteps);
+        // Table indices 616 and 821 at shift 5, against 720 and 880 at shift 8.
+        for (index, expected) in [(1usize, 0.7570977917981072f64), (2, 0.5215617715617716)] {
+            assert!(
+                (five.sigmas[index] - expected).abs() < 1e-9,
+                "shift-5 rung {index}: got {}, want {expected}",
+                five.sigmas[index]
+            );
+            assert!(
+                (eight.sigmas[index] - five.sigmas[index]).abs() > 1e-6,
+                "rung {index}: shift 5 and shift 8 must disagree"
+            );
+        }
+        // Not the naive `rung / 1000` either — that would be exact.
+        assert!((eight.sigmas[1] - 0.757).abs() > 1e-7);
+        assert!((eight.sigmas[2] - 0.522).abs() > 1e-7);
+    }
+
+    #[test]
+    fn dmd_from_rungs_refuses_malformed_ladders() {
+        assert!(WanSchedule::from_rungs(&[], DMD_TABLE_SHIFT).is_err());
+        // Ascending.
+        assert!(WanSchedule::from_rungs(&[522, 757], DMD_TABLE_SHIFT).is_err());
+        // Repeated is not strictly descending either.
+        assert!(WanSchedule::from_rungs(&[757, 757], DMD_TABLE_SHIFT).is_err());
+        // Out of the 1..=1000 training range.
+        assert!(WanSchedule::from_rungs(&[1001, 500], DMD_TABLE_SHIFT).is_err());
+        assert!(WanSchedule::from_rungs(&[500, 0], DMD_TABLE_SHIFT).is_err());
+        // A nonsense table shift.
+        assert!(WanSchedule::from_rungs(&[1000, 757, 522], 0.0).is_err());
+    }
+
+    /// The whole three-rung walk, against the upstream identities:
+    /// `x0 = x - sigma_i * v` and, on every non-terminal rung,
+    /// `x_next = (1 - sigma_{i+1}) * x0 + sigma_{i+1} * noise`
+    /// (`fastvideo/models/utils.py:174`,
+    /// `scheduling_flow_match_euler_discrete.py:634`).
+    #[test]
+    fn dmd_trace_follows_the_x0_then_renoise_identity() {
+        let device = Device::Cpu;
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let mut solver = FlowDmd::new(schedule.clone());
+        let mut x = Tensor::from_vec(vec![0.4f32, -1.1, 0.9, 0.25], 4, &device).unwrap();
+        let noise = Tensor::from_vec(vec![0.31f32, 1.7, -0.6, 0.05], 4, &device).unwrap();
+        let values = |t: &Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let noise_values = values(&noise);
+
+        for index in 0..schedule.steps() {
+            let sigma = schedule.sigmas[index];
+            let t = schedule.timesteps[index] as f64 / 1000.0;
+            // Synthetic velocity field: `v = 0.05 * x + t/1000`.
+            let v = x.affine(0.05, t).unwrap();
+            let x_pre = values(&x);
+            let v_values = values(&v);
+            let expected_x0: Vec<f32> = x_pre
+                .iter()
+                .zip(&v_values)
+                .map(|(x, v)| x - sigma as f32 * v)
+                .collect();
+
+            let pass_noise = index + 1 < schedule.steps();
+            x = solver
+                .step_with_noise(&v, index, &x, pass_noise.then_some(&noise))
+                .unwrap();
+
+            let got_x0 = values(solver.last_x0().expect("a step records its x0"));
+            for (i, (g, e)) in got_x0.iter().zip(&expected_x0).enumerate() {
+                assert!((g - e).abs() < 1e-6, "step {index} x0[{i}]: {g} vs {e}");
+            }
+
+            let got = values(&x);
+            if pass_noise {
+                let sigma_next = schedule.sigmas[index + 1] as f32;
+                for (i, g) in got.iter().enumerate() {
+                    let want = (1.0 - sigma_next) * expected_x0[i] + sigma_next * noise_values[i];
+                    assert!(
+                        (g - want).abs() < 1e-6,
+                        "step {index} x[{i}]: {g} vs {want}"
+                    );
+                }
+            } else {
+                // The terminal rung returns the clean prediction verbatim.
+                for (i, g) in got.iter().enumerate() {
+                    assert!(
+                        (g - expected_x0[i]).abs() < 1e-7,
+                        "terminal rung x[{i}]: {g} vs {}",
+                        expected_x0[i]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dmd_requires_noise_on_every_non_terminal_rung() {
+        let device = Device::Cpu;
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let mut solver = FlowDmd::new(schedule);
+        let x = Tensor::from_vec(vec![0.4f32, -1.1], 2, &device).unwrap();
+        let v = Tensor::from_vec(vec![0.1f32, 0.2], 2, &device).unwrap();
+        let error = solver
+            .step_with_noise(&v, 0, &x, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("noise"), "{error}");
+    }
+
+    #[test]
+    fn dmd_refuses_out_of_order_drive() {
+        let device = Device::Cpu;
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let mut solver = FlowDmd::new(schedule);
+        let x = Tensor::from_vec(vec![0.4f32, -1.1], 2, &device).unwrap();
+        let v = Tensor::from_vec(vec![0.1f32, 0.2], 2, &device).unwrap();
+        let noise = Tensor::from_vec(vec![0.7f32, -0.2], 2, &device).unwrap();
+        assert!(solver
+            .step_with_noise(&v, 1, &x, Some(&noise))
+            .unwrap_err()
+            .to_string()
+            .contains("in order"));
+        solver.step_with_noise(&v, 0, &x, Some(&noise)).unwrap();
+        assert!(solver.step_with_noise(&v, 0, &x, Some(&noise)).is_err());
+    }
+
+    #[test]
+    fn dmd_wants_fresh_noise_on_every_rung_but_the_last() {
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let dmd = WanSolver::Dmd(FlowDmd::new(schedule));
+        assert!(dmd.wants_fresh_noise(0));
+        assert!(dmd.wants_fresh_noise(1));
+        assert!(!dmd.wants_fresh_noise(2));
+        assert!(!dmd.wants_fresh_noise(3));
+
+        // No other solver ever re-noises.
+        let config = WanScheduleConfig::new(4, 5.0);
+        for solver in [
+            WanSolver::UniPc(FlowUniPc::from_config(config).unwrap()),
+            WanSolver::Euler(FlowEuler::new(WanSchedule::new(config).unwrap())),
+            WanSolver::DpmPp(FlowDpmPp::new(WanSchedule::dpmpp(config).unwrap())),
+        ] {
+            for index in 0..5 {
+                assert!(!solver.wants_fresh_noise(index));
+            }
+        }
+    }
+
+    /// `WanSolver::step` is the noiseless shape; driving a DMD ladder through
+    /// it would silently drop the re-noise between rungs, so it refuses.
+    #[test]
+    fn dmd_refuses_the_noiseless_step_entry_point() {
+        let device = Device::Cpu;
+        let schedule = WanSchedule::from_rungs(&[1000, 757, 522], DMD_TABLE_SHIFT).unwrap();
+        let mut solver = WanSolver::Dmd(FlowDmd::new(schedule));
+        let x = Tensor::from_vec(vec![0.4f32, -1.1], 2, &device).unwrap();
+        let v = Tensor::from_vec(vec![0.1f32, 0.2], 2, &device).unwrap();
+        let error = solver.step(&v, 0, &x).unwrap_err().to_string();
+        assert!(error.contains("step_with_noise"), "{error}");
+    }
+
+    /// The non-DMD solvers ignore a noise argument entirely: `step_with_noise`
+    /// is `step` for them, which is what lets the denoise loop drive all four
+    /// through one call.
+    #[test]
+    fn step_with_noise_is_step_for_the_non_dmd_solvers() {
+        let device = Device::Cpu;
+        let config = WanScheduleConfig::new(4, 5.0);
+        let x = Tensor::from_vec(vec![0.4f32, -1.1, 0.9, 0.25], 4, &device).unwrap();
+        let v = Tensor::from_vec(vec![0.1f32, 0.2, -0.3, 0.05], 4, &device).unwrap();
+        let noise = Tensor::from_vec(vec![9.0f32, 9.0, 9.0, 9.0], 4, &device).unwrap();
+        let values = |t: &Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for kind in 0..3 {
+            let make = || match kind {
+                0 => WanSolver::UniPc(FlowUniPc::from_config(config).unwrap()),
+                1 => WanSolver::Euler(FlowEuler::new(WanSchedule::new(config).unwrap())),
+                _ => WanSolver::DpmPp(FlowDpmPp::new(WanSchedule::dpmpp(config).unwrap())),
+            };
+            let mut plain = make();
+            let mut noised = make();
+            assert_eq!(
+                values(&plain.step(&v, 0, &x).unwrap()),
+                values(&noised.step_with_noise(&v, 0, &x, Some(&noise)).unwrap()),
+            );
         }
     }
 }

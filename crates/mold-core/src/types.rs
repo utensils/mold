@@ -2193,6 +2193,18 @@ impl GuidanceCapabilities {
                     Self::FIXED_ONE
                 }
             }
+            // A DMD-distilled Wan tier walks a fixed rung ladder, predicting
+            // x0 at each rung and re-noising to the next
+            // (`manifest::wan_dmd_ladder`, FastVideo's `DmdDenoisingStage`).
+            // There is no unconditional branch to weight, so the scale is
+            // pinned at 1.0 and there is no negative prompt to encode. Every
+            // other Wan tier keeps ordinary CFG.
+            "wan"
+                if crate::manifest::wan_dmd_ladder(&crate::manifest::resolve_model_name(model))
+                    .is_some() =>
+            {
+                Self::FIXED_ONE
+            }
             // The undistilled FLUX.2 [klein] base checkpoints are the one
             // Flux.2 tier that runs a real unconditional branch, so they are
             // the one that can use a negative prompt. Every distilled tier —
@@ -5719,6 +5731,158 @@ mod tests {
         assert!(absent.export_formats.is_empty());
     }
 
+    /// The geometry controls follow the turntable's rule: an untouched value
+    /// serializes to NOTHING, so an older client's request and a new client's
+    /// default request are the same bytes.
+    #[test]
+    fn mesh_geometry_options_serialize_to_nothing_when_untouched() {
+        assert_eq!(
+            serde_json::to_value(MeshGeometryOptions::default()).unwrap(),
+            serde_json::json!({})
+        );
+        let options = MeshGeometryOptions {
+            size_mm: Some(120.0),
+            up_axis: Some(MeshUpAxis::Y),
+            origin: Some(MeshExportOrigin::Center),
+        };
+        assert_eq!(
+            serde_json::to_value(options).unwrap(),
+            serde_json::json!({"size_mm": 120.0, "up_axis": "y", "origin": "center"})
+        );
+    }
+
+    /// Both option groups flatten into ONE flat request body: the geometry
+    /// fields sit beside the turntable's, not under a nested key, because
+    /// that is what the route has always accepted.
+    #[test]
+    fn mesh_export_options_flatten_into_one_flat_body() {
+        assert_eq!(
+            serde_json::to_value(MeshExportOptions::default()).unwrap(),
+            serde_json::json!({})
+        );
+        let options = MeshExportOptions {
+            turntable: MeshTurntableOptions {
+                playback: Some(MeshTurntablePlayback::Bounce),
+                frames: Some(24),
+                ..Default::default()
+            },
+            geometry: MeshGeometryOptions {
+                size_mm: Some(80.5),
+                origin: Some(MeshExportOrigin::Floor),
+                ..Default::default()
+            },
+        };
+        let body = serde_json::json!({
+            "playback": "bounce",
+            "frames": 24,
+            "size_mm": 80.5,
+            "origin": "floor"
+        });
+        assert_eq!(serde_json::to_value(options).unwrap(), body);
+        assert_eq!(
+            serde_json::from_value::<MeshExportOptions>(body).unwrap(),
+            options
+        );
+    }
+
+    /// One spelling for the wire, the CLI and `Display`, round-tripping in
+    /// both directions and case-insensitively on the way in.
+    #[test]
+    fn geometry_enum_spellings_round_trip() {
+        for (raw, expected) in [("y", MeshUpAxis::Y), ("Z", MeshUpAxis::Z)] {
+            assert_eq!(raw.parse::<MeshUpAxis>().unwrap(), expected);
+            assert_eq!(expected.to_string(), raw.to_ascii_lowercase());
+            assert_eq!(expected.as_str(), raw.to_ascii_lowercase());
+            assert_eq!(
+                serde_json::to_value(expected).unwrap(),
+                serde_json::json!(raw.to_ascii_lowercase())
+            );
+        }
+        assert!("x".parse::<MeshUpAxis>().is_err());
+        for (raw, expected) in [
+            ("center", MeshExportOrigin::Center),
+            ("FLOOR", MeshExportOrigin::Floor),
+        ] {
+            assert_eq!(raw.parse::<MeshExportOrigin>().unwrap(), expected);
+            assert_eq!(expected.to_string(), raw.to_ascii_lowercase());
+            assert_eq!(expected.as_str(), raw.to_ascii_lowercase());
+            assert_eq!(
+                serde_json::to_value(expected).unwrap(),
+                serde_json::json!(raw.to_ascii_lowercase())
+            );
+        }
+        assert!("origin".parse::<MeshExportOrigin>().is_err());
+    }
+
+    /// A resolved geometry ALWAYS carries its `size_mm` key, as `null` when
+    /// the format ships in model units: a client reading the advertised
+    /// defaults has to tell "unscaled" from "this server did not say".
+    #[test]
+    fn a_resolved_geometry_always_writes_its_size_key() {
+        let unscaled = MeshExportGeometry {
+            size_mm: None,
+            up_axis: MeshUpAxis::Y,
+            origin: MeshExportOrigin::Floor,
+        };
+        assert_eq!(
+            serde_json::to_value(unscaled).unwrap(),
+            serde_json::json!({"size_mm": null, "up_axis": "y", "origin": "floor"})
+        );
+        assert_eq!(
+            serde_json::from_value::<MeshExportGeometry>(
+                serde_json::json!({"up_axis": "y", "origin": "floor"})
+            )
+            .unwrap(),
+            unscaled
+        );
+    }
+
+    /// The geometry block is the ONLY gate a client has: an older server does
+    /// not send it, and reads back as `None` rather than as a default that
+    /// would look like a host that honours the keys.
+    #[test]
+    fn absent_export_geometry_reads_as_no_geometry_support() {
+        let older: MeshCapabilities = serde_json::from_value(serde_json::json!({
+            "generation": true,
+            "formats": ["glb"],
+            "export_formats": ["glb", "obj", "stl"],
+            "textures": false
+        }))
+        .unwrap();
+        assert_eq!(older.export_geometry, None);
+        assert_eq!(
+            serde_json::to_value(&older).unwrap().get("export_geometry"),
+            None,
+            "an absent block must not be written back as null"
+        );
+
+        let newer: MeshCapabilities = serde_json::from_value(serde_json::json!({
+            "generation": true,
+            "formats": ["glb"],
+            "export_formats": ["glb", "stl"],
+            "textures": false,
+            "export_geometry": {
+                "size_mm": {"min": 1.0, "max": 1000.0, "default": 100.0},
+                "up_axes": ["y", "z"],
+                "origins": ["center", "floor"],
+                "defaults": {
+                    "stl": {"size_mm": 100.0, "up_axis": "z", "origin": "floor"}
+                }
+            }
+        }))
+        .unwrap();
+        let block = newer.export_geometry.expect("the block");
+        assert_eq!(block.size_mm.default, 100.0);
+        assert_eq!(
+            block.defaults.get("stl").copied(),
+            Some(MeshExportGeometry {
+                size_mm: Some(100.0),
+                up_axis: MeshUpAxis::Z,
+                origin: MeshExportOrigin::Floor,
+            })
+        );
+    }
+
     /// The turntable controls serialize to exactly the video export's field
     /// names and spellings, and an untouched value serializes to NOTHING, so
     /// a geometry export's request is byte-for-byte what it was before the
@@ -7915,6 +8079,37 @@ mod tests {
             ),
             GuidanceCapabilities::FIXED_ONE,
         );
+    }
+
+    /// A DMD-distilled Wan tier predicts x0 at each pinned rung and is
+    /// re-noised to the next; there is no unconditional branch to weight, so
+    /// the scale is pinned at 1.0 and there is no negative prompt to encode.
+    /// Every other Wan tier keeps ordinary adjustable CFG.
+    #[test]
+    fn wan_dmd_ladder_tiers_pin_guidance_at_one() {
+        assert_eq!(
+            GuidanceCapabilities::for_recipe("wan", "wan21-t2v-1.3b:turbo", None),
+            GuidanceCapabilities::FIXED_ONE,
+        );
+        // The bare name still resolves to the base tier, which keeps CFG.
+        assert_eq!(
+            GuidanceCapabilities::for_recipe("wan", "wan21-t2v-1.3b", None),
+            GuidanceCapabilities::ADJUSTABLE_CFG,
+        );
+        for guided in [
+            "wan21-t2v-1.3b:bf16",
+            "wan22-ti2v-5b:fp16",
+            // The Self-Forcing 5B distill runs at guidance 1.0 by DEFAULT but
+            // is not rung-pinned, so its scale stays adjustable.
+            "wan22-ti2v-5b:turbo",
+            "wan22-t2v-a14b:q8",
+        ] {
+            assert_eq!(
+                GuidanceCapabilities::for_recipe("wan", guided, None),
+                GuidanceCapabilities::ADJUSTABLE_CFG,
+                "{guided}",
+            );
+        }
     }
 
     /// Only the undistilled FLUX.2 [klein] base checkpoints run an
@@ -10863,7 +11058,7 @@ pub struct ServerCapabilities {
 }
 
 /// What a host can do with 3-D artifacts.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MeshCapabilities {
     /// A mesh family has a runnable engine on this host. False on a host that
     /// carries the manifests and the contract but no engine arm — which is a
@@ -10891,6 +11086,17 @@ pub struct MeshCapabilities {
     /// only, which is a materially different product and must not be
     /// discovered by a user after waiting for a render.
     pub textures: bool,
+    /// The geometry controls a geometry export accepts, and the defaults it
+    /// applies when a request omits them.
+    ///
+    /// ABSENT means a server built before these existed - one that parses the
+    /// request, IGNORES `size_mm`, `up_axis` and `origin`, and answers 200
+    /// with an unscaled `y`-up file. There is no error to catch and nothing
+    /// in the response that says so, which is exactly why the presence of
+    /// this block is the ONLY safe gate: a client must not send the keys
+    /// without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_geometry: Option<MeshExportGeometryCapabilities>,
 }
 
 /// Deserialize `export_formats`, dropping any name this build does not know.
@@ -10984,6 +11190,18 @@ impl MeshExportFormat {
     /// A turntable render rather than a geometry container.
     pub fn is_animation(self) -> bool {
         matches!(self, Self::Gif | Self::Apng | Self::Webp)
+    }
+
+    /// Whether `size_mm`, `up_axis` and `origin` mean anything for this
+    /// format.
+    ///
+    /// The three geometry containers, and nothing else. `Glb` is excluded on
+    /// purpose even though it holds geometry: it is served back BYTE FOR BYTE
+    /// as stored, so transforming it would make the stored artifact and its
+    /// own download disagree. An animation is a render of the mesh through a
+    /// fitted camera, where a millimetre size has no meaning at all.
+    pub fn takes_geometry_options(self) -> bool {
+        matches!(self, Self::Obj | Self::Stl | Self::Ply)
     }
 
     /// The generation-side [`OutputFormat`] an animated export encodes as,
@@ -11123,6 +11341,162 @@ pub struct MeshTurntableOptions {
     pub frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+}
+
+/// Which world axis points up in an exported geometry file.
+///
+/// The stored GLB is glTF's frame, `y` up. STL and PLY carry no axis
+/// convention of their own, and the tools that read them - slicers, CAD, and
+/// Blender's own STL/PLY importers - take the coordinates as-is with `z` up,
+/// so a `y`-up export arrives lying on its side. OBJ is the exception:
+/// Blender's OBJ importer converts `y`-up itself, so rotating here as well
+/// would tip it over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshUpAxis {
+    /// glTF's own frame, unchanged.
+    Y,
+    /// Rotate the mesh so `+Z` is up.
+    Z,
+}
+
+impl MeshUpAxis {
+    /// The wire spelling, which is also what the CLI flag accepts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Y => "y",
+            Self::Z => "z",
+        }
+    }
+}
+
+impl std::fmt::Display for MeshUpAxis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MeshUpAxis {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "y" => Ok(Self::Y),
+            "z" => Ok(Self::Z),
+            other => Err(format!("unknown up axis '{other}' (expected y or z)")),
+        }
+    }
+}
+
+/// Where an exported mesh's origin sits relative to its bounding box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshExportOrigin {
+    /// The bounding box's centre is the origin.
+    Center,
+    /// The bounding box RESTS on the ground plane: its minimum along the up
+    /// axis is exactly 0 and the other two axes stay centred. What a slicer's
+    /// build plate and a DCC tool's floor both assume.
+    Floor,
+}
+
+impl MeshExportOrigin {
+    /// The wire spelling, which is also what the CLI flag accepts.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Center => "center",
+            Self::Floor => "floor",
+        }
+    }
+}
+
+impl std::fmt::Display for MeshExportOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MeshExportOrigin {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "center" => Ok(Self::Center),
+            "floor" => Ok(Self::Floor),
+            other => Err(format!(
+                "unknown origin '{other}' (expected center or floor)"
+            )),
+        }
+    }
+}
+
+/// The optional geometry controls of a mesh export request.
+///
+/// Every field absent means the server's default for the requested format
+/// ([`crate::validation::mesh_export_geometry_defaults`]), so an all-`None`
+/// value is exactly the request an older client sends, and a turntable or a
+/// `glb` passthrough carries none of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshGeometryOptions {
+    /// Longest bounding-box axis in millimetres.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_mm: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_axis: Option<MeshUpAxis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<MeshExportOrigin>,
+}
+
+/// A RESOLVED geometry export: what the server will actually write, after the
+/// per-format defaults have filled in whatever the request left out.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshExportGeometry {
+    /// Longest bounding-box axis in millimetres, or `None` to leave the mesh
+    /// in model units.
+    ///
+    /// The key is ALWAYS serialized, as `null`, because a client reading the
+    /// advertised defaults has to tell "this format ships unscaled" from
+    /// "this server did not say" - and `skip_serializing_if` would make those
+    /// two the same bytes.
+    #[serde(default)]
+    pub size_mm: Option<f64>,
+    pub up_axis: MeshUpAxis,
+    pub origin: MeshExportOrigin,
+}
+
+/// Every optional control of `POST /api/gallery/export/:filename`.
+///
+/// Both halves flatten into ONE flat request body - `{format, playback?,
+/// repeat?, max_dimension?, fps?, frames?, size_mm?, up_axis?, origin?}` -
+/// because they were always flat on the wire and a nested rewrite would break
+/// every existing client for no gain. The split is only about which group of
+/// formats a field applies to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeshExportOptions {
+    #[serde(flatten)]
+    pub turntable: MeshTurntableOptions,
+    #[serde(flatten)]
+    pub geometry: MeshGeometryOptions,
+}
+
+/// The bounds and default of the `size_mm` control, in millimetres.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshSizeControl {
+    pub min: f64,
+    pub max: f64,
+    pub default: f64,
+}
+
+/// What a host will do with the geometry controls, and what it does when a
+/// request omits them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshExportGeometryCapabilities {
+    pub size_mm: MeshSizeControl,
+    pub up_axes: Vec<MeshUpAxis>,
+    pub origins: Vec<MeshExportOrigin>,
+    /// Per-format resolved defaults, keyed by the format's wire spelling. A
+    /// format absent from this map takes no geometry options at all.
+    pub defaults: std::collections::BTreeMap<String, MeshExportGeometry>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

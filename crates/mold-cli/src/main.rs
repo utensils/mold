@@ -1067,12 +1067,21 @@ pub enum LibraryAction {
     /// stored glTF carries — OBJ has no materials, STL has no shared vertices
     /// or UVs — which is why none of them is a generation target. An animated
     /// format is a TURNTABLE: the gallery poster's view rendered around the
-    /// mesh, so the first frame is the poster itself.
+    /// mesh, framed once for the whole sweep.
+    ///
+    /// On a host that advertises `capabilities.mesh.export_geometry`, a
+    /// geometry container is written print-ready: STL and PLY are scaled to
+    /// 100 mm on their longest axis, turned `z` up and rested on the floor,
+    /// and OBJ keeps its model units and `y` up. `--size-mm`, `--up-axis` and
+    /// `--origin` override that, and are refused outright against a host that
+    /// does not advertise the block, which would silently ignore them.
     #[command(after_long_help = "\
 Examples:
   mold library export mold-hunyuan3d-1700000000000.glb --format stl
   mold library export chair.glb --format obj -o ~/prints/chair.obj
   mold library export chair.glb --format ply --output -   Write to stdout
+  mold library export chair.glb --format stl --size-mm 120
+  mold library export chair.glb --format stl --up-axis y --origin center
   mold library export chair.glb --format gif              36 frames, 10 fps, 512 px, loops
   mold library export chair.glb --format gif --playback bounce --repeat once
   mold library export chair.glb --format webp --frames 72 --fps 24 --max-dimension 768")]
@@ -1090,6 +1099,8 @@ Examples:
         output: Option<String>,
         #[command(flatten)]
         turntable: TurntableArgs,
+        #[command(flatten)]
+        geometry: GeometryArgs,
     },
 }
 
@@ -1127,6 +1138,42 @@ impl From<TurntableArgs> for mold_core::MeshTurntableOptions {
             max_dimension: args.max_dimension,
             frames: args.frames,
             fps: args.fps,
+        }
+    }
+}
+
+/// Geometry controls for `mold library export --format obj|stl|ply`.
+///
+/// Every one is optional, and on a host that advertises
+/// `capabilities.mesh.export_geometry` an absent flag means the FORMAT's own
+/// default rather than "unchanged": the stored `.glb` is normalized model
+/// space, so a verbatim transcode reaches a slicer as a two-millimetre blob
+/// lying on its side. STL and PLY default to 100 mm on the longest axis, `z`
+/// up, resting on the floor; OBJ keeps its model units and `y` up, because
+/// every tool that reads OBJ converts the axis itself and treats one unit as
+/// one metre. Refused on `glb` and on a turntable, which have no geometry to
+/// shape, and against a host without the block, which would drop them.
+#[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq)]
+pub struct GeometryArgs {
+    /// Longest bounding-box axis in millimetres, 1 to 1000 (default 100 for
+    /// stl and ply; obj stays in model units).
+    #[arg(long, value_name = "MM", help_heading = "Geometry")]
+    size_mm: Option<f64>,
+    /// Which world axis points up (default z for stl and ply, y for obj).
+    #[arg(long, value_name = "y|z", help_heading = "Geometry")]
+    up_axis: Option<mold_core::MeshUpAxis>,
+    /// Where the origin sits: `floor` rests the mesh on the ground plane,
+    /// `center` puts the bounding-box centre on it (default floor).
+    #[arg(long, value_name = "center|floor", help_heading = "Geometry")]
+    origin: Option<mold_core::MeshExportOrigin>,
+}
+
+impl From<GeometryArgs> for mold_core::MeshGeometryOptions {
+    fn from(args: GeometryArgs) -> Self {
+        Self {
+            size_mm: args.size_mm,
+            up_axis: args.up_axis,
+            origin: args.origin,
         }
     }
 }
@@ -4330,6 +4377,7 @@ mod tests {
                             format,
                             output,
                             turntable,
+                            geometry,
                         },
                 } => {
                     assert_eq!(filename, "chair.glb");
@@ -4339,6 +4387,11 @@ mod tests {
                         mold_core::MeshTurntableOptions::from(turntable),
                         mold_core::MeshTurntableOptions::default(),
                         "no turntable flag means the server's defaults"
+                    );
+                    assert_eq!(
+                        mold_core::MeshGeometryOptions::from(geometry),
+                        mold_core::MeshGeometryOptions::default(),
+                        "no geometry flag means the format's own defaults"
                     );
                 }
                 _ => panic!("expected Library export"),
@@ -4416,6 +4469,84 @@ mod tests {
                     "chair.glb",
                     "--format",
                     "gif",
+                    bad[0],
+                    bad[1]
+                ])
+                .is_err(),
+                "{bad:?} must not parse"
+            );
+        }
+    }
+
+    /// The geometry flags are parsed by the wire enums, so a spelling the
+    /// server would refuse never leaves the shell, and an absent flag stays
+    /// absent rather than becoming a value the CLI invented.
+    #[test]
+    fn library_export_geometry_flags_parse_by_the_wire_types() {
+        match parse(&[
+            "library",
+            "export",
+            "chair.glb",
+            "--format",
+            "stl",
+            "--size-mm",
+            "120",
+            "--up-axis",
+            "y",
+            "--origin",
+            "center",
+        ])
+        .command
+        {
+            Commands::Library {
+                action: LibraryAction::Export { geometry, .. },
+            } => assert_eq!(
+                mold_core::MeshGeometryOptions::from(geometry),
+                mold_core::MeshGeometryOptions {
+                    size_mm: Some(120.0),
+                    up_axis: Some(mold_core::MeshUpAxis::Y),
+                    origin: Some(mold_core::MeshExportOrigin::Center),
+                }
+            ),
+            _ => panic!("expected Library export"),
+        }
+
+        match parse(&[
+            "library",
+            "export",
+            "chair.glb",
+            "--format",
+            "ply",
+            "--up-axis",
+            "z",
+        ])
+        .command
+        {
+            Commands::Library {
+                action: LibraryAction::Export { geometry, .. },
+            } => assert_eq!(
+                mold_core::MeshGeometryOptions::from(geometry),
+                mold_core::MeshGeometryOptions {
+                    up_axis: Some(mold_core::MeshUpAxis::Z),
+                    ..Default::default()
+                },
+                "the flags a request does not name stay absent"
+            ),
+            _ => panic!("expected Library export"),
+        }
+
+        for bad in [
+            ["--up-axis", "w"],
+            ["--origin", "bed"],
+            ["--size-mm", "large"],
+        ] {
+            assert!(
+                try_parse(&[
+                    "library",
+                    "export",
+                    "chair.glb",
+                    "--format",
+                    "stl",
                     bad[0],
                     bad[1]
                 ])

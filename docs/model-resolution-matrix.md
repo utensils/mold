@@ -2742,6 +2742,26 @@ Models: `wan21-t2v-1.3b:bf16`.
 
 Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
+### `wan21-t2v-1.3b:turbo`
+
+Schema 1 · hash `9b250fa313ea41e65cf6f972567c86abb2b2b276c3cc5cda8aabc882b8ce63de` · default recipe `default`
+
+Models: `wan21-t2v-1.3b:turbo`.
+
+#### Default (`default`)
+
+- Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `832x480`, 3 steps, guidance 1.
+- Steps: 3–3 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–257 on `4n+1` (default 81); FPS 1–120 by 1, default 16; duration limit none.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `26:15` | `832x480` (recommended) |
+| `15:26` | `480x832` (recommended) |
+
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ### Profile `wan.wan21-t2v-14b`
 
 Schema 1 · hash `894cff1c3170097cdf8eefc0aadfde793fa6bb5148e7a34ba0cb4613ce592240` · default recipe `default`
