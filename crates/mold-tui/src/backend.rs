@@ -1519,7 +1519,7 @@ fn canonicalize_generation_authority(
 /// file accepted at entry can still be deleted, truncated, or swapped for a
 /// symlink before Generate is pressed, so the load is re-checked here and a
 /// failure aborts dispatch with `mold_core::identity`'s own wording.
-fn build_request(
+pub(crate) fn build_request(
     params: &GenerateParams,
     prompt: &str,
     negative_prompt: &Option<String>,
