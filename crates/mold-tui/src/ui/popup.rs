@@ -17,6 +17,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::StgBlocksInput { .. }) => render_stg_blocks_input(frame, app),
         Some(Popup::ReferencesInput { .. }) => render_references_input(frame, app),
         Some(Popup::IdentityImageInput { .. }) => render_identity_image_input(frame, app),
+        Some(Popup::SourceImageInput { .. }) => render_source_image_input(frame, app),
         Some(Popup::FilingInput { .. }) => render_filing_input(frame, app),
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
@@ -113,6 +114,8 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  Ctrl+M             Open model selector"),
         Line::from("  j/k                Navigate parameters"),
         Line::from("  +/- or Left/Right  Adjust / expand a section"),
+        Line::from("  Enter on Source    Attach a source image (path picker)"),
+        Line::from("  x / Backspace      Clear the selected row's image"),
         Line::from(""),
         Line::from(Span::styled(
             "Library View",
@@ -709,17 +712,51 @@ fn render_references_input(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_identity_image_input(frame: &mut Frame, app: &mut App) {
-    let theme = &app.theme;
-    let area = centered_rect(frame.area(), 72, 24);
-    frame.render_widget(Clear, area);
-
     let Some(Popup::IdentityImageInput { input, error }) = &app.popup else {
         return;
     };
+    render_path_input(
+        frame,
+        &app.theme,
+        " Identity photo ",
+        "Path to a PNG or JPEG portrait (leave empty to clear). \
+         Checked before it is accepted.",
+        input,
+        error.as_deref(),
+    );
+}
+
+/// The Source row's picker: same shape as the identity one, because both
+/// are "one local file path, checked before it is accepted".
+fn render_source_image_input(frame: &mut Frame, app: &mut App) {
+    let Some(Popup::SourceImageInput { input, error }) = &app.popup else {
+        return;
+    };
+    render_path_input(
+        frame,
+        &app.theme,
+        " Source image ",
+        "Path to a PNG, JPEG, or WebP image (~ expands; leave empty to clear). \
+         Checked before it is accepted.",
+        input,
+        error.as_deref(),
+    );
+}
+
+fn render_path_input(
+    frame: &mut Frame,
+    theme: &crate::ui::theme::Theme,
+    title: &str,
+    hint: &str,
+    input: &str,
+    error: Option<&str>,
+) {
+    let area = centered_rect(frame.area(), 72, 24);
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.popup_border())
-        .title(" Identity photo ")
+        .title(title.to_string())
         .title_style(theme.title_focused())
         .style(theme.popup_bg());
     let inner = block.inner(area);
@@ -728,12 +765,9 @@ fn render_identity_image_input(frame: &mut Frame, app: &mut App) {
         return;
     }
     frame.render_widget(
-        Paragraph::new(
-            "Path to a PNG or JPEG portrait (leave empty to clear). \
-             Checked before it is accepted.",
-        )
-        .style(theme.dim())
-        .wrap(Wrap { trim: true }),
+        Paragraph::new(hint.to_string())
+            .style(theme.dim())
+            .wrap(Wrap { trim: true }),
         Rect { height: 2, ..inner },
     );
     frame.render_widget(
@@ -748,7 +782,7 @@ fn render_identity_image_input(frame: &mut Frame, app: &mut App) {
     );
     if let Some(error) = error {
         frame.render_widget(
-            Paragraph::new(error.as_str())
+            Paragraph::new(error.to_string())
                 .style(theme.error())
                 .wrap(Wrap { trim: true }),
             Rect {

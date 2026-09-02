@@ -967,6 +967,7 @@ fn child_outcome(
         seed: result.seed,
         generation_time_ms: result.generation_time_ms,
         preview_bytes: None,
+        mesh: None,
     }
 }
 
@@ -994,11 +995,21 @@ async fn hydrate_last_completed(
     // decode after a multi-megabyte download, so the poster the server
     // rendered at save time (served by the thumbnail route) is fetched
     // instead — the same picture the grid shows.
-    last.preview_bytes = if crate::gallery_scan::is_mesh_filename(filename) {
-        client.get_gallery_thumbnail(filename).await.ok()
+    if crate::gallery_scan::is_mesh_filename(filename) {
+        last.preview_bytes = client.get_gallery_thumbnail(filename).await.ok();
+        // The caption's tris · verts · extent: a singleton reads them off
+        // `MeshData`, but neither the durable child result nor the gallery
+        // record carries them, so the stored GLB is read back and counted
+        // — one download for the print the pane is about to show, the same
+        // round trip a raster batch makes for its preview bytes.
+        last.mesh = client
+            .get_gallery_image(filename)
+            .await
+            .ok()
+            .and_then(|glb| crate::app::DurableMeshFacts::from_glb(&glb));
     } else {
-        client.get_gallery_image(filename).await.ok()
-    };
+        last.preview_bytes = client.get_gallery_image(filename).await.ok();
+    }
 }
 
 /// What the batch was submitted with. The Create form may have moved on
@@ -1849,6 +1860,33 @@ mod tests {
     fn ordinary_request() -> GenerateRequest {
         let config = mold_core::Config::default();
         build_request(&GenerateParams::from_config(&config), "print", &None).unwrap()
+    }
+
+    /// The Source row's path is read at dispatch and rides the request as
+    /// `source_image` bytes with its file name — on a mesh recipe exactly as
+    /// on a raster one, with the GLB pin untouched.
+    #[test]
+    fn the_source_row_path_rides_the_request_as_bytes() {
+        let config = mold_core::Config::default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let cat = dir.path().join("armchair.png");
+        std::fs::write(&cat, b"\x89PNG\r\n\x1a\nnot really a png").unwrap();
+        params.source_image_path = Some(cat.to_string_lossy().to_string());
+
+        let request = build_request(&params, "", &None).unwrap();
+        assert_eq!(
+            request.source_image.as_deref(),
+            Some(&b"\x89PNG\r\n\x1a\nnot really a png"[..])
+        );
+        assert_eq!(request.source_image_name.as_deref(), Some("armchair.png"));
+        assert_eq!(request.output_format, Some(mold_core::OutputFormat::Glb));
+
+        params.source_image_path = None;
+        let request = build_request(&params, "", &None).unwrap();
+        assert_eq!(request.source_image, None);
+        assert_eq!(request.source_image_name, None);
     }
 
     /// The mesh block is absent-until-touched: an untouched form ships no

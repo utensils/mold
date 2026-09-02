@@ -146,6 +146,9 @@ pub fn is_mesh_filename(filename: &str) -> bool {
 /// one download. Returns `None` on a failed request; a response that is not
 /// a raster (the server's SVG placeholder for a print with no poster) is
 /// returned but not cached, so a poster written later is still picked up.
+/// The cache is trusted only when it holds a raster for the same reason:
+/// a placeholder that reached the disk by another route must not be served
+/// back forever in place of a poster the host has since written.
 pub async fn fetch_and_cache_mesh_poster(
     server_url: &str,
     host_id: &str,
@@ -153,7 +156,7 @@ pub async fn fetch_and_cache_mesh_poster(
 ) -> Option<Vec<u8>> {
     let cached = crate::thumbnails::thumbnail_path(Path::new(filename));
     if let Ok(data) = std::fs::read(&cached) {
-        if !data.is_empty() {
+        if looks_like_raster(&data) {
             return Some(data);
         }
     }
@@ -169,7 +172,7 @@ pub async fn fetch_and_cache_mesh_poster(
 
 /// PNG or JPEG magic — what a poster is, as opposed to the SVG placeholder
 /// the thumbnail route answers with when a mesh has no poster yet.
-fn looks_like_raster(data: &[u8]) -> bool {
+pub(crate) fn looks_like_raster(data: &[u8]) -> bool {
     data.starts_with(b"\x89PNG\r\n\x1a\n") || data.starts_with(&[0xFF, 0xD8, 0xFF])
 }
 
