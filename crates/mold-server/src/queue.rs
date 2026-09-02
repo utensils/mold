@@ -432,6 +432,43 @@ pub(crate) fn save_video_to_dir(
     events: Option<&crate::events::EventBroadcaster>,
     gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> Option<String> {
+    save_video_to_dir_with_sidecar(
+        dir,
+        bytes,
+        gif_preview,
+        format,
+        model,
+        metadata,
+        generation_time_ms,
+        db,
+        events,
+        gallery_gate,
+        None,
+    )
+}
+
+/// [`save_video_to_dir`] with a hook that runs once the final filename is
+/// known and BEFORE `GalleryAdded` is published.
+///
+/// A sidecar tile nothing downstream can regenerate has to exist by the time
+/// the event goes out: a client that fetches the tile on the event would
+/// otherwise race the writer and cache whatever placeholder it got. Filename
+/// allocation, the durable archive record, the rollback, and the event all
+/// stay here rather than being duplicated per media kind.
+#[allow(clippy::too_many_arguments)]
+fn save_video_to_dir_with_sidecar(
+    dir: &std::path::Path,
+    bytes: &[u8],
+    gif_preview: &[u8],
+    format: OutputFormat,
+    model: &str,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+    before_publish: Option<&dyn Fn(&str)>,
+) -> Option<String> {
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!("failed to create output dir {}: {e}", dir.display());
         return None;
@@ -492,6 +529,9 @@ pub(crate) fn save_video_to_dir(
     drop(reservation);
     if !gif_preview.is_empty() {
         save_video_preview_gif(&filename, gif_preview);
+    }
+    if let Some(before_publish) = before_publish {
+        before_publish(&filename);
     }
     let seeded = db.and_then(|db| upsert_and_report_filing(db, &record));
     let image_row = Some(Box::new(gallery_image_with_filing(
@@ -557,10 +597,11 @@ pub(crate) fn save_audio_to_dir(
 /// downstream can render one on demand. A glTF buffer has no raster frame,
 /// so without the poster the gallery would show a placeholder forever.
 ///
-/// `save_video_to_dir` is reused for the primary write rather than
-/// duplicated: it already owns filename allocation, the durable archive
+/// `save_video_to_dir_with_sidecar` is reused for the primary write rather
+/// than duplicated: it already owns filename allocation, the durable archive
 /// record, the rollback that deletes the file when the archive fails, and the
-/// `GalleryAdded` event. None of that is raster-specific.
+/// `GalleryAdded` event. None of that is raster-specific, and its hook is
+/// what lets the poster land before the event rather than after it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn save_mesh_to_dir(
     dir: &std::path::Path,
@@ -574,11 +615,11 @@ pub(crate) fn save_mesh_to_dir(
     events: Option<&crate::events::EventBroadcaster>,
     gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> Option<String> {
-    let filename = save_video_to_dir(
+    save_video_to_dir_with_sidecar(
         dir,
         bytes,
-        // No GIF preview: there is no motion to preview, and the poster below
-        // is what every grid actually lays out.
+        // No GIF preview: there is no motion to preview, and the poster
+        // sidecar is what every grid actually lays out.
         &[],
         format,
         model,
@@ -587,11 +628,15 @@ pub(crate) fn save_mesh_to_dir(
         db,
         events,
         gallery_gate,
-    )?;
-    if !poster_png.is_empty() {
-        save_mesh_poster_thumbnail(&filename, poster_png);
-    }
-    Some(filename)
+        // The poster lands BEFORE `GalleryAdded`: a client fetching the tile
+        // on the event used to race this write and could be answered the
+        // placeholder for a print whose poster existed a millisecond later.
+        Some(&|filename: &str| {
+            if !poster_png.is_empty() {
+                save_mesh_poster_thumbnail(filename, poster_png);
+            }
+        }),
+    )
 }
 
 pub(crate) fn save_mesh_poster_thumbnail(filename: &str, png_bytes: &[u8]) {
@@ -605,20 +650,17 @@ pub(crate) fn save_mesh_poster_thumbnail(filename: &str, png_bytes: &[u8]) {
 /// Testable inner of [`save_mesh_poster_thumbnail`] with an explicit cache
 /// directory, so unit tests don't race on `MOLD_HOME`.
 fn save_mesh_poster_thumbnail_to(thumb_dir: &std::path::Path, filename: &str, png_bytes: &[u8]) {
-    if let Err(e) = std::fs::create_dir_all(thumb_dir) {
+    // One writer for both sidecar names, shared with the on-demand render in
+    // `crate::thumbnails`, so save time and fetch time cannot disagree about
+    // where a poster lives or write a tile a reader can catch half-finished.
+    if let Err(error) =
+        crate::thumbnails::write_mesh_poster_sidecars(thumb_dir, filename, png_bytes)
+    {
         tracing::warn!(
-            "failed to create thumbnail cache dir {}: {e}",
-            thumb_dir.display()
+            file = %filename,
+            error = %format!("{error:#}"),
+            "failed to write the mesh poster thumbnail"
         );
-        return;
-    }
-    for thumb_path in mold_core::media_paths::mesh_poster_thumbnail_paths(thumb_dir, filename) {
-        if let Err(e) = std::fs::write(&thumb_path, png_bytes) {
-            tracing::warn!(
-                "failed to write mesh poster thumbnail {}: {e}",
-                thumb_path.display()
-            );
-        }
     }
 }
 

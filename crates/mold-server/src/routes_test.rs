@@ -16014,6 +16014,152 @@ mod tests {
         .unwrap()
     }
 
+    /// A mesh print's tile is DERIVED from the stored GLB, not a by-product
+    /// of the render that made it. Every mesh mirrored onto a host — imported
+    /// over `PUT /api/gallery/import`, or copied into the output directory —
+    /// arrives without the poster its origin wrote at save time, and used to
+    /// keep the generic wireframe-cube placeholder forever because nothing
+    /// downstream could produce one.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_mesh_without_a_sidecar_renders_its_poster_on_demand() {
+        let mold_home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("MOLD_HOME", mold_home.path().as_os_str());
+        let (app, _output_dir) = gallery_export_app(&[("armchair.glb", gallery_glb_fixture())]);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery/thumbnail/armchair.glb")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "image/png"
+        );
+        let etag = response.headers()[axum::http::header::ETAG]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            !etag.contains("placeholder"),
+            "a real poster must not carry the placeholder tag: {etag}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..4], &[0x89, b'P', b'N', b'G']);
+
+        // Both sidecar names now hold the poster, so the TUI and the next
+        // request are free hits rather than a second rasterization.
+        let thumb_dir = mold_home.path().join("cache").join("thumbnails");
+        for sidecar in
+            mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, "armchair.glb")
+        {
+            assert!(sidecar.is_file(), "{} is missing", sidecar.display());
+            assert_eq!(std::fs::read(&sidecar).unwrap(), body.as_ref());
+        }
+    }
+
+    /// The placeholder is still the answer for a mesh nothing can read — but
+    /// it is tagged apart from a real poster, so a client that cached one
+    /// revalidates into the tile a later request renders instead of holding a
+    /// wireframe cube for the life of the file.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_unreadable_mesh_still_answers_the_tagged_placeholder() {
+        let mold_home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("MOLD_HOME", mold_home.path().as_os_str());
+        let (app, _output_dir) =
+            gallery_export_app(&[("broken.glb", b"not a glTF container".to_vec())]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery/thumbnail/broken.glb")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "image/svg+xml"
+        );
+        assert!(response.headers()[axum::http::header::ETAG]
+            .to_str()
+            .unwrap()
+            .ends_with("-placeholder\""));
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "public, max-age=300"
+        );
+        let thumb_dir = mold_home.path().join("cache").join("thumbnails");
+        assert!(
+            !thumb_dir.join("broken.glb.png").exists(),
+            "a failed render must not leave a sidecar behind"
+        );
+    }
+
+    /// The import envelope carries bytes and metadata, never the origin's
+    /// poster — so the tile is derived here, before `GalleryAdded` goes out,
+    /// and a client that fetches on the event finds it already written.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn importing_a_mesh_writes_its_poster_before_announcing_it() {
+        let mold_home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("MOLD_HOME", mold_home.path().as_os_str());
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+        let metadata = output_metadata("a mirrored mesh");
+
+        let response = app
+            .oneshot(
+                Request::put("/api/gallery/import/mirrored.glb")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(
+                        Some(&metadata),
+                        &gallery_glb_fixture(),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            mold_core::ServerEvent::GalleryAdded { filename, .. } if filename == "mirrored.glb"
+        ));
+        let thumb_dir = mold_home.path().join("cache").join("thumbnails");
+        for sidecar in
+            mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, "mirrored.glb")
+        {
+            assert!(sidecar.is_file(), "{} is missing", sidecar.display());
+            assert_eq!(
+                &std::fs::read(&sidecar).unwrap()[..4],
+                &[0x89, b'P', b'N', b'G']
+            );
+        }
+    }
+
     fn gallery_export_app(files: &[(&str, Vec<u8>)]) -> (axum::Router, tempfile::TempDir) {
         let output_dir = tempfile::tempdir().unwrap();
         for (name, bytes) in files {

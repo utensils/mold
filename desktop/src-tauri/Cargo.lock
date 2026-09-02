@@ -4168,6 +4168,7 @@ dependencies = [
  "mdns-sd-discovery",
  "mold-ai-core",
  "mold-ai-db",
+ "mold-ai-inference",
  "mold-ai-server",
  "notify-rust",
  "objc2",

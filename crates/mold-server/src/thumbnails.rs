@@ -154,8 +154,8 @@ pub fn is_mesh_filename(filename: &str) -> bool {
 }
 
 /// Dispatch on the filename: video poster, or raster decode. Audio and mesh
-/// have no pixels to read (their sidecar tiles are written at save time) and
-/// are refused here so callers reach for the sidecar or the placeholder.
+/// have no pixels to read and are refused here, so callers reach for the
+/// sidecar, [`ensure_mesh_poster`], or the placeholder.
 ///
 /// Refusing is what keeps the raster decode from ever being handed a glTF
 /// buffer or a RIFF header. `image::open` on either would fail anyway, but it
@@ -178,6 +178,109 @@ pub fn render_thumbnail(
     } else {
         render_raster_thumbnail(source, max_dim, format)
     }
+}
+
+/// The edge an on-demand mesh poster is drawn at.
+///
+/// Deliberately the figure the H3 engine already renders at save time
+/// (`hunyuan3d::engine::POSTER_SIZE`), so a tile derived from a mirrored GLB
+/// is indistinguishable from one written by the machine that generated it.
+pub const MESH_POSTER_SIZE: u32 = 512;
+
+/// Render the gallery poster for a stored `.glb`.
+///
+/// The poster is derivable from the file, not a by-product of generation:
+/// the mesh IS the picture. Writing it only at save time left every mesh a
+/// client had merely MIRRORED — imported over `PUT /api/gallery/import`, or
+/// copied into the output directory — showing the generic wireframe cube
+/// forever, because nothing downstream could ever produce one.
+///
+/// Bounded on both axes the rasterizer can blow up on: the requested edge is
+/// clamped to the poster module's own `MAX_POSTER_SIZE` (its G-buffers cost
+/// ~29 bytes per supersampled pixel), and `read_glb` refuses anything that is
+/// not a triangle mesh before a single pixel is shaded.
+pub fn render_mesh_poster(source: &Path) -> anyhow::Result<Vec<u8>> {
+    render_mesh_poster_sized(source, MESH_POSTER_SIZE)
+}
+
+/// [`render_mesh_poster`] at an explicit edge, clamped to the rasterizer's
+/// own ceiling rather than refused, because this is a cache tile and not a
+/// user-facing export the way `/api/gallery/export` is.
+pub fn render_mesh_poster_sized(source: &Path, size: u32) -> anyhow::Result<Vec<u8>> {
+    use mold_inference::hunyuan3d::poster::MAX_POSTER_SIZE;
+    let size = size.clamp(1, MAX_POSTER_SIZE);
+    let bytes = std::fs::read(source)
+        .map_err(|error| anyhow::anyhow!("cannot read the mesh {}: {error}", source.display()))?;
+    let mesh = mold_inference::hunyuan3d::glb::read_glb(&bytes)
+        .map_err(|error| anyhow::anyhow!("cannot read the mesh: {error}"))?;
+    mold_inference::hunyuan3d::poster::render_poster(&mesh, size)
+}
+
+/// Write one tile atomically (temp + rename) so a concurrent reader never
+/// sees a half-written PNG.
+pub fn write_bytes_atomically(dest: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    if let Err(error) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// Write a mesh poster to BOTH sidecar names.
+///
+/// The server route reads `<file>.png` and the TUI reads `<file>.thumb.png`,
+/// so a writer that guesses one leaves the other surface on the placeholder —
+/// see `mold_core::media_paths::mesh_poster_thumbnail_paths`. A failure on
+/// either name is reported; the first is kept so a caller can log one cause.
+pub fn write_mesh_poster_sidecars(
+    thumb_dir: &Path,
+    filename: &str,
+    png: &[u8],
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(thumb_dir)?;
+    let mut first_error: Option<anyhow::Error> = None;
+    for dest in mold_core::media_paths::mesh_poster_thumbnail_paths(thumb_dir, filename) {
+        if let Err(error) = write_bytes_atomically(&dest, png) {
+            first_error.get_or_insert(error);
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// The poster bytes for a stored mesh: the sidecar when one is already
+/// there, otherwise a fresh render written back to both sidecar names.
+///
+/// The write is best effort. A read-only or full cache directory must still
+/// yield a tile for this request — only a mesh that cannot be READ or RENDERED
+/// is a placeholder.
+pub fn ensure_mesh_poster(
+    source: &Path,
+    thumb_dir: &Path,
+    filename: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let sidecar = thumb_dir.join(format!("{filename}.png"));
+    if let Ok(bytes) = std::fs::read(&sidecar) {
+        if sniff_content_type(&bytes).is_some() {
+            return Ok(bytes);
+        }
+    }
+    let png = render_mesh_poster(source)?;
+    if let Err(error) = write_mesh_poster_sidecars(thumb_dir, filename, &png) {
+        tracing::warn!(
+            file = %filename,
+            error = %format!("{error:#}"),
+            "mesh poster rendered but its sidecars could not be written"
+        );
+    }
+    Ok(png)
 }
 
 /// One requested rendition of a tile. The default (256 px PNG) is the shape
@@ -413,6 +516,99 @@ mod tests {
         let source = dir.path().join("clip.wav");
         std::fs::write(&source, b"RIFF....WAVE").unwrap();
         assert!(render_thumbnail(&source, "clip.wav", 256, ThumbFormat::Png).is_err());
+    }
+
+    /// A two-triangle quad, the same shape the gallery export tests use.
+    /// Small enough to render in milliseconds, real enough to exercise the
+    /// glTF reader and the rasterizer rather than a stub.
+    fn glb_fixture() -> Vec<u8> {
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            normals: Some(vec![[0.0, 0.0, 1.0]; 4]),
+            uvs: None,
+            vertex_colors: None,
+        };
+        mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial::default(),
+            None,
+        )
+        .expect("write the GLB fixture")
+    }
+
+    #[test]
+    fn a_stored_glb_renders_its_own_poster() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("mold-hunyuan3d-1.glb");
+        std::fs::write(&source, glb_fixture()).unwrap();
+        let png = render_mesh_poster(&source).expect("render the poster");
+        assert_eq!(sniff_content_type(&png), Some("image/png"));
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (MESH_POSTER_SIZE, MESH_POSTER_SIZE)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_mesh_is_an_error_not_a_blank_tile() {
+        let dir = tempfile::tempdir().unwrap();
+        let corrupt = dir.path().join("broken.glb");
+        std::fs::write(&corrupt, b"not a glTF container at all").unwrap();
+        assert!(render_mesh_poster(&corrupt).is_err());
+        assert!(render_mesh_poster(&dir.path().join("absent.glb")).is_err());
+    }
+
+    /// The route reads `<file>.png` and the TUI reads `<file>.thumb.png`, so
+    /// one render has to land under both names or one surface keeps the
+    /// placeholder for a print that has a perfectly good tile.
+    #[test]
+    fn ensuring_a_poster_writes_both_sidecar_names() {
+        let output = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let name = "mold-hunyuan3d-fp16-1788357387469.glb";
+        let source = output.path().join(name);
+        std::fs::write(&source, glb_fixture()).unwrap();
+
+        let png = ensure_mesh_poster(&source, cache.path(), name).expect("render on demand");
+        assert_eq!(sniff_content_type(&png), Some("image/png"));
+        let sidecars = mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), name);
+        for sidecar in &sidecars {
+            assert!(sidecar.is_file(), "{} was not written", sidecar.display());
+            assert_eq!(std::fs::read(sidecar).unwrap(), png);
+        }
+        assert!(
+            sidecars[0] != sidecars[1],
+            "the two consumers must not share one path"
+        );
+
+        // A second call is served from the sidecar rather than re-rendered:
+        // planting different bytes under the server's name is what comes back.
+        std::fs::write(&sidecars[0], b"\x89PNG\r\n\x1a\nplanted").unwrap();
+        let second = ensure_mesh_poster(&source, cache.path(), name).expect("sidecar hit");
+        assert_eq!(second, b"\x89PNG\r\n\x1a\nplanted");
+    }
+
+    /// A corrupt sidecar is not a tile. Reading it back as one served an
+    /// `<img>` tag whatever happened to be on disk, so it is re-rendered.
+    #[test]
+    fn a_corrupt_sidecar_is_re_rendered_rather_than_served() {
+        let output = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let name = "quad.glb";
+        let source = output.path().join(name);
+        std::fs::write(&source, glb_fixture()).unwrap();
+        let sidecar = cache.path().join(format!("{name}.png"));
+        std::fs::write(&sidecar, b"truncated garbage").unwrap();
+        let png = ensure_mesh_poster(&source, cache.path(), name).expect("re-render");
+        assert_eq!(sniff_content_type(&png), Some("image/png"));
+        assert_eq!(std::fs::read(&sidecar).unwrap(), png);
     }
 
     #[test]

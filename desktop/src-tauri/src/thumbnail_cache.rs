@@ -252,8 +252,20 @@ impl ThumbnailCache {
         if bytes.is_empty() || bytes.len() > MAX_ENTRY_BYTES {
             return Err("The thumbnail is empty or too large to cache.".into());
         }
-        if sniff_content_type(bytes).is_none() {
-            return Err("The thumbnail is not a recognised image.".into());
+        match sniff_content_type(bytes) {
+            None => return Err("The thumbnail is not a recognised image.".into()),
+            // A placeholder is what a host could answer at one moment, not
+            // the print's tile, and this cache is keyed on content version
+            // with no expiry — so storing one pinned a mesh's wireframe cube
+            // or an audio waveform's fallback for the life of the file, even
+            // after the host learned to render the real thing. Placeholders
+            // are the only SVGs mold serves as tiles; refusing them keeps the
+            // durable cache to real rasters. Both callers degrade cleanly:
+            // the protocol handler logs and still serves the bytes, and
+            // `prepareNativeThumbnail` answers null so the blob route keeps
+            // the tile visible.
+            Some("image/svg+xml") => return Err("Placeholder tiles are not cached durably.".into()),
+            Some(_) => {}
         }
         let path = self.path_for(digest);
         let dir = path
@@ -615,6 +627,33 @@ mod tests {
         assert_eq!(sniff_content_type(b"<html></html>"), None);
         assert_eq!(sniff_content_type(b""), None);
         assert_eq!(sniff_content_type(b"\x7fELF"), None);
+    }
+
+    /// A placeholder is what a host could answer at one moment, not the
+    /// print's tile — and this cache never expires an entry, so storing one
+    /// pinned a mesh's wireframe cube for the life of the file even after the
+    /// host learned to render the real poster.
+    #[test]
+    fn refuses_to_store_a_placeholder_svg_as_a_durable_tile() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_in(&dir);
+        let mesh = key("local", "armchair.glb", "1:10", SizeTier::S256).digest();
+        assert!(cache
+            .put(
+                &mesh,
+                mold_server::thumbnails::MESH_PLACEHOLDER_SVG.as_bytes()
+            )
+            .is_err());
+        assert!(cache
+            .put(
+                &mesh,
+                mold_server::thumbnails::AUDIO_PLACEHOLDER_SVG.as_bytes()
+            )
+            .is_err());
+        assert!(!cache.contains(&mesh));
+        // The real poster, under the same key, is stored as any tile is.
+        assert!(cache.put(&mesh, PNG).is_ok());
+        assert!(cache.contains(&mesh));
     }
 
     #[test]
