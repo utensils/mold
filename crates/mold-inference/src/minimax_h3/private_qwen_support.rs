@@ -1137,8 +1137,20 @@ mod tests {
             assert_eq!(support.conditioner_config().text_config.hidden_size, 5_120);
             assert_eq!(
                 support.tokenizer().get_vocab_size(true),
-                RELEASED_TOKENIZER_VOCAB_SIZE
+                H3_REGISTERED_VOCABULARY_SIZE
             );
+            // The released file itself must still be the released file.
+            assert_eq!(
+                support.tokenizer().get_vocab_size(false),
+                RELEASED_TOKENIZER_BASE_VOCAB_SIZE
+            );
+            for (token, expected) in H3_EXTRA_SPECIAL_TOKENS {
+                assert_eq!(
+                    support.tokenizer().token_to_id(token),
+                    Some(expected),
+                    "{token} must resolve to {expected} on the real released tokenizer"
+                );
+            }
             assert_eq!(support.support_identity_sha256().len(), 64);
             support.revalidate().unwrap();
             identities.push(support.support_identity_sha256().to_owned());
