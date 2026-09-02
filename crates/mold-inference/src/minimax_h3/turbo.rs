@@ -47,9 +47,9 @@ pub(crate) struct H3TurboTierContract {
 ///
 /// All five tiers select `KSamplerSelect: euler` over Comfy's
 /// `BasicScheduler("simple")` grid in their published reference workflows. Only
-/// the 768p-trained tiers move the video shift, which the 4-step tier's own
-/// Diffusers documentation passes as `--video-shift 6` and which every
-/// LightX2V 768p config repeats.
+/// the 768p-trained tiers move the video shift; which of those three shifts are
+/// transcribed upstream and which one mold infers is recorded on
+/// [`H3_TURBO_768P_VIDEO_SHIFT`] itself.
 pub(crate) const REVIEWED_TURBO_TIERS: &[H3TurboTierContract] = &[
     H3TurboTierContract {
         tier: H3TurboLoraTier::Fl2v8StepV10,
@@ -638,10 +638,17 @@ mod tests {
             assert!(contradiction.contains("contradict"), "{contradiction}");
             let refused = env_only.unwrap_err().to_string();
             assert!(refused.contains("h3-private-uat"), "{refused}");
-            assert!(
-                refused.contains(mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP),
-                "{refused}"
-            );
+            // Every reviewed tag, not just the two the old literal sentence
+            // happened to name: the refusal is formatted from the manifest
+            // tier table precisely so it can never go stale again, and this
+            // loop is what would fail if it were written out by hand.
+            for tier in mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+                assert!(
+                    refused.contains(tier.model),
+                    "{} missing from {refused}",
+                    tier.model
+                );
+            }
         }
     }
 

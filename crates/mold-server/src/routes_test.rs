@@ -12077,6 +12077,16 @@ mod tests {
             false,
             Some(RuntimeUnavailableReason::UnsupportedLayout.message()),
         );
+        // Every H3 row's `hf_repo` is the BASE stack's repository, derived
+        // from the manifest's Transformer file (`catalog::model_row`), which
+        // is why the two lightx2v Turbo tags below still read `COMFY_REPO`:
+        // the tag executes the Comfy-Org INT8 stack, and the third-party
+        // adapter's own repository and revision are provenance carried by the
+        // manifest FILE row (`TurboManifestTier::adapter_hf_repo` /
+        // `adapter_hf_revision`), not by this one-repository summary field.
+        // A Discover row therefore names where the 20.97 GB comes from; the
+        // adapter source is documented on the model page and pinned in the
+        // authorization record.
         assert_eq!(
             h3,
             std::collections::BTreeSet::from([

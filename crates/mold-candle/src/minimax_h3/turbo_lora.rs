@@ -192,11 +192,16 @@ impl H3TurboLoraTier {
     /// publishes every adapter under [`H3_TURBO_LORA_DIRECTORY`]; lightx2v
     /// publishes at the repository root, so the path is per-tier rather than
     /// a shared prefix.
+    ///
+    /// Deliberately an exhaustive match rather than "lightx2v or else
+    /// `loras/`": a third publishing source must state its own layout here
+    /// and cannot inherit a prefix by being unrecognized.
     pub fn repository_path(self) -> String {
-        if self.source_repository() == H3_TURBO_LORA_LIGHTX2V_REPOSITORY {
-            self.file_name().to_owned()
-        } else {
-            format!("{H3_TURBO_LORA_DIRECTORY}/{}", self.file_name())
+        match self {
+            Self::Fl2v8StepV10 | Self::Fl2v768p4StepV10 | Self::Ref2v4StepV10 => {
+                format!("{H3_TURBO_LORA_DIRECTORY}/{}", self.file_name())
+            }
+            Self::Fl2v768p4StepV11 | Self::Fl2v768p8StepV10 => self.file_name().to_owned(),
         }
     }
 
@@ -1939,6 +1944,37 @@ mod tests {
 
     // ----------------------------------------------------------------- tiers
 
+    /// Every checked-in golden header is claimed by a shipped tier.
+    ///
+    /// `published_tier_pins_are_recomputed_from_the_checked_in_headers` walks
+    /// `H3TurboLoraTier::ALL`, so a `.header` no tier names is bytes that
+    /// nothing validates: it can be captured from the wrong revision, or rot
+    /// against its published source, and every gate stays green. Asserting the
+    /// two sets are EQUAL closes it in both directions — an orphan fixture
+    /// fails here, and so does a tier whose fixture was never committed.
+    #[test]
+    fn every_checked_in_header_fixture_is_claimed_by_a_tier() {
+        let claimed = H3TurboLoraTier::ALL
+            .into_iter()
+            .map(|tier| tier.header_fixture_path())
+            .collect::<std::collections::BTreeSet<_>>();
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/minimax_h3/turbo");
+        let mut present = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|extension| extension.to_str()) == Some("header") {
+                present.insert(path);
+            }
+        }
+        assert_eq!(
+            present,
+            claimed,
+            "every .header under {} must be claimed by exactly one tier",
+            directory.display()
+        );
+    }
+
     #[test]
     fn published_tier_pins_are_recomputed_from_the_checked_in_headers() {
         for tier in H3TurboLoraTier::ALL {
@@ -1995,12 +2031,17 @@ mod tests {
                 "{tier:?}"
             );
             // Comfy-Org re-hosts every adapter under `loras/`; lightx2v
-            // publishes its own at the repository root. The path is derived
-            // from the tier's own source, never assumed.
-            let expected_path = if tier.source_repository() == H3_TURBO_LORA_REPOSITORY {
-                format!("{H3_TURBO_LORA_DIRECTORY}/{}", tier.file_name())
-            } else {
-                tier.file_name().to_owned()
+            // publishes its own at the repository root. Match the source
+            // EXHAUSTIVELY rather than defaulting the unknown case, so a
+            // third repository has to declare its layout in both places
+            // instead of silently agreeing with whichever branch is the
+            // fallback.
+            let expected_path = match tier.source_repository() {
+                H3_TURBO_LORA_REPOSITORY => {
+                    format!("{H3_TURBO_LORA_DIRECTORY}/{}", tier.file_name())
+                }
+                H3_TURBO_LORA_LIGHTX2V_REPOSITORY => tier.file_name().to_owned(),
+                other => panic!("{tier:?} publishes from unregistered repository {other}"),
             };
             assert_eq!(tier.repository_path(), expected_path, "{tier:?}");
             assert_eq!(

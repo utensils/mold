@@ -28,7 +28,8 @@ completion. The script then cross-checks the header-derived file size
 against the HF repository tree API's own recorded `size` and `lfs.oid`
 for that exact path at that exact revision, so the header pin and the
 published artifact identity are corroborated independently of one
-another.
+another. That cross-check runs BEFORE the output file is opened, so a
+mismatched fixture never reaches disk.
 
 Companion of `scripts/capture-minimax-h3-*.py`; unlike those, this tool
 never opens a checkpoint payload and needs no fixture root or
@@ -207,14 +208,10 @@ def main(argv: list[str]) -> int:
     file_bytes = 8 + header_len + payload_bytes
     header_identity_sha256 = hashlib.sha256(prefix + json_bytes).hexdigest()
 
-    out_path = args.out
-    parent = os.path.dirname(out_path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(out_path, "wb") as handle:
-        handle.write(prefix)
-        handle.write(json_bytes)
-
+    # Cross-check BEFORE writing anything. The size the header implies must
+    # equal the size the repository records for this exact path at this exact
+    # revision; a mirror that ignored `Range`, or a fixture pulled from the
+    # wrong revision, fails here with no bytes on disk to clean up.
     entry = lookup_tree_entry(args.repo, args.revision, args.path)
     tree_size = entry.get("size")
     if tree_size != file_bytes:
@@ -224,6 +221,14 @@ def main(argv: list[str]) -> int:
             f"bytes for {args.path!r} ({args.repo}@{args.revision})"
         )
     lfs_sha256 = (entry.get("lfs") or {}).get("oid")
+
+    out_path = args.out
+    parent = os.path.dirname(out_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(out_path, "wb") as handle:
+        handle.write(prefix)
+        handle.write(json_bytes)
 
     summary = {
         "repo": args.repo,

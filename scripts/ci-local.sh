@@ -369,9 +369,15 @@ if wants gpu; then
         # CUDA device and the SM89 attention edge, so the bare feature fails at
         # the build script before a single test compiles (and the attention
         # release contract refuses that recipe here anyway).
+        #
+        # The filter is the MODULE path alone: `h3_private_bridge` already
+        # selects every test in the module, `turbo_variants_ride` included.
+        # This runs only in the local gpu lane — GitHub CI still only
+        # `cargo check`s this graph (.github/workflows/ci.yml, "Check the
+        # private MiniMax H3 UAT server build"), so the same drift can recur
+        # on a PR nobody runs ci-local against. Closing that is #1361's scope.
         step "gpu: CUDA public H3 server bridge tests" \
-          cargo test -p mold-ai-server --lib --features h3-cuda -- \
-          turbo_variants_ride h3_private_bridge
+          cargo test -p mold-ai-server --lib --features h3-cuda -- h3_private_bridge
         # The capture adapters compile only under `cuda`, so the CPU rust suite
         # above never sees them.
         for bin in h3_qwen_layer50_capture h3_visual_vae_capture \

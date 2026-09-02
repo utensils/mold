@@ -2950,16 +2950,29 @@ mod tests {
         let capability = super::build_fl2va_capability(&models).unwrap();
         assert_eq!(capability.partitions.len(), 1, "one partition per task");
         let turbo = &capability.partitions[0].turbo;
-        // The partition is FL2VA-only, so its `turbo[]` excludes the
-        // Ref2VA-only Turbo tier(s) in the reviewed manifest table; count
-        // only the rows this task actually owns rather than the whole table.
+        // The partition is FL2VA-only, so its `turbo[]` carries exactly the
+        // FL2VA Turbo tags and never the Ref2VA one. Assert the SET by name
+        // rather than a count recomputed with the production filter: a count
+        // derived from `task_for_model` moves in lockstep with the builder,
+        // so a wrong filter would satisfy both sides at once — which is the
+        // class of bug this assertion exists to catch.
+        let advertised = turbo
+            .iter()
+            .map(|variant| variant.model.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            turbo.len(),
-            mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS
-                .iter()
-                .filter(|t| mold_core::minimax_h3::task_for_model(t.model)
-                    == Some(mold_core::minimax_h3::Task::Fl2va))
-                .count()
+            advertised,
+            std::collections::BTreeSet::from([
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P_V11,
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP_768P,
+            ]),
+            "the FL2VA partition advertises exactly the FL2VA Turbo tags"
+        );
+        assert!(
+            !advertised.contains(mold_core::minimax_h3::REF2VA_COMFY_TURBO_4STEP),
+            "a Ref2VA Turbo tag must never ride the FL2VA partition"
         );
         for variant in turbo {
             assert!(!variant.installed);
@@ -3545,8 +3558,22 @@ mod structural_tests {
         assert!(!debug.contains(&request.prompt));
     }
 
+    /// The idempotency subject binds whatever the BUILD GRAPH gives it, and
+    /// the two arms below are both deliberate (`private_ingress_subject_sha256`).
+    ///
+    /// - Without public `h3`, the boundary refuses to classify anything
+    ///   without an API key, so the subject binds the caller's restart-stable
+    ///   durable identity: one client keeps idempotency across a server
+    ///   restart, and two authenticated clients on one instance never share
+    ///   it.
+    /// - With public `h3`, the partition is reachable unauthenticated, so
+    ///   there is no key to bind and the subject binds the server instance
+    ///   instead: a keyless host offers ONE shared anonymous subject per
+    ///   process, and a restart deliberately starts a new one.
+    ///
+    /// The replay authority is exact in both graphs; only the subject moves.
     #[test]
-    fn idempotency_subject_is_stable_but_replay_authority_is_exact() {
+    fn idempotency_subject_is_whatever_the_build_graph_binds_and_replay_authority_is_exact() {
         let auth = authenticated();
         let request = request(mold_core::minimax_h3::FL2VA_COMFY);
         let admitted = super::classify_h3_private_ingress_with_runtime(

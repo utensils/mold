@@ -157,9 +157,11 @@ pub struct TurboManifestTier {
 /// pins, and selection stays by model identity.
 ///
 /// Adapters come from two reviewed repositories: Comfy-Org's `loras/`
-/// re-hosts and, for the two 768p tiers ModelTC published after them,
-/// [`LIGHTX2V_REPO`] at its repository root. Each row names its own source and
-/// revision, so acquisition never has to infer provenance from the tag.
+/// re-hosts and, for the two adapters Comfy-Org never re-hosted,
+/// [`LIGHTX2V_REPO`] at its repository root. (768p training is not the
+/// distinction — `FL2VA_COMFY_TURBO_4STEP_768P` is 768p-trained too and comes
+/// from Comfy-Org.) Each row names its own source and revision, so acquisition
+/// never has to infer provenance from the tag.
 pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
     TurboManifestTier {
         model: FL2VA_COMFY_TURBO_8STEP,

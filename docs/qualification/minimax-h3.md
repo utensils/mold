@@ -1013,6 +1013,62 @@ a fresh process:
 Both tiers therefore render this canvas correctly and well inside a 24 GB
 card, and the Turbo tier's advantage is time alone.
 
+### The lightx2v Turbo tiers campaign (2026-09-02)
+
+Two FL2VA Turbo tags take their adapter from a SECOND third-party source,
+[`lightx2v/Minimax-h3-Turbo`](https://huggingface.co/lightx2v/Minimax-h3-Turbo/tree/05ef678438e84933c406131b59abbf86919b3aac)
+at pinned revision `05ef678438e84933c406131b59abbf86919b3aac`:
+`minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1` (5 terminal-inclusive
+grid points) and `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p` (9). Each
+is the same 42.482 GB Comfy-Org INT8 FL2VA stack plus one 1.956 GB rank-128
+PEFT adapter, so their IDENTITY evidence is pinned rather than measured — size,
+published SHA-256, and a golden header fixture under
+`crates/mold-candle/testdata/minimax_h3/turbo/`, from which
+`published_tier_pins_are_recomputed_from_the_checked_in_headers` recomputes
+every other literal a tier reports. lightx2v declares `apache-2.0` for the
+adapters; the MiniMax H3 Community License still governs the base checkpoint.
+
+**The video shift of the v1.1 tier is an inference, not a transcription.** Two
+of the three 768p-trained tiers carry an upstream-documented shift: ModelTC's
+Turbo model-specs table lists `6 / 3` for `FL2VA Turbo 4-step v1.0 768p` and
+`FL2VA Turbo 8-step v1.0 768p`, and LightX2V's own
+`configs/minimax_h3/dmd/minimax_h3_fp8_8step.json` and
+`minimax_h3_int8_convrot_8step.json` run the 8-step tier at
+`video_flow_shift: 6.0`, `audio_flow_shift: 3.0`, `infer_steps: 9`, `alpha: 8`
+— the same figures `REVIEWED_TURBO_TIERS` ships. `4-step v1.1 768p` has NO row
+in that spec table and is named by no LightX2V config; mold inherits 6.0 from
+its v1.0 768p predecessor (same 768p training resolution, same rank 128 /
+alpha 128 / scale 1.0 header metadata) and says so on
+`H3_TURBO_768P_VIDEO_SHIFT` itself. Nobody should read 6.0 for that one tier as
+a value transcribed from upstream.
+
+**The A/B that would settle it has not run.** Planned matrix, to be recorded
+here with per-render evidence before the shift is treated as qualified: the
+fixed campaign request (prompt "a red fox in a snowy pine forest at dawn",
+seed 770021, 124 frames, 24 fps, guidance 0, one recorded source PNG) at both
+measured canvases, 768x768 and 1344x768, for v1.1 at shift 6 against v1.1 at
+shift 12 (a second binary carrying an uncommitted one-row edit, as the 768x768
+campaign above used a scratch patch), alongside the shipped 4-step v1.0 768p
+and 8-step 768p tiers. Per render: wall clock POST to MP4 bytes, the
+`scheduler_estimates` row (`shape_bucket`, `sample_count`, `ewma_*`,
+`vram_high_water_bytes`), a 1 Hz `nvidia-smi` peak, `VmHWM`, `ffprobe` facts
+with an output SHA-256 prefix, and a visual bullet after viewing frames 0, 40,
+80, and 123. A tie ships 6 and the tie is recorded. Until that section exists,
+these two tags carry pinned-identity evidence only — the same standing every
+other reviewed tier's structural pins have, and less than the two measured
+canvases above.
+
+**Adapters pulled ahead of the release are unowned by the running service.**
+Both adapters land in the shared model store at
+`shared/minimax-h3/loras/<basename>`, beside the Comfy-Org adapters, keyed by
+their own basenames. A mold that does not know the two tags has no manifest for
+them: `/api/models` shows no row, `mold rm` claims no removal ownership, and
+repair will not touch them. So a scratch server used to pull them onto a host
+whose production service is an older release leaves bytes that older service can
+neither see nor clean up — invisible and unowned, not harmless-and-managed —
+until that service upgrades to a release carrying the tags, after which
+`mold rm` of the tags is the ordinary cleanup path.
+
 ### What is derived, and how
 
 Since the canvas and the clip length became rules, the envelope and the memory
